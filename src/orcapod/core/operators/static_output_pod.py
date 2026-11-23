@@ -513,7 +513,12 @@ class StaticOutputOperatorPod(TraceableBase):
             upstream,
         )
 
-    def rows_dropped_text(self, position: int, others: Sequence[str]) -> str | None:
+    def rows_dropped_text(
+        self,
+        position: int,
+        others: Sequence[str],
+        inputs: Sequence[StreamProtocol],
+    ) -> str | None:
         """What this operator drops of the rows of its input at ``position``, in words,
         for ``explain()``; ``None`` when it drops none (the default).
 
@@ -522,6 +527,8 @@ class StaticOutputOperatorPod(TraceableBase):
         Args:
             position: The input's position among the operator's inputs.
             others: The names of the operator's other inputs, sorted.
+            inputs: The operator's inputs, in order; only their schemas (``keys()``)
+                may be read.
 
         Returns:
             A phrase (``t >= 1.0``; ``rows without a match in 'probes' are dropped``),

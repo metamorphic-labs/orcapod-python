@@ -119,7 +119,12 @@ class DropNulls(UnaryOperator):
             self.columns = tuple(sorted(set(names)))
         super().__init__(**kwargs)
 
-    def rows_dropped_text(self, position: int, others: Sequence[str]) -> str | None:
+    def rows_dropped_text(
+        self,
+        position: int,
+        others: Sequence[str],
+        inputs: Sequence[StreamProtocol],
+    ) -> str | None:
         """What the step drops, for ``explain()``: rows with a null in its columns."""
         if self.columns is None:
             return "no null in any tag or data column"

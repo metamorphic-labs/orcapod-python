@@ -12,6 +12,23 @@ from dataclasses import dataclass
 from orcapod.types.condition import Condition
 
 
+def plain_repr(value: object) -> str:
+    """Return ``value`` as ``explain()`` writes a name or a key: by the ``repr`` of its
+    built-in base type (``str``, ``bytes``, ``int``, ``float``, ``bool``), so a subclass's
+    own ``__repr__`` never runs; any other value as ``<type name>``."""
+    if isinstance(value, str):
+        return str.__repr__(value)
+    if isinstance(value, bytes):
+        return bytes.__repr__(value)
+    if isinstance(value, bool):  # before int: a bool is an int
+        return bool.__repr__(value)
+    if isinstance(value, int):
+        return int.__repr__(value)
+    if isinstance(value, float):
+        return float.__repr__(value)
+    return f"<{type(value).__name__}>"
+
+
 @dataclass(frozen=True)
 class Step:
     """A step above a source that drops some of the rows read.
@@ -63,8 +80,13 @@ class SourceReading:
 
     def lines(self) -> list[str]:
         """Return the reading as text lines (``Explanation.text``)."""
+        after = "; ".join(step.describe() for step in self.steps) or "nothing"
         if not self.bound:
-            return [f"slot {self.name!r}: no source bound"]
+            # The steps are declared: show them although no source is bound yet.
+            return [
+                f"slot {self.name!r}: no source bound",
+                f"  applied after reading: {after}",
+            ]
         if not self.known:
             applied = "not known for this source kind"
         elif self.condition or self.limit is not None:
@@ -76,7 +98,6 @@ class SourceReading:
             applied = ", ".join(parts)
         else:
             applied = "nothing (the whole table is read)"
-        after = "; ".join(step.describe() for step in self.steps) or "nothing"
         return [
             f"source {self.name!r} ({self.kind})",
             f"  applied by the source: {applied}",

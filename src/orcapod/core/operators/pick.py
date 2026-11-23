@@ -7,6 +7,7 @@ import typing
 from collections.abc import Sequence
 from typing import Any, ClassVar, TYPE_CHECKING, cast
 
+from orcapod.types.explanation import plain_repr
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
@@ -85,13 +86,21 @@ class Pick(UnaryOperator):
         self._value_arrow_type_error: str = ""
         super().__init__(**kwargs)
 
-    def rows_dropped_text(self, position: int, others: Sequence[str]) -> str | None:
+    def rows_dropped_text(
+        self,
+        position: int,
+        others: Sequence[str],
+        inputs: Sequence[StreamProtocol],
+    ) -> str | None:
         """What the step drops, for ``explain()``: rows missing the key of a ``dict``
         column, unless a miss raises. A struct field is known to exist (checked when the
         step is built), so a struct projection drops none."""
         if self.fail_on_miss or self._mode != "map":
             return None
-        return f"rows whose {self.column!r} has no key {self.key!r} are dropped"
+        return (
+            f"rows whose {plain_repr(self.column)} has no key "
+            f"{plain_repr(self.key)} are dropped"
+        )
 
     def identity_structure(self) -> Any:
         self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)

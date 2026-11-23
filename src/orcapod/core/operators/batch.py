@@ -283,7 +283,12 @@ class Batch(UnaryOperator):
         }
         return config
 
-    def rows_dropped_text(self, position: int, others: Sequence[str]) -> str | None:
+    def rows_dropped_text(
+        self,
+        position: int,
+        others: Sequence[str],
+        inputs: Sequence[StreamProtocol],
+    ) -> str | None:
         """What the step drops, for ``explain()``: a last partial batch, if asked."""
         return "a last partial batch is dropped" if self.drop_partial_batch else None
 

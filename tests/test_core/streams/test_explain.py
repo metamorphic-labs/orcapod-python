@@ -21,6 +21,8 @@ import pytest
 from orcapod import PipelineJob, col, function_pod
 from orcapod.core.nodes.source_node import SourceNode
 from orcapod.core.operators import (
+    DropNulls,
+    Pick,
     Batch,
     Filter,
     GroupBy,
@@ -185,7 +187,10 @@ class TestSectionFiveCases:
             Filter(col("t") >= 1.0)(slot, label="late")
         reading = job.nodes["late"].explain().sources[0]
         assert not reading.bound
-        assert reading.lines() == ["slot 'units': no source bound"]
+        assert reading.lines() == [
+            "slot 'units': no source bound",
+            "  applied after reading: t >= 1.0 (Filter[late])",
+        ]
 
 
 class TestSourcesThatCannotSay:
@@ -357,7 +362,10 @@ class TestReviewOfPr503:
         slot = SourceNode(name="units", tag_schema=tag_schema, data_schema=data_schema)
         (reading,) = Filter(col("t") >= 1.0)(slot).explain().sources
         assert not reading.bound
-        assert reading.lines() == ["slot 'units': no source bound"]
+        assert reading.lines() == [
+            "slot 'units': no source bound",
+            "  applied after reading: t >= 1.0 (Filter)",
+        ]
 
     @pytest.mark.parametrize(
         ("first", "second", "expected"),
@@ -517,7 +525,7 @@ class TestSecondReviewOfPr503:
     )
     def test_a_constraint_value_is_written_only_by_a_builtin_repr(self, value, shown):
         op = PolarsFilter(constraints={"session": value})
-        assert op.rows_dropped_text(0, []) == f"session={shown}"
+        assert op.rows_dropped_text(0, [], []) == f"session={shown}"
 
     @pytest.mark.parametrize(
         ("predicate", "shown"),
@@ -529,7 +537,9 @@ class TestSecondReviewOfPr503:
         ids=["str_subclass", "object", "mask"],
     )
     def test_a_predicate_is_written_only_by_polars(self, predicate, shown):
-        assert PolarsFilter(predicates=[predicate]).rows_dropped_text(0, []) == shown
+        assert (
+            PolarsFilter(predicates=[predicate]).rows_dropped_text(0, [], []) == shown
+        )
 
     @pytest.mark.parametrize(
         "constraints",
@@ -539,7 +549,7 @@ class TestSecondReviewOfPr503:
     def test_constraints_are_read_only_as_an_exact_dict(self, constraints):
         op = PolarsFilter(constraints=constraints)
         name = type(constraints).__name__
-        assert op.rows_dropped_text(0, []) == f"<{name}>"
+        assert op.rows_dropped_text(0, [], []) == f"<{name}>"
 
     def test_a_dict_pick_lists_its_misses(self):
         source = DictSource(
@@ -559,3 +569,96 @@ class TestSecondReviewOfPr503:
         )
         (reading,) = Filter(col("t") >= 1.0)(slot).explain().sources
         assert reading.name == "units"
+
+
+class _LoudName(str):
+    """A ``str`` subclass whose ``__repr__`` is user code."""
+
+    def __repr__(self) -> str:
+        raise AssertionError("explain() ran user code")
+
+
+class _LoudIndex(int):
+    """An ``int`` subclass whose ``__repr__`` is user code."""
+
+    def __repr__(self) -> str:
+        raise AssertionError("explain() ran user code")
+
+
+class TestReviewOfPr498:
+    """CodeRabbit's review of PR 498 at cb3e3e1c, where explain() is now reviewed."""
+
+    def test_a_join_of_one_input_drops_no_row(self):
+        assert Join()(_units()).explain().sources[0].steps == ()
+        two = Join()(_units(), _probes()).explain().sources
+        assert all(len(r.steps) == 1 for r in two)
+
+    @pytest.mark.parametrize(
+        ("make", "text"),
+        [
+            (
+                lambda: Pick(_LoudName("m"), _LoudName("a")),
+                "rows whose 'm' has no key 'a' are dropped",
+            ),
+            (
+                lambda: Index(_LoudName("xs"), _LoudIndex(1)),
+                "rows whose 'xs' has no element 1 are dropped",
+            ),
+        ],
+        ids=["pick_str_subclasses", "index_subclasses"],
+    )
+    def test_names_and_keys_are_written_without_user_code(self, make, text):
+        op = make()
+        op._mode = "map"  # pyright: ignore[reportAttributeAccessIssue]  # Pick's dict mode, as validation sets it
+        assert op.rows_dropped_text(0, [], []) == text
+
+    @pytest.mark.parametrize(
+        ("other_tags", "left", "right"),
+        [
+            (
+                ["session"],
+                ["rows without a match in 'probes' are dropped"],
+                ["its rows only choose rows of 'units' and do not flow on"],
+            ),
+            (
+                [],
+                [],
+                [
+                    "no tag is shared with 'units': its rows choose nothing and do not flow on"
+                ],
+            ),
+        ],
+        ids=["shared_tag", "no_shared_tag"],
+    )
+    def test_a_semi_join_drops_rows_only_on_a_shared_tag(self, other_tags, left, right):
+        table = pa.table(
+            {
+                "probe_session": pa.array(["s1", "s2"], pa.large_string()),
+                "probe": pa.array(["imec0", "imec1"], pa.large_string()),
+            }
+        )
+        if other_tags:
+            table = table.rename_columns(["session", "probe"])
+        probes = ArrowTableSource(
+            table,
+            tag_columns=other_tags or ["probe_session"],
+            tag_only_columns=True,
+            source_id="probes",
+        )
+        by_name = {r.name: r for r in SemiJoin()(_units(), probes).explain().sources}
+        assert [s.text for s in by_name["units"].steps] == left
+        assert [s.text for s in by_name["probes"].steps] == right
+
+    def test_an_unbound_slot_keeps_its_steps_in_the_text(self):
+        tag_schema, data_schema = _units().output_schema()
+        slot = SourceNode(name="units", tag_schema=tag_schema, data_schema=data_schema)
+        text = str(_units_filter_over(slot).explain())
+        assert "slot 'units': no source bound" in text
+        assert (
+            "applied after reading: t >= 1.0 (Filter); no null in rate (DropNulls)"
+            in text
+        )
+
+
+def _units_filter_over(stream):
+    return DropNulls("rate")(Filter(col("t") >= 1.0)(stream))

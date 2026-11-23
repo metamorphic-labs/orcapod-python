@@ -149,7 +149,7 @@ def _reach(stream: StreamProtocol, memo: dict[int, _Reach]) -> _Reach:
     producer = stream.producer if kind == "inputs" else None
     result = {}
     for position, reach in enumerate(reaches):
-        step = _step_of(stream, producer, position, reaches)
+        step = _step_of(stream, producer, position, inputs, reaches)
         for key, (reading, distance, steps) in reach.items():
             here = distance + 1
             _, kept, merged = result.get(key, (reading, here, {}))
@@ -172,6 +172,7 @@ def _step_of(
     stream: StreamProtocol,
     producer: object,
     position: int,
+    inputs: Sequence[StreamProtocol],
     reaches: Sequence[_Reach],
 ) -> Step | None:
     """Return the step ``stream``'s operator takes on its input at ``position``; the
@@ -185,7 +186,7 @@ def _step_of(
         for i, reach in enumerate(reaches)
         if i != position
     )
-    text = producer.rows_dropped_text(position, others)
+    text = producer.rows_dropped_text(position, others, inputs)
     if text is None:
         return None
     return Step(operator=type(producer).__name__, label=stream.label, text=text)

@@ -5,6 +5,7 @@ import json
 from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import Any, ClassVar, TYPE_CHECKING
 
+from orcapod.types.explanation import plain_repr
 from orcapod.core.operators.meta_columns import (
     WithoutMetaWriter,
     without_input_meta,
@@ -1368,9 +1369,17 @@ class Join(NonZeroInputOperator):
 
         return merged_sys
 
-    def rows_dropped_text(self, position: int, others: Sequence[str]) -> str | None:
+    def rows_dropped_text(
+        self,
+        position: int,
+        others: Sequence[str],
+        inputs: Sequence[StreamProtocol],
+    ) -> str | None:
         """What the join drops, for ``explain()``: rows without a match in the others."""
-        names = ", ".join(repr(name) for name in others)
+        if not others:
+            # A join of one input passes every row through.
+            return None
+        names = ", ".join(plain_repr(name) for name in others)
         return f"rows without a match in {names} are dropped"
 
     def identity_structure(self) -> Any:

@@ -1,6 +1,7 @@
 from collections.abc import Sequence
 from typing import Any, ClassVar, TYPE_CHECKING, cast
 
+from orcapod.types.explanation import plain_repr
 from orcapod.core.operators.base import (
     BinaryOperator,
     require_matchable_key,
@@ -590,9 +591,14 @@ class MergeJoin(BinaryOperator):
             data_tags=data_tag_names(tag_schema, data_schema),
         )
 
-    def rows_dropped_text(self, position: int, others: Sequence[str]) -> str | None:
+    def rows_dropped_text(
+        self,
+        position: int,
+        others: Sequence[str],
+        inputs: Sequence[StreamProtocol],
+    ) -> str | None:
         """What the join drops, for ``explain()``: rows without a match in the others."""
-        names = ", ".join(repr(name) for name in others)
+        names = ", ".join(plain_repr(name) for name in others)
         return f"rows without a match in {names} are dropped"
 
     def identity_structure(self) -> Any:

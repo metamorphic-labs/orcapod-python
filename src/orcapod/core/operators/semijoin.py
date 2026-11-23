@@ -5,6 +5,7 @@ from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Collection, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, final
 
+from orcapod.types.explanation import plain_repr
 from orcapod.channels import ChannelClosed, ReadableChannel, WritableChannel
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.core.data_tags import stream_data_tags
@@ -465,12 +466,25 @@ class SemiJoin(BinaryOperator):
             values.append(value)
         return tuple(values)
 
-    def rows_dropped_text(self, position: int, others: Sequence[str]) -> str | None:
+    def rows_dropped_text(
+        self,
+        position: int,
+        others: Sequence[str],
+        inputs: Sequence[StreamProtocol],
+    ) -> str | None:
         """What the semi-join does, for ``explain()``: the first input keeps the rows
-        that match the second; the second's rows only choose and do not flow on."""
-        names = ", ".join(repr(name) for name in others)
+        that match the second; the second's rows only choose and do not flow on.
+
+        With no tag column shared by the two inputs (``_match_keys``, read from their
+        schemas), every row of the first input flows on and the second chooses nothing.
+        """
+        names = ", ".join(plain_repr(name) for name in others)
+        left, right = inputs
+        shared = self._match_keys(tuple(left.keys()[0]), tuple(right.keys()[0]))
         if position == 0:
-            return f"rows without a match in {names} are dropped"
+            return f"rows without a match in {names} are dropped" if shared else None
+        if not shared:
+            return f"no tag is shared with {names}: its rows choose nothing and do not flow on"
         return f"its rows only choose rows of {names} and do not flow on"
 
     def identity_structure(self) -> Any:

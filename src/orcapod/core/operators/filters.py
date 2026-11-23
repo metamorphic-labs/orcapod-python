@@ -188,7 +188,12 @@ class PolarsFilter(UnaryOperator):
         constraints = inner.get("constraints")
         return cls(predicates=predicates, constraints=constraints)
 
-    def rows_dropped_text(self, position: int, others: Sequence[str]) -> str | None:
+    def rows_dropped_text(
+        self,
+        position: int,
+        others: Sequence[str],
+        inputs: Sequence[StreamProtocol],
+    ) -> str | None:
         """What the filter keeps, for ``explain()``: its constraints and predicates as
         text, each sorted (display only).
 
