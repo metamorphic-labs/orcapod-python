@@ -9,6 +9,7 @@ from orcapod.databases._row_index import KeyIndex, compact_tail, matching_rows
 from orcapod.databases.utils import (
     coerce_record_id,
     first_changed_column,
+    first_logical_identity_change,
     in_held_column_order,
 )
 from orcapod.errors import InputValidationError
@@ -17,6 +18,7 @@ from orcapod.utils.lazy_module import LazyModule
 if TYPE_CHECKING:
     import pyarrow as pa
     import pyarrow.compute as pc
+
     from orcapod.pipeline.serialization import DatabaseRegistry
 else:
     pa = LazyModule("pyarrow")
@@ -258,6 +260,24 @@ class InMemoryArrowDatabase:
             )
 
         record_key = self._get_record_key(record_path)
+        held = [
+            table.schema
+            for table in (
+                self._tables.get(record_key),
+                self._pending_batches.get(record_key),
+            )
+            if table is not None
+        ]
+        # A column of another logical type would read back as the held one
+        # (ITL-1371): refused first, on the raw identifier bytes, before the
+        # reorder below compares types (which may call an extension's serializer),
+        # whatever skip_duplicates (as in every database).
+        identity = first_logical_identity_change(held, records)
+        if identity is not None:
+            raise InputValidationError(
+                f"Cannot append to the table at {record_path!r}: column "
+                f"{identity[0]!r}: {identity[1]}. Nothing was written."
+            )
         # Columns match by name: rows with the held columns in another order are
         # put in the held order, the pending batch's, else the stored table's
         # (ITL-1367).
@@ -270,14 +290,6 @@ class InMemoryArrowDatabase:
         )
         # The table holds one type per column: rows whose field metadata or nested
         # field attributes differ would read back with the held ones (ITL-1334).
-        held = [
-            table.schema
-            for table in (
-                self._tables.get(record_key),
-                self._pending_batches.get(record_key),
-            )
-            if table is not None
-        ]
         changed = first_changed_column(held, records.schema)
         if changed is not None:
             raise InputValidationError(

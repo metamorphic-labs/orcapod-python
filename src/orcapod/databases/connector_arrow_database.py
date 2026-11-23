@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, cast
 from orcapod.databases.utils import (
     coerce_record_id,
     first_changed_column,
+    first_logical_identity_change,
     in_held_column_order,
 )
 from orcapod.errors import (
@@ -33,12 +34,12 @@ from orcapod.errors import (
     UnstorableColumnError,
     UnstorableTableNameError,
 )
+from orcapod.protocols.db_connector_protocol import ColumnInfo, DBConnectorProtocol
 from orcapod.utils.arrow_utils import (
     normalize_schema_to_large_types,
     normalize_table_to_large_types,
     normalize_to_large_types,
 )
-from orcapod.protocols.db_connector_protocol import ColumnInfo, DBConnectorProtocol
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -442,8 +443,13 @@ class ConnectorArrowDatabase:
         # Columns match by name: rows with the held columns in another order are
         # put in the held order, so the connector always receives the stored order
         # (ITL-1367).
+        # A column of another logical type is refused first, on the raw identifier
+        # bytes, before the reorder compares types (ITL-1371).
+        # The held schemas are gathered once for both checks (one table listing).
+        held = self._held_schemas(record_path)
+        self._refuse_changed_columns(record_path, records, held, identity_only=True)
         records = in_held_column_order(records, self._held_column_order(record_path))
-        self._refuse_changed_columns(record_path, records.schema)
+        self._refuse_changed_columns(record_path, records, held)
 
         records = self._deduplicate_within_table(records)
         input_ids = set(cast(list[bytes], records[self.RECORD_ID_COLUMN].to_pylist()))
@@ -519,24 +525,13 @@ class ConnectorArrowDatabase:
             for c in self._connector.get_column_info(table_name)
         ]
 
-    def _refuse_changed_columns(
-        self, record_path: tuple[str, ...], schema: pa.Schema
-    ) -> None:
-        """Refuse rows whose columns would not read back as written (ITL-1334).
-
-        The table holds one type per column, so an appended column must have the held
-        column's field metadata and nested field attributes (``appended_field_change``),
-        held by the stored table and by a batch pending for it: otherwise one side's
-        rows would read back with the other's. A connector that keeps no field
-        metadata refuses metadata and nested types itself, so only one that keeps it
-        is checked. The stored table's schema is read once per table
-        (``_read_stored_schema``): an append the check accepts does not change it.
-
-        Raises:
-            InputValidationError: For the first such column, naming it and the path.
-        """
+    def _held_schemas(self, record_path: tuple[str, ...]) -> list[pa.Schema] | None:
+        """The schemas held for the table, the pending batch's and the stored one's,
+        for ``_refuse_changed_columns``; ``None`` when the connector keeps no field
+        metadata. The stored table's schema is read once per table
+        (``_read_stored_schema``): an append the check accepts does not change it."""
         if not self.keeps_field_metadata:
-            return
+            return None
         held: list[pa.Schema] = []
         pending = self._pending_batches.get(self._get_record_key(record_path))
         if pending is not None:
@@ -549,7 +544,38 @@ class ConnectorArrowDatabase:
                 self._stored_schemas[table_name] = stored
         if stored is not None:
             held.append(stored)
-        changed = first_changed_column(held, schema)
+        return held
+
+    def _refuse_changed_columns(
+        self,
+        record_path: tuple[str, ...],
+        records: pa.Table,
+        held: list[pa.Schema] | None,
+        *,
+        identity_only: bool = False,
+    ) -> None:
+        """Refuse rows whose columns would not read back as written (ITL-1334).
+
+        The table holds one type per column, so an appended column must have the held
+        column's field metadata and nested field attributes (``appended_field_change``),
+        held by the stored table and by a batch pending for it: otherwise one side's
+        rows would read back with the other's. A connector that keeps no field
+        metadata refuses metadata and nested types itself, so only one that keeps it
+        is checked (``held`` is ``None`` for one that keeps none).
+
+        A column of another logical type identifier is refused first
+        (``first_logical_identity_change``, ITL-1371); ``identity_only`` checks only
+        that, so it can run before the rows are reordered by name.
+
+        Raises:
+            InputValidationError: For the first such column, naming it and the path.
+        """
+        if held is None:
+            return
+        # A column of another logical type would read back as the held one (ITL-1371).
+        changed = first_logical_identity_change(held, records)
+        if changed is None and not identity_only:
+            changed = first_changed_column(held, records.schema)
         if changed is not None:
             raise InputValidationError(
                 f"Cannot append to the table at {record_path!r}: column "
