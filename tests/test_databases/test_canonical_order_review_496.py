@@ -82,7 +82,10 @@ def test_a_delta_table_main_created_with_a_merge_reserved_name_still_appends(
         )
 
     with patch.object(
-        database_utils, "canonical_column_order", lambda records, record_id: records
+        database_utils,
+        "canonical_column_order",
+        lambda records, record_id: records,
+        create=True,
     ):
         DeltaTableDatabase(tmp_path).add_records(
             PATH, rows(1), record_id_column="rid", flush=True

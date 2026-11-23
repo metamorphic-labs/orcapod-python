@@ -87,7 +87,10 @@ def _first_write(generation: str) -> Any:
     if generation == "canonical":
         return nullcontext()
     return patch.object(
-        database_utils, "canonical_column_order", lambda records, record_id: records
+        database_utils,
+        "canonical_column_order",
+        lambda records, record_id: records,
+        create=True,
     )
 
 
@@ -735,10 +738,15 @@ def test_a_table_dropped_and_written_again_by_the_same_handle_takes_the_new_orde
     tmp_path: Path,
 ) -> None:
     """The handle that wrote the dropped table writes the replacement as a new table:
-    in the canonical order (ITL-1370), nothing of the dropped table remembered."""
+    in the canonical order (ITL-1370), nothing of the dropped table remembered. The
+    dropped table is stored in another order (``a, rid, b``, as before ITL-1370), so a
+    handle that remembered it would show it (PR 491 Codex round 2, finding 4)."""
     path = tmp_path / "store.db"
     db = _sqlite(path)
-    db.add_records(PATH, _abc(1), record_id_column="rid", flush=True)
+    with _first_write("before ITL-1370"):
+        db.add_records(
+            PATH, _abc(1, ("a", "rid", "b")), record_id_column="rid", flush=True
+        )
     with sqlite3.connect(path) as other:
         other.execute('DROP TABLE "t"')
     db.add_records(PATH, _abc(2, ("b", "rid", "a")), record_id_column="rid", flush=True)
@@ -864,6 +872,64 @@ def test_two_logical_types_over_one_storage_type_are_not_reordered(
         second.add_records(PATH, permuted, record_id_column="rid")
         with pytest.raises(pa.ArrowInvalid):
             second.flush()
+    elif not stored:
+        with pytest.raises(ValueError, match="Schema mismatch"):
+            second.add_records(PATH, permuted, record_id_column="rid")
+    else:
+        # Pre-existing on main and equal here (ITL-1371's family): Delta takes the
+        # rows by name and the stored table can no longer be read as one type.
+        second.add_records(PATH, permuted, record_id_column="rid", flush=True)
+        with pytest.raises(OrcapodDatabaseReadError):
+            inner.get_all_records(PATH, record_id_column="rid")
+        return
+    inner.flush()
+    stored_rows = inner.get_all_records(PATH, record_id_column="rid")
+    assert stored_rows is not None
+    assert stored_rows.column("rid").to_pylist() == [bytes([1])]
+
+
+@pytest.mark.parametrize("backend", ["in-memory", "Delta"])
+@pytest.mark.parametrize("stored", [False, True], ids=["pending", "committed"])
+def test_two_annotated_logical_types_over_one_storage_type_are_not_reordered(
+    tmp_path: Path, backend: str, stored: bool
+) -> None:
+    """The annotated form of the case above (PR 491 Codex round 2, finding 3): the
+    column is held as its storage type with an ``ARROW:extension`` annotation, and a
+    permuted append carries another logical type's annotation. Refused as on main,
+    never read back under the held type (main's verdicts, measured on 321284ae)."""
+    from tests.test_databases.test_extension_aware_database import (
+        _make_converter_with_type,
+    )
+
+    one = _make_converter_with_type("test.itl1367.annotated.held")
+    two = _make_converter_with_type("test.itl1367.annotated.other")
+
+    def rows(n: int, ext_type: Any, order: list[str]) -> pa.Table:
+        return (
+            _abc(n)
+            .append_column(
+                _annotated("text", ext_type).with_type(pa.large_string()),
+                pa.array([str(n)], pa.large_string()),
+            )
+            .select(order)
+        )
+
+    inner = (
+        InMemoryArrowDatabase()
+        if backend == "in-memory"
+        else DeltaTableDatabase(tmp_path / "delta")
+    )
+    ExtensionAwareDatabase(inner, one[0]).add_records(
+        PATH,
+        rows(1, one[1], ["rid", "a", "b", "text"]),
+        record_id_column="rid",
+        flush=stored,
+    )
+    second = ExtensionAwareDatabase(inner, two[0])
+    permuted = rows(2, two[1], ["text", "b", "rid", "a"])
+    if backend == "in-memory":
+        with pytest.raises(InputValidationError, match="other field metadata"):
+            second.add_records(PATH, permuted, record_id_column="rid")
     elif not stored:
         with pytest.raises(ValueError, match="Schema mismatch"):
             second.add_records(PATH, permuted, record_id_column="rid")

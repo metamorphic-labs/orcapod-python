@@ -50,7 +50,10 @@ def _before_itl_1370() -> AbstractContextManager[Any]:
     """Tables created in this context are written as before ITL-1370: in the order
     of their first write."""
     return patch.object(
-        database_utils, "canonical_column_order", lambda records, record_id: records
+        database_utils,
+        "canonical_column_order",
+        lambda records, record_id: records,
+        create=True,
     )
 
 
