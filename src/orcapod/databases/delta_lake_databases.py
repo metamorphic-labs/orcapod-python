@@ -16,23 +16,6 @@ from orcapod.databases._row_index import (
     matching_rows,
     rows_at,
 )
-from orcapod.databases.utils import (
-    UNKNOWN,
-    IdentityNode,
-    appended_field_change,
-    coerce_record_id,
-    identity_node,
-    logical_identity_change,
-    matched_pairs,
-    metadata_bytes,
-)
-from orcapod.errors import (
-    InputValidationError,
-    OrcapodDatabaseReadError,
-    TableListingNotSupportedError,
-    TypeIdentityError,
-    UnstorableColumnError,
-)
 from orcapod.databases.delta_arrow_types import (
     ARROW_TYPE_KEY,
     first_column_out_of_stored_range,
@@ -49,6 +32,24 @@ from orcapod.databases.storage_utils import (
     delta_to_pyarrow_dataset,
     is_cloud_uri,
     parse_base_path,
+)
+from orcapod.databases.utils import (
+    UNKNOWN,
+    IdentityNode,
+    appended_field_change,
+    coerce_record_id,
+    identity_node,
+    in_held_column_order,
+    logical_identity_change,
+    matched_pairs,
+    metadata_bytes,
+)
+from orcapod.errors import (
+    InputValidationError,
+    OrcapodDatabaseReadError,
+    TableListingNotSupportedError,
+    TypeIdentityError,
+    UnstorableColumnError,
 )
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
@@ -1986,6 +1987,14 @@ class DeltaTableDatabase:
             # Check for conflicts - insert never allows duplicates when skip_duplicates=False
             # self._check_all_conflicts(record_path, deduplicated_table)
             filtered_table = deduplicated_table
+
+        # Columns match by name within a pending batch: rows with the pending
+        # batch's columns in another order, each field equal, are put in its order
+        # (ITL-1367). Only the pending batch: a stored table already takes an append
+        # by name (delta-rs), and the batch is left exactly as main holds it.
+        pending = self._pending_batches.get(self._get_record_key(record_path))
+        if pending is not None:
+            filtered_table = in_held_column_order(filtered_table, list(pending.schema))
 
         # Step 4: the rows' field attributes, compared as given: a merge or a
         # coercion casts them to the pending batch's schema, which would give them
