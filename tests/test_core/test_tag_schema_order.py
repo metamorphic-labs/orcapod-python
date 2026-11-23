@@ -139,25 +139,10 @@ def _demoted(stream: Any, result: Any) -> set[str]:
     return {c for c in tags if c in data and c not in out_tags and c in out_data}
 
 
-# MapTags(drop_unmapped=True) predicts no system tags (ITL-1363, fixed by PR 484):
-# remove this mark when that fix is on main.
-_ITL_1363 = pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="ITL-1363: MapTags(drop_unmapped=True) predicts no system-tag columns",
-)
-
-
 @pytest.mark.parametrize(
     "data_tags", DATA_TAG_SETS, ids=lambda d: "+".join(d) or "none"
 )
-@pytest.mark.parametrize(
-    "name",
-    [
-        pytest.param(name, marks=_ITL_1363) if name == "map_tags_drop" else name
-        for name in OPERATORS
-    ],
-)
+@pytest.mark.parametrize("name", list(OPERATORS))
 def test_the_prediction_lists_the_columns_in_the_result_order(
     name: str, data_tags: tuple[str, ...]
 ) -> None:
