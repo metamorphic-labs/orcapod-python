@@ -15,22 +15,26 @@ constraints from its upstreams' content and does not show every row of its table
   rows the live job showed for every function, operator and side-effect node, and after the
   source changes it gives the rows of the source as it is now (counting the inputs with no
   stored result). It needs the sources to be rebuildable from the file or bound again.
-- **The read without a run, `node.as_source()` / `get_all_records()`, does not meet it.** It
-  shows every row stored under the node's content hash: the rows of every run of the job over
-  the same source ids, not the saved run's. In the main case it shows 7 rows where the live
-  job shows 5, including two different values for one tag (`s1/2` = 4.0 and 5.0). It does
-  separate jobs whose source ids differ (case i: no row of the other job ever appears).
-  This is documented behaviour; it is a design gap against the goal, not a defect (B1).
+- **`node.as_source()` / `get_all_records()` show what is stored, by design.** They show
+  every row stored under the node's content hash: the rows of every run of the job over the
+  same source ids (in the main case 7 rows where the live job shows 5, including two values
+  for one tag, `s1/2` = 4.0 and 5.0), and with a `where`-restricted source the unrestricted
+  runs' rows too. They separate jobs whose source ids differ (case i: no row of the other job
+  ever appears). **Not a defect** (developer, 2026-11-22: "node.as_source IS meant to be
+  what's stored, so that's fine: it is not tied to a specific run"). Whether to offer a
+  second view that keeps the run's upstream restriction is an open question, ITL-1399
+  (low priority).
 - **Whether the pods are importable or changed makes no difference**: the loader never
   imports the pods module (checked: `pods_imported_by_loaded_job = False` in every
   situation), and nothing in a loaded job runs user functions.
-- **Defects filed** (A): structural classes not rebuilt from a saved schema (ITL-1390);
-  connector databases (SQLite) saved but never rebuilt (ITL-1391); `Pipeline.load` +
-  `from_pipeline` unusable with any function node (ITL-1392); `PollingSource` saved but never
-  rebuilt (ITL-1393); a moved
-  or missing Delta database is silently re-created by load and reads (ITL-1395); a
-  `CachedSource` presenting two rows for one key (ITL-1396, live, found in passing); two
-  misleading messages (ITL-1397).
+- **Issues filed** (A), with the developer's decisions of 2026-11-22: rebuilding an
+  `orcapod.dataclass` column from a saved schema, a missing feature (ITL-1390); connector
+  databases (SQLite) saved but never rebuilt (ITL-1391); `Pipeline.load` + `from_pipeline`
+  unusable with any function node (ITL-1392); `PollingSource` saved but never rebuilt
+  (ITL-1393); a missing database location must raise, never be created (ITL-1395); a
+  load-only run with unbound sources says nothing (ITL-1398); a `CachedSource` presenting two
+  rows for one key (ITL-1396, live, found in passing); two misleading messages (ITL-1397);
+  the run-restricted view question (ITL-1399).
 
 ## The jobs measured
 
@@ -148,10 +152,10 @@ sentence is out of date (minor; not filed separately).
 | `DerivedSource` (plain, over a job node) | limit: not rebuilt; nodes below stay empty; message says "in memory" (ITL-956, ITL-1397) | | |
 | `PollingSource` | does not work: never rebuilt (ITL-1393) | | |
 | Function node, load-only run | works | n/a (refused by the database) | works with `database=` given |
-| Function node, `as_source()` | limit: every run's rows (B1) | n/a | works with `database=` given |
+| Function node, `as_source()` | works: everything stored, every run's rows (by design, B1) | n/a | works with `database=` given |
 | Function node, user-class output | does not work without the class (ITL-1390); works when imported first | n/a | |
 | Operator node, load-only run | works (re-run over loaded inputs) | works only with `database=` given (ITL-1391) | |
-| Operator node, `as_source()` | LOG: limit, every logged run; OFF: empty | same, with `database=` | |
+| Operator node, `as_source()` | LOG: every logged run (by design); OFF: empty | same, with `database=` | |
 | Side-effect node | works (passes rows on, never delivers) | | |
 | Database rebuilt from the file | works | does not work (ITL-1391) | limit: rebuilt empty, warns |
 | Pipeline blueprint → job | does not work with a function node (ITL-1392) | | |
@@ -177,11 +181,32 @@ with `database=` given). "load-only" is `job.run(load_only=True)` then `as_table
 | (vii) upstream function not importable | every node below `score` | = live | as above | the chain needs no function: it uses the stored rows of `score` |
 | (viii) operator with / without cache | `filt`, `join` (LOG); `semijoin`, `groupby`, `batch`, `dropnulls` (OFF) | = live | LOG: every logged run; OFF: 0 | |
 | SQLite, operator-only form | `filt`, `join` (LOG) | = live | 6 (+2 earlier runs) | same as Delta |
-| (ii) source restricted with `where` | not run: only `SpiralDBTableSource` has `where`, and `spiral` is not installed here | | | By the documented rules a restriction is in no identity, so the restricted and unrestricted runs share `__node_content_hash`: `as_source()` would show both; a load-only run would re-read the source with its saved `where` |
+| (ii) source restricted with `where(subject_id="m2")`, after an unrestricted run of the same job (`where_case.py`, the test suite's SpiralDB double) | `double` | = live restricted (2: `m2` only), summary `conditions` `{'events': subject_id='m2'}` | 5: the unrestricted run's `m1` rows too, live and loaded alike | the saved `where` is rebuilt with the source and the load-only run reads through it; a restriction is in no identity (restricted and unrestricted content hashes equal), so `as_source()` shows both runs: by design |
 
 **No read showed a row of another job sharing the tables.** No case found a node showing every
 row of a shared table. The limit is across runs of one job over one source id: the content
 hash of a source is an address, not a digest of its rows, so every run's rows share one key.
+
+### Why a SQLite database does not come back (ITL-1391)
+
+`connector_database_case.py` (ten lines of job, run once):
+
+1. `job.save` writes the database as `{"type": "connector_arrow_database", "connector":
+   {"connector_type": "sqlite", "db_path": "<absolute path>/store.sqlite"}, "base_path": [],
+   "max_hierarchy_depth": 10}`.
+2. `PipelineJob.load` looks `type` up in `DATABASE_REGISTRY` (`pipeline/serialization.py`),
+   which holds `delta_table`, `in_memory` and `noop` only. It logs `Could not reconstruct the
+   database from its saved config: Unknown database type: 'connector_arrow_database'. Known
+   types: ['delta_table', 'in_memory', 'noop']. Node results cannot be read until a database is
+   given: PipelineJob.load(path, database=...) or job.bind(database=...).`
+3. The loaded job's `database` is `None`: `as_source()` raises `Cannot create a DerivedSource
+   without a database`, `run(load_only=True)` raises `PipelineJob.run() requires a database`.
+4. Saving the loaded job again writes `"database": null`: the file has lost its database.
+
+Database kinds with a loader: Delta, in-memory (rebuilt empty, with a warning), no-op.
+Without one: every `ConnectorArrowDatabase` (SQLite, PostgreSQL, SpiralDB connectors), though
+each writes a config. Passing `PipelineJob.load(path, database=ConnectorArrowDatabase(
+SQLiteConnector(...)))` makes every read work (section 4, SQLite row).
 
 ## 5. What a loaded job refuses or cannot do
 
@@ -189,8 +214,8 @@ hash of a source is an address, not a digest of its rows, so every run's rows sh
 |---|---|---|
 | plain `job.run()` | `RuntimeError` (text in section 2-3) | yes |
 | node with an unbound source, `node.run(load_only=True)` | `UnboundSourceError: SourceJobNode 'readings' has no concrete source bound. Call job.bind(sources={'<name>': source}) before running.` | partly: a literal `<name>` (ITL-1397) |
-| unbound source, `job.run(load_only=True)` | returns a summary with no nodes, no warning | no (related: ITL-1318) |
-| database moved / missing (Delta) | loads; load creates the missing root, reads create table folders; reads give 0 rows; one `OrcapodDatabaseContentWarning` per node when `expected_rows` is saved ("the job file records 7 rows ... holds 0") | no: never says the database is missing (ITL-1395) |
+| unbound source, `job.run(load_only=True)` | returns a summary with no nodes, no warning | no: "unfriendly and should be improved" (developer), ITL-1398 (related: ITL-1318) |
+| database moved / missing (Delta) | loads; load creates the missing root, reads create table folders; reads give 0 rows; one `OrcapodDatabaseContentWarning` per node when `expected_rows` is saved ("the job file records 7 rows ... holds 0") | no. Decided (developer): when the saved location does not exist, raise naming the path; never create it on load or read (ITL-1395) |
 | moved, `database=` given | `as_source()` works; sources still point at the old absolute paths, so the load-only run runs nothing until the sources are bound again; then = live | the log says to bind |
 | SQLite database in the file | `WARNING Could not reconstruct the database ... Unknown database type: 'connector_arrow_database' ... Node results cannot be read until a database is given: PipelineJob.load(path, database=...)` | yes, but it should not happen (ITL-1391) |
 | in-memory database, no `database=` | `WARNING Loading pipeline with in-memory database. Cached data from the original run is not available`; reads empty | yes |
@@ -224,37 +249,35 @@ from_pipeline(pipeline, database=..., sources=...)` raises for a pipeline with a
 node, with the pods importable or not (ITL-1392). So a blueprint cannot today become a job,
 read-only or runnable. Operator-only blueprints were not tried.
 
-## (A) Defects filed
+## (A) Issues filed
 
-| Issue | Defect |
-|---|---|
-| ITL-1390 | structural (`orcapod.dataclass`) column not rebuilt from a saved schema; exact class needs an import the message does not mention |
-| ITL-1391 | connector database (SQLite) saved but never rebuilt; resave drops it |
-| ITL-1392 | `Pipeline.load` + `from_pipeline` fails with any function node |
-| ITL-1393 | `PollingSource` saved but never rebuilt (unknown source type) |
-| ITL-1395 | a missing Delta database is re-created by load and reads; reads silently empty |
-| ITL-1396 | `CachedSource` with key columns presents two rows for one key (live, found in passing) |
-| ITL-1397 | messages: `DerivedSource` called "in memory"; literal `<name>` in `UnboundSourceError` |
+| Issue | Kind | What |
+|---|---|---|
+| ITL-1390 | missing feature (Medium) | rebuild an `orcapod.dataclass` column from its saved identity record ("a clear gap in implementation", developer); an exact class needs an import the message does not mention |
+| ITL-1391 | defect | connector database (SQLite) saved but never rebuilt; resave drops it (explained above) |
+| ITL-1392 | defect | `Pipeline.load` + `from_pipeline` fails with any function node |
+| ITL-1393 | defect | `PollingSource` saved but never rebuilt (unknown source type) |
+| ITL-1395 | defect, behaviour decided | a missing saved database location must raise naming the path; load and reads never create it |
+| ITL-1398 | defect | a load-only run with unbound sources returns an empty summary and says nothing |
+| ITL-1396 | defect (live) | `CachedSource` with key columns presents two rows for one key |
+| ITL-1397 | defect (Low) | messages: `DerivedSource` called "in memory"; literal `<name>` in `UnboundSourceError` |
+| ITL-1399 | question (Low) | whether to offer a stored view keeping the run's upstream restriction, beside `as_source()` |
 
-Existing issues that cover further findings: ITL-1318 (load-only run with an unbound source
-reports nothing useful), ITL-956 (a plain `as_source()` source cannot be rebuilt), ITL-977
+Not a defect: `as_source()` / `get_all_records()` showing everything stored for a node (B1).
+
+Existing issues that cover further findings: ITL-1318 (a load-only run with an unbound
+source misreports its nodes), ITL-956 (a plain `as_source()` source cannot be rebuilt), ITL-977
 (operator cache mode not saved), ITL-1129 (`as_source()` and superseded results).
 
 ## (B) Design gaps against the goal
 
-**B1. The stored view without a run is not the saved run.** `as_source()` and
-`get_all_records()` on a loaded node return every row under the node's content hash, so
-every run over the same source ids (superseded values, rows since removed from the source).
-The saved run's rows can be shown today only by re-reading the sources
-(`run(load_only=True)`), which needs the sources. What it would take: name the run's rows in
-the file or the database. Options: (a) record, per function and operator node, the entry ids
-of the saved run (in the job file, or as a run table in the database keyed by `run_id`), and
-let the loaded node's default view read exactly those; (b) store the run id with each
-pipeline record and filter by the saved `run_id`. **Recommendation:** (b) a run table
-(run id → entry ids per node) written at the end of a run, so the loaded job's default view is
-the saved run, `as_source()` stays "everything stored", and nothing needs the sources. This
-also gives OFF operators something to show (their rows are a function of their inputs' named
-rows).
+**B1. No view of the saved run without the sources.** `as_source()` and `get_all_records()`
+show what is stored for a node, not tied to a run: that is their intended meaning (developer,
+2026-11-22), not a defect. The rows one run produced are shown today only by re-reading the
+sources (`run(load_only=True)`). Whether a run-restricted view should exist at all is not
+clear ("not clear what that would mean", developer) and is filed as a low-priority question,
+ITL-1399. If it is wanted, one way: a run table (run id → entry ids per node) written at the
+end of a run, read by the loaded job without the sources.
 
 **B2. The chain needs the sources.** The load-only path applies the chain only through
 sources the file can rebuild (CSV and Delta paths). In-memory sources, a plain
@@ -265,7 +288,7 @@ necessary. **Recommendation:** B1 first; then saved paths relative to the job fi
 
 **B3. User classes need their definitions.** A loaded job is meant to be readable without
 the code; an exact class column is unreadable without its module, and a structural one is
-too (ITL-1390). **Recommendation:** fix ITL-1390, and read an exact class column whose class
+too: the missing feature ITL-1390. **Recommendation:** implement ITL-1390, and read an exact class column whose class
 cannot be found as its storage struct, with a warning, instead of failing every read.
 
 **B4. A job file is not shareable as it stands.** It holds absolute paths, and a connector
@@ -286,9 +309,8 @@ an exact class) should require an explicit opt-in.
 
 ## (C) Not tested
 
-- A source restricted with `where` (only `SpiralDBTableSource` has it; `spiral` not
-  installed): reasoned from the documented rules only.
-- PostgreSQL and SpiralDB databases (no local server).
+- PostgreSQL and SpiralDB databases (no local server); the `where` case ran against the
+  test suite's SpiralDB double, not a live service.
 - The async orchestrator (`run_async(load_only=True)`).
 - `DeltaTableSource`, `DataFrameSource`, `ListSource`, `DBTableSource` sources; a
   `DerivedSource` with `tags_as_data`; data-tags; logical types other than user classes

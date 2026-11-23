@@ -12,6 +12,8 @@ uv run python docs/dev/scripts/itl_1388/run_audit.py $ROOT             # readers
 uv run python docs/dev/scripts/itl_1388/analyze.py $ROOT/delta $ROOT/delta/out/main.b.json
 uv run python docs/dev/scripts/itl_1388/roundtrip.py $ROOT/delta main b
 uv run python docs/dev/scripts/itl_1388/scenarios.py $ROOT             # changed/moved/missing, blueprint
+PYTHONPATH=. uv run python docs/dev/scripts/itl_1388/where_case.py $ROOT/where   # SpiralDB double
+uv run python docs/dev/scripts/itl_1388/connector_database_case.py $ROOT/connector
 ```
 
 - `pods_template.py`: the user module `itl1388_pods` in two variants (`v1`, `changed`).
