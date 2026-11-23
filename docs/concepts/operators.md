@@ -771,8 +771,23 @@ The conditions are:
 | combined | several arguments and keywords (all hold), `a & b`, `a \| b`, `~a` | |
 
 Write `&`, `|` and `~`, never `and`, `or` and `not`, and put each comparison in parentheses
-when you combine it, as in Polars. A list given as a keyword value is refused: membership is
-`col(c).is_in([...])`.
+when you combine it, as in Polars. Python cannot refuse `and` between two conditions:
+`(col("t") > 1.0) and (col("t") < 2.0)` silently keeps only the second. A list given as a keyword value is
+refused: membership is `col(c).is_in([...])`.
+
+A condition that no row can satisfy is kept as written and keeps zero rows: Orcapod does not
+try to tell a contradiction (there is no general way). Naming one column twice in one call
+with two values is refused, as an argument error:
+
+```python
+print(recorded.filter((col("session") == "s1") & (col("session") == "s2")).as_table().num_rows)
+# 0
+try:
+    recorded.filter({"session": "s1"}, session="s2")
+except ValueError as error:
+    print(error)
+# column 'session' is named twice in one call, as 's1' in the mapping and as 's2' as a keyword; give it once
+```
 
 A tag column and a data column are filtered alike. A value must be exactly of its column's
 Python type, and fit its Arrow type: `7` is accepted for a `uint32` column, `-1` is not, and
