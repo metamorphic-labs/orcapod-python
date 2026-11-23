@@ -127,6 +127,13 @@ class FaultyStore:
         self._inner.flush()
         faults.pending_paths.clear()
 
+    def flush_batch(self, record_path: tuple[str, ...]) -> None:
+        """Flush the in-memory batch through the same fault injection."""
+        try:
+            self.flush()
+        except OSError as exc:
+            raise OrcapodDatabaseWriteError(self.base_path, flush=True) from exc
+
     def __getattr__(self, name: str) -> Any:
         """Delegate everything else to the wrapped database."""
         return getattr(self._inner, name)
