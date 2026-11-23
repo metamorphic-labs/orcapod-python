@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import gc
+import weakref
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, cast
@@ -238,6 +240,33 @@ def test_restricted_copy_keeps_client_after_parent_closes(
     assert sorted(cast("list[int]", restricted.as_table()["k"].to_pylist())) == [0, 2]
     assert calls == {"lookup": 1, "metadata": 1, "scan": 1}
     restricted.close()
+
+
+def test_invalid_where_releases_client_with_exception_retained(
+    calls: collections.Counter[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clients: list[weakref.ReferenceType[fake_pyspiral.FakeSpiral]] = []
+    original = fake_pyspiral.FakeSpiral.__init__
+
+    def track(
+        sdk: fake_pyspiral.FakeSpiral,
+        *,
+        config: object = None,
+        overrides: dict[str, str] | None = None,
+    ) -> None:
+        original(sdk, config=config, overrides=overrides)
+        clients.append(weakref.ref(sdk))
+
+    monkeypatch.setattr(fake_pyspiral.FakeSpiral, "__init__", track)
+    source = _source("plain")
+    assert len(clients) == 1 and clients[0]() is not None
+    with pytest.raises(ValueError, match="missing_column") as held:
+        source.where(missing_column=1)
+
+    source.close()
+    gc.collect()
+    assert held.value.__traceback__ is not None
+    assert clients[0]() is None
 
 
 @pytest.mark.parametrize("restricted", [False, True])

@@ -565,6 +565,7 @@ class SpiralDBTableSource(RootSource):
         try:
             restricted._apply_restriction(condition)
         except (ValueError, TypeError) as exc:
+            restricted.close()
             raise type(exc)(f"SpiralDB table {self._qualified!r}: {exc}") from exc
         return restricted
 
