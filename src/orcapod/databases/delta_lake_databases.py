@@ -2862,6 +2862,13 @@ class DeltaTableDatabase:
                 source_alias="source",
                 target_alias="target",
                 merge_schema=self.allow_schema_evolution,
+                # The pending rows are in memory already. Not streaming them lets
+                # delta-rs read their id range first and plan the join with it: a
+                # one-row commit to a 10M-row table took 270 ms instead of 400 ms
+                # (ITL-1377). The id column has no file statistics (delta-rs keeps
+                # none for binary columns), so no file is skipped, and a concurrent
+                # commit of any id still makes this commit fail.
+                streamed_exec=False,
             ).when_not_matched_insert_all().execute()
         except CommitFailedError as conflict:
             raise _LostCommitRace(conflict) from conflict
