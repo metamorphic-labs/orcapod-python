@@ -12,7 +12,6 @@ uv run python docs/dev/scripts/itl_1388/run_audit.py $ROOT             # readers
 uv run python docs/dev/scripts/itl_1388/analyze.py $ROOT/delta $ROOT/delta/out/main.b.json
 uv run python docs/dev/scripts/itl_1388/roundtrip.py $ROOT/delta main b
 uv run python docs/dev/scripts/itl_1388/scenarios.py $ROOT             # changed/moved/missing, blueprint
-uv run python docs/dev/scripts/itl_1388/secrets_check.py $ROOT/secrets
 ```
 
 - `pods_template.py`: the user module `itl1388_pods` in two variants (`v1`, `changed`).

@@ -27,7 +27,7 @@ constraints from its upstreams' content and does not show every row of its table
 - **Defects filed** (A): structural classes not rebuilt from a saved schema (ITL-1390);
   connector databases (SQLite) saved but never rebuilt (ITL-1391); `Pipeline.load` +
   `from_pipeline` unusable with any function node (ITL-1392); `PollingSource` saved but never
-  rebuilt (ITL-1393); credentials written in plain text into the job file (ITL-1394); a moved
+  rebuilt (ITL-1393); a moved
   or missing Delta database is silently re-created by load and reads (ITL-1395); a
   `CachedSource` presenting two rows for one key (ITL-1396, live, found in passing); two
   misleading messages (ITL-1397).
@@ -88,13 +88,12 @@ parameter name of `maybe`, output type of `label`, major version of `mean_score`
   and its cache database config; a `PollingSource` its `impl_module` / `impl_class`; a plain
   `DerivedSource` no origin (so it cannot be rebuilt, ITL-956); in-memory sources only their
   schema (no data).
-- `bindings.database`: the database's `to_config()`: Delta `root_uri` (**absolute path**)
-  and **`storage_options` verbatim** (a synthetic value given there appears in the file:
-  `secrets_check.py`; ITL-1394); SQLite the `db_path`; PostgreSQL, by reading the code, the
-  DSN as given, password included; in-memory just `{"type": "in_memory"}`.
+- `bindings.database`: the database's `to_config()`: Delta `root_uri` (**absolute path**);
+  SQLite the `db_path`; in-memory just `{"type": "in_memory"}`. What a job file holds about
+  database locations is covered in a private issue.
 
 Machine-specific content: every CSV, Delta source and database path, and the cache database
-path of a `CachedSource`. Credentials: database storage options and DSNs (ITL-1394).
+path of a `CachedSource`.
 
 `Pipeline.save` writes the `pipeline` part alone.
 
@@ -233,7 +232,6 @@ read-only or runnable. Operator-only blueprints were not tried.
 | ITL-1391 | connector database (SQLite) saved but never rebuilt; resave drops it |
 | ITL-1392 | `Pipeline.load` + `from_pipeline` fails with any function node |
 | ITL-1393 | `PollingSource` saved but never rebuilt (unknown source type) |
-| ITL-1394 | credentials (`storage_options`, DSN) written into the job file in plain text |
 | ITL-1395 | a missing Delta database is re-created by load and reads; reads silently empty |
 | ITL-1396 | `CachedSource` with key columns presents two rows for one key (live, found in passing) |
 | ITL-1397 | messages: `DerivedSource` called "in memory"; literal `<name>` in `UnboundSourceError` |
@@ -270,9 +268,8 @@ the code; an exact class column is unreadable without its module, and a structur
 too (ITL-1390). **Recommendation:** fix ITL-1390, and read an exact class column whose class
 cannot be found as its storage struct, with a warning, instead of failing every read.
 
-**B4. A job file is not shareable as it stands.** It holds absolute paths and credentials
-(ITL-1394), and a connector database cannot be reopened (ITL-1391). **Recommendation:** no
-secrets in the file; database and source locations either relative or overridable in one
+**B4. A job file is not shareable as it stands.** It holds absolute paths, and a connector
+database cannot be reopened (ITL-1391). **Recommendation:** database and source locations either relative or overridable in one
 call (`PipelineJob.load(path, database=..., sources_root=...)`).
 
 **B5. Saving a loaded job drops what the loader could not rebuild.** **Recommendation:** keep
@@ -291,7 +288,7 @@ an exact class) should require an explicit opt-in.
 
 - A source restricted with `where` (only `SpiralDBTableSource` has it; `spiral` not
   installed): reasoned from the documented rules only.
-- PostgreSQL and SpiralDB databases (no local server; the DSN finding is from the code).
+- PostgreSQL and SpiralDB databases (no local server).
 - The async orchestrator (`run_async(load_only=True)`).
 - `DeltaTableSource`, `DataFrameSource`, `ListSource`, `DBTableSource` sources; a
   `DerivedSource` with `tags_as_data`; data-tags; logical types other than user classes

@@ -3,7 +3,7 @@
 Usage: ``python reader.py <job.json> <out.json> [--database-root <dir>]``
 
 Run by ``run_audit.py`` with the pods module importable (unchanged or changed) or not.
-Never prints a secret: database configs are not printed, only the reads' results.
+Database configs are not printed, only the reads' results.
 
 Records, per node, before and after ``job.run(load_only=True)``: ``as_table()``,
 ``head()``, the notebook preview, ``output_schema()``, ``keys()``, ``as_source()``,
