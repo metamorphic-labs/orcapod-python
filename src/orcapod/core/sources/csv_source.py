@@ -12,7 +12,10 @@ from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource, saved_tag_only_columns
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
-from orcapod.core.sources.source_ids import location_source_name
+from orcapod.core.sources.source_ids import (
+    location_source_name,
+    saved_given_name,
+)
 from orcapod.core.sources.reload import keep_nullable_columns, same_rows
 from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
@@ -294,9 +297,11 @@ class CSVSource(RootSource):
         tag_only_columns: TagOnlyColumns = (),
         **kwargs: Any,
     ) -> None:
-        if source_id is None:
-            source_id = location_source_name(str(file_path))
         super().__init__(source_id=source_id, **kwargs)
+        if self._source_name is None:
+            # A default name is where the data lives, not a name the user gave: it is
+            # not checked for a start shaped like a source id (ITL-1425).
+            self._source_name = location_source_name(str(file_path))
 
         self._file_path = file_path
         # Every later read (a check, ITL-1102) opens the file found now, whatever the
@@ -503,6 +508,11 @@ class CSVSource(RootSource):
             tag_only_columns=saved_tag_only_columns(config),
             system_tag_columns=config.get("system_tag_columns", ()),
             record_id_columns=config.get("record_id_columns"),
-            source_id=cls.saved_source_name(config),
+            # A saved default name is given again as no name, so it is not taken for
+            # one the user gave (ITL-1425).
+            source_id=saved_given_name(
+                cls.saved_source_name(config),
+                location_source_name(str(config["file_path"])),
+            ),
             schema=cls.saved_schema(config),
         )

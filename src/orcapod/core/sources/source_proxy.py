@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
+from orcapod.core.sources.source_ids import parse_source_id
 from orcapod.core.streams.view import (
     ViewStatus,
     StreamView,
@@ -203,8 +204,13 @@ class SourceProxy(RootSource):
 
     @property
     def source_name(self) -> str:
-        """The name part of the saved source id."""
-        return self._saved_source_id.partition(":")[2]
+        """The name part of the saved source id, read by the one parser.
+
+        Raises:
+            ValueError: If the saved id is not a source id (a config that names no
+                source gives ``"unknown"``).
+        """
+        return parse_source_id(self._saved_source_id).name
 
     def pipeline_identity_structure(self) -> Any:
         return ContentHash.from_string(self._pipeline_hash_str)

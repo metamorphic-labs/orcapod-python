@@ -124,9 +124,10 @@ class DerivedSource(RootSource):
     equals the tag when the source is read; downstream it is plain data.
 
     Being a source, this form starts provenance afresh by the rule every source
-    follows: its own system-tag columns, record IDs derived from its ``source_id``
-    and each row's position (or ``record_id_columns``), and a source-info token
-    for every data column, the copies included. It stores nothing itself; like
+    follows: its own system-tag columns, record IDs from each row's position (or
+    its ``record_id_columns`` values), which never hold the source id (ITL-1425),
+    and a source-info token (``<source id>::<record id>::<column>``) for every data
+    column, the copies included. It stores nothing itself; like
     any source it can be wrapped with ``cached(database)``.
 
     Identity (``tags_as_data`` form):
@@ -134,8 +135,9 @@ class DerivedSource(RootSource):
           2026, ITL-1313). The default this form had, a hash of the derivation,
           was of questionable stability (``record_id_columns=None`` and ``()``,
           one key policy, gave two ids).
-        - ``content_hash`` follows the rule of every root source (class name,
-          output schema and ``source_id``) plus the sorted ``tags_as_data`` items,
+        - ``content_hash`` follows the rule of every root source (``source_id``,
+          ``derived_v1:<name>``, output schema and key columns; no class name,
+          ITL-1425) plus the sorted ``tags_as_data`` items,
           since two mappings can give one schema and one explicit ``source_id``.
         - ``pipeline_hash`` is schema-only, as for every root source.
 
@@ -160,9 +162,10 @@ class DerivedSource(RootSource):
 
     Args:
         origin: The source or DB-backed job node to derive from.
-        source_id: Canonical source name. Required with ``tags_as_data``; the plain
-            form defaults it to ``derived:<algorithm label>:<hex>`` of the origin's
-            content hash.
+        source_id: The source's name; its id is ``derived_v1:<name>`` (ITL-1425).
+            Required with ``tags_as_data``; the plain form defaults the name to
+            ``<algorithm label>:<hex>`` of the origin's content hash, so its id is
+            ``derived_v1:semantic_v1:<hex>``.
         tags_as_data: Maps a tag column of the origin to the name of the data
             column that receives a copy of it.
         record_id_columns: Key columns whose values identify a row in record IDs and

@@ -133,6 +133,24 @@ def build_source_id(kind: str, version: int, name: str) -> str:
     return f"{kind_part(kind, version)}:{require_source_name(name)}"
 
 
+def parse_kind_part(text: str) -> tuple[str, int]:
+    """Take a kind part ``<kind>_v<N>`` apart into its kind and version.
+
+    For a caller handed a kind part already built (``SourceStreamBuilder.build``), which
+    then builds the id with ``build_source_id``.
+
+    Raises:
+        ValueError: If ``text`` is not a kind part.
+    """
+    match = _KIND_PART_PATTERN.fullmatch(text)
+    if match is None:
+        raise ValueError(
+            f"{text!r} is not the kind part of a source id: a kind part is "
+            "'<kind>_v<N>', for example 'csv_v1'"
+        )
+    return match.group(1), int(match.group(2))
+
+
 def parse_source_id(source_id: str) -> ParsedSourceId:
     """Take a source id apart at its first ``:``.
 
@@ -190,6 +208,17 @@ def location_source_name(location: str) -> str:
             f"the location {location!r} gives no default source name: it is empty, "
             "contains '::', or starts or ends with ':'; give the source a source_id"
         ) from exc
+
+
+def saved_given_name(saved_name: str | None, default_name: str) -> str | None:
+    """The name to give a source rebuilt from a saved config: ``None`` for its default.
+
+    A config saves a source's name whether it was given or is the default built from
+    where the data lives; given again as no name, a saved default is rebuilt as the
+    default, which is not checked like a name the user gave
+    (``warn_if_name_looks_like_an_id``). The id is the same either way.
+    """
+    return None if saved_name == default_name else saved_name
 
 
 def joined_location(separator: str, *parts: str) -> str:

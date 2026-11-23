@@ -884,7 +884,7 @@ print(sorted(PROVISIONAL_SOURCES))
 
 | Source | What is still open |
 |---|---|
-| `PollingSource` | its default source id hashes the implementation's own identity, and its content hash leaves out the source id and the declared schema (ITL-1316) |
+| `PollingSource` | its default source id hashes the implementation's own identity, and its content hash leaves out the declared schema (ITL-1316); it holds the source id (ITL-1425) |
 | `DerivedSource`, both forms | the plain form (`node.as_source()`) hashes only its origin's content hash and accepts a `source_id` its identity does not use; the `tags_as_data` form changed just before this release (ITL-1317) |
 
 So everything built on a `DerivedSource`, whether it came from `node.as_source()` or from

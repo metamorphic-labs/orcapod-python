@@ -101,6 +101,7 @@ class DBTableSource(RootSource):
         tag_only_columns: TagOnlyColumns = (),
         _query: str | None = None,
     ) -> None:
+        address: str | None = None
         if source_id is None:
             address = self._table_address(connector, table_name)
             if address is None:
@@ -113,13 +114,17 @@ class DBTableSource(RootSource):
                     "source of your database (SQLiteTableSource, "
                     "PostgreSQLTableSource), whose default id holds the address."
                 )
-            source_id = location_source_name(address)
         super().__init__(
             source_id=source_id,
             label=label,
             data_context=data_context,
             config=config,
         )
+        if self._source_name is None:
+            assert address is not None
+            # A default name is where the data lives, not a name the user gave: it is
+            # not checked for a start shaped like a source id (ITL-1425).
+            self._source_name = location_source_name(address)
 
         self._connector = connector
         self._table_name = table_name

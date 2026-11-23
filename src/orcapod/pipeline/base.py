@@ -33,6 +33,41 @@ logger = logging.getLogger(__name__)
 NodeT = TypeVar("NodeT", bound=Hashable)
 
 
+def _refuse_sources_sharing_a_slot_name(
+    slot_name: str, streams: list[cp.StreamProtocol]
+) -> None:
+    """Refuse two different sources that would take one slot name (ITL-1425).
+
+    A slot is named by its source's name, without the kind part, so two different
+    sources whose names are equal (a SQLite table ``data.db:main.records`` and a CSV
+    file at that path; Arrow and data frame sources over one table with default ids)
+    would share one ``job.sources`` and ``bind`` key, and one would replace the other.
+    Only sources are refused here: a slot of another stream is named by its label and
+    content hash.
+
+    Raises:
+        SourceSlotNameCollisionError: Naming every full source id and the remedy.
+    """
+    from orcapod.core.sources.base import RootSource
+
+    sources = [s for s in streams if isinstance(s, RootSource)]
+    if len(sources) < 2:
+        return
+    from orcapod.errors import SourceSlotNameCollisionError
+
+    ids = sorted({s.source_id for s in sources})
+    described = (
+        ", ".join(repr(i) for i in ids)
+        if len(ids) > 1
+        else f"{ids[0]!r} ({len(sources)} sources with other key columns or rows)"
+    )
+    raise SourceSlotNameCollisionError(
+        f"{len(sources)} different sources would take the slot name {slot_name!r}: "
+        f"{described}. A slot is named by the source's name without its kind part; "
+        "give each source its own name with source_id=... when it is built."
+    )
+
+
 @dataclass(frozen=True)
 class InvocationGraph:
     """Interchange value object between Pipeline and PipelineJob.
@@ -504,6 +539,9 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                     f"Assign distinct source_id values to the conflicting sources "
                     f"so each slot has a unique, stable identity."
                 )
+            _refuse_sources_sharing_a_slot_name(
+                node_name, [self._source_streams[h] for h in hashes]
+            )
 
         # 3. Topological pass — create function / operator nodes.
         for key in _nx.topological_sort(self._hash_graph):

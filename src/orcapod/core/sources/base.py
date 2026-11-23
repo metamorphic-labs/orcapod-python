@@ -259,6 +259,29 @@ class RootSource(StreamBase):
         return {"source_name": self.source_name, "source_version": self.SOURCE_VERSION}
 
     @classmethod
+    def require_saved_name_fields(cls, config: dict[str, Any]) -> None:
+        """Refuse a saved config written before source ids named their kind (ITL-1425).
+
+        Such a config holds a ``source_id`` and no ``source_name``. It is not read as
+        anything else: ``from_config`` refuses it, and ``PipelineJob.load`` refuses a
+        file holding one anywhere (``check_saved_source_config``), instead of loading
+        the job with that source missing.
+
+        Args:
+            config: A saved source config (``to_config``).
+
+        Raises:
+            ValueError: If the config holds a ``source_id`` but no ``source_name``.
+        """
+        if "source_id" in config and "source_name" not in config:
+            raise ValueError(
+                f"the saved {cls.SOURCE_KIND} source config holds a source_id but no "
+                "source_name: it was saved before every source id named its kind and "
+                "implementation version (ITL-1425); build the source again and save "
+                "the job again"
+            )
+
+    @classmethod
     def saved_source_name(cls, config: dict[str, Any]) -> str | None:
         """Return the name a saved source config holds, warning on a version change.
 
@@ -277,13 +300,7 @@ class RootSource(StreamBase):
                 was saved before source ids named their kind (ITL-1425) and is not read
                 as anything else.
         """
-        if "source_id" in config and "source_name" not in config:
-            raise ValueError(
-                f"the saved {cls.SOURCE_KIND} source config holds a source_id but no "
-                "source_name: it was saved before every source id named its kind and "
-                "implementation version (ITL-1425); build the source again and save "
-                "the job again"
-            )
+        cls.require_saved_name_fields(config)
         saved_version = config.get("source_version")
         if saved_version is not None and saved_version != cls.SOURCE_VERSION:
             warnings.warn(
@@ -391,6 +408,11 @@ class RootSource(StreamBase):
         tag_schema, data_schema = self.output_schema()
         type_converter = self.data_context.type_converter
         return {
+            # The full id, for a proxy when the name is not saved (a default derived
+            # name, recomputed from an origin a load may not rebuild). Not
+            # ``source_id``: a config with that key and no ``source_name`` is one saved
+            # before ITL-1425, and is refused.
+            "full_source_id": self.source_id,
             "content_hash": self.content_hash().to_string(),
             "pipeline_hash": self.pipeline_hash().to_string(),
             "tag_schema": serialize_schema(tag_schema, type_converter),

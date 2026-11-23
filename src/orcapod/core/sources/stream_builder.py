@@ -16,7 +16,12 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pyarrow as pa
 
-from orcapod.core.sources.source_ids import hash_source_name, require_source_name
+from orcapod.core.sources.source_ids import (
+    build_source_id,
+    hash_source_name,
+    parse_kind_part,
+    require_source_name,
+)
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import RowIdentifierError
 from orcapod.logical_types.identifier import LogicalTypeIdentifierError
@@ -434,7 +439,8 @@ class SourceStreamBuilder:
             ValueError: If the table has no columns ("Table is empty"), if
                 tag_columns or a key column are not in the table, a key column's
                 type is not allowed, a key value is null or repeated, or if
-                ``kind_part`` is not given, or if ``hash_in_key_order`` is given with
+                ``kind_part`` is not given or is not ``<kind>_v<N>``, or if the
+                source id it builds is not valid, or if ``hash_in_key_order`` is given with
                 a ``source_name`` or without key columns.
             InputValidationError: If a column's type is, or contains, a
                 dictionary: dictionary-encoded columns are not currently supported
@@ -547,9 +553,10 @@ class SourceStreamBuilder:
                 "build() needs the kind part of the source id (kind_part, "
                 "'<kind>_v<N>'): every source id is '<kind part>:<name>'"
             )
+        kind, version = parse_kind_part(kind_part)
         if source_name is None:
             source_name = hash_source_name(table_hash)
-        source_id = f"{kind_part}:{source_name}"
+        source_id = build_source_id(kind, version, source_name)
 
         # 7. Attach the source-info tokens and the system tags.
         stream = self.attach_provenance(

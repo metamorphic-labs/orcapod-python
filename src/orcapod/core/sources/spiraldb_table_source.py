@@ -638,8 +638,9 @@ class SpiralDBTableSource(RootSource):
         return None
 
     def identity_structure(self) -> Any:
-        """Identity from the class, the schema, the source id (the table's locator) and
-        the key columns (the primary key, or ``record_id_columns``).
+        """Identity from the source id (``spiraldb_table_v1:`` and the table's locator),
+        the schema and the key columns (the primary key, or ``record_id_columns``), as
+        for every root source; no class name (ITL-1425).
 
         With ``tags_as_data`` given, its sorted items follow: two mappings can give
         the same schema (two key columns of one type copied to one name) while the

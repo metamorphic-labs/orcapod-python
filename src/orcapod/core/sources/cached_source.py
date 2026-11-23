@@ -14,7 +14,11 @@ from orcapod.core.data_tags import stream_data_tags
 from orcapod.config import OrcapodConfig
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.source_ids import parse_source_id
-from orcapod.errors import InputValidationError, UnstorableColumnError
+from orcapod.errors import (
+    CachedSourceIdMismatchError,
+    InputValidationError,
+    UnstorableColumnError,
+)
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     typed_arrow_schemas,
@@ -94,6 +98,8 @@ class CachedSource(RootSource):
     _skipped_rows_reported: bool = False
     # Set once a cache table found at the older layout has been accounted for.
     _stale_tables_checked: bool = False
+    # Whether the cache table was found to hold this source's rows only (ITL-1425).
+    _source_ids_checked: bool = False
 
     def __init__(
         self,
@@ -379,6 +385,7 @@ class CachedSource(RootSource):
         """
         seen = self._source_modified_time()
         live_with_hash = self._live_records()
+        self._require_rows_of_this_source()
         # Store in DB with hash as record ID (skip_duplicates deduplicates).
         # The data context column is appended after the record hashes are computed:
         # it names the generation of hashing that produced them and is not hashed.
@@ -405,6 +412,7 @@ class CachedSource(RootSource):
         if records is None:
             return set()
         records = keep_rows_of_data_context(records, self.data_context_key)
+        self._require_source_ids(records)
         return {
             h
             for h in records.column(self.HASH_COLUMN_NAME).to_pylist()
@@ -507,8 +515,61 @@ class CachedSource(RootSource):
                 self._cache_database.base_path + self.cache_path,
                 stored_rows - records.num_rows,
             )
+        self._require_source_ids(records)
         self._require_declared_types(records)
         return records
+
+    def _require_rows_of_this_source(self) -> None:
+        """Refuse a cache table holding rows of another source id, before a write.
+
+        Read once per source object; a table not yet written holds no other id.
+
+        Raises:
+            CachedSourceIdMismatchError: If a stored row names another source id.
+        """
+        if self._source_ids_checked:
+            return
+        records = self._cache_database.get_all_records(
+            self.cache_path, record_id_column=self.HASH_COLUMN_NAME
+        )
+        if records is None:
+            return
+        self._require_source_ids(
+            keep_rows_of_data_context(records, self.data_context_key)
+        )
+
+    def _require_source_ids(self, records: pa.Table) -> None:
+        """Refuse cached rows written under another source id than this one (ITL-1425).
+
+        A cache keeps one source's rows. Rows stored under another full source id (the
+        same data read by another version of its kind, after a load where the class
+        declares a newer ``SOURCE_VERSION``) are not this source's rows: presenting
+        them, or adding this source's rows beside them, would mix two sources in one
+        table. Nothing is converted or moved.
+
+        Raises:
+            CachedSourceIdMismatchError: Naming both ids.
+        """
+        stored_ids: set[str] = set()
+        for name in records.column_names:
+            if name.startswith(constants.SYSTEM_TAG_SOURCE_ID_PREFIX):
+                stored_ids.update(
+                    value
+                    for value in records.column(name).unique().to_pylist()
+                    if value is not None
+                )
+        others = sorted(stored_ids - {self.source_id})
+        if others:
+            raise CachedSourceIdMismatchError(
+                f"CachedSource at {'/'.join(self.cache_path)!r} reads "
+                f"{self.source_id!r}, but its cache holds rows of "
+                f"{', '.join(repr(i) for i in others)}; nothing was read or written. "
+                "The cache must be rebuilt for the new id (another cache_path or "
+                "cache database), or the reader's version pinned to the one that "
+                "wrote it."
+            )
+        if stored_ids:
+            self._source_ids_checked = True
 
     def _build_merged_stream(self) -> ArrowTableStream:
         """Ingest live data (if available), then return all cached records.

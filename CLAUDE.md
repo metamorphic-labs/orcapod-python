@@ -939,7 +939,7 @@ Every pipeline element has two parallel hashes:
    sources that differ only in how they name their rows are two sources, with one pipeline
    hash and one source id (developer, November 16, 2026, ITL-1154). Row content enters only where a source puts it into its own
    identity: the default `source_id` of the in-memory sources
-   (`<source kind>:<algorithm label>:<hex>` of the table hash, used when none is given; the rows
+   (`<kind>_v<N>:<algorithm label>:<hex>` of the table hash, used when none is given; the rows
    in the order given, or sorted by the key columns with `hash_in_key_order=True`, ITL-1272). A
    `ListSource` has no rule of its own (developer, November 21, 2026, ITL-1272): its elements
    and tag function enter only through that default and its output schema (their types), and
@@ -1428,8 +1428,15 @@ data. The rules:
   id). A saved config holds `source_name` and `source_version` apart (the kind is
   `source_type`); loaded where the class declares another version, the source has the
   installed version's id (`SourceVersionWarning`), never a rewritten one. A slot (a
-  `job.nodes` and `bind` key) is named by the source's name, not its full id. A
-  `CachedSource` presents its wrapped source's id; a `SourceProxy` the saved id. Tokens,
+  `job.nodes` and `bind` key) is named by the source's name, not its full id, and two
+  different sources with one name are refused in a job (`SourceSlotNameCollisionError`,
+  `pipeline/base._refuse_sources_sharing_a_slot_name`). A `CachedSource` presents its
+  wrapped source's id and refuses, before any read or write, a cache table whose rows name
+  another id (`CachedSourceIdMismatchError`; never a silent move to another path); a
+  `SourceProxy` the saved id (rebuilt from the saved name fields, or the `full_source_id`
+  identity field). A legacy config (`source_id`, no `source_name`) is refused, also nested,
+  by `PipelineJob.load`. The name-shaped-like-an-id warning is for a given name only, not a
+  default location. Tokens,
   system tags and `source_id` show the full id; a record id never holds the source id. A
   `DerivedSource` with `tags_as_data` has no default: it requires a `source_id` (ITL-1313).
   A default name built from a hash is `<algorithm label>:<hex>`, built

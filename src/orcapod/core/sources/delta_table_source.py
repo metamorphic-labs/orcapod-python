@@ -11,7 +11,10 @@ from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource, saved_tag_only_columns
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
-from orcapod.core.sources.source_ids import location_source_name
+from orcapod.core.sources.source_ids import (
+    location_source_name,
+    saved_given_name,
+)
 from orcapod.core.sources.reload import same_rows
 from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
@@ -68,10 +71,12 @@ class DeltaTableSource(RootSource):
     ) -> None:
         resolved = Path(delta_table_path).resolve()
 
-        if source_id is None:
-            # The table folder's path or URI as passed: a relative path stays relative.
-            source_id = location_source_name(os.fspath(delta_table_path))
         super().__init__(source_id=source_id, **kwargs)
+        if self._source_name is None:
+            # The table folder's path or URI as passed: a relative path stays relative.
+            # A default name is where the data lives, not a name the user gave: it is
+            # not checked for a start shaped like a source id (ITL-1425).
+            self._source_name = location_source_name(os.fspath(delta_table_path))
 
         self._delta_table_path = resolved
 
@@ -189,5 +194,9 @@ class DeltaTableSource(RootSource):
             tag_only_columns=saved_tag_only_columns(config),
             system_tag_columns=config.get("system_tag_columns", ()),
             record_id_columns=config.get("record_id_columns"),
-            source_id=cls.saved_source_name(config),
+            # A saved default name is given again as no name (ITL-1425).
+            source_id=saved_given_name(
+                cls.saved_source_name(config),
+                location_source_name(os.fspath(config["delta_table_path"])),
+            ),
         )

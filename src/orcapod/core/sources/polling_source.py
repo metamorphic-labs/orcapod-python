@@ -205,9 +205,10 @@ class PollingSource(RootSource, Generic[T]):
             See ``PollingConfig`` for field semantics and defaults.
             All fields are validated at construction — ``ValueError`` is
             raised for out-of-range values.
-        source_id: Optional stable string identifier for provenance tracking.
-            Defaults to ``polling_source:<label>:<hex>`` of the semantic hash of
-            ``impl.identity()``.
+        source_id: Optional name of the source; its id is
+            ``polling_source_v1:<name>`` (ITL-1425). The name defaults to
+            ``<label>:<hex>`` of the semantic hash of ``impl.identity()``, so the
+            default id is ``polling_source_v1:semantic_v1:<hex>``.
         label: Optional human-readable label shown in pipeline diagrams.
         data_context: Optional data context key or instance for type
             conversion and hashing.

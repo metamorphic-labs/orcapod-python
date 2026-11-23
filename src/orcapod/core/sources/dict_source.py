@@ -38,7 +38,7 @@ class DictSource(RootSource):
 
     TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
-    # The config type key; also the kind prefix of the default source id.
+    # The config type key; also the kind in the kind part of the source id.
     SOURCE_KIND: ClassVar[str] = "dict"
     # The version of this kind's implementation, in the kind part (ITL-1425).
     SOURCE_VERSION: ClassVar[int] = 1

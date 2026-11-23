@@ -37,7 +37,7 @@ class ListSource(RootSource):
     def _default_tag(element: Any, idx: int) -> dict[str, Any]:
         return {"element_index": idx}
 
-    # The config type key; also the kind prefix of the default source id.
+    # The config type key; also the kind in the kind part of the source id.
     SOURCE_KIND: ClassVar[str] = "list"
     # The version of this kind's implementation, in the kind part (ITL-1425).
     SOURCE_VERSION: ClassVar[int] = 1
