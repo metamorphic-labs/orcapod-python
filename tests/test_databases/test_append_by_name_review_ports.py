@@ -401,6 +401,9 @@ class _MarkedStorage(pa.ExtensionType):
         return cls(storage_type.field("value").metadata[b"marker"])
 
 
+pa.register_extension_type(_MarkedStorage(b"registration"))  # pyright: ignore[reportArgumentType]  # the stubs name PyExtensionType; pyarrow takes any ExtensionType
+
+
 def _marked_rows(n: int, marker: bytes, order: tuple[str, ...]) -> pa.Table:
     ext_type = _MarkedStorage(marker)
     values = pa.ExtensionArray.from_storage(
@@ -414,41 +417,53 @@ def _marked_rows(n: int, marker: bytes, order: tuple[str, ...]) -> pa.Table:
     return pa.table({name: columns[name] for name in order})
 
 
+@pytest.mark.parametrize("database", ["in-memory", "Delta"])
+@pytest.mark.parametrize("flushed", [False, True], ids=["pending", "flushed"])
 @pytest.mark.parametrize(
-    ("database", "flushed", "error"),
-    [
-        ("in-memory", False, pa.ArrowInvalid),
-        ("in-memory", True, pa.ArrowInvalid),
-        ("Delta", False, ValueError),
-    ],
-    ids=["in-memory pending", "in-memory committed", "Delta pending"],
+    "order",
+    [("b", "rid", "a"), ("rid", "a", "b")],
+    ids=["another order", "same order"],
 )
-def test_a_permuted_append_with_other_metadata_inside_an_extension_is_refused(
-    tmp_path: Path, database: str, flushed: bool, error: type[BaseException]
+def test_other_metadata_inside_an_extensions_storage_is_not_compared_on_append(
+    tmp_path: Path, database: str, flushed: bool, order: tuple[str, ...]
 ) -> None:
-    """An extension type whose storage struct child carries other field metadata: a
-    permuted append is not taken for the held column (its marker would be replaced by
-    the held one), so it is refused as main refused it before PR 491 (321284ae)
-    (PR 496 CodeRabbit, utils.py:303). A committed Delta table of such a type fails
-    to read on main too (pre-existing, not pinned here)."""
-    db = (
-        InMemoryArrowDatabase()
-        if database == "in-memory"
-        else DeltaTableDatabase(tmp_path)
-    )
+    """Pinned, not endorsed: an append whose extension column's storage struct child
+    carries other field metadata (``incoming`` against the held ``held``) is accepted
+    in either column order, and a fresh read reports the held metadata. Storage field
+    metadata was never compared on append (on 321284ae the same-order append is
+    accepted too; its another-order refusals were the column-order refusal ITL-1367
+    removed), so the two orders now behave alike. Whether to refuse it is ITL-1415,
+    to be decided with ITL-1371; this pin makes that decision visible (PR 496
+    CodeRabbit, utils.py:303).
+
+    Delta, flushed, another order: on main a new table keeps its first write's order
+    and delta-rs takes the incoming metadata when the append arrives in another
+    order; here a new table is canonical and the append is committed in its order,
+    so the held metadata stays, as for an append in the same order. A table written
+    before ITL-1370 commits as on main."""
+
+    def fresh() -> Any:
+        if database == "in-memory":
+            return memory
+        return DeltaTableDatabase(tmp_path)
+
+    memory = InMemoryArrowDatabase()
+    db = fresh()
     db.add_records(
         PATH,
         _marked_rows(1, b"held", ("rid", "a", "b")),
         record_id_column="rid",
         flush=flushed,
     )
-    with pytest.raises(error):
-        db.add_records(
-            PATH,
-            _marked_rows(2, b"incoming", ("b", "rid", "a")),
-            record_id_column="rid",
-        )
-        db.flush()
+    db.add_records(PATH, _marked_rows(2, b"incoming", order), record_id_column="rid")
+    db.flush()
+
+    stored = fresh().get_all_records(PATH, record_id_column="rid")
+    assert stored is not None
+    assert sorted(stored.column("b").to_pylist()) == [1, 2]
+    column_type = stored.schema.field("a").type
+    assert isinstance(column_type, _MarkedStorage)
+    assert column_type.storage_type.field(0).metadata == {b"marker": b"held"}
 
 
 # ── PR 496, CodeRabbit (function_node.py:3615), declined ─────────────────────────────
