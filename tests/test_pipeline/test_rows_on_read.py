@@ -167,12 +167,15 @@ def test_a_narrower_bind_is_described_from_its_declared_schema() -> None:
     assert set(node.keys()[0]) <= set(schema.names)
 
 
-def test_a_narrower_bind_channel_raises_as_its_rows_do() -> None:
-    """The source node's channel carries its rows: ITL-1366's input raises as on main.
+def test_a_narrower_bind_channel_delivers_its_rows() -> None:
+    """The source node's channel carries its rows: ITL-1366's input, which ``main``
+    completes since 4d192bfc (a tag schema in tag order, #486).
 
-    ``open_channel()`` reads the node's output, the rows built when read, which raise
-    the duplicate-column error ``main``'s row path raises.
+    ``open_channel()`` reads the node's output, the rows built when read: the table of
+    the node's rows by ``main``'s row path.
     """
+    from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+
     import asyncio
 
     table = pa.table(
@@ -199,8 +202,11 @@ def test_a_narrower_bind_channel_raises_as_its_rows_do() -> None:
     slot = next(label for label in job.nodes if label != "selected")
     job.bind(sources={slot: source(False)})
     node: Any = job.nodes[slot]
-    with pytest.raises(ValueError, match="Duplicate column name"):
-        asyncio.run(node.open_channel().collect())
+    batches = asyncio.run(node.open_channel().collect())
+    delivered = pa.Table.from_batches(batches)
+    expected = StaticOutputOperatorPod._rows_to_table(list(node.iter_data()))[0]  # pyright: ignore[reportPrivateUsage]  # main's row path
+    assert delivered.column_names == expected.column_names
+    assert delivered.to_pylist() == expected.to_pylist()
 
 
 def _replay_job(database: InMemoryArrowDatabase, *, with_successor: bool) -> Any:

@@ -164,8 +164,8 @@ def test_a_source_node_opens_a_channel_on_its_rows() -> None:
 
 def test_a_bound_source_node_sends_its_rows_in_their_own_column_order() -> None:
     """A source whose physical columns are x, j, k, y with tags declared k, j: the
-    node's batches have the column order of its own rows (``execute()``: k, j, ...),
-    not the slot's schema order."""
+    node's batches have the column order of its own rows (``execute()``: k, j, ...).
+    Since ``main`` 4d192bfc the slot's schema lists the tags in tag order too (#486)."""
     stream = ArrowTableSource(
         pa.table(
             {
@@ -180,7 +180,7 @@ def test_a_bound_source_node_sends_its_rows_in_their_own_column_order() -> None:
         source_id="ordered",
     )
     node = SourceJobNode.from_stream(stream, name="ordered")
-    assert node.keys()[0] != stream.keys()[0]  # the slot's order is another
+    assert node.keys()[0] == stream.keys()[0] == ("k", "j")  # tag order (#486)
     rows = list(node.iter_data())  # the rows execute() returned before ITL-1347 stage 2
     expected = StaticOutputOperatorPod._rows_to_table(rows)[0]
     batches = run(node.open_channel().collect)
@@ -284,8 +284,8 @@ def test_a_rebind_before_the_first_read_is_read_whole() -> None:
 
 def test_a_source_nodes_conversion_keeps_the_delivered_column_order() -> None:
     """Plain tags declared ``k, j`` over physical columns ``x, j, k, y``: the stream
-    ``to_stream()`` makes keeps the columns in the order they were delivered
-    (the node's rows), though the node describes itself in the slot's order."""
+    ``to_stream()`` makes keeps the columns in the order they were delivered (the
+    node's rows), which since ``main`` 4d192bfc is also the slot's (tag order, #486)."""
     stream = ArrowTableSource(
         pa.table(
             {
@@ -300,7 +300,7 @@ def test_a_source_nodes_conversion_keeps_the_delivered_column_order() -> None:
         source_id="ordered",
     )
     node = SourceJobNode.from_stream(stream, name="ordered")
-    assert node.keys()[0] == ("j", "k")  # the slot's order
+    assert node.keys()[0] == ("k", "j")  # the slot's order: tag order (#486)
 
     async def read() -> tuple[list[str], list[str]]:
         batches = await node.open_channel().collect()
