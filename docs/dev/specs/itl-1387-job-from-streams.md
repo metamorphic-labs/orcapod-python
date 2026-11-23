@@ -369,8 +369,13 @@ without:
 Decided (developer, 2026-11-22): "If the function is loadable the node and upstream chain
 should be treated like just any stream whose upstream chain can be taken to construct pod and
 nodes into the absorbing pipeline. If any of the step is unloadable, I agree that likely
-should be errored out for now." Attaching a loadable function when a job is loaded is
-ITL-1407. As built here: a loaded node that has a producer (an operator node) is walked like
+should be errored out for now." Then revised (developer, 2026-11-22): when a step is not
+loadable, "we should actually create the proxy node into the absorbing pipeline without
+erroring but do throw a warning and make sure to use databases for the absorbing pipeline".
+That target is designed and built under ITL-1407 (with attaching a loadable function when a
+job is loaded): a proxy node in the absorbing job, a warning, and the absorbing job's
+databases. What follows is the INTERIM behaviour of this PR, a clear and named refusal until
+ITL-1407 lands. As built here: a loaded node that has a producer (an operator node) is walked like
 any stream; a function node whose function is not attached is refused when it is recorded,
 naming the step: its function is not attached (not loadable, or not loaded), and
 `node.as_source()` gives its stored results. Once ITL-1407 attaches loadable functions, such
@@ -461,7 +466,7 @@ How a test proves it (section 8 has the plan):
 | `CachedSource` | handled, as a root | as by hand; a `CachedSource` over a restricted source is already refused at construction |
 | `PollingSource` | handled, as a root | registering never polls (identity is `impl.identity()`); a run checks it as by hand |
 | A node of another job | walked, with every upstream step (D7, revised) | section 5.1 |
-| A function node of a loaded job | refused by name while its function is not attached (section 5.2) | `as_source()` for its stored results; ITL-1407 attaches loadable functions |
+| A function node of a loaded job | interim: refused by name while its function is not attached (section 5.2) | `as_source()` for its stored results; target (ITL-1407): a loadable function attached and walked, an unloadable step brought in as a proxy node with a warning, on the absorbing job's databases |
 | An operator node of a loaded job | walked (its operator is rebuilt), down to what lies beneath | section 5.2 |
 | A raw `ArrowTableStream` root, a joined stream as a root | refused, as today | the bind check; binding such a stream is ITL-1127 |
 | A bare root source registered alone | refused (D9) | there is no step to register, and no by-hand equivalent (a `with` block records only steps); the message says to register a stream built from it |
@@ -664,8 +669,9 @@ are ITL-1389.
    source; one step under two different assigned labels is refused. (Recommended.)
 7. **D7** REVISED (developer, 2026-11-22): a node of another job is walked with every
    upstream step (5.1); a loaded node with a loadable function is walked like any stream,
-   and a step whose function is not attached is refused (developer, 2026-11-22; attaching
-   loadable functions is ITL-1407) (5.2).
+   and a step whose function is not attached is refused for now; the decided target is a
+   proxy node with a warning on the absorbing job's databases (developer, 2026-11-22;
+   ITL-1407) (5.2).
 8. **D8** (built as recommended, not individually confirmed) Side-effect pods are registered like any step (deliveries happen on `run()`), rather
    than refused. (Recommended; refusing is the cautious alternative.)
 9. **D9** (built as recommended, not individually confirmed) Registering a bare root source alone is refused. (Recommended.)

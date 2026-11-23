@@ -408,7 +408,7 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                     raise ValueError(
                         f"The function of step {stream.label!r} is not attached (it "
                         "was not loadable, or not loaded), so the step cannot be "
-                        "brought into a pipeline. For its stored results use "
+                        "brought into a pipeline yet. For its stored results use "
                         "node.as_source()."
                     )
                 continue  # a leaf: the bind check decides when the pipeline compiles
