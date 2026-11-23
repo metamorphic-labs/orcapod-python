@@ -1,6 +1,7 @@
 # ITL-1374: `Filter`, a general row filter that is part of the pipeline
 
-Status: DRAFT for the developer's decision (2026-11-22). Design only: no library code.
+Status: approved: decisions 2-13, developer, 2026-11-22; 1 and 15 pending (built as
+recommended; the operator is provisional, so the form can still change).
 Related: ITL-1265 (a `Filter` over a `Condition`, the earlier issue this one realizes),
 ITL-1218 / ITL-1219 (source restrictions), ITL-1266 (provisional operators), ITL-1251
 (floats: `0.0 == -0.0`, NaN equals NaN), ITL-1373 (exploring a dataset; findings fold in here).
@@ -221,8 +222,11 @@ Checked when the condition is built (`TypeError` / `ValueError`, as `Condition.o
 - a Polars or Arrow expression given as a condition: `TypeError`, pointing to `col(...)` and
   to `polars_filter` (until stretch 1 translates them);
 - an aggregate or anything that reads other rows: not expressible (`col` has no such method).
-- a Python `bool` used where a condition is expected (`col("t") > 1 and col("t") < 2`):
-  `TypeError` from the condition's `__bool__`, pointing to `&` (Polars does the same).
+- a column reference used as a truth value (`col("t") and col("u")`): `TypeError`,
+  pointing to `&` (Polars does the same). Implementation note (piece A): a `Condition`'s
+  own truth value stays "requires anything" (`Condition()` is false), as `where` and
+  existing code rely on it, so `(col("t") > 1) and (col("t") < 2)` cannot be refused: it
+  evaluates to the second condition. The docs must show `&`.
 
 Checked when the filter is applied to a stream (`InputValidationError`, naming the column):
 

@@ -31,7 +31,7 @@ from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.cached_source import CachedSource
 from orcapod.sources import SpiralDBTableSource
 from orcapod.core.operators import MapData
-from orcapod.types import CacheMode, Condition
+from orcapod.types import CacheMode, Condition, col
 from tests.test_databases import fake_pyspiral
 
 _PROJECT = "workshop-sample"
@@ -2559,3 +2559,34 @@ class TestSummaryKeys:
         first = _source(label="a").where(subject_id="m1")
         second = _source(label="b").where(subject_id="m2")
         assert set(restrictions_in_force([second, first])) == {"a", "b"}
+
+
+class TestWhereTakesEqualitiesOnly:
+    """``where`` refuses every condition but equalities, pointing to ``filter`` (ITL-1374)."""
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda: col("timestamp") >= 3,
+            lambda: col("subject_id").is_in(["m1", "m2"]),
+            lambda: col("note").is_null(),
+            lambda: (col("subject_id") == "m1") | (col("subject_id") == "m2"),
+            lambda: ~(col("subject_id") == "m1"),
+            lambda: col("subject_id") != "m1",
+        ],
+        ids=["comparison", "is_in", "null test", "or", "not", "not equal"],
+    )
+    def test_a_condition_other_than_equality_is_refused(self, project, build):
+        with pytest.raises(TypeError, match=r"equality conditions only.*filter"):
+            _source().where(build())
+
+    def test_an_equality_built_with_col_is_taken(self, project):
+        """``col(c) == v`` is the equality ``where`` takes, with the keyword's rows."""
+        restricted = _source().where(col("subject_id") == "m2")
+
+        assert _timestamps(restricted) == [4, 5]
+        assert restricted.condition == Condition.of(subject_id="m2")
+
+    def test_the_constructor_refuses_it_too(self, project):
+        with pytest.raises(TypeError, match="equality conditions only"):
+            _source(where=col("timestamp") >= 3)

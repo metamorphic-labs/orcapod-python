@@ -22,6 +22,7 @@ The class is re-exported by ``orcapod.types``, where it is imported from; ``col`
 
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import date, datetime
@@ -233,21 +234,26 @@ def _require_condition_value(column: object, value: object) -> None:
     """
     if not isinstance(column, str):
         raise TypeError(
-            f"where: a column name is a string, got {column!r} "
-            f"({type(column).__name__})"
+            f"a column name is a string, got {column!r} ({type(column).__name__})"
         )
     if value is None:
         raise ValueError(
-            f"where: column {column!r}: None is refused: a null equals "
-            "nothing, so the condition would match no row"
+            f"column {column!r}: None is refused: a null equals nothing, so the "
+            f"condition would match no row; to keep the null rows write "
+            f"col({column!r}).is_null()"
         )
     if type(value) not in _CONDITION_VALUE_TYPES:
+        membership = (
+            f"; for membership write col({column!r}).is_in([...])"
+            if isinstance(value, (list, tuple, set, frozenset))
+            else ""
+        )
         raise TypeError(
-            f"where: column {column!r}: the value {value!r} is a "
+            f"column {column!r}: the value {value!r} is a "
             f"{type(value).__name__}, and a condition value is exactly a bool, "
             "int, float, str, bytes, datetime.datetime or datetime.date; "
             "convert it explicitly (a NumPy scalar with .item()): Orcapod "
-            "converts no value"
+            f"converts no value{membership}"
         )
 
 
@@ -265,7 +271,39 @@ def condition_value_type(arrow_type: pa.DataType) -> type | None:
     Returns:
         The exact Python type of a value for that column, or ``None``.
     """
-    raise NotImplementedError
+    if pa.types.is_boolean(arrow_type):
+        return bool
+    if pa.types.is_integer(arrow_type):
+        return int
+    if pa.types.is_floating(arrow_type):
+        return float
+    if pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type):
+        return str
+    if (
+        pa.types.is_binary(arrow_type)
+        or pa.types.is_large_binary(arrow_type)
+        or pa.types.is_fixed_size_binary(arrow_type)
+    ):
+        return bytes
+    if pa.types.is_timestamp(arrow_type):
+        return datetime
+    if pa.types.is_date(arrow_type):
+        return date
+    return None
+
+
+def is_ordered_type(arrow_type: pa.DataType) -> bool:
+    """Return whether an order comparison (``<``, ``<=``, ``>``, ``>=``) takes a column
+    of ``arrow_type``: integer, float, string, binary, timestamp or date (not bool).
+
+    Args:
+        arrow_type: The column's Arrow type.
+
+    Returns:
+        Whether the column's values have an order a condition may compare by.
+    """
+    expected = condition_value_type(arrow_type)
+    return expected is not None and expected is not bool
 
 
 def check_value_for_column(value: object, arrow_type: pa.DataType) -> None:
@@ -288,7 +326,56 @@ def check_value_for_column(value: object, arrow_type: pa.DataType) -> None:
             column's type takes no value condition. The message names the type and
             the value, not the column: the caller names it.
     """
-    raise NotImplementedError
+    expected = condition_value_type(arrow_type)
+    if expected is None:
+        raise TypeError(
+            f"holds {arrow_type}, which a value condition does not support; only a "
+            "null test (is_null, is_not_null) takes it"
+        )
+    if type(value) is not expected:
+        raise TypeError(
+            f"holds {arrow_type} ({expected.__name__}), but the value {value!r} is a "
+            f"{type(value).__name__}; convert it explicitly to {expected.__name__} (a "
+            "NumPy scalar with .item(), a date or time string with date.fromisoformat "
+            "or datetime.fromisoformat): Orcapod converts no value"
+        )
+    if isinstance(value, datetime):
+        zoned = getattr(arrow_type, "tz", None) is not None
+        if zoned != (value.utcoffset() is not None):
+            raise TypeError(
+                f"holds {arrow_type}, so the value must be "
+                f"{'an aware' if zoned else 'a naive'} datetime; got {value!r}"
+            )
+    if isinstance(value, float):
+        # Rounding to the column's precision is how a float column stores any
+        # value, so it is not refused; a finite value beyond its range is.
+        stored = pa.scalar(value, type=arrow_type).as_py()
+        if math.isfinite(value) and not math.isfinite(stored):
+            raise TypeError(f"holds {arrow_type}, whose range does not reach {value!r}")
+        return
+    try:
+        exact = _same_stored_value(pa.scalar(value, type=arrow_type).as_py(), value)
+    except (pa.ArrowInvalid, OverflowError) as exc:
+        raise TypeError(
+            f"holds {arrow_type}, which cannot hold {value!r}: {exc}"
+        ) from exc
+    if not exact:
+        raise TypeError(f"holds {arrow_type}, which cannot hold {value!r} exactly")
+
+
+def _same_stored_value(stored: object, value: object) -> bool:
+    """Return whether the column's form of a condition value is the value itself.
+
+    An aware datetime is compared by instant (its own offset, ``fold`` included):
+    the column hands it back in its own zone object, and Python's ``==`` never
+    equals two zones' values in a daylight-saving overlap.
+    """
+    if isinstance(stored, datetime) and isinstance(value, datetime):
+        stored_instant = instant_microseconds(stored)
+        value_instant = instant_microseconds(value)
+        if stored_instant is not None and value_instant is not None:
+            return stored_instant == value_instant
+    return stored == value
 
 
 def field_arrow_type(path: FieldPath, schema: pa.Schema) -> pa.DataType:
@@ -309,7 +396,42 @@ def field_arrow_type(path: FieldPath, schema: pa.Schema) -> pa.DataType:
             a field is not in its struct (the message lists the struct's fields with
             their types), or a field is asked of a column that is not a struct.
     """
-    raise NotImplementedError
+    if path.column not in schema.names:
+        raise ValueError(
+            f"no column {path.column!r}; the columns are {list(schema.names)}"
+        )
+    arrow_type = schema.field(path.column).type
+    reached = path.column
+    for name in path.fields:
+        storage = (
+            arrow_type.storage_type
+            if isinstance(arrow_type, pa.ExtensionType)
+            else arrow_type
+        )
+        if not pa.types.is_struct(storage):
+            raise ValueError(
+                f"{reached!r} holds {arrow_type}, which is not a struct, so it has no "
+                f"field {name!r}"
+            )
+        index = storage.get_field_index(name)
+        if index < 0:
+            fields = ", ".join(
+                f"{storage.field(i).name}: {storage.field(i).type}"
+                for i in range(storage.num_fields)
+            )
+            raise ValueError(
+                f"{reached!r} has no field {name!r}; its fields are {fields}"
+            )
+        arrow_type = storage.field(index).type
+        reached = f"{reached}.{name}"
+    return arrow_type
+
+
+def _large(arrow_type: pa.DataType) -> pa.DataType:
+    """Return ``arrow_type`` in its large-normalized form (two columns compare by it)."""
+    from orcapod.utils.arrow_utils import normalize_to_large_types
+
+    return normalize_to_large_types(arrow_type, keep_null=True)
 
 
 def check_condition(condition: Condition, schema: pa.Schema) -> None:
@@ -329,7 +451,43 @@ def check_condition(condition: Condition, schema: pa.Schema) -> None:
         ValueError: If a column or field is missing.
         TypeError: If a value or a column's type does not fit its term.
     """
-    raise NotImplementedError
+    for term in condition.terms():
+        arrow_type = field_arrow_type(term.path, schema)
+        _check_term(term, arrow_type, schema)
+
+
+def _check_term(term: Term, arrow_type: pa.DataType, schema: pa.Schema) -> None:
+    """Check one term against the Arrow type of its column (``check_condition``)."""
+    name = term.path.text()
+    if term.operator in NULL_TESTS:
+        return
+    if term.operator in ORDER_COMPARISONS and not is_ordered_type(arrow_type):
+        raise TypeError(
+            f"column {name!r} holds {arrow_type}, which has no order a comparison "
+            f"({term.operator}) may use; compare with == or is_in, or test for null"
+        )
+    value = term.value
+    if isinstance(value, ColumnOperand):
+        other_type = field_arrow_type(value.path, schema)
+        if not _large(arrow_type).equals(_large(other_type)):
+            raise TypeError(
+                f"columns {name!r} ({arrow_type}) and {value.path.text()!r} "
+                f"({other_type}) have different types; Orcapod converts no column"
+            )
+        if condition_value_type(arrow_type) is None:
+            raise TypeError(
+                f"column {name!r} holds {arrow_type}, which a comparison does not "
+                "support"
+            )
+        return
+    values = (
+        value if term.operator == "is_in" and isinstance(value, tuple) else (value,)
+    )
+    for one in values:
+        try:
+            check_value_for_column(one, arrow_type)
+        except TypeError as exc:
+            raise TypeError(f"column {name!r} {exc}") from exc
 
 
 def check_condition_columns(
@@ -350,7 +508,44 @@ def check_condition_columns(
         ValueError: If a column is missing (the message lists the columns there are).
         TypeError: If a value is not of its column's Python type.
     """
-    raise NotImplementedError
+    for term in condition.terms():
+        paths = [term.path]
+        if isinstance(term.value, ColumnOperand):
+            paths.append(term.value.path)
+        for path in paths:
+            if path.column not in python_schema:
+                raise ValueError(
+                    f"no column {path.column!r}; the columns are {list(python_schema)}"
+                )
+        if term.path.fields or term.operator in NULL_TESTS:
+            continue
+        column_type = _without_none(python_schema[term.path.column])
+        if column_type not in _CONDITION_VALUE_TYPES:
+            continue  # a logical or nested type: check_condition decides
+        value = term.value
+        if isinstance(value, ColumnOperand):
+            continue
+        values = (
+            value if term.operator == "is_in" and isinstance(value, tuple) else (value,)
+        )
+        for one in values:
+            if type(one) is not column_type:
+                raise TypeError(
+                    f"column {term.path.column!r} holds {getattr(column_type, '__name__', column_type)}, "
+                    f"but the value {one!r} is a {type(one).__name__}; convert it "
+                    "explicitly: Orcapod converts no value"
+                )
+
+
+def _without_none(python_type: object) -> object:
+    """Return ``python_type`` without ``None`` when it is ``T | None``; else unchanged."""
+    import types
+    import typing
+
+    if typing.get_origin(python_type) not in (typing.Union, types.UnionType):
+        return python_type
+    members = tuple(m for m in typing.get_args(python_type) if m is not type(None))
+    return members[0] if len(members) == 1 else python_type
 
 
 def check_equality_conditions(
@@ -372,7 +567,19 @@ def check_equality_conditions(
         TypeError: If a value is not of its column's type, does not fit it, or the
             column's type has no equality condition.
     """
-    raise NotImplementedError
+    unknown = [c for c in conditions if c not in schema.names]
+    if unknown:
+        raise ValueError(
+            f"where names columns that the table does not have: {unknown}. "
+            f"Columns: {schema.names}"
+        )
+    for column, value in conditions.items():
+        arrow_type = schema.field(column).type
+        try:
+            check_value_for_column(value, arrow_type)
+        except TypeError as exc:
+            raise TypeError(f"column {column!r} {exc}") from exc
+    return dict(conditions)
 
 
 # -----------------------------------------------------------------------------
@@ -409,7 +616,15 @@ class ColumnRef:
             TypeError: If a name is not a string.
             ValueError: If a name is empty.
         """
-        raise NotImplementedError
+        for name in (column, *fields):
+            if not isinstance(name, str):
+                raise TypeError(
+                    f"a column or field name is a string, got {name!r} "
+                    f"({type(name).__name__})"
+                )
+            if not name:
+                raise ValueError("a column or field name is not empty")
+        object.__setattr__(self, "_path", FieldPath(column, tuple(fields)))
 
     @property
     def path(self) -> FieldPath:
@@ -425,7 +640,16 @@ class ColumnRef:
         Returns:
             The reference one level inward.
         """
-        raise NotImplementedError
+        return ColumnRef(self._path.column, (*self._path.fields, name))
+
+    def _term(self, operator: Operator, value: object) -> Condition:
+        """Return the condition of one term on this reference, its value checked."""
+        if isinstance(value, ColumnRef):
+            operand: object = ColumnOperand(value.path)
+        else:
+            _require_condition_value(self._path.text(), value)
+            operand = value
+        return Condition._of_children((Term(self._path, operator, operand),))  # pyright: ignore[reportPrivateUsage]  # one module
 
     def is_in(self, values: Iterable[object]) -> Condition:
         """Return the condition that the column's value is one of ``values``.
@@ -444,7 +668,31 @@ class ColumnRef:
             TypeError: If ``values`` is a string or bytes, or a value is not exactly of
                 a supported type, or the values are of several types.
         """
-        raise NotImplementedError
+        name = self._path.text()
+        if isinstance(values, (str, bytes)) or not isinstance(values, Iterable):
+            raise TypeError(
+                f"column {name!r}: is_in takes a collection of values, such as "
+                f"[3, 7], not {values!r}"
+            )
+        unique: list[object] = []
+        for value in values:
+            _require_condition_value(name, value)
+            if unique and type(value) is not type(unique[0]):
+                raise TypeError(
+                    f"column {name!r}: is_in values are of one type; got "
+                    f"{unique[0]!r} ({type(unique[0]).__name__}) and {value!r} "
+                    f"({type(value).__name__})"
+                )
+            if not any(_same_condition_value(value, kept) for kept in unique):
+                unique.append(value)
+        if not unique:
+            raise ValueError(
+                f"column {name!r}: is_in needs at least one value (no value matches "
+                "no row)"
+            )
+        return Condition._of_children(  # pyright: ignore[reportPrivateUsage]  # one module
+            (Term(self._path, "is_in", tuple(unique)),)
+        )
 
     def between(self, low: object, high: object) -> Condition:
         """Return the condition ``low <= value <= high`` (both ends included).
@@ -463,35 +711,59 @@ class ColumnRef:
                 supported type.
             ValueError: If ``low`` is greater than ``high``.
         """
-        raise NotImplementedError
+        name = self._path.text()
+        _require_condition_value(name, low)
+        _require_condition_value(name, high)
+        if type(low) is not type(high):
+            raise TypeError(
+                f"column {name!r}: between takes two values of one type; got "
+                f"{low!r} ({type(low).__name__}) and {high!r} ({type(high).__name__})"
+            )
+        for end in (low, high):
+            if isinstance(end, float) and end != end:
+                raise ValueError(f"column {name!r}: a NaN is not an end of a range")
+        try:
+            reversed_range = bool(low > high)  # pyright: ignore[reportOperatorIssue]  # one checked type
+        except TypeError as exc:
+            raise TypeError(
+                f"column {name!r}: between {low!r} and {high!r}: {exc}"
+            ) from exc
+        if reversed_range:
+            raise ValueError(
+                f"column {name!r}: between({low!r}, {high!r}) has its low end above "
+                "its high end, so it matches no row"
+            )
+        return Condition._of_children(  # pyright: ignore[reportPrivateUsage]  # one module
+            (Term(self._path, ">=", low), Term(self._path, "<=", high))
+        )
 
     def is_null(self) -> Condition:
         """Return the condition that the value is null (a null struct makes its fields null)."""
-        raise NotImplementedError
+        return Condition._of_children((Term(self._path, "is_null", None),))  # pyright: ignore[reportPrivateUsage]  # one module
 
     def is_not_null(self) -> Condition:
         """Return the condition that the value is present (it does not narrow the type)."""
-        raise NotImplementedError
+        return Condition._of_children((Term(self._path, "is_not_null", None),))  # pyright: ignore[reportPrivateUsage]  # one module
 
     @override
     def __eq__(self, other: object) -> Condition:  # pyright: ignore[reportIncompatibleMethodOverride]  # builds a condition, as pl.col does
-        raise NotImplementedError
+        return self._term("==", other)
 
     @override
     def __ne__(self, other: object) -> Condition:  # pyright: ignore[reportIncompatibleMethodOverride]  # builds a condition, as pl.col does
-        raise NotImplementedError
+        return self._term("!=", other)
 
     def __lt__(self, other: object) -> Condition:
-        raise NotImplementedError
+        return self._term("<", other)
 
     def __le__(self, other: object) -> Condition:
-        raise NotImplementedError
+        return self._term("<=", other)
 
     def __gt__(self, other: object) -> Condition:
-        raise NotImplementedError
+        return self._term(">", other)
 
     def __ge__(self, other: object) -> Condition:
-        raise NotImplementedError
+        return self._term(">=", other)
 
     __hash__ = None  # pyright: ignore[reportAssignmentType]  # == builds a condition, so no hash
 
@@ -501,7 +773,10 @@ class ColumnRef:
         Raises:
             TypeError: Always.
         """
-        raise NotImplementedError
+        raise TypeError(
+            f"{self!r} has no truth value: combine conditions with & (and), | (or) "
+            "and ~ (not), never with and, or, not"
+        )
 
     @override
     def __setattr__(self, name: str, value: object) -> None:
@@ -509,7 +784,9 @@ class ColumnRef:
 
     @override
     def __repr__(self) -> str:
-        raise NotImplementedError
+        return f"col({self._path.column!r})" + "".join(
+            f".field({name!r})" for name in self._path.fields
+        )
 
 
 def col(name: str) -> ColumnRef:
@@ -656,32 +933,56 @@ class Condition:
                 positional argument is neither a mapping nor a condition (a mask by
                 position, a Polars or Arrow expression).
         """
-        if len(conditions) == 1 and isinstance(conditions[0], Condition):
-            mapping = conditions[0]
-            condition = mapping.combined(cls._equal_to(columns)) if columns else mapping
-        elif len(conditions) <= 1:
-            only = conditions[0] if conditions else None
-            if only is not None and not isinstance(only, Mapping):
-                raise NotImplementedError
-            merged = dict(only or {})
-            for column, value in [*merged.items(), *columns.items()]:
-                _require_condition_value(column, value)
+        if (
+            len(conditions) == 1
+            and isinstance(conditions[0], Condition)
+            and not columns
+        ):
+            condition = conditions[0]
+        else:
+            built: list[Condition] = []
+            merged: dict[str, object] = {}
+            for argument in conditions:
+                if argument is None:
+                    continue
+                if isinstance(argument, Condition):
+                    built.append(argument)
+                elif isinstance(argument, Mapping):
+                    for column, value in argument.items():
+                        _require_condition_value(column, value)
+                        if column in merged and not _same_condition_value(
+                            merged[column], value
+                        ):
+                            raise ValueError(
+                                f"column {column!r} is given as {merged[column]!r} "
+                                f"and as {value!r} in two mappings"
+                            )
+                        merged[column] = value
+                else:
+                    raise TypeError(
+                        f"a condition is a mapping of column to value, or a condition "
+                        f"built with col(...); got {type(argument).__name__}. A mask "
+                        "by position is not a condition (row order is not a result); "
+                        "for a Polars expression use polars_filter"
+                    )
             for column, value in columns.items():
+                _require_condition_value(column, value)
                 if column in merged and not _same_condition_value(
                     merged[column], value
                 ):
                     raise ValueError(
-                        f"where: column {column!r} is given as {merged[column]!r} in "
+                        f"column {column!r} is given as {merged[column]!r} in "
                         f"the mapping and as {value!r} as a keyword"
                     )
                 merged[column] = value
-            condition = cls._equal_to(merged)
-        else:
-            raise NotImplementedError
+            condition = Condition()
+            for part in built:
+                condition = condition.combined(part)
+            condition = condition.combined(cls._equal_to(merged))
         if not condition:
             raise ValueError(
-                "a condition needs at least one column: where(column=value, ...) or "
-                "where({column: value, ...})"
+                "a condition needs at least one column: where(column=value, ...), "
+                "filter(column=value, ...), or a mapping {column: value, ...}"
             )
         return condition
 
@@ -740,11 +1041,21 @@ class Condition:
     def columns(self) -> frozenset[str]:
         """Every stream column a term reads (the column of a struct field path; both
         columns of a comparison of two columns)."""
-        raise NotImplementedError
+        names: set[str] = set()
+        for term in self.terms():
+            names.add(term.path.column)
+            if isinstance(term.value, ColumnOperand):
+                names.add(term.value.path.column)
+        return frozenset(names)
 
     def terms(self) -> Iterator[Term]:
         """Yield every term of the tree, depth first, in the order given."""
-        raise NotImplementedError
+        return _terms_of(self._root)
+
+    def _node(self) -> Node:
+        """Return the condition as one node: its one child, or its ``AllOf``."""
+        children = self._root.children
+        return children[0] if len(children) == 1 else self._root
 
     def combined(self, other: Condition) -> Condition:
         """Return the condition requiring both this one and ``other``.
@@ -780,17 +1091,35 @@ class Condition:
 
     def __and__(self, other: Condition) -> Condition:
         """Return ``self.combined(other)``: both must hold."""
-        raise NotImplementedError
+        if not isinstance(other, Condition):
+            return NotImplemented
+        return self.combined(other)
 
     def __or__(self, other: Condition) -> Condition:
         """Return the condition that this one or ``other`` holds (Kleene: unknown or
         true is true)."""
-        raise NotImplementedError
+        if not isinstance(other, Condition):
+            return NotImplemented
+        if not self or not other:
+            raise ValueError(
+                "an empty condition holds for every row, so 'or' with it holds for "
+                "every row; leave it out"
+            )
+        options: list[Node] = []
+        for node in (self._node(), other._node()):
+            for option in node.children if isinstance(node, AnyOf) else (node,):
+                if not any(same_node(option, kept) for kept in options):
+                    options.append(option)
+        return Condition._of_children((AnyOf(tuple(options)),))
 
     def __invert__(self) -> Condition:
         """Return the condition that this one does not hold (unknown stays unknown, so
         a row with a null the condition reads is kept by neither)."""
-        raise NotImplementedError
+        if not self:
+            raise ValueError(
+                "an empty condition holds for every row; 'not' of it holds for none"
+            )
+        return Condition._of_children((Negation(self._node()),))
 
     def canonical_form(self) -> tuple[object, ...]:
         """Return the condition's identity: plain tagged data, order-free, typed values.
@@ -815,7 +1144,7 @@ class Condition:
         Returns:
             The canonical form, a tuple whose first element is ``"all"``.
         """
-        raise NotImplementedError
+        return _canonical_node(self._root)
 
     def text(self) -> str:
         """Return the condition as words: ``a='x', b=1`` (``no condition`` if empty).
@@ -826,11 +1155,7 @@ class Condition:
         """
         if not self._root.children:
             return "no condition"
-        if self.only_equalities:
-            return ", ".join(
-                f"{column}={value!r}" for column, value in self.equalities.items()
-            )
-        raise NotImplementedError
+        return ", ".join(_node_text(child) for child in self._root.children)
 
     def to_config(self) -> dict[str, object]:
         """Return the condition as it is saved, JSON-ready.
@@ -849,7 +1174,7 @@ class Condition:
             The saved form.
         """
         if not self.only_equalities:
-            raise NotImplementedError
+            return {_TREE_KEY: _node_to_config(self._root)}
         return {
             column: _condition_value_to_config(value)
             for column, value in self.equalities.items()
@@ -866,7 +1191,15 @@ class Condition:
             The condition; with no column, the condition every row satisfies.
         """
         if _TREE_KEY in saved:
-            raise NotImplementedError
+            if len(saved) != 1:
+                raise ValueError(
+                    f"a saved condition with {_TREE_KEY!r} holds nothing else; got "
+                    f"{sorted(saved)}"
+                )
+            root = _node_from_config(saved[_TREE_KEY])
+            if not isinstance(root, AllOf):
+                raise ValueError(f"a saved condition's tree is an 'all'; got {root!r}")
+            return cls._of_children(root.children)
         return cls._equal_to(
             {
                 column: _condition_value_from_config(value)
@@ -907,7 +1240,7 @@ class Condition:
             return "Condition()"
         if self.only_equalities:
             return f"Condition.of({dict(self.equalities)!r})"
-        raise NotImplementedError
+        return f"Condition.from_config({self.to_config()!r})"
 
 
 _TREE_KEY = ":condition"
@@ -957,3 +1290,190 @@ def _same_term(a: Term, b: Term) -> bool:
     if a.value is None or b.value is None:
         return a.value is b.value
     return _same_condition_value(a.value, b.value)
+
+
+def _terms_of(node: Node) -> Iterator[Term]:
+    """Yield the terms of ``node``, depth first, in the order given."""
+    if isinstance(node, Term):
+        yield node
+    elif isinstance(node, Negation):
+        yield from _terms_of(node.child)
+    else:
+        for child in node.children:
+            yield from _terms_of(child)
+
+
+# -----------------------------------------------------------------------------
+# Canonical form (the identity a Filter hashes; ITL-1374 section 3.2)
+# -----------------------------------------------------------------------------
+
+
+def _canonical_value(value: object) -> tuple[str, str]:
+    """Return a condition value as ``(type token, text)``; see ``canonical_form``."""
+    if isinstance(value, bool):
+        return ("bool", "true" if value else "false")
+    if isinstance(value, int):
+        return ("int", str(value))
+    if isinstance(value, float):
+        if value != value:
+            return ("float", "nan")
+        return ("float", (0.0 if value == 0 else value).hex())
+    if isinstance(value, str):
+        return ("str", value)
+    if isinstance(value, bytes):
+        return ("bytes", value.hex())
+    if isinstance(value, datetime):
+        instant = instant_microseconds(value)
+        if instant is not None:
+            return ("datetime_aware", str(instant))
+        return ("datetime_naive", value.replace(fold=0).isoformat())
+    if isinstance(value, date):
+        return ("date", value.isoformat())
+    raise TypeError(
+        f"no condition value is a {type(value).__name__}"
+    )  # pragma: no cover
+
+
+def _canonical_path(path: FieldPath) -> tuple[object, ...]:
+    """Return ``("col", name)``, wrapped in ``("field", <path>, name)`` per field."""
+    form: tuple[object, ...] = ("col", path.column)
+    for name in path.fields:
+        form = ("field", form, name)
+    return form
+
+
+def _sorted_unique(
+    forms: Iterable[tuple[object, ...]],
+) -> tuple[tuple[object, ...], ...]:
+    """Return ``forms`` without repeats, sorted by their JSON text (any nesting)."""
+    by_text = {json.dumps(form): form for form in forms}
+    return tuple(by_text[text] for text in sorted(by_text))
+
+
+def _canonical_node(node: Node) -> tuple[object, ...]:
+    """Return the canonical form of ``node``; see ``Condition.canonical_form``."""
+    if isinstance(node, Term):
+        path = _canonical_path(node.path)
+        value = node.value
+        if node.operator in NULL_TESTS:
+            return ("term", path, node.operator)
+        if isinstance(value, ColumnOperand):
+            return ("term", path, node.operator, ("ref", _canonical_path(value.path)))
+        if node.operator == "is_in" and isinstance(value, tuple):
+            return (
+                "term",
+                path,
+                "is_in",
+                _sorted_unique(_canonical_value(v) for v in value),
+            )
+        return ("term", path, node.operator, _canonical_value(value))
+    if isinstance(node, Negation):
+        return ("not", _canonical_node(node.child))
+    kind = AllOf if isinstance(node, AllOf) else AnyOf
+    flat: list[Node] = []
+    pending = list(node.children)
+    while pending:
+        child = pending.pop(0)
+        if isinstance(child, kind):
+            pending[:0] = child.children
+        else:
+            flat.append(child)
+    return (
+        "all" if kind is AllOf else "any",
+        _sorted_unique(_canonical_node(child) for child in flat),
+    )
+
+
+# -----------------------------------------------------------------------------
+# Text and the saved form
+# -----------------------------------------------------------------------------
+
+
+def _node_text(node: Node) -> str:
+    """Return ``node`` as words (display only)."""
+    if isinstance(node, Term):
+        path = node.path.text()
+        value = node.value
+        if node.operator in NULL_TESTS:
+            return f"{path} is {'not ' if node.operator == 'is_not_null' else ''}null"
+        if isinstance(value, ColumnOperand):
+            return f"{path} {node.operator} {value.path.text()}"
+        if node.operator == "is_in" and isinstance(value, tuple):
+            return f"{path} in [{', '.join(repr(v) for v in value)}]"
+        if node.operator == EQUALS:
+            return f"{path}={value!r}"
+        return f"{path} {node.operator} {value!r}"
+    if isinstance(node, Negation):
+        return f"not ({_node_text(node.child)})"
+    word = " and " if isinstance(node, AllOf) else " or "
+    return "(" + word.join(_node_text(child) for child in node.children) + ")"
+
+
+def _path_to_config(path: FieldPath) -> dict[str, object]:
+    return {"column": path.column, "fields": list(path.fields)}
+
+
+def _node_to_config(node: Node) -> dict[str, object]:
+    """Return ``node`` in its JSON form; see ``Condition.to_config``."""
+    if isinstance(node, Negation):
+        return {"not": _node_to_config(node.child)}
+    if isinstance(node, AllOf):
+        return {"all": [_node_to_config(child) for child in node.children]}
+    if isinstance(node, AnyOf):
+        return {"any": [_node_to_config(child) for child in node.children]}
+    saved = {**_path_to_config(node.path), "op": node.operator}
+    value = node.value
+    if isinstance(value, ColumnOperand):
+        saved["other"] = _path_to_config(value.path)
+    elif node.operator == "is_in" and isinstance(value, tuple):
+        saved["values"] = [_condition_value_to_config(v) for v in value]
+    elif node.operator not in NULL_TESTS:
+        saved["value"] = _condition_value_to_config(value)
+    return saved
+
+
+_OPERATORS: frozenset[str] = COMPARISONS | NULL_TESTS | {"is_in"}
+
+
+def _path_from_config(saved: object) -> FieldPath:
+    if not isinstance(saved, Mapping):
+        raise ValueError(f"a saved column path is a mapping; got {saved!r}")
+    fields = saved.get("fields", [])
+    if not isinstance(fields, list):
+        raise ValueError(f"a saved column path's fields are a list; got {fields!r}")
+    return ColumnRef(saved.get("column"), tuple(fields)).path  # pyright: ignore[reportArgumentType]  # checked by ColumnRef
+
+
+def _node_from_config(saved: object) -> Node:
+    """Return the node ``_node_to_config`` wrote; the values checked as ``of`` checks."""
+    if not isinstance(saved, Mapping):
+        raise ValueError(f"a saved condition node is a mapping; got {saved!r}")
+    if set(saved) == {"not"}:
+        return Negation(_node_from_config(saved["not"]))
+    for key, kind in (("all", AllOf), ("any", AnyOf)):
+        if set(saved) == {key}:
+            children = saved[key]
+            if not isinstance(children, list):
+                raise ValueError(f"a saved {key!r} holds a list; got {children!r}")
+            return kind(tuple(_node_from_config(child) for child in children))
+    path = _path_from_config(saved)
+    operator = saved.get("op")
+    if operator not in _OPERATORS:
+        raise ValueError(f"a saved condition term has an unknown operator {operator!r}")
+    if "other" in saved:
+        value: object = ColumnOperand(_path_from_config(saved["other"]))
+    elif operator == "is_in":
+        values = saved.get("values")
+        if not isinstance(values, list) or not values:
+            raise ValueError(
+                f"a saved is_in term holds a list of values; got {values!r}"
+            )
+        value = tuple(_condition_value_from_config(v) for v in values)
+        for one in value:
+            _require_condition_value(path.text(), one)
+    elif operator in NULL_TESTS:
+        value = None
+    else:
+        value = _condition_value_from_config(saved.get("value"))
+        _require_condition_value(path.text(), value)
+    return Term(path, operator, value)  # pyright: ignore[reportArgumentType]  # checked against _OPERATORS

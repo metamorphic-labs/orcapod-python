@@ -39,8 +39,6 @@ from __future__ import annotations
 import asyncio
 import copy
 import dataclasses
-import datetime
-import math
 from collections.abc import AsyncIterator, Collection, Generator, Iterator, Mapping
 from contextlib import contextmanager
 from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING
@@ -51,7 +49,6 @@ from orcapod.core.sources.base import RootSource, saved_tag_only_columns
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.source_ids import joined_location, location_source_id
 from orcapod.core.sources.derived_source import validate_tags_as_data
-from orcapod.utils.datetime_utils import instant_microseconds, is_aware
 from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
     key_column_type_allowed,
@@ -64,6 +61,7 @@ from orcapod.core.streams.view import ViewStatus, StreamView
 from orcapod.databases.spiraldb_connector import SpiralDBConnector
 from orcapod.errors import InputValidationError, RowIdentifierError, SourceTooLargeError
 from orcapod.types import ColumnConfig, Condition
+from orcapod.types.condition import check_equality_conditions
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.schema_utils import _normalize_column_list
@@ -129,43 +127,14 @@ def _schema_difference(found: "pa.Schema", expected: "pa.Schema") -> str:
     )
 
 
-def _condition_value_type(arrow_type: "pa.DataType") -> type | None:
-    """Return the Python type a ``where`` value must have for a column of ``arrow_type``.
-
-    ``None`` for a column type that equality conditions do not support (lists,
-    structs, decimals, logical types and the rest).
-    """
-    if pa.types.is_boolean(arrow_type):
-        return bool
-    if pa.types.is_integer(arrow_type):
-        return int
-    if pa.types.is_floating(arrow_type):
-        return float
-    if pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type):
-        return str
-    if (
-        pa.types.is_binary(arrow_type)
-        or pa.types.is_large_binary(arrow_type)
-        or pa.types.is_fixed_size_binary(arrow_type)
-    ):
-        return bytes
-    if pa.types.is_timestamp(arrow_type):
-        return datetime.datetime
-    if pa.types.is_date(arrow_type):
-        return datetime.date
-    return None
-
-
 def _checked_conditions(
     conditions: Mapping[str, object], schema: "pa.Schema"
 ) -> dict[str, object]:
     """Check ``where`` conditions against the table's columns; convert nothing.
 
-    Orcapod is type strict: a value must be exactly of the Python type of its column
-    (``bool`` is not taken for an integer column, ``int`` not for a float column, a
-    NumPy scalar or a date string not for anything), within what the column's Arrow
-    type holds, and a time zone column takes an aware ``datetime``, any other
-    timestamp column a naive one.
+    The one rule for condition values, ``check_equality_conditions``
+    (``orcapod.types.condition``), which ``Filter`` shares: a value is exactly of its
+    column's Python type and fits the column's Arrow type.
 
     Args:
         conditions: Column name to value.
@@ -179,75 +148,7 @@ def _checked_conditions(
         TypeError: If a value is not of its column's type, does not fit it, or the
             column's type has no equality condition.
     """
-    unknown = [c for c in conditions if c not in schema.names]
-    if unknown:
-        raise ValueError(
-            f"where names columns that the table does not have: {unknown}. "
-            f"Columns: {schema.names}"
-        )
-    for column, value in conditions.items():
-        arrow_type = schema.field(column).type
-        expected = _condition_value_type(arrow_type)
-        if expected is None:
-            raise TypeError(
-                f"where: column {column!r} holds {arrow_type}, which an equality "
-                "condition does not support; restrict on another column"
-            )
-        if type(value) is not expected:
-            raise TypeError(
-                f"where: column {column!r} holds {arrow_type} ({expected.__name__}), "
-                f"but the value {value!r} is a {type(value).__name__}; convert it "
-                f"explicitly to {expected.__name__} (a NumPy scalar with .item(), a "
-                "date or time string with date.fromisoformat or "
-                "datetime.fromisoformat): Orcapod converts no value"
-            )
-        if isinstance(value, datetime.datetime):
-            zoned = getattr(arrow_type, "tz", None) is not None
-            if zoned != is_aware(value):
-                raise TypeError(
-                    f"where: column {column!r} holds {arrow_type}, so the value must "
-                    f"be {'an aware' if zoned else 'a naive'} datetime; got {value!r}"
-                )
-        if isinstance(value, float):
-            # Rounding to the column's precision is how a float column stores any
-            # value, so it is not refused; a finite value beyond its range is.
-            stored = pa.scalar(value, type=arrow_type).as_py()
-            if math.isfinite(value) and not math.isfinite(stored):
-                raise TypeError(
-                    f"where: column {column!r} holds {arrow_type}, whose range does "
-                    f"not reach {value!r}"
-                )
-        else:
-            try:
-                exact = _same_stored_value(
-                    pa.scalar(value, type=arrow_type).as_py(), value
-                )
-            except (pa.ArrowInvalid, OverflowError) as exc:
-                raise TypeError(
-                    f"where: column {column!r} holds {arrow_type}, which cannot hold "
-                    f"{value!r}: {exc}"
-                ) from exc
-            if not exact:
-                raise TypeError(
-                    f"where: column {column!r} holds {arrow_type}, which cannot hold "
-                    f"{value!r} exactly"
-                )
-    return dict(conditions)
-
-
-def _same_stored_value(stored: object, value: object) -> bool:
-    """Return whether the column's form of a condition value is the value itself.
-
-    An aware datetime is compared by instant (its own offset, ``fold`` included):
-    the column hands it back in its own zone object, and Python's ``==`` never
-    equals two zones' values in a daylight-saving overlap.
-    """
-    if isinstance(stored, datetime.datetime) and isinstance(value, datetime.datetime):
-        stored_instant = instant_microseconds(stored)
-        value_instant = instant_microseconds(value)
-        if stored_instant is not None and value_instant is not None:
-            return stored_instant == value_instant
-    return stored == value
+    return check_equality_conditions(conditions, schema)
 
 
 SPIRALDB_SOURCE_ID_HAS_TABLE_ID = True
@@ -645,8 +546,10 @@ class SpiralDBTableSource(RootSource):
                 value.
             TypeError: If a value is not exactly of its column's Python type or does
                 not fit the column's Arrow type: nothing is converted (a NumPy scalar,
-                a date given as a string), or the column's type takes no equality
-                condition.
+                a date given as a string), the column's type takes no equality
+                condition, or the condition holds anything but equalities (a
+                comparison, ``is_in``, a null test, ``|`` or ``~``: filter the stream
+                instead).
         """
         condition = Condition.of(mapping, **columns)
         restricted = self._copy()
@@ -696,6 +599,12 @@ class SpiralDBTableSource(RootSource):
                 restricted to another value.
             TypeError: If a value is not of its column's type or does not fit it.
         """
+        if not condition.only_equalities:
+            raise TypeError(
+                f"where takes equality conditions only today (column=value); "
+                f"{condition} has others. Filter the stream instead, as a step of "
+                f"the pipeline: source.filter(...) with the same condition"
+            )
         _checked_conditions(condition.equalities, self._table_schema)
         self._condition = self._condition.combined(condition)
         self._update_modified_time()
