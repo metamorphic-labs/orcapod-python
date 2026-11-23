@@ -386,15 +386,15 @@ def _rows_of(*ids: bytes, column: str = "x") -> pa.Table:
 
 
 @pytest.mark.parametrize("depth", [1, 2], ids=["its cause", "a cause of its cause"])
-@pytest.mark.parametrize(
-    "seen", [False, True], ids=["append (every id new)", "MERGE (a stored id)"]
-)
+@pytest.mark.parametrize("seen", [False, True], ids=["every id new", "a stored id"])
 def test_a_commit_conflict_carrying_a_duplicate_name_cause_stays_queued(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seen: bool, depth: int
 ) -> None:
     """Finding: a ``CommitFailedError`` (another writer committed first) whose cause
-    chain names a duplicate is not a refusal of the rows: the batch stays queued and a
-    later flush commits it, on the append path and the MERGE path."""
+    chain names a duplicate is not a refusal of the rows: the commit is retried (every
+    commit to an existing table is a MERGE, ITL-1377), and after the last attempt the
+    batch stays queued and a later flush commits it, every id new or a stored id
+    among them."""
     from deltalake.exceptions import CommitFailedError, DeltaError
 
     db = DeltaTableDatabase(tmp_path)
@@ -418,11 +418,13 @@ def test_a_commit_conflict_carrying_a_duplicate_name_cause_stays_queued(
         raise CommitFailedError("another writer committed first") from cause
 
     with monkeypatch.context() as patched:
+        patched.setattr(dld, "_COMMIT_ATTEMPTS", 3)
+        patched.setattr(dld, "_sleep_before_retry", lambda attempt: None)
         patched.setattr(deltalake, "write_deltalake", conflict)
         patched.setattr(deltalake.DeltaTable, "merge", conflict)
         with pytest.raises(RuntimeError, match="Failed to flush") as info:
             db.flush()
-    assert called == ["merge" if seen else "append"]
+    assert called == ["merge"] * 3
     assert isinstance(info.value.__cause__, CommitFailedError)
     assert db._pending_batches  # pyright: ignore[reportPrivateUsage]
     db.flush()

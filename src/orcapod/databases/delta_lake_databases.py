@@ -622,11 +622,22 @@ _CASE_INSENSITIVE = (
 
 def _differ_only_in_case(names: list[str]) -> tuple[str, str] | None:
     """The first two of ``names`` that differ only in case, or ``None``."""
+    position = _case_clash_position(names)
+    if position is None:
+        return None
+    second = names[position]
+    first = next(n for n in names if n.lower() == second.lower() and n != second)
+    return first, second
+
+
+def _case_clash_position(names: list[str]) -> int | None:
+    """The position in ``names`` of the first name that differs only in case from an
+    earlier one, or ``None``. A position, since the name itself may be repeated."""
     seen: dict[str, str] = {}
-    for name in names:
+    for position, name in enumerate(names):
         other = seen.setdefault(name.lower(), name)
         if other != name:
-            return other, name
+            return position
     return None
 
 
@@ -1632,6 +1643,12 @@ def _database_error_to_raise(errors: list[Exception]) -> Exception | None:
     return None
 
 
+def _table_id(delta_table: deltalake.DeltaTable) -> str:
+    """The Delta table's own id, which a table created again at the same path does
+    not share."""
+    return str(delta_table.metadata().id)
+
+
 @dataclass
 class _CommittedSnapshot:
     """What one version of a stored Delta table holds, kept in memory (ITL-919).
@@ -1642,6 +1659,10 @@ class _CommittedSnapshot:
 
     Attributes:
         version: The table version described.
+        table_id: The Delta table's own id (``metadata().id``, set when the table is
+            created), or ``""`` for a table this database has just created. A
+            version describes one table only: a table removed and created again
+            starts over at version 0 with another id (review of PR 511).
         ids: The stored record ids (never null), or ``None`` until first needed.
         rows: Indexes over every stored row, read exactly as ``get_all_records``
             reads them, or ``None`` until first needed.
@@ -1653,6 +1674,7 @@ class _CommittedSnapshot:
     """
 
     version: int
+    table_id: str = ""
     ids: set[bytes] | None = None
     rows: KeyIndex | None = None
     files: frozenset[str] = frozenset()
@@ -2100,9 +2122,14 @@ class DeltaTableDatabase:
             The snapshot for the table's version; its parts are read on first use.
         """
         version = delta_table.version()
+        table_id = _table_id(delta_table)
         snapshot = self._snapshots.get(record_key)
-        if snapshot is None or snapshot.version != version:
-            snapshot = _CommittedSnapshot(version)
+        if (
+            snapshot is None
+            or snapshot.version != version
+            or snapshot.table_id != table_id
+        ):
+            snapshot = _CommittedSnapshot(version, table_id)
             self._snapshots[record_key] = snapshot
         return snapshot
 
@@ -2249,12 +2276,16 @@ class DeltaTableDatabase:
             UnstorableColumnError: For the first column Delta cannot hold, naming the
                 column, its Arrow type and Delta's reason.
         """
-        clash = _differ_only_in_case(schema.names)
-        if clash is not None:
+        position = _case_clash_position(schema.names)
+        if position is not None:
+            # By position: the name may be repeated (``a``, ``A``, ``A``), and a
+            # lookup by a repeated name raises (review of PR 511).
+            clash = _differ_only_in_case(schema.names)
+            assert clash is not None
             raise UnstorableColumnError(
                 database_kind=type(self).__name__,
                 column=clash[1],
-                arrow_type=schema.field(clash[1]).type,
+                arrow_type=schema.field(position).type,
                 reason=_case_reason(*clash),
             )
         for field in schema:
@@ -2701,8 +2732,24 @@ class DeltaTableDatabase:
                 logger.debug("All records were duplicates, nothing to insert")
                 return None
         else:
-            # Check for conflicts - insert never allows duplicates when skip_duplicates=False
-            # self._check_all_conflicts(record_path, deduplicated_table)
+            # An id already queued would be committed twice: the commit inserts the
+            # ids the stored table does not hold, and both queued rows are such ids.
+            # Refused as the in-memory database refuses it (review of PR 511).
+            queued = self._pending_record_ids.get(self._get_record_key(record_path))
+            if queued:
+                again = {
+                    rid
+                    for rid in cast(
+                        list[bytes],
+                        deduplicated_table[self.RECORD_ID_COLUMN].to_pylist(),
+                    )
+                    if rid in queued
+                }
+                if again:
+                    raise ValueError(
+                        f"Records with IDs {again} already exist in the pending "
+                        "batch. Use skip_duplicates=True to skip them."
+                    )
             filtered_table = deduplicated_table
 
         # Against the rows queued, on the rows that remain once duplicates are
@@ -3796,17 +3843,19 @@ class DeltaTableDatabase:
             OrcapodDatabaseReadError: If the stored ids could not be read.
         """
         cached = self._snapshots.get(record_key)
+        table_id = _table_id(delta_table)
         if (
             cached is not None
             and cached.ids is not None
             and cached.version == delta_table.version()
+            and cached.table_id == table_id
         ):
             return cached
         try:
             ids = self._scan_ids(delta_table)
         except Exception as e:
             raise OrcapodDatabaseReadError(table_uri, abs_path_components) from e
-        return _CommittedSnapshot(delta_table.version(), ids=ids)
+        return _CommittedSnapshot(delta_table.version(), table_id, ids=ids)
 
     def _extend_snapshot(
         self,
@@ -3835,10 +3884,11 @@ class DeltaTableDatabase:
             The new snapshot.
         """
         version = committed.version()
-        if version != base.version + 1:
-            return _CommittedSnapshot(version)
+        table_id = _table_id(committed)
+        if version != base.version + 1 or base.table_id not in ("", table_id):
+            return _CommittedSnapshot(version, table_id)
         assert base.ids is not None
-        snapshot = _CommittedSnapshot(version, ids=base.ids | inserted_ids)
+        snapshot = _CommittedSnapshot(version, table_id, ids=base.ids | inserted_ids)
         if (
             base.rows is None
             or base.dataset_schema is None

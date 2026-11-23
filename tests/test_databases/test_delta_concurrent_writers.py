@@ -256,11 +256,19 @@ def test_writers_in_other_processes_store_each_id_once(tmp_path: Path) -> None:
         context.Process(target=_write_ids, args=(str(tmp_path), start, ids, value))
         for value in (1, 2, 3)
     ]
-    for process in processes:
-        process.start()
-    for process in processes:
-        process.join(timeout=120)
-        assert process.exitcode == 0
+    try:
+        for process in processes:
+            process.start()
+        for process in processes:
+            process.join(timeout=120)
+        assert [process.exitcode for process in processes] == [0, 0, 0]
+    finally:
+        # A worker still running after the timeout never outlives the test
+        # (review of PR 511).
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join()
     stored = _stored(tmp_path)
     assert [rid for rid, _ in stored] == [bytes([n]) for n in ids]
 
@@ -280,10 +288,12 @@ def test_writers_creating_one_table_at_once_store_an_id_once(tmp_path: Path) -> 
         errors: list[BaseException] = []
 
         def write(value: int) -> None:
-            db = DeltaTableDatabase(root)
-            db.add_records(PATH, _records(1, value), record_id_column="rid")
-            start.wait()
+            # A writer that fails before the barrier reports it, and the barrier's
+            # timeout lets the others report theirs (review of PR 511).
             try:
+                db = DeltaTableDatabase(root)
+                db.add_records(PATH, _records(1, value), record_id_column="rid")
+                start.wait(timeout=60)
                 db.flush()
             except BaseException as e:  # noqa: BLE001  # reported below
                 errors.append(e)
@@ -292,7 +302,8 @@ def test_writers_creating_one_table_at_once_store_an_id_once(tmp_path: Path) -> 
         for thread in threads:
             thread.start()
         for thread in threads:
-            thread.join()
+            thread.join(timeout=120)
+        assert not any(thread.is_alive() for thread in threads)
         assert errors == []
         stored = _stored(root)
         assert [rid for rid, _ in stored] == [b"\x01"], trial
@@ -334,3 +345,98 @@ def test_a_batch_that_keeps_losing_withdraws_the_records_waiting_on_it(
         records, record_id_column="rid"
     )
     assert stored is None or stored.num_rows == 0
+
+
+@pytest.mark.parametrize(
+    "interrupted", ["the wait", "the commit"], ids=["in the wait", "in the commit"]
+)
+def test_an_interrupted_retry_keeps_the_batch_queued(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, interrupted: str
+) -> None:
+    """Review of PR 511: a ``KeyboardInterrupt`` during the wait between attempts, or
+    during an attempt, after a lost commit. A lost attempt wrote nothing: the
+    interrupt propagates, the batch and its ids are queued again (with a batch of
+    another table, untouched), and a later flush commits every row once."""
+    db = DeltaTableDatabase(tmp_path)
+    other = ("other",)
+    db.add_records(PATH, _records(1, 10), record_id_column="rid", flush=True)
+    db.add_records(PATH, _records(2, 20), record_id_column="rid")
+    db.add_records(PATH, _records(3, 30), record_id_column="rid")
+    real_merge = deltalake.DeltaTable.merge
+    attempts: list[int] = []
+
+    def lose(self: Any, *args: Any, **kwargs: Any) -> Any:
+        attempts.append(1)
+        if interrupted == "the commit" and len(attempts) > 1:
+            raise KeyboardInterrupt
+        raise CommitFailedError("another writer committed first")
+
+    def interrupt(attempt: int) -> None:
+        raise KeyboardInterrupt
+
+    with monkeypatch.context() as patched:
+        patched.setattr(deltalake.DeltaTable, "merge", lose)
+        if interrupted == "the wait":
+            patched.setattr(delta_lake_databases, "_sleep_before_retry", interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            db.flush_batch(PATH)
+    assert deltalake.DeltaTable.merge is real_merge
+    pending = db._pending_batches  # pyright: ignore[reportPrivateUsage]
+    assert pending["t"].num_rows == 2
+    assert db._pending_record_ids["t"] == {b"\x02", b"\x03"}  # pyright: ignore[reportPrivateUsage]
+    db.add_records(other, _records(4, 40), record_id_column="rid")
+    db.flush()
+    assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+    assert _stored(tmp_path) == [(b"\x01", 10), (b"\x02", 20), (b"\x03", 30)]
+
+
+@pytest.mark.parametrize("commits", [1, 2], ids=["same version", "another version"])
+def test_a_table_created_again_is_not_read_with_the_old_tables_ids(
+    tmp_path: Path, commits: int
+) -> None:
+    """Review of PR 511: another writer removes the table and creates it again, so it
+    starts over at version 0. A commit of this database onto it must not take the old
+    table's ids for the new one's: a later ``skip_duplicates`` add of an id only the
+    old table held is stored, and one the new table holds is skipped."""
+    import shutil
+
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(PATH, _records(1, 10), record_id_column="rid", flush=True)
+    assert db.get_record_by_id(PATH, b"\x01") is not None  # its ids are read
+    shutil.rmtree(tmp_path / "t")
+    other = DeltaTableDatabase(tmp_path)
+    for n in range(2, 2 + commits):
+        other.add_records(PATH, _records(n, 20), record_id_column="rid", flush=True)
+    db.add_records(PATH, _records(9, 90), record_id_column="rid", flush=True)
+    both = pa.concat_tables([_records(1, 11), _records(2, 21)])
+    db.add_records(PATH, both, record_id_column="rid", skip_duplicates=True, flush=True)
+    assert _stored(tmp_path) == sorted(
+        [(b"\x01", 11), (b"\x09", 90)]
+        + [(bytes([n]), 20) for n in range(2, 2 + commits)]
+    )
+
+
+@pytest.mark.parametrize("stored", [False, True], ids=["new table", "stored table"])
+def test_an_id_already_queued_is_refused_without_skip_duplicates(
+    tmp_path: Path, stored: bool
+) -> None:
+    """Review of PR 511: an id queued, added again without ``skip_duplicates``, would
+    be committed twice (both rows are ids the stored table does not hold). It is
+    refused with ``ValueError``, as the in-memory database refuses it, and nothing of
+    that add is queued; with ``skip_duplicates`` the queued row is kept."""
+    db = DeltaTableDatabase(tmp_path)
+    if stored:
+        db.add_records(PATH, _records(9, 90), record_id_column="rid", flush=True)
+    db.add_records(
+        PATH,
+        pa.concat_tables([_records(1, 10), _records(2, 20)]),
+        record_id_column="rid",
+    )
+    again = pa.concat_tables([_records(3, 30), _records(2, 21)])
+    with pytest.raises(ValueError, match="already exist in the pending batch"):
+        db.add_records(PATH, again, record_id_column="rid")
+    assert db._pending_batches["t"].num_rows == 2  # pyright: ignore[reportPrivateUsage]
+    db.add_records(PATH, again, record_id_column="rid", skip_duplicates=True)
+    db.flush()
+    expected = [(b"\x01", 10), (b"\x02", 20), (b"\x03", 30)]
+    assert _stored(tmp_path) == sorted(expected + ([(b"\x09", 90)] if stored else []))

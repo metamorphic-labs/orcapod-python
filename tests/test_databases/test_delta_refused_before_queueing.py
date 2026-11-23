@@ -703,3 +703,31 @@ def test_a_clash_with_a_cached_version_is_checked_against_the_stored_one(
             _add(db, _rows(b"2", **anchor, **added))
         assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
         assert _stored_ids(tmp_path) == [b"1"]
+
+
+@pytest.mark.parametrize(
+    "names",
+    [["a", "A", "A"], ["A", "a", "a"], ["a", "b", "A", "b"]],
+    ids=lambda names: "".join(names),
+)
+def test_a_case_clash_beside_a_repeated_name_names_the_column(
+    tmp_path: Path, names: list[str]
+) -> None:
+    """Review of PR 511: with a name repeated, the case clash is still refused with
+    ``UnstorableColumnError``, naming the column and the type at its position."""
+    types = [pa.int8(), pa.int16(), pa.int32(), pa.int64()][: len(names)]
+    table = pa.Table.from_arrays(
+        [pa.array([b"1"], pa.large_binary())] + [pa.array([1], t) for t in types],
+        names=["rid", *names],
+    )
+    db = DeltaTableDatabase(tmp_path)
+    with pytest.raises(UnstorableColumnError) as info:
+        _add(db, table)
+    position = next(
+        i
+        for i, n in enumerate(names)
+        if any(m.lower() == n.lower() and m != n for m in names[:i])
+    )
+    assert info.value.column == names[position]
+    assert str(types[position]) in str(info.value)
+    assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]

@@ -7,14 +7,18 @@ into it then fails, so its rows would stay queued forever (review of PR 511). Li
 backtick in a name (ITL-1375), such a name is refused for certain: when rows are added,
 and for a table that already holds one.
 
-The names are provoked with deltalake itself, so an upgrade that renames, adds or drops
-one fails this file.
+The names are provoked with deltalake itself, for the names ``CANDIDATES`` enumerates
+only: an upgrade that drops or renames one of them, or starts reserving another of them,
+fails this file. A name an upgrade newly reserves outside that list is not detected here;
+``CANDIDATES`` is read from deltalake 1.6.6's merge planner and is to be read again on an
+upgrade.
 """
 
 from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import cast
 
 import deltalake
 import pyarrow as pa
@@ -29,7 +33,8 @@ from orcapod.errors import InputValidationError, UnstorableColumnError
 PATH = ("t",)
 
 # Every ``__delta_rs_*`` name deltalake 1.6.6's merge planner writes, and names near
-# them: the ones a MERGE refuses must be exactly ``MERGE_RESERVED_COLUMNS``.
+# them: the ones a MERGE refuses must be exactly ``MERGE_RESERVED_COLUMNS``. Only these
+# names are probed (review of PR 511).
 CANDIDATES = sorted(
     MERGE_RESERVED_COLUMNS
     | {
@@ -165,3 +170,40 @@ def test_a_nested_field_with_a_reserved_name_is_kept(tmp_path: Path) -> None:
         )
     stored = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="rid")
     assert stored is not None and stored.num_rows == 2
+
+
+@pytest.mark.parametrize("rebuilt", [True, False], ids=["rebuilt", "unchanged"])
+@pytest.mark.parametrize("name", ["a`b", "__delta_rs_source"])
+def test_a_cached_table_holding_such_a_name_is_checked_again_when_rebuilt(
+    tmp_path: Path, name: str, rebuilt: bool
+) -> None:
+    """Review of PR 511: the database cached a handle of a table holding such a name;
+    the table is rebuilt without it. The refusal is checked again against the version
+    stored now: the rows are stored. Unchanged, they are still refused, nothing
+    queued."""
+    root = str(tmp_path / "t")
+    deltalake.write_deltalake(
+        root,
+        pa.table(
+            {"__record_id": pa.array([b"1"], pa.large_binary()), "v": [1], name: [1]}
+        ),
+    )
+    db = DeltaTableDatabase(tmp_path)
+    db.get_all_records(PATH)  # the handle is cached
+    assert db._delta_table_cache  # pyright: ignore[reportPrivateUsage]
+    rows = pa.table({"rid": pa.array([b"2", b"3"], pa.large_binary()), "v": [2, 3]})
+    if not rebuilt:
+        with pytest.raises(InputValidationError, match="Delta|MERGE|backtick"):
+            db.add_records(PATH, rows, record_id_column="rid")
+        assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+        return
+    current = deltalake.DeltaTable(root).to_pyarrow_table().drop_columns([name])
+    deltalake.write_deltalake(root, current, mode="overwrite", schema_mode="overwrite")
+    db.add_records(PATH, rows, record_id_column="rid", flush=True)
+    stored = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="rid")
+    assert stored is not None
+    assert sorted(cast(list[bytes], stored.column("rid").to_pylist())) == [
+        b"1",
+        b"2",
+        b"3",
+    ]

@@ -383,13 +383,15 @@ class TestEveryColumnKind:
         """delta-rs cannot MERGE such a table, and every later commit is one (ITL-1375)."""
         db = DeltaTableDatabase(tmp_path)
         with pytest.raises(UnstorableColumnError) as info:
+            # No flush: the refusal is when the rows are added (review of PR 511).
             db.add_records(
                 PATH,
                 rows(range(0, 3)).append_column("x`y", pa.array([0, 1, 2], pa.int64())),
-                flush=True,
             )
         assert info.value.column == "x`y"
         assert "backtick" in info.value.reason
+        assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+        db.flush()
         assert not (tmp_path / "t" / "_delta_log").exists()
         # A backtick inside a nested field's name is merged as any other.
         nested = pa.array([{"x`y": i} for i in range(3)])
@@ -499,11 +501,11 @@ class TestTablesCreatedElsewhere:
         # deltalake 1.6 no longer logs the binary-column warning (1.0.2 did); what
         # the property was about stays: no min/max is kept for a binary column.
         assert configuration(tmp_path / "t") == {}
-        added = pa.table(
-            deltalake.DeltaTable(str(tmp_path / "t")).get_add_actions(flatten=True)
-        )
-        assert "min.v" in added.column_names
-        assert not any(n.startswith("min.h") for n in added.column_names)
+        # Every data file, those the two MERGEs added included, has a minimum for
+        # ``v`` and none for the binary ``h`` (review of PR 511).
+        per_file = columns_with_statistics(tmp_path / "t")
+        assert len(per_file) >= 3
+        assert all("v" in stats and "h" not in stats for stats in per_file)
         assert stored_ids(db) == sorted(f"id{i}".encode() for i in range(30))
 
     def test_plain_deltalake_appends_to_a_table_with_the_property(
