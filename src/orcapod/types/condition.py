@@ -1000,9 +1000,11 @@ class Condition:
 
         Raises:
             ValueError: If no column is given, a value is ``None`` (a null equals
-                nothing, so the condition would match no row), a column is given in
-                a mapping and as a keyword with different values, or a column is
-                required to equal two different values.
+                nothing, so the condition would match no row), or one column is
+                named twice in this call with different values (in a mapping and as
+                a keyword, or in two mappings). A contradiction between conditions
+                (``col("x") == 1`` given with ``col("x") == 5``) is kept: it holds
+                for no row.
             TypeError: If a column name is not a string, a value is not exactly of a
                 supported type (a list given as a value: use ``col(c).is_in``), or a
                 positional argument is neither a mapping nor a condition (a mask by
@@ -1029,8 +1031,9 @@ class Condition:
                             merged[column], value
                         ):
                             raise ValueError(
-                                f"column {column!r} is given as {merged[column]!r} "
-                                f"and as {value!r} in two mappings"
+                                f"column {column!r} is named twice in one call, as "
+                                f"{merged[column]!r} and as {value!r} (in two "
+                                "mappings); give it once"
                             )
                         merged[column] = value
                 else:
@@ -1046,8 +1049,9 @@ class Condition:
                     merged[column], value
                 ):
                     raise ValueError(
-                        f"column {column!r} is given as {merged[column]!r} in "
-                        f"the mapping and as {value!r} as a keyword"
+                        f"column {column!r} is named twice in one call, as "
+                        f"{merged[column]!r} in the mapping and as {value!r} as a "
+                        "keyword; give it once"
                     )
                 merged[column] = value
             condition = Condition()
@@ -1140,32 +1144,22 @@ class Condition:
     def combined(self, other: Condition) -> Condition:
         """Return the condition requiring both this one and ``other``.
 
-        A requirement both state is kept once. ``a & b`` is the same.
+        A requirement both state is kept once. ``a & b`` is the same. A contradiction
+        is kept as it is, never refused (developer, 2026-11-22): there is no general way
+        to tell one (``x == 1`` with ``x > 5``, disjoint memberships, ranges, nulls), so
+        ``(col("x") == 1) & (col("x") == 5)`` is a condition that holds for no row and
+        a filter over it keeps zero rows.
 
         Args:
             other: The condition to add.
 
         Returns:
             The condition requiring everything both require.
-
-        Raises:
-            ValueError: If a column is required to equal two different values.
         """
         children = list(self._root.children)
         for node in other._root.children:
             if any(same_node(node, kept) for kept in children):
                 continue
-            if isinstance(node, Term) and _is_plain_equality(node):
-                for kept in children:
-                    if (
-                        isinstance(kept, Term)
-                        and _is_plain_equality(kept)
-                        and kept.path == node.path
-                    ):
-                        raise ValueError(
-                            f"column {node.path.column!r} is already required to "
-                            f"equal {kept.value!r}; it cannot also equal {node.value!r}"
-                        )
             children.append(node)
         return Condition._of_children(tuple(children))
 
@@ -1238,6 +1232,22 @@ class Condition:
         if not self._root.children:
             return "no condition"
         return ", ".join(_node_text(child) for child in self._root.children)
+
+    def canonical_text(self) -> str:
+        """Return the condition as ``text()`` words, in no given order.
+
+        The children of every ``all`` and ``any`` and the values of every ``is_in`` are
+        in the order ``canonical_form`` sorts them, so ``a & b`` and ``b & a``, or
+        ``is_in([3, 7])`` and ``is_in([7, 3])``, read identically. For a display that
+        must not follow how the condition was written (``explain()``); ``text()``
+        keeps the order given.
+        """
+        if not self._root.children:
+            return "no condition"
+        return ", ".join(
+            _node_text(child, canonical=True)
+            for child in _canonically_sorted(self._root.children)
+        )
 
     def to_config(self) -> dict[str, object]:
         """Return the condition as it is saved, JSON-ready.
@@ -1479,8 +1489,14 @@ def _canonical_node(node: Node) -> tuple[object, ...]:
 # -----------------------------------------------------------------------------
 
 
-def _node_text(node: Node) -> str:
-    """Return ``node`` as words (display only)."""
+def _canonically_sorted(nodes: Iterable[Node]) -> list[Node]:
+    """Return ``nodes`` in the order of their canonical form."""
+    return sorted(nodes, key=lambda node: json.dumps(_canonical_node(node)))
+
+
+def _node_text(node: Node, canonical: bool = False) -> str:
+    """Return ``node`` as words (display only); ``canonical`` sorts children and
+    ``is_in`` values as ``canonical_form`` does."""
     if isinstance(node, Term):
         path = node.path.text()
         value = node.value
@@ -1489,14 +1505,19 @@ def _node_text(node: Node) -> str:
         if isinstance(value, ColumnOperand):
             return f"{path} {node.operator} {value.path.text()}"
         if node.operator == "is_in" and isinstance(value, tuple):
+            if canonical:
+                value = tuple(
+                    sorted(value, key=lambda v: json.dumps(_canonical_value(v)))
+                )
             return f"{path} in [{', '.join(repr(v) for v in value)}]"
         if node.operator == EQUALS:
             return f"{path}={value!r}"
         return f"{path} {node.operator} {value!r}"
     if isinstance(node, Negation):
-        return f"not ({_node_text(node.child)})"
+        return f"not ({_node_text(node.child, canonical)})"
     word = " and " if isinstance(node, AllOf) else " or "
-    return "(" + word.join(_node_text(child) for child in node.children) + ")"
+    children = _canonically_sorted(node.children) if canonical else node.children
+    return "(" + word.join(_node_text(child, canonical) for child in children) + ")"
 
 
 def _path_to_config(path: FieldPath) -> dict[str, object]:

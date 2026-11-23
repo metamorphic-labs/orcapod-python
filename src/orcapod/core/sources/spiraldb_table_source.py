@@ -606,6 +606,17 @@ class SpiralDBTableSource(RootSource):
                 f"the pipeline: source.filter(...) with the same condition"
             )
         _checked_conditions(condition.equalities, self._table_schema)
+        # A condition keeps a contradiction (it holds for no row), but a restriction
+        # is pushed down as one value per column: a second value for a column already
+        # restricted is refused here, as it always was.
+        for column, value in condition.equalities.items():
+            held = self._condition.equalities.get(column, value)
+            if not Condition.of({column: held}) == Condition.of({column: value}):
+                raise ValueError(
+                    f"column {column!r} is already restricted to {held!r}; it cannot "
+                    f"also equal {value!r} (a source reads one value per column; filter "
+                    "the stream to state a condition that holds for no row)"
+                )
         self._condition = self._condition.combined(condition)
         self._update_modified_time()
 
