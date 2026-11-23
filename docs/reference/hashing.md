@@ -1817,7 +1817,8 @@ layouts above was written by another build of Orcapod. Orcapod does not read it 
 and never modifies it. The path of a table holds hashes (of the function's output schema, of
 the pipeline), and another build can compute other hashes, so such a table is not looked for
 at a computed path. The beginning of a path holds no hash: the job, then the name of the
-function (`<job>/<function>/...` and `<job>/_result/<function>/...`;
+function (`<job>/<function>/...` and `<job>/_result/<function>/...`, or `<function>/...` in
+a separate result database;
 `side_effect_function/<function>` for a function pod that takes the invocation context;
 `side_effects/<pod>` for a side-effect pod; `<prefix>/source` for a cached source without
 an explicit `cache_path`). A node lists the tables stored under that beginning
