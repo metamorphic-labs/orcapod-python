@@ -144,7 +144,7 @@ class TestCombined:
     )
     def test_a_conflicting_value_is_refused(self, first, second):
         """Another value (another type counts) for one column is refused, naming it."""
-        with pytest.raises(ValueError, match=r"unit.*already restricted"):
+        with pytest.raises(ValueError, match=r"unit.*already required"):
             Condition.of(session=2, unit=first).combined(Condition.of(unit=second))
 
     def test_combining_leaves_both_unchanged(self):

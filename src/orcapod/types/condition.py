@@ -988,8 +988,8 @@ class Condition:
             condition = condition.combined(cls._equal_to(merged))
         if not condition:
             raise ValueError(
-                "a condition needs at least one column: where(column=value, ...), "
-                "filter(column=value, ...), or a mapping {column: value, ...}"
+                "a condition needs at least one column: column=value, a mapping "
+                "{column: value, ...}, or a condition built with col(...)"
             )
         return condition
 
@@ -1090,8 +1090,8 @@ class Condition:
                         and kept.path == node.path
                     ):
                         raise ValueError(
-                            f"where: column {node.path.column!r} is already restricted "
-                            f"to {kept.value!r}; it cannot also equal {node.value!r}"
+                            f"column {node.path.column!r} is already required to "
+                            f"equal {kept.value!r}; it cannot also equal {node.value!r}"
                         )
             children.append(node)
         return Condition._of_children(tuple(children))
