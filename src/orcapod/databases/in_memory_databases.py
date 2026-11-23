@@ -401,12 +401,13 @@ class InMemoryArrowDatabase:
         try:
             self._promote(record_key, pending)
         except BaseException:
+            # A refused in-memory batch leaves the queue, as it did before guards.
             self._pending_commits.finish(record_key, committed=False)
-            self._pending_commits.restore(record_key, pending, ids)
             raise
         else:
-            self._pending_commits.forget(record_key, ids)
             self._pending_commits.finish(record_key, committed=True)
+        finally:
+            self._pending_commits.forget(record_key, ids)
 
     def _promote(self, record_key: str, pending: "pa.Table") -> None:
         """Append the ready rows and update the committed indexes."""

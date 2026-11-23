@@ -333,6 +333,51 @@ class TestFlushBehaviour:
         assert result.num_rows == 2
 
 
+@pytest.mark.parametrize(
+    "separate", [False, True], ids=["whole-flush", "scoped-result"]
+)
+def test_refused_result_batch_is_dropped_with_its_dependent_record(
+    separate: bool,
+) -> None:
+    """A failed promotion clears the bad batch so a corrected write can proceed."""
+    results = InMemoryArrowDatabase()
+    pipeline = InMemoryArrowDatabase() if separate else results.at("pipeline")
+    result_path = ("results",)
+    pipeline_path = ("records",)
+    prior = pa.table({"value": pa.array([1], type=pa.int64())})
+    refused = pa.table({"value": pa.array([2], type=pa.int32())})
+    corrected = pa.table({"value": pa.array([2], type=pa.int64())})
+
+    results.add_record(result_path, b"prior", prior, flush=True)
+    results.add_record(result_path, b"new", refused)
+    attempt = results.pending_result(result_path, b"new")
+    assert attempt is not None
+    with pipeline.guard_record(pipeline_path, b"new", attempt):
+        pipeline.add_record(pipeline_path, b"new", corrected)
+
+    with pytest.raises(pa.ArrowInvalid):
+        if separate:
+            results.flush_result_batch(result_path, publish_records=True)
+        else:
+            results.flush()
+
+    results.flush()
+    pipeline.flush()
+    assert results.get_all_records(result_path) == prior
+    assert results.get_record_by_id(result_path, b"new") is None
+    assert pipeline.get_all_records(pipeline_path) is None
+
+    results.add_record(result_path, b"new", corrected)
+    retry = results.pending_result(result_path, b"new")
+    assert retry is not None and retry is not attempt
+    with pipeline.guard_record(pipeline_path, b"new", retry):
+        pipeline.add_record(pipeline_path, b"new", corrected)
+    results.flush()
+    pipeline.flush()
+    assert results.get_record_by_id(result_path, b"new") == corrected
+    assert pipeline.get_record_by_id(pipeline_path, b"new") == corrected
+
+
 # ---------------------------------------------------------------------------
 # 10. at() and base_path
 # ---------------------------------------------------------------------------
