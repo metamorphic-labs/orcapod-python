@@ -434,11 +434,16 @@ needs a new data context version.
   `job.nodes`, is a job-capture gap outside `Filter`'s scope, for its own issue.)
 - **`RestrictedAggregationWarning` (F12)**: a `where`-restricted source feeding `GroupBy`,
   `Batch` or `MergeJoin` warns at every run, because the restriction is in no identity: the
-  aggregate's hash does not say which rows were aggregated. A `Filter` step never triggers
-  it: its condition is in the identity of every node downstream, so the aggregate's hash
-  says exactly which rows it saw. This is a reason to prefer `filter` over `where` once a
-  selection becomes part of what a pipeline computes. A pushdown (below) is internal to the
-  `Filter` and must not trigger the warning either.
+  aggregate's hash does not say which rows were aggregated. A `Filter` step does not
+  trigger it by itself: its condition is in the identity of every node downstream, so a
+  filter over an unrestricted source lets the aggregate's hash say exactly which rows it
+  saw. A filter does not clear it either: when a `where`-restricted source stays upstream
+  of the `Filter`, the restriction is still in no identity (two restrictions to different
+  sessions, filtered alike, give one downstream identity over different rows), so the
+  warning still applies. This is a reason to move a selection from `where` into `filter`
+  once it becomes part of what a pipeline computes. A pushdown (below) is internal to the
+  `Filter` and must not trigger the warning: the source it reads is not restricted by the
+  user, and the `Filter` still evaluates its whole condition.
 - **`filter` directly over a source versus `where`**: the same rows (except NaN and signed
   zero on float columns, 2.4), different identities: `where` leaves the source's identity
   unchanged and adds no node; `filter` adds a node. A pipeline that started from

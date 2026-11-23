@@ -787,3 +787,111 @@ class TestSavedTreesMeetTheBuildChecks:
         one, two = (col("k") == 1).root.children, (col("k") == 2).root.children
         condition = Condition._of_children((*one, *two))  # pyright: ignore[reportPrivateUsage]  # the state no public call reaches
         assert not condition.only_equalities
+
+
+# --- CodeRabbit review of PR 493 -------------------------------------------------------
+
+
+class _ShiftingZone(dt.tzinfo):
+    """A tzinfo whose offset moves by one hour on every call after the first."""
+
+    def __init__(self, hours: int) -> None:
+        self.hours = hours
+
+    def utcoffset(self, _value: dt.datetime | None) -> dt.timedelta:
+        offset = dt.timedelta(hours=self.hours)
+        self.hours += 1
+        return offset
+
+    def dst(self, _value: dt.datetime | None) -> dt.timedelta:
+        return dt.timedelta(0)
+
+
+class TestReviewFindings:
+    @pytest.mark.parametrize(
+        "wall, hours",
+        [(dt.datetime(1, 1, 1, 0, 0), 1), (dt.datetime(2026, 11, 25, 9, 0), 0)],
+        ids=["no UTC datetime", "in range"],
+    )
+    def test_the_offset_is_read_once(self, wall, hours):
+        """Every step of the freeze uses the first offset the tzinfo gave."""
+        (term,) = (col("at") == wall.replace(tzinfo=_ShiftingZone(hours))).root.children
+        assert isinstance(term, Term)
+        expected = wall.replace(tzinfo=dt.timezone(dt.timedelta(hours=hours)))
+        assert term.value == expected
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda a, b: Condition.of({"at": a}, {"at": b}),
+            lambda a, b: Condition.of({"at": a}, at=b),
+        ],
+        ids=["two mappings", "mapping and keyword"],
+    )
+    def test_the_value_compared_is_the_value_kept(self, build):
+        """Values are frozen before a repeated column is compared, and that frozen
+        value is the one kept."""
+        first = dt.datetime(2026, 11, 25, 9, 0, tzinfo=dt.timezone.utc)
+        second = dt.datetime(2026, 11, 25, 10, 0, tzinfo=_ShiftingZone(1))
+        condition = build(first, second)
+        assert dict(condition.equalities) == {"at": first}
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda: col("x") == 1,
+            lambda: (col("x") == 1) & (col("y") > 2.0),
+            lambda: col("x").is_in([1, 2]),
+        ],
+    )
+    def test_or_with_itself_is_itself(self, build):
+        condition = build() | build()
+        assert condition == build()
+        assert _canonical(condition) == _canonical(build())
+        loaded = Condition.from_config(json.loads(json.dumps(condition.to_config())))
+        assert loaded == condition and _canonical(loaded) == _canonical(condition)
+
+    @pytest.mark.parametrize(
+        "value", [1, "x", {"date": "2026-11-25"}, {"float": "nan"}], ids=repr
+    )
+    def test_an_equality_on_a_column_named_like_the_tree_key(self, value):
+        saved = {":condition": value}
+        assert Condition.from_config(saved).to_config() == saved
+
+    @pytest.mark.parametrize(
+        "first, second",
+        [
+            (col("x").is_in([1, 2, 3]), col("x").is_in([3, 1, 2])),
+            (
+                (col("a") == 1) | (col("b") == 2) | col("c").is_null(),
+                col("c").is_null() | (col("b") == 2) | (col("a") == 1),
+            ),
+            (
+                Condition.of(col("t") > 1.0, ~col("u").is_in([2, 1])),
+                Condition.of(~col("u").is_in([1, 2]), col("t") > 1.0),
+            ),
+        ],
+        ids=["is_in values", "or alternatives", "all children"],
+    )
+    def test_the_saved_form_follows_no_given_order(self, first, second):
+        assert json.dumps(first.to_config()) == json.dumps(second.to_config())
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda: Condition.of({"": 1}),
+            lambda: Condition.of(**{"": 1}),
+            lambda: col(""),
+        ],
+        ids=["mapping", "keyword", "col"],
+    )
+    def test_an_empty_column_name_is_refused_everywhere(self, build):
+        with pytest.raises(ValueError, match="not empty"):
+            build()
+
+    def test_membership_of_many_values_keeps_the_first_of_each(self):
+        values = [*range(5000), *range(5000), -0.0][:-1]
+        (term,) = col("x").is_in(values).root.children
+        assert isinstance(term, Term) and term.value == tuple(range(5000))
+        (floats,) = col("x").is_in([0.0, -0.0, math.nan, float("nan")]).root.children
+        assert isinstance(floats, Term) and len(floats.value) == 2  # pyright: ignore[reportArgumentType]

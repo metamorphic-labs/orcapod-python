@@ -69,7 +69,6 @@ from orcapod.protocols.core_protocols import StreamProtocol
 from .several_items import (
     DATA_FIRST_REVERSED,
     DATA_TAGS,
-    INTERLEAVED,
     LAYOUTS,
     MAIN,
     MIXED,
@@ -210,8 +209,7 @@ COLUMN_ORDER_ISSUE = "ITL-1249"
 KEYS_XFAIL = pytest.mark.xfail(
     strict=True,
     reason=f"{COLUMN_ORDER_ISSUE}: with a table layout other than the tag order, the "
-    + "result's keys list the tags in the input table's physical order, its rows in "
-    + "tag order",
+    + "keys and the sync rows place a demoted data-tag differently",
 )
 ASYNC_ORDER_XFAIL = pytest.mark.xfail(
     strict=True,
@@ -237,12 +235,10 @@ def assert_async_column_order_equals_sync(
     )
 
 
-# Where the column order fails today (ITL-1249), per arrangement. In the reversed layout
-# the tags sit in another order than the tag order: every unary result's keys follow
-# the table (but ``DropTagColumns(["t3", "t1"])`` of plain tags leaves one tag). With
-# data-tags, a tag demoted to data sits elsewhere in the sync rows than in the async
-# rows, in the reversed and the interleaved layout.
-KEYS_PASS = {("drop_tag_columns", PLAIN)}
+# Where the column order fails today (ITL-1249), per arrangement. Since ITL-1365 a
+# stream's tag schema follows its tag order, so every result's keys list the tags as its
+# rows do. With data-tags, a tag demoted to data sits elsewhere in the sync rows than in
+# the keys and the async rows, in the reversed and the interleaved layout.
 DEMOTED_DATA_TAG_CASES = {
     ("select_tag_columns", DATA_TAGS),
     ("drop_tag_columns", DATA_TAGS),
@@ -254,9 +250,7 @@ DEMOTED_DATA_TAG_CASES = {
 
 
 def _keys_fail(label: str, role: str, layout: str) -> bool:
-    if layout == DATA_FIRST_REVERSED:
-        return (label, role) not in KEYS_PASS
-    return layout == INTERLEAVED and (label, role) in DEMOTED_DATA_TAG_CASES
+    return layout != TAGS_FIRST and (label, role) in DEMOTED_DATA_TAG_CASES
 
 
 def _async_order_fails(label: str, role: str, layout: str) -> bool:
@@ -845,7 +839,7 @@ def _several_input_sources(
     return op, _sources(specs, order_index, layout, role, rows=rows)
 
 
-def _several_input_params(fails_in_reversed_layout: bool) -> list[Any]:
+def _several_input_params() -> list[Any]:
     """One parameter per several-input case, role, tag order and layout."""
     return [
         pytest.param(
@@ -854,9 +848,6 @@ def _several_input_params(fails_in_reversed_layout: bool) -> list[Any]:
             order_index,
             layout,
             id=f"{label}/{role}/{order_index}/{layout}",
-            marks=[ASYNC_ORDER_XFAIL]
-            if fails_in_reversed_layout and layout == DATA_FIRST_REVERSED
-            else [],
         )
         for label in SEVERAL_INPUT_CASES
         for role in ROLES
@@ -866,7 +857,7 @@ def _several_input_params(fails_in_reversed_layout: bool) -> list[Any]:
 
 
 @pytest.mark.parametrize(
-    ("label", "role", "order_index", "layout"), _several_input_params(False)
+    ("label", "role", "order_index", "layout"), _several_input_params()
 )
 def test_several_input_result_keys_equal_its_row_keys(
     label: str, role: str, order_index: int, layout: str
@@ -875,10 +866,10 @@ def test_several_input_result_keys_equal_its_row_keys(
     assert_keys_equal_row_keys(op()(*sources))
 
 
-# In the reversed layout, Join, SemiJoin and MergeJoin give the sync rows the table's
-# tag order and the async rows the tag order (ITL-1249).
+# Join, SemiJoin and MergeJoin give the sync and the async rows one column order, also
+# in the reversed layout (ITL-1249's case, resolved by ITL-1365).
 @pytest.mark.parametrize(
-    ("label", "role", "order_index", "layout"), _several_input_params(True)
+    ("label", "role", "order_index", "layout"), _several_input_params()
 )
 def test_several_input_async_column_order_equals_sync(
     label: str, role: str, order_index: int, layout: str
