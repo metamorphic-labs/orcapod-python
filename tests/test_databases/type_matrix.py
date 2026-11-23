@@ -1041,6 +1041,10 @@ Some refusals depend on the values or names as well as the type:
   field, so a map with such metadata is refused there.
 - A fixed-size list or fixed-size binary read back by Delta with another length or width
   than its type is refused on read, never padded or cut.
+- Delta refuses a column whose name holds a backtick, of any type: delta-rs cannot MERGE
+  such a table, and every commit to an existing Delta table is a MERGE. A table that
+  already holds such a column takes no further append. A backtick in a nested field's
+  name is kept.
 
 A table holds one type per column. An append whose columns differ from the held ones
 (stored, or still pending) in field metadata (the column's own, or a nested field's: a

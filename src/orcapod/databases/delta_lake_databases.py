@@ -671,6 +671,8 @@ def _append_refusal(
     One rule for what an append is refused for, checked before the rows are buffered
     and again at flush against the version then loaded:
 
+    - a stored column whose name delta-rs cannot MERGE (``_unmergeable_name_reason``,
+      ITL-1375);
     - a column change (``_column_change``): other field attributes, a struct that
       adds a non-nullable field or one inside a map, or omits a non-nullable one;
     - a column stored as non-nullable that the rows omit or hold a null in (Delta
@@ -687,6 +689,11 @@ def _append_refusal(
         ``(column, reason)``, or ``None`` when the rows can be appended.
     """
     held = _held_columns(delta_table)
+    # A table stored with such a column (before ITL-1375) takes no further commit.
+    for name in held:
+        reason = _unmergeable_name_reason(name)
+        if reason is not None:
+            return name, reason
     for field in rows.schema:
         if field.name in held:
             change = _column_change(held[field.name], field)
@@ -843,6 +850,28 @@ def _holds_null_type(arrow_type: pa.DataType) -> bool:
     )
 
 
+def _unmergeable_name_reason(name: str) -> str | None:
+    """Say why Delta cannot commit to a table with a column named ``name``, or ``None``.
+
+    delta-rs cannot MERGE a table with a top-level column whose name holds a backtick
+    (``Expected close delimiter``), and every commit to an existing table is a MERGE
+    (ITL-1377), so such a table would take only its first commit (ITL-1375). A
+    backtick in a nested field's name is merged as any other.
+
+    Args:
+        name: A top-level column name.
+
+    Returns:
+        The reason, or ``None`` when the name is accepted.
+    """
+    if "`" in name:
+        return (
+            "the name holds a backtick, and delta-rs cannot MERGE a table with such a "
+            "column; every commit to an existing Delta table is a MERGE"
+        )
+    return None
+
+
 def delta_unstorable_reason(field: "pa.Field[Any]") -> str | None:
     """Say why Delta cannot hold a column, even through a recorded type, or ``None``.
 
@@ -858,10 +887,16 @@ def delta_unstorable_reason(field: "pa.Field[Any]") -> str | None:
     Args:
         field: A column, as given to the database.
 
+    A top-level name holding a backtick is refused too (``_unmergeable_name_reason``,
+    ITL-1375).
+
     Returns:
         Delta's reason (``Invalid data type for Delta Lake: Decimal256(40, 2)``), or
         ``None`` when Delta holds the column.
     """
+    name_reason = _unmergeable_name_reason(field.name)
+    if name_reason is not None:
+        return name_reason
     if arrow_utils.holds_renamed_map(field.type):
         # The recorded type goes through Arrow IPC, which renames them (ITL-1334).
         return "a map's key and item fields read back as 'key' and 'value'"
