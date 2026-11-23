@@ -37,6 +37,7 @@ from orcapod.operators import (
     Join,
     MergeJoin,
     SelectDataColumns,
+    SemiJoin,
 )
 from orcapod.sources import ArrowTableSource, CachedSource, DictSource
 
@@ -1330,3 +1331,88 @@ def test_a_selection_token_that_contradicts_the_operator_raises(
     )
     with pytest.raises(ProvenanceInconsistencyError):
         node.trace({"k": "x", "i": 0}, "picked")
+
+
+# ---------------------------------------------------------------------------
+# Tenth review (head 9b278cbc)
+# ---------------------------------------------------------------------------
+
+
+@function_pod(output_keys="result")
+def same_x(x: int) -> int:
+    return x
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_a_semi_join_right_input_never_reaches_its_output(mode: str) -> None:
+    """SemiJoin of two bindings with one source id and schema: the right input's rows
+    only choose; asked by the right binding, no node past the SemiJoin holds its row,
+    and the SemiJoin is named as the step that does not pass it on."""
+    left = DictSource(
+        [{"k": "x", "i": 0, "x": 7, "y": 9}],
+        tag_columns=["k", "i"],
+        tag_only_columns=True,
+        source_id="same",
+    )
+    schema = pa.schema(
+        [
+            pa.field("k", pa.large_string(), nullable=False),
+            pa.field("i", pa.int64(), nullable=False),
+            pa.field("x", pa.int64(), nullable=False),
+            pa.field("y", pa.int64(), nullable=False),
+        ]
+    )
+    right = ArrowTableSource(
+        pa.Table.from_pylist([{"k": "x", "i": 0, "x": 70, "y": 90}], schema=schema),
+        tag_columns=["k", "i"],
+        tag_only_columns=True,
+        source_id="same",
+    )
+    job = PipelineJob(name=f"semi{mode}", database=InMemoryArrowDatabase())
+    with job:
+        same_x.pod(SelectDataColumns(["x"])(SemiJoin()(left, right)), label="result")
+    run(job, mode)
+    semi = job.nodes["SemiJoin"]
+    right_label = semi.upstreams[1].label
+    trace = semi.trace({}, "x")
+    assert [c.value for c in trace.source_cells()] == [7]
+    for label in ("SemiJoin", "result"):
+        answer = job.nodes[label].why_missing(right_label, "row_0")
+        assert answer.missing and answer.reached_function is not True
+        assert answer.present_in == (right_label,)
+        assert answer.removed_by is not None
+        assert answer.removed_by.operator == "SemiJoin"
+        assert "only choose" in answer.removed_by.text
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_an_input_row_must_keep_the_tags_the_step_keeps(
+    mode: str, tmp_path: Path
+) -> None:
+    """A cache holding two versions of one record that differ only in a tag (equal data
+    and tokens): the k='new' output row comes from the k='new' input row."""
+    cache = InMemoryArrowDatabase()
+
+    def data(key: str) -> DictSource:
+        return DictSource(
+            [{"k": key, "i": 0, "x": 7, "y": 9}],
+            tag_columns=["k", "i"],
+            tag_only_columns=True,
+            source_id="same",
+        )
+
+    CachedSource(data("old"), cache_database=cache, cache_path=("shared",)).as_table()
+    current = CachedSource(data("new"), cache_database=cache, cache_path=("shared",))
+    job = PipelineJob(name=f"tagged{mode}", database=InMemoryArrowDatabase())
+    with job:
+        SelectDataColumns(["x"])(SelectDataColumns(["x", "y"])(current))
+    run(job, mode)
+    target = next(
+        n
+        for n in job.nodes.values()
+        if n.label.startswith("SelectDataColumns")
+        and n.upstreams[0].label.startswith("SelectDataColumns")
+    )
+    trace = target.trace({"k": "new", "i": 0}, "x")
+    (step,) = trace.root.inputs
+    assert dict(step.tags)["k"] == "new"

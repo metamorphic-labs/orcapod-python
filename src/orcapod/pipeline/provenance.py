@@ -519,15 +519,50 @@ def _input_rows(
             by_values.setdefault(tuple(r[u] for u in up_names), []).append(r)
         lookups[index_key] = (up_rows, by_values)  # keeps the list alive with its id
     _, by_values = lookups[index_key]
-    return list(by_values.get(tuple(row[o] for o, _ in ordered), []))
+    found = by_values.get(tuple(row[o] for o, _ in ordered), [])
+    return [r for r in found if _tags_agree(node, row, r)]
+
+
+def _passes_rows(node: Any, index: int) -> bool:
+    """Whether the rows of input ``index`` flow on into the node's rows.
+
+    A ``SemiJoin``'s right input only chooses which left rows pass: its rows never
+    flow on, so nothing of it is matched against the node's rows (which carry the
+    left input's system tags, maybe under the very names the right input has).
+    """
+    from orcapod.core.operators import SemiJoin
+
+    return not (type(getattr(node, "producer", None)) is SemiJoin and index != 0)
+
+
+def _tags_agree(node: Any, row: Row, up_row: Row) -> bool:
+    """Whether an input row holds the user tags an output row keeps from it.
+
+    A step that keeps a tag keeps its value: a tag of both rows must be equal. A
+    renaming step's renamed names are not compared (a rename changes them).
+    """
+    from orcapod.core.operators import MapColumns, MapTags
+
+    producer: Any = getattr(node, "producer", None)
+    renamed: set[str] = set()
+    if type(producer) in (MapTags, MapColumns):
+        name_map = cast(dict[str, str], producer.name_map)
+        renamed = set(name_map) | set(name_map.values())
+    return all(
+        same_value(row[t], up_row[t])
+        for t in _keys(node)[0]
+        if t in row and t in up_row and t not in renamed
+    )
 
 
 def _one(rows: list[Row], node: Any, what: str) -> Row:
-    """The one row of ``rows``; several rows count as one only when identical."""
+    """The one row of ``rows``; several rows count as one only when identical in
+    every value (data, tags, system tags, tokens), never by a data hash alone."""
     if not rows:
         raise ProvenanceInconsistencyError(f"node {node.label!r}: {what}: no row")
     hashes = {r.get(_ROW_HASH) for r in rows}
-    if len(rows) > 1 and (len(hashes) > 1 or None in hashes):
+    identical = all(same_value(r, rows[0]) for r in rows[1:])
+    if len(rows) > 1 and (len(hashes) > 1 or None in hashes or not identical):
         raise ProvenanceInconsistencyError(
             f"node {node.label!r}: {what}: {len(rows)} different rows match and nothing "
             "tells them apart; the link is ambiguous"
@@ -1694,6 +1729,8 @@ def _emitted_ids(source_node: Any, nodes: Sequence[Any], reader: _Reader) -> set
         for r in snapshot:
             ids |= {sid for sid, _ in _pairs(r, _system_tags(r))}
     for consumer, index in _consumers(source_node, nodes):
+        if not _passes_rows(consumer, index):
+            continue  # its rows carry the other input's ids
         if _folding(consumer) is not None:
             continue  # its rows hold folds, not ids
         if _kind(consumer) != "source" and consumer.is_stale:
@@ -1910,7 +1947,7 @@ def _carried(
                 kept[id(r)] = r
         return list(kept.values())
     for index, upstream in enumerate(n.upstreams):
-        if id(upstream) not in on_path:
+        if id(upstream) not in on_path or not _passes_rows(n, index):
             continue
         if _kind(upstream) == "source":
             pairs = wanted.get(id(upstream), set())
@@ -1952,7 +1989,7 @@ def _source_columns(
         return set(_declared_system_tags(source_node))
     found: set[str] = set()
     for index, upstream in enumerate(node.upstreams):
-        if id(source_node) not in _ancestry(upstream):
+        if id(source_node) not in _ancestry(upstream) or not _passes_rows(node, index):
             continue
         if upstream is source_node:
             up_columns: set[str] | None = set(_declared_system_tags(source_node))
@@ -2067,7 +2104,14 @@ def _blame(
         if i != position
     ]
     text = None
-    if (
+    names = ", ".join(plain_repr(name) for name in sorted(others))
+    if not _passes_rows(current, position):
+        # A SemiJoin's right input: its rows only choose and never flow on (in
+        # explain()'s words, built here from what the nodes hold: no input's keys()).
+        text = f"its rows only choose rows of {names} and do not flow on"
+    elif type(producer).__name__ == "SemiJoin":
+        text = f"rows without a match in {names} are dropped"
+    elif (
         producer is not None
         and _library_class(producer)
         and hasattr(producer, "rows_dropped_text")

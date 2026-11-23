@@ -1,8 +1,11 @@
 # Provenance: tracing a value
 
-!!! note "In development"
-    `trace`, `why_missing` and `diagram(highlight=...)` are new: their interface and their
-    text may change in any release.
+!!! warning "Provisional"
+    `trace` and `why_missing` are provisional in 0.4.0. Their answers may be refined in a
+    later release. A case they cannot prove is reported `unavailable` or refused with
+    `ProvenanceInconsistencyError`, never guessed. Their known limits are listed under
+    [Known limits](#known-limits). `diagram(highlight=...)` is in development: its
+    interface and its look may change in any release.
 
 A job keeps what it needs to answer "where did this value come from?" for every cell it
 holds. `node.trace(row, column)` follows one cell back, step by step, to the source cells it
@@ -184,7 +187,7 @@ print(job.diagram(highlight=trace.highlight()))
 A `Highlight` can also be made by hand, from node labels and `(upstream, downstream)` label
 pairs. A label the job does not have is refused with `ValueError`.
 
-## Limits
+## Known limits
 
 - Job nodes only. A plain stream keeps no stored records, so it cannot be traced this way.
 - A source is never read. A source cell is known from the token of the row read from
@@ -208,3 +211,13 @@ pairs. A label the job does not have is refused with `ValueError`.
   key selects the NaN group.
 - A node the trace passes must hold its run. After a full run every node does; after
   `node.run()` the nodes above it do.
+- Only Orcapod's own operators are followed, each by its own rule (which input column
+  each output column comes from). A subclass of an Orcapod operator, and an operator of
+  your own, may do anything: their links are `unavailable`.
+- A `SemiJoin`'s right input only chooses which left rows pass. Its rows never reach the
+  SemiJoin's output, and `why_missing` says so.
+- The stored answer (`reached_function`) after a `GroupBy` or `Batch` is known only for
+  the groups the run holds now; otherwise it is `None`.
+- When a function recomputed a lost result, its stored entries are told apart by the
+  run id that pipeline entries are to record (ITL-1433); until then the latest entry is
+  shown.

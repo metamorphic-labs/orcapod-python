@@ -90,7 +90,9 @@ class Highlight:
 class SourceCell:
     """One cell of a source, where a traced value came from.
 
-    In development: this interface may change.
+    Provisional in 0.4.0: answers may be refined; a case that cannot be proven is
+    reported unavailable or refused (the known limits are in the provenance concept
+    page).
 
     Attributes:
         node: The label of the job's source node.
@@ -116,7 +118,9 @@ class SourceCell:
 class FunctionRun:
     """Which function produced a function node's value for one input row, and how.
 
-    In development: this interface may change.
+    Provisional in 0.4.0: answers may be refined; a case that cannot be proven is
+    reported unavailable or refused (the known limits are in the provenance concept
+    page).
 
     Read from the node's stored pipeline entry (why: which input row) and its stored
     result (which function, which computation).
@@ -169,7 +173,9 @@ class FunctionRun:
 class TraceStep:
     """One node's part in a trace: the cell there and the cells it came from.
 
-    In development: this interface may change.
+    Provisional in 0.4.0: answers may be refined; a case that cannot be proven is
+    reported unavailable or refused (the known limits are in the provenance concept
+    page).
 
     Attributes:
         node: The node's label.
@@ -258,7 +264,9 @@ class TraceStep:
 class Trace:
     """One cell of a job node traced back to the source cells it was made from.
 
-    In development: this interface may change.
+    Provisional in 0.4.0: answers may be refined; a case that cannot be proven is
+    reported unavailable or refused (the known limits are in the provenance concept
+    page).
 
     Returned by ``node.trace(row, column)``; plain data, built by reading what the job's
     nodes hold and what their databases store, without computing, calling user code,
@@ -345,7 +353,9 @@ class Trace:
 class Absence:
     """Whether rows of one source record reached a job node, and if not, why.
 
-    In development: this interface may change.
+    Provisional in 0.4.0: answers may be refined; a case that cannot be proven is
+    reported unavailable or refused (the known limits are in the provenance concept
+    page).
 
     Returned by ``node.why_missing(source, record_id)``; plain data, built by reading
     what the job's nodes hold and what their databases store, without computing,

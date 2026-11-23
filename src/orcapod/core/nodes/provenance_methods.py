@@ -19,7 +19,9 @@ class ProvenanceMethods:
     def trace(self, row: Mapping[str, Any], column: str) -> Trace:
         """Trace one cell of this node back to the source cells it was made from.
 
-        In development: this interface may change.
+        Provisional in 0.4.0: answers may be refined; a case that cannot be proven is
+        reported unavailable or refused (the known limits are in the provenance concept
+        page).
 
         Each step names the node, the cell's value there and its row's tags. A function
         step says which function produced the value, with its version, body hash,
@@ -51,7 +53,9 @@ class ProvenanceMethods:
     def why_missing(self, source: str, record_id: str) -> Absence:
         """Say whether rows from one source record reach this node, and if not, why.
 
-        In development: this interface may change.
+        Provisional in 0.4.0: answers may be refined; a case that cannot be proven is
+        reported unavailable or refused (the known limits are in the provenance concept
+        page).
 
         First, from the first function node's stored pipeline entries: whether the
         record ever reached it, in any run. Then, from the rows the nodes hold: the
