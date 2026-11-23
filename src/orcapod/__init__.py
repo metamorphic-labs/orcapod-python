@@ -64,6 +64,9 @@ from .extensions import OrcapodExtension, register_extension
 # Your own data types: a dataclass identified by its name and fields (ITL-972)
 from .structural import dataclass
 
+# Row conditions for filter and where (ITL-1374)
+from .types.condition import col
+
 # Post-run hook types (ITL-523)
 from .hooks import (
     HookConfig,
@@ -102,6 +105,7 @@ __all__ = [
     "sources",
     "streams",
     "types",
+    "col",
     # Stable type aliases
     "Directory",
     "File",
