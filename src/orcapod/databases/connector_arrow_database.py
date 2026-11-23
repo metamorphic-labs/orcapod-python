@@ -29,6 +29,7 @@ import pyarrow.compute as pc
 from orcapod.databases.utils import (
     coerce_record_id,
     first_changed_column,
+    in_held_column_order,
 )
 from orcapod.errors import (
     InputValidationError,
@@ -48,6 +49,36 @@ def _arrow_schema_to_column_infos(schema: pa.Schema) -> list[ColumnInfo]:
     return [
         ColumnInfo(name=field.name, arrow_type=field.type, nullable=field.nullable)
         for field in schema
+    ]
+
+
+def _alike(parts: list[pa.Table]) -> list[pa.Table]:
+    """Stored and queued rows under one schema when they differ only in a column's
+    nullability: a store may read a column back ``NOT NULL`` (PostgreSQL's primary
+    key) that the queued rows declare nullable. Each such field is nullable when
+    either side's is, and the arrays are re-wrapped under it, never cast. Any other
+    difference is left for ``pa.concat_tables`` to refuse, as before."""
+    first = parts[0].schema
+    if any(part.schema.names != first.names for part in parts):
+        return parts
+    fields = []
+    for i, field in enumerate(first):
+        others = [part.schema.field(i) for part in parts[1:]]
+        loose = field.with_nullable(True)
+        if not all(
+            other.with_nullable(True).equals(loose, check_metadata=True)
+            for other in others
+        ):
+            return parts
+        fields.append(
+            field.with_nullable(field.nullable or any(o.nullable for o in others))
+        )
+    schema = pa.schema(fields, metadata=cast(Any, first.metadata))
+    return [
+        part
+        if part.schema.equals(schema, check_metadata=True)
+        else pa.Table.from_arrays(part.columns, schema=schema)
+        for part in parts
     ]
 
 
@@ -403,6 +434,10 @@ class ConnectorArrowDatabase:
         self._connector.validate_records(records)
 
         record_key = self._get_record_key(record_path)
+        # Columns match by name: rows with the held columns in another order are
+        # put in the held order, so the connector always receives the stored order
+        # (ITL-1367).
+        records = in_held_column_order(records, self._held_column_order(record_path))
         self._refuse_changed_columns(record_path, records.schema)
 
         records = self._deduplicate_within_table(records)
@@ -448,6 +483,36 @@ class ConnectorArrowDatabase:
 
         if flush:
             self.flush()
+
+    def _held_column_order(
+        self, record_path: tuple[str, ...]
+    ) -> "list[pa.Field[Any]] | None":
+        """The columns of the batch pending for the table, in its order, or ``None``.
+
+        An append is aligned when it is queued only to rows this handle queued
+        (ITL-1367): nothing about a stored table is trusted across calls, since
+        another connection may rename, add, drop, retype or create again a column
+        between two calls. The stored table is looked up fresh where queued and
+        stored rows meet, a flush (``_stored_columns``, main's own lookup) and a read
+        that combines them (the rows it reads), and the queued rows are matched to it
+        there, by name, after the flush's own check. A point lookup of a queued row
+        answers from memory, as main does.
+        """
+        pending = self._pending_batches.get(self._get_record_key(record_path))
+        if pending is not None:
+            return list(pending.schema)
+        return None
+
+    def _stored_columns(self, table_name: str) -> "list[pa.Field[Any]] | None":
+        """The stored table's columns as the connector reports them now, in its order
+        (``get_column_info``, large-normalized types), or ``None`` when it does not
+        exist. Never remembered: each call asks the connector."""
+        if table_name not in self._connector.get_table_names():
+            return None
+        return [
+            pa.field(c.name, normalize_to_large_types(c.arrow_type, keep_null=True))
+            for c in self._connector.get_column_info(table_name)
+        ]
 
     def _refuse_changed_columns(
         self, record_path: tuple[str, ...], schema: pa.Schema
@@ -560,14 +625,13 @@ class ConnectorArrowDatabase:
             # names and Arrow types match before writing.  Schema evolution is
             # intentionally out of scope; a clear ValueError is preferable to a
             # cryptic DB-level error or a silent partial write.
-            existing_table_names = self._connector.get_table_names()
-            if table_name in existing_table_names:
+            # Looked up now, as the check needs: nothing about the stored table is
+            # trusted from an earlier call (ITL-1367).
+            existing = self._stored_columns(table_name)
+            if existing is not None:
                 # A connector reads text and binary back in their large variants,
                 # which are the same types (ITL-1162).
-                existing_cols = {
-                    c.name: normalize_to_large_types(c.arrow_type, keep_null=True)
-                    for c in self._connector.get_column_info(table_name)
-                }
+                existing_cols = {f.name: f.type for f in existing}
                 pending_cols = {
                     c.name: normalize_to_large_types(c.arrow_type, keep_null=True)
                     for c in columns
@@ -587,6 +651,10 @@ class ConnectorArrowDatabase:
                         f"pending={_fmt(pending_cols)}. "
                         "Schema evolution is not supported."
                     )
+
+                # Checked by exact name and type above: only then are the rows put
+                # in the stored order, by name (ITL-1367).
+                pending = in_held_column_order(pending, existing)
 
             self._connector.create_table_if_not_exists(
                 table_name, columns, pk_column=self.RECORD_ID_COLUMN
@@ -641,11 +709,20 @@ class ConnectorArrowDatabase:
             parts.append(committed)
         pending = self._pending_batches.get(record_key)
         if pending is not None and pending.num_rows > 0:
+            # Matched to the stored rows just read, by name (ITL-1367).
+            if committed is not None:
+                pending = in_held_column_order(
+                    pending,
+                    [
+                        f.with_type(normalize_to_large_types(f.type, keep_null=True))
+                        for f in committed.schema
+                    ],
+                )
             parts.append(pending)
 
         if not parts:
             return None
-        table = parts[0] if len(parts) == 1 else pa.concat_tables(parts)
+        table = parts[0] if len(parts) == 1 else pa.concat_tables(_alike(parts))
         return self._handle_record_id_column(table, record_id_column)
 
     def get_records_by_ids(

@@ -706,16 +706,9 @@ def test_every_input_is_closed_when_one_close_fails() -> None:
     asyncio.run(go())
 
 
-# --- A prediction bug that refuses a valid result (ITL-1365) ---------------------------------
+# --- A prediction that once refused a valid result (ITL-1365, fixed on main) --------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=ValueError,
-    reason="ITL-1365: DropTagColumns predicts its tags in another order than its result "
-    "has them (pre-existing on main), so the result's batches do not match the "
-    "description and send() refuses them; the result should be sent",
-)
 def test_drop_tag_columns_over_three_tags_sends_its_result() -> None:
     """Tags c, b, a with data-tags a and b; ``DropTagColumns(["a"])``: the channel
     result is the table built from the sync rows."""
