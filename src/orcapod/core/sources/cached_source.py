@@ -11,8 +11,8 @@ from typing_extensions import override
 from orcapod import contexts
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.config import OrcapodConfig
-from orcapod.core.sources import source_ids
 from orcapod.core.sources.base import RootSource
+from orcapod.core.sources.source_ids import parse_source_id
 from orcapod.errors import InputValidationError, UnstorableColumnError
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
@@ -255,7 +255,7 @@ class CachedSource(RootSource):
     @property
     def source_name(self) -> str:
         """The name part of the wrapped source's source id."""
-        return source_ids.parse_source_id(self._source.source_id).name
+        return parse_source_id(self._source.source_id).name
 
     def _compute_arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema]":
         """The wrapped source's Arrow schemas: the cache stores that source's rows."""

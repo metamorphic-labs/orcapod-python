@@ -14,7 +14,13 @@ from orcapod.errors import SourceVersionWarning
 from orcapod.core.streams.view import StreamView
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.types import ColumnConfig, Condition, ContentHash, Schema
-from orcapod.core.sources import source_ids
+from orcapod.core.sources.source_ids import (
+    build_source_id,
+    kind_part,
+    register_kind,
+    require_source_name,
+    warn_if_name_looks_like_an_id,
+)
 from orcapod.core.sources.provisional import warn_provisional_source
 from orcapod.utils.provisional import note_provisional_use, provisional_class_name
 from orcapod.utils.schema_utils import arrow_schema_identity
@@ -99,13 +105,13 @@ class RootSource(StreamBase):
     @classmethod
     def kind_part(cls) -> str:
         """The kind part of this class's source ids: ``<SOURCE_KIND>_v<SOURCE_VERSION>``."""
-        return source_ids.kind_part(cls.SOURCE_KIND, cls.SOURCE_VERSION)
+        return kind_part(cls.SOURCE_KIND, cls.SOURCE_VERSION)
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
         kind = cls.__dict__.get("SOURCE_KIND")
         if kind is not None:
-            source_ids.register_kind(kind)
+            register_kind(kind)
 
     # Whether the source takes ``tag_only_columns`` and saves it in its config
     # (ITL-1019): from format 0.3.0 on such a config always holds it.
@@ -138,8 +144,8 @@ class RootSource(StreamBase):
         )
         # A given source_id is the source's name: its kind part is added in front.
         if source_id is not None:
-            source_ids.require_source_name(source_id)
-            source_ids.warn_if_name_looks_like_an_id(source_id)
+            _ = require_source_name(source_id)
+            warn_if_name_looks_like_an_id(source_id)
         self._source_name: str | None = source_id
 
     # -------------------------------------------------------------------------
@@ -193,9 +199,7 @@ class RootSource(StreamBase):
             ValueError: If the source has no name yet.
         """
         self._note_provisional_identity_use()
-        return source_ids.build_source_id(
-            self.SOURCE_KIND, self.SOURCE_VERSION, self.source_name
-        )
+        return build_source_id(self.SOURCE_KIND, self.SOURCE_VERSION, self.source_name)
 
     @property
     def source_name(self) -> str:

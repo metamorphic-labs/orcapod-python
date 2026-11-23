@@ -91,8 +91,9 @@ class ProtoDerivedSource(RootSource):
                 pa.field(name, field.type, nullable=field.nullable), table[tag]
             )
         builder = SourceStreamBuilder(self.data_context, self.orcapod_config)
+        # The builder takes the name and the kind part apart since ITL-1425.
         self._stream = builder.build(
-            table, tag_columns=tag_keys, source_id=source_id
+            table, tag_columns=tag_keys, source_name=source_id, kind_part="derived_v1"
         ).stream
 
     def identity_structure(self) -> Any:
