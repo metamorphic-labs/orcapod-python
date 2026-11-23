@@ -447,7 +447,11 @@ A filter directly over a source reads the whole table and then filters it; `wher
 the matching rows. On a large table, keep `where` on the source for speed and put the same
 `filter` in the pipeline for its identity: the rows are the same, and the restriction rules
 above apply to the source. This holds for equalities on integer, string, bytes, bool, date and
-timestamp columns. On a float column it does not when the value is a NaN or a signed zero:
+timestamp columns, on a source without a `limit`. With a `limit` it does not: the source
+reads the first rows that match the `where`, so the `filter` sees other rows than it would
+over the source alone (with `limit=2` and unit ids `[1, 2, 2]`, `filter(unit_id=2)` alone
+keeps one row, the `where` and the `filter` together keep two). On a float column it does
+not either when the value is a NaN or a signed zero:
 `where` matches by the table system's equality (a NaN may match no row), `filter` by
 Orcapod's (a NaN matches the NaN rows), so `where` can drop rows the `filter` alone would
 keep. For such a value, filter without the `where`.
