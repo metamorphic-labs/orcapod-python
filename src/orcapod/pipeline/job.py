@@ -1808,7 +1808,6 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # is the source of truth.
         expected_rows: dict[str, int] = run_block.get("expected_rows", {})
 
-        bp_key_of = {id(bp): h for h, bp in pipeline._persistent_node_map.items()}
         for node_hash in _nx.topological_sort(job._hash_graph):
             bp_node = pipeline._persistent_node_map.get(node_hash)
             if bp_node is None:
@@ -1842,9 +1841,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
             elif isinstance(bp_node, _OperatorNode):
                 descriptor = getattr(bp_node, "_descriptor", None) or {}
-                # The inputs in the blueprint node's order, its argument order
-                # (ITL-1417); a graph's predecessors do not keep that order.
-                preds = [bp_key_of[id(up)] for up in bp_node.upstreams]
+                # The inputs in argument order, as the file gives them (ITL-1417); a
+                # graph's predecessors do not keep that order. A read-only node keeps
+                # its inputs too, as before.
+                preds = pipeline._loaded_input_keys.get(  # pyright: ignore[reportPrivateUsage]  # set by Pipeline.load for this loader
+                    node_hash
+                ) or list(job._hash_graph.predecessors(node_hash))
                 input_streams = tuple(
                     job._persistent_node_map[p]
                     for p in preds

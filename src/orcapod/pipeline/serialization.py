@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 #          a load refuses a file without them (ITL-1159, ITL-1019).
 #          Each operator node lists its inputs in argument order under ``inputs``
 #          (ITL-1417, added within 0.4.0: a file without it still loads, except an
-#          ordered operator over two inputs, which is refused).
+#          operator over two or more inputs not known to be commutative, refused).
 # A file of an earlier format (0.1.0 to 0.3.0) is refused at load, never read in its
 # old grammar: load and save had not been used in production (developer, 2026-11-21).
 # Taking such files to the current format is the migration tool's work (ITL-1048).
@@ -55,36 +55,52 @@ PIPELINE_FORMAT_VERSION = "0.4.0"
 OPERATOR_INPUTS_KEY = "inputs"
 
 
-def require_known_argument_order(
-    operator: Any, input_keys: list[str], label: str | None
+def require_positively_commutative(
+    operator: Any,
+    input_streams: tuple[Any, ...],
+    input_keys: list[str],
+    label: str | None,
 ) -> None:
-    """Refuse to rebuild an ordered operator whose argument order a file does not give.
+    """Accept an operator of a legacy file only when it is known to be commutative.
 
     A file saved before ``OPERATOR_INPUTS_KEY`` was written lists an operator's
     inputs only through its edges, in the order the steps were recorded (ITL-1417).
-    For a commutative operator (``Join``) the order does not matter; for an ordered
-    one (``MergeJoin``, ``SemiJoin``) over two different inputs it cannot be known, so
-    the file is refused rather than read with a guessed order.
+    Its argument order cannot be known, so an operator node with two or more
+    different inputs is accepted only when it is positively known to be fully
+    commutative: the operator is available, and ``argument_symmetry``, called as its
+    contract requires (on the rebuilt input streams), returns a flat ``frozenset`` of
+    exactly those inputs. Anything else (the call raises, a tuple, a nested group, an
+    operator that is not available, an input not restored) is refused: when in doubt,
+    refuse.
 
     Args:
-        operator: The rebuilt operator.
+        operator: The rebuilt operator, or ``None`` when it is not available.
+        input_streams: The rebuilt input nodes.
         input_keys: The keys of its inputs, in edge order.
         label: The node's label, for the message.
 
     Raises:
-        ValueError: If the operator takes its inputs in order and the file does not
-            say which comes first.
+        ValueError: If the operator is not positively known to be commutative.
     """
     if len(set(input_keys)) < 2:
         return
-    if not isinstance(operator.argument_symmetry(tuple(input_keys)), tuple):
-        return
-    raise ValueError(
-        f"The saved job's node {label!r} ({type(operator).__name__}) takes its inputs "
-        "in order, and the file does not say which comes first: it was saved before "
-        "Orcapod wrote each operator's inputs in argument order (ITL-1417), so loading "
-        "it could swap them. Build the job from its code and save it again."
+    refusal = ValueError(
+        f"The saved job's node {label!r} has several inputs, and the file does not say "
+        "in which order: it was saved before Orcapod wrote each operator's inputs in "
+        "argument order (ITL-1417), and the operator is not known to be commutative, "
+        "so loading it could swap them. Build the job from its code and save it again."
     )
+    if operator is None or len(input_streams) != len(input_keys):
+        raise refusal
+    try:
+        symmetry = operator.argument_symmetry(input_streams)
+    except Exception as exc:
+        raise refusal from exc
+    if not isinstance(symmetry, frozenset):
+        raise refusal
+    members = cast("frozenset[Any]", symmetry)
+    if {id(member) for member in members} != {id(stream) for stream in input_streams}:
+        raise refusal
 
 
 def require_current_format(version: str, current: str) -> None:

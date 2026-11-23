@@ -89,6 +89,8 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         """
         super().__init__(name=name, tracker_manager=tracker_manager)
         self._auto_compile = auto_compile
+        # A loaded blueprint's operator input keys in argument order (ITL-1417).
+        self._loaded_input_keys: dict[str, list[str]] = {}
 
     # ------------------------------------------------------------------
     # Context manager — respects auto_compile flag
@@ -327,7 +329,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             OPERATOR_INPUTS_KEY,
             PIPELINE_FORMAT_VERSION,
             require_current_format,
-            require_known_argument_order,
+            require_positively_commutative,
             require_nullability_records,
             arrow_schema_from_texts,
             deserialize_schema,
@@ -368,6 +370,8 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             upstream_map.setdefault(down_hash, []).append(up_hash)
 
         reconstructed: dict[str, GraphNode] = {}
+        # Each operator's input keys in argument order, for the job loader (ITL-1417).
+        loaded_input_keys: dict[str, list[str]] = {}
 
         for node_hash in topo_order:
             descriptor = nodes_data.get(node_hash)
@@ -567,10 +571,11 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                             exc,
                         )
                         operator = None
-                if saved_inputs is None and operator is not None:
-                    require_known_argument_order(
-                        operator, up_hashes, descriptor.get("label")
+                if saved_inputs is None:
+                    require_positively_commutative(
+                        operator, upstream_nodes, up_hashes, descriptor.get("label")
                     )
+                loaded_input_keys[node_hash] = list(up_hashes)
                 node = OperatorNode.from_descriptor(
                     descriptor,
                     operator=operator,
@@ -608,6 +613,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             if isinstance(descriptor.get("output_schema"), dict)
         }
         pipeline._persistent_node_map = dict(reconstructed)
+        pipeline._loaded_input_keys = loaded_input_keys
 
         nodes_by_label: dict[str, GraphNode] = {}
         for node in reconstructed.values():
