@@ -166,10 +166,11 @@ class ArrowDatabaseProtocol(Protocol):
         ...
 
     def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
-        """Read the current stored schema, including for an empty table.
+        """Read the current table schema, including for an empty table.
 
-        The path is relative to this database view. A missing table gives
-        ``None``. This operation reads schema metadata without fetching rows.
+        The path is relative to this database view. If the table has only queued
+        records, use their schema. Return ``None`` if the table has neither a
+        committed schema nor a queued batch. No rows are fetched.
         """
         ...
 

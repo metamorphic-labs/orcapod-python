@@ -18,7 +18,11 @@ from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.streams import ArrowTableStream
-from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
+from orcapod.databases import (
+    ConnectorArrowDatabase,
+    DeltaTableDatabase,
+    InMemoryArrowDatabase,
+)
 from orcapod.errors import OrcapodDatabaseError, UnstorableColumnError
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.pipeline.observer import NoOpObserver
@@ -28,6 +32,7 @@ from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 from orcapod.sources import DictSource
 from orcapod.system_constants import PIPELINE_DB_SCHEMA_VERSION
 from orcapod.types import NodeConfig
+from tests.test_databases.test_connector_arrow_database import MockDBConnector
 
 RUN_ID = "__pipeline_run_id"
 RECORDED_AT = "__recorded_at"
@@ -253,7 +258,9 @@ def test_attach_checks_pipeline_metadata_support(column: str) -> None:
 
 
 @pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
-@pytest.mark.parametrize("variant", ["nonempty", "empty", "wrong-type"])
+@pytest.mark.parametrize(
+    "variant", ["nonempty", "empty", "wrong-type", "nullable-time", "required-run-id"]
+)
 def test_pipeline_table_with_incompatible_schema_must_be_rebuilt(
     orchestrator: str, variant: str, tmp_path: Path
 ) -> None:
@@ -268,6 +275,20 @@ def test_pipeline_table_with_incompatible_schema_must_be_rebuilt(
             current.schema.get_field_index(RECORDED_AT),
             pa.field(RECORDED_AT, pa.int64(), nullable=False),
             pa.array([0, 1], type=pa.int64()),
+        )
+    elif variant == "nullable-time":
+        time = current.schema.field(RECORDED_AT)
+        legacy = current.set_column(
+            current.schema.get_field_index(RECORDED_AT),
+            time.with_nullable(True),
+            pa.nulls(current.num_rows, type=time.type),
+        )
+    elif variant == "required-run-id":
+        run_id = current.schema.field(RUN_ID)
+        legacy = current.set_column(
+            current.schema.get_field_index(RUN_ID),
+            run_id.with_nullable(False),
+            current[RUN_ID],
         )
     else:
         legacy = current.drop([RUN_ID, RECORDED_AT])
@@ -295,6 +316,10 @@ def test_pipeline_table_with_incompatible_schema_must_be_rebuilt(
         assert f"{RECORDED_AT} has type int64, expected timestamp[us, tz=UTC]" in str(
             error
         )
+    elif variant == "nullable-time":
+        assert f"{RECORDED_AT} is nullable, expected non-nullable" in str(error)
+    elif variant == "required-run-id":
+        assert f"{RUN_ID} is non-nullable, expected nullable" in str(error)
     else:
         assert RUN_ID in str(error) and RECORDED_AT in str(error)
     if variant == "empty":
@@ -302,6 +327,64 @@ def test_pipeline_table_with_incompatible_schema_must_be_rebuilt(
     else:
         assert pipeline_rows(destination).equals(legacy)
     assert destination.list_table_paths() == [path]
+
+
+@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
+@pytest.mark.parametrize("flush", [False, True], ids=["queued", "committed"])
+@pytest.mark.parametrize("backend", ["memory", "delta", "connector"])
+def test_legacy_schema_is_refused_before_evaluation(
+    orchestrator: str,
+    flush: bool,
+    backend: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An incompatible schema shared across views prevents calls and result writes."""
+    seed = InMemoryArrowDatabase()
+    pod = summarize.pod
+    assert isinstance(pod, FunctionPod)
+    stream = source()
+    seeder = FunctionJobNode(pod, stream, pipeline_database=seed)
+    _ = seeder.run()
+    path = pipeline_path(seed)
+    legacy = pipeline_rows(seed).drop([RUN_ID, RECORDED_AT])
+
+    root: ArrowDatabaseProtocol
+    if backend == "delta":
+        root = DeltaTableDatabase(tmp_path)
+    elif backend == "connector":
+        root = ConnectorArrowDatabase(MockDBConnector())
+    else:
+        root = InMemoryArrowDatabase()
+    root.at("pipeline").add_records(
+        path, legacy, record_id_column=RECORD_ID, flush=flush
+    )
+    pipeline = root.at("pipeline")
+    results = InMemoryArrowDatabase()
+    writer = FunctionJobNode(
+        pod, stream, pipeline_database=pipeline, result_database=results
+    )
+    data_function = pod.data_function
+
+    def unexpected_call(*args: object, **kwargs: object) -> None:
+        """Fail if the schema check lets the function evaluate."""
+        pytest.fail("The function evaluated before the pipeline schema was refused")
+
+    monkeypatch.setattr(data_function, "call", unexpected_call)
+    monkeypatch.setattr(data_function, "async_call", unexpected_call)
+    with pytest.raises((OrcapodDatabaseError, ExceptionGroup)) as info:
+        _ = execute_standalone(writer, stream, orchestrator)
+    error = info.value
+    if isinstance(error, ExceptionGroup):
+        (error,) = OrcapodDatabaseError.in_group(error)
+    assert "Rebuild the pipeline table" in str(error)
+    assert RUN_ID in str(error) and RECORDED_AT in str(error)
+    assert results.list_table_paths() == []
+    retained = pipeline.get_all_records(path, record_id_column=RECORD_ID)
+    assert retained is not None
+    assert retained.sort_by([("site", "ascending"), (INDEX, "ascending")]).equals(
+        legacy
+    )
 
 
 @pytest.mark.parametrize("orchestrator", ORCHESTRATORS)

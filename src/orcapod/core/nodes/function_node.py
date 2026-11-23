@@ -3292,7 +3292,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
     def _require_current_pipeline_write_schema(
         self, *, before_compute: bool = False
     ) -> None:
-        """Check the stored schema before each append and before the first computation.
+        """Check the table schema before each append and before the first computation.
 
         Args:
             before_compute: Preflight before executing a function on a cache miss.
@@ -3310,12 +3310,23 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 if index < 0:
                     issues.append(f"missing {expected.name}")
                     continue
+                actual = existing.field(index)
                 actual_type = arrow_utils.normalize_to_large_types(
-                    existing.field(index).type, keep_null=True
+                    actual.type, keep_null=True
                 )
                 if actual_type != expected.type:
                     issues.append(
                         f"{expected.name} has type {actual_type}, expected {expected.type}"
+                    )
+                if actual.nullable != expected.nullable:
+                    actual_nullability = (
+                        "nullable" if actual.nullable else "non-nullable"
+                    )
+                    expected_nullability = (
+                        "nullable" if expected.nullable else "non-nullable"
+                    )
+                    issues.append(
+                        f"{expected.name} is {actual_nullability}, expected {expected_nullability}"
                     )
             if issues:
                 raise OrcapodDatabaseError(

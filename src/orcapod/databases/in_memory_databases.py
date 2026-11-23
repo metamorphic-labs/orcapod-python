@@ -549,8 +549,11 @@ class InMemoryArrowDatabase:
     # ------------------------------------------------------------------
 
     def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
-        """Return the committed table's schema, if present."""
-        table = self._tables.get(self._get_record_key(record_path))
+        """Return the committed schema or the schema of a new, queued table."""
+        key = self._get_record_key(record_path)
+        table = self._tables.get(key)
+        if table is None:
+            table = self._pending_batches.get(key)
         return None if table is None else table.schema
 
     def _combined_table(self, record_key: str) -> "pa.Table | None":

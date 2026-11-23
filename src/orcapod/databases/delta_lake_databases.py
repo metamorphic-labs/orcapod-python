@@ -1590,7 +1590,7 @@ class DeltaTableDatabase:
         return self._get_delta_table(record_path) is not None
 
     def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
-        """Read the latest Delta schema from the log without loading data files."""
+        """Read the latest Delta schema from the log or the table's first batch."""
         from deltalake.exceptions import TableNotFoundError
 
         try:
@@ -1601,7 +1601,8 @@ class DeltaTableDatabase:
             )
             return pa.schema(_held_columns(table).values())
         except TableNotFoundError:
-            return None
+            pending = self._pending_batches.get(self._get_record_key(record_path))
+            return None if pending is None else pending.schema
         except Exception as exc:
             raise self._read_failed(record_path) from exc
 
