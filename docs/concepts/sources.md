@@ -823,7 +823,7 @@ before. Things to know:
 print(with_start.upstreams)
 # ()
 print(with_start.source_id)
-# experiments_with_start
+# derived_v1:experiments_with_start
 ```
 
 Only a source can do this. An operator rearranges rows and columns, and every data value it
@@ -1031,7 +1031,7 @@ table = source.as_table(columns={"source": True})
 print(table.column_names)
 # ['subject_id', 'age', 'weight', '_source_age', '_source_weight']
 print(table.column("_source_weight").to_pylist())
-# ['mice::row_0::weight']
+# ['dict_v1:mice::row_0::weight']
 
 # Show system tag columns
 tag_schema, data_schema = source.output_schema(columns={"system_tags": True})

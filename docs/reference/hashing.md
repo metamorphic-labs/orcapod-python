@@ -143,7 +143,7 @@ stored = rule_store.get_all_records(pipeline_table)
 print(ContentHash.from_prefixed_digest(stored["__input_data_hash"][0].as_py()))
 # arrow_v1:000002fcbe7eec1821a57679d34084a583d8282798563aa706ecb9c0c24382580de4df
 print(ContentHash.from_prefixed_digest(stored["__node_content_hash"][0].as_py()))
-# semantic_v1:97b375d9ccdb0a11c6c90c6c0e8818c874a816b94eaea77a6949be3f7433e507
+# semantic_v1:8012c762a770c5bc66c326389084dc4091cb7abbca18540e3728a5e43f1ab671
 print([name for name in stored.column_names if name.startswith("_tag_source_id")])
 # ['_tag_source_id::a6cc3f4239c696722e50039db2c30e3fbd35b07dbfe9e07fe406ca71b5035af2']
 ```
@@ -1124,7 +1124,7 @@ print(
 )
 # {"subject":"s1"}
 print(first_row["_source_age"])
-# subjects::{"subject":"s1"}::age
+# dict_v1:subjects::{"subject":"s1"}::age
 ```
 
 ---

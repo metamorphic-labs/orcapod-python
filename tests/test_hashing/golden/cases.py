@@ -987,10 +987,15 @@ def schema_source_stream_builder() -> dict[str, Any]:
     builder = SourceStreamBuilder(_ctx(), DEFAULT_CONFIG)
     out: dict[str, Any] = {}
     variants: dict[str, dict[str, Any]] = {
-        "default_source_id": {"source_kind": "arrow_table"},
-        "named_source_id": {"source_id": "golden_source"},
+        # Every source id has a kind part (ITL-1425): the builder takes it and a name.
+        "default_source_id": {"kind_part": "arrow_table_v1"},
+        "named_source_id": {
+            "kind_part": "arrow_table_v1",
+            "source_name": "golden_source",
+        },
         "record_id_column": {
-            "source_id": "golden_source",
+            "kind_part": "arrow_table_v1",
+            "source_name": "golden_source",
             "record_id_columns": "subject",
         },
     }
@@ -1173,7 +1178,7 @@ def schema_hash_in_key_order() -> dict[str, Any]:
             result = builder.build(
                 pa.Table.from_pylist(rows, schema=schema),
                 tag_columns=tags,
-                source_kind="arrow_table",
+                kind_part="arrow_table_v1",
                 **kwargs,
             )
             out[f"builder.{variant}.{order}.table_hash"] = result.table_hash.to_string()
