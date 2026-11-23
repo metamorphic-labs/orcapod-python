@@ -1856,3 +1856,116 @@ def test_the_join_diagnostic_calls_no_method_of_the_other_source(mode: str) -> N
     b.armed = True
     answer = job.nodes["Join"].why_missing("a", "row_0")
     assert answer.missing and answer.removed_by is not None
+
+
+# ---------------------------------------------------------------------------
+# Thirteenth review (head c41f88d3)
+# ---------------------------------------------------------------------------
+
+
+@function_pod(output_keys="length")
+def k_length(k: str) -> int:
+    return len(k)
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_a_stored_witness_must_be_the_held_input(mode: str) -> None:
+    """Two jobs of one name over two bindings with one source id at a tied Join, with
+    record ids swapped between the jobs: the first job's entry has the canonical system
+    tags of the second job's row but other input data, and its binding cannot be
+    proven; it is no witness."""
+    database = InMemoryArrowDatabase()
+    schema = pa.schema(
+        [
+            pa.field("k", pa.large_string(), nullable=False),
+            pa.field("i", pa.int64(), nullable=False),
+            pa.field("rid", pa.int64(), nullable=False),
+        ]
+    )
+
+    def make(current: bool) -> tuple[Any, Any]:
+        key = "shared-new" if current else "shared-old"
+        id_a, id_b = (0, 1) if current else (1, 0)
+        a = DictSource(
+            [{"k": key, "i": 0, "rid": id_a}],
+            tag_columns=["k", "i"],
+            source_id="s",
+            record_id_columns=["rid"],
+        )
+        b = ArrowTableSource(
+            pa.Table.from_pylist([{"k": key, "i": 0, "rid": id_b}], schema=schema),
+            tag_columns=["k", "i"],
+            source_id="s",
+            record_id_columns=["rid"],
+        )
+        job = PipelineJob(name="history", database=database)
+        with job:
+            k_length.pod(
+                Join()(
+                    SelectDataColumns(["k", "i"])(a), SelectDataColumns(["k", "i"])(b)
+                ),
+                label="length",
+            )
+        from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+
+        orchestrator = (
+            AsyncPipelineOrchestrator()
+            if mode == "async"
+            else SyncPipelineOrchestrator()
+        )
+        job.run(orchestrator=orchestrator, load_only=current)
+        binding = next(
+            u.upstreams[0]
+            for u in job.nodes["Join"].upstreams
+            if type(u.upstreams[0].bound_source) is DictSource
+        )
+        return binding, job.nodes["length"]
+
+    make(False)
+    binding, node = make(True)
+    answer = node.why_missing(binding.label, '{"rid":0}')
+    assert answer.reached_function is None
+    assert answer.entry_recorded is None
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_rejoin_keeps_the_common_token_of_a_shared_column(mode: str) -> None:
+    source = DictSource(
+        [{"k": "x", "i": 0, "x": 1, "y": 2}], tag_columns=["k", "i"], source_id="a"
+    )
+    from orcapod.operators import Rejoin
+
+    job = PipelineJob(name=f"rejoin{mode}", database=InMemoryArrowDatabase())
+    with job:
+        Rejoin()(
+            SelectDataColumns(["k", "x"])(source), SelectDataColumns(["k", "y"])(source)
+        )
+    run(job, mode)
+    trace = job.nodes["Rejoin"].trace({}, "k")
+    assert trace.status == "traced"
+    assert [(c.source_id, c.record_id, c.column) for c in trace.source_cells()] == [
+        ("a", "row_0", "k")
+    ]
+
+
+def test_a_falling_through_data_tag_token_must_name_its_own_column() -> None:
+    """A data-tag i falling through a function over the source directly: a held
+    token naming q (same value) is refused."""
+    source = DictSource(
+        [{"k": "x", "i": 7, "q": 7}], tag_columns=["k", "i", "q"], source_id="a"
+    )
+    job = PipelineJob(name="ownname", database=InMemoryArrowDatabase())
+    with job:
+        k_length.pod(source, label="length")
+    job.run()
+    node = job.nodes["length"]
+    assert [c.column for c in node.trace({}, "i").source_cells()] == ["i"]
+    for key, (tag, data) in list(node._cached_output_datas.items()):
+        if data is not None:
+            node._cached_output_datas[key] = (
+                tag,
+                data.with_source_info(i="a::row_0::q"),
+            )
+    node._cached_output_table = None
+    with pytest.raises(ProvenanceInconsistencyError, match="another column"):
+        node.trace({}, "i")

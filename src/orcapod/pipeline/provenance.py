@@ -1216,9 +1216,11 @@ class _Tracer:
         return self.passed_on(node, index, upstream, cell, None, drop_front=False)
 
     def verify_merged_key(self, node: Any, cell: _Cell) -> None:
-        """A key several inputs of a join share has one token, the join's fold of the
-        inputs' own tokens (``join_v1``, sorted): rebuild it and compare. Inputs whose
-        token is not known here (not held) leave it unchecked."""
+        """A key several inputs of a join share has one token: for ``Join`` and
+        ``MergeJoin`` the fold of the inputs' own tokens (``join_v1``, sorted), for
+        ``Rejoin`` the one token its inputs share (it keeps its origin row's columns).
+        Rebuild it and compare. Inputs whose token is not known here (not held) leave
+        it unchecked."""
         from orcapod.core.operators.join import _fold_members  # pyright: ignore[reportPrivateUsage]  # the join's own fold of merged tokens, ITL-1432
 
         tokens: list[str | None] = []
@@ -1242,6 +1244,16 @@ class _Tracer:
             if len(found) != 1:
                 return
             tokens.append(found.pop())
+        from orcapod.core.operators import Rejoin
+
+        if type(getattr(node, "producer", None)) is Rejoin:
+            # Rejoin keeps its origin row's columns: the inputs' common token.
+            if set(tokens) != {cell.whole_token}:
+                raise ProvenanceInconsistencyError(
+                    f"node {node.label!r}: the token of {cell.column!r} is not the "
+                    "token its inputs share"
+                )
+            return
         if cell.whole_token != _fold_members(tokens):
             raise ProvenanceInconsistencyError(
                 f"node {node.label!r}: the token of the key {cell.column!r} is not the "
@@ -1437,11 +1449,18 @@ class _Tracer:
         the row's system tags, verified by its token and value."""
         upstream = node.upstreams[0]
         if _kind(upstream) == "source":
+            token = cell.token
+            if isinstance(token, str) and _parse_token(token)[2] != cell.column:
+                raise ProvenanceInconsistencyError(
+                    f"node {node.label!r}: the token {token!r} of the data-tag "
+                    f"{cell.column!r} names another column; a data-tag falls through "
+                    "under its own name"
+                )
             inputs = self.to_source(
                 node,
                 0,
                 cell.row,
-                cell.token,
+                token,
                 cell.value,
                 cell.path[_list_depth(cell) :],
                 None,
@@ -2170,9 +2189,11 @@ def _reached(
     names = _system_tags(entries[0])
     direct = False
     unknown = False
+    crosses_tie = False
     for source_node in sources:
         tied: list[bool] = []
         columns = _source_columns(source_node, function_node, names, reader, tied)
+        crosses_tie = crosses_tie or bool(tied)
         if not columns:
             continue
         pairs = wanted[id(source_node)]
@@ -2189,9 +2210,19 @@ def _reached(
     # The held run's witness first: an entry for an input row the run holds from the
     # record (a group that holds it, say) proves receipt, whatever the direct names.
     up = carried.get(id(function_node.upstreams[0]))
-    if up:
-        keys = {tuple(r.get(c) for c in names) for r in up}
-        if any(tuple(e.get(c) for c in names) in keys for e in entries):
+    if up and not crosses_tie:
+        # A witness is an entry for the very input row the run holds: its system tags
+        # AND its input data hash. Through a Join of tied inputs the system tags are
+        # canonical by value and cannot name the binding, so no witness is taken.
+        keys = {(tuple(r.get(c) for c in names), r.get(_ROW_HASH)) for r in up}
+        if any(
+            (
+                tuple(e.get(c) for c in names),
+                _hash_text(e.get(constants.INPUT_DATA_HASH_COL)),
+            )
+            in keys
+            for e in entries
+        ):
             return True, True
     if unknown:
         return None, None
