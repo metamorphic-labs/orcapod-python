@@ -200,7 +200,9 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def _events() -> SpiralDBTableSource:
-    return SpiralDBTableSource(_PROJECT, "event", source_id="events")
+    return SpiralDBTableSource(
+        _PROJECT, "event", source_id="events", tag_only_columns=True
+    )
 
 
 def _timestamps(stream: Any) -> list[int]:
@@ -242,7 +244,9 @@ class TestWhereAgainstFilter:
 
 
 def _limited(limit: int | None = None) -> SpiralDBTableSource:
-    return SpiralDBTableSource(_PROJECT, "event", source_id="events", limit=limit)
+    return SpiralDBTableSource(
+        _PROJECT, "event", source_id="events", limit=limit, tag_only_columns=True
+    )
 
 
 @pytest.mark.parametrize(

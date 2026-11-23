@@ -427,7 +427,9 @@ rows (for a float column, `where` uses the table system's own equality for NaN a
 `filter` Orcapod's: see [Filter](operators.md#filter)). One spelling differs: `filter` takes
 `label=` (the step's label, as every stream method does), so a column named `label` is written
 `filter({"label": "x"})` or `filter(col("label") == "x")`, while `where(label="x")` restricts
-that column. The difference is where the selection lives:
+that column. Neither takes `None` as a value: both raise `ValueError` and point to
+`col(c).is_null()`, a null test that only `filter` takes. The difference is where the
+selection lives:
 
 <!-- docs-test: skip -->
 ```python
