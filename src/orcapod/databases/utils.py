@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -234,11 +235,14 @@ class IdentityNode:
             directly as another's storage, ``.name`` for the other children of a
             nested type). Labels may repeat: Arrow allows two struct children or
             union members of one name.
+        encoded: Whether the place is dictionary-encoded as given (its values stand
+            where it stands).
     """
 
     known: bool
     identifier: RawIdentifier | None
     claims: bool = True
+    encoded: bool = False
     children: "tuple[tuple[str, IdentityNode], ...]" = ()
 
 
@@ -299,7 +303,8 @@ def identity_node(arrow_field: "pa.Field[Any]") -> IdentityNode:
     """
     arrow_type = arrow_field.type
     if pa.types.is_dictionary(arrow_type):
-        return identity_node(arrow_field.with_type(arrow_type.value_type))
+        values = identity_node(arrow_field.with_type(arrow_type.value_type))
+        return dataclasses.replace(values, encoded=True)
     identifier = _annotation(arrow_field.metadata)
     if pa.types.is_null(arrow_type):
         # A bare null claims nothing; an annotated one claims its annotation.
@@ -397,8 +402,10 @@ def logical_identity_change(
     A table holds one logical type per column and per nested field, so at every place
     both sides have, the appended identifier must be the held one; no logical type is
     an identifier too. The rule refuses only where it knows: wherever the held
-    identifier is not reliably known, or a side is a bare untyped null, it abstains
-    at that place, and a place only one side has (struct evolution, another kind of
+    identifier is not reliably known, where a dictionary-encoded place is given over
+    a held place with no identifier (Delta stores a dictionary of extension values
+    plain, losing it), or where a side is a bare untyped null, it abstains at that
+    place, and a place only one side has (struct evolution, another kind of
     type) is left to the database's other append checks. It compares raw bytes,
     never Arrow type equality: pyarrow's equality of two instances of one Python
     extension class ignores their serialized metadata. Places pair as
@@ -414,7 +421,16 @@ def logical_identity_change(
     """
     if not (held.claims and incoming.claims):
         return None
-    if held.known and incoming.known and held.identifier != incoming.identifier:
+    # A dictionary-encoded place over a stored place with no identifier: Delta stores
+    # a dictionary of extension values as plain values, losing the identifier
+    # (ITL-1372), so "none" there is not known; the identifier comparison abstains.
+    unknown_loss = incoming.encoded and held.identifier is None
+    if (
+        held.known
+        and incoming.known
+        and not unknown_loss
+        and held.identifier != incoming.identifier
+    ):
         return (
             f"{path} is of logical type {_identifier_text(incoming.identifier)}, the "
             f"stored column's {_identifier_text(held.identifier)}"

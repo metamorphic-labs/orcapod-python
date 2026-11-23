@@ -739,9 +739,10 @@ def test_every_container_is_walked(tmp_path: Path, container: str, state: str) -
 def test_delta_dictionary_of_extension_values(tmp_path: Path) -> None:
     """A dictionary is an encoding: its values' identifier stands where it stands. A
     pending batch is compared as given (another identifier refused). Delta decodes a
-    dictionary column and stores its values as plain storage, with no identifier in
-    the log (as on main), so the stored column holds no logical type and a logical
-    append to it is refused, as over any plain column."""
+    dictionary column and stores its values as plain values, losing the identifier
+    (pre-existing, ITL-1372): over that loss the rule cannot know the stored
+    identifier, so a dictionary written again is accepted and its rows stored as on
+    main (plain values)."""
     with _store("Delta", tmp_path) as store:
         store.db.add_records(
             PATH, _container_rows("dictionary", b"m", [b"1"]), record_id_column="id"
@@ -753,14 +754,13 @@ def test_delta_dictionary_of_extension_values(tmp_path: Path) -> None:
                 record_id_column="id",
             )
         store.db.flush()
-        with pytest.raises(InputValidationError, match="stored column's no logical"):
-            store.db.add_records(
-                PATH,
-                _container_rows("dictionary", b"m", [b"333"]),
-                record_id_column="id",
-            )
-        stored = store.stored()
-        assert stored.column("id").to_pylist() == [b"1"]
+        store.reopen()
+        store.db.add_records(
+            PATH, _container_rows("dictionary", b"m", [b"333"]), record_id_column="id"
+        )
+        stored = store.stored().sort_by("id")
+        assert stored.column("id").to_pylist() == [b"1", b"333"]
+        assert stored.column("x").to_pylist() == ["1", "333"]
         assert identity_node(stored.schema.field("x")).identifier is None
 
 
