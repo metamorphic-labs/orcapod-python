@@ -973,13 +973,9 @@ def test_a_source_table_with_other_system_tags_is_not_its_rows() -> None:
         system_tag_columns=["region"],
         source_id="s",
     )
-    assert not system_tags_as_rows_give(
-        narrow.as_table(columns={"system_tags": True}).schema
-    )
+    assert not system_tags_as_rows_give(narrow.as_table(columns={"system_tags": True}))
     stock = _plain()
-    assert system_tags_as_rows_give(
-        stock.as_table(columns={"system_tags": True}).schema
-    )
+    assert system_tags_as_rows_give(stock.as_table(columns={"system_tags": True}))
 
 
 def test_a_retained_output_keeps_only_its_rows_once_read(
@@ -1153,3 +1149,114 @@ def test_a_held_output_reads_its_node_s_upstreams_when_read() -> None:
     assert output.upstreams == node.upstreams
     assert output.built().upstreams == node.upstreams
     assert output.producer is node.producer
+
+
+# ── the system-tag check looks at values and field metadata (CodeRabbit / Codex
+# on the stage 3-4 review, carried to stages 1-2) ──────────────────────────────
+
+_SYSTEM_TAG_CASES = {
+    "null_in_non_null_field": (["a", None], None),
+    "field_metadata": (["a", "b"], {b"ARROW:extension:name": b"file"}),
+    "other_field_metadata": (["a", "b"], {b"k": b"v"}),
+}
+
+
+def _system_tag_outcome(case: str, asynchronous: bool) -> Any:
+    """A job whose operator returns an exact ``ArrowTableStream`` with one more system
+    tag (``case``): what it keeps, stores and hands on, or the error it raises."""
+    from orcapod.operators import SelectDataColumns
+    from orcapod.pipeline import AsyncPipelineOrchestrator
+    from orcapod.system_constants import constants
+
+    values, metadata = _SYSTEM_TAG_CASES[case]
+    name = f"{constants.SYSTEM_TAG_PREFIX}extra"
+
+    class AddSystemTag(SelectDataColumns):
+        def unary_static_process(self, stream: Any) -> Any:
+            out: Any = super().unary_static_process(stream)
+            table = out.as_table(columns={"source": True, "system_tags": True})
+            field = pa.field(name, pa.large_string(), nullable=False, metadata=metadata)
+            table = table.append_column(field, pa.array(values, pa.large_string()))
+            return ArrowTableStream(table, tag_columns=["k"])
+
+    database = InMemoryArrowDatabase()
+    job = PipelineJob(name="system_tag_kinds", database=database)
+    with job:
+        source = DictSource(
+            [{"k": 1, "x": 1, "y": 3}, {"k": 2, "x": 2, "y": 4}],
+            tag_columns=["k"],
+            tag_only_columns=True,
+            source_id="s",
+        )
+        Batch(batch_size=2)(AddSystemTag(["x"])(source, label="marked"), label="b")
+    node: Any = job.nodes["marked"]
+    node.attach_databases(
+        pipeline_database=database.at("log"), cache_mode=CacheMode.LOG
+    )
+    try:
+        if asynchronous:
+            job.run(orchestrator=AsyncPipelineOrchestrator())
+        else:
+            job.run()
+    except Exception as error:  # noqa: BLE001  # the outcome is compared
+        return (type(error).__name__, str(error).splitlines()[0])
+    kept = node.as_table(columns={"system_tags": True, "source": True})
+    stored = database.at("log").get_all_records(
+        node._stored_table_path,  # pyright: ignore[reportPrivateUsage]  # the raw LOG table
+        record_id_column="_record_hash",
+    )
+    successor = job.nodes["b"].as_table(columns={"system_tags": True, "source": True})
+    return (
+        str(kept.schema),
+        [
+            (field.name, field.metadata)
+            for field in kept.schema
+            if field.name.startswith(constants.SYSTEM_TAG_PREFIX)
+        ],
+        kept.to_pylist(),
+        None if stored is None else (str(stored.schema), stored.to_pylist()),
+        str(successor.schema),
+        successor.to_pylist(),
+    )
+
+
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("case", list(_SYSTEM_TAG_CASES))
+def test_a_result_whose_system_tags_rows_retype_is_main_s_row_build(
+    case: str, asynchronous: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An operator result over an exact ``ArrowTableStream`` with a system tag holding
+    a null under a non-null field, or carrying field metadata, is what ``main``'s row
+    path gives (types, flags, metadata, values, stored record hashes, the successor),
+    or raises its error: the whole-table route is refused for it."""
+    from orcapod.core.nodes import operator_node
+
+    got = _system_tag_outcome(case, asynchronous)
+    with monkeypatch.context() as patch:
+        # The oracle: the eager route off, every result through main's row path.
+        patch.setattr(operator_node, "reads_as_its_class", lambda obj, cls: False)
+        expected = _system_tag_outcome(case, asynchronous)
+    assert got == expected
+
+
+@pytest.mark.parametrize("case", list(_SYSTEM_TAG_CASES))
+def test_the_source_route_refuses_the_same_system_tags(case: str) -> None:
+    """The source route uses the same check (``system_tags_as_rows_give``): a table
+    whose system tag holds a null under a non-null field, or carries field metadata,
+    is not its rows' table. (A library source builds its own system tags, so no
+    bound source reaches the route with such a column; the check is shared.)"""
+    from orcapod.core.streams.base import system_tags_as_rows_give
+    from orcapod.system_constants import constants
+
+    values, metadata = _SYSTEM_TAG_CASES[case]
+    field = pa.field(
+        f"{constants.SYSTEM_TAG_PREFIX}extra",
+        pa.large_string(),
+        nullable=False,
+        metadata=metadata,
+    )
+    table = pa.Table.from_arrays(
+        [pa.array([1, 2]), pa.array(values, pa.large_string())],
+        schema=pa.schema([pa.field("k", pa.int64()), field]),
+    )
+    assert not system_tags_as_rows_give(table)

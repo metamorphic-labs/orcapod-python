@@ -1726,7 +1726,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
                 # operator again (an upstream with no modified time), so the table,
                 # the keys and the gate describe one computation.
                 result_table = produced.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
-                if not system_tags_as_rows_give(result_table.schema):
+                if not system_tags_as_rows_give(result_table):
                     result_table = None
             if result_table is None:
                 # Otherwise (a custom stream kind, a replaced reader, rows of another
