@@ -695,7 +695,7 @@ class PollingSource(RootSource, Generic[T]):
             "tag_columns": list(self._tag_columns),
             "record_id_columns": list(self._record_id_columns),
             "polling_config": dataclasses.asdict(self._polling_config),
-            **self.source_id_config(),
+            **self._source_id_config(),
             "impl_config": self._impl.to_config(),
         }
 

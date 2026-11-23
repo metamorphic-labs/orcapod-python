@@ -105,11 +105,11 @@ class TestCSVSource:
 
     def test_source_id_defaults_to_file_path(self, csv_path):
         src = CSVSource(file_path=csv_path)
-        assert src.source_id == f"csv:{csv_path}"
+        assert src.source_id == f"csv_v1:{csv_path}"
 
     def test_source_id_explicit_overrides_default(self, csv_path):
         src = CSVSource(file_path=csv_path, source_id="my_csv_name")
-        assert src.source_id == "my_csv_name"
+        assert src.source_id == "csv_v1:my_csv_name"
 
     def test_file_not_found_raises(self, tmp_path):
         with pytest.raises(Exception):
@@ -131,7 +131,7 @@ class TestCSVSource:
 
     def test_source_id_explicit(self, csv_path):
         src = CSVSource(file_path=csv_path, source_id="my_csv_id")
-        assert src.source_id == "my_csv_id"
+        assert src.source_id == "csv_v1:my_csv_id"
 
     def test_same_source_id_yields_equivalent_source_fields(self, tmp_path):
         """Two CSV files at different paths with same source_id
@@ -198,11 +198,11 @@ class TestDeltaTableSource:
 
     def test_source_id_defaults_to_path_as_passed(self, delta_path):
         src = DeltaTableSource(delta_table_path=delta_path)
-        assert src.source_id == f"delta_table:{delta_path}"
+        assert src.source_id == f"delta_table_v1:{delta_path}"
 
     def test_source_id_explicit_overrides_default(self, delta_path):
         src = DeltaTableSource(delta_table_path=delta_path, source_id="my_delta")
-        assert src.source_id == "my_delta"
+        assert src.source_id == "delta_table_v1:my_delta"
 
     def test_bad_path_raises_value_error(self, tmp_path):
         with pytest.raises(ValueError, match="Delta table not found"):
@@ -224,7 +224,7 @@ class TestDeltaTableSource:
 
     def test_source_id_explicit(self, delta_path):
         src = DeltaTableSource(delta_table_path=delta_path, source_id="delta_id")
-        assert src.source_id == "delta_id"
+        assert src.source_id == "delta_table_v1:delta_id"
 
     def test_nonexistent_record_id_column_raises(self, delta_path):
         with pytest.raises(ValueError, match="record_id_columns"):
@@ -380,7 +380,7 @@ class TestDictSourceAdditional:
         src = DictSource(
             data=data, tag_columns=["id"], source_id="my_dict", tag_only_columns=True
         )
-        assert src.source_id == "my_dict"
+        assert src.source_id == "dict_v1:my_dict"
 
 
 # ---------------------------------------------------------------------------
@@ -434,8 +434,8 @@ class TestListSourceAdditional:
         src = ListSource(name="item", data=["a", "b"])
         identity = src.identity_structure()
         assert identity == RootSource.identity_structure(src)
-        assert identity[0] == "ListSource"
-        assert identity[2:] == (src.source_id, ())
+        assert identity[0] == src.source_id
+        assert identity[2:] == ((),)
 
     def test_same_data_same_content_hash(self):
         src1 = ListSource(name="x", data=[1, 2, 3])
@@ -478,11 +478,11 @@ class TestArrowTableSourceAdditional:
             infer_nullable=True,
             tag_only_columns=True,
         )
-        assert src.source_id == "my_source"
+        assert src.source_id == "arrow_table_v1:my_source"
         t = src.as_table(all_info=True)
         source_cols = [c for c in t.column_names if c.startswith("_source_")]
         token = t.column(source_cols[0])[0].as_py()
-        assert token.startswith("my_source::")
+        assert token.startswith("arrow_table_v1:my_source::")
 
     def test_system_tag_columns_forwarded_to_stream(self):
         """system_tag_columns passed at construction are preserved."""

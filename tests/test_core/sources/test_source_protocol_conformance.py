@@ -343,7 +343,8 @@ class TestSourceId:
         src = ArrowTableSource(
             table=table, source_id="my_explicit_id", infer_nullable=True
         )
-        assert src.source_id == "my_explicit_id"
+        assert src.source_name == "my_explicit_id"
+        assert src.source_id == f"{type(src).kind_part()}:my_explicit_id"
 
     def test_source_id_in_provenance_tokens(self, arrow_src):
         table = arrow_src.as_table(all_info=True)

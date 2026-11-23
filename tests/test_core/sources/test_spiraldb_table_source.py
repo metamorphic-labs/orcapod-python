@@ -406,7 +406,8 @@ class TestConfigSerialization:
         assert cfg["table_id"] == src.table_id
         assert cfg["tag_columns"] == ["session_id"]
         assert cfg["overrides"] == overrides
-        assert cfg["source_id"] == src.source_id
+        assert cfg["source_name"] == src.source_name
+        assert cfg["source_version"] == src.SOURCE_VERSION
         for field in ("content_hash", "pipeline_hash", "tag_schema", "data_schema"):
             assert field in cfg
 

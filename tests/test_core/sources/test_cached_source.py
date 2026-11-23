@@ -505,8 +505,9 @@ class TestCachedSourceWithSourceProxy:
             cache_database=db,
             # An explicit cache_path excludes the layout component (sdb_v1).
             cache_path=cached.cache_path[:-1],
-            source_id=source.source_id,
         )
+        # A cache presents its wrapped source's id (ITL-1425).
+        assert loaded.source_id == source.source_id == "arrow_table_v1:test_src"
 
         result = loaded.as_table()
         assert result.num_rows == 2
@@ -563,8 +564,8 @@ class TestCachedSourceWithSourceProxy:
             cache_database=db,
             # An explicit cache_path excludes the layout component (sdb_v1).
             cache_path=cached.cache_path[:-1],
-            source_id=source.source_id,
         )
+        assert loaded.source_id == cached.source_id == source.source_id
         assert loaded.content_hash() == original_content
         assert loaded.pipeline_hash() == original_pipeline
 

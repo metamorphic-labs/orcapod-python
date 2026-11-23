@@ -213,7 +213,7 @@ class TestPKAsDefaultTags:
         from orcapod.core.sources import SQLiteTableSource
 
         src = SQLiteTableSource(pk_db, "measurements", tag_only_columns=True)
-        assert src.source_id == f"sqlite_table:{pk_db}:main.measurements"
+        assert src.source_id == f"sqlite_table_v1:{pk_db}:main.measurements"
 
     def test_explicit_source_id_overrides_default(self, pk_db):
         from orcapod.core.sources import SQLiteTableSource
@@ -221,7 +221,7 @@ class TestPKAsDefaultTags:
         src = SQLiteTableSource(
             pk_db, "measurements", source_id="meas", tag_only_columns=True
         )
-        assert src.source_id == "meas"
+        assert src.source_id == "sqlite_table_v1:meas"
 
 
 # ===========================================================================

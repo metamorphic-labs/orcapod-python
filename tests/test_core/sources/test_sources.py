@@ -49,7 +49,7 @@ def _make_arrow_source(record_id_columns=None, source_id=None):
 class TestSourceId:
     def test_explicit_source_id_is_used(self):
         src = _make_arrow_source(source_id="my_source")
-        assert src.source_id == "my_source"
+        assert src.source_id == "arrow_table_v1:my_source"
 
     def test_default_source_id_is_content_hash(self):
         src = _make_arrow_source()
@@ -113,7 +113,7 @@ class TestArrowTableSourceInfoTokens:
         table = src.as_table(all_info=True)
         source_col = [c for c in table.column_names if c.startswith("_source_score")]
         values = table.column(source_col[0]).to_pylist()
-        assert all(v.startswith("my_ds::") for v in values)
+        assert all(v.startswith("arrow_table_v1:my_ds::") for v in values)
 
 
 # ---------------------------------------------------------------------------

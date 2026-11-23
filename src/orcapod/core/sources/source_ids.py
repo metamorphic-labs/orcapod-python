@@ -147,7 +147,9 @@ def parse_source_id(source_id: str) -> ParsedSourceId:
             f"{source_id!r} is not a source id: a source id is "
             "'<kind>_v<N>:<name>', for example 'csv_v1:units'"
         )
-    return ParsedSourceId(match.group(1), int(match.group(2)), require_source_name(name))
+    return ParsedSourceId(
+        match.group(1), int(match.group(2)), require_source_name(name)
+    )
 
 
 def hash_source_name(content_hash: ContentHash, hexdigits: int | None = None) -> str:

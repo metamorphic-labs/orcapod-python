@@ -445,11 +445,6 @@ class SourceStreamBuilder:
         """
         # Whole-argument checks first, before the table is read.
         key_columns = normalize_record_id_columns(record_id_columns) or ()
-        if kind_part is None:
-            raise ValueError(
-                "build() needs the kind part of the source id (kind_part, "
-                "'<kind>_v<N>'): every source id is '<kind part>:<name>'"
-            )
         if source_name is not None:
             require_source_name(source_name)
         require_hash_in_key_order_usable(
@@ -550,6 +545,11 @@ class SourceStreamBuilder:
 
         # 6. Default name: the labelled table hash, at full length, after the kind
         # part (ITL-1425). A default built from a hash says which algorithm made it.
+        if kind_part is None:
+            raise ValueError(
+                "build() needs the kind part of the source id (kind_part, "
+                "'<kind>_v<N>'): every source id is '<kind part>:<name>'"
+            )
         if source_name is None:
             source_name = hash_source_name(table_hash)
         source_id = f"{kind_part}:{source_name}"
