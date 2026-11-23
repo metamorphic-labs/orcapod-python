@@ -75,14 +75,14 @@ def test_source_info_is_one_token_per_member() -> None:
     batched = Batch(batch_size=2)(_source())
     assert _source_info(batched) == [
         {
-            "_source_s": ["B::row_0::s", "B::row_1::s"],
-            "_source_x": ["B::row_0::x", "B::row_1::x"],
-            "_source_y": ["B::row_0::y", "B::row_1::y"],
+            "_source_s": ["dict_v1:B::row_0::s", "dict_v1:B::row_1::s"],
+            "_source_x": ["dict_v1:B::row_0::x", "dict_v1:B::row_1::x"],
+            "_source_y": ["dict_v1:B::row_0::y", "dict_v1:B::row_1::y"],
         },
         {
-            "_source_s": ["B::row_2::s"],
-            "_source_x": ["B::row_2::x"],
-            "_source_y": ["B::row_2::y"],
+            "_source_s": ["dict_v1:B::row_2::s"],
+            "_source_x": ["dict_v1:B::row_2::x"],
+            "_source_y": ["dict_v1:B::row_2::y"],
         },
     ]
 
@@ -100,7 +100,7 @@ def test_a_batch_of_one_is_a_list_of_one() -> None:
     batched = Batch(batch_size=1)(_source())
     assert stream_data_tags(batched) == ("s", "x")
     assert [data["x"] for _, data in batched.iter_data()] == [[20], [10], [5]]
-    assert _source_info(batched)[0]["_source_x"] == ["B::row_0::x"]
+    assert _source_info(batched)[0]["_source_x"] == ["dict_v1:B::row_0::x"]
 
 
 def test_drop_partial_batch_drops_the_incomplete_batch() -> None:
@@ -153,7 +153,10 @@ def test_batch_after_group_by_nests_the_lists() -> None:
     [info] = _source_info(batched)
     # The key's tokens are the group's merged tokens, listed: none is folded again.
     assert len(info["_source_s"]) == 2
-    assert info["_source_x"] == [["B::row_1::x", "B::row_0::x"], ["B::row_2::x"]]
+    assert info["_source_x"] == [
+        ["dict_v1:B::row_1::x", "dict_v1:B::row_0::x"],
+        ["dict_v1:B::row_2::x"],
+    ]
 
 
 def test_batch_after_batch_nests_the_data_tag() -> None:
@@ -164,8 +167,8 @@ def test_batch_after_batch_nests_the_data_tag() -> None:
     [(tag, data)] = list(batched.iter_data())
     assert tag["x"] == data["x"] == [[20, 10], [5]]
     assert _source_info(batched)[0]["_source_x"] == [
-        ["B::row_0::x", "B::row_1::x"],
-        ["B::row_2::x"],
+        ["dict_v1:B::row_0::x", "dict_v1:B::row_1::x"],
+        ["dict_v1:B::row_2::x"],
     ]
 
 

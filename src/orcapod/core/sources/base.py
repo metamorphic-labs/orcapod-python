@@ -474,7 +474,8 @@ class RootSource(StreamBase):
         itself is not changed."""
         if self.has_assigned_label or self._source_name is None:
             return self.label
-        return self.source_id
+        # The header names the class already; the name is the part that is the user's.
+        return self.source_name
 
     def head(
         self,

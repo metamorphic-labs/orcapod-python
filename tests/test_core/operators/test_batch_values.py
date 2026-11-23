@@ -130,7 +130,9 @@ def _expected(
                 "s": [f"s{i}" for i in range(start, end)],
                 "x": _exact(x.slice(start, end - start)),
                 "y": _exact(y.slice(start, end - start)),
-                "source_x": [f"src::row_{i}::x" for i in range(start, end)],
+                "source_x": [
+                    f"arrow_table_v1:src::row_{i}::x" for i in range(start, end)
+                ],
             }
         )
     return sorted(out, key=lambda r: repr(r["s"]))

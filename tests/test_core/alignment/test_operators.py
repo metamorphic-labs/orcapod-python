@@ -227,7 +227,7 @@ CASES = [
         prepare=derive_from_d(
             "dp",
             lambda o: o.values["d"][0]["value"],
-            lambda o: f"D::{o.token}::d['p']",
+            lambda o: f"{o.source_id}::{o.token}::d['p']",
         ),
         expected=lambda s: rows(s.oracle, "D"),
     ),
@@ -235,7 +235,9 @@ CASES = [
         "index_new_column",
         lambda s: Index("seq", 1, out="second")(s.d),
         prepare=derive_from_d(
-            "second", lambda o: o.values["seq"][1], lambda o: f"D::{o.token}::seq[1]"
+            "second",
+            lambda o: o.values["seq"][1],
+            lambda o: f"{o.source_id}::{o.token}::seq[1]",
         ),
         expected=lambda s: rows(s.oracle, "D"),
     ),
@@ -243,7 +245,9 @@ CASES = [
         "index_in_place",
         lambda s: Index("seq", 0)(s.d),
         prepare=derive_from_d(
-            "seq", lambda o: o.values["seq"][0], lambda o: f"D::{o.token}::seq[0]"
+            "seq",
+            lambda o: o.values["seq"][0],
+            lambda o: f"{o.source_id}::{o.token}::seq[0]",
         ),
         expected=lambda s: rows(s.oracle, "D"),
     ),
@@ -333,9 +337,7 @@ def member_values(case: OpCase, sources: Sources) -> tuple[str, list[Any]] | Non
     if case.covers is None:
         return None
     column, source_id = case.covers
-    return column, [
-        o.values[column] for o in sources.oracle.origins if o.source_id == source_id
-    ]
+    return column, [o.values[column] for o in sources.oracle.origins if o.of(source_id)]
 
 
 def check_stream(case: OpCase, stream: Any, sources: Sources) -> None:
