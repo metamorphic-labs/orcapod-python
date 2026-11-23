@@ -197,11 +197,20 @@ class ArrowTableStream(StreamBase):
 
         # Respect Arrow nullable flags as-is (after optional inference above):
         # nullable=True → T | None, nullable=False → T.
+        # The tag schema lists the tags in tag order, as ``keys()`` does and as the
+        # data schema follows ``_data_columns``; never in table layout (ITL-1365).
+        # A declared name the table does not hold (renamed into a system tag, or a
+        # system tag that is not there) is left out, as before.
+        names = set(self._table.column_names)
         tag_schema = pa.schema(
-            f for f in self._table.schema if f.name in self._tag_columns
+            self._table.schema.field(name)
+            for name in dict.fromkeys(self._tag_columns)
+            if name in names
         )
         system_tag_schema = pa.schema(
-            f for f in self._table.schema if f.name in self._system_tag_columns
+            self._table.schema.field(name)
+            for name in dict.fromkeys(self._system_tag_columns)
+            if name in names
         )
         all_tag_schema = arrow_utils.join_arrow_schemas(tag_schema, system_tag_schema)
         data_schema = pa.schema(
