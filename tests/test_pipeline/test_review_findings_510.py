@@ -224,17 +224,50 @@ def test_a_channel_on_a_stream_whose_rows_cannot_make_one_table_raises() -> None
         asyncio.run(stream.open_channel().collect())
 
 
-def test_an_arrow_table_source_channel_takes_the_whole_table() -> None:
-    """The ordinary case keeps the fast path: a source's own system tags are what the
-    rows give."""
-    source = ArrowTableSource(
-        pa.table({"k": [1, 2], "x": [10, 20]}),
-        tag_columns=["k"],
+def _arrow_table_source() -> ArrowTableSource:
+    return ArrowTableSource(
+        pa.table({"k": [1, 2], "j": ["a", "b"], "x": [10, 20], "y": [0.5, 1.5]}),
+        tag_columns=["k", "j"],
         tag_only_columns=True,
         source_id="s",
     )
+
+
+def _dict_source() -> DictSource:
+    return DictSource(
+        [{"k": 1, "j": "a", "x": 10, "y": 0.5}, {"k": 2, "j": "b", "x": 20, "y": 1.5}],
+        tag_columns=["j", "k"],
+        tag_only_columns=True,
+        source_id="s",
+    )
+
+
+@pytest.mark.parametrize(
+    "make", [_arrow_table_source, _dict_source], ids=["arrow_table", "dict"]
+)
+def test_a_library_source_channel_takes_the_whole_table(
+    make: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ordinary case keeps the fast path: a library source's own system tags are
+    what the rows give, so its channel never builds a table from rows (CodeRabbit on
+    PR #510: the values alone cannot tell the two routes apart)."""
+    from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+
+    builds: list[int] = []
+    original = StaticOutputOperatorPod._materialize_upstream  # pyright: ignore[reportPrivateUsage]  # the row path, watched
+
+    def watched(rows: Any, upstream: Any) -> Any:
+        builds.append(1)
+        return original(rows, upstream)
+
+    monkeypatch.setattr(
+        StaticOutputOperatorPod, "_materialize_upstream", staticmethod(watched)
+    )
+    source = make()
     delivered = pa.Table.from_batches(asyncio.run(source.open_channel().collect()))
     assert delivered["x"].to_pylist() == [10, 20]
+    assert delivered["y"].to_pylist() == [0.5, 1.5]
+    assert builds == []
 
 
 # ── job.py:1003 (declined): no route for the old ``run(held_rows=)`` override ─
