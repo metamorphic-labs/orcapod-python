@@ -506,7 +506,9 @@ def test_an_all_duplicate_add_is_skipped_not_refused(
     assert _stored_ids(tmp_path) == [b"pending", b"stored"]
 
 
-@pytest.mark.parametrize("suffix", ["'q", " space", '"dq', "(x)", "::y"])
+@pytest.mark.parametrize(
+    "suffix", ["'q", " space", '"dq', "(x)", "::y", "\nsecond line"]
+)
 def test_the_backstop_names_the_column_whole(tmp_path: Path, suffix: str) -> None:
     """N5: the column named by the flush's case-folding refusal is the batch's own
     field, with its type, also when its name holds a quote."""
@@ -639,4 +641,20 @@ def test_the_backstop_names_the_struct_that_holds_the_pair(tmp_path: Path) -> No
         db.flush()
     assert info.value.column == f"outer.right.{lower}"
     assert "string" in str(info.value)
+    assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+
+
+def test_the_backstop_names_the_column_colliding_with_a_stored_one(
+    tmp_path: Path,
+) -> None:
+    """Review of PR 504, round five, finding 3: the pair forms at the commit, between a
+    stored column and the batch's column (Delta's case folding only). The batch's own
+    column is named, with its type."""
+    upper, lower = RUST_ONLY_FOLDS[0]
+    db = DeltaTableDatabase(tmp_path)
+    _add(db, _rows(b"1", **{upper: pa.array([1])}), flush=True)
+    with pytest.raises(UnstorableColumnError) as info:
+        _add(db, _rows(b"2", **{lower: pa.array([2], pa.int32())}), flush=True)
+    assert info.value.column == lower
+    assert "int32" in str(info.value)
     assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
