@@ -646,13 +646,31 @@ def _case_reason(first: str, second: str, nested: bool = False) -> str:
 
 
 # delta-rs reports two names equal under its case folding (Rust ``to_lowercase``).
-_DUPLICATE_NAME = re.compile(r"Duplicate field name \(case-insensitive\): '([^']*)'")
+# Delta's duplicate-name refusal, as deltalake 1.6.6 words it: at the START of the
+# message of deltalake's own error (a bare ``Exception`` or a ``DeltaError``), after
+# its ``External error:`` / ``Kernel error:`` / ``Generic DeltaTable error:`` wrappers.
+# Never matched inside other text: a table's path may contain the same words
+# (review of PR 504, round four).
+_DUPLICATE_NAME = re.compile(
+    r"^(?:(?:External|Kernel|Generic DeltaTable) error: )*"
+    r"Schema error: Duplicate field name \(case-insensitive\): '(.*)'"
+)
+
+
+def _is_delta_error(error: BaseException) -> bool:
+    """Whether ``error`` is one deltalake raised: a ``DeltaError``, or the bare
+    ``Exception`` its schema conversion raises."""
+    from deltalake.exceptions import DeltaError
+
+    return type(error) is Exception or isinstance(error, DeltaError)
 
 
 def _duplicate_name_in(error: BaseException) -> str | None:
     """The name delta-rs reports as a case-insensitive duplicate in ``error``'s chain."""
     for seen in _error_chain(error):
-        match = _DUPLICATE_NAME.search(str(seen))
+        if not _is_delta_error(seen):
+            continue
+        match = _DUPLICATE_NAME.match(str(seen))
         if match is not None:
             return match.group(1)
     return None
@@ -704,7 +722,7 @@ def _permanent_commit_failure(error: BaseException) -> bool:
         return False
     if isinstance(error, SchemaMismatchError):
         return True
-    if type(error) is Exception and _DUPLICATE_NAME.search(str(error)):
+    if type(error) is Exception and _DUPLICATE_NAME.match(str(error)):
         return True
     if isinstance(error, DeltaError):
         return str(error).startswith(PERMANENT_DELTA_ERROR_PREFIXES)
@@ -714,53 +732,52 @@ def _permanent_commit_failure(error: BaseException) -> bool:
 def _reported_field(error: BaseException, schema: pa.Schema) -> tuple[str, Any]:
     """The field of ``schema`` delta-rs names as a duplicate in ``error``'s chain.
 
-    Delta's own schema check locates it: a column whose schema Delta refuses on its own
-    holds the colliding struct fields, and the field is named by its path in that
-    column (``s.ᲊ``) with its type; otherwise the collision is between top-level
-    columns. Names come from the schema, the longest one Delta's message quotes, so a
-    name holding a quote is named whole. ``(the reported text, null)`` when no field
-    matches.
+    Delta's own schema check locates it: each struct of the schema (the top level
+    included) is checked on its direct children alone, each child standing in as an
+    ``int64``, so a collision deeper down is not seen there. The struct Delta refuses
+    holds the pair, and the field is named by its path (``outer.right.ᲊ``) with its
+    type. Names come from the schema, the longest one Delta's message quotes, so a
+    name holding a quote is named whole. ``(the reported text, null)`` when no struct
+    is refused.
     """
     messages = [str(seen) for seen in _error_chain(error)]
 
     def quoted(field: "pa.Field[Any]") -> bool:
         return any(f"(case-insensitive): '{field.name}'" in m for m in messages)
 
-    for column in schema:
+    for prefix, children in _structs_of(schema):
+        probe = pa.schema([pa.field(c.name, pa.int64()) for c in children])
         try:
-            deltalake.Schema.from_arrow(pa.schema([column]))
+            deltalake.Schema.from_arrow(probe)
         except Exception as refused:  # noqa: BLE001  # only a duplicate name is looked at
             if _duplicate_name_in(refused) is None:
                 continue
-            nested = [
-                (path, field)
-                for path, field in _field_paths(column)
-                if path != column.name and quoted(field)
-            ]
-            if nested:
-                path, field = max(nested, key=lambda item: len(item[1].name))
-                return path, field.type
-    top = [field for field in schema if quoted(field)]
-    if top:
-        field = max(top, key=lambda f: len(f.name))
-        return field.name, field.type
+            named = [c for c in children if quoted(c)]
+            if named:
+                field = max(named, key=lambda c: len(c.name))
+                return prefix + field.name, field.type
     return _duplicate_name_in(error) or "", pa.null()
 
 
-def _field_paths(column: "pa.Field[Any]") -> list[tuple[str, "pa.Field[Any]"]]:
-    """``column`` and every struct field inside it, each with its dotted path."""
-    found: list[tuple[str, pa.Field[Any]]] = []
+def _structs_of(schema: pa.Schema) -> list[tuple[str, list["pa.Field[Any]"]]]:
+    """``(path prefix, direct children)`` of the top level and of every struct inside,
+    through lists, maps and logical types."""
+    found: list[tuple[str, list[pa.Field[Any]]]] = [("", list(schema))]
 
-    def visit(path: str, field: "pa.Field[Any]") -> None:
-        found.append((path, field))
-        arrow_type = field.type
+    def visit(prefix: str, arrow_type: pa.DataType) -> None:
         if isinstance(arrow_type, pa.ExtensionType):
             arrow_type = arrow_type.storage_type
+        if pa.types.is_struct(arrow_type):
+            children = [arrow_type.field(i) for i in range(arrow_type.num_fields)]
+            found.append((prefix, children))
+            for child in children:
+                visit(f"{prefix}{child.name}.", child.type)
+            return
         for i in range(arrow_type.num_fields):
-            child = arrow_type.field(i)
-            visit(f"{path}.{child.name}", child)
+            visit(prefix, arrow_type.field(i).type)
 
-    visit(column.name, column)
+    for field in schema:
+        visit(f"{field.name}.", field.type)
     return found
 
 
@@ -985,7 +1002,7 @@ def _exact_refusal(
 
 
 def _append_refusal(
-    delta_table: deltalake.DeltaTable, rows: pa.Table
+    delta_table: deltalake.DeltaTable, rows: pa.Table, schema_evolution: bool
 ) -> tuple[str, str] | None:
     """The first column of ``rows`` the stored table cannot take, and why (ITL-1334).
 
@@ -1005,6 +1022,9 @@ def _append_refusal(
     Args:
         delta_table: The loaded stored table.
         rows: The rows to append, with their own types.
+        schema_evolution: Whether the database's MERGE evolves the stored schema:
+            only then does a new column name enter it, so only then is a name
+            differing only in case from a stored one refused.
 
     Returns:
         ``(column, reason)``, or ``None`` when the rows can be appended.
@@ -1020,7 +1040,10 @@ def _append_refusal(
             change = _column_change(held[field.name], field)
             if change is not None:
                 return field.name, change
-        else:
+        elif schema_evolution:
+            # A new name enters the stored schema only when the MERGE evolves it;
+            # without evolution Delta leaves an unknown column out, as main did
+            # (review of PR 504, round four).
             clash = _differ_only_in_case([*held, field.name])
             if clash is not None:
                 return field.name, _case_reason(*clash)
@@ -2165,7 +2188,9 @@ class DeltaTableDatabase:
                     ) from unreadable
                 delta_table = None
             if delta_table is not None:
-                refusal = _append_refusal(delta_table, records)
+                refusal = _append_refusal(
+                    delta_table, records, self.allow_schema_evolution
+                )
         if refusal is not None:
             column, reason = refusal
             raise InputValidationError(
@@ -3277,7 +3302,9 @@ class DeltaTableDatabase:
 
         # The add-time check, against the version just loaded: another writer may
         # have committed since the rows were buffered (ITL-1334).
-        refusal = _append_refusal(delta_table, original_table)
+        refusal = _append_refusal(
+            delta_table, original_table, self.allow_schema_evolution
+        )
         if refusal is not None:
             column, reason = refusal
             raise InputValidationError(

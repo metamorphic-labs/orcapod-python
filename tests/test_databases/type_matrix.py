@@ -1058,23 +1058,31 @@ another order): every value keeps its field's name, and an omitted field reads a
 in the appended rows. An append is refused, naming the column and the field, when it
 would add a non-nullable struct field (the stored rows have no value for it) or add a
 struct field inside a map (Delta cannot). A nested field the append makes nullable reads
-as nullable afterwards, as Delta stores it.
+as nullable afterwards, as Delta stores it, when the appended rows hold no null in it; a
+null there, in a field stored non-nullable, is refused by deltalake 1.6 at the commit
+(1.0.2 stored it and made the field nullable).
 
 On Delta, the commit is the point of truth. When rows are added, only what is certain is
-refused, before anything is queued: two names differing only in case, a stored table
-deltalake cannot read, another logical type (another
-extension name or other extension metadata) over a stored logical column, and a struct
-evolution that would put two names differing only in case into one struct. What
-deltalake refuses at the commit for the rows themselves (a changed field metadata, a type
-it cannot insert or cast, a null in a non-nullable column) is raised by the flush, once,
-naming the table, Delta's reason and the rows not written; those rows leave the queue,
-and the other tables of the flush still commit. Any other failure keeps its rows queued.
-So a column whose Arrow type Delta keeps through a recorded type (the "(recorded type)"
-cells below, every list and map included) cannot gain a field when schema evolution is
-on, nor have a nested nullability change: the record is the column's field metadata,
-which deltalake 1.5 and later does not let a commit change. A struct column without a
-record still gains fields, an append may still add a new column, and an untyped `null`
-column takes the stored type.
+refused, before anything is queued: two names differing only in case (a name differing
+only in case from a stored column only when schema evolution is on, the only case in
+which it would enter the stored schema), a stored table deltalake cannot read because two
+of its names differ only in case, another logical type (another extension name or other
+extension metadata) over a stored logical column, and a struct evolution that would put
+two names differing only in case into one struct. Four kinds of refusal by deltalake at
+the commit are raised by the flush once, naming the table, Delta's reason and the rows
+not written, and those rows leave the queue (the other tables of the flush still commit):
+a changed field metadata (`SchemaMismatchError`), two names equal under Delta's case
+folding, a type DataFusion cannot insert or cast into the stored one, and a row Delta
+finds invalid (a null in a non-nullable column, a failed CHECK constraint). A CHECK
+constraint whose verdict changes by chance would accept such rows on a later try;
+Orcapod writes none. Any other failure keeps its rows queued and is raised again by the
+next flush, as before: a storage error, a constraint whose evaluation itself fails, a
+stored table unreadable for another reason. So a column whose Arrow type Delta keeps
+through a recorded type (the "(recorded type)" cells below, every list and map included)
+cannot gain a field when schema evolution is on, nor have a nested nullability change:
+the record is the column's field metadata, which deltalake 1.5 and later does not let a
+commit change. A struct column without a record still gains fields, an append may still
+add a new column, and an untyped `null` column takes the stored type.
 
 An append matches columns by name, exactly as Arrow matches them (`a` and `A` are two
 columns), never by position. Delta alone refuses two columns, or two fields of one

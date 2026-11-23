@@ -214,15 +214,18 @@ saying that Delta reports a name as equal to another's under its case folding is
 kind of failure.
 
 **Cause.** A `DeltaTableDatabase` refuses only what it can tell for certain when rows are
-added (names that differ only in case, a stored table deltalake cannot read, another logical type over a stored logical column). Everything
-else is decided by deltalake when it commits. The refusals that would happen again at
-every flush are raised once: a changed field metadata, which deltalake 1.5 and later
-refuses (a struct with a recorded type gaining a field, a list's items becoming
-nullable), a type DataFusion cannot insert or cast into the stored one, or a null in a
-non-nullable column. The rows are dropped from the queue so that the next flush is not
-refused the same way; other tables of the same flush still commit. A failure that may
-pass, such as a storage error, keeps its rows queued, and the next flush tries them
-again.
+added (names that differ only in case, a stored table deltalake cannot read because two of
+its names differ only in case, another logical type over a stored logical column).
+Everything else is decided by deltalake when it commits. Four kinds of refusal are raised
+once, because every later flush would be refused the same way: a changed field metadata,
+which deltalake 1.5 and later refuses (a struct with a recorded type gaining a field, a
+list's items becoming nullable); two names equal under Delta's case folding; a type
+DataFusion cannot insert or cast into the stored one; and a row Delta finds invalid (a
+null in a non-nullable column, a failed CHECK constraint). The rows are dropped from the
+queue so that the next flush is not refused the same way; other tables of the same flush
+still commit. Any other failure keeps its rows queued, and the next flush tries them
+again, as before: a storage error, a constraint whose evaluation itself fails, a stored
+table unreadable for another reason.
 
 **Fix.** Read Delta's reason, correct the rows (or their declared types) and add them
 again. In a job, running it again computes the same rows and fails the same way until

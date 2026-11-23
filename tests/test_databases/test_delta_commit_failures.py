@@ -184,3 +184,94 @@ def test_a_type_coercion_refusal_is_raised_once_through_orcapod(tmp_path: Path) 
     assert "1 rows queued for it were not written" in str(info.value)
     assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
     db.flush()  # a no-op
+
+
+# ── Review of PR 504, round four ────────────────────────────────────────────────────
+
+
+def test_a_check_constraint_refusal_is_permanent(tmp_path: Path) -> None:
+    """Finding 1, the stated limit: deltalake reports a failed CHECK constraint as
+    ``Invalid data found``, which is taken as permanent: the rows are raised once and
+    leave the queue. A constraint whose verdict changes by chance (``random()``) would
+    have accepted them on a later try; Orcapod writes no CHECK constraint, and the error
+    says the rows were not written."""
+    db = DeltaTableDatabase(tmp_path)
+    rows = lambda rid, x: pa.table(  # noqa: E731
+        {"rid": pa.array([rid], pa.large_binary()), "x": pa.array([x], pa.int64())}
+    )
+    db.add_records(PATH, rows(b"1", 1), record_id_column="rid", flush=True)
+    deltalake.DeltaTable(str(tmp_path / "t")).alter.add_constraint(
+        {"positive": "x > 0"}
+    )
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(PATH, rows(b"2", 0), record_id_column="rid")
+    with pytest.raises(InputValidationError, match="Invalid data found"):
+        db.flush()
+    assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+    db.flush()  # a no-op
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="permissions")
+def test_a_storage_failure_whose_path_names_a_duplicate_is_not_dropped(
+    tmp_path: Path,
+) -> None:
+    """Finding 2: only deltalake's own duplicate-name error counts, by where its message
+    starts. A permission error whose PATH holds the same words keeps its rows queued,
+    and a later flush, once the store is writable, commits them."""
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    path = ("parent", "Duplicate field name (case-insensitive): 'x'")
+    db = DeltaTableDatabase(tmp_path)
+    rows = pa.table({"rid": pa.array([b"1"], pa.large_binary()), "x": [11]})
+    db.add_records(path, rows, record_id_column="rid")
+    parent.chmod(0o500)
+    try:
+        with pytest.raises(Exception) as info:  # noqa: B017  # main's error, unchanged
+            db.flush()
+        assert not isinstance(info.value, InputValidationError)
+        assert db._pending_batches  # pyright: ignore[reportPrivateUsage]
+    finally:
+        parent.chmod(0o700)
+    db.flush()
+    stored = DeltaTableDatabase(tmp_path).get_all_records(path, record_id_column="rid")
+    assert stored is not None
+    assert stored.column("x").to_pylist() == [11]
+
+
+@pytest.mark.parametrize("seen", [False, True], ids=["every id new", "a stored id"])
+def test_an_unrecorded_struct_child_loosened_to_nullable_is_refused_once(
+    tmp_path: Path, seen: bool
+) -> None:
+    """Finding 5, a narrowing of deltalake 1.6: with schema evolution on, a null in a
+    struct child stored non-nullable (an unrecorded struct) is refused by Delta at the
+    commit (``Invalid data found``); deltalake 1.0.2 stored it and made the child
+    nullable. Raised once; nothing stays queued."""
+    strict = pa.struct([pa.field("a", pa.int64(), nullable=False)])
+    loose = pa.struct([pa.field("a", pa.int64())])
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(
+        PATH,
+        pa.table(
+            {
+                "rid": pa.array([b"1"], pa.large_binary()),
+                "s": pa.array([{"a": 1}], strict),
+            }
+        ),
+        record_id_column="rid",
+        flush=True,
+    )
+    ids = [b"1", b"2"] if seen else [b"2"]
+    db.add_records(
+        PATH,
+        pa.table(
+            {
+                "rid": pa.array(ids, pa.large_binary()),
+                "s": pa.array([{"a": None}] * len(ids), loose),
+            }
+        ),
+        record_id_column="rid",
+    )
+    with pytest.raises(InputValidationError, match="Invalid data found"):
+        db.flush()
+    assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+    db.flush()  # a no-op
