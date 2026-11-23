@@ -13,7 +13,7 @@ import functools
 import json
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Collection, Iterator, Mapping
+from collections.abc import AsyncIterator, Collection, Iterator, Mapping, Sequence
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -177,13 +177,41 @@ class _DeclaredForm:
         order = list(range(len(names)))
         source_info = tuple(f"{constants.SOURCE_PREFIX}{n}" for n in self.data_order)
         groups = (self.tag_order, self.system_tag_order, self.data_order, source_info)
-        for group in groups:
-            present = [name for name in group if name in position]
-            for slot, name in zip(
-                sorted(position[n] for n in present), present, strict=True
-            ):
-                order[slot] = position[name]
-        return order
+        placed = _placed(order, position, groups)
+        if len(set(placed)) == len(placed):
+            return placed
+        # A data-tag is in the tag group and the data group, and placing it twice
+        # filled one position twice and lost another column (ITL-1420): place it with
+        # the tags only. Only for this case, so no order that was a placement before
+        # changes.
+        tags = set(self.tag_order)
+        data = tuple(n for n in self.data_order if n not in tags)
+        return _placed(
+            order, position, (self.tag_order, self.system_tag_order, data, source_info)
+        )
+
+
+def _placed(
+    order: list[int], position: dict[str, int], groups: Sequence[Sequence[str]]
+) -> list[int]:
+    """``order`` with each group's present names filling its positions in group order.
+
+    Args:
+        order: The column positions to start from.
+        position: Each column name's position.
+        groups: Groups of names, each in the order to place them.
+
+    Returns:
+        A new list of positions.
+    """
+    placed = list(order)
+    for group in groups:
+        present = [name for name in group if name in position]
+        for slot, name in zip(
+            sorted(position[n] for n in present), present, strict=True
+        ):
+            placed[slot] = position[name]
+    return placed
 
 
 def _system_tag_columns(
