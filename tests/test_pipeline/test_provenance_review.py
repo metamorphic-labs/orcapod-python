@@ -1023,3 +1023,69 @@ def test_pick_after_index_after_a_fold_traces_one_member(fold: str) -> None:
     trace = job.nodes["Pick"].trace({"k": row["k"]}, "x")
     assert trace.root.value == 4
     assert [(c.record_id, c.value) for c in trace.source_cells()] == [("row_1", 4)]
+
+
+# ---------------------------------------------------------------------------
+# Seventh review (head e1c4f3fb): columns mapped by each operator's semantics
+# ---------------------------------------------------------------------------
+
+
+def test_a_column_named_like_an_access_path_is_not_an_input() -> None:
+    """Index("x", 0, out="chosen") then a select of "chosen": the input is x only, not
+    an unrelated column literally named "x[0]" holding the same value."""
+    schema = pa.schema(
+        [
+            pa.field("k", pa.large_string(), nullable=False),
+            pa.field("g", pa.large_string(), nullable=False),
+            pa.field("x", pa.large_list(pa.int64()), nullable=False),
+            pa.field("x[0]", pa.int64(), nullable=False),
+        ]
+    )
+    source = table_source(
+        [{"k": "a", "g": "1", "x": [1, 2], "x[0]": 1}], schema, ["k", "g"], "s"
+    )
+    job = PipelineJob(name="literal", database=InMemoryArrowDatabase())
+    with job:
+        SelectDataColumns(["chosen"])(Index("x", 0, out="chosen")(source))
+    job.run()
+    for label in ("Index", "SelectDataColumns"):
+        trace = job.nodes[label].trace({"k": "a", "g": "1"}, "chosen")
+        assert [(c.column, c.value) for c in trace.source_cells()] == [("x", 1)]
+
+
+@pytest.mark.parametrize("left_first", [True, False])
+def test_renamed_branches_of_one_source_are_told_apart(left_first: bool) -> None:
+    """x renamed to "left" on one branch and "right" on another, then MergeJoin:
+    "left" comes from its own branch only."""
+    from orcapod.operators import MapData
+
+    source = table_source(rows_kgxy(("a", "1", 1, 0)), TWO_BY_TWO, ["k", "g"], "s")
+    job = PipelineJob(name=f"renamed{left_first}", database=InMemoryArrowDatabase())
+    with job:
+        left = MapData({"x": "left"})(SelectDataColumns(["x"])(source))
+        right = MapData({"x": "right"})(SelectDataColumns(["x"])(source))
+        MergeJoin()(left, right) if left_first else MergeJoin()(right, left)
+    job.run()
+    trace = job.nodes["MergeJoin"].trace({"k": "a", "g": "1"}, "left")
+    # Only the branch renaming x to "left" is on the way.
+    renames = {step.node for step in trace.root.walk() if step.operator == "MapData"}
+    assert len(renames) == 1
+    assert [(c.column, c.value) for c in trace.source_cells()] == [("x", 1)]
+
+
+@pytest.mark.parametrize("a_first", [True, False])
+def test_a_shared_data_tag_at_merge_join_traces_to_both_inputs(a_first: bool) -> None:
+    """A data-tag k of both inputs is one key (a scalar with a merged token): it comes
+    from both inputs' rows, as a tag join key does."""
+    a = DictSource([{"k": "x", "p": 1}], tag_columns=["k"], source_id="a")
+    b = DictSource([{"k": "x", "q": 2}], tag_columns=["k"], source_id="b")
+    job = PipelineJob(name=f"key{a_first}", database=InMemoryArrowDatabase())
+    with job:
+        MergeJoin()(a, b) if a_first else MergeJoin()(b, a)
+    job.run()
+    trace = job.nodes["MergeJoin"].trace({"k": "x"}, "k")
+    assert trace.status == "traced"
+    assert [(c.source_id, c.record_id, c.value) for c in trace.source_cells()] == [
+        ("a", "row_0", "x"),
+        ("b", "row_0", "x"),
+    ]

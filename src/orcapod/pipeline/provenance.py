@@ -722,6 +722,97 @@ def _function_run(
     )
 
 
+def _input_columns(node: Any, index: int, column: str) -> list[str] | None:
+    """The columns of input ``index`` that output ``column`` of a row-wise operator
+    comes from, by the operator's own semantics (its stored arguments), never by
+    matching tokens or values (they only verify a link).
+
+    - Select, drop, filter, ``DropNulls``, ``AddTags``, ``TagBy``, ``Join``,
+      ``Rejoin``, ``MergeJoin`` (a column of one input) and ``Index`` / ``Pick``
+      (a column they do not select from): the same name, from an input that has it;
+    - ``SemiJoin``: the same name, from its left input only;
+    - ``MapData``, ``MapColumns`` and ``MapTags`` (a data-tag renamed in both roles):
+      the renamed column's old name; a name renamed away is no longer that column.
+
+    Returns:
+        The input columns (empty when this input gives none); ``None`` for an operator
+        whose column mapping is not known here, so the link is unavailable.
+    """
+    from orcapod.core.operators import (
+        AddTags,
+        DropColumns,
+        DropDataColumns,
+        DropNulls,
+        DropTagColumns,
+        Filter,
+        Index,
+        Join,
+        MapColumns,
+        MapData,
+        MapTags,
+        MergeJoin,
+        Pick,
+        PolarsFilter,
+        Rejoin,
+        SelectColumns,
+        SelectDataColumns,
+        SelectTagColumns,
+        SemiJoin,
+        TagBy,
+    )
+
+    producer = getattr(node, "producer", None)
+    data = set(_keys(node.upstreams[index])[1])
+    same = [column] if column in data else []
+    if isinstance(producer, SemiJoin):
+        return same if index == 0 else []
+    if isinstance(producer, (MapData, MapColumns)) or (
+        isinstance(producer, MapTags) and not producer.tag_only
+    ):
+        name_map = cast(dict[str, str], producer.name_map)
+        old = {new: previous for previous, new in name_map.items()}
+        if column in old:
+            return [old[column]] if old[column] in data else []
+        return [] if column in name_map else same
+    if isinstance(
+        producer,
+        (
+            Filter,
+            PolarsFilter,
+            DropNulls,
+            SelectDataColumns,
+            SelectTagColumns,
+            SelectColumns,
+            DropDataColumns,
+            DropTagColumns,
+            DropColumns,
+            AddTags,
+            TagBy,
+            MapTags,
+            Join,
+            Rejoin,
+            MergeJoin,
+            Index,
+            Pick,
+        ),
+    ):
+        return same
+    return None
+
+
+def _merged_key(node: Any, column: str) -> bool:
+    """Whether ``column`` is a data-tag several inputs of a join share: one key, with
+    one merged token, whose value is every input's (as a tag join key)."""
+    from orcapod.core.operators import Join, MergeJoin, Rejoin
+
+    if not isinstance(getattr(node, "producer", None), (Join, MergeJoin, Rejoin)):
+        return False
+    sharing = [
+        u for u in node.upstreams if column in _keys(u)[0] and column in _keys(u)[1]
+    ]
+    return len(sharing) > 1
+
+
 class _Tracer:
     def __init__(self) -> None:
         self.reader = _Reader()
@@ -921,7 +1012,9 @@ class _Tracer:
     def merged(self, node: Any, column: str) -> bool:
         """Whether ``column`` is a column of both inputs of a ``MergeJoin`` (merged
         into ``[first, second]``)."""
-        return all(column in _keys(u)[1] for u in node.upstreams)
+        return not _merged_key(node, column) and all(
+            column in _keys(u)[1] for u in node.upstreams
+        )
 
     def from_input(
         self,
@@ -990,9 +1083,32 @@ class _Tracer:
         if drop_front:
             whole = cast(list[Any], whole)[cast(int, slot)]
         path = cell.path[1:] if drop_front else cell.path
-        if whole is None:
+        columns = _input_columns(node, index, cell.column)
+        if columns is None:
+            return [self.unread(node, cell.column, None, "unavailable")]
+        if not columns:
+            return []
+        # A key several inputs share has one merged token: each input's own token is
+        # not the cell's, so the link is verified by the value alone.
+        key = _merged_key(node, cell.column)
+        if whole is None and not key:
             return []
         if _kind(upstream) == "source":
+            if key:
+                pairs = _positional_pairs(cell.row, node, index, upstream)
+                if len(pairs) != 1:
+                    return []
+                ((sid, record_id),) = pairs
+                sep = constants.BLOCK_SEPARATOR
+                return self.to_source(
+                    node,
+                    index,
+                    cell.row,
+                    f"{sid}{sep}{record_id}{sep}{columns[0]}",
+                    cell.value,
+                    path,
+                    slot,
+                )
             token = whole
             depth = 0
             while (
@@ -1002,6 +1118,10 @@ class _Tracer:
             ):
                 token = cast(list[Any], token)[cast(int, path[depth])]
                 depth += 1
+            if isinstance(token, str) and _parse_token(token)[2] not in columns:
+                # A source token keeps the source's own column name (a rename does not
+                # change it): it must be the column the operator maps from.
+                return []
             return self.to_source(
                 node, index, cell.row, token, cell.value, path[depth:], slot
             )
@@ -1011,11 +1131,11 @@ class _Tracer:
         matched = _input_rows(cell.row, node, index, up_rows, self.reader.lookups)
         prefix = constants.SOURCE_PREFIX
         found: list[TraceStep] = []
-        for up_column in _keys(upstream)[1]:
+        for up_column in columns:
             good: list[_Cell] = []
             for r in matched:
-                if r.get(prefix + up_column) != whole:
-                    continue
+                if not key and r.get(prefix + up_column) != whole:
+                    continue  # the token verifies the link
                 up = _Cell(r, up_column, path)
                 try:
                     if same_value(up.value, cell.value):
