@@ -54,6 +54,7 @@ from orcapod.utils.schema_utils import (
 )
 
 if TYPE_CHECKING:
+    from orcapod.types.explanation import Explanation
     import pyarrow as pa
 
     from orcapod.channels import WritableChannel
@@ -802,6 +803,16 @@ class SourceNodeBase(TraceableBase, ABC):
         Returns a tuple identifying this node as a named schema-only source slot.
         """
         return ("source_node", self._name)
+
+    def explain(self) -> Explanation:
+        """Say what the source bound here applies itself (``StreamBase.explain``).
+
+        Returns:
+            An ``Explanation``; for a slot with no source bound, that it has none.
+        """
+        from orcapod.core.streams.explain import explain
+
+        return explain(self)
 
     @property
     def producer(self) -> None:

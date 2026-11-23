@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from typing import Any, ClassVar, TYPE_CHECKING, TypeAlias
 
 from orcapod.core.data_tags import stream_data_tags
@@ -173,6 +173,13 @@ class PolarsFilter(UnaryOperator):
                     predicates.append(pl.Expr.deserialize(p, format="json"))
         constraints = inner.get("constraints")
         return cls(predicates=predicates, constraints=constraints)
+
+    def rows_dropped_text(self, position: int, others: Sequence[str]) -> str | None:
+        """What the filter keeps, for ``explain()``: its constraints and predicates as
+        text, each sorted (display only)."""
+        parts = sorted(f"{name}={value!r}" for name, value in self.constraints.items())
+        parts += sorted(str(predicate) for predicate in self.predicates)
+        return ", ".join(parts) if parts else None
 
     def identity_structure(self) -> Any:
         self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)

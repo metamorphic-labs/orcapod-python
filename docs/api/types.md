@@ -19,3 +19,9 @@ Core type definitions used throughout Orcapod.
 ::: orcapod.types.col
 
 ::: orcapod.types.ColumnRef
+
+::: orcapod.types.Explanation
+
+::: orcapod.types.SourceReading
+
+::: orcapod.types.Step

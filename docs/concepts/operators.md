@@ -847,6 +847,29 @@ node whose condition enters the identity of every step after it. Explore with `w
 the selection with `filter` when it becomes part of what the pipeline computes. `where`
 takes only equalities today and refuses any other condition, pointing to `filter`.
 
+**What is read, and what is applied after reading.** `stream.explain()` (new in this
+release) says, for every source a stream reads, what the source applies itself (its `where`
+restriction and limit) and which steps drop rows after the rows are read. A `filter` over an
+unrestricted table reads the whole table, and `explain()` says so. It computes, reads,
+polls and writes nothing, and runs no code of yours:
+
+```python
+print(recorded.filter(col("t") >= 1.0, label="late").drop_nulls(["rate"]).explain())
+# DynamicPodStream[DropNulls] reads:
+#   source 'recorded' (ArrowTableSource)
+#     applied by the source: nothing (the whole table is read)
+#     applied after reading: t >= 1.0 (Filter[late]); no null in rate (DropNulls)
+```
+
+Every source gets one block, in source-name order, and the steps are listed from the source
+upward. A join's unmatched rows are listed too (`rows without a match in 'probes' are
+dropped (Join)`), as are `SemiJoin`, `MergeJoin`, `Rejoin`, `DropNulls`, `PolarsFilter`,
+`Batch(drop_partial_batch=True)` and `Pick` or `Index` when a miss drops the row. A derived or
+cached source cannot say what it reads (it reads rows stored earlier): its block says "not
+known for this source kind". The result is an `Explanation` (`orcapod.types`), plain data
+whose `text()` is what it prints. The preview of a `Filter` directly over a source shows the
+same split in one line of its header.
+
 When `filter` cannot say what you need (arithmetic between columns, a string function), use
 [PolarsFilter](#polarsfilter).
 

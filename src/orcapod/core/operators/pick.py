@@ -85,6 +85,13 @@ class Pick(UnaryOperator):
         self._value_arrow_type_error: str = ""
         super().__init__(**kwargs)
 
+    def rows_dropped_text(self, position: int, others: Sequence[str]) -> str | None:
+        """What the step drops, for ``explain()``: rows missing the key, unless a miss
+        raises."""
+        if self.fail_on_miss:
+            return None
+        return f"rows whose {self.column!r} has no key {self.key!r} are dropped"
+
     def identity_structure(self) -> Any:
         self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         # fail_on_miss intentionally excluded — it controls error behaviour,

@@ -16,6 +16,7 @@ from orcapod.protocols.hashing_protocols import PipelineElementProtocol
 from orcapod.types import ColumnConfig, Condition, Schema
 
 if TYPE_CHECKING:
+    from orcapod.types.explanation import Explanation
     import pandas as pd
     import polars as pl
     import pyarrow as pa
@@ -442,6 +443,13 @@ class StreamWithOperationsProtocol(StreamProtocol, Protocol):
         Keep the rows that satisfy every condition, as a step of the pipeline:
         keywords and mappings are equalities, other conditions are built with
         ``col``. The output has this stream's columns and types.
+        """
+        ...
+
+    def explain(self) -> "Explanation":
+        """
+        Say what each source this stream reads applies itself (its restriction, or its
+        whole table) and which steps drop rows after reading; computes nothing.
         """
         ...
 
