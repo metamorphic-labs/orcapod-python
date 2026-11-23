@@ -509,14 +509,12 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         # 2a. Validate source-node name uniqueness.
         # Source node names are identity-forming (used as bind() keys and
         # included in content_hash()).  Two distinct source nodes with the
-        # same name indicate a source_id collision.  If their schemas also
-        # differ the caller has assigned the same source_id to conceptually
-        # different sources — raise an error.  If the schemas happen to match
-        # the nodes are functionally identical (same name + same schema would
-        # normally produce the same content_hash and be deduplicated at
-        # recording time, so this branch is only reached in unusual edge cases
-        # such as non-RootSource concrete streams with colliding label:hash
-        # names), and we leave them as-is.
+        # same name are refused: with different schemas by InconsistentSourceError,
+        # and when two or more are sources (RootSource), whatever their schemas, by
+        # SourceSlotNameCollisionError (ITL-1425: a slot is named by the source's
+        # name without its kind part, so another kind, version, key or id would
+        # otherwise share the slot). Only streams that are not sources, with equal
+        # schemas and colliding label:hash names, are left as they are.
         name_to_hashes: dict[str, list[str]] = {}
         for h, node in node_map.items():
             name_to_hashes.setdefault(node._name, []).append(h)

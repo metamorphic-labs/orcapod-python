@@ -25,8 +25,8 @@ class ListSource(RootSource):
     (default) or the dict returned by ``tag_function(element, index)``.
 
     Its identity is that of every root source (``RootSource.identity_structure``:
-    class name, output schema, ``source_id``, key columns; developer, November 21,
-    2026, ITL-1272). The elements and the tags the tag function gave enter it only
+    ``source_id``, output schema, key columns, no class name; developer, November 21,
+    2026, ITL-1272; ITL-1425). The elements and the tags the tag function gave enter it only
     through the default source id, the hash of the built table, when no
     ``source_id`` is given, and through the output schema (their types); with a
     ``source_id``, the source is an address: other elements of the same types leave its
@@ -67,8 +67,9 @@ class ListSource(RootSource):
                 the first row (or there is no row).
             data_schema: The Python schema of the rows, when it must not be
                 inferred from the values.
-            source_id: The source's name; by default ``list:<label>:<hex>`` of the
-                built table's hash.
+            source_id: The source's name; its id is ``list_v1:<name>``
+                (ITL-1425). By default the name is ``<label>:<hex>`` of the built
+                table's hash, so the id is ``list_v1:arrow_v1:<hex>``.
             record_id_columns: The key columns that name a row, in key order;
                 ``None`` or ``()`` for the position.
             hash_in_key_order: Hash the table for the default source id with its

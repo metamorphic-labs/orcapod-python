@@ -187,7 +187,10 @@ class CachedSource(RootSource):
             "cache_path_prefix": list(self._cache_path_prefix),
             # The path without its layout component, as ``cache_path`` takes it.
             "cache_path": list(self._unversioned_cache_path),
-            # Note: identity fields (content_hash, pipeline_hash, etc.) intentionally omitted
+            # Note: identity fields (content_hash, pipeline_hash, etc.) intentionally
+            # omitted: a cache has its wrapped source's identity, which the inner
+            # source's config carries; a proxy for a cache config that cannot be
+            # rebuilt takes it from there (serialization._source_proxy_from_config).
         }
 
     @classmethod

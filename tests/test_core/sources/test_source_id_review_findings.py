@@ -655,3 +655,74 @@ class TestThirdReview:
             rebuilt = DerivedSource.from_config(config)
             assert rebuilt.source_id == named.source_id == "derived_v1:copied"
             assert rebuilt.to_config()["source_name_given"] is True
+
+
+# ---------------------------------------------------------------------------
+# CodeRabbit review of PR 525 (head 5e6ad527)
+# ---------------------------------------------------------------------------
+
+
+class TestCodeRabbitReview:
+    def _legacy_tags_as_data_config(
+        self, csv_path: Path, tags: list[str]
+    ) -> dict[str, object]:
+        from orcapod.sources import DerivedSource
+
+        config = DerivedSource(
+            _csv(csv_path, tags, source_id="subjects"),
+            tags_as_data={"session": "session_copy", "subject": "subject_copy"},
+            source_id="copied",
+        ).to_config()
+        config["source_id"] = config.pop("source_name")
+        del config["source_name_given"]
+        del config["source_version"]
+        return config
+
+    @pytest.mark.parametrize("tags", TAG_ORDERS)
+    def test_a_legacy_tags_as_data_config_is_refused_as_legacy(self, csv_path, tags):
+        from orcapod.sources import DerivedSource
+
+        config = self._legacy_tags_as_data_config(csv_path, tags)
+        with pytest.raises(ValueError, match="saved before") as caught:
+            DerivedSource.require_saved_source_id(config)
+        assert "needs a source_id" not in str(caught.value)
+        with pytest.raises(ValueError, match="saved before"):
+            DerivedSource.from_config(config)
+        nested = {"source_type": "cached", "inner_source": config}
+        with pytest.raises(ValueError, match="saved before"):
+            DerivedSource.require_saved_source_id(nested)
+
+    def test_a_tags_as_data_config_without_a_name_still_needs_one(self, csv_path):
+        from orcapod.sources import DerivedSource
+
+        config = self._legacy_tags_as_data_config(csv_path, KEY)
+        del config["source_id"]
+        with pytest.raises(ValueError, match="needs a source_id"):
+            DerivedSource.require_saved_source_id(config)
+
+    @pytest.mark.parametrize("tags", TAG_ORDERS)
+    def test_a_nested_cache_that_cannot_be_rebuilt_keeps_its_source_id(
+        self, tmp_path, csv_path, tags
+    ):
+        inner = CachedSource(
+            _csv(csv_path, tags, source_id="subjects"),
+            cache_database=DeltaTableDatabase(tmp_path / "inner"),
+        )
+        outer = CachedSource(
+            inner, cache_database=DeltaTableDatabase(tmp_path / "outer")
+        )
+        assert outer.as_table().num_rows == len(ROWS)
+        config = outer.to_config()
+        # The cache configs hold no identity (ENG-320); the wrapped source's does.
+        assert "full_source_id" not in config["inner_source"]
+        assert config["inner_source"]["inner_source"]["full_source_id"] == (
+            "csv_v1:subjects"
+        )
+        # The inner cache cannot be rebuilt: a proxy stands in for it.
+        config["inner_source"]["cache_database"] = {"type": "not_a_database"}
+        reloaded = CachedSource.from_config(config)
+        assert isinstance(reloaded.cached_source, SourceProxy)
+        assert reloaded.source_id == outer.source_id == "csv_v1:subjects"
+        table = reloaded.as_table(columns={"system_tags": True})
+        assert table.num_rows == len(ROWS)
+        assert _source_ids(table) == {"csv_v1:subjects"}

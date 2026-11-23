@@ -215,7 +215,7 @@ class DerivedSource(RootSource):
 
     @classmethod
     def require_saved_source_id(cls, config: Mapping[str, Any]) -> None:
-        """Refuse a saved ``tags_as_data`` config without a ``source_id`` (ITL-1313).
+        """Refuse a saved ``tags_as_data`` config without a saved name (ITL-1313).
 
         Checks the config and every source config nested in it (under the keys of
         ``serialization.NESTED_SOURCE_CONFIG_KEYS``: a derived source's ``origin``, a
@@ -229,7 +229,10 @@ class DerivedSource(RootSource):
 
         Raises:
             ValueError: If the config, or a config nested in it, is a derived source
-                with ``tags_as_data`` but no ``source_id`` (absent or null).
+                with ``tags_as_data`` but no saved name (``source_name`` absent or
+                null), or one saved before ITL-1425 (a ``source_id`` without a
+                ``source_name``, refused by ``require_saved_name_fields`` with its
+                own message).
         """
         from orcapod.pipeline.serialization import NESTED_SOURCE_CONFIG_KEYS
 
@@ -238,6 +241,9 @@ class DerivedSource(RootSource):
             and config.get("tags_as_data") is not None
             and config.get("source_name") is None
         ):
+            # A config saved before ITL-1425 holds a source_id: say so, not that one
+            # is missing.
+            cls.require_saved_name_fields(dict(config))
             raise cls._missing_source_id()
         for key in NESTED_SOURCE_CONFIG_KEYS:
             nested = config.get(key)

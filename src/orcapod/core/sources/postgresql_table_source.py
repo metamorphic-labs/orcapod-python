@@ -84,7 +84,7 @@ def postgresql_table_address(
 ) -> str:
     """Return ``<host>:<port>/<database>.<schema>.<table>``, a PostgreSQL table's address.
 
-    The location of the default source id (``postgresql_table:<address>``, ITL-1267):
+    The default name of the source (its id is ``postgresql_table_v1:<address>``; ITL-1267, ITL-1425):
     the server the connection reached, then the table's three-part name. The host is
     written by ``_server_name``; the port is always the number. The address names one
     table only: the parts of the three-part name hold neither ``.`` nor ``/``, so the
@@ -153,8 +153,9 @@ class PostgreSQLTableSource(DBTableSource):
         system_tag_columns: Additional system-level tag columns.
         record_id_columns: The key columns that identify a row; ``None``: the
             primary key (a table without one is refused); ``()``: the position.
-        source_id: Canonical source name. Defaults to
-            ``postgresql_table:<host>:<port>/<database>.<schema>.<table>``
+        source_id: The source's name; its id is ``postgresql_table_v1:<name>``
+            (ITL-1425). The name defaults to
+            ``<host>:<port>/<database>.<schema>.<table>``
             (``postgresql_table_address``); connection parameters that name
             several servers, or a host beside a ``hostaddr``, give no default.
         label: Human-readable label for this source node.

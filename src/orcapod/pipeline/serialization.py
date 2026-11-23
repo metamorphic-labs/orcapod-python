@@ -651,6 +651,19 @@ def _source_proxy_from_config(
     from orcapod.core.sources.source_proxy import SourceProxy
     from orcapod.types import Schema
 
+    inner_config = config.get("inner_source")
+    if (
+        node_descriptor is None
+        and not config.get("content_hash")
+        and config.get("source_type") == "cached"
+        and isinstance(inner_config, dict)
+    ):
+        # A cache has its wrapped source's identity (id, hashes, schemas), and its own
+        # config holds none: the proxy stands in with the wrapped source's, so a cache
+        # nested in another cache that cannot be rebuilt keeps its source id and the
+        # outer cache still reads its rows (ITL-1425).
+        return _source_proxy_from_config(cast("dict[str, Any]", inner_config))
+
     if node_descriptor is not None:
         # New format: top-level node descriptor carries identity
         content_hash = node_descriptor.get("content_hash")

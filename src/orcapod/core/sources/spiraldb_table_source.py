@@ -203,8 +203,8 @@ class SpiralDBTableSource(RootSource):
     not apply, and the header says how many rows the table has.
 
     Identity. The source is identified by where the table is, never by its rows. The
-    default ``source_id`` is ``spiraldb_table:<project_id>.<dataset>.<table_name>@<table
-    id>`` (``spiraldb_table_address``): Spiral's own table identifier, then the table id,
+    default ``source_id`` is ``spiraldb_table_v1:<project_id>.<dataset>.<table_name>@<table
+    id>`` (the name from ``spiraldb_table_address`` after the kind part, ITL-1425): Spiral's own table identifier, then the table id,
     SpiralDB's own, so a table dropped and created again under the same name is a
     different source, and a renamed table gets a new source id too. A row is
     identified by its primary key (or ``record_id_columns``) in the JSON key form.
@@ -249,8 +249,9 @@ class SpiralDBTableSource(RootSource):
             memory, about 5 KB per row and node.
         batch_rows: The most rows handed on at once while iterating (default 8,192).
             A SpiralDB batch larger than this is held while its slices are handed on.
-        source_id: Canonical source name for the registry and provenance tokens.
-            Defaults to ``"<project_id>/<dataset>.<table_name>@<table id>"``.
+        source_id: The source's name; its id is ``spiraldb_table_v1:<name>``
+            (ITL-1425). The name defaults to
+            ``<project_id>.<dataset>.<table_name>@<table id>``.
         label: Human-readable label for this source node.
         data_context: Data context governing type conversion and hashing.
         config: OrcaPod configuration.

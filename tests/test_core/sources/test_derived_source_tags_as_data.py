@@ -412,6 +412,8 @@ class TestProvenance:
         r_table = recipe.as_table(columns={"source": True, "system_tags": True})
         d_table = derived.as_table(columns={"source": True, "system_tags": True})
         assert d_table.column_names == r_table.column_names
+        # The same Arrow types and nullability (a copy keeps its tag's exact type).
+        assert d_table.schema.equals(r_table.schema), "schema mismatch"
         # The same rows, system tags and tokens, but for the kind part of the source
         # id, which names the source that read them (ITL-1425).
         for name in d_table.column_names:

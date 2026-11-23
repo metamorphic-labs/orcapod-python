@@ -33,7 +33,7 @@ import sys
 import tempfile
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pyarrow as pa
 
@@ -61,8 +61,14 @@ class ProtoDerivedSource(RootSource):
         origin: The stream to derive from.
         tags_as_data: Maps a tag column of the origin to the name of the data column
             that receives a copy of it.
-        source_id: Canonical source name. Defaults to ``derived:<origin source_id>``.
+        source_id: The source's name; its id is ``derived_v1:<name>`` (ITL-1425).
+            Defaults to ``derived:<origin source_id>``.
     """
+
+    # The kind part of its id, as every source declares it (ITL-1425); the stream it
+    # builds carries the same kind part.
+    SOURCE_KIND: ClassVar[str] = "derived"
+    SOURCE_VERSION: ClassVar[int] = 1
 
     def __init__(
         self,
@@ -93,7 +99,10 @@ class ProtoDerivedSource(RootSource):
         builder = SourceStreamBuilder(self.data_context, self.orcapod_config)
         # The builder takes the name and the kind part apart since ITL-1425.
         self._stream = builder.build(
-            table, tag_columns=tag_keys, source_name=source_id, kind_part="derived_v1"
+            table,
+            tag_columns=tag_keys,
+            source_name=source_id,
+            kind_part=self.kind_part(),
         ).stream
 
     def identity_structure(self) -> Any:
