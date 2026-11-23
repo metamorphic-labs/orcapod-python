@@ -87,8 +87,10 @@ class ArrowTableSource(RootSource):
 
     TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
-    # The config type key; also the kind prefix of the default source id.
+    # The config type key; also the kind in the kind part of the source id.
     SOURCE_KIND: ClassVar[str] = "arrow_table"
+    # The version of this kind's implementation, in the kind part (ITL-1425).
+    SOURCE_VERSION: ClassVar[int] = 1
 
     def __init__(
         self,
@@ -118,8 +120,8 @@ class ArrowTableSource(RootSource):
             table,
             tag_columns=tag_columns,
             data_tags=source_data_tags(tag_columns, tag_only_columns),
-            source_id=self._source_id,
-            source_kind=self.SOURCE_KIND,
+            source_name=self._source_name,
+            kind_part=self.kind_part(),
             record_id_columns=normalize_record_id_columns(record_id_columns) or (),
             system_tag_columns=system_tag_columns,
             hash_in_key_order=hash_in_key_order,
@@ -136,8 +138,8 @@ class ArrowTableSource(RootSource):
         self._record_id_columns = normalize_record_id_columns(record_id_columns)
         self._key_columns = self._record_id_columns or ()
 
-        if self._source_id is None:
-            self._source_id = result.source_id
+        if self._source_name is None:
+            self._source_name = result.source_name
 
     def to_config(self, db_registry=None) -> dict[str, Any]:
         """Serialize metadata-only config (in-memory table is not serializable)."""
@@ -148,7 +150,7 @@ class ArrowTableSource(RootSource):
             if self._record_id_columns is None
             else list(self._record_id_columns),
             **self._tag_only_config(),
-            "source_id": self.source_id,
+            **self._source_id_config(),
             **self._identity_config(),
         }
 

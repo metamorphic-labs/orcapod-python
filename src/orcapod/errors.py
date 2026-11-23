@@ -695,6 +695,28 @@ class SourceCheckFailedWarning(UserWarning):
     """
 
 
+class SourceNameWarning(UserWarning):
+    """A given source name starts like the id of a source kind (ITL-1425).
+
+    Every source id is ``<kind>_v<N>:<name>``, and Orcapod always adds the kind part of
+    the source that reads the data. A given ``source_id`` is the name: one that starts
+    with ``<registered kind>_v<N>:`` (``delta_table_v1:units``) is accepted as it is,
+    nested after the reader's own kind part (``csv_v1:delta_table_v1:units``), and this
+    warning says so. Give the name alone.
+    """
+
+
+class SourceVersionWarning(UserWarning):
+    """A saved source was written by another version of its kind (ITL-1425).
+
+    A saved job records each source's kind, implementation version and name. Loaded
+    where the source class declares another version, the source is rebuilt as the
+    installed version, so its source id names that version (``delta_table_v2:units``
+    for a source saved as ``delta_table_v1:units``): a different source id, a different
+    source. The saved id is not rewritten.
+    """
+
+
 class RestrictedAggregationWarning(UserWarning):
     """A restricted source feeds an aggregating step of a job run (ITL-1218).
 

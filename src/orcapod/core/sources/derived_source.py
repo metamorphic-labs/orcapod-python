@@ -15,7 +15,7 @@ from typing_extensions import override
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.provisional import warn_provisional_source
 from orcapod.core.sources.reload import same_rows
-from orcapod.core.sources.source_ids import hash_source_id
+from orcapod.core.sources.source_ids import hash_source_name
 from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
     normalize_record_id_columns,
@@ -192,8 +192,10 @@ class DerivedSource(RootSource):
     """
 
     # The config type key (names the class a saved config is rebuilt with) and
-    # the kind prefix of the plain form's default source id.
+    # the kind in the source id's kind part, for both forms.
     SOURCE_KIND: ClassVar[str] = "derived"
+    # The version of this kind's implementation, in the kind part (ITL-1425).
+    SOURCE_VERSION: ClassVar[int] = 1
     PROVISIONAL = True
     """Provisional in data context v1, both forms (ITL-1331, ``PROVISIONAL_SOURCES``)."""
 
@@ -230,7 +232,7 @@ class DerivedSource(RootSource):
         if (
             config.get("source_type") == cls.SOURCE_KIND
             and config.get("tags_as_data") is not None
-            and config.get("source_id") is None
+            and config.get("source_name") is None
         ):
             raise cls._missing_source_id()
         for key in NESTED_SOURCE_CONFIG_KEYS:
@@ -273,12 +275,10 @@ class DerivedSource(RootSource):
 
         self._explicit_source_id = source_id
         if source_id is None:
-            # Only the plain form gets here without a source id. A source id is the
-            # source's name, used as-is in system tags and source-info values; a
-            # default built from a hash keeps a source-kind prefix and the hash's
-            # label (developer, November 11, 2026): ``derived:<algorithm
-            # label>:<hex>`` of the origin's content hash.
-            source_id = hash_source_id(self.SOURCE_KIND, origin.content_hash())
+            # Only the plain form gets here without a source id. Its default name is
+            # the origin's content hash with its label, after the kind part
+            # (ITL-1425): ``derived_v1:<algorithm label>:<hex>``.
+            source_id = hash_source_name(origin.content_hash())
         super().__init__(source_id=source_id, **kwargs)
         self._origin = origin
         self._record_id_columns = key_columns
@@ -299,8 +299,8 @@ class DerivedSource(RootSource):
         """Return what the content hash is built from.
 
         The plain form is tied to the origin node's content hash. The
-        ``tags_as_data`` form is the root source rule (class name, output schema,
-        ``source_id``, key columns) followed by the sorted mapping items: two mappings can give
+        ``tags_as_data`` form is the root source rule (``source_id``, output schema,
+        key columns) followed by the sorted mapping items: two mappings can give
         the same schema (two tag columns of one type copied to one name) while the
         copy holds different values, so with an explicit ``source_id`` the mapping
         has to tell the sources apart (ITL-1000).
@@ -344,7 +344,10 @@ class DerivedSource(RootSource):
             "record_id_columns": None
             if self._record_id_columns is None
             else list(self._record_id_columns),
-            "source_id": self._explicit_source_id,
+            # The plain form's default name is not written: it is recomputed from
+            # the origin.
+            "source_name": self._explicit_source_id,
+            "source_version": self.SOURCE_VERSION,
         }
         # Every concrete source has to_config; the abstract RootSource does not
         # declare it, so look it up as PipelineJob.save does.
@@ -395,7 +398,7 @@ class DerivedSource(RootSource):
         origin = resolve_source_from_config(config["origin"], db_registry=db_registry)
         return cls(
             origin,
-            source_id=config.get("source_id"),
+            source_id=cls.saved_source_name(config),
             tags_as_data=config["tags_as_data"],
             record_id_columns=config.get("record_id_columns"),
         )
@@ -594,7 +597,8 @@ class DerivedSource(RootSource):
             table,
             tag_columns=self._origin.keys()[0],
             data_tags=self._data_tags(),
-            source_id=self.source_id,
+            source_name=self.source_name,
+            kind_part=self.kind_part(),
             record_id_columns=self._record_id_columns or (),
         )
         return result.stream

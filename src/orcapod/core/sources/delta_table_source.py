@@ -10,7 +10,7 @@ from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource, saved_tag_only_columns
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
-from orcapod.core.sources.source_ids import location_source_id
+from orcapod.core.sources.source_ids import location_source_name
 from orcapod.core.sources.reload import same_rows
 from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
@@ -50,7 +50,9 @@ class DeltaTableSource(RootSource):
     """
 
     SOURCE_KIND: ClassVar[str] = "delta_table"
-    """Config type key and default source-id kind of this source (one vocabulary)."""
+    """Config type key and the kind in the source id's kind part (one vocabulary)."""
+    SOURCE_VERSION: ClassVar[int] = 1
+    """The version of this kind's implementation, in the kind part (ITL-1425)."""
     TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
     def __init__(
@@ -68,9 +70,7 @@ class DeltaTableSource(RootSource):
 
         if source_id is None:
             # The table folder's path or URI as passed: a relative path stays relative.
-            source_id = location_source_id(
-                self.SOURCE_KIND, os.fspath(delta_table_path)
-            )
+            source_id = location_source_name(os.fspath(delta_table_path))
         super().__init__(source_id=source_id, **kwargs)
 
         self._delta_table_path = resolved
@@ -99,8 +99,8 @@ class DeltaTableSource(RootSource):
         self._stream = result.stream
         self._tag_columns = result.tag_columns
         self._system_tag_columns = result.system_tag_columns
-        if self._source_id is None:
-            self._source_id = result.source_id
+        if self._source_name is None:
+            self._source_name = result.source_name
 
     def _read_table(self) -> "pa.Table":
         """Read the table at the Delta version ``self._delta_table`` is loaded at."""
@@ -117,7 +117,8 @@ class DeltaTableSource(RootSource):
             table,
             tag_columns=self._tag_columns,
             data_tags=source_data_tags(self._tag_columns, self._tag_only_columns),
-            source_id=self._source_id,
+            source_name=self._source_name,
+            kind_part=self.kind_part(),
             record_id_columns=self._record_id_columns or (),
             system_tag_columns=self._system_tag_columns,
         )
@@ -173,7 +174,7 @@ class DeltaTableSource(RootSource):
             "record_id_columns": None
             if self._record_id_columns is None
             else list(self._record_id_columns),
-            "source_id": self.source_id,
+            **self._source_id_config(),
             **self._identity_config(),
         }
 
@@ -188,5 +189,5 @@ class DeltaTableSource(RootSource):
             tag_only_columns=saved_tag_only_columns(config),
             system_tag_columns=config.get("system_tag_columns", ()),
             record_id_columns=config.get("record_id_columns"),
-            source_id=config.get("source_id"),
+            source_id=cls.saved_source_name(config),
         )

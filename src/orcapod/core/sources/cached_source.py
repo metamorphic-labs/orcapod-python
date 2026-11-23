@@ -11,6 +11,7 @@ from typing_extensions import override
 from orcapod import contexts
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.config import OrcapodConfig
+from orcapod.core.sources import source_ids
 from orcapod.core.sources.base import RootSource
 from orcapod.errors import InputValidationError, UnstorableColumnError
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
@@ -82,7 +83,9 @@ class CachedSource(RootSource):
     """
 
     SOURCE_KIND: ClassVar[str] = "cached"
-    """Config type key and default source-id kind of this source (one vocabulary)."""
+    """Config type key of this source. Not in its source id: it has its wrapped source's."""
+    SOURCE_VERSION: ClassVar[int] = 1
+    """The version of this kind's implementation (ITL-1425); not in its source id."""
 
     HASH_COLUMN_NAME = "_record_hash"
 
@@ -97,12 +100,15 @@ class CachedSource(RootSource):
         cache_database: ArrowDatabaseProtocol,
         cache_path_prefix: tuple[str, ...] = (),
         cache_path: tuple[str, ...] | None = None,
-        source_id: str | None = None,
         label: str | None = None,
         data_context: str | contexts.DataContext | None = None,
         config: OrcapodConfig | None = None,
     ) -> None:
         """Wrap ``source`` in a cache kept in ``cache_database``.
+
+        The cached source has its wrapped source's ``source_id`` (ITL-1425): its rows
+        are that source's rows, with that source's system tags and tokens; a cache is
+        not another implementation reading the data.
 
         Raises:
             ValueError: If ``source`` is restricted (a condition or a limit).
@@ -112,10 +118,7 @@ class CachedSource(RootSource):
         refuse_restricted_cache_input(source)
         if data_context is None:
             data_context = source.data_context_key
-        if source_id is None:
-            source_id = source.source_id
         super().__init__(
-            source_id=source_id,
             label=label,
             data_context=data_context,
             config=config,
@@ -177,7 +180,6 @@ class CachedSource(RootSource):
             "cache_path_prefix": list(self._cache_path_prefix),
             # The path without its layout component, as ``cache_path`` takes it.
             "cache_path": list(self._unversioned_cache_path),
-            "source_id": self.source_id,
             # Note: identity fields (content_hash, pipeline_hash, etc.) intentionally omitted
         }
 
@@ -236,7 +238,6 @@ class CachedSource(RootSource):
             cache_database=cache_db,
             cache_path_prefix=tuple(config.get("cache_path_prefix", ())),
             cache_path=tuple(config["cache_path"]) if "cache_path" in config else None,
-            source_id=config.get("source_id"),
         )
 
     # -------------------------------------------------------------------------
@@ -245,6 +246,16 @@ class CachedSource(RootSource):
 
     def identity_structure(self) -> Any:
         return self._source.identity_structure()
+
+    @property
+    def source_id(self) -> str:
+        """The wrapped source's source id: the cache presents that source's rows."""
+        return self._source.source_id
+
+    @property
+    def source_name(self) -> str:
+        """The name part of the wrapped source's source id."""
+        return source_ids.parse_source_id(self._source.source_id).name
 
     def _compute_arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema]":
         """The wrapped source's Arrow schemas: the cache stores that source's rows."""

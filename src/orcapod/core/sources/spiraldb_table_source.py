@@ -47,7 +47,7 @@ from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource, saved_tag_only_columns
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
-from orcapod.core.sources.source_ids import joined_location, location_source_id
+from orcapod.core.sources.source_ids import joined_location, location_source_name
 from orcapod.core.sources.derived_source import validate_tags_as_data
 from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
@@ -281,7 +281,9 @@ class SpiralDBTableSource(RootSource):
     """
 
     SOURCE_KIND: ClassVar[str] = "spiraldb_table"
-    """Config type key and default source-id kind of this source (one vocabulary)."""
+    """Config type key and the kind in the source id's kind part (one vocabulary)."""
+    SOURCE_VERSION: ClassVar[int] = 1
+    """The version of this kind's implementation, in the kind part (ITL-1425)."""
     TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
     # Whether a notebook display reads the first rows. False shows the schema and the
@@ -391,10 +393,9 @@ class SpiralDBTableSource(RootSource):
                 "column must hold strings, integers, booleans, timestamps or dates."
             )
         self._record_id_columns = given_key
-        if self._source_id is None:
-            self._source_id = location_source_id(
-                self.SOURCE_KIND,
-                spiraldb_table_address(project_id, dataset, table_name, self._table_id),
+        if self._source_name is None:
+            self._source_name = location_source_name(
+                spiraldb_table_address(project_id, dataset, table_name, self._table_id)
             )
         # Every declared tag is a data-tag unless kept tag-only (ITL-1023).
         self._data_tags = source_data_tags(resolved_tags, tag_only_columns)
@@ -405,7 +406,8 @@ class SpiralDBTableSource(RootSource):
             template = self._builder.build(
                 schema.empty_table(),
                 tag_columns=resolved_tags,
-                source_id=self._source_id,
+                source_name=self._source_name,
+                kind_part=self.kind_part(),
                 system_tag_columns=system_tag_columns,
                 data_tags=self._data_tags,
             )
@@ -430,7 +432,8 @@ class SpiralDBTableSource(RootSource):
             template = self._builder.build(
                 self._with_tag_copies(self._table_schema.empty_table()),
                 tag_columns=template.tag_columns,
-                source_id=self._source_id,
+                source_name=self._source_name,
+                kind_part=self.kind_part(),
                 system_tag_columns=template.system_tag_columns,
                 data_tags=self._data_tags,
             )
@@ -1069,7 +1072,7 @@ class SpiralDBTableSource(RootSource):
             "record_id_columns": None
             if self._record_id_columns is None
             else list(self._record_id_columns),
-            "source_id": self.source_id,
+            **self._source_id_config(),
             **self._identity_config(),
         }
 
@@ -1104,7 +1107,7 @@ class SpiralDBTableSource(RootSource):
             record_id_columns=config.get("record_id_columns"),
             batch_rows=config.get("batch_rows", DEFAULT_BATCH_ROWS),
             tags_as_data=config.get("tags_as_data"),
-            source_id=config.get("source_id"),
+            source_id=cls.saved_source_name(config),
             label=config.get("label"),
             data_context=config.get("data_context"),
             overrides=config.get("overrides"),

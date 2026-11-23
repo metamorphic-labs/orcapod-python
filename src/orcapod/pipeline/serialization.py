@@ -589,6 +589,31 @@ def resolve_source_from_config(
         raise
 
 
+def saved_source_id(config: dict[str, Any]) -> str:
+    """Rebuild the source id a saved source config names (ITL-1425).
+
+    A config holds the kind (``source_type``), the implementation version
+    (``source_version``) and the name (``source_name``) apart; the id is rebuilt from
+    them by ``source_ids.build_source_id``, never parsed out of one string. A config
+    that does not name its source (a plain derived source, whose default name is
+    recomputed from its origin) gives ``"unknown"``.
+
+    Args:
+        config: A saved source config.
+
+    Returns:
+        The source id, or ``"unknown"``.
+    """
+    from orcapod.core.sources.source_ids import build_source_id
+
+    kind = config.get("source_type")
+    version = config.get("source_version")
+    name = config.get("source_name")
+    if kind is None or version is None or name is None:
+        return "unknown"
+    return build_source_id(kind, version, name)
+
+
 def _source_proxy_from_config(
     config: dict[str, Any],
     node_descriptor: dict[str, Any] | None = None,
@@ -665,7 +690,7 @@ def _source_proxy_from_config(
     )
 
     return SourceProxy(
-        source_id=config.get("source_id", "unknown"),
+        source_id=saved_source_id(config),
         content_hash_str=content_hash,
         pipeline_hash_str=pipeline_hash_val,
         tag_schema=tag_schema,

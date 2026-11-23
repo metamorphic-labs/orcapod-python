@@ -47,6 +47,8 @@ class DataFrameSource(RootSource):
 
     # The config type key; also the kind prefix of the default source id.
     SOURCE_KIND: ClassVar[str] = "data_frame"
+    # The version of this kind's implementation, in the kind part (ITL-1425).
+    SOURCE_VERSION: ClassVar[int] = 1
 
     def __init__(
         self,
@@ -100,8 +102,8 @@ class DataFrameSource(RootSource):
             arrow_table,
             tag_columns=tag_columns,
             data_tags=source_data_tags(tag_columns, tag_only_columns),
-            source_id=self._source_id,
-            source_kind=self.SOURCE_KIND,
+            source_name=self._source_name,
+            kind_part=self.kind_part(),
             record_id_columns=self._key_columns,
             hash_in_key_order=hash_in_key_order,
             system_tag_columns=system_tag_columns,
@@ -112,8 +114,8 @@ class DataFrameSource(RootSource):
         self._tag_only_columns = tuple(
             c for c in result.tag_columns if c not in result.data_tags
         )
-        if self._source_id is None:
-            self._source_id = result.source_id
+        if self._source_name is None:
+            self._source_name = result.source_name
 
     def to_config(self, db_registry=None) -> dict[str, Any]:
         """Serialize metadata-only config (DataFrame is not serializable)."""
@@ -121,7 +123,7 @@ class DataFrameSource(RootSource):
             "source_type": self.SOURCE_KIND,
             "tag_columns": list(self._tag_columns),
             **self._tag_only_config(),
-            "source_id": self.source_id,
+            **self._source_id_config(),
             **self._identity_config(),
         }
 

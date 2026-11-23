@@ -100,7 +100,9 @@ class SQLiteTableSource(DBTableSource):
     """
 
     SOURCE_KIND: ClassVar[str] = "sqlite_table"
-    """Config type key and default source-id kind of this source (one vocabulary)."""
+    """Config type key and the kind in the source id's kind part (one vocabulary)."""
+    SOURCE_VERSION: ClassVar[int] = 1
+    """The version of this kind's implementation, in the kind part (ITL-1425)."""
 
     def __init__(
         self,
@@ -241,7 +243,7 @@ class SQLiteTableSource(DBTableSource):
             tag_only_columns=saved_tag_only_columns(config),
             system_tag_columns=config.get("system_tag_columns", ()),
             record_id_columns=config.get("record_id_columns"),
-            source_id=config.get("source_id"),
+            source_id=cls.saved_source_name(config),
             label=config.get("label"),
             data_context=config.get("data_context"),
         )
