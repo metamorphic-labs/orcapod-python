@@ -1198,6 +1198,11 @@ def _append_refusal(
         reason = _unmergeable_name_reason(name)
         if reason is not None:
             return name, reason
+    # Folded once per check, not once per new column (review of PR 504, round eight).
+    held_clash = _differ_only_in_case(list(held))
+    held_folded: dict[str, str] = {}
+    for name in held:
+        held_folded.setdefault(name.lower(), name)
     for field in rows.schema:
         if field.name in held:
             change = _column_change(held[field.name], field)
@@ -1207,9 +1212,11 @@ def _append_refusal(
             # A new name enters the stored schema only when the MERGE evolves it;
             # without evolution Delta leaves an unknown column out, as main did
             # (review of PR 504, round four).
-            clash = _differ_only_in_case([*held, field.name])
-            if clash is not None:
-                return field.name, _case_reason(*clash)
+            if held_clash is not None:
+                return field.name, _case_reason(*held_clash)
+            stored_name = held_folded.get(field.name.lower())
+            if stored_name is not None:
+                return field.name, _case_reason(stored_name, field.name)
     exact = _exact_refusal(delta_table, rows)
     if exact is not None:
         return exact
@@ -2297,8 +2304,8 @@ class DeltaTableDatabase:
         """
         position = _case_clash_position(schema.names)
         if position is not None:
-            # By position: the name may be repeated (``a``, ``A``, ``A``), and a
-            # lookup by a repeated name raises (review of PR 511).
+            # By position: the name may be repeated (``x``, ``X``, ``X``), and a
+            # lookup by a repeated name raises (reviews of PR 504 and PR 511).
             clash = _differ_only_in_case(schema.names)
             assert clash is not None
             raise UnstorableColumnError(
@@ -2423,7 +2430,7 @@ class DeltaTableDatabase:
                 # replaced: the rows are refused only if the version stored now
                 # refuses them too (review of PR 504, round seven). An accepted add
                 # keeps the cached handle, so it costs no reload.
-                self._delta_table_cache.pop(self._get_record_key(record_path), None)
+                self._forget_loaded_table(record_path)
                 delta_table = self._stored_table_for_check(record_path)
                 refusal = (
                     None
@@ -2439,6 +2446,18 @@ class DeltaTableDatabase:
                 f"{self._get_table_uri(record_path)!r}: column {column!r}: {reason}. "
                 "The stored rows are unchanged and nothing was written."
             )
+
+    def _forget_loaded_table(self, record_path: tuple[str, ...]) -> None:
+        """Drop the table handle and the snapshot of it cached for ``record_path``.
+
+        Both go together: the next load may find a table another writer created
+        again at the same version, and a snapshot is kept by version only, so a
+        snapshot left behind would serve the old table's rows for the new one
+        (review of PR 504, round eight).
+        """
+        record_key = self._get_record_key(record_path)
+        self._delta_table_cache.pop(record_key, None)
+        self._snapshots.pop(record_key, None)
 
     def _stored_table_for_check(
         self, record_path: tuple[str, ...]
@@ -2563,7 +2582,7 @@ class DeltaTableDatabase:
         if identity_refusal(_stored_identities(delta_table), rows) is None:
             return None
         # Decide the refusal on the version stored now.
-        self._delta_table_cache.pop(self._get_record_key(record_path), None)
+        self._forget_loaded_table(record_path)
         try:
             delta_table = self._get_delta_table(record_path)
         except OrcapodDatabaseReadError:

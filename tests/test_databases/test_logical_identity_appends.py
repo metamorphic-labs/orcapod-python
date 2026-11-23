@@ -2319,12 +2319,13 @@ def test_delta_recorded_type_decides_a_child_the_log_keeps_plain(
 def test_delta_handle_after_delete_and_recreate_reads_the_new_tables_ids(
     tmp_path: Path,
 ) -> None:
-    """Round 5, finding 2 (ITL-1413), fixed by the review of PR 511: a held handle
-    whose table was deleted and recreated at the same path, at the same Delta version,
-    no longer reuses the old table's cached ids. Snapshots are keyed by the Delta
-    table's own id as well as its version, so an old id the new table lacks is stored,
-    and an id of the new table is skipped (every commit to an existing table is a
-    MERGE, ITL-1377)."""
+    """Round 5, finding 2 (ITL-1413): a held handle whose table was deleted and
+    recreated at the same path, at the same Delta version, no longer reuses the old
+    table's cached ids, so an old id the new table lacks is stored once, and an id of
+    the new table is not stored twice. Here the add of another identifier reopens the
+    table, and a reopen drops the snapshot with the handle (review of PR 504, round
+    eight); ITL-1377 also keys every snapshot by the Delta table's own id and commits
+    every append to an existing table as a MERGE."""
     import shutil
 
     import deltalake
