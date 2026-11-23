@@ -193,15 +193,7 @@ def make_source(
         The source. A column is nullable exactly when it holds a null.
     """
     arrangement = arrangement or Arrangement(spec.tags, TAGS_FIRST, PLAIN)
-    names = _layout(spec, arrangement.tag_order, arrangement.layout)
-    columns = {name: spec.columns[name] for name in names}
-    if rows is not None:
-        columns = {name: column.take(list(rows)) for name, column in columns.items()}
-    schema = pa.schema(
-        pa.field(name, column.type, nullable=column.null_count > 0)
-        for name, column in columns.items()
-    )
-    table = pa.table(list(columns.values()), schema=schema)
+    table = make_table(spec, arrangement, rows=rows)
     if arrangement.roles == PLAIN:
         tag_only: bool | list[str] = True
     elif arrangement.roles == DATA_TAGS:
@@ -216,6 +208,21 @@ def make_source(
         source_id=source_id or spec.source_id,
         tag_only_columns=tag_only,
     )
+
+
+def make_table(
+    spec: Spec, arrangement: Arrangement, *, rows: Sequence[int] | None = None
+) -> pa.Table:
+    """Build the arranged Arrow input, marking only columns with nulls nullable."""
+    names = _layout(spec, arrangement.tag_order, arrangement.layout)
+    columns = {name: spec.columns[name] for name in names}
+    if rows is not None:
+        columns = {name: column.take(list(rows)) for name, column in columns.items()}
+    schema = pa.schema(
+        pa.field(name, column.type, nullable=column.null_count > 0)
+        for name, column in columns.items()
+    )
+    return pa.table(list(columns.values()), schema=schema)
 
 
 def row_fingerprint(
