@@ -9,7 +9,7 @@ Requires the ``spiraldb`` optional extra: ``pip install orcapod[spiraldb]``.
 Authentication is handled externally — run ``spiral login`` once; pyspiral keeps
 the credentials in its per-user application directory
 (``~/Library/Application Support/pyspiral/`` on macOS, ``~/.config/pyspiral/`` on Linux).
-The SDK client belongs to this source and is reused for its reads and freshness checks.
+The SDK client is reused for reads and freshness checks, including on restricted copies.
 Use a new source after changing the SDK endpoint, credentials or options. Use the source
 as a context manager or call ``close()`` after its reads and jobs have finished.
 
@@ -569,7 +569,7 @@ class SpiralDBTableSource(RootSource):
         return restricted
 
     def _copy(self) -> "SpiralDBTableSource":
-        """Return a new source object on the same table, sharing no mutable state.
+        """Return a new source on the same table and configured client.
 
         The future ``copy()`` (ITL-1219). No metadata is read again, so the copy
         reads the version this source pinned. Shared, because immutable: the table
@@ -577,17 +577,21 @@ class SpiralDBTableSource(RootSource):
         the data context and config, the condition (immutable) and limit, the tuples of
         tag, data-tag and key columns and the pinned version. Copied: the
         ``tags_as_data`` and ``overrides`` mappings. Reset: the content and pipeline
-        hash caches (they are recomputed, equal, on first use) and the SDK client
-        (the copy opens its own on demand). The modified time is carried over;
-        ``_apply_restriction`` moves it. A SpiralDB source holds no row
-        it read, so there is nothing else to reset.
+        hash caches (they are recomputed, equal, on first use). Each source owns
+        a connector that holds the same SDK client and can be closed independently.
+        The modified time is carried over until ``_apply_restriction`` moves it.
+        A SpiralDB source holds no rows it read.
         """
-        duplicate = copy.copy(self)
+        with self._connection_lock:
+            connection = self._connection
+            if connection is None:
+                raise RuntimeError("SpiralDBTableSource is closed")
+            duplicate = copy.copy(self)
+            duplicate._connection = connection.share_client()
         duplicate._tags_as_data = dict(self._tags_as_data)
         duplicate._overrides = (
             None if self._overrides is None else dict(self._overrides)
         )
-        duplicate._connection = None
         duplicate._connection_lock = Lock()
         duplicate._content_hash_cache = {}
         duplicate._pipeline_hash_cache = {}
@@ -688,7 +692,7 @@ class SpiralDBTableSource(RootSource):
             return self._connection
 
     def close(self) -> None:
-        """Release this source's SDK client after its reads have finished."""
+        """Release this source's reference to the SDK client after its reads finish."""
         with self._connection_lock:
             self._closed = True
             if self._connection is not None:
@@ -713,6 +717,18 @@ class SpiralDBTableSource(RootSource):
         """The table as error messages name it."""
         return f"{self._project_id}/{self._dataset}.{self._table_name}"
 
+    def _lookup_table(self) -> SpiralDBTable:
+        """Resolve the name and check that it still identifies this source's table."""
+        table = self._connector().lookup_table(self._table_name)
+        table_id = table.table_id
+        if table_id != self._table_id:
+            raise ValueError(
+                f"SpiralDB table {self._qualified!r} is now another table (id "
+                f"{table_id!r}; the source reads {self._table_id!r}): it was "
+                "dropped and created again. Build the source again to read it."
+            )
+        return table
+
     @property
     def row_count_estimate(self) -> int:
         """The whole table's row count as SpiralDB's manifests record it.
@@ -722,9 +738,8 @@ class SpiralDBTableSource(RootSource):
         account, and the count can be above what a scan returns when rows were
         deleted or overwritten and not yet compacted.
         """
-        return self._connector().get_row_count_estimate(
-            self._table_name, asof=self._asof
-        )
+        asof = self._asof
+        return self._lookup_table().row_count_estimate(asof=asof)
 
     @override
     def check_for_new_data(self) -> bool:
@@ -751,14 +766,7 @@ class SpiralDBTableSource(RootSource):
             return False
         # One lookup per check (ITL-1350): a table dropped and created again since
         # is found by this lookup, and its schema and version come from it.
-        table = self._connector().lookup_table(self._table_name)
-        table_id = table.table_id
-        if table_id != self._table_id:
-            raise ValueError(
-                f"SpiralDB table {self._qualified!r} is now another table (id "
-                f"{table_id!r}; the source reads {self._table_id!r}): it was "
-                "dropped and created again. Build the source again to read it."
-            )
+        table = self._lookup_table()
         schema = arrow_utils.drop_system_columns(
             table.arrow_schema().empty_table()
         ).schema
@@ -813,7 +821,7 @@ class SpiralDBTableSource(RootSource):
                 key column holds a null.
         """
         asof = self._asof
-        table = self._connector().lookup_table(self._table_name)
+        table = self._lookup_table()
         yield from self._read_batches(
             table, asof=asof, limit=self._limit, max_rows=self._max_rows
         )
@@ -987,7 +995,7 @@ class SpiralDBTableSource(RootSource):
         limit = self._limit
         head_limit = n if limit is None else min(n, limit)
         asof = self._asof
-        table = self._connector().lookup_table(self._table_name)
+        table = self._lookup_table()
         rows = self._whole_table(
             self._read_batches(table, asof=asof, limit=head_limit, max_rows=None),
             columns=columns,

@@ -705,16 +705,43 @@ class FakeProject:
 
     def list_tables(self) -> list[TableResource]:
         """Return every table of the project, in every dataset."""
+        return self._list_tables()
+
+    def _list_tables(
+        self, dataset: str | None = None, table: str | None = None
+    ) -> list[TableResource]:
+        """Apply the SDK's project API filters, which omit empty values."""
         out = []
         for ident in self._store.identifiers(self._project_id):
-            dataset, _, table = ident.partition(".")
+            found_dataset, _, found_table = ident.partition(".")
+            if (dataset and dataset != found_dataset) or (
+                table and table != found_table
+            ):
+                continue
             table_id = self._store.table_id(self._project_id, ident)
-            out.append(TableResource(table_id, self._project_id, dataset, table))
+            out.append(
+                TableResource(table_id, self._project_id, found_dataset, found_table)
+            )
         return out
 
     def table(self, identifier: str) -> FakeTable:
-        """Open the table ``"<dataset>.<table>"``."""
-        return FakeTable(self._store, self._project_id, identifier)
+        """Parse and resolve a name as pyspiral does, including omitted filters."""
+        parts = identifier.split(".")
+        if len(parts) == 1:
+            dataset, table = "default", parts[0]
+        elif len(parts) == 2:
+            dataset, table = parts
+        else:
+            raise ValueError(
+                f"Invalid table identifier: {self._project_id}.{identifier}"
+            )
+        resources = self._list_tables(dataset, table)
+        if not resources:
+            raise ValueError(f"Table not found: {self._project_id}.{dataset}.{table}")
+        resolved = resources[0]
+        return FakeTable(
+            self._store, self._project_id, f"{resolved.dataset}.{resolved.table}"
+        )
 
     def create_table(
         self,

@@ -24,6 +24,7 @@ import logging
 import re
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
+from copy import copy
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
@@ -567,6 +568,11 @@ class SpiralDBConnector:
         if self._closed:
             raise RuntimeError("SpiralDBConnector is closed")
 
+    def share_client(self) -> SpiralDBConnector:
+        """Return an independently closable connector in the same SDK client scope."""
+        self._require_open()
+        return copy(self)
+
     def _table_id(self, table_name: str) -> str:
         """Return the dataset-qualified table identifier for a plain table name."""
         return f"{self._dataset}.{table_name}"
@@ -600,6 +606,16 @@ class SpiralDBConnector:
         """
         self._require_open()
         identifier = self._table_id(table_name)
+        if (
+            not self._dataset
+            or not table_name
+            or "." in self._dataset
+            or "." in table_name
+        ):
+            # The SDK omits empty filters and treats dots as identifier separators.
+            raise SpiralDBTableNotFoundError(
+                f"Table not found: {self._project_id}.{identifier}"
+            )
         try:
             table = self._project.table(identifier)
         except ValueError as exc:

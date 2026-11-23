@@ -228,13 +228,15 @@ def test_lookup_preserves_unrelated_sdk_errors(
     assert calls == {"client": 1}
 
 
-def test_restricted_copy_owns_its_client(calls: collections.Counter[str]) -> None:
+def test_restricted_copy_keeps_client_after_parent_closes(
+    calls: collections.Counter[str],
+) -> None:
     source = _source("plain")
     restricted = source.where(subject="s0")
     source.close()
     calls.clear()
     assert sorted(cast("list[int]", restricted.as_table()["k"].to_pylist())) == [0, 2]
-    assert calls == {"client": 1, "lookup": 1, "metadata": 1, "scan": 1}
+    assert calls == {"lookup": 1, "metadata": 1, "scan": 1}
     restricted.close()
 
 
@@ -271,6 +273,109 @@ def test_each_read_resolves_once_and_reuses_its_client(
     assert head.table.num_rows == 1
     assert head.total_rows == 3
     assert calls == {"lookup": 1, "metadata": 1, "scan": 1, "manifest": 1}
+
+
+@pytest.mark.parametrize(
+    ("dataset", "name"),
+    [("default", ""), ("", "t"), ("default", "default.t"), ("default.extra", "t")],
+)
+def test_source_rejects_malformed_names_before_sdk_lookup(
+    calls: collections.Counter[str], dataset: str, name: str
+) -> None:
+    """Empty or already qualified names keep the source's missing-table diagnostic."""
+    with pytest.raises(ValueError) as exc:
+        SpiralDBTableSource(
+            _PROJECT, name, dataset=dataset, source_id="explicit-source"
+        )
+    assert type(exc.value) is ValueError
+    assert str(exc.value) == (
+        f"SpiralDB project {_PROJECT!r}, dataset {dataset!r}: "
+        f"Table {name!r} not found in database."
+    )
+    assert calls["lookup"] == calls["metadata"] == calls["scan"] == 0
+
+
+def _write_scope_table(root_layout: list[str], value: int) -> str:
+    """Write the same-shaped table with a recognizable value in this fake endpoint."""
+    project = fake_pyspiral.FakeSpiral().project(_PROJECT)
+    table = project.create_table("default.t", key_schema=_keys(["subject", "k"]))
+    rows = _rows(root_layout, [0])
+    rows = rows.set_column(
+        rows.schema.get_field_index("x"),
+        _FIELDS["x"],
+        pa.array([value], type=pa.int64()),
+    )
+    table.write(rows)
+    write_nullability_record(table, rows.schema)
+    return table.table_id
+
+
+async def _async_x(source: SpiralDBTableSource) -> list[object]:
+    """Return the x values from a public asynchronous source read."""
+    return [data.as_dict()["x"] async for _, data in source.async_iter_data()]
+
+
+@pytest.mark.parametrize("async_read", [False, True])
+def test_copy_keeps_its_original_endpoint(tmp_path: Path, async_read: bool) -> None:
+    layout = ["subject", "k", "x", "y"]
+    with fake_pyspiral.install(tmp_path / "endpoint-a"):
+        original_id = _write_scope_table(layout, 14)
+        source = _source("plain", asof=1)
+        restricted = source.where(subject="s0")
+        assert restricted.table_id == original_id
+
+    with fake_pyspiral.install(tmp_path / "endpoint-b"):
+        assert _write_scope_table(layout, 29) != original_id
+        if async_read:
+            assert asyncio.run(_async_x(restricted)) == [14]
+        else:
+            assert restricted.as_table()["x"].to_pylist() == [14]
+
+
+@pytest.mark.parametrize("asof", [None, 1])
+@pytest.mark.parametrize("mode", ["table", "iter", "async", "head", "count"])
+def test_each_read_refuses_a_replacement_before_scanning(
+    calls: collections.Counter[str], asof: int | None, mode: str
+) -> None:
+    source = _source("plain", asof=asof)
+    project = fake_pyspiral.FakeSpiral().project(_PROJECT)
+    project.drop_table("default.t")
+    keys, layout = _ARRANGED["keys"], _ARRANGED["layout"]
+    replacement = project.create_table("default.t", key_schema=_keys(keys))
+    replacement.write(_rows(layout, [0]))
+    write_nullability_record(replacement, _schema(layout))
+    reads: dict[str, Callable[[], object]] = {
+        "table": source.as_table,
+        "iter": lambda: list(source.iter_data()),
+        "async": lambda: asyncio.run(_async_x(source)),
+        "head": lambda: source.head(1),
+        "count": lambda: source.row_count_estimate,
+    }
+    calls.clear()
+    with pytest.raises(ValueError, match="dropped and created again"):
+        reads[mode]()
+    assert calls == {"lookup": 1}
+
+
+def test_two_async_job_readers_use_the_restricted_sources_endpoint(
+    tmp_path: Path,
+) -> None:
+    layout = ["subject", "k", "x", "y"]
+    with fake_pyspiral.install(tmp_path / "endpoint-a"):
+        _write_scope_table(layout, 14)
+        restricted = _source("plain", asof=1).where(subject="s0")
+    with fake_pyspiral.install(tmp_path / "endpoint-b"):
+        _write_scope_table(layout, 29)
+        job = PipelineJob(name="two-readers", database=InMemoryArrowDatabase())
+        with job:
+            SelectColumns(["subject", "x"])(restricted, label="left")
+            SelectColumns(["k", "x"])(restricted, label="right")
+        start = len(fake_pyspiral.scan_log)
+        job.run(orchestrator=AsyncPipelineOrchestrator())
+        assert job.nodes["left"].as_table()["x"].to_pylist() == [14]
+        assert job.nodes["right"].as_table()["x"].to_pylist() == [14]
+        # The async job fans one scan out to both readers of this source.
+        assert len(fake_pyspiral.scan_log) - start == 1
 
 
 @pytest.mark.parametrize("orchestrator", [None, AsyncPipelineOrchestrator])
