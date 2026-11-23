@@ -358,18 +358,59 @@ class TestReviewOfPr503:
         assert not reading.bound
         assert reading.lines() == ["slot 'units': no source bound"]
 
-    def test_two_restrictions_of_one_table_are_two_readings(self, spiral):
-        source = _event()
-        stream = SemiJoin()(
-            source.where(subject_id="m1"), source.where(subject_id="m2")
-        )
-        conditions = [r.condition.text() for r in stream.explain().sources]
-        assert conditions == ["subject_id='m1'", "subject_id='m2'"]
+    @pytest.mark.parametrize(
+        ("first", "second", "expected"),
+        [
+            (
+                {"where": {"subject_id": "m1"}},
+                {"where": {"subject_id": "m2"}},
+                ["where subject_id='m1'", "where subject_id='m2'"],
+            ),
+            (
+                {"where": {"subject_id": "m1"}},
+                {},
+                ["nothing (the whole table is read)", "where subject_id='m1'"],
+            ),
+            ({"limit": 1}, {"limit": 2}, ["limit 1", "limit 2"]),
+        ],
+        ids=["two_conditions", "condition_and_none", "two_limits"],
+    )
+    def test_two_restrictions_of_one_table_are_two_readings(
+        self, spiral, first, second, expected
+    ):
+        def build(restriction: dict[str, Any]) -> SpiralDBTableSource:
+            source = (
+                _event(limit=restriction["limit"])
+                if "limit" in restriction
+                else _event()
+            )
+            if "where" in restriction:
+                source = source.where(**restriction["where"])
+            return source
 
-    def test_a_step_reached_by_two_paths_is_listed_once(self):
+        stream = SemiJoin()(build(first), build(second))
+        applied = sorted(
+            r.lines()[1].removeprefix("  applied by the source: ")
+            for r in stream.explain().sources
+        )
+        assert applied == expected
+
+    @pytest.mark.parametrize(
+        "combine",
+        [
+            lambda late: SemiJoin()(late, late.select_data_columns(["t"])),
+            lambda late: SemiJoin()(
+                late, late.select_data_columns(["t", "rate"]).select_data_columns(["t"])
+            ),
+            lambda late: MergeJoin()(
+                late.select_data_columns(["t"]), late.select_data_columns(["rate"])
+            ),
+        ],
+        ids=["semijoin_depths_0_1", "semijoin_depths_0_2", "merge_join_two_branches"],
+    )
+    def test_a_step_reached_by_two_paths_is_listed_once(self, combine):
         late = _units().filter(col("t") >= 1.0, label="late")
-        stream = SemiJoin()(late, late.select_data_columns(["t"]))
-        (reading,) = stream.explain().sources
+        (reading,) = combine(late).explain().sources
         assert [s.label for s in reading.steps].count("late") == 1
 
     def test_shared_inputs_cost_one_visit_per_node(self):
@@ -380,12 +421,33 @@ class TestReviewOfPr503:
         assert reading.steps[0].operator == "Filter"
 
     def test_explain_is_on_every_stream_type(self):
-        stream: StreamProtocol = _units().filter(col("t") >= 1.0)
-        assert stream.explain().sources[0].name == "units"
+        # Through a parameter typed StreamProtocol: basedpyright checks the protocol
+        # declares explain() (it narrows an annotated variable to the value's class).
+        def explained(stream: StreamProtocol) -> Explanation:
+            return stream.explain()
+
+        assert explained(_units().filter(col("t") >= 1.0)).sources[0].name == "units"
 
 
 class _Loud(str):
     """A ``str`` subclass whose ``__str__`` and ``__repr__`` are user code."""
+
+    def __str__(self) -> str:
+        raise AssertionError("explain() ran user code")
+
+    def __repr__(self) -> str:
+        raise AssertionError("explain() ran user code")
+
+
+class _LoudInt(int):
+    """An ``int`` subclass whose ``__repr__`` is user code."""
+
+    def __repr__(self) -> str:
+        raise AssertionError("explain() ran user code")
+
+
+class _LoudObject:
+    """An object whose ``__str__`` and ``__repr__`` are user code."""
 
     def __str__(self) -> str:
         raise AssertionError("explain() ran user code")
@@ -406,6 +468,47 @@ class TestSecondReviewOfPr503:
         assert (
             step.text == 'session=<_Loud>, unit=3, <_Loud>, [(col("t")) > (dyn int: 1)]'
         )
+
+    @pytest.mark.parametrize(
+        ("value", "shown"),
+        [
+            (_Loud("s1"), "<_Loud>"),
+            (_LoudInt(3), "<_LoudInt>"),
+            (_LoudObject(), "<_LoudObject>"),
+            ("s1", "'s1'"),
+            (3, "3"),
+            (2.5, "2.5"),
+            (True, "True"),
+            (b"x", "b'x'"),
+            (None, "None"),
+        ],
+        ids=[
+            "str_subclass",
+            "int_subclass",
+            "object",
+            "str",
+            "int",
+            "float",
+            "bool",
+            "bytes",
+            "none",
+        ],
+    )
+    def test_a_constraint_value_is_written_only_by_a_builtin_repr(self, value, shown):
+        op = PolarsFilter(constraints={"session": value})
+        assert op.rows_dropped_text(0, []) == f"session={shown}"
+
+    @pytest.mark.parametrize(
+        ("predicate", "shown"),
+        [
+            (_Loud("t > 1"), "<_Loud>"),
+            (_LoudObject(), "<_LoudObject>"),
+            ([True, False], "<list>"),
+        ],
+        ids=["str_subclass", "object", "mask"],
+    )
+    def test_a_predicate_is_written_only_by_polars(self, predicate, shown):
+        assert PolarsFilter(predicates=[predicate]).rows_dropped_text(0, []) == shown
 
     def test_a_dict_pick_lists_its_misses(self):
         source = DictSource(
