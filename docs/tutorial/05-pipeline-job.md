@@ -234,8 +234,6 @@ print(len(calls))
 ```
 
 This is a different, empty database, so everything was computed once more: 71 further calls.
-(You will see many `WARN deltalake_core::writer::stats` lines while it writes. They are
-harmless; see [Part 0](00-setup.md#messages-you-can-ignore).)
 
 Now do what a new Python session would do: make a new database object for the same directory,
 build the job, run it.

@@ -79,10 +79,19 @@ another order): every value keeps its field's name, and an omitted field reads a
 in the appended rows. An append is refused, naming the column and the field, when it
 would add a non-nullable struct field (the stored rows have no value for it) or add a
 struct field inside a map (Delta cannot). A nested field the append makes nullable reads
-as nullable afterwards, as Delta stores it.
+as nullable afterwards, as Delta stores it. A column whose Arrow type Delta keeps
+through a recorded type (the "(recorded type)" cells below, every list and map
+included) cannot gain a field: the record is the column's field metadata, which Delta
+(deltalake 1.5 and later) does not let a commit change, so such an append is refused,
+naming the column, before anything is queued. A struct column without a record still
+gains fields, and an append may still add a new column. Another logical type over a
+stored logical column's storage type is refused the same way.
 
 An append matches columns by name, exactly as Arrow matches them (`a` and `A` are two
-columns), never by position. Rows whose columns are the held table's columns in another
+columns), never by position. Delta alone refuses two columns, or two fields of one
+struct, whose names differ only in case: Delta column names are case-insensitive, so
+such a table, or an append that would make one, is refused naming both, before anything
+is queued. Rows whose columns are the held table's columns in another
 order, each field equal to the held one (the same type at every depth, the same logical
 type, the same field attributes), are put in the held order, whether the table was
 flushed in between or not. The in-memory database matches them to the rows still pending,
