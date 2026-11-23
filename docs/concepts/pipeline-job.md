@@ -207,6 +207,14 @@ its result table records which inputs it was performed for. Jobs that share a re
 database share that record too: a job performs the action only for inputs no job sharing
 the database has performed it for.
 
+### Result commit ordering
+
+A function node publishes its pipeline records after the referenced results
+commit, also when the results are in a separate result database. Failed result batches
+withdraw their pending pipeline records.
+`NoOpArrowDatabase` explicitly discards results and still allows pipeline
+bookkeeping to be written.
+
 ### Connector databases
 
 A `ConnectorArrowDatabase` stores a column only when its connector can store it as written.

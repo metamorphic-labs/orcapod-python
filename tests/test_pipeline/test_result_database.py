@@ -669,8 +669,8 @@ class TestACachedSourceIsNotTheJobs:
         assert not any(p.endswith("sdb_v1") for p in table_paths(db))
 
 
-# B2 and B3 are fixed on main for every case by ITL-1412; this PR merges after it.
-# Until then these pin the failures on the two-database form, strictly.
+# B2 and B3 were fixed on main for every case by ITL-1412: these check that the order
+# holds across two databases (a separate result database).
 
 
 def _dangling_record_ids(pipeline_root: pathlib.Path, result_root: pathlib.Path) -> int:
@@ -697,21 +697,7 @@ def _dangling_record_ids(pipeline_root: pathlib.Path, result_root: pathlib.Path)
 class TestCommitOrderAcrossTwoDatabases:
     """B2 (async) and B3: results are committed before the records naming them."""
 
-    @pytest.mark.parametrize(
-        "mode",
-        [
-            "sync",
-            pytest.param(
-                "async",
-                marks=pytest.mark.xfail(
-                    strict=True,
-                    raises=AssertionError,
-                    reason="ITL-1412: a node's batch commit flushes the whole "
-                    "pipeline database, publishing a sibling's records first",
-                ),
-            ),
-        ],
-    )
+    @pytest.mark.parametrize("mode", ["sync", "async"])
     def test_no_record_is_published_before_its_result(
         self, tmp_path: pathlib.Path, mode: str
     ) -> None:
@@ -745,12 +731,6 @@ class TestCommitOrderAcrossTwoDatabases:
             _ = job.run(orchestrator=orchestrator)
         assert dangling and not any(dangling)
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=AssertionError,
-        reason="ITL-1412: a failed result commit still publishes the pipeline "
-        "records, and the error names the pipeline database",
-    )
     def test_a_failed_result_commit_publishes_no_record(
         self, tmp_path: pathlib.Path, orchestrator: Orchestrator
     ) -> None:

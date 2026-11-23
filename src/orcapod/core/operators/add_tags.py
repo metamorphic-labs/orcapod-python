@@ -324,7 +324,12 @@ class AddTags(UnaryOperator):
         tag_keys, _ = stream.keys()
         data_context = stream.data_context  # pyright: ignore[reportAttributeAccessIssue]  # StreamProtocol omits data_context, which every concrete stream provides (ITL-844)
         table = stream.as_table(
-            columns={"source": True, "system_tags": True, "sort_by_tags": False}
+            columns={
+                "source": True,
+                "system_tags": True,
+                "context": True,
+                "sort_by_tags": False,
+            }
         )
         return ArrowTableStream(
             self._with_constants(table, tag_keys, data_context.type_converter),

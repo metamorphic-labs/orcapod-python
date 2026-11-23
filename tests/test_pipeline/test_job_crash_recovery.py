@@ -34,9 +34,9 @@ N_ROWS = 250
 # Runs one job over N_ROWS rows. Arguments: store path, calls file, commit_every_rows,
 # orchestrator ("sync" or "async"), crash ("none", "fn:<x>" or "flush:<n>"), late row
 # ("none" or a row number). "fn:<x>" exits while computing row x, once the batches of the
-# rows before x are committed; "flush:<n>" exits on the n-th store-wide flush. The run's
-# first flush commits what was pending before it; each later one is a node's commit,
-# called right after the node committed its result table.
+# rows before x are committed; "flush:<n>" exits at the n-th pipeline commit.
+# The first commit flushes writes pending before the run. Later commits flush the
+# node's pipeline table after the result table.
 #
 # The async orchestrator computes rows on a thread pool ahead of the stage that records
 # them and commits every commit_every_rows rows, so without a wait row x could be
@@ -66,6 +66,7 @@ JOB_SCRIPT = textwrap.dedent(
     from orcapod.databases import DeltaTableDatabase
     from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
     from orcapod.sources import DictSource
+    from orcapod.system_constants import PIPELINE_DB_SCHEMA_VERSION
 
     database_path, calls_path, every, orchestrator, crash, late = sys.argv[1:7]
     crash_kind, _, crash_arg = crash.partition(":")
@@ -99,13 +100,22 @@ JOB_SCRIPT = textwrap.dedent(
         def at(self, *path: str) -> "CrashOnFlush":
             return CrashOnFlush(self._inner.at(*path), self._state)
 
-        def flush(self) -> None:
+        def _commit(self, flush) -> None:
             self._state["n"] += 1
             if crash_kind == "flush" and self._state["n"] == int(crash_arg):
                 os._exit(3)
-            self._inner.flush()
+            flush()
             if crash_kind == "fn" and self._state["n"] >= flushes_before_crash:
                 earlier_batches_committed.set()
+
+        def flush(self) -> None:
+            self._commit(self._inner.flush)
+
+        def flush_batch(self, path: tuple[str, ...]) -> None:
+            if path[-1] == PIPELINE_DB_SCHEMA_VERSION:
+                self._commit(lambda: self._inner.flush_batch(path))
+            else:
+                self._inner.flush_batch(path)
 
         def __getattr__(self, name: str) -> Any:
             return getattr(self._inner, name)
