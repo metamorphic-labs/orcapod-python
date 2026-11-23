@@ -606,3 +606,30 @@ def test_what_changes_between_add_and_flush_is_decided_at_the_flush(
     else:
         db.allow_schema_evolution = True
     _refused_once_at_flush(db)
+
+
+def test_the_backstop_names_the_struct_that_holds_the_pair(tmp_path: Path) -> None:
+    """Review of PR 504, round four, finding 7: two structs under one column, the
+    colliding pair in ``outer.right`` and an unrelated field of the same name in
+    ``outer.left``: the field named is the one in the struct Delta refuses."""
+    upper, lower = RUST_ONLY_FOLDS[0]
+    db = DeltaTableDatabase(tmp_path)
+    for rid, name in ((b"1", upper), (b"2", lower)):
+        outer = pa.struct(
+            [
+                ("left", pa.struct([(lower, pa.int64())])),
+                ("right", pa.struct([(name, pa.string())])),
+            ]
+        )
+        table = pa.table(
+            {
+                "rid": pa.array([rid], pa.large_binary()),
+                "outer": pa.array([{"left": {lower: 1}, "right": {name: "v"}}], outer),
+            }
+        )
+        db.add_records(PATH, table, record_id_column="rid", schema_handling="merge")
+    with pytest.raises(UnstorableColumnError) as info:
+        db.flush()
+    assert info.value.column == f"outer.right.{lower}"
+    assert "string" in str(info.value)
+    assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]

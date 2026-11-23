@@ -183,3 +183,28 @@ def test_the_sweep_covers_every_kind() -> None:
     assert kinds == {"same", "record", "evolution", "null/layout", "path", "logical"}
     assert len(VARIANTS) > 100
     _ = product  # the sweep is the product of the three parameters above
+
+
+@pytest.mark.parametrize("evolve", [False, True], ids=["evolution off", "evolution on"])
+def test_a_name_differing_in_case_from_a_stored_column(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, evolve: bool
+) -> None:
+    """Review of PR 504, round four, finding 3: ``A`` beside a stored ``a``. Without
+    schema evolution Delta's MERGE leaves the unknown column out and stores the row (as
+    main did): nothing is refused. With evolution the name would enter the stored
+    schema, which Delta refuses: refused when added, and Delta refuses it too."""
+    initial = pa.table(
+        {"rid": pa.array([b"1"], pa.large_binary()), "anchor": [1], "a": [11]}
+    )
+    incoming = pa.table(
+        {"rid": pa.array([b"2"], pa.large_binary()), "anchor": [2], "A": [22]}
+    )
+    live, queued = _run(tmp_path / "live", initial, incoming, evolve)
+    assert not queued
+    if not evolve:
+        assert live == "stored"
+        return
+    assert live == "refused when added"
+    monkeypatch.setattr(dld, "_append_refusal", lambda *args: None)
+    raw, _ = _run(tmp_path / "raw", initial, incoming, evolve)
+    assert raw != "stored"
