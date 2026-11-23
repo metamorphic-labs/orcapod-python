@@ -131,6 +131,13 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
         """
         ...
 
+    def explain(self) -> "Explanation":
+        """
+        Say what each source this stream reads applies itself (its restriction, or its
+        whole table) and which steps drop rows after reading; computes nothing.
+        """
+        ...
+
     def keys(
         self,
         *,
@@ -443,13 +450,6 @@ class StreamWithOperationsProtocol(StreamProtocol, Protocol):
         Keep the rows that satisfy every condition, as a step of the pipeline:
         keywords and mappings are equalities, other conditions are built with
         ``col``. The output has this stream's columns and types.
-        """
-        ...
-
-    def explain(self) -> "Explanation":
-        """
-        Say what each source this stream reads applies itself (its restriction, or its
-        whole table) and which steps drop rows after reading; computes nothing.
         """
         ...
 

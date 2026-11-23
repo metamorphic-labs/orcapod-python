@@ -33,6 +33,7 @@ from orcapod.core.sources import ArrowTableSource
 from orcapod.core.sources.cached_source import CachedSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
+from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.sources import SpiralDBTableSource
 from orcapod.types import Condition, Explanation, SourceReading, Step
 from tests.test_databases import fake_pyspiral
@@ -345,3 +346,39 @@ def test_explaining_a_job_writes_and_computes_nothing():
         node.explain()
     assert list(database.list_table_paths()) == []
     assert job.nodes["late"].head().status.value == "not_computed"
+
+
+class TestReviewOfPr503:
+    """CodeRabbit's review of PR 503: each finding as a test."""
+
+    def test_a_pipelines_source_node_reads_as_unbound(self):
+        tag_schema, data_schema = _units().output_schema()
+        slot = SourceNode(name="units", tag_schema=tag_schema, data_schema=data_schema)
+        (reading,) = Filter(col("t") >= 1.0)(slot).explain().sources
+        assert not reading.bound
+        assert reading.lines() == ["slot 'units': no source bound"]
+
+    def test_two_restrictions_of_one_table_are_two_readings(self, spiral):
+        source = _event()
+        stream = SemiJoin()(
+            source.where(subject_id="m1"), source.where(subject_id="m2")
+        )
+        conditions = [r.condition.text() for r in stream.explain().sources]
+        assert conditions == ["subject_id='m1'", "subject_id='m2'"]
+
+    def test_a_step_reached_by_two_paths_is_listed_once(self):
+        late = _units().filter(col("t") >= 1.0, label="late")
+        stream = SemiJoin()(late, late.select_data_columns(["t"]))
+        (reading,) = stream.explain().sources
+        assert [s.label for s in reading.steps].count("late") == 1
+
+    def test_shared_inputs_cost_one_visit_per_node(self):
+        stream = _units().filter(col("t") >= 1.0)
+        for _ in range(40):  # 2**40 paths, 40 nodes
+            stream = SemiJoin()(stream, stream)
+        (reading,) = stream.explain().sources
+        assert reading.steps[0].operator == "Filter"
+
+    def test_explain_is_on_every_stream_type(self):
+        stream: StreamProtocol = _units().filter(col("t") >= 1.0)
+        assert stream.explain().sources[0].name == "units"

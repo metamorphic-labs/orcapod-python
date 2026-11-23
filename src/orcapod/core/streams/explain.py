@@ -29,23 +29,6 @@ def stream_name(stream: StreamProtocol) -> str:
     return f"{type(stream).__name__}[{stream.label}]"
 
 
-def input_name(stream: StreamProtocol) -> str:
-    """Return how an input of a step is named: by the sources it reads (their names,
-    sorted; a slot's name for an unbound slot)."""
-    names: set[str] = set()
-
-    def walk(current: StreamProtocol) -> None:
-        _, found = _beneath(current)
-        if isinstance(found, SourceReading):
-            names.add(found.name)
-            return
-        for upstream in found:
-            walk(upstream)
-
-    walk(stream)
-    return ", ".join(sorted(names))
-
-
 def _beneath(
     stream: StreamProtocol,
 ) -> tuple[str, tuple[StreamProtocol, ...] | SourceReading]:
@@ -54,17 +37,20 @@ def _beneath(
     A job's input slot reads its bound source, a proxy its delegate; a root source, a
     cached source and a stream with no producer and no input end the walk.
     """
-    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.core.nodes.source_node import SourceJobNode, SourceNodeBase
     from orcapod.core.sources.base import RootSource
     from orcapod.core.sources.source_proxy import SourceProxy
     from orcapod.pipeline.restrictions import source_name
 
-    if isinstance(stream, (SourceJobNode, SourceProxy)):
-        bound = (
-            stream.bound_source
-            if isinstance(stream, SourceJobNode)
-            else stream.delegate
-        )
+    if isinstance(stream, (SourceNodeBase, SourceProxy)):
+        # A job's slot reads its bound source, a proxy its delegate; a pipeline's
+        # ``SourceNode`` declares a slot and never holds a source.
+        if isinstance(stream, SourceJobNode):
+            bound = stream.bound_source
+        elif isinstance(stream, SourceProxy):
+            bound = stream.delegate
+        else:
+            bound = None
         if bound is None:
             return "unbound", SourceReading(
                 name=stream.label,
@@ -101,17 +87,101 @@ def _beneath(
     return "inputs", upstreams
 
 
+_ReadingKey = tuple[str, str, bool, bool, Condition, "int | None"]
+"""A source as an explanation tells sources apart: name, kind, whether it says what it
+reads, whether it is bound, and its restriction (two restrictions of one table are two
+readings)."""
+
+
+def _reading_key(reading: SourceReading) -> _ReadingKey:
+    return (
+        reading.name,
+        reading.kind,
+        reading.known,
+        reading.bound,
+        reading.condition,
+        reading.limit,
+    )
+
+
+def _sort_key(key: _ReadingKey) -> tuple[str, str, bool, bool, str, int]:
+    name, kind, known, bound, condition, limit = key
+    return (
+        name,
+        kind,
+        known,
+        bound,
+        condition.canonical_text(),
+        -1 if limit is None else limit,
+    )
+
+
+# Per source a node reaches: the source's reading, the node's distance from it (the
+# shortest path), and the steps on the way, each by the node and text that made it,
+# with that node's distance from the source.
+_Reach = dict[
+    _ReadingKey, tuple[SourceReading, int, dict[tuple[int, str], tuple[int, Step]]]
+]
+
+
+def _reach(stream: StreamProtocol, memo: dict[int, _Reach]) -> _Reach:
+    """Return the sources ``stream`` reads and the steps above each, once per node.
+
+    Each node is expanded once (``memo``), so a graph whose nodes share inputs costs one
+    visit per node, not one per path. A step is identified by the node that takes it
+    (and its text, as a ``SemiJoin`` drops differently on each input), so a step reached
+    by several paths is listed once, at its shortest distance from the source.
+    """
+    known = memo.get(id(stream))
+    if known is not None:
+        return known
+    kind, found = _beneath(stream)
+    if isinstance(found, SourceReading):
+        result: _Reach = {_reading_key(found): (found, 0, {})}
+        memo[id(stream)] = result
+        return result
+    inputs = found
+    reaches = [_reach(upstream, memo) for upstream in inputs]
+    producer = stream.producer if kind == "inputs" else None
+    result = {}
+    for position, reach in enumerate(reaches):
+        step = _step_of(stream, producer, position, reaches)
+        for key, (reading, distance, steps) in reach.items():
+            here = distance + 1
+            _, kept, merged = result.get(key, (reading, here, {}))
+            merged = dict(merged)
+            for step_key, (step_distance, kept_step) in steps.items():
+                previous = merged.get(step_key)
+                if previous is None or step_distance < previous[0]:
+                    merged[step_key] = (step_distance, kept_step)
+            if step is not None:
+                step_key = (id(stream), step.text)
+                previous = merged.get(step_key)
+                if previous is None or here < previous[0]:
+                    merged[step_key] = (here, step)
+            result[key] = (reading, min(kept, here), merged)
+    memo[id(stream)] = result
+    return result
+
+
 def _step_of(
-    stream: StreamProtocol, position: int, inputs: Sequence[StreamProtocol]
+    stream: StreamProtocol,
+    producer: object,
+    position: int,
+    reaches: Sequence[_Reach],
 ) -> Step | None:
-    """Return the step ``stream``'s operator takes on its input at ``position``."""
+    """Return the step ``stream``'s operator takes on its input at ``position``; the
+    other inputs are named by the sources they read (sorted, joined)."""
     from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 
-    producer = stream.producer
     if not isinstance(producer, StaticOutputOperatorPod):
         return None
-    others = [input_name(s) for i, s in enumerate(inputs) if i != position]
-    text = producer.rows_dropped_text(position, sorted(others))
+    others = sorted(
+        ", ".join(sorted({reading.name for reading, _, _ in reach.values()}))
+        for i, reach in enumerate(reaches)
+        if i != position
+    )
+    text = producer.rows_dropped_text(position, others)
     if text is None:
         return None
     return Step(operator=type(producer).__name__, label=stream.label, text=text)
@@ -126,38 +196,14 @@ def explain(stream: StreamProtocol) -> Explanation:
     Returns:
         The explanation; nothing is computed, read, polled or written.
     """
-    # Each path from ``stream`` down to a source contributes the steps on it. A step
-    # reached by several paths (a diamond) is listed once.
-    readings: dict[tuple[str, str], tuple[SourceReading, list[tuple[int, Step]]]] = {}
-
-    def walk(
-        current: StreamProtocol, above: list[tuple[int, Step]], depth: int
-    ) -> None:
-        kind, found = _beneath(current)
-        if isinstance(found, SourceReading):
-            key = (found.name, found.kind)
-            _, steps = readings.setdefault(key, (found, []))
-            for item in above:
-                if item not in steps:
-                    steps.append(item)
-            return
-        inputs = found
-        for position, upstream in enumerate(inputs):
-            step = _step_of(current, position, inputs) if kind == "inputs" else None
-            walk(
-                upstream,
-                above if step is None else [*above, (depth, step)],
-                depth + 1,
-            )
-
-    walk(stream, [], 0)
+    reach = _reach(stream, {})
     sources = []
-    for key in sorted(readings):
-        reading, steps = readings[key]
-        # Nearest the source first: the deepest step first; ties in a fixed order.
+    for key in sorted(reach, key=_sort_key):
+        reading, _, steps = reach[key]
+        # Nearest the source first; ties in a fixed order.
         ordered = sorted(
-            steps,
-            key=lambda item: (-item[0], item[1].operator, item[1].label, item[1].text),
+            steps.values(),
+            key=lambda item: (item[0], item[1].operator, item[1].label, item[1].text),
         )
         sources.append(
             SourceReading(
