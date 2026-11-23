@@ -215,6 +215,11 @@ class ExtensionAwareDatabase:
         return getattr(self._db, "flush_batch")  # noqa: B009  # AttributeError when absent, by design
 
     @property
+    def flush_pending_table(self) -> Callable[[tuple[str, ...]], None]:
+        """The wrapped database's in-memory table promotion, if supported."""
+        return getattr(self._db, "flush_pending_table")  # noqa: B009  # optional capability
+
+    @property
     def pending_result(
         self,
     ) -> Callable[[tuple[str, ...], bytes], PendingCommit | None]:

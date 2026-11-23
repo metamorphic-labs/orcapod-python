@@ -2334,6 +2334,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
     ) -> None:
         """Flush one table and withdraw its dependent records if a result write fails."""
         flush_batch = getattr(database, "flush_batch", None)
+        if result and flush_batch is None:
+            flush_batch = getattr(database, "flush_pending_table", None)
         try:
             if flush_batch is None:
                 database.flush()
@@ -2363,14 +2365,18 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 self._flush_node_table(
                     ephemeral.result_database, ephemeral.record_path, result=True
                 )
+            pipeline_database = self._require_pipeline_database()
             pod = self._cached_function_pod
             if isinstance(pod, CachedFunctionPod):
-                self._flush_node_table(
-                    pod.result_database, pod.record_path, result=True
-                )
-            self._flush_node_table(
-                self._require_pipeline_database(), self._versioned_pipeline_path
-            )
+                result_database = pod.result_database
+                if getattr(result_database, "stores_records", True) and (
+                    getattr(pipeline_database, "stores_records", True)
+                    or getattr(result_database, "flush_batch", None) is not None
+                ):
+                    self._flush_node_table(
+                        result_database, pod.record_path, result=True
+                    )
+            self._flush_node_table(pipeline_database, self._versioned_pipeline_path)
         except BaseException as exc:
             self._commit_failed = True
             if isinstance(exc, OrcapodDatabaseError):
@@ -2389,49 +2395,38 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         database = self._require_pipeline_database()
         path = self._versioned_pipeline_path
         pod = self._ephemeral_cached_pod if is_ephemeral else self._cached_function_pod
-        if isinstance(pod, CachedFunctionPod):
+        if (
+            self._commit_every_rows is not None
+            and isinstance(pod, CachedFunctionPod)
+            and getattr(database, "stores_records", True)
+            and getattr(pod.result_database, "stores_records", True)
+        ):
             result_database = pod.result_database
-            if not getattr(result_database, "stores_records", True):
-                return  # A dry run has no stored results to reference.
-            if self._commit_every_rows is not None:
-                try:
-                    pending_result = getattr(result_database, "pending_result", None)
-                    if pending_result is None:
-                        # A database without dependency tracking must finish the
-                        # result write before the pipeline record enters any queue.
-                        self._flush_node_table(
-                            result_database, pod.record_path, result=True
-                        )
-                        if (
-                            result_database.get_record_by_id(pod.record_path, result_id)
-                            is None
-                        ):
-                            raise ValueError(
-                                "The result was missing after its database flushed."
-                            )
-                        dependency = None
-                    else:
-                        dependency = pending_result(pod.record_path, result_id)
-                except OrcapodDatabaseError:
-                    raise
-                except Exception as exc:
-                    raise OrcapodDatabaseWriteError(
-                        database_write_path(result_database, pod.record_path),
-                        node_label=self.label,
-                        flush=True,
-                        table_flush=True,
-                    ) from exc
-                if dependency is not None:
-                    guard_record = getattr(database, "guard_record", None)
-                    if guard_record is not None:
-                        with guard_record(path, record_id, dependency):
-                            database.add_record(
-                                path, record_id, record, skip_duplicates=True
-                            )
-                        return
-                    self._flush_node_table(
-                        result_database, pod.record_path, result=True
+            try:
+                pending_result = getattr(result_database, "pending_result", None)
+                if pending_result is None:
+                    raise RuntimeError(
+                        "The result store cannot track its pending results."
                     )
+                dependency = pending_result(pod.record_path, result_id)
+            except OrcapodDatabaseError:
+                raise
+            except Exception as exc:
+                raise OrcapodDatabaseWriteError(
+                    database_write_path(result_database, pod.record_path),
+                    node_label=self.label,
+                    flush=True,
+                    table_flush=True,
+                ) from exc
+            if dependency is not None:
+                guard_record = getattr(database, "guard_record", None)
+                if guard_record is None:
+                    raise RuntimeError(
+                        "The pipeline store cannot guard a pending result."
+                    )
+                with guard_record(path, record_id, dependency):
+                    database.add_record(path, record_id, record, skip_duplicates=True)
+                return
         database.add_record(path, record_id, record, skip_duplicates=True)
 
     def _row_processed(self) -> None:

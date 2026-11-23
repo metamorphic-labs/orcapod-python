@@ -43,7 +43,7 @@ class PendingCommits:
         batches: dict[str, pa.Table],
         ids: dict[str, set[bytes]],
         *,
-        on_empty: Callable[[str], None],
+        on_empty: Callable[[str], None] | None = None,
     ) -> None:
         self._record_id_column = record_id_column
         self._batches = batches
@@ -95,7 +95,8 @@ class PendingCommits:
         else:
             self._batches.pop(key)
             self._ids.pop(key)
-            self._on_empty(key)
+            if self._on_empty is not None:
+                self._on_empty(key)
 
     def take_ready(self, key: str) -> tuple[pa.Table, set[bytes]] | None:
         """Take the records ready to commit, leaving blocked records readable."""
