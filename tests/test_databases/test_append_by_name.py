@@ -1143,6 +1143,7 @@ def test_postgresql_matches_an_append_in_another_order_by_name(
     first_order, second_order = FIRST_ORDERS[first], SECOND_ORDERS[second]
     _add(db, _rows(first_order, [1, 2]), flush=when == "after a flush")
     _add(db, _rows(second_order, [3, 4]))
-    _check(db.get_all_records(PATH, record_id_column=ID), first_order, [1, 2, 3, 4])
+    expected = _given_order("PostgreSQL", first_order)  # canonical (ITL-1370)
+    _check(db.get_all_records(PATH, record_id_column=ID), expected, [1, 2, 3, 4])
     db.flush()
-    _check(db.get_all_records(PATH, record_id_column=ID), first_order, [1, 2, 3, 4])
+    _check(db.get_all_records(PATH, record_id_column=ID), expected, [1, 2, 3, 4])
