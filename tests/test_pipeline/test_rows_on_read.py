@@ -10,7 +10,7 @@ nobody reads is never built.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pytest
@@ -489,7 +489,7 @@ def test_a_filtering_subclass_delivers_only_its_rows() -> None:
 
     class AboveTen(ArrowTableSource):
         def iter_data(self) -> Any:
-            return (row for row in super().iter_data() if row[1]["x"] > 10)
+            return (row for row in super().iter_data() if cast(int, row[1]["x"]) > 10)
 
     table = pa.table({"k": pa.array([1, 2]), "x": pa.array([10, 20])})
     job = PipelineJob(name="filtering", database=InMemoryArrowDatabase())
@@ -1107,3 +1107,49 @@ def test_a_lazy_output_describes_itself_without_converting_python_types(
     job.bind(sources={"s": raw})
     out: Any = job.nodes["s"].execute()
     assert out.arrow_schema().field("x").type == kind
+
+
+# ── CodeRabbit on PR #510: the node's own reading ─────────────────────────────
+
+
+def test_a_source_job_node_subclass_hands_on_the_rows_it_reads() -> None:
+    """A ``SourceJobNode`` subclass whose ``iter_data`` filters hands on, from
+    ``execute``, the rows it reads, as ``main`` did by iterating them: the
+    whole-table route is only for an exact ``SourceJobNode`` (the one rule). The
+    async path reads ``async_iter_data``, as on ``main``."""
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.core.operators.static_output_pod import at_edge
+
+    class AboveTen(SourceJobNode):
+        def iter_data(self) -> Any:
+            return (row for row in super().iter_data() if cast(int, row[1]["x"]) > 10)
+
+    source = ArrowTableSource(
+        pa.table({"k": pa.array([1, 2]), "x": pa.array([10, 20])}),
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="s",
+    )
+    node: Any = AboveTen.from_stream(source)
+    assert type(node) is AboveTen
+    output = at_edge(node.execute())
+    assert output.as_table()["x"].to_pylist() == [20]
+
+
+def test_a_held_output_reads_its_node_s_upstreams_when_read() -> None:
+    """``RowsOnRead.upstreams`` is the node's, read when asked, and the built stream
+    takes the node's lineage when it is built: where ``main`` built a successor's
+    input from the node's rows, at the edge, from the node as it was then. A snapshot
+    taken when the output is made would differ from ``main`` for a node re-wired in
+    between (CodeRabbit on #510, declined; re-wiring a node during a run is
+    unsupported, ITL-1369)."""
+    from orcapod.core.operators.static_output_pod import RowsOnRead
+
+    job = PipelineJob(name="lineage", database=InMemoryArrowDatabase())
+    with job:
+        _plain().select_data_columns(["x"], label="selected")
+    node: Any = job.nodes["selected"]
+    output = RowsOnRead(list(_plain().iter_data()), node)
+    assert output.upstreams == node.upstreams
+    assert output.built().upstreams == node.upstreams
+    assert output.producer is node.producer

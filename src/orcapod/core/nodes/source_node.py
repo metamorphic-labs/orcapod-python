@@ -31,6 +31,7 @@ from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
     CompleteStreamFeed,
     keys_of_rows,
+    reads_as_its_class,
     system_tags_as_rows_give,
     stream_arrow_schema,
     schema_requires_io,
@@ -1833,9 +1834,10 @@ class SourceJobNode(SourceNodeBase):
         """The bound source's table and the keys of its rows (``keys_of_rows``).
 
         ``None`` for a narrower bind (its rows are given as the declared schema one by
-        one, ``_declared_rows``) and for a bound stream that is not a library source
-        kind whose table is its rows (``TABLE_IS_ROWS``): the node then hands on those
-        rows (``RowsOnRead``).
+        one, ``_declared_rows``), for a node that is not exactly a ``SourceJobNode``
+        (a subclass may read its rows its own way), and for a bound stream that is not
+        a library source kind whose table is its rows (``TABLE_IS_ROWS``): the node then
+        hands on those rows (``RowsOnRead``).
 
         Raises:
             UnboundSourceError: When no concrete source is attached.
@@ -1846,6 +1848,11 @@ class SourceJobNode(SourceNodeBase):
                 "Call job.bind(sources={'<name>': source}) before running."
             )
         if self._declared_form is not None:
+            return None
+        if not reads_as_its_class(self, SourceJobNode):
+            # A subclass, or a node with a member replaced on the instance, may read
+            # its rows its own way (an ``iter_data`` that filters): its rows, as main
+            # iterated them (ITL-1347, the one rule).
             return None
         if (
             not table_is_rows(self._bound_source)
