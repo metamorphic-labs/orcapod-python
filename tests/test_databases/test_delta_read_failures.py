@@ -471,14 +471,15 @@ class TestLegitimateAppendsStillPass:
 
     def test_new_struct_field_inside_a_list_is_refused(self, base: Path) -> None:
         """An append that adds a field to a struct inside a list column would change
-        the list column's recorded type: refused before anything is buffered, the
-        stored rows unchanged (deltalake refuses such a commit; ITL-1403)."""
+        the list column's recorded type: Delta refuses the commit, the flush raises
+        once and the batch leaves the queue, the stored rows unchanged (ITL-1403)."""
         db = DeltaTableDatabase(base_path=base)
         stored_type = pa.large_list(pa.struct([("a", pa.int64())]))
         append(db, rows([b"a"], pa.array([[{"a": 1}]], stored_type)))
         evolved = pa.large_list(pa.struct([("a", pa.int64()), ("b", pa.int64())]))
-        with pytest.raises(InputValidationError, match="recorded Arrow type"):
+        with pytest.raises(InputValidationError, match="Delta refused the commit"):
             append(db, rows([b"b"], pa.array([[{"a": 2, "b": 3}]], evolved)))
+        assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
 
         back = DeltaTableDatabase(base_path=base).get_all_records(
             PATH, record_id_column="rid"

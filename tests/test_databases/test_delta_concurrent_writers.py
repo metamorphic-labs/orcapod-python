@@ -16,7 +16,7 @@ from __future__ import annotations
 import multiprocessing
 import sys
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from unittest.mock import patch
 
 import deltalake
@@ -59,7 +59,12 @@ def _stored(root: Path) -> list[tuple[bytes, int]]:
     """Every stored ``(record id, a)``, read by a fresh database, sorted."""
     table = DeltaTableDatabase(root).get_all_records(PATH, record_id_column="rid")
     assert table is not None
-    return sorted(zip(table["rid"].to_pylist(), table["a"].to_pylist()))
+    return sorted(
+        zip(
+            cast(list[bytes], table["rid"].to_pylist()),
+            cast(list[int], table["a"].to_pylist()),
+        )
+    )
 
 
 def _operations(root: Path) -> list[str]:
