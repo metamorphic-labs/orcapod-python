@@ -656,3 +656,50 @@ def test_the_backstop_names_the_column_colliding_with_a_stored_one(
     assert info.value.column == lower
     assert "int32" in str(info.value)
     assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+
+
+# (stored, added, what another writer stores instead): a name the added rows hold that
+# differs only in case from a stored one, as a column and as a struct field.
+STALE_CLASHES: dict[str, tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = {
+    "column": ({"a": pa.array([1])}, {"A": pa.array([2])}, {"b": pa.array([1])}),
+    "struct field": (
+        {"s": pa.array([{"a": 1, "c": 1}])},
+        {"s": pa.array([{"A": 2, "c": 2}])},
+        {"s": pa.array([{"b": 1, "c": 1}])},
+    ),
+}
+
+
+@pytest.mark.parametrize("replaced", [True, False], ids=["replaced", "unchanged"])
+@pytest.mark.parametrize("kind", sorted(STALE_CLASHES))
+def test_a_clash_with_a_cached_version_is_checked_against_the_stored_one(
+    tmp_path: Path, kind: str, replaced: bool
+) -> None:
+    """Review of PR 504, round seven: the database holds a cached handle of the table;
+    another writer replaces the clashing name. The rows are checked again against the
+    version stored now before they are refused: accepted and stored when the clash is
+    gone, refused (nothing queued) when it is still there."""
+    stored, added, other = STALE_CLASHES[kind]
+    anchor = {"anchor": pa.array([1])}
+    db = DeltaTableDatabase(tmp_path, allow_schema_evolution=True)
+    _add(db, _rows(b"1", **anchor, **stored), flush=True)
+    db.get_all_records(PATH, record_id_column="rid")  # the handle is cached
+    assert db._delta_table_cache  # pyright: ignore[reportPrivateUsage]
+    if replaced:
+        current = deltalake.DeltaTable(str(tmp_path / "t")).to_pyarrow_table()
+        names = [n for n in current.column_names if n not in stored]
+        deltalake.write_deltalake(
+            str(tmp_path / "t"),
+            current.select(names).append_column(
+                *next(iter((pa.field(k, v.type), v) for k, v in other.items()))
+            ),
+            mode="overwrite",
+            schema_mode="overwrite",
+        )
+        _add(db, _rows(b"2", **anchor, **added), flush=True)
+        assert _stored_ids(tmp_path) == [b"1", b"2"]
+    else:
+        with pytest.raises(InputValidationError, match="differ only in case"):
+            _add(db, _rows(b"2", **anchor, **added))
+        assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+        assert _stored_ids(tmp_path) == [b"1"]

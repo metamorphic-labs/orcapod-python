@@ -20,6 +20,7 @@ import pytest
 from orcapod import PipelineJob, function_pod
 from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import DeltaTableDatabase
+from orcapod.errors import OrcapodDatabaseWriteError, UnstorableColumnError
 from orcapod.system_constants import constants
 
 UPPER, LOWER = "Ᲊ", "ᲊ"
@@ -45,11 +46,20 @@ def test_no_pipeline_record_names_a_dropped_result(
     job = PipelineJob(name="itl1403", database=database)
     with job:
         _pair.pod(source, label="pair")
-    with pytest.raises(Exception):  # noqa: B017  # the run fails: the result batch is dropped
+    with pytest.raises(OrcapodDatabaseWriteError) as info:
         if use_async:
             asyncio.run(job.run_async())
         else:
             job.run()
+    # The result batch was dropped at the flush, on Delta's own report of the two
+    # names (review of PR 504, round seven): not refused when added, and no other
+    # failure.
+    refusal = info.value.__cause__
+    assert isinstance(refusal, UnstorableColumnError)
+    assert refusal.column == LOWER
+    assert "under its case folding" in str(refusal)
+    assert "were not written and are no longer queued" in str(refusal)
+    assert "_result" in str(refusal)
     fresh = DeltaTableDatabase(tmp_path)
     referenced: list[object] = []
     for path in fresh.list_table_paths():
@@ -75,7 +85,7 @@ def test_a_result_batch_delta_refuses_withdraws_its_pipeline_records(
     import deltalake
     from deltalake.exceptions import SchemaMismatchError
 
-    from orcapod.errors import InputValidationError, OrcapodDatabaseWriteError
+    from orcapod.errors import InputValidationError
 
     real_write = deltalake.write_deltalake
 

@@ -684,6 +684,22 @@ def _duplicate_name_in(error: BaseException) -> str | None:
     return None
 
 
+def _write_refused_for_duplicate_name(error: BaseException) -> str | None:
+    """The duplicate name for which Delta refused the write itself, else ``None``.
+
+    Only an error deltalake raised for the write counts, never one that merely carries
+    a duplicate-name cause: a ``CommitFailedError`` (another writer committed first)
+    and a table that could not be loaded (``OrcapodDatabaseReadError``, raised before
+    the write) keep their rows queued for a later flush (review of PR 504, round
+    seven).
+    """
+    from deltalake.exceptions import CommitFailedError
+
+    if not _is_delta_error(error) or isinstance(error, CommitFailedError):
+        return None
+    return _duplicate_name_in(error)
+
+
 def _error_chain(error: BaseException) -> list[BaseException]:
     """``error`` and its explicit causes (``raise ... from``), each once.
 
@@ -2347,26 +2363,24 @@ class DeltaTableDatabase:
                     f"{'omit it' if omitted else 'hold a null'}",
                 )
         if refusal is None:
-            try:
-                delta_table = self._get_delta_table(record_path)
-            except OrcapodDatabaseReadError as unreadable:
-                duplicate = _duplicate_name_in(unreadable)
-                if duplicate is not None:
-                    # Written before deltalake 1.5.1, which no longer reads it: every
-                    # flush would fail the same way, so nothing is queued (ITL-1403).
-                    raise InputValidationError(
-                        f"Cannot append to the stored table "
-                        f"{self._get_table_uri(record_path)!r}: it holds columns whose "
-                        f"names differ only in case (one is {duplicate!r}), which "
-                        "deltalake 1.5.1 and later cannot read: "
-                        f"{_CASE_INSENSITIVE} of them. Nothing was queued. Rebuild the "
-                        "table with distinct names, using a deltalake version before "
-                        "1.5.1 to read it."
-                    ) from unreadable
-                delta_table = None
+            delta_table = self._stored_table_for_check(record_path)
             if delta_table is not None:
                 refusal = _append_refusal(
                     delta_table, records, self.allow_schema_evolution
+                )
+            if refusal is not None:
+                # The handle may be cached from a version another writer has since
+                # replaced: the rows are refused only if the version stored now
+                # refuses them too (review of PR 504, round seven). An accepted add
+                # keeps the cached handle, so it costs no reload.
+                self._delta_table_cache.pop(self._get_record_key(record_path), None)
+                delta_table = self._stored_table_for_check(record_path)
+                refusal = (
+                    None
+                    if delta_table is None
+                    else _append_refusal(
+                        delta_table, records, self.allow_schema_evolution
+                    )
                 )
         if refusal is not None:
             column, reason = refusal
@@ -2375,6 +2389,35 @@ class DeltaTableDatabase:
                 f"{self._get_table_uri(record_path)!r}: column {column!r}: {reason}. "
                 "The stored rows are unchanged and nothing was written."
             )
+
+    def _stored_table_for_check(
+        self, record_path: tuple[str, ...]
+    ) -> deltalake.DeltaTable | None:
+        """The stored table rows added to ``record_path`` are checked against.
+
+        ``None`` when no table is stored, or when it cannot be loaded for a reason the
+        flush reports (``OrcapodDatabaseReadError``).
+
+        Raises:
+            InputValidationError: If the stored table holds two names differing only in
+                case, written before deltalake 1.5.1, which no longer reads it: every
+                flush would fail the same way, so nothing is queued (ITL-1403).
+        """
+        try:
+            return self._get_delta_table(record_path)
+        except OrcapodDatabaseReadError as unreadable:
+            duplicate = _duplicate_name_in(unreadable)
+            if duplicate is not None:
+                raise InputValidationError(
+                    f"Cannot append to the stored table "
+                    f"{self._get_table_uri(record_path)!r}: it holds columns whose "
+                    f"names differ only in case (one is {duplicate!r}), which "
+                    "deltalake 1.5.1 and later cannot read: "
+                    f"{_CASE_INSENSITIVE} of them. Nothing was queued. Rebuild the "
+                    "table with distinct names, using a deltalake version before "
+                    "1.5.1 to read it."
+                ) from unreadable
+            return None
 
     def _refuse_declared_nulls(
         self, record_path: tuple[str, ...], rows: pa.Table
@@ -3289,16 +3332,24 @@ class DeltaTableDatabase:
           (``_append_refusal``). The batch is dropped from the queue, since every later
           flush would refuse it too; the error says how many rows were not written.
           Correct the rows and add them again (ITL-1334).
-        - Any other failure (a table that cannot be loaded, a failed write): the batch
-          stays queued, so a later flush tries it again.
+        - Refused by Delta for the rows themselves (ITL-1403): a ``SchemaMismatchError``,
+          a ``DeltaError`` whose message starts with one of
+          ``PERMANENT_DELTA_ERROR_PREFIXES`` (raised as ``InputValidationError``), or two
+          names equal under Delta's case folding (raised as ``UnstorableColumnError``).
+          Every later flush would be refused the same way, so the batch is dropped from
+          the queue and nothing of it is written: correct the rows and add them again.
+        - Any other failure (a table that cannot be loaded, another writer committing
+          first, a storage error): the batch stays queued, so a later flush tries it
+          again.
 
         Raises:
             OrcapodDatabaseReadError: If a batch's existing table could not be loaded. It is
                 raised as itself; every other batch that failed in this flush is
                 added to it as a note.
             InputValidationError: If no batch failed with ``OrcapodDatabaseReadError`` but a
-                batch was refused by its stored table (dropped from the queue, above).
-                Other failed batches are added to it as notes.
+                batch was refused by its stored table or by Delta for its rows
+                (dropped from the queue, above). Other failed batches are added to it
+                as notes.
             UnstorableColumnError: If neither of the above, but Delta refused a batch
                 for two names equal under its case folding (dropped from the queue:
                 every later flush would refuse it too; ITL-1403).
@@ -3461,7 +3512,7 @@ class DeltaTableDatabase:
             raise refused from e
         except BaseException as e:
             permanent = isinstance(e, Exception) and _permanent_commit_failure(e)
-            reported = _duplicate_name_in(e) if isinstance(e, Exception) else None
+            reported = _write_refused_for_duplicate_name(e)
             if permanent and reported is None:
                 # Refused by Delta for the rows themselves: every later flush would be
                 # refused the same way, so the batch leaves the queue, and nothing of

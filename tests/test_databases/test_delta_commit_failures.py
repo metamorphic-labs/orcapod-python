@@ -23,7 +23,14 @@ import pytest
 
 from orcapod.databases import DeltaTableDatabase
 from orcapod.databases import delta_lake_databases as dld
-from orcapod.errors import InputValidationError, UnstorableColumnError
+from orcapod.errors import (
+    InputValidationError,
+    OrcapodDatabaseReadError,
+    UnstorableColumnError,
+)
+from tests.test_databases.test_delta_refused_before_queueing import (
+    _legacy_case_only_table,  # pyright: ignore[reportPrivateUsage]
+)
 
 PATH = ("t",)
 
@@ -307,6 +314,10 @@ def test_a_failure_inside_an_unrelated_handler_is_classified_on_its_own(
                 info.value, (InputValidationError, UnstorableColumnError)
             )
             assert db._pending_batches  # pyright: ignore[reportPrivateUsage]
+        else:
+            # Review of PR 504, round seven: without the probe's error there is no
+            # ambient context, and the test would prove nothing.
+            pytest.fail("deltalake accepted two names equal under its case folding")
     finally:
         parent.chmod(0o700)
     db.flush()
@@ -363,3 +374,92 @@ def test_a_refused_result_batch_withdraws_the_records_waiting_on_it(
         records, record_id_column="rid"
     )
     assert stored is None or stored.num_rows == 0
+
+
+# ── Review of PR 504, round seven ───────────────────────────────────────────────────
+
+
+def _rows_of(*ids: bytes, column: str = "x") -> pa.Table:
+    return pa.table(
+        {"rid": pa.array(list(ids), pa.large_binary()), column: list(range(len(ids)))}
+    )
+
+
+@pytest.mark.parametrize("depth", [1, 2], ids=["its cause", "a cause of its cause"])
+@pytest.mark.parametrize(
+    "seen", [False, True], ids=["append (every id new)", "MERGE (a stored id)"]
+)
+def test_a_commit_conflict_carrying_a_duplicate_name_cause_stays_queued(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, seen: bool, depth: int
+) -> None:
+    """Finding: a ``CommitFailedError`` (another writer committed first) whose cause
+    chain names a duplicate is not a refusal of the rows: the batch stays queued and a
+    later flush commits it, on the append path and the MERGE path."""
+    from deltalake.exceptions import CommitFailedError, DeltaError
+
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(PATH, _rows_of(b"1"), record_id_column="rid", flush=True)
+    db.add_records(
+        PATH,
+        _rows_of(b"1", b"2", b"3") if seen else _rows_of(b"2", b"3"),
+        record_id_column="rid",
+    )
+    called: list[str] = []
+
+    def conflict(*args: Any, **kwargs: Any) -> Any:
+        called.append("merge" if "predicate" in kwargs else "append")
+        cause: BaseException = Exception(
+            "Schema error: Duplicate field name (case-insensitive): 'x'"
+        )
+        for _ in range(depth - 1):
+            outer = DeltaError("Generic DeltaTable error")
+            outer.__cause__ = cause
+            cause = outer
+        raise CommitFailedError("another writer committed first") from cause
+
+    with monkeypatch.context() as patched:
+        patched.setattr(deltalake, "write_deltalake", conflict)
+        patched.setattr(deltalake.DeltaTable, "merge", conflict)
+        with pytest.raises(RuntimeError, match="Failed to flush") as info:
+            db.flush()
+    assert called == ["merge" if seen else "append"]
+    assert isinstance(info.value.__cause__, CommitFailedError)
+    assert db._pending_batches  # pyright: ignore[reportPrivateUsage]
+    db.flush()
+    assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+    stored = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="rid")
+    assert stored is not None
+    assert sorted(cast(list[bytes], stored.column("rid").to_pylist())) == [
+        b"1",
+        b"2",
+        b"3",
+    ]
+
+
+@pytest.mark.parametrize("column", ["a", "c"], ids=["a held name", "a new name"])
+def test_a_target_that_cannot_be_loaded_keeps_its_batch_queued(
+    tmp_path: Path, column: str
+) -> None:
+    """Finding: rows queued for a table that a writer before deltalake 1.5.1 then
+    creates with ``a`` and ``A``. The flush fails loading the table, before any write:
+    the read error is raised as itself, the batch stays queued (a later flush retries
+    once the table is repaired), and a batch for another table is committed."""
+    db = DeltaTableDatabase(tmp_path)
+    other = ("other",)
+    db.add_records(PATH, _rows_of(b"2", b"3", column=column), record_id_column="rid")
+    db.add_records(other, _rows_of(b"7", b"8"), record_id_column="rid")
+    _legacy_case_only_table(tmp_path)
+    with pytest.raises(OrcapodDatabaseReadError):
+        db.flush()
+    assert set(db._pending_batches) == {"t"}  # pyright: ignore[reportPrivateUsage]
+    stored = DeltaTableDatabase(tmp_path).get_all_records(other, record_id_column="rid")
+    assert stored is not None and stored.num_rows == 2
+    # Repaired: the table is removed, and the queued rows are committed.
+    import shutil
+
+    shutil.rmtree(tmp_path / "t")
+    db.flush()
+    assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+    stored = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="rid")
+    assert stored is not None
+    assert sorted(cast(list[bytes], stored.column("rid").to_pylist())) == [b"2", b"3"]
