@@ -8,6 +8,7 @@ from collections.abc import (
     Collection,
     Iterable,
     Iterator,
+    Mapping,
     Sequence,
 )
 from datetime import datetime, timezone
@@ -1175,51 +1176,6 @@ async def _streams_of(inputs: Sequence[RecordBatchInput]) -> list[StreamProtocol
 # ---------------------------------------------------------------------------
 
 
-def transport_schema(stream: StreamProtocol) -> pa.Schema | None:
-    """Return the schema ``stream``'s record batches have, from its description.
-
-    Never computes, reads or polls a row: the stream's zero-row input with the columns
-    of F in F's order (``row_built_names``) and its provenance fields as a row builds
-    them (``row_built_provenance``), as ``stream_arrow_schema`` of stage 2 gives it. A
-    ``null`` type is kept, as the description declares it (record batches carry it as
-    ``large_string``, holding only nulls). The flags of system-tag and source-info
-    fields are not part of it: they follow the values of the complete table.
-
-    Args:
-        stream: The describing stream.
-
-    Returns:
-        The schema, or ``None`` for a stream that cannot say its Arrow types without
-        rows (an unbound input slot, a source that has not polled yet, a description
-        whose types are undeclared: ``arrow_types_declared`` false).
-    """
-    # TODO(ITL-1360): ``stream.arrow_schema()``, once every stream has it.
-    from orcapod.core.streams.base import row_built_names, row_built_provenance
-    from orcapod.utils import arrow_utils
-
-    if not getattr(stream, "arrow_types_declared", True):
-        # The rows decide the types (and the column order) of a description whose
-        # types are undeclared (a narrower bind, ``RowsOnRead``): the first batch sets
-        # them.
-        return None
-    typed = StaticOutputOperatorPod._zero_row_input(stream)  # pyright: ignore[reportPrivateUsage]  # the zero-row form of an input
-    if typed is None:
-        return None
-    zero_rows = typed.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
-    zero_rows = zero_rows.cast(
-        pa.schema(
-            [
-                field.with_type(
-                    arrow_utils.normalize_to_large_types(field.type, keep_null=True)
-                )
-                for field in zero_rows.schema
-            ]
-        )
-    )
-    names = row_built_names(zero_rows.column_names, stream.keys())
-    return row_built_provenance(zero_rows.select(names)).schema
-
-
 ROW_BUILT_OUTPUT = "_orcapod_row_built_output"
 """The attribute that marks a complete node output in the row-built form (ITL-1347).
 
@@ -1256,7 +1212,9 @@ def stream_from_batches(
     """
     if not batches:
         return StaticOutputOperatorPod._materialize_upstream([], stream)  # pyright: ignore[reportPrivateUsage]  # the zero-row input of an operator
-    table = pa.Table.from_batches([with_open_provenance_flags(b) for b in batches])
+    table = concatenate_batches(batches)
+    if table is None:
+        return StaticOutputOperatorPod._materialize_upstream([], stream)  # pyright: ignore[reportPrivateUsage]  # the zero-row input of an operator
     return StaticOutputOperatorPod._output_stream(  # pyright: ignore[reportPrivateUsage]  # F and the identity, stage 2's
         table, _keys_in_delivered_order(stream.keys(), table.column_names), stream
     )
@@ -1292,28 +1250,119 @@ def _keys_in_delivered_order(
     return ordered_tags, data_tags + plain
 
 
-def with_open_provenance_flags(batch: pa.RecordBatch) -> pa.RecordBatch:
-    """Flag every system-tag and source-info field of ``batch`` nullable.
+def settle_token_types(
+    batch: pa.RecordBatch, accepted: Mapping[str, pa.DataType]
+) -> dict[str, pa.DataType]:
+    """Each source-info column's token type, settled with the batches accepted so far.
 
-    Record batches of one channel differ at most in these flags: each is built from its
-    own rows (``row_built_columns`` leaves them, ``_flag_by_values`` sets them over a
-    complete table). Opened, they have one schema and can be put under one another;
-    the complete table's flags are then set by its values. The same arrays.
+    A source-info column's type follows its tokens over the complete table, as a row
+    types each token from its value (``arrow_utils.source_info_arrow_type``, the one
+    rule ``_type_source_info_by_values`` applies). A batch with no rows has no token
+    and settles nothing. Every token of the batch must then be representable in its
+    column's settled type, so that the complete table can be built.
 
     Args:
         batch: A record batch of a stream's rows.
+        accepted: Each column's token type from the batches accepted so far.
 
     Returns:
-        The batch with those fields nullable.
+        The token types with this batch accepted.
+
+    Raises:
+        SourceInfoTypesDisagree: If the batch's tokens give a column two types, or a
+            type other than the accepted batches'.
+        RowBuiltFormUnavailable: If a token cannot be represented in its column's
+            settled type.
     """
+    from orcapod.utils import arrow_utils
+
+    settled = dict(accepted)
+    if not batch.num_rows:
+        return settled  # no token: nothing to learn
+    for field, column in zip(batch.schema, batch.columns, strict=True):
+        if not field.name.startswith(constants.SOURCE_PREFIX):
+            continue
+        kinds: set[pa.DataType]
+        if pa.types.is_large_string(field.type):
+            kinds = {pa.large_string()}
+        else:
+            kinds = {
+                arrow_utils.source_info_arrow_type(value)
+                for value in column.to_pylist()
+            }
+        if field.name in settled:
+            kinds.add(settled[field.name])
+        if len(kinds) > 1:
+            raise SourceInfoTypesDisagree(field.name)
+        (kind,) = kinds
+        _ = _tokens_as(column, kind, field.name)  # representable, or refused
+        settled[field.name] = kind
+    return settled
+
+
+def _tokens_as(
+    column: pa.Array[Any],
+    kind: pa.DataType,
+    name: str,  # pyright: ignore[reportExplicitAny]  # any column
+) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny]  # any column
+    """``column``'s tokens as an array of ``kind``: the same array when it has that type.
+
+    Raises:
+        RowBuiltFormUnavailable: If a token cannot be represented as ``kind``.
+    """
+    if column.type == kind:
+        return column
+    try:
+        return pa.array(column.to_pylist(), type=kind)
+    except (pa.ArrowInvalid, pa.ArrowTypeError, TypeError, ValueError) as error:
+        raise RowBuiltFormUnavailable(
+            f"{name}: a token cannot be represented as {kind} ({error})"
+        ) from error
+
+
+def concatenate_batches(batches: Sequence[pa.RecordBatch]) -> pa.Table | None:
+    """Put a stream's record batches under one another, or ``None`` with no row.
+
+    Batches built from different rows may differ in their provenance fields: a
+    system-tag or source-info field's nullability, and a source-info column's token
+    type, follow each batch's own values. Each source-info column is brought to the
+    type its tokens settle over all the batches (``settle_token_types``), and every
+    provenance field is flagged nullable, so that the batches have one schema; the
+    complete table's flags and types are then set by its values (``_row_built_form``).
+    A batch with no rows is left out. The values are unchanged.
+
+    Args:
+        batches: Record batches of one stream's rows, in order.
+
+    Returns:
+        The table, or ``None`` when no batch has a row.
+
+    Raises:
+        SourceInfoTypesDisagree: If the tokens give a source-info column two types.
+        RowBuiltFormUnavailable: If a token cannot be represented in its column's
+            settled type.
+    """
+    rows = [batch for batch in batches if batch.num_rows]
+    if not rows:
+        return None
+    settled: dict[str, pa.DataType] = {}
+    for batch in rows:
+        settled = settle_token_types(batch, settled)
     prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
-    schema = pa.schema(
-        [
-            field.with_nullable(True) if field.name.startswith(prefixes) else field
-            for field in batch.schema
-        ]
-    )
-    return pa.RecordBatch.from_arrays(batch.columns, schema=schema)
+    opened: list[pa.RecordBatch] = []
+    for batch in rows:
+        columns: list[Any] = []  # pyright: ignore[reportExplicitAny]  # any column
+        fields: list[pa.Field[Any]] = []  # pyright: ignore[reportExplicitAny]  # any field
+        for field, column in zip(batch.schema, batch.columns, strict=True):
+            if field.name in settled:
+                column = _tokens_as(column, settled[field.name], field.name)
+                field = pa.field(field.name, settled[field.name])
+            if field.name.startswith(prefixes):
+                field = field.with_nullable(True)
+            columns.append(column)
+            fields.append(field)
+        opened.append(pa.RecordBatch.from_arrays(columns, schema=pa.schema(fields)))
+    return pa.Table.from_batches(opened)
 
 
 class RowsOnRead:
