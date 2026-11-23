@@ -236,6 +236,9 @@ def _require_condition_value(column: object, value: object) -> None:
         raise TypeError(
             f"a column name is a string, got {column!r} ({type(column).__name__})"
         )
+    if not column:
+        # As col("") refuses it, so a saved condition always reads back.
+        raise ValueError("a column name is not empty")
     if value is None:
         raise ValueError(
             f"column {column!r}: None is refused: a null equals nothing, so the "
@@ -278,8 +281,9 @@ def _frozen(value: object) -> object:
     """
     if type(value) is not datetime:
         return value
-    instant = instant_microseconds(value)
-    if instant is None:
+    # The tzinfo is read once: every later step uses this one observation of the offset.
+    offset = value.utcoffset()
+    if offset is None:
         return datetime(
             value.year,
             value.month,
@@ -289,14 +293,15 @@ def _frozen(value: object) -> object:
             value.second,
             value.microsecond,
         )
+    fixed = timezone(offset)
+    instant = instant_microseconds(value.replace(tzinfo=fixed, fold=0))
+    assert instant is not None  # a fixed timezone always has an offset
     try:
         return _UTC_ORIGIN + timedelta(microseconds=instant)
     except OverflowError:
         # An instant with no UTC datetime (year 1 at a positive offset, year 9999 at a
-        # negative one) keeps its wall time under its offset, as a fixed, immutable
-        # timezone: still nothing calls the original tzinfo again.
-        offset = value.utcoffset()
-        assert offset is not None  # an instant was computed from it
+        # negative one) keeps its wall time under the offset read above, as a fixed,
+        # immutable timezone: still nothing calls the original tzinfo again.
         return datetime(
             value.year,
             value.month,
@@ -305,7 +310,7 @@ def _frozen(value: object) -> object:
             value.minute,
             value.second,
             value.microsecond,
-            tzinfo=timezone(offset),
+            tzinfo=fixed,
         )
 
 
@@ -663,8 +668,10 @@ class ColumnRef:
     fits its column is checked when the condition meets a stream.
 
     ``==`` and ``!=`` build conditions, so a ``ColumnRef`` is not hashable and has no
-    truth value: ``col("t") > 1 and col("t") < 2`` raises ``TypeError``; write
-    ``(col("t") > 1) & (col("t") < 2)``.
+    truth value (``col("t") and col("u")`` raises ``TypeError``). Combine conditions
+    with ``&``, ``|`` and ``~``, never ``and``, ``or`` and ``not``: a ``Condition`` that
+    requires something is true, so ``(col("t") > 1) and (col("t") < 2)`` silently
+    evaluates to ``col("t") < 2`` alone. Write ``(col("t") > 1) & (col("t") < 2)``.
     """
 
     __slots__: tuple[str, ...] = ("_path",)
@@ -739,6 +746,7 @@ class ColumnRef:
                 f"[3, 7], not {values!r}"
             )
         unique: list[object] = []
+        seen: set[object] = set()  # hash keys consistent with _same_condition_value
         for given in values:
             value = _checked_value(name, given)
             if unique and type(value) is not type(unique[0]):
@@ -747,7 +755,9 @@ class ColumnRef:
                     f"{unique[0]!r} ({type(unique[0]).__name__}) and {value!r} "
                     f"({type(value).__name__})"
                 )
-            if not any(_same_condition_value(value, kept) for kept in unique):
+            key = _condition_hash_key(value)
+            if key not in seen:
+                seen.add(key)
                 unique.append(value)
         if not unique:
             raise ValueError(
@@ -1013,8 +1023,8 @@ class Condition:
                 if isinstance(argument, Condition):
                     built.append(argument)
                 elif isinstance(argument, Mapping):
-                    for column, value in argument.items():
-                        _require_condition_value(column, value)
+                    for column, given in argument.items():
+                        value = _checked_value(column, given)
                         if column in merged and not _same_condition_value(
                             merged[column], value
                         ):
@@ -1030,8 +1040,8 @@ class Condition:
                         "by position is not a condition (row order is not a result); "
                         "for a Polars expression use polars_filter"
                     )
-            for column, value in columns.items():
-                _require_condition_value(column, value)
+            for column, given in columns.items():
+                value = _checked_value(column, given)
                 if column in merged and not _same_condition_value(
                     merged[column], value
                 ):
@@ -1180,6 +1190,8 @@ class Condition:
             for option in node.children if isinstance(node, AnyOf) else (node,):
                 if not any(same_node(option, kept) for kept in options):
                     options.append(option)
+        if len(options) == 1:
+            return self  # a | a is a: one alternative is no disjunction
         return Condition._of_children((AnyOf(tuple(options)),))
 
     def __invert__(self) -> Condition:
@@ -1260,15 +1272,18 @@ class Condition:
         Returns:
             The condition; with no column, the condition every row satisfies.
         """
-        if _TREE_KEY in saved:
-            if len(saved) != 1:
+        tree = saved.get(_TREE_KEY)
+        # A saved equality value is a scalar or a one-key tagged mapping (float, date,
+        # datetime, bytes); any other mapping under the key is a tree. So an equality on
+        # a column named like the key still reads as an equality.
+        if isinstance(tree, Mapping) and not (
+            len(tree) == 1 and set(tree) <= _TAGGED_VALUE_KEYS
+        ):
+            if len(saved) != 1 or set(tree) != {"all"}:
                 raise ValueError(
-                    f"a saved condition with {_TREE_KEY!r} holds nothing else; got "
-                    f"{sorted(saved)}"
+                    f"a saved condition tree is the one key {_TREE_KEY!r} holding "
+                    f"{{'all': [...]}}; got {dict(saved)!r}"
                 )
-            tree = saved[_TREE_KEY]
-            if not isinstance(tree, Mapping) or set(tree) != {"all"}:
-                raise ValueError(f"a saved condition's tree is an 'all'; got {tree!r}")
             # Rebuilt through the public builders, so a saved tree meets every check a
             # built one does (two values required of one column are refused).
             return _condition_from_config(tree)
@@ -1316,6 +1331,9 @@ class Condition:
 
 
 _TREE_KEY = ":condition"
+
+_TAGGED_VALUE_KEYS = frozenset({_FLOAT_KEY, _DATETIME_KEY, _DATE_KEY, _BYTES_KEY})
+"""The keys of a tagged condition value in a saved config."""
 """The key of a saved condition that is not only equalities."""
 
 
@@ -1489,16 +1507,19 @@ def _node_to_config(node: Node) -> dict[str, object]:
     """Return ``node`` in its JSON form; see ``Condition.to_config``."""
     if isinstance(node, Negation):
         return {"not": _node_to_config(node.child)}
-    if isinstance(node, AllOf):
-        return {"all": [_node_to_config(child) for child in node.children]}
-    if isinstance(node, AnyOf):
-        return {"any": [_node_to_config(child) for child in node.children]}
+    if isinstance(node, (AllOf, AnyOf)):
+        # Children in the order of their canonical form: what is saved never follows
+        # the order they were given in (display keeps that order).
+        children = sorted(node.children, key=lambda c: json.dumps(_canonical_node(c)))
+        key = "all" if isinstance(node, AllOf) else "any"
+        return {key: [_node_to_config(child) for child in children]}
     saved = {**_path_to_config(node.path), "op": node.operator}
     value = node.value
     if isinstance(value, ColumnOperand):
         saved["other"] = _path_to_config(value.path)
     elif node.operator == "is_in" and isinstance(value, tuple):
-        saved["values"] = [_condition_value_to_config(v) for v in value]
+        ordered = sorted(value, key=lambda v: json.dumps(_canonical_value(v)))
+        saved["values"] = [_condition_value_to_config(v) for v in ordered]
     elif node.operator not in NULL_TESTS:
         saved["value"] = _condition_value_to_config(value)
     return saved
