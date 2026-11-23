@@ -829,6 +829,17 @@ print(first.pipeline_hash() == second.pipeline_hash())
 The conditions are checked when the filter is built and when it meets its input, so a filter
 that works on a stream works the same inside a `PipelineJob`.
 
+`head()` of a filter shows, without computing anything, the rows of its input's own `head()`
+that match: it may show fewer rows than asked, or none, and says which rows it looked at.
+Over a step that has not run (a function pod, for example) it reads not computed, as any
+`head()` does:
+
+```python
+# The input's first 3 rows hold t = 0.5, 1.2 and 2.0: two match.
+print(recorded.filter(col("t") >= 1.0).head(3).as_table().num_rows)
+# 2
+```
+
 **`where` and `filter`.** A source that can restrict what it reads (`where`, see
 [Restricting a source](sources.md#restricting-a-source-versus-filtering-in-the-pipeline)) takes the same equalities. The two give the
 same rows, but `where` is not a step of the pipeline: it changes no hash, while `filter` is a

@@ -85,12 +85,13 @@ class TestSavedJob:
     def test_a_saved_job_reloads_the_same_filter(self, tmp_path: Path):
         """Every condition kind survives ``save`` and ``load``: same hashes, same rows."""
         store = tmp_path / "store"
-        job = PipelineJob(name="filtered", database=DeltaTableDatabase(store))
+        database = DeltaTableDatabase(store)
+        job = PipelineJob(name="filtered", database=database)
         with job:
             _recordings().filter(_EVERY_KIND, label="kept")
+        # The job's own database object: job.run() flushes it, so the rows reach disk.
         job.nodes["kept"].attach_databases(
-            pipeline_database=DeltaTableDatabase(store).at("filtered"),
-            cache_mode=CacheMode.LOG,
+            pipeline_database=database.at("filtered"), cache_mode=CacheMode.LOG
         )
         job.run()
         expected = _kept(job.nodes["kept"])
@@ -108,6 +109,9 @@ class TestSavedJob:
         assert isinstance(operator, Filter)
         assert operator.condition == _EVERY_KIND
         assert operator.identity_structure() == kept.producer.identity_structure()
+        # Everything stored for the node reads back (its run's own view is empty
+        # before a run in this process, by design).
+        assert _kept(reloaded.as_source()) == expected
 
 
 class TestRestrictedAggregationWarning:
