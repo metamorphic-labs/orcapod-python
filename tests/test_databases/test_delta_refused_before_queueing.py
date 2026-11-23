@@ -176,3 +176,26 @@ def test_names_folded_alike_only_by_delta_are_refused_once(tmp_path: Path) -> No
     assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
     db.flush()
     assert not (tmp_path / "t" / "_delta_log").exists()
+
+
+def test_a_storage_typed_column_carrying_another_extension_name(tmp_path: Path) -> None:
+    """A logical identity given as ``ARROW:extension:*`` field metadata on a storage
+    type is compared as an extension type's is: another name is refused when added."""
+
+    def rows(rid: bytes, name: str) -> pa.Table:
+        field = pa.field(
+            "x",
+            pa.int64(),
+            metadata={"ARROW:extension:name": name, "ARROW:extension:metadata": ""},
+        )
+        return pa.Table.from_arrays(
+            [pa.array([rid], pa.large_binary()), pa.array([1])],
+            schema=pa.schema([pa.field("rid", pa.large_binary()), field]),
+        )
+
+    db = DeltaTableDatabase(tmp_path)
+    _add(db, rows(b"1", "itl1403.one"), flush=True)
+    with pytest.raises(InputValidationError, match="'itl1403.two'"):
+        _add(db, rows(b"2", "itl1403.two"))
+    assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+    assert _stored_ids(tmp_path) == [b"1"]
