@@ -1751,6 +1751,24 @@ class DynamicPodStream(StreamBase):
             table = typed_zero_row_table(upstream)
             if table is None:
                 return None
+            context = StaticOutputOperatorPod._upstream_context(upstream)
+            if upstream.producer is None:
+                # An upstream with no producer (a raw stream, a source) states its own
+                # pipeline hash, which a stream rebuilt from its zero-row table would
+                # not (a raw stream's meta columns enter its hash, and its zero-row
+                # table has none): the system-tag names then follow the upstream's
+                # hash, as on the sync path (``_as_upstream_stream``'s rule).
+                inputs.append(
+                    _RowsOfStream(
+                        table,
+                        tag_columns=upstream.keys()[0],
+                        pipeline_hash=upstream.pipeline_hash(),
+                        data_tags=stream_data_tags(upstream),
+                        upstreams=upstream.upstreams,
+                        data_context=context,
+                    )
+                )
+                continue
             inputs.append(
                 ArrowTableStream(
                     table,
@@ -1758,7 +1776,7 @@ class DynamicPodStream(StreamBase):
                     data_tags=stream_data_tags(upstream),
                     producer=upstream.producer,
                     upstreams=upstream.upstreams,
-                    data_context=StaticOutputOperatorPod._upstream_context(upstream),
+                    data_context=context,
                 )
             )
         pod = cast(StaticOutputOperatorPod, self._pod)

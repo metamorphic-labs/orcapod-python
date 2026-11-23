@@ -48,6 +48,32 @@ def _with_other_group_note(
     return InputValidationError(f"{error}{note}")
 
 
+def _plan_group(
+    columns: Collection[str], name_map: Mapping[str, str], drop_unmapped: bool
+) -> tuple[dict[str, str], list[str]]:
+    """Return the renames and the dropped columns of one group's user columns.
+
+    The one rule every mapper's schema prediction and result follow (ITL-1363):
+    only a user column (a tag, or a data column that is not meta) is renamed or,
+    with ``drop_unmapped``, dropped. A column outside ``columns`` (a system tag,
+    source info, the context or a meta column) is never renamed and never
+    dropped, whatever ``name_map`` holds, so a prediction must not filter a whole
+    schema by the names of ``name_map``.
+
+    Args:
+        columns: The input's user columns of the group, in order.
+        name_map: The mapper's renames.
+        drop_unmapped: Whether the user columns not in ``name_map`` are dropped.
+
+    Returns:
+        The renames of the user columns ``name_map`` names, and the user columns
+        dropped (none without ``drop_unmapped``), in input order.
+    """
+    renames = {c: name_map[c] for c in columns if c in name_map}
+    dropped = [c for c in columns if c not in name_map] if drop_unmapped else []
+    return renames, dropped
+
+
 class MapData(UnaryOperator):
     """Rename data columns.
 
@@ -246,12 +272,16 @@ class MapData(UnaryOperator):
             columns=columns, all_info=all_info
         )
 
-        # Create new data schema with renamed keys
+        # Only the user data columns are renamed or dropped (``_plan_group``).
+        renames, dropped = _plan_group(
+            [c for c in stream.keys()[1] if not is_meta_column(c)],
+            self.name_map,
+            self.drop_unmapped,
+        )
         new_data_schema = {
-            self.name_map.get(k, k): v
+            renames.get(k, k): v
             for k, v in data_schema.items()
-            if not k.startswith(constants.META_PREFIX)
-            and (k in self.name_map or not self.drop_unmapped)
+            if not k.startswith(constants.META_PREFIX) and k not in dropped
         }
 
         return tag_schema, Schema(new_data_schema)
@@ -516,17 +546,20 @@ class MapTags(UnaryOperator):
             columns=columns, all_info=all_info
         )
 
+        # Only the user tags are renamed or dropped: the system tags the
+        # table keeps are kept here too (``_plan_group``, ITL-1363).
+        renames, dropped = _plan_group(
+            stream.keys()[0], self.name_map, self.drop_unmapped
+        )
         new_tag_schema = {
-            self.name_map.get(k, k): v
-            for k, v in tag_schema.items()
-            if k in self.name_map or not self.drop_unmapped
+            renames.get(k, k): v for k, v in tag_schema.items() if k not in dropped
         }
         if not self.tag_only:
             # A data-tag's data column is renamed with it (one column).
             data_tags = set(stream_data_tags(stream))
             data_schema = Schema(
                 {
-                    self.name_map.get(k, k) if k in data_tags else k: v
+                    renames.get(k, k) if k in data_tags else k: v
                     for k, v in data_schema.items()
                 }
             )
@@ -686,16 +719,13 @@ class MapColumns(UnaryOperator):
             tag_columns: The input's tag columns, in order.
             data_columns: The input's user data columns, in order (no meta column).
         """
-        tag_renames = {c: self.name_map[c] for c in tag_columns if c in self.name_map}
-        data_renames = {c: self.name_map[c] for c in data_columns if c in self.name_map}
-        if not self.drop_unmapped:
-            return tag_renames, data_renames, [], []
-        return (
-            tag_renames,
-            data_renames,
-            [c for c in tag_columns if c not in self.name_map],
-            [c for c in data_columns if c not in self.name_map],
+        tag_renames, tags_dropped = _plan_group(
+            tag_columns, self.name_map, self.drop_unmapped
         )
+        data_renames, data_dropped = _plan_group(
+            data_columns, self.name_map, self.drop_unmapped
+        )
+        return tag_renames, data_renames, tags_dropped, data_dropped
 
     def _validate_columns(
         self, tag_columns: Collection[str], data_columns: Collection[str]
