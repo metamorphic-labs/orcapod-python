@@ -621,6 +621,22 @@ class Datagram(ContentIdentifiableBase):
 
         return arrow_utils.join_arrow_schemas(*all_schemas)
 
+    def _keep_content_hash(self, content_hash: ContentHash, hasher_id: str) -> None:
+        """Keep ``content_hash`` as this datagram's, computed before it was built.
+
+        The one digest of an input row (ITL-1361): a function node computes a row's
+        data hash once, when it prepares the row's entry id
+        (``data_table_content_hash``, the definition ``content_hash`` follows), as
+        ``main`` did by hashing the row's datagram then. A datagram built later for
+        that row keeps that digest, so the stored input data hash and record id use
+        it and nothing hashes the value again (a ``File`` that changed meanwhile).
+
+        Args:
+            content_hash: The row's data hash.
+            hasher_id: The semantic hasher's id it was computed with.
+        """
+        _ = self._content_hash_cache.setdefault(hasher_id, content_hash)
+
     def identity_structure(self) -> Any:
         """Return the primary data table, marked as a table Orcapod built.
 

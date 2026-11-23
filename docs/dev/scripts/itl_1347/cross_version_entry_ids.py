@@ -2,8 +2,10 @@
 
 Run once per Orcapod version, each with its own environment, over the same inputs:
 
-    <env>/bin/python -I cross_version_entry_ids.py <store dir> write <out.json>
-    <other env>/bin/python -I cross_version_entry_ids.py <store dir> load <out.json>
+    PYTHONPATH=<repository root> <env>/bin/python cross_version_entry_ids.py <store dir> write <out.json>
+    PYTHONPATH=<repository root> <other env>/bin/python cross_version_entry_ids.py <store dir> load <out.json>
+
+(not ``-I``: it ignores ``PYTHONPATH``, which the fixture import needs).
 
 ``write`` runs a function job node over each input and stores its results in a Delta
 store; ``load`` runs the same node load-only over the same store. A store written by one
@@ -39,6 +41,7 @@ from tests.test_core.operators.several_items import MAIN, arrangements, make_sou
 
 warnings.simplefilter("ignore")
 CALLS: list[Any] = []
+DECLARED: dict[str, Any] = {}
 
 
 @function_pod(output_keys="y")
@@ -127,6 +130,63 @@ def cases() -> dict[str, tuple[Any, Any]]:
             flat,
             ArrowTableStream(table, tag_columns=["k"], system_tag_columns=["e"]),
         )
+    out["raw/meta_column"] = (
+        flat,
+        ArrowTableStream(
+            pa.table({"k": ["a", "b"], "d1": [1, 2], "__review": [10, 11]}),
+            tag_columns=["k"],
+        ),
+    )
+    # The node is declared against the clean input and executed on the raw one.
+    DECLARED["raw/meta_column"] = ArrowTableStream(
+        pa.table({"k": ["a", "b"], "d1": [1, 2]}), tag_columns=["k"]
+    )
+    extension = {b"ARROW:extension:name": b"file", b"ARROW:extension:metadata": b""}
+    out["raw/extension_metadata_system_tag"] = (
+        flat,
+        ArrowTableStream(
+            pa.Table.from_arrays(
+                [
+                    pa.array(["a", "b"]),
+                    pa.array([1, 2]),
+                    pa.array(["s", "t"], pa.large_string()),
+                ],
+                schema=pa.schema(
+                    [
+                        pa.field("k", pa.large_string()),
+                        pa.field("d1", pa.int64()),
+                        pa.field(
+                            "_tag_s",
+                            pa.large_string(),
+                            nullable=False,
+                            metadata=extension,
+                        ),
+                    ]
+                ),
+            ),
+            tag_columns=["k"],
+        ),
+    )
+    out["raw/null_in_non_null_system_tag"] = (
+        flat,
+        ArrowTableStream(
+            pa.Table.from_arrays(
+                [
+                    pa.array(["a", "b"]),
+                    pa.array([1, 2]),
+                    pa.array(["s", None], pa.large_string()),
+                ],
+                schema=pa.schema(
+                    [
+                        pa.field("k", pa.large_string()),
+                        pa.field("d1", pa.int64()),
+                        pa.field("_tag_extra", pa.large_string(), nullable=False),
+                    ]
+                ),
+            ),
+            tag_columns=["k"],
+        ),
+    )
     out["raw/null_data_column"] = (
         untyped,
         ArrowTableStream(
@@ -144,7 +204,9 @@ def main() -> None:
         observer = Cached()
         CALLS.clear()
         try:
-            node = FunctionJobNode(pod.pod, stream, pipeline_database=database)
+            node = FunctionJobNode(
+                pod.pod, DECLARED.get(label, stream), pipeline_database=database
+            )
             node.execute(stream, observer=observer, load_only=(mode == "load"))
             database.flush()
             ids: list[str] = []

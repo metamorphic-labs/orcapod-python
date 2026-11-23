@@ -71,8 +71,11 @@ from orcapod.core.streams.view import (
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
 from orcapod.core.nodes.staleness import RunHoldingNode
-from orcapod.core.datagrams.datagram import data_table_content_hash
-from orcapod.utils.observer_rows import reads_no_rows
+from orcapod.core.datagrams.datagram import (
+    Datagram,
+    _one_row_tables,  # pyright: ignore[reportPrivateUsage]  # the datagrams' own row reader
+    data_table_content_hash,
+)
 from orcapod.core.datagrams.tag_data import Data, EmptyData, Tag
 from orcapod.errors import (
     EphemeralResultMissingError,
@@ -237,9 +240,11 @@ def _slices_are_rows(table: "pa.Table") -> bool:
     """Whether a row's datagrams hold exactly the slices of ``table`` (ITL-1361).
 
     A row's tag rebuilds its system tags from their values (non-null ``large_string``
-    is what that gives: ``system_tags_as_rows_give``), and every datagram normalizes
-    its table to the large layouts with ``null`` as ``large_string``: the slices are
-    the rows' own tables only when that normalization changes nothing.
+    without metadata, holding no null, is what that gives: ``system_tags_as_rows_give``);
+    a row's data does not hash a meta (``__``) column; and every datagram normalizes
+    its table to the large layouts with ``null`` as ``large_string``. The slices are
+    the rows' own tables only when the table has system tags so, no meta column, and
+    that normalization changes nothing.
 
     Args:
         table: The stream's table: user tags, system tags and data.
@@ -247,9 +252,15 @@ def _slices_are_rows(table: "pa.Table") -> bool:
     Returns:
         Whether the entry ids may be taken from the table's slices.
     """
-    return system_tags_as_rows_give(
-        table.schema
-    ) and arrow_utils.normalize_table_to_large_types(table).schema.equals(table.schema)
+    return (
+        system_tags_as_rows_give(table)
+        and not any(
+            name.startswith(constants.META_PREFIX) for name in table.column_names
+        )
+        and arrow_utils.normalize_table_to_large_types(table).schema.equals(
+            table.schema
+        )
+    )
 
 
 def _large_layout(table: "pa.Table") -> "pa.Table":
@@ -428,14 +439,30 @@ class _LazyRows:
     observers only. The rows are made once, when one is first read.
     """
 
-    def __init__(self, stream: StreamProtocol) -> None:
+    def __init__(
+        self,
+        stream: StreamProtocol,
+        data_hashes: Sequence[ContentHash],
+        hasher_id: str,
+    ) -> None:
         self._stream = stream
+        self._data_hashes = data_hashes
+        self._hasher_id = hasher_id
         self._rows: list[tuple[TagProtocol, DataProtocol]] | None = None
 
     def get(self) -> list[tuple[TagProtocol, DataProtocol]]:
-        """The stream's rows, made on the first call."""
+        """The stream's rows, made on the first call.
+
+        Each row's data keeps the data hash computed when its entry id was prepared
+        (``Datagram._keep_content_hash``): one digest per input row, never computed
+        again from the value.
+        """
         if self._rows is None:
-            self._rows = list(self._stream.iter_data())
+            rows = list(self._stream.iter_data())
+            for (_, data), data_hash in zip(rows, self._data_hashes, strict=True):
+                if isinstance(data, Datagram):
+                    data._keep_content_hash(data_hash, self._hasher_id)  # pyright: ignore[reportPrivateUsage]  # the row's one digest
+            self._rows = rows
         return self._rows
 
 
@@ -517,6 +544,35 @@ class _DataView(_RowView):
 
     __slots__ = ()
     _PART = 1
+
+
+def _reads_no_rows(observer: object) -> bool:
+    """Whether ``observer`` is one of the library observers that read no input row.
+
+    A closed set of exact library classes (``NoOpObserver``, ``RunCountingObserver``),
+    and a ``CompositeObserver`` all of whose observers are in it: never a subclass, and
+    never anything an observer states about itself. Only these receive row views
+    (``_TagView``, ``_DataView``); every other observer receives the rows themselves,
+    as on ``main`` (ITL-1361).
+
+    Args:
+        observer: The observer a node passes rows to.
+
+    Returns:
+        Whether it may receive row views.
+    """
+    # Imported here: the pipeline package imports the nodes.
+    from orcapod.pipeline.composite_observer import CompositeObserver
+    from orcapod.pipeline.observer import NoOpObserver
+    from orcapod.pipeline.run_summary import RunCountingObserver
+
+    kind = type(observer)
+    if kind in (NoOpObserver, RunCountingObserver):
+        return True
+    if kind is CompositeObserver:
+        composite = cast(CompositeObserver, observer)
+        return all(_reads_no_rows(member) for member in composite.observers)
+    return False
 
 
 def _protocol_members(protocol: Any) -> list[str]:
@@ -2195,6 +2251,16 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
     # Override clear_cache to also clear DB caches
     # ------------------------------------------------------------------
 
+    def _forget_stored_hit_tables(self) -> None:
+        """Drop the stored tables an earlier sync run kept (``_cached_results``).
+
+        A run keeps only the tables of the results it loads; a result held from an
+        earlier run has no place recorded, and its output row is built from its
+        datagram, as before (ITL-1361).
+        """
+        self._stored_hit_tables = []
+        self._stored_hit_positions = {}
+
     def clear_cache(self) -> None:
         """Clear in-memory output caches, content hash cache, and node identity path cache.
 
@@ -2340,8 +2406,11 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             )
             tag_schema = input_stream.output_schema(columns={"system_tags": True})[0]
             ctx_obs.on_node_start(node_label, node_hash, tag_schema=tag_schema)
-            inputs = self._input_entries(input_stream, row_views=reads_no_rows(ctx_obs))
-            _ = self.get_cached_results(base_entry_ids=[eid for _, _, eid in inputs])
+            inputs = self._input_entries(
+                input_stream, row_views=_reads_no_rows(ctx_obs)
+            )
+            self._forget_stored_hit_tables()
+            _ = self._cached_results([eid for _, _, eid in inputs], keep_tables=True)
             for tag, data, entry_id in inputs:
                 entry = self._stored_entry(entry_id)
                 if entry is None:
@@ -2955,7 +3024,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             # Collect upstream entries and resolve base_entry_ids (stable across
             # recomputation)
             upstream_entries = self._input_entries(
-                input_stream, row_views=reads_no_rows(ctx_obs)
+                input_stream, row_views=_reads_no_rows(ctx_obs)
             )
             base_entry_ids = [eid for _, _, eid in upstream_entries]
 
@@ -2965,7 +3034,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             # that the per-data cache-hit check below uses _cached_output_datas
             # directly — which includes None-output entries (function returned None)
             # and prevents spurious recomputation of already-processed data.
-            self.get_cached_results(base_entry_ids=base_entry_ids)
+            self._forget_stored_hit_tables()
+            self._cached_results(base_entry_ids, keep_tables=True)
 
             # Base entry ids of the inputs that gave a row (a cache hit or a
             # successful computation), one per input: the node's rows afterwards.
@@ -3259,6 +3329,17 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             Empty dict if no DB is attached, ``base_entry_ids`` is empty, or no
             matches are found.
         """
+        return self._cached_results(base_entry_ids)
+
+    def _cached_results(
+        self, base_entry_ids: list[bytes], *, keep_tables: bool = False
+    ) -> dict[bytes, tuple[TagProtocol, DataProtocol]]:
+        """``get_cached_results``; with ``keep_tables``, also keep the stored tables.
+
+        The sync path's run keeps the table of the stored results it loads, so its
+        output takes their rows from it (``_output_from_stored_tables``, ITL-1361); no
+        other caller keeps them (the async path is as before).
+        """
         if self._cached_function_pod is None or not base_entry_ids:
             return {}
 
@@ -3266,7 +3347,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             eid for eid in base_entry_ids if eid not in self._cached_output_datas
         ]
         if missing:
-            loaded = self._load_cached_entries(missing)
+            loaded = self._load_cached_entries(missing, keep_tables=keep_tables)
             self._cached_output_datas.update(loaded)
             if loaded:
                 self._cached_output_table = None
@@ -3429,7 +3510,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         building each row's tables (ITL-1361); any other input computes each id from
         its row, as before. The rows are then views made only when one is read
         (``_TagView``, ``_DataView``) when ``row_views`` (the node's observers read no
-        input row, ``reads_no_rows``), and otherwise the rows themselves.
+        input row, ``_reads_no_rows``), and otherwise the rows themselves.
 
         Args:
             input_stream: The node's input.
@@ -3455,8 +3536,6 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 for tag, data in input_stream.iter_data()
             ]
         tag_keys, data_keys = input_stream.keys()
-        # The rows themselves are made only when one is read (``_RowView``).
-        lazy = _LazyRows(input_stream)
         system_tags = [
             name
             for name in table.column_names
@@ -3469,12 +3548,23 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         # A row view stands for the row's datagram (``_RowView``): the checker cannot
         # see that through its delegation, so the cast goes through object.
         rows_context = contexts.resolve_context(input_stream.data_context_key)
-        ids = [
-            self._base_entry_id_of_slices(
-                tag_side.slice(index, 1), data_side.slice(index, 1), rows_context
-            )
-            for index in range(table.num_rows)
+        # One digest per row, computed here, where main hashed each row's data.
+        # One-row tables read batch by batch (``_one_row_tables``): a row's cost does
+        # not grow with the number of chunks, as ``Table.slice(i, 1)``'s does.
+        row_tables = list(_one_row_tables(tag_side, data_side))
+        data_hashes = [
+            data_table_content_hash(data_row, rows_context)
+            for _, data_row in row_tables
         ]
+        ids = [
+            self._base_entry_id_of_slices(tag_row, data_hash)
+            for (tag_row, _), data_hash in zip(row_tables, data_hashes, strict=True)
+        ]
+        # The rows themselves are made only when one is read (``_RowView``); each
+        # row's data keeps the digest computed above.
+        lazy = _LazyRows(
+            input_stream, data_hashes, rows_context.semantic_hasher.hasher_id
+        )
         if not row_views:
             # An observer that may read the rows receives the rows themselves.
             return [
@@ -3491,26 +3581,23 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         ]
 
     def _base_entry_id_of_slices(
-        self, tag_row: pa.Table, data_row: pa.Table, rows_context: contexts.DataContext
+        self, tag_row: pa.Table, data_hash: ContentHash
     ) -> bytes:
-        """One row's base entry id from its one-row tag and data slices.
+        """One row's base entry id from its one-row tag slice and its data hash.
 
         ``compute_base_entry_id`` of the row, from its table (``_input_entries``), by
         the same definitions: the preimage is the tag side with its system tags and
         the input data hash (``_with_input_data_hash``), and the input data hash is
-        the content hash a datagram of the data columns has
-        (``data_table_content_hash``, in the rows' data context, as each row's data
-        is hashed); only the tables come from slices instead of the row's datagrams.
+        the content hash a datagram of the row's data columns has
+        (``data_table_content_hash``, computed by the caller once per row).
 
         Args:
             tag_row: The row's user tags and system tags, flags as a row has them.
-            data_row: The row's data columns.
-            rows_context: The data context the stream's rows are in.
+            data_hash: The row's input data hash.
 
         Returns:
             The base entry id.
         """
-        data_hash = data_table_content_hash(data_row, rows_context)
         return self.data_context.arrow_hasher.hash_table(
             _with_input_data_hash(tag_row, data_hash)
         ).to_prefixed_digest()
@@ -4246,6 +4333,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
     def _load_cached_entries(
         self,
         base_entry_ids: list[bytes] | None = None,
+        *,
+        keep_tables: bool = False,
     ) -> "dict[bytes, tuple[TagProtocol, DataProtocol]]":
         """DB loader: fetch ``(tag, data)`` pairs from the pipeline and result databases.
 
@@ -4265,6 +4354,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         Args:
             base_entry_ids: If provided, load only these specific base entry IDs.
                 If ``None``, load all records for this node.
+            keep_tables: Keep the stored rows' table and each result's place in it
+                (``_stored_hit_tables``), for the sync run's output (ITL-1361).
 
         Returns:
             dict mapping base_entry_id → ``(tag, data)``. Empty dict when either
@@ -4284,14 +4375,15 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         stored = self._stored_rows_stream(fetched)
         if stored is not None:
             base_entry_ids_col, stream, data_ids = stored
-            # The stored rows' table, so an output of these results is taken from it
-            # instead of being built again from their datagrams (ITL-1361).
+            # The stored rows' table, so a sync run's output of these results is taken
+            # from it instead of being built again from their datagrams (ITL-1361).
             table_index = len(self._stored_hit_tables)
-            self._stored_hit_tables.append(
-                _StoredHitTable(
-                    stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS), stream.keys()
+            if keep_tables:
+                self._stored_hit_tables.append(
+                    _StoredHitTable(
+                        stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS), stream.keys()
+                    )
                 )
-            )
             for row, (base_eid, data_id, (tag, data)) in enumerate(
                 zip(base_entry_ids_col, data_ids, stream.iter_data(), strict=True)
             ):
@@ -4299,11 +4391,12 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 # carries the stored ``__data_id`` as its datagram id (ITL-1060).
                 stored_data = _with_datagram_id(data, data_id)
                 loaded[base_eid] = (tag, stored_data)
-                self._stored_hit_positions[id(stored_data)] = (
-                    stored_data,
-                    table_index,
-                    row,
-                )
+                if keep_tables:
+                    self._stored_hit_positions[id(stored_data)] = (
+                        stored_data,
+                        table_index,
+                        row,
+                    )
 
         # --- Process EmptyData tokens (ephemeral misses) ---
         for base_eid, empty_data in fetched.empty_data_tokens.items():

@@ -22,13 +22,14 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
-from orcapod import PipelineJob, function_pod
+from orcapod import File, PipelineJob, function_pod
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.nodes import function_node as function_node_module
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
+from orcapod.invocation import InvocationContext
 from orcapod.operators import Batch, GroupBy
 from orcapod.sources import DictSource
 from tests.test_core.operators.several_items import MAIN, arrangements, make_source
@@ -166,6 +167,44 @@ def _with_system_tag(column: Any, data: Any = None) -> ArrowTableStream:
     return ArrowTableStream(table, tag_columns=["k"], system_tag_columns=["r"])
 
 
+def _null_in_a_non_null_system_tag() -> ArrowTableStream:
+    """A system-tag field declared non-nullable that holds a null (Arrow accepts it)."""
+    schema = pa.schema(
+        [
+            pa.field("k", pa.large_string()),
+            pa.field("d1", pa.int64()),
+            pa.field("_tag_extra", pa.large_string(), nullable=False),
+        ]
+    )
+    table = pa.Table.from_arrays(
+        [
+            pa.array(["a", "b"], pa.large_string()),
+            pa.array([1, 2]),
+            pa.array(["s", None], pa.large_string()),
+        ],
+        schema=schema,
+    )
+    table.validate(full=True)
+    return ArrowTableStream(table, tag_columns=["k"])
+
+
+def _extension_metadata_system_tag() -> ArrowTableStream:
+    """A non-null ``large_string`` system tag carrying Arrow extension field metadata."""
+    metadata = {b"ARROW:extension:name": b"file", b"ARROW:extension:metadata": b""}
+    schema = pa.schema(
+        [
+            pa.field("k", pa.int64()),
+            pa.field("d1", pa.int64()),
+            pa.field("_tag_s", pa.large_string(), nullable=False, metadata=metadata),
+        ]
+    )
+    table = pa.Table.from_arrays(
+        [pa.array([1, 2]), pa.array([3, 4]), pa.array(["a", "b"], pa.large_string())],
+        schema=schema,
+    )
+    return ArrowTableStream(table, tag_columns=["k"])
+
+
 class _Filtering(ArrowTableStream):
     def iter_data(self) -> Any:
         return (row for row in super().iter_data() if cast(int, row[1]["d1"]) > 10)
@@ -194,6 +233,17 @@ class _Filtering(ArrowTableStream):
             ),
             id="filtering_subclass",
         ),
+        pytest.param(
+            lambda: ArrowTableStream(
+                pa.table({"k": [1, 2], "d1": [10, 20], "__review": [3, 4]}),
+                tag_columns=["k"],
+            ),
+            id="meta_column",
+        ),
+        pytest.param(
+            lambda: _null_in_a_non_null_system_tag(), id="null_in_non_null_tag"
+        ),
+        pytest.param(lambda: _extension_metadata_system_tag(), id="extension_metadata"),
     ],
 )
 def test_inputs_whose_rows_type_columns_otherwise_take_the_row_path(
@@ -201,8 +251,16 @@ def test_inputs_whose_rows_type_columns_otherwise_take_the_row_path(
 ) -> None:
     """Where the slices are not the rows' own tables (a row rebuilds its system tags
     from their values, a datagram maps ``null`` to ``large_string``, a subclass reads
-    its rows its own way), the ids are taken from the rows, as on ``main``."""
-    _assert_one_definition(stream())
+    its rows its own way, a meta column a row's data does not hash), the ids are taken
+    from the rows, as on ``main``: the precondition refuses the slice path."""
+    built = stream()
+    assert not (
+        function_node_module._reads_as_a_table_stream(built)  # pyright: ignore[reportPrivateUsage]  # the precondition
+        and function_node_module._slices_are_rows(  # pyright: ignore[reportPrivateUsage]
+            built.as_table(columns={"system_tags": True})
+        )
+    )
+    _assert_one_definition(built)
 
 
 # ── a store written by one path is found by the other ─────────────────────────
@@ -216,17 +274,26 @@ def _double(d1: int) -> int:
     return 2 * d1
 
 
+_SLICES_ARE_ROWS = function_node_module._slices_are_rows  # pyright: ignore[reportPrivateUsage]  # the predicate, captured before any test patches it
+
+
 def _run(database: InMemoryArrowDatabase, *, slices: bool, monkeypatch: Any) -> Any:
-    """Run a job of one function node over the family's source on ``database``."""
-    monkeypatch.setattr(
-        function_node_module,
-        "_slices_are_rows",
-        function_node_module._slices_are_rows if slices else (lambda table: False),  # pyright: ignore[reportPrivateUsage]  # the path under test
-    )
+    """Run a job of one function node over the family's source on ``database``, with
+    its ids from the table's slices (``slices``) or from its rows, and check that the
+    run took that path."""
+    taken: list[str] = []
+
+    def predicate(table: Any) -> bool:
+        admitted = _SLICES_ARE_ROWS(table) if slices else False
+        taken.append("slices" if admitted else "rows")
+        return admitted
+
+    monkeypatch.setattr(function_node_module, "_slices_are_rows", predicate)
     job = PipelineJob(name="paths", database=database)
     with job:
         _double.pod(make_source(MAIN).select_data_columns(["d1"]), label="doubled")
     job.run()
+    assert taken and all(path == ("slices" if slices else "rows") for path in taken)
     node: Any = job.nodes["doubled"]
     joined = node._fetch_joined_records()  # pyright: ignore[reportPrivateUsage]  # the stored entry ids
     assert joined is not None
@@ -321,22 +388,56 @@ def test_row_views_are_tags_and_data_for_every_public_check() -> None:
 
 
 def test_only_the_library_row_blind_observers_get_views() -> None:
-    """``reads_no_rows``: exactly the classes that declare it, never a subclass; a
-    composite only when every observer in it reads none."""
+    """A closed set of exact library classes, and a composite only of those; never a
+    subclass, also one that states it reads no row (its own ``READS_NO_ROWS``)."""
     from orcapod.pipeline.composite_observer import CompositeObserver
     from orcapod.pipeline.observer import NoOpObserver
     from orcapod.pipeline.run_summary import RunCountingObserver
-    from orcapod.utils.observer_rows import reads_no_rows
+
+    reads_no_rows = function_node_module._reads_no_rows  # pyright: ignore[reportPrivateUsage]  # under test
 
     class Watch(NoOpObserver):
         pass
+
+    class Claims(NoOpObserver):
+        READS_NO_ROWS = True
+
+        @property
+        def reads_no_rows(self) -> bool:
+            return True
 
     assert reads_no_rows(NoOpObserver())
     assert reads_no_rows(RunCountingObserver())
     assert reads_no_rows(CompositeObserver(NoOpObserver(), RunCountingObserver()))
     assert not reads_no_rows(Watch())
+    assert not reads_no_rows(Claims())
     assert not reads_no_rows(CompositeObserver(Watch(), RunCountingObserver()))
+    assert not reads_no_rows(CompositeObserver(Claims(), RunCountingObserver()))
     assert not reads_no_rows(object())
+
+
+def test_an_observer_claiming_to_read_no_rows_receives_the_rows() -> None:
+    """A subclass with its own claim, alone or in a composite, gets ``Tag`` / ``Data``."""
+    from orcapod.core.datagrams import Data, Tag
+    from orcapod.pipeline.composite_observer import CompositeObserver
+    from orcapod.pipeline.observer import NoOpObserver
+    from orcapod.pipeline.run_summary import RunCountingObserver
+
+    seen: list[tuple[Any, Any]] = []
+
+    class Claims(NoOpObserver):
+        READS_NO_ROWS = True
+
+        def contextualize(self, *identity_path: str) -> Any:
+            return self
+
+        def on_data_start(self, node_label: str, tag: Any, data: Any) -> None:
+            seen.append((tag, data))
+
+    _observed_rows(Claims())
+    _observed_rows(CompositeObserver(Claims(), RunCountingObserver()))
+    assert len(seen) == 24
+    assert all(type(t) is Tag and type(d) is Data for t, d in seen)
 
 
 # ── a side-effect node's pass-through ─────────────────────────────────────────
@@ -374,6 +475,9 @@ def test_a_pass_through_whose_rows_retype_system_tags_is_main_s_row_build() -> N
     (name,) = [n for n in edge.column_names if n.startswith("_tag")]
     assert edge.schema.field(name).type == pa.int64()
 
+    with pytest.raises(pa.ArrowInvalid):
+        _side_effect_edge(_null_in_a_non_null_system_tag())
+
     nullable = ArrowTableStream(
         pa.table(
             {
@@ -387,3 +491,89 @@ def test_a_pass_through_whose_rows_retype_system_tags_is_main_s_row_build() -> N
     )
     with pytest.raises(pa.ArrowInvalid):
         _side_effect_edge(nullable)
+
+
+# ── one digest per input row ───────────────────────────────────────────────────
+
+
+@function_pod(output_keys="y", ctx_arg="ctx")
+def _read_and_change(x: int, f: File, ctx: InvocationContext) -> int:
+    path = Path(str(f))
+    before = len(path.read_text())
+    if x == 1:
+        _ = path.write_text("changed contents")
+    return before
+
+
+def test_a_file_is_hashed_once_per_row(tmp_path: Path) -> None:
+    """A ``File`` both rows reference changes while the first row is processed: the
+    second row's entry id, stored input data hash and pipeline record id all use the
+    digest of the file when the run prepared its rows, as ``main`` computed it once."""
+    path = tmp_path / "input.txt"
+    _ = path.write_text("old")
+    source = DictSource(
+        [{"x": 1, "f": File(path)}, {"x": 2, "f": File(path)}], source_id="fixture"
+    )
+    expected = [
+        data.content_hash().to_prefixed_digest() for _, data in source.iter_data()
+    ]
+    database = InMemoryArrowDatabase()
+    job = PipelineJob(name="file_timing", database=database)
+    with job:
+        _read_and_change.pod(source, label="read")
+    job.run()
+    node: Any = job.nodes["read"]
+    joined = node._fetch_joined_records()  # pyright: ignore[reportPrivateUsage]  # the stored digests
+    assert joined is not None
+    record_id = next(
+        name for name in joined.table.column_names if name.startswith("_tag_record_id")
+    )
+    stored = joined.table.sort_by(record_id)  # row_0, row_1: the source's order
+    assert stored["__input_data_hash"].to_pylist() == expected
+    tags_and_data = list(source.iter_data())
+    assert sorted(stored["__pipeline_base_entry_id"].to_pylist()) == sorted(
+        node.compute_base_entry_id(tag, data) for tag, data in tags_and_data
+    )
+
+
+def test_the_async_cache_only_path_keeps_no_old_rows() -> None:
+    """Reading a CACHE_ONLY node's stored rows again and again through its channel
+    entry point retains no earlier read's rows (the async path is as before)."""
+    import asyncio
+    import gc
+    import weakref
+
+    from orcapod.channels import Channel
+    from orcapod.pipeline.serialization import LoadStatus
+
+    job = PipelineJob(name="cache_only", database=InMemoryArrowDatabase())
+    with job:
+        _double.pod(
+            DictSource(
+                [{"k": k, "d1": k} for k in range(3)],
+                tag_columns=["k"],
+                tag_only_columns=True,
+                source_id="source",
+            ),
+            label="doubled",
+        )
+    job.run()
+    node: Any = job.nodes["doubled"]
+    node.clear_cache()
+    node._load_status = LoadStatus.CACHE_ONLY  # pyright: ignore[reportPrivateUsage]  # a loaded node's state
+
+    async def read() -> list[Any]:
+        source: Channel[Any] = Channel(buffer_size=4)
+        sink: Channel[Any] = Channel(buffer_size=4)
+        await source.writer.close()
+        await node.async_execute(source.reader, sink.writer)
+        return await sink.reader.collect()
+
+    earlier: list[weakref.ref[Any]] = []
+    for _ in range(4):
+        rows = asyncio.run(read())
+        assert len(rows) == 3
+        gc.collect()
+        assert all(ref() is None for ref in earlier)
+        earlier.append(weakref.ref(rows[0][1]))
+        del rows

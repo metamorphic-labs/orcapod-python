@@ -102,8 +102,9 @@ def test_stored_and_computed_rows_interleave(pod: Any, compared: list[int]) -> N
     assert len(compared) == 3
 
 
-def test_duplicate_inputs_give_one_row_each(compared: list[int]) -> None:
-    """Two equal inputs are two output rows, both from the store on a warm run."""
+def test_repeated_values_give_one_row_each(compared: list[int]) -> None:
+    """Rows with equal data values (distinct inputs: each its own tag ``j``) are one
+    output row each, all from the store on a warm run."""
     from orcapod.sources import DictSource
 
     database = InMemoryArrowDatabase()
@@ -115,6 +116,49 @@ def test_duplicate_inputs_give_one_row_each(compared: list[int]) -> None:
     )
     _job(source, tripled, database).run()
     _job(source, tripled, database).run()
+    assert compared == [4, 4]
+
+
+def test_duplicate_inputs_give_one_row_each(compared: list[int]) -> None:
+    """Inputs that are equal in every column, system tags included (one base entry
+    id, the same record id), are one output row each, computed once on a cold run
+    and every occurrence taken from the store on a warm run (repeated positions in
+    the stored table)."""
+    import pyarrow as pa
+
+    from orcapod.core.streams import ArrowTableStream
+
+    schema = pa.schema(
+        [
+            pa.field("k", pa.int64(), nullable=False),
+            pa.field("d1", pa.int64(), nullable=False),
+            pa.field("sid", pa.large_string(), nullable=False),
+            pa.field("rid", pa.large_string(), nullable=False),
+        ]
+    )
+    table = pa.table(
+        {
+            "k": [0, 1, 0, 1],
+            "d1": [10, 20, 10, 20],
+            "sid": ["s", "s", "s", "s"],
+            "rid": ["row_0", "row_1", "row_0", "row_1"],
+        },
+        schema=schema,
+    )
+    stream = ArrowTableStream(
+        table, tag_columns=["k"], system_tag_columns=["sid", "rid"]
+    )
+    database = InMemoryArrowDatabase()
+    for _ in range(2):
+        node = FunctionJobNode(
+            tripled.pod,  # pyright: ignore[reportArgumentType]  # a function pod
+            stream,
+            pipeline_database=database,
+        )
+        output = node.execute(stream)
+        assert output.as_table()["tripled"].to_pylist() == [30, 60, 30, 60]
+    entries = node._input_entries(stream)  # pyright: ignore[reportPrivateUsage]  # the ids repeat
+    assert len({entry_id for _, _, entry_id in entries}) == 2
     assert compared == [4, 4]
 
 
@@ -136,8 +180,8 @@ class _ReadsRows(NoOpObserver):
 def test_an_observer_reading_the_input_rows_sees_them(compared: list[int]) -> None:
     """On a run over stored results, the rows an observer reads are the input's rows.
 
-    The node shows its observers views of its input rows (``_RowView``), made when
-    read; their values are the rows' own.
+    An observer that may read the rows (any but the library's row-blind ones, so this
+    one) receives the rows themselves, as on ``main``; their values are the rows' own.
     """
     database = InMemoryArrowDatabase()
     source = _keyed(list(range(6)))

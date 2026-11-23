@@ -6,7 +6,7 @@ when no observability is configured.  Every method is a zero-cost no-op.
 
 from __future__ import annotations
 
-from typing import Any, ClassVar
+from typing import Any
 
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 from orcapod.types import SchemaLike
@@ -47,9 +47,6 @@ class NoOpObserver:
     observability is configured.  ``create_data_logger`` returns the
     shared ``_NOOP_LOGGER`` singleton.
     """
-
-    READS_NO_ROWS: ClassVar[bool] = True
-    """It reads no input row's tag or data (``reads_no_rows``)."""
 
     def contextualize(self, *identity_path: str) -> NoOpObserver:
         return self

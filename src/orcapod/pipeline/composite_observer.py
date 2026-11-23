@@ -25,7 +25,6 @@ from __future__ import annotations
 from typing import Any
 
 from orcapod.pipeline.observer import NoOpLogger
-from orcapod.utils.observer_rows import reads_no_rows
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 from orcapod.types import SchemaLike
 
@@ -44,9 +43,9 @@ class CompositeObserver:
         self._observers = list(observers)
 
     @property
-    def READS_NO_ROWS(self) -> bool:  # noqa: N802  # the name ``reads_no_rows`` reads on every observer
-        """Whether every observer it calls reads no input row (``reads_no_rows``)."""
-        return all(reads_no_rows(observer) for observer in self._observers)
+    def observers(self) -> tuple[Any, ...]:
+        """The observers it calls, in order."""
+        return tuple(self._observers)
 
     def contextualize(self, *identity_path: str) -> "CompositeObserver":
         """Return a new CompositeObserver wrapping each child's contextualized version."""

@@ -967,13 +967,9 @@ def test_a_source_table_with_other_system_tags_is_not_its_rows() -> None:
         system_tag_columns=["region"],
         source_id="s",
     )
-    assert not system_tags_as_rows_give(
-        narrow.as_table(columns={"system_tags": True}).schema
-    )
+    assert not system_tags_as_rows_give(narrow.as_table(columns={"system_tags": True}))
     stock = _plain()
-    assert system_tags_as_rows_give(
-        stock.as_table(columns={"system_tags": True}).schema
-    )
+    assert system_tags_as_rows_give(stock.as_table(columns={"system_tags": True}))
 
 
 def test_a_retained_output_keeps_only_its_rows_once_read(

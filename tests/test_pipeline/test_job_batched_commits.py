@@ -450,11 +450,9 @@ def test_base_entry_id_is_computed_once_per_row(
         calls["n"] += 1
         return original(self, tag, input_data)
 
-    def counting_slices(
-        self: FunctionJobNode, tag_row: Any, data_row: Any, rows_context: Any
-    ) -> bytes:
+    def counting_slices(self: FunctionJobNode, tag_row: Any, data_hash: Any) -> bytes:
         calls["n"] += 1
-        return original_of_slices(self, tag_row, data_row, rows_context)
+        return original_of_slices(self, tag_row, data_hash)
 
     monkeypatch.setattr(FunctionJobNode, "compute_base_entry_id", counting)
     monkeypatch.setattr(FunctionJobNode, "_base_entry_id_of_slices", counting_slices)

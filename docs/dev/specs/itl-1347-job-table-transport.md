@@ -821,9 +821,13 @@ The function is still called once per row. Everything around the call is Arrow d
 from their stored table, a side-effect node's pass-through as F of its input table) is
 used only where the table is provably its rows': the stream is exactly an
 `ArrowTableStream` (or the row-built stream a job hands a node), with no member replaced on
-the instance, in the node's data context, with system tags that are non-null
-`large_string` (`system_tags_as_rows_give`) and no column a datagram would retype
-(`_slices_are_rows`; a stored table is checked the same way). Anything else takes
+the instance, in the node's data context, with system tags that are what rows give
+(`system_tags_as_rows_give`: non-null `large_string` fields without field metadata,
+holding no null; stage 2's source and operator routes use the same helper), no meta
+(`__`) column, and no column a datagram would retype (`_slices_are_rows`; a stored table
+is checked the same way). A row's data hash is computed once, when its entry id is
+prepared, and a datagram built later for the row keeps it
+(`Datagram._keep_content_hash`): nothing hashes a value again. Anything else takes
 `main`'s row path. The entry id has one definition on both paths: the preimage's last
 column is `_with_input_data_hash`, and the input data hash is `data_table_content_hash`, a
 data datagram's content hash.
@@ -884,11 +888,12 @@ view**: one internal class, `RowView`, that satisfies `TagProtocol` or `DataProt
 Arrow table or record batch and a row index. It builds the datagram only when it is first
 read.
 
-- Only the library observers that read no input row (`READS_NO_ROWS` declared on their own
-  class: `NoOpObserver`, `RunCountingObserver`, and a `CompositeObserver` of only such;
-  `reads_no_rows`) receive row views (`_TagView`, `_DataView`, every protocol member
-  declared on the class). Every other observer, a subclass included, receives the rows
-  themselves, as on `main` (ITL-1361 review: a view is not a `Tag`).
+- Only the library observers that read no input row, a closed set of exact classes
+  (`NoOpObserver`, `RunCountingObserver`, and a `CompositeObserver` of only such;
+  `_reads_no_rows`, never a subclass and never anything an observer states about
+  itself), receive row views (`_TagView`, `_DataView`, every protocol member declared on
+  the class). Every other observer receives the rows themselves, as on `main` (ITL-1361
+  review: a view is not a `Tag`).
 
 Event order stays as today:
 - sync: input order;
