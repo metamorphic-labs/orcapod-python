@@ -9,6 +9,7 @@ from .column_selection import (
     SelectTagColumns,
 )
 from .drop_nulls import DropNulls
+from .filter import Filter
 from .filters import PolarsFilter
 from .group_by import GroupBy
 from .index import Index
@@ -38,6 +39,7 @@ __all__ = [
     "SelectColumns",
     "DropColumns",
     "PolarsFilter",
+    "Filter",
     "DropNulls",
     "AddTags",
     "Pick",

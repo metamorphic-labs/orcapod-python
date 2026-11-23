@@ -123,6 +123,15 @@ class StaticOutputOperatorPod(TraceableBase):
     predicate, so no user code runs to learn the column types (ITL-912).
     """
 
+    HEAD_FROM_INPUT_HEAD: ClassVar[bool] = False
+    """Whether ``head`` may show this operator over the rows its input's head shows.
+
+    Declared by an operator that keeps or drops each input row by that row alone, with
+    no user code and no effect (``Filter``, decision 13 of ITL-1374); its ``head_rows``
+    then chooses the rows. Any other operator's head shows no rows before it is computed,
+    and its input's head is never asked for.
+    """
+
     PROVISIONAL: ClassVar[bool] = False
     """Whether the operator is provisional: its identity is not frozen (ITL-1266).
 
@@ -730,6 +739,26 @@ class StaticOutputOperatorPod(TraceableBase):
             stream_data_tags(upstream),
             upstream,
         )
+
+    def head_rows(self, stream: StreamProtocol, table: pa.Table) -> pa.Table | None:
+        """The rows ``head`` may show of this operator over ``stream``, from the rows
+        ``stream``'s own ``head`` shows (``table``), before the result is computed.
+
+        Asked only when ``HEAD_FROM_INPUT_HEAD`` is set. ``None`` (the default): nothing
+        is shown, because the head of an operator is
+        not, in general, the operator over the head of its input (a group over ten rows
+        has the wrong members). An operator whose result row by row is a choice among
+        its input's rows, decided by no user code and with no effect, may answer with
+        the rows of ``table`` it keeps (``Filter``, decision 13 of ITL-1374).
+
+        Args:
+            stream: The operator's one input.
+            table: The rows its ``head`` shows, with the columns it was asked for.
+
+        Returns:
+            The rows to show, with ``table``'s columns, or ``None``.
+        """
+        return None
 
     def zero_row_result(self, *inputs: StreamProtocol) -> StreamProtocol:
         """This operator's result over zero-row inputs, for its zero-row table (ITL-912).
@@ -2003,10 +2032,55 @@ class DynamicPodStream(StreamBase):
             return head_of(
                 self._cached_stream.head(n, columns=config), self, origin="computed"
             )
+        matching = self._matching_head(n, config)
+        if matching is not None:
+            return matching
         return self._head_without_rows(
             config,
             ViewStatus.NOT_COMPUTED,
             note=STALE_NOTE if had_result else None,
+        )
+
+    def _matching_head(self, n: int, config: ColumnConfig) -> StreamView | None:
+        """The head an operator shows from its input's head (``head_rows``), or ``None``.
+
+        Only for one input whose own ``head`` shows rows (or knows it has none), which
+        never computes, polls or delivers; the operator's ``head_rows`` decides. The
+        view says which rows were looked at: those its input's head shows.
+        """
+        if not self._pod.HEAD_FROM_INPUT_HEAD or len(self._upstreams) != 1:
+            return None
+        (upstream,) = self._upstreams
+        upstream_view = head_of(upstream.head(n, columns=config), upstream)
+        if upstream_view.status is not ViewStatus.ROWS:
+            return None
+        rows = self._pod.head_rows(upstream, upstream_view.table)
+        if rows is None:
+            return None
+        looked_at = upstream_view.table.num_rows
+        complete = (
+            upstream_view.total_rows == looked_at
+            and not upstream_view.total_is_estimate
+        )
+        shown = rows.num_rows
+        sorting = ", sorted by tags" if upstream_view.sorted_by_tags else ""
+        if complete:
+            description = (
+                f"all {shown:,} matching {'row' if shown == 1 else 'rows'} of its "
+                f"input's {looked_at:,}{sorting}"
+            )
+        else:
+            description = (
+                f"{shown:,} matching {'row' if shown == 1 else 'rows'} among the "
+                f"{looked_at:,} its input's head shows{sorting} (not computed; run() "
+                "computes every row)"
+            )
+        return StreamView.of_rows(
+            self,
+            rows,
+            tag_columns=upstream_view.tag_columns,
+            total_rows=shown if complete else None,
+            description=description,
         )
 
     def __repr__(self) -> str:

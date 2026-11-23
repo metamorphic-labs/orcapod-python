@@ -1859,7 +1859,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
             elif isinstance(bp_node, _OperatorNode):
                 descriptor = getattr(bp_node, "_descriptor", None) or {}
-                preds = list(job._hash_graph.predecessors(node_hash))
+                # The inputs in argument order, as the file gives them (ITL-1417); a
+                # graph's predecessors do not keep that order. A read-only node keeps
+                # its inputs too, as before.
+                preds = pipeline._loaded_input_keys.get(  # pyright: ignore[reportPrivateUsage]  # set by Pipeline.load for this loader
+                    node_hash
+                ) or list(job._hash_graph.predecessors(node_hash))
                 input_streams = tuple(
                     job._persistent_node_map[p]
                     for p in preds

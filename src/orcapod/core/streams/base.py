@@ -41,7 +41,7 @@ from orcapod.protocols.core_protocols import (
 )
 from orcapod.protocols.core_protocols.streams import RecordBatchInput
 from orcapod.system_constants import constants
-from orcapod.types import ColumnConfig, Schema
+from orcapod.types import ColumnConfig, Condition, Schema
 from orcapod.utils import arrow_utils
 
 # TODO: consider using this instead of making copy of dicts
@@ -1016,6 +1016,42 @@ class StreamBase(TraceableBase):
         return PolarsFilter(predicates=predicates, constraints=total_constraints)(
             self, label=label
         )
+
+    def filter(
+        self,
+        *conditions: Condition | Mapping[str, object],
+        label: str | None = None,
+        **columns: object,
+    ) -> StreamBase:
+        """Keep the rows that satisfy every condition; a step of the pipeline.
+
+        ``s.filter(session="s1")``, ``s.filter({"session": "s1"})`` and
+        ``s.filter(col("t") >= 1.0, col("unit").is_in([3, 7]), session="s1")``:
+        keywords and mappings are equalities, every other condition is built with
+        ``col``; all of them must hold. Tag and data columns are named alike. The
+        output has this stream's columns and types; only the rows change. See
+        ``orcapod.core.operators.Filter``.
+
+        Args:
+            *conditions: Conditions (built with ``col`` or ``Condition.of``) and
+                mappings of column name to value.
+            label: Optional node label for the pipeline graph. A column named
+                ``label`` is written ``filter({"label": ...})`` or with ``col``.
+            **columns: Column name to the value it must equal.
+
+        Returns:
+            A stream over the kept rows, in input order.
+
+        Raises:
+            ValueError: If no condition is given.
+            TypeError: If an argument is neither a condition nor a mapping, or a
+                value is not exactly of a supported type.
+            InputValidationError: If a column is missing or a value does not fit
+                its column.
+        """
+        from orcapod.core.operators import Filter
+
+        return Filter(Condition.of(*conditions, **columns))(self, label=label)
 
     def drop_nulls(
         self,

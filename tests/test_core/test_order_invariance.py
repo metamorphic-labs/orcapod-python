@@ -35,9 +35,11 @@ A case owned by an open issue is ``xfail(strict=True)`` naming it
 from __future__ import annotations
 
 import asyncio
+import functools
 import inspect
 import itertools
 import json
+import operator
 import re
 import sqlite3
 from collections.abc import Callable, Sequence
@@ -51,12 +53,13 @@ import pyarrow.csv as pa_csv
 import pytest
 
 import orcapod
-from orcapod import PipelineJob, function_pod, operators, sources, streams
+from orcapod import PipelineJob, col, function_pod, operators, sources, streams
 from orcapod.channels import Channel
 from orcapod.core.nodes import SourceJobNode
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
+from orcapod.types import Condition
 from orcapod.operators import (
     AddTags,
     Batch,
@@ -64,6 +67,7 @@ from orcapod.operators import (
     DropDataColumns,
     DropNulls,
     DropTagColumns,
+    Filter,
     GroupBy,
     Index,
     Join,
@@ -423,6 +427,32 @@ OPERATOR_CASES: dict[str, tuple[OperatorCase, ...]] = {
             lambda items: PolarsFilter(predicates=list(items)),
             (pl.col("d1") > 10, pl.col("t3") == 1),
             argument_issue="ITL-1247",
+        ),
+    ),
+    "Filter": (
+        # Positional conditions on a tag, a data column and every role.
+        OperatorCase(
+            "filter_conditions",
+            lambda items: Filter(Condition.of(*items)),
+            (col("t1") == "a", col("d1") > 10, col("t3").is_in([1, 2])),
+        ),
+        # Keywords.
+        OperatorCase(
+            "filter_keywords",
+            lambda items: Filter(Condition.of(**dict(items))),
+            (("t1", "a"), ("t2", 1)),
+        ),
+        # The values of is_in.
+        OperatorCase(
+            "filter_is_in_values",
+            lambda items: Filter(col("d1").is_in(list(items))),
+            (20, 30, 50),
+        ),
+        # The operands of |.
+        OperatorCase(
+            "filter_or_operands",
+            lambda items: Filter(functools.reduce(operator.or_, items)),
+            (col("t2") == 2, col("d2").is_null(), col("d3") == "x"),
         ),
     ),
     "DropNulls": (

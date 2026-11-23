@@ -191,11 +191,14 @@ def _condition_hash_key(value: object) -> tuple[type, object]:
 
 def _condition_value_to_config(value: object) -> object:
     """Return a condition value in its JSON form (date, datetime, bytes and a NaN or
-    infinite float tagged: ``{"float": "nan" | "inf" | "-inf"}``)."""
+    infinite float tagged: ``{"float": "nan" | "inf" | "-inf"}``; ``-0.0`` as ``0.0``)."""
     if isinstance(value, float) and not math.isfinite(value):
         return {
             _FLOAT_KEY: "nan" if value != value else ("inf" if value > 0 else "-inf")
         }
+    if isinstance(value, float) and value == 0.0:
+        # -0.0 is 0.0 (the float rule), so two equal conditions save one form.
+        return 0.0
     if isinstance(value, datetime):
         return {_DATETIME_KEY: value.isoformat()}
     if isinstance(value, date):
@@ -284,6 +287,9 @@ def _require_condition_value(column: object, value: object) -> None:
 _UTC_ORIGIN = datetime(1, 1, 1, tzinfo=timezone.utc)
 """0001-01-01 UTC, the origin of ``instant_microseconds``."""
 
+_MAX_WALL_MICROSECONDS = (datetime.max - datetime.min) // timedelta(microseconds=1)
+"""The wall time ``datetime.max``, in microseconds since 0001-01-01."""
+
 
 def _frozen(value: object) -> object:
     """Return a condition value as a condition holds it: nothing in it calls back later.
@@ -298,7 +304,9 @@ def _frozen(value: object) -> object:
     Every other value is returned as it is.
 
     An instant that has no UTC ``datetime`` (year 1 at a positive offset, year 9999 at
-    a negative one) keeps its wall time under its offset as a fixed ``timezone``.
+    a negative one) is held at the nearest wall time (``datetime.min`` or
+    ``datetime.max``) under the fixed offset that names the instant there, so its
+    representation depends on the instant only.
     """
     if type(value) is not datetime:
         return value
@@ -321,18 +329,16 @@ def _frozen(value: object) -> object:
         return _UTC_ORIGIN + timedelta(microseconds=instant)
     except OverflowError:
         # An instant with no UTC datetime (year 1 at a positive offset, year 9999 at a
-        # negative one) keeps its wall time under the offset read above, as a fixed,
-        # immutable timezone: still nothing calls the original tzinfo again.
-        return datetime(
-            value.year,
-            value.month,
-            value.day,
-            value.hour,
-            value.minute,
-            value.second,
-            value.microsecond,
-            tzinfo=fixed,
-        )
+        # negative one) is held at the nearest wall time a datetime has, under the fixed
+        # offset that names the instant there. Decided by the instant alone, so every
+        # spelling of one instant is held, written and saved the same way.
+        if instant < 0:
+            wall = datetime.min
+            shift = timedelta(microseconds=-instant)
+        else:
+            wall = datetime.max
+            shift = timedelta(microseconds=_MAX_WALL_MICROSECONDS - instant)
+        return wall.replace(tzinfo=timezone(shift))
 
 
 def _checked_value(column: str, value: object) -> object:
@@ -1180,9 +1186,16 @@ class Condition:
             The condition requiring everything both require.
         """
         children = list(self._root.children)
+        # Kept nodes by their hash key (consistent with ``same_node``), so each new node
+        # is compared only with the kept nodes of its key, not with every kept node.
+        kept_by_key: dict[object, list[Node]] = {}
+        for kept in children:
+            kept_by_key.setdefault(_node_hash_key(kept), []).append(kept)
         for node in other._root.children:
-            if any(same_node(node, kept) for kept in children):
+            bucket = kept_by_key.setdefault(_node_hash_key(node), [])
+            if any(same_node(node, kept) for kept in bucket):
                 continue
+            bucket.append(node)
             children.append(node)
         return Condition._of_children(tuple(children))
 
