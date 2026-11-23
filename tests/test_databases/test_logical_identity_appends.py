@@ -1258,47 +1258,88 @@ def test_extension_metadata_that_is_not_text(state: str) -> None:
     assert stored is not None and stored.num_rows == 2
 
 
-@pytest.mark.parametrize("state", ["committed", "reopened"])
-def test_delta_logical_type_over_a_plain_column(tmp_path: Path, state: str) -> None:
-    """A stored Delta column with no identifier is known to hold no logical type only
-    when the log records its Arrow type: then another identifier is refused,
-    dictionary-encoded or not. Without a record (a plain text column, or one Delta
-    wrote from a dictionary of extension values, losing its identifier: ITL-1372) the
-    absence proves nothing and the rule abstains, so main's checks decide: an
-    extension column is accepted, as on main."""
-    uint16 = pa.uint16()
+RECORDED_STORAGES = {
+    "uint16": (pa.uint16(), lambda n: list(range(n))),
+    "fixed_size_binary": (pa.binary(4), lambda n: [b"%04d" % i for i in range(n)]),
+}
 
-    def recorded_rows(ids: list[bytes], identifier: bool, encoded: bool) -> pa.Table:
-        values: Any = pa.array(range(len(ids)), uint16)
-        if identifier:
-            values = _UINT16(b"e").wrap_array(values)
-        if encoded:
+
+@pytest.mark.parametrize("state", ["committed", "reopened"])
+@pytest.mark.parametrize("encoded", [False, True], ids=["plain", "dictionary"])
+@pytest.mark.parametrize("form", FORMS)
+@pytest.mark.parametrize("storage", list(RECORDED_STORAGES))
+def test_delta_logical_type_over_a_recorded_plain_column(
+    tmp_path: Path, storage: str, form: str, encoded: bool, state: str
+) -> None:
+    """A stored Delta column whose log records its Arrow type (``uint16``, fixed-size
+    binary) and carries no identifier is known to hold no logical type: another
+    identifier is refused, as an extension type or an annotation, dictionary-encoded
+    or not (round 3, finding 1)."""
+    arrow_type, values_of = RECORDED_STORAGES[storage]
+
+    def rows(ids: list[bytes], identifier: bool) -> pa.Table:
+        values: Any = pa.array(values_of(len(ids)), arrow_type)
+        field = pa.field("x", arrow_type)
+        if identifier and form == "extension":
+            values = _ext_over(arrow_type)(b"e").wrap_array(values)
+            field = pa.field("x", values.type)
+        elif identifier:
+            field = pa.field(
+                "x", arrow_type, metadata={NAME: b"itl1371.over", META: b"e"}
+            )
+        if encoded and identifier:
             values = pa.DictionaryArray.from_arrays(
                 pa.array(range(len(ids)), pa.int8()), values
             )
+            field = field.with_type(values.type)
         return pa.Table.from_arrays(
-            [pa.array(ids, pa.large_binary()), values], names=["id", "x"]
+            [pa.array(ids, pa.large_binary()), values],
+            schema=pa.schema([pa.field("id", pa.large_binary()), field]),
         )
 
-    for encoded in (False, True):
-        root = tmp_path / f"recorded-{encoded}"
-        with _store("Delta", root) as store:
-            store.db.add_records(
-                PATH,
-                recorded_rows([b"1"], False, False),
-                record_id_column="id",
-                flush=True,
-            )
-            if state == "reopened":
-                store.reopen()
-            with pytest.raises(
-                InputValidationError, match="stored column's no logical"
-            ):
-                store.db.add_records(
-                    PATH, recorded_rows([b"22"], True, encoded), record_id_column="id"
-                )
-            assert store.stored().column("id").to_pylist() == [b"1"]
+    with _store("Delta", tmp_path) as store:
+        store.db.add_records(
+            PATH, rows([b"1"], False), record_id_column="id", flush=True
+        )
+        if state == "reopened":
+            store.reopen()
+        with pytest.raises(InputValidationError, match="stored column's no logical"):
+            store.db.add_records(PATH, rows([b"22"], True), record_id_column="id")
+        assert store.stored().column("id").to_pylist() == [b"1"]
 
+
+_EXT_OVER: dict[str, Any] = {}
+
+
+def _ext_over(storage: Any) -> Any:
+    """An extension class named ``itl1371.over`` over ``storage``, one per storage."""
+    key = str(storage)
+    if key not in _EXT_OVER:
+
+        class _Over(pa.ExtensionType):
+            def __init__(self, meta: bytes) -> None:
+                self._meta = meta
+                super().__init__(storage, "itl1371.over")
+
+            def __arrow_ext_serialize__(self) -> bytes:
+                return self._meta
+
+            @classmethod
+            def __arrow_ext_deserialize__(
+                cls, storage_type: Any, serialized: bytes
+            ) -> Any:
+                return cls(serialized)
+
+        _EXT_OVER[key] = _Over
+    return _EXT_OVER[key]
+
+
+@pytest.mark.parametrize("state", ["committed", "reopened"])
+def test_delta_logical_type_over_a_plain_column(tmp_path: Path, state: str) -> None:
+    """Without a recorded Arrow type (a plain text column, or one Delta wrote from a
+    dictionary of extension values, losing its identifier: ITL-1372) a stored column
+    with no identifier proves nothing and the rule abstains, so main's checks decide:
+    an extension column is accepted, as on main (round 3, findings 1 and 5)."""
     with _store("Delta", tmp_path / "unrecorded") as store:
         store.db.add_records(
             PATH,
@@ -1312,25 +1353,6 @@ def test_delta_logical_type_over_a_plain_column(tmp_path: Path, state: str) -> N
             PATH, _rows(HELD, "extension", "top", [b"22"]), record_id_column="id"
         )
         assert store.stored().num_rows == 2
-
-
-def _uint16_type() -> Any:
-    class _UInt16(pa.ExtensionType):
-        def __init__(self, meta: bytes) -> None:
-            self._meta = meta
-            super().__init__(pa.uint16(), "itl1371.uint16")
-
-        def __arrow_ext_serialize__(self) -> bytes:
-            return self._meta
-
-        @classmethod
-        def __arrow_ext_deserialize__(cls, storage_type: Any, serialized: bytes) -> Any:
-            return cls(serialized)
-
-    return _UInt16
-
-
-_UINT16 = _uint16_type()
 
 
 @pytest.mark.parametrize("state", ["committed", "reopened"])
@@ -1481,11 +1503,16 @@ def test_an_opaque_name_never_reads_as_a_text_name() -> None:
     assert "\"b'\\\\xff';\", the stored column's b'\\xff';" in str(refused.value)
 
 
+@pytest.mark.parametrize("skip_duplicates", [False, True])
 @pytest.mark.parametrize("state", ["pending", "committed"])
-def test_every_chunk_identifier_is_compared(state: str) -> None:
+@pytest.mark.parametrize("kind", ["in-memory", "Delta"])
+def test_every_chunk_identifier_is_compared(
+    tmp_path: Path, kind: str, state: str, skip_duplicates: bool
+) -> None:
     """pyarrow lets the chunks of one column hold one Python extension class with
     other serialized metadata: each chunk's own identifier is compared, so a later
-    chunk of another identifier is refused; chunks of the same bytes are accepted."""
+    chunk of another identifier is refused; chunks of the same bytes are accepted
+    (round 3, finding 6)."""
 
     def rows(metas: list[bytes], ids: list[bytes]) -> pa.Table:
         chunks = [_wrapped(meta, [i.decode()]) for meta, i in zip(metas, ids)]
@@ -1494,12 +1521,22 @@ def test_every_chunk_identifier_is_compared(state: str) -> None:
             names=["id", "x"],
         )
 
-    db = InMemoryArrowDatabase()
+    with _store(kind, tmp_path) as store:
+        _check_chunk_identifiers(store, rows, state, skip_duplicates)
+
+
+def _check_chunk_identifiers(
+    store: _Store, rows: Any, state: str, skip_duplicates: bool
+) -> None:
+    db = store.db
     db.add_records(
         PATH, rows([b"m"], [b"1"]), record_id_column="id", flush=state == "committed"
     )
-    db.add_records(PATH, rows([b"m", b"m"], [b"2", b"3"]), record_id_column="id")
-    mixed = rows([b"m", b"n"], [b"4", b"5"])
+    db.add_records(
+        PATH, rows([b"m", b"m"], [b"2", b"3"]), record_id_column="id", flush=True
+    )
+    ids = [b"2", b"3"] if skip_duplicates else [b"4", b"5"]
+    mixed = rows([b"m", b"n"], ids)
     assert [c.type.__arrow_ext_serialize__() for c in mixed.column("x").chunks] == [
         b"m",
         b"n",
@@ -1507,10 +1544,10 @@ def test_every_chunk_identifier_is_compared(state: str) -> None:
     with pytest.raises(
         InputValidationError, match="'itl1371.a;6e', the stored column's 'itl1371.a;6d'"
     ):
-        db.add_records(PATH, mixed, record_id_column="id")
-    db.flush()
-    stored = db.get_all_records(PATH, record_id_column="id")
-    assert stored is not None
+        db.add_records(
+            PATH, mixed, record_id_column="id", skip_duplicates=skip_duplicates
+        )
+    stored = store.stored()
     assert sorted(cast(list[bytes], stored.column("id").to_pylist())) == [
         b"1",
         b"2",
@@ -1897,3 +1934,256 @@ def test_the_identity_is_refused_before_the_reorder_calls_a_serializer(
             )
         assert "'itl1371.raising;6e6577'" in str(refused.value)
         assert "'itl1371.raising;6f6c64'" in str(refused.value)
+
+
+# ---------------------------------------------------------------------------
+# Every review finding pinned (developer, 2026-11-22): round 4 limits and the
+# declined CodeRabbit item
+# ---------------------------------------------------------------------------
+
+
+def _failing_reader(error: type[Exception]) -> Any:
+    """A registered ``itl1371.a`` whose reader cannot read stored metadata."""
+
+    class Failing(pa.ExtensionType):
+        def __init__(self) -> None:
+            super().__init__(pa.large_string(), "itl1371.a")
+
+        def __arrow_ext_serialize__(self) -> bytes:
+            return b"current"
+
+        @classmethod
+        def __arrow_ext_deserialize__(cls, storage_type: Any, serialized: bytes) -> Any:
+            raise error("itl1371.a cannot read this metadata")
+
+    return Failing
+
+
+@pytest.mark.parametrize("skip_duplicates", [False, True])
+@pytest.mark.parametrize("shape", ["list", "map"])
+def test_delta_identity_beneath_lists_and_maps_comes_before_an_undecodable_child(
+    tmp_path: Path, shape: str, skip_duplicates: bool
+) -> None:
+    """A struct child beneath a list or map whose stored identifier the registered
+    reader cannot read: another identifier is refused naming both, from the log,
+    before any decode, with either duplicate setting (round 4, finding 1). The rows
+    are annotated: an extension type the registered reader cannot write is refused
+    as unstorable before the rule (a stated limit)."""
+    form = "annotated"
+    from orcapod.errors import TypeIdentityError
+
+    root = tmp_path / "delta"
+    DeltaTableDatabase(root).add_records(
+        PATH,
+        _struct_beneath(shape, form, b"m", [b"1"]),
+        record_id_column="id",
+        flush=True,
+    )
+    pa.register_extension_type(cast(Any, _failing_reader(TypeIdentityError)()))
+    try:
+        path = "x[].v" if shape == "list" else "x.item.v"
+        with pytest.raises(
+            InputValidationError, match=re.escape(f"{path} is of logical type")
+        ) as refused:
+            DeltaTableDatabase(root).add_records(
+                PATH,
+                _struct_beneath(shape, form, b"n", [b"1", b"22"]),
+                record_id_column="id",
+                skip_duplicates=skip_duplicates,
+            )
+        assert "the stored column's 'itl1371.a;6d'" in str(refused.value)
+    finally:
+        pa.unregister_extension_type("itl1371.a")
+
+
+def test_delta_duplicate_scan_type_identity_error_propagates_as_itself(
+    tmp_path: Path,
+) -> None:
+    """Pins main's ITL-881 carve-out (round 4, finding 6): the same identifier with
+    ``skip_duplicates``, over a stored child the registered reader refuses with
+    ``TypeIdentityError``: the duplicate scan's decode raises it as itself, not as
+    ``OrcapodDatabaseReadError``, in every ``schema_handling`` mode."""
+    from orcapod.errors import TypeIdentityError
+
+    root = tmp_path / "delta"
+    rows = _rows(HELD, "annotated", "struct", [b"1"])
+    DeltaTableDatabase(root).add_records(PATH, rows, record_id_column="id", flush=True)
+    pa.register_extension_type(cast(Any, _failing_reader(TypeIdentityError)()))
+    try:
+        for mode in ("error", "merge", "coerce"):
+            with pytest.raises(TypeIdentityError):
+                DeltaTableDatabase(root).add_records(
+                    PATH,
+                    rows,
+                    record_id_column="id",
+                    skip_duplicates=True,
+                    schema_handling=cast(Any, mode),
+                )
+    finally:
+        pa.unregister_extension_type("itl1371.a")
+
+
+@pytest.mark.parametrize("schema_evolution", [False, True])
+@pytest.mark.parametrize("serializer", ["changed", "raising"])
+def test_delta_merge_source_with_a_changed_or_raising_serializer(
+    tmp_path: Path, serializer: str, schema_evolution: bool
+) -> None:
+    """Pins the stated difference from main (round 4, finding 5): the MERGE source
+    carries the identifier bytes Arrow holds. With a serializer that changed after
+    its type was made, the stored identifier stays the held one (main rewrote it);
+    with one that raises, the commit goes through under the held bytes (main failed
+    it)."""
+    import deltalake
+
+    class ListExt(pa.ExtensionType):
+        def __init__(self, payload: bytes | None) -> None:
+            self.payload = payload
+            super().__init__(pa.large_list(pa.large_string()), "itl1371.lists")
+
+        def __arrow_ext_serialize__(self) -> bytes:
+            if self.payload is None:
+                raise RuntimeError("serializer asked again")
+            return self.payload
+
+        @classmethod
+        def __arrow_ext_deserialize__(cls, storage_type: Any, serialized: bytes) -> Any:
+            return cls(serialized)
+
+    def rows(ext: Any, ids: list[bytes]) -> pa.Table:
+        storage = pa.array([["v"]] * len(ids), pa.large_list(pa.large_string()))
+        return pa.table(
+            {"id": pa.array(ids, pa.large_binary()), "x": ext.wrap_array(storage)}
+        )
+
+    db = DeltaTableDatabase(tmp_path / "delta", allow_schema_evolution=schema_evolution)
+    db.add_records(PATH, rows(ListExt(b"m"), [b"1"]), record_id_column="id", flush=True)
+    second = ListExt(b"m")
+    given = rows(second, [b"1", b"22"])
+    second.payload = b"changed" if serializer == "changed" else None
+    db.add_records(PATH, given, record_id_column="id", flush=True)
+    stored = deltalake.DeltaTable(str(tmp_path / "delta" / "t")).schema().fields[1]
+    assert metadata_bytes(stored.metadata)[META] == b"m"
+    ids = deltalake.DeltaTable(str(tmp_path / "delta" / "t")).to_pyarrow_table()
+    assert sorted(cast(list[bytes], ids["__record_id"].to_pylist())) == [b"1", b"22"]
+
+
+@pytest.mark.parametrize("skip_duplicates", [False, True])
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_zero_row_append_is_outside_the_rule(
+    tmp_path: Path, kind: str, skip_duplicates: bool
+) -> None:
+    """Pins a stated limit (round 4, finding 7): a zero-row append writes nothing and
+    returns before the rule, whatever identifier it carries, as on main."""
+    with _store(kind, tmp_path) as store:
+        store.db.add_records(
+            PATH, _annotated_top(b"m", [b"1"]), record_id_column="id", flush=True
+        )
+        store.db.add_records(
+            PATH,
+            _annotated_top(b"n", []),
+            record_id_column="id",
+            skip_duplicates=skip_duplicates,
+        )
+        assert store.stored().column("id").to_pylist() == [b"1"]
+
+
+def test_an_unwritable_encoding_is_refused_before_the_rule(tmp_path: Path) -> None:
+    """Pins a stated limit (round 4, finding 7): a column the database cannot write is
+    refused by its own check before the identity rule, as on main: Delta refuses
+    metadata that is not UTF-8 as unstorable; SQLite refuses any field metadata."""
+    from orcapod.databases.sqlite_connector import SQLiteConnector
+    from orcapod.errors import UnstorableColumnError
+
+    delta = DeltaTableDatabase(tmp_path / "delta")
+    delta.add_records(
+        PATH, _annotated_top(b"m", [b"1"]), record_id_column="id", flush=True
+    )
+    with pytest.raises(UnstorableColumnError):
+        delta.add_records(PATH, _annotated_top(b"\xff", [b"22"]), record_id_column="id")
+
+    sqlite = ConnectorArrowDatabase(SQLiteConnector(str(tmp_path / "store.db")))
+    plain = pa.table(
+        {
+            "id": pa.array([b"1"], pa.large_binary()),
+            "x": pa.array(["v"], pa.large_string()),
+        }
+    )
+    sqlite.add_records(PATH, plain, record_id_column="id", flush=True)
+    with pytest.raises(ValueError, match="does not preserve Arrow metadata"):
+        sqlite.add_records(PATH, _annotated_top(b"n", [b"22"]), record_id_column="id")
+
+
+def test_connector_compares_against_its_cached_stored_schema(tmp_path: Path) -> None:
+    """Pins the connector's behaviour, as main's (round 4, finding 3): it compares
+    against the stored schema it caches for the ITL-1334 check, so after another
+    connection replaces the table (same ids, another identifier), the original
+    handle still refuses by the replaced identifier and a new handle by the one
+    stored now."""
+    with fake_pyspiral.install(tmp_path / "spiral"):
+        fake_pyspiral.FakeSpiral().project("p")
+        held = ConnectorArrowDatabase(SpiralDBConnector("p"))
+        held.add_records(
+            PATH, _annotated_top(b"m", [b"1"]), record_id_column="id", flush=True
+        )
+        held.add_records(  # reads and caches the stored schema
+            PATH,
+            _annotated_top(b"m", [b"1"]),
+            record_id_column="id",
+            skip_duplicates=True,
+        )
+        connector = SpiralDBConnector("p")
+        fake_pyspiral.FakeSpiral().project("p").drop_table(
+            connector._table_id("t")  # pyright: ignore[reportPrivateUsage]  # the fake's id of the table
+        )
+        fresh = ConnectorArrowDatabase(connector)
+        fresh.add_records(
+            PATH, _annotated_top(b"n", [b"1"]), record_id_column="id", flush=True
+        )
+        with pytest.raises(
+            InputValidationError, match="the stored column's 'itl1371.a;6d'"
+        ):
+            held.add_records(
+                PATH,
+                _annotated_top(b"n", [b"1"]),
+                record_id_column="id",
+                skip_duplicates=True,
+            )
+        with pytest.raises(
+            InputValidationError, match="the stored column's 'itl1371.a;6e'"
+        ):
+            ConnectorArrowDatabase(SpiralDBConnector("p")).add_records(
+                PATH,
+                _annotated_top(b"m", [b"1"]),
+                record_id_column="id",
+                skip_duplicates=True,
+            )
+
+
+def test_delta_flush_refuses_after_another_writer_changed_the_identifier(
+    tmp_path: Path,
+) -> None:
+    """Pins the declined CodeRabbit item (flush-time recheck, 11052fab): rows queued
+    with ``skip_duplicates``, then another writer stores the same ids under another
+    identifier: the flush, which compares against the version it loads, refuses
+    the queued rows (they were duplicates the MERGE would not insert; nothing is
+    lost and the stored rows are the other writer's)."""
+    import deltalake
+
+    root = tmp_path / "delta"
+    writer = DeltaTableDatabase(root)
+    writer.add_records(
+        PATH, _annotated_top(b"m", [b"1"]), record_id_column="id", skip_duplicates=True
+    )
+    deltalake.write_deltalake(
+        str(root / "t"),
+        _annotated_top(b"n", [b"1"]).rename_columns(["__record_id", "x"]),
+        mode="overwrite",
+        schema_mode="overwrite",
+    )
+    with pytest.raises(
+        InputValidationError, match="the stored column's 'itl1371.a;6e'"
+    ):
+        writer.flush()
+    stored = DeltaTableDatabase(root).get_all_records(PATH, record_id_column="id")
+    assert stored is not None and stored.column("id").to_pylist() == [b"1"]
+    assert identity_node(stored.schema.field("x")).identifier == (b"itl1371.a", b"n")
