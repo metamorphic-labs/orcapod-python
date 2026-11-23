@@ -225,7 +225,7 @@ class TestPassThrough:
                 "f32": pa.Array.from_buffers(
                     pa.float32(),
                     3,
-                    [None, pa.py_buffer(signalling + struct.pack("<ff", 1.0, 2.0))],
+                    [None, pa.py_buffer(signalling + struct.pack("<ff", 1.0, 2.0))],  # pyright: ignore[reportArgumentType]  # no validity buffer: no nulls
                 ),
                 "ns": pa.array([1, 2, 3], pa.time64("ns")),
                 "dec": pa.array(
@@ -238,8 +238,9 @@ class TestPassThrough:
             table, tag_columns=["k"], tag_only_columns=True, source_id="bits"
         )
         out = source.filter(col("k").is_in([1, 3])).as_table()
-        f32 = out.column("f32").combine_chunks()
-        assert f32.buffers()[1].to_pybytes()[:8] == signalling + struct.pack("<f", 2.0)
+        f32 = out.column("f32").combine_chunks().buffers()[1]
+        assert f32 is not None
+        assert f32.to_pybytes()[:8] == signalling + struct.pack("<f", 2.0)
         assert (
             out.column("ns").to_pylist() == table.column("ns").take([0, 2]).to_pylist()
         )

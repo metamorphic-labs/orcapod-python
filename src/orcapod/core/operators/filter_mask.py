@@ -28,7 +28,7 @@ import math
 import struct
 from collections.abc import Sequence
 from datetime import date, datetime, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, TypeAlias
 
 from orcapod.errors import InputValidationError
 from orcapod.types.condition import (
@@ -56,6 +56,9 @@ else:
 EQ, NE, LT, LE, GT, GE = "==", "!=", "<", "<=", ">", ">="
 IS_IN, IS_NULL, IS_NOT_NULL = "is_in", "is_null", "is_not_null"
 
+_Values: TypeAlias = Any  # pyright: ignore[reportExplicitAny]  # a column, a mask or a scalar: pyarrow's stubs type each compute kernel per argument kind, and these flow between chunked arrays, arrays and scalars
+"""What the kernel passes between Arrow compute calls."""
+
 # The comparison ``a <op> b`` is ``b <swapped op> a``.
 _SWAPPED = {LT: GT, LE: GE, GT: LT, GE: LE, EQ: EQ, NE: NE}
 
@@ -81,7 +84,7 @@ def check_filter_condition(condition: Condition, schema: pa.Schema) -> None:
         raise InputValidationError(f"Filter: {error}") from error
 
 
-def _compute_form(values: pa.ChunkedArray) -> pa.ChunkedArray:
+def _compute_form(values: _Values) -> _Values:
     """Return ``values`` as Arrow compute compares them: ``float16`` as ``float32``.
 
     An exact widening, for the mask only.
@@ -91,7 +94,7 @@ def _compute_form(values: pa.ChunkedArray) -> pa.ChunkedArray:
     return values
 
 
-def _resolve(table: pa.Table, path: FieldPath) -> pa.ChunkedArray:
+def _resolve(table: pa.Table, path: FieldPath) -> _Values:
     """Return the values ``path`` names in ``table`` (checked by ``check_condition``)."""
     values = table.column(path.column)
     for name in path.fields:
@@ -99,13 +102,14 @@ def _resolve(table: pa.Table, path: FieldPath) -> pa.ChunkedArray:
             # A user class column: its storage struct holds its declared fields.
             storage_type = values.type.storage_type
             values = pa.chunked_array(
-                [chunk.storage for chunk in values.chunks], type=storage_type
+                [chunk.storage for chunk in values.chunks],  # pyright: ignore[reportAttributeAccessIssue]  # chunks of an extension column are extension arrays
+                type=storage_type,
             )
         values = pc.struct_field(values, [values.type.get_field_index(name)])
     return values
 
 
-def _literal_scalar(arrow_type: pa.DataType, value: object) -> pa.Scalar:
+def _literal_scalar(arrow_type: pa.DataType, value: object) -> _Values:
     """Return a checked literal as a scalar compared in its column's type.
 
     ``check_condition`` has checked that ``value`` is of the column's Python type and
@@ -140,9 +144,7 @@ def _literal_scalar(arrow_type: pa.DataType, value: object) -> pa.Scalar:
     return pa.scalar(value, type=arrow_type)
 
 
-def _null_where_any_null(
-    result: pa.ChunkedArray, *operands: pa.ChunkedArray
-) -> pa.ChunkedArray:
+def _null_where_any_null(result: _Values, *operands: _Values) -> _Values:
     """Return ``result`` with a null wherever an operand is null (unknown)."""
     valid = pc.is_valid(operands[0])
     for operand in operands[1:]:
@@ -150,7 +152,7 @@ def _null_where_any_null(
     return pc.if_else(valid, result, pa.scalar(None, type=pa.bool_()))
 
 
-def _float_compare(op: str, left: object, right: object) -> pa.ChunkedArray:
+def _float_compare(op: str, left: _Values, right: _Values) -> _Values:
     """Compare two float operands (arrays or scalars) by Orcapod's float rule.
 
     ``0.0`` equals ``-0.0``, NaN equals NaN, NaN is greater than every number. The
@@ -180,9 +182,7 @@ _ARROW_COMPARE = {
 }
 
 
-def _compare(
-    op: str, left: pa.ChunkedArray, right: pa.ChunkedArray | pa.Scalar, floats: bool
-) -> pa.ChunkedArray:
+def _compare(op: str, left: _Values, right: _Values, floats: bool) -> _Values:
     """Compare ``left`` with ``right`` (an array or a scalar) by ``op``, Kleene nulls."""
     if floats:
         # Nulls in the result are set below, whatever the float rule gives them.
@@ -194,7 +194,7 @@ def _compare(
     return _null_where_any_null(result, left, right)
 
 
-def _term_mask(table: pa.Table, term: Term) -> pa.ChunkedArray:
+def _term_mask(table: pa.Table, term: Term) -> _Values:
     """Return the mask of one checked term over ``table``."""
     values = _resolve(table, term.path)
     if term.operator == IS_NULL:
@@ -226,7 +226,7 @@ def _term_mask(table: pa.Table, term: Term) -> pa.ChunkedArray:
     return _compare(term.operator, computed.cast(scalar.type), scalar, floats)
 
 
-def _node_mask(table: pa.Table, node: Node) -> pa.ChunkedArray:
+def _node_mask(table: pa.Table, node: Node) -> _Values:
     if isinstance(node, Term):
         return _term_mask(table, node)
     if isinstance(node, Negation):
@@ -243,7 +243,7 @@ def _node_mask(table: pa.Table, node: Node) -> pa.ChunkedArray:
     return result
 
 
-def condition_mask(table: pa.Table, condition: Condition) -> pa.ChunkedArray:
+def condition_mask(table: pa.Table, condition: Condition) -> _Values:
     """Return the mask of ``condition`` over ``table``: ``True`` keeps a row, ``False``
     or null (unknown) drops it.
 

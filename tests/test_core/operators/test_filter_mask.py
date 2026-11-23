@@ -7,8 +7,10 @@ rule, ``check_condition``) before the kernel evaluates them.
 from __future__ import annotations
 
 import operator
+from collections.abc import Callable
 import struct
 from datetime import date, datetime, timedelta, timezone
+from typing import Any
 
 import pyarrow as pa
 import pytest
@@ -24,7 +26,7 @@ from orcapod.types.condition import ColumnRef
 
 NAN = float("nan")
 
-_OPERATORS = {
+_OPERATORS: dict[str, Callable[[Any, Any], Any]] = {
     "==": operator.eq,
     "!=": operator.ne,
     "<": operator.lt,
@@ -99,7 +101,7 @@ def units() -> pa.Table:
     )
 
 
-def kept(table: pa.Table, condition: Condition) -> list[tuple[str, int]]:
+def kept(table: pa.Table, condition: Condition) -> list[tuple[Any, Any]]:
     out = filter_table(table, checked(table, condition))
     return list(zip(out.column("session").to_pylist(), out.column("unit").to_pylist()))
 
@@ -496,7 +498,7 @@ def test_values_pass_through_bit_for_bit():
     values = pa.Array.from_buffers(
         pa.float32(),
         2,
-        [None, pa.py_buffer(bytes.fromhex("0100807f") + struct.pack("<f", 1.0))],
+        [None, pa.py_buffer(bytes.fromhex("0100807f") + struct.pack("<f", 1.0))],  # pyright: ignore[reportArgumentType]  # no validity buffer: no nulls
     )
     t = pa.table(
         {
@@ -508,6 +510,6 @@ def test_values_pass_through_bit_for_bit():
     out = _filtered(t, term(c("k"), "is_in", (1, 2)))
     assert out.schema == t.schema
     assert out.column("time").equals(t.column("time"))
-    assert out.column("v").chunk(0).buffers()[1].to_pybytes()[:4] == bytes.fromhex(
-        "0100807f"
-    )
+    data = out.column("v").combine_chunks().buffers()[1]
+    assert data is not None
+    assert data.to_pybytes()[:4] == bytes.fromhex("0100807f")
