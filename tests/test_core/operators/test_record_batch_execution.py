@@ -711,7 +711,9 @@ def test_every_input_is_closed_when_one_close_fails() -> None:
 
 def test_drop_tag_columns_over_three_tags_sends_its_result() -> None:
     """Tags c, b, a with data-tags a and b; ``DropTagColumns(["a"])``: the channel
-    result is the table built from the sync rows."""
+    result is the table built from the sync rows. The operator predicts its tags in
+    another order than its result has them (ITL-1365); the send check compares
+    columns by name, so the order-only difference does not refuse the result."""
     stream = ArrowTableStream(
         pa.table(
             {

@@ -1062,6 +1062,125 @@ def test_a_batch_of_other_columns_is_refused() -> None:
     run(write)
 
 
+def _in_order(batch: pa.RecordBatch, names: Sequence[str]) -> pa.RecordBatch:
+    return batch.select(list(names))
+
+
+@pytest.mark.parametrize("retain", [True, False], ids=["retained", "bounded"])
+@pytest.mark.parametrize("declared", [True, False], ids=["declared", "undeclared"])
+def test_the_first_batch_fixes_the_column_order(retain: bool, declared: bool) -> None:
+    """Columns are compared by name: a batch whose columns are the stream's in another
+    order is taken (a column order is not a result). The first batch with rows fixes
+    the channel's order, and every later batch is put into it, never the other way
+    round."""
+    table = source().as_table(columns=ALL)
+    stream = (
+        source()
+        if declared
+        else _UntypedStream(
+            table, tag_columns=["subject", "trial"], data_tags=["trial"]
+        )
+    )
+    assert stream.arrow_types_declared is declared
+    first, second, third = batches_of(stream, 3)
+    names = first.schema.names
+    reversed_names = list(reversed(names))
+    shuffled = names[1::2] + names[::2]
+    assert len({tuple(names), tuple(reversed_names), tuple(shuffled)}) == 3
+    sent = [
+        _in_order(first, reversed_names),
+        second,  # the description's order
+        _in_order(third, shuffled),
+    ]
+
+    def names_of(batch: pa.RecordBatch) -> list[str]:
+        return batch.schema.names
+
+    async def through_reader() -> tuple[list[list[str]], Any]:
+        output = OutputChannel(stream, retain=retain, buffer_size=4)
+        reader = output.open_reader()
+        received: list[list[str]] = []
+        for batch in sent:
+            await output.send(batch)
+            received.append(names_of(await reader.receive()))
+        await output.close()
+        return received, output.result() if retain else None
+
+    received, result = run(through_reader)
+    assert received == [reversed_names] * 3
+    if result is not None:
+        rows = result.as_table(columns=ALL)
+        assert rows.num_rows == 7
+        assert sorted(rows.column_names) == sorted(names)
+
+        async def in_description_order() -> Any:
+            output = OutputChannel(stream)
+            for batch in (first, second, third):
+                await output.send(batch)
+            await output.close()
+            return output.result()
+
+        expected = run(in_description_order).as_table(columns=ALL)
+        assert same(rows.select(expected.column_names), expected)
+
+
+@pytest.mark.parametrize("declared", [True, False], ids=["declared", "undeclared"])
+def test_a_reordered_batch_must_still_have_the_streams_columns(declared: bool) -> None:
+    """Order aside, the check is unchanged: names match exactly (case counts), and each
+    column's type and nullability are the description's (or the first batch's, without
+    Arrow types). A refused batch fixes no order."""
+    table = source().as_table(columns=ALL)
+    stream = (
+        source()
+        if declared
+        else _UntypedStream(
+            table, tag_columns=["subject", "trial"], data_tags=["trial"]
+        )
+    )
+    first, second = batches_of(stream, 4)
+    reversed_names = list(reversed(first.schema.names))
+
+    def reordered(batch: pa.RecordBatch) -> pa.RecordBatch:
+        return _in_order(batch, reversed_names)
+
+    recased = reordered(second).rename_columns(
+        ["Note" if name == "note" else name for name in reversed_names]
+    )
+    retyped = reordered(second)
+    retyped = retyped.set_column(
+        retyped.schema.get_field_index("amplitude"),
+        "amplitude",
+        retyped.column("amplitude").cast(pa.float64()),
+    )
+    reflagged = reordered(second)
+    reflagged = pa.RecordBatch.from_arrays(
+        reflagged.columns,
+        schema=pa.schema(
+            [
+                f.with_nullable(not f.nullable) if f.name == "trial" else f
+                for f in reflagged.schema
+            ]
+        ),
+    )
+
+    async def write() -> list[str]:
+        output = OutputChannel(stream)
+        reader = output.open_reader()
+        await output.send(first)  # fixes the description's order
+        for wrong, said in (
+            (recased, "'Note'"),
+            (retyped, "column 'amplitude' is double"),
+            (reflagged, "column 'trial' is (not )?nullable"),
+        ):
+            with pytest.raises(ValueError, match=said):
+                await output.send(wrong)
+        await output.send(reordered(second))
+        _ = await reader.receive()
+        return (await reader.receive()).schema.names
+
+    assert run(write) == first.schema.names
+
+
 def test_what_a_description_does_not_say_is_accepted() -> None:
     """A ``null`` column travels as ``large_string``, and a source-info field's
     nullability is set over the complete table: neither is a mismatch."""

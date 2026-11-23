@@ -153,6 +153,8 @@ class OutputChannel:
         # Each source-info column's token type as the batches accepted so far settle it
         # (``settle_token_types``): a later batch must settle with it.
         self._token_types: dict[str, pa.DataType] = {}
+        # The column order of the channel's batches: the first batch with rows'.
+        self._order: list[str] | None = None
         self._changed = asyncio.Event()
 
     @property
@@ -185,8 +187,19 @@ class OutputChannel:
         if self._closed:
             raise ChannelClosed("Cannot send to a closed channel")
 
-    def _check_schema(self, batch: pa.RecordBatch) -> None:
-        """Raise unless ``batch`` has the schema of this channel's record batches."""
+    def _check_schema(self, batch: pa.RecordBatch) -> pa.RecordBatch:
+        """Check ``batch`` against the channel's description; return it in the
+        channel's column order.
+
+        The columns are compared by name, not by position: a result's column order
+        may follow its input's arrangement where the description follows another
+        (an order-only difference, which no stored table depends on). The first batch
+        with rows fixes the channel's column order, and a later batch is put into it,
+        so that the batches can be put under one another.
+
+        Raises:
+            ValueError: If the batch's columns are not the stream's.
+        """
         names = batch.schema.names
         if len(set(names)) != len(names):
             repeated = sorted({name for name in names if names.count(name) > 1})
@@ -220,6 +233,12 @@ class OutputChannel:
         token_types = settle_token_types(batch, self._token_types)
         self._schema = schema
         self._token_types = token_types
+        if batch.num_rows:
+            if self._order is None:
+                self._order = names
+            elif names != self._order:
+                batch = batch.select(self._order)
+        return batch
 
     async def send(self, batch: pa.RecordBatch) -> None:
         """Send one Arrow record batch of the stream's transport columns.
@@ -242,7 +261,7 @@ class OutputChannel:
             ValueError: If the batch's schema is not the stream's.
         """
         self._raise_if_ended()
-        self._check_schema(batch)
+        batch = self._check_schema(batch)
         if not batch.num_rows:
             return
         self._sent += 1
@@ -389,7 +408,8 @@ def _named(stream: Any) -> str:  # pyright: ignore[reportExplicitAny]  # any str
 def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
     """Say how a record batch's columns differ from a channel's, or ``None``.
 
-    The batch must have the description's columns in the same order, each with exactly
+    The batch must have the description's columns, compared by name (their order is
+    not compared: the channel keeps one order of its own), each with exactly
     the description's type in its large variant (no other representation is taken and
     converted: type strictness), the same nullability and the same field metadata. A
     ``null`` type of the description (anywhere in a column's type) is carried as
@@ -401,10 +421,11 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
     or ``large_list`` of a token type).
     """
     sent = batch.schema
-    if declared.names != sent.names:
+    if sorted(declared.names) != sorted(sent.names):
         return f"it has {sent.names}, the stream has {declared.names}"
     provenance = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
-    for index, (expected, column) in enumerate(zip(declared, sent)):
+    for index, column in enumerate(sent):
+        expected = declared.field(column.name)
         carried = arrow_utils.normalize_to_large_types(expected.type)
         if column.name.startswith(constants.SOURCE_PREFIX):
             if not _is_token_type(column.type):
