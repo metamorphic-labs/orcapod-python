@@ -338,6 +338,35 @@ row hashes, so every case that reads a source's rows moves, not only those that 
 | Cost before 0.4.0 | the developer's approval of the exact list (`--remove`, then regenerate); v1 is open, a pre-release freezes nothing (RELEASING.md) |
 | Cost after 0.4.0 | a new data context version, in a minor release |
 
+### 3.7a The implementation's moved list (for the developer's approval)
+
+`generate_golden_hashes.py --check` on the implementation (no golden file written): **659
+entries move**, every one listed with its pinned and live value and its explanation in
+`golden-moved-implementation.tsv` beside the scripts.
+
+| Group | Frozen-file | Provisional | Total |
+|---|---|---|---|
+| schema | 118 | 12 | 130 |
+| datagram | 93 | 15 | 108 |
+| pipeline | 130 | 288 | 418 |
+| torch | 0 | 3 | 3 |
+| semantic, arrow | 0 | 0 | 0 |
+| **all** | **341** | **318** | **659** |
+
+| Why it moved | Entries | Checked how |
+|---|---|---|
+| source id text (a source id, a source-id system-tag value): the kind part is added | 424 | mechanically: the live value is the pinned one with `<kind>_v1:` in front, or a default's `<kind>:` prefix become `<kind>_v1:` |
+| content hash of a source or of a stream or node downstream of one (class name out, source id holds the kind part) | 200 | every one is a `content_hash`; no `pipeline_hash` moved |
+| folded system-tag value (`batch_v1` / `group_v1`) over members' source ids | 28 | the fold label is unchanged; its input is the members' source ids |
+| `node.as_source()` default id: `derived_v1:` plus the origin's (moved) content hash | 2 | prefix checked |
+| pipeline-table record ids (built from system-tag values) | 5 | the table paths (pipeline hashes) are unchanged |
+
+Against the simulation (`K_always`, 703): 54 simulated moves do not happen, all in job cases
+(`job`, `polars_filter_expr_job`, `drop_nulls_job`, `rejoin_job`, `rejoin_job_async`),
+because a slot is named by the source's name, not its full id (Decisions, 9); 10 entries move
+that the simulation did not (`source_stream_builder`), because that golden case now passes the
+builder a kind part, as every source does.
+
 ### 3.8 How the design meets the requirements
 
 | | |
