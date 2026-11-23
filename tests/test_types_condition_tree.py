@@ -580,8 +580,10 @@ _BUILDERS_OF_TWO: list[Callable[[dt.datetime, dt.datetime], Condition]] = [
 
 
 class TestDatetimesAreFrozen:
-    @pytest.mark.parametrize("build", _BUILDERS_OF_TWO)
-    def test_a_mutable_tzinfo_is_read_once(self, build):
+    @pytest.mark.parametrize(
+        "build, literals", zip(_BUILDERS_OF_TWO, [1, 2, 2, 2, 2, 2], strict=True)
+    )
+    def test_a_mutable_tzinfo_is_read_once(self, build, literals):
         """After the condition is built nothing calls the value's tzinfo, and changing
         its offset changes neither the condition, its identity nor what it checks."""
         zone = _MutableZone(0)
@@ -593,6 +595,8 @@ class TestDatetimesAreFrozen:
             condition.text(),
             json.dumps(condition.to_config()),
         )
+        # Building read each datetime's offset once: one call per literal it holds.
+        assert zone.calls == literals
         zone.calls, zone.hours = 0, 1  # the offset moves after the build
 
         schema = pa.schema(
@@ -1002,3 +1006,75 @@ class TestCanonicalText:
         assert condition.canonical_text() == "t >= 1.0, u in [3, 7]"
         assert condition.text() == "u in [3, 7], t >= 1.0"  # text keeps the order given
         assert Condition().canonical_text() == "no condition"
+
+
+class TestSecondReviewOfPR493:
+    @pytest.mark.parametrize(
+        "offset",
+        [
+            dt.timedelta(microseconds=1),
+            dt.timedelta(seconds=1, microseconds=1),
+            dt.timedelta(hours=1, microseconds=1),
+        ],
+        ids=["zero whole seconds", "one second", "one hour"],
+    )
+    def test_a_value_kept_under_its_offset_reloads_exactly(self, offset):
+        """A year-1 value at a positive offset has no UTC datetime and keeps its
+        offset; the saved form restores that offset, fraction included."""
+        value = dt.datetime(1, 1, 1, tzinfo=dt.timezone(offset))
+        condition = col("at") == value
+        loaded = Condition.from_config(json.loads(json.dumps(condition.to_config())))
+        (term,) = loaded.root.children
+        assert isinstance(term, Term)
+        assert term.value.utcoffset() == offset  # pyright: ignore[reportAttributeAccessIssue]
+        assert loaded == condition and _canonical(loaded) == _canonical(condition)
+
+    @pytest.mark.parametrize(
+        "first, second",
+        [
+            (
+                lambda: col("x").is_in([0.0, -0.0, 1.0]),
+                lambda: col("x").is_in([-0.0, 0.0, 1.0]),
+            ),
+            (lambda: col("x") == 0.0, lambda: col("x") == -0.0),
+            (lambda: col("x") >= -0.0, lambda: col("x") >= 0.0),
+        ],
+        ids=["is_in", "equality", "comparison"],
+    )
+    def test_canonical_text_shows_one_zero(self, first, second):
+        assert first().canonical_text() == second().canonical_text()
+        assert "-0.0" not in first().canonical_text() + second().canonical_text()
+
+    def test_a_saved_comparison_with_both_operands_is_refused(self):
+        saved = {
+            ":condition": {
+                "all": [
+                    {
+                        "column": "x",
+                        "fields": [],
+                        "op": "==",
+                        "value": 1,
+                        "other": {"column": "y", "fields": []},
+                    }
+                ]
+            }
+        }
+        with pytest.raises(ValueError, match="one operand"):
+            Condition.from_config(saved)
+        for condition in (col("x") == col("y"), col("x") == 1):
+            assert Condition.from_config(condition.to_config()) == condition
+
+
+class TestMembershipZeroAndScale:
+    def test_one_zero_is_kept_and_saved_whatever_the_order(self):
+        first, second = (
+            col("x").is_in([0.0, -0.0, 1.0]),
+            col("x").is_in([-0.0, 0.0, 1.0]),
+        )
+        assert json.dumps(first.to_config()) == json.dumps(second.to_config())
+        assert first.text() == second.text() == "x in [0.0, 1.0]"
+
+    def test_large_memberships_compare_as_sets(self):
+        values = list(range(10_000))
+        assert col("x").is_in(values) == col("x").is_in(list(reversed(values)))
+        assert col("x").is_in(values) != col("x").is_in([*values[:-1], 10_000])

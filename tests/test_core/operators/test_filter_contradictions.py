@@ -25,9 +25,12 @@ from .several_items import async_rows
 pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
 
 
-def _units(tag_only_columns: Any = True) -> ArrowTableSource:
+def _units(
+    tag_only_columns: Any = True, arrangement: str = "given"
+) -> ArrowTableSource:
     """Tags ``session`` and ``unit``; data ``t`` and ``probe``. With
-    ``tag_only_columns=["session"]``, ``unit`` is a data-tag."""
+    ``tag_only_columns=["session"]``, ``unit`` is a data-tag. ``arrangement="reversed"``
+    declares the tags in the other order and lays the table out backwards."""
     table = pa.table(
         {
             "session": pa.array(["s1", "s1", "s2", "s2"], pa.large_string()),
@@ -36,9 +39,13 @@ def _units(tag_only_columns: Any = True) -> ArrowTableSource:
             "probe": pa.array(["imec0", "imec1", "imec0", "imec1"], pa.large_string()),
         }
     )
+    tags = ["session", "unit"]
+    if arrangement == "reversed":
+        table = table.select(list(reversed(table.column_names)))
+        tags = list(reversed(tags))
     return ArrowTableSource(
         table,
-        tag_columns=["session", "unit"],
+        tag_columns=tags,
         tag_only_columns=tag_only_columns,
         source_id="units",
     )
@@ -57,14 +64,15 @@ def _terms(column: str, values: tuple[object, object]) -> list[Condition]:
     return [col(column) == values[0], col(column) == values[1], col("t") >= 0.0]
 
 
+@pytest.mark.parametrize("arrangement", ["given", "reversed"])
 @pytest.mark.parametrize(
     "role, options, column, values", _ROLES, ids=[r[0] for r in _ROLES]
 )
 class TestZeroRows:
     def test_every_order_builds_one_operator_and_keeps_no_row(
-        self, role, options, column, values
+        self, role, options, column, values, arrangement
     ):
-        source = _units(options)
+        source = _units(options, arrangement)
         hashes = set()
         for order in itertools.permutations(_terms(column, values)):
             filtered = Filter(Condition.of(*order))(source)
@@ -74,22 +82,26 @@ class TestZeroRows:
             hashes.add(filtered.pipeline_hash().to_string())
         assert len(hashes) == 1
 
-    def test_the_and_spelling_and_the_method_agree(self, role, options, column, values):
-        source = _units(options)
+    def test_the_and_spelling_and_the_method_agree(
+        self, role, options, column, values, arrangement
+    ):
+        source = _units(options, arrangement)
         first, second, every = _terms(column, values)
         by_and = Filter(first & every & second)(source)
         by_method = source.filter(second, every, first)
         assert by_and.as_table().num_rows == by_method.as_table().num_rows == 0
         assert by_and.pipeline_hash() == by_method.pipeline_hash()
 
-    def test_async_keeps_no_row(self, role, options, column, values):
-        source = _units(options)
+    def test_async_keeps_no_row(self, role, options, column, values, arrangement):
+        source = _units(options, arrangement)
         for order in (_terms(column, values), list(reversed(_terms(column, values)))):
             assert async_rows(Filter(Condition.of(*order)), source) == []
 
-    def test_each_half_alone_keeps_rows(self, role, options, column, values):
+    def test_each_half_alone_keeps_rows(
+        self, role, options, column, values, arrangement
+    ):
         """The zero rows come from the contradiction, not from either term."""
-        source = _units(options)
+        source = _units(options, arrangement)
         first, second, every = _terms(column, values)
         assert source.filter(first, every).as_table().num_rows == 2
         assert source.filter(second, every).as_table().num_rows == 2
