@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
+from contextlib import AbstractContextManager
 from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
 
 from orcapod.protocols.db_connector_protocol import ColumnInfo, DBConnectorProtocol
 
 if TYPE_CHECKING:
     import pyarrow as pa
+    from orcapod.databases._pending_commits import PendingCommit
 
 
 @runtime_checkable
@@ -204,6 +206,29 @@ class ArrowDatabaseWithMetadataProtocol(
     """A protocol that combines ArrowDatabaseProtocol with metadata capabilities."""
 
     pass
+
+
+@runtime_checkable
+class ResultCommitGuardingDatabaseProtocol(Protocol):
+    """Optional support for publishing pipeline records after their results commit.
+
+    A result store returns a pending commit token for a buffered result and resolves
+    it when the write succeeds or fails. A pipeline store keeps a guarded record
+    readable in its queue until the token permits publication, and withdraws it if
+    the result write fails. The node uses this capability when both stores offer it.
+    """
+
+    def pending_result(
+        self, record_path: tuple[str, ...], record_id: bytes
+    ) -> PendingCommit | None:
+        """Return the result's pending commit, or None if it is already available."""
+        ...
+
+    def guard_record(
+        self, record_path: tuple[str, ...], record_id: bytes, dependency: PendingCommit
+    ) -> AbstractContextManager[None]:
+        """Guard a record by its result's commit while the caller queues the record."""
+        ...
 
 
 class TableCommittingDatabaseProtocol(Protocol):

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from pathlib import Path
-from typing import Literal, TypedDict, cast
+from typing import Any, Literal, TypedDict, cast
 
 import deltalake
 import pyarrow as pa
@@ -378,3 +378,100 @@ def test_connector_result_failure_withdraws_its_pipeline_records(
     assert RESULT in str(raised.value)
     pipeline.flush()
     assert not pipeline.list_table_paths()
+
+
+class ProtocolOnlyDatabase:
+    """Delegate only the database API, without exposing commit extensions."""
+
+    def __init__(self, inner: InMemoryArrowDatabase) -> None:
+        self._inner = inner
+
+    def add_record(self, *args: Any, **kwargs: Any) -> None:
+        self._inner.add_record(*args, **kwargs)
+
+    def add_records(self, *args: Any, **kwargs: Any) -> None:
+        self._inner.add_records(*args, **kwargs)
+
+    def get_record_by_id(self, *args: Any, **kwargs: Any) -> pa.Table | None:
+        return self._inner.get_record_by_id(*args, **kwargs)
+
+    def get_all_records(self, *args: Any, **kwargs: Any) -> pa.Table | None:
+        return self._inner.get_all_records(*args, **kwargs)
+
+    def get_records_by_ids(self, *args: Any, **kwargs: Any) -> pa.Table | None:
+        return self._inner.get_records_by_ids(*args, **kwargs)
+
+    def get_records_with_column_value(
+        self, *args: Any, **kwargs: Any
+    ) -> pa.Table | None:
+        return self._inner.get_records_with_column_value(*args, **kwargs)
+
+    def flush(self) -> None:
+        self._inner.flush()
+
+    @property
+    def base_path(self) -> tuple[str, ...]:
+        return self._inner.base_path
+
+    def at(self, *path_components: str) -> ProtocolOnlyDatabase:
+        return ProtocolOnlyDatabase(self._inner.at(*path_components))
+
+    def table_exists(self, record_path: tuple[str, ...]) -> bool:
+        return self._inner.table_exists(record_path)
+
+    def list_table_paths(self, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
+        return self._inner.list_table_paths(prefix)
+
+    def to_config(self) -> dict[str, Any]:
+        return self._inner.to_config()
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> ProtocolOnlyDatabase:
+        return cls(InMemoryArrowDatabase.from_config(config))
+
+
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("placement", ["pipeline", "result", "both", "shared"])
+def test_protocol_only_database_preserves_main_rows_and_flushes(
+    monkeypatch: pytest.MonkeyPatch, asynchronous: bool, placement: str
+) -> None:
+    """A user database can run jobs with just the original database methods."""
+    pipeline = InMemoryArrowDatabase().at("pipeline")
+    result = InMemoryArrowDatabase().at("result")
+    pipeline_store = (
+        ProtocolOnlyDatabase(pipeline) if placement != "result" else pipeline
+    )
+    result_store = (
+        ProtocolOnlyDatabase(result) if placement in ("result", "both") else result
+    )
+    assert isinstance(pipeline_store, ArrowDatabaseProtocol)
+    assert isinstance(result_store, ArrowDatabaseProtocol)
+    calls: list[tuple[str, ...]] = []
+    original_flush = InMemoryArrowDatabase.flush
+
+    def observe_flush(database: InMemoryArrowDatabase) -> None:
+        calls.append(database.base_path)
+        original_flush(database)
+
+    monkeypatch.setattr(InMemoryArrowDatabase, "flush", observe_flush)
+    job = make_job(
+        pipeline_store,
+        None if placement == "shared" else result_store,
+    )
+    run(job, asynchronous, every=2)
+    node = job.nodes["out"]
+    assert sorted(cast(list[int], node.as_table()["y"].to_pylist())) == [
+        10,
+        13,
+        16,
+        19,
+        22,
+    ]
+    assert sorted(cast(list[int], node.as_source().as_table()["y"].to_pylist())) == [
+        10,
+        13,
+        16,
+        19,
+        22,
+    ]
+    assert calls == [("pipeline", "mixed")] * 4 + [("pipeline", "mixed", "_result")]

@@ -12,7 +12,10 @@ from orcapod.utils.lazy_module import LazyModule
 if TYPE_CHECKING:
     import pyarrow as pa
 
-    from orcapod.protocols.database_protocols import TableCommittingDatabaseProtocol
+    from orcapod.protocols.database_protocols import (
+        ResultCommitGuardingDatabaseProtocol,
+        TableCommittingDatabaseProtocol,
+    )
 else:
     pa = LazyModule("pyarrow")
 
@@ -62,6 +65,17 @@ def as_table_committing(database: object) -> TableCommittingDatabaseProtocol | N
     if not callable(flush_batch):
         return None
     return cast("TableCommittingDatabaseProtocol", database)
+
+
+def as_result_commit_guarding(
+    database: object,
+) -> ResultCommitGuardingDatabaseProtocol | None:
+    """Resolve the optional guard methods, including on database wrappers."""
+    if callable(getattr(database, "pending_result", None)) and callable(
+        getattr(database, "guard_record", None)
+    ):
+        return cast("ResultCommitGuardingDatabaseProtocol", database)
+    return None
 
 
 _IDENTIFIER = r'(?:"[^"]+"|\w+)'

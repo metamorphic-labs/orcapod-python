@@ -99,6 +99,7 @@ from orcapod.protocols.core_protocols import (
     TagProtocol,
     TrackerManagerProtocol,
 )
+from orcapod.databases.utils import as_result_commit_guarding, as_table_committing
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.protocols.observability_protocols import (
     DataExecutionLoggerProtocol,
@@ -2331,10 +2332,11 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         path: tuple[str, ...],
         *,
         result: bool = False,
+        whole: bool = False,
     ) -> None:
         """Flush one table and withdraw its dependent records if a result write fails."""
-        flush_batch = getattr(database, "flush_batch", None)
-        if result and flush_batch is None:
+        flush_batch = None if whole else getattr(database, "flush_batch", None)
+        if result and not whole and flush_batch is None:
             flush_batch = getattr(database, "flush_pending_table", None)
         try:
             if flush_batch is None:
@@ -2357,32 +2359,71 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 table_flush=flush_batch is not None,
             ) from exc
 
+    def _guarded_commits(self, pipeline_database: ArrowDatabaseProtocol) -> bool:
+        """Check the optional capability on the pipeline and active result stores."""
+        pod = (
+            self._ephemeral_cached_pod
+            if self._node_config.is_result_ephemeral
+            else self._cached_function_pod
+        )
+        return (
+            isinstance(pod, CachedFunctionPod)
+            and as_result_commit_guarding(pipeline_database) is not None
+            and as_result_commit_guarding(pod.result_database) is not None
+        )
+
+    def _commit_legacy_ephemeral(self) -> None:
+        """Keep the whole ephemeral-store flush used without commit guards."""
+        pod = self._ephemeral_cached_pod
+        if self._node_config.is_result_ephemeral and pod is not None:
+            self._flush_node_table(
+                pod.result_database, pod.record_path, result=True, whole=True
+            )
+
+    def _commit_legacy_result(self) -> None:
+        """Keep the old result-table flush for stores that commit table by table."""
+        pod = self._cached_function_pod
+        if (
+            isinstance(pod, CachedFunctionPod)
+            and as_table_committing(pod.result_database) is not None
+        ):
+            self._flush_node_table(pod.result_database, pod.record_path, result=True)
+
     def _commit_pending_writes(self) -> None:
         """Commit results before publishing any records that depend on them."""
         try:
-            ephemeral = self._ephemeral_cached_pod
-            if self._node_config.is_result_ephemeral and ephemeral is not None:
-                self._flush_node_table(
-                    ephemeral.result_database, ephemeral.record_path, result=True
-                )
             pipeline_database = self._require_pipeline_database()
-            pod = self._cached_function_pod
-            if isinstance(pod, CachedFunctionPod):
-                result_database = pod.result_database
-                if getattr(result_database, "stores_records", True) and (
-                    getattr(pipeline_database, "stores_records", True)
-                    or getattr(result_database, "flush_batch", None) is not None
-                ):
-                    self._flush_node_table(
-                        result_database, pod.record_path, result=True
-                    )
-            self._flush_node_table(pipeline_database, self._versioned_pipeline_path)
+            if not self._guarded_commits(pipeline_database):
+                self._commit_legacy_ephemeral()
+                self._commit_legacy_result()
+                self._flush_node_table(
+                    pipeline_database, self._versioned_pipeline_path, whole=True
+                )
+            else:
+                self._commit_guarded_writes(pipeline_database)
         except BaseException as exc:
             self._commit_failed = True
             if isinstance(exc, OrcapodDatabaseError):
                 exc.add_context(node_label=self.label)
             raise
         self._rows_since_commit = 0
+
+    def _commit_guarded_writes(self, pipeline_database: ArrowDatabaseProtocol) -> None:
+        """Commit one node's guarded batches."""
+        ephemeral = self._ephemeral_cached_pod
+        if self._node_config.is_result_ephemeral and ephemeral is not None:
+            self._flush_node_table(
+                ephemeral.result_database, ephemeral.record_path, result=True
+            )
+        pod = self._cached_function_pod
+        if isinstance(pod, CachedFunctionPod):
+            result_database = pod.result_database
+            if getattr(result_database, "stores_records", True) and (
+                getattr(pipeline_database, "stores_records", True)
+                or getattr(result_database, "flush_batch", None) is not None
+            ):
+                self._flush_node_table(result_database, pod.record_path, result=True)
+        self._flush_node_table(pipeline_database, self._versioned_pipeline_path)
 
     def _write_pipeline_record(
         self,
@@ -2402,31 +2443,26 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             and getattr(pod.result_database, "stores_records", True)
         ):
             result_database = pod.result_database
-            try:
-                pending_result = getattr(result_database, "pending_result", None)
-                if pending_result is None:
-                    raise RuntimeError(
-                        "The result store cannot track its pending results."
-                    )
-                dependency = pending_result(pod.record_path, result_id)
-            except OrcapodDatabaseError:
-                raise
-            except Exception as exc:
-                raise OrcapodDatabaseWriteError(
-                    database_write_path(result_database, pod.record_path),
-                    node_label=self.label,
-                    flush=True,
-                    table_flush=True,
-                ) from exc
-            if dependency is not None:
-                guard_record = getattr(database, "guard_record", None)
-                if guard_record is None:
-                    raise RuntimeError(
-                        "The pipeline store cannot guard a pending result."
-                    )
-                with guard_record(path, record_id, dependency):
-                    database.add_record(path, record_id, record, skip_duplicates=True)
-                return
+            pipeline_guard = as_result_commit_guarding(database)
+            result_guard = as_result_commit_guarding(result_database)
+            if pipeline_guard is not None and result_guard is not None:
+                try:
+                    dependency = result_guard.pending_result(pod.record_path, result_id)
+                except OrcapodDatabaseError:
+                    raise
+                except Exception as exc:
+                    raise OrcapodDatabaseWriteError(
+                        database_write_path(result_database, pod.record_path),
+                        node_label=self.label,
+                        flush=True,
+                        table_flush=True,
+                    ) from exc
+                if dependency is not None:
+                    with pipeline_guard.guard_record(path, record_id, dependency):
+                        database.add_record(
+                            path, record_id, record, skip_duplicates=True
+                        )
+                    return
         database.add_record(path, record_id, record, skip_duplicates=True)
 
     def _row_processed(self) -> None:
@@ -2454,7 +2490,12 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         """
         if self._commit_every_rows is None or self._commit_failed:
             return
-        commit_best_effort(run_error, self._commit_pending_writes)
+        database = self._pipeline_database
+        if database is not None and self._guarded_commits(database):
+            commit_best_effort(run_error, self._commit_pending_writes)
+        else:
+            commit_best_effort(run_error, self._commit_legacy_ephemeral)
+            commit_best_effort(run_error, self._commit_legacy_result)
 
     @staticmethod
     def _commit_or_end_node(

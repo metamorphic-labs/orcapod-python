@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
+from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, Any
 
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
     import pyarrow as pa
+    from orcapod.databases._pending_commits import PendingCommit
 else:
     pa = LazyModule("pyarrow")
 
@@ -102,6 +104,16 @@ class NoOpArrowDatabase:
 
     def flush(self) -> None:
         pass
+
+    def pending_result(self, record_path: tuple[str, ...], record_id: bytes) -> None:
+        """Treat explicitly discarded outputs as resolved for bookkeeping."""
+        return None
+
+    def guard_record(
+        self, record_path: tuple[str, ...], record_id: bytes, dependency: PendingCommit
+    ) -> AbstractContextManager[None]:
+        """Accept the bookkeeping dependency without retaining the pipeline record."""
+        return nullcontext()
 
     def list_table_paths(self, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
         """Return no path: this no-op implementation never stores a table.
