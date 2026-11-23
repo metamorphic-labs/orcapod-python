@@ -1969,3 +1969,70 @@ def test_a_falling_through_data_tag_token_must_name_its_own_column() -> None:
     node._cached_output_table = None
     with pytest.raises(ProvenanceInconsistencyError, match="another column"):
         node.trace({}, "i")
+
+
+# ---------------------------------------------------------------------------
+# Fourteenth review (head 66193439): why_missing explanations
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_a_semi_join_right_record_is_explained_by_row_flow_alone(mode: str) -> None:
+    left = DictSource(
+        [{"k": "retain", "x": 1}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="left",
+    )
+    right = DictSource(
+        [{"k": "retain", "y": 2}, {"k": "absent", "y": 3}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="right",
+    )
+    job = PipelineJob(name=f"semiright{mode}", database=InMemoryArrowDatabase())
+    with job:
+        SemiJoin()(left, right)
+    run(job, mode)
+    for record in ("row_0", "row_1"):
+        answer = job.nodes["SemiJoin"].why_missing("right", record)
+        assert answer.missing
+        assert (
+            answer.because == "its rows only choose rows of 'left' and do not flow on"
+        )
+
+
+@pytest.mark.parametrize("first,second", [("old", "new"), ("new", "old")])
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_every_held_version_of_a_record_gets_its_reason(
+    mode: str, first: str, second: str
+) -> None:
+    """A cache holds two versions of s's row_0; b matches only old, c only new. Both
+    versions' reasons are given, in one order whichever was cached first."""
+    cache = InMemoryArrowDatabase()
+
+    def data(key: str) -> DictSource:
+        return DictSource(
+            [{"k": key, "x": 1}],
+            tag_columns=["k"],
+            tag_only_columns=True,
+            source_id="s",
+        )
+
+    CachedSource(data(first), cache_database=cache, cache_path=("shared",)).as_table()
+    a = CachedSource(data(second), cache_database=cache, cache_path=("shared",))
+    b = DictSource(
+        [{"k": "old", "y": 2}], tag_columns=["k"], tag_only_columns=True, source_id="b"
+    )
+    c = DictSource(
+        [{"k": "new", "z": 3}], tag_columns=["k"], tag_only_columns=True, source_id="c"
+    )
+    job = PipelineJob(name=f"versions{mode}{first}", database=InMemoryArrowDatabase())
+    with job:
+        Join()(SelectDataColumns(["x"])(a), b, c)
+    run(job, mode)
+    answer = job.nodes["Join"].why_missing("s", "row_0")
+    assert answer.missing
+    assert answer.because == (
+        "no row with k='new' in 'b' (reads b); no row with k='old' in 'c' (reads c)"
+    )

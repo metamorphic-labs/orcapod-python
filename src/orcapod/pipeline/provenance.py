@@ -2370,9 +2370,16 @@ def _blame(
     )
     because = step.text
     held_up = carried[id(holding[0])] or []
-    if len(current.upstreams) > 1 and held_up:
-        because = (
-            _missing_key_text(current, position, holding[0], held_up[0], reader)
-            or because
-        )
+    if len(current.upstreams) > 1 and held_up and _passes_rows(current, position):
+        # One reason per held row from the record (a cache can hold several versions
+        # of it), each once, in text order: never the order the rows were held in. A
+        # SemiJoin's right input is explained by its row-flow rule alone.
+        reasons = {
+            reason
+            for row in held_up
+            if (reason := _missing_key_text(current, position, holding[0], row, reader))
+            is not None
+        }
+        if reasons:
+            because = "; ".join(sorted(reasons))
     return step, because, edges
