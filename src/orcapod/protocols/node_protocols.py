@@ -46,7 +46,7 @@ class SourceNodeProtocol(Protocol):
         self,
         *,
         observer: ExecutionObserverProtocol | None = None,
-    ) -> list[tuple[TagProtocol, DataProtocol]]: ...
+    ) -> StreamProtocol: ...
 
     async def async_execute(
         self,
@@ -89,7 +89,7 @@ class FunctionNodeProtocol(Protocol):
         error_policy: Literal["continue", "fail_fast"] = "continue",
         run_id: str | None = None,
         load_only: bool = False,
-    ) -> list[tuple[TagProtocol, DataProtocol]]: ...
+    ) -> StreamProtocol: ...
 
     async def async_execute(
         self,
@@ -129,7 +129,7 @@ class OperatorNodeProtocol(Protocol):
         *input_streams: StreamProtocol,
         observer: ExecutionObserverProtocol | None = None,
         load_only: bool = False,
-    ) -> list[tuple[TagProtocol, DataProtocol]]: ...
+    ) -> StreamProtocol: ...
 
     async def async_execute(
         self,
@@ -162,7 +162,7 @@ class SideEffectNodeProtocol(Protocol):
         observer: "ExecutionObserverProtocol | None" = None,
         run_id: str | None = None,
         load_only: bool = False,
-    ) -> "list[tuple[TagProtocol, DataProtocol]]": ...
+    ) -> "StreamProtocol": ...
 
     async def async_execute(
         self,

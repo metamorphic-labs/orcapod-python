@@ -65,15 +65,11 @@ import io
 import json
 import math
 import struct
-from typing import TYPE_CHECKING, Any
+from typing import Any
+
+import polars as pl
 
 from orcapod.types import ContentHash
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import polars as pl
-else:
-    pl = LazyModule("polars")
 
 POLARS_EXPR_HASH_LABEL = "polars_expr_v1"
 

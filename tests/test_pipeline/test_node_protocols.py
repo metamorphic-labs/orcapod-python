@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 from unittest.mock import MagicMock
 
@@ -15,6 +17,7 @@ from orcapod.protocols.node_protocols import (
     is_operator_node,
 )
 import pyarrow as pa
+from orcapod.pipeline.observer import NoOpObserver
 from orcapod.core.sources import ArrowTableSource
 from orcapod.core.nodes.source_node import SourceJobNode
 from orcapod.channels import Channel
@@ -200,14 +203,14 @@ class TestSourceNodeExecute:
 
     def test_execute_returns_list(self):
         node = self._make_source_node()
-        result = node.execute()
+        result = list(node.execute().iter_data())
         assert isinstance(result, list)
         assert len(result) == 3
 
     def test_execute_populates_cached_results(self):
         """execute() on SourceJobNode returns correct data (no caching field)."""
         node = self._make_source_node()
-        result = node.execute()
+        result = list(node.execute().iter_data())
         assert len(result) == 3
 
     def test_execute_with_observer(self):
@@ -234,7 +237,7 @@ class TestSourceNodeExecute:
     def test_execute_without_observer(self):
         """execute() works fine with no observer."""
         node = self._make_source_node()
-        result = node.execute()
+        result = list(node.execute().iter_data())
         assert len(result) == 3
 
 
@@ -312,32 +315,33 @@ class TestFunctionNodeExecute:
         node = self._make_function_node()
         events = []
 
-        class Obs:
-            def contextualize(self, *identity_path):
+        class Obs(NoOpObserver):
+            def contextualize(self, *identity_path: str) -> Obs:
                 return self
 
-            def on_node_start(self, node_label, node_hash, **kwargs):
+            def on_node_start(
+                self, node_label: str, node_hash: str, tag_schema: Any = None
+            ) -> None:
                 events.append(("node_start", node_label))
 
-            def on_node_end(self, node_label, node_hash, **kwargs):
+            def on_node_end(self, node_label: str, node_hash: str) -> None:
                 events.append(("node_end", node_label))
 
-            def on_data_start(self, node_label, t, p):
+            def on_data_start(self, node_label: str, tag: Any, data: Any) -> None:
                 events.append(("data_start",))
 
-            def on_data_end(self, node_label, t, ip, op, cached):
+            def on_data_end(
+                self,
+                node_label: str,
+                tag: Any,
+                input_data: Any,
+                output_data: Any,
+                cached: bool,
+            ) -> None:
                 events.append(("data_end", cached))
 
-            def on_data_crash(self, node_label, t, p, exc):
-                pass
-
-            def create_data_logger(self, t, p, **kwargs):
-                from orcapod.pipeline.observer import _NOOP_LOGGER
-
-                return _NOOP_LOGGER
-
         input_stream = node._input_stream
-        result = node.execute(input_stream, observer=Obs())
+        result = list(node.execute(input_stream, observer=Obs()).iter_data())
 
         assert len(result) == 2
         assert events[0][0] == "node_start"
@@ -348,7 +352,7 @@ class TestFunctionNodeExecute:
     def test_execute_without_observer(self):
         node = self._make_function_node()
         input_stream = node._input_stream
-        result = node.execute(input_stream)
+        result = list(node.execute(input_stream).iter_data())
         assert len(result) == 2
         values = sorted([pkt.as_dict()["result"] for _, pkt in result])
         assert values == [2, 4]
@@ -472,30 +476,26 @@ class TestOperatorNodeExecute:
         node = self._make_join_node()
         events = []
 
-        class Obs:
-            def contextualize(self, *identity_path):
+        class Obs(NoOpObserver):
+            def contextualize(self, *identity_path: str) -> Obs:
                 return self
 
-            def on_node_start(self, node_label, node_hash, **kwargs):
+            def on_node_start(
+                self, node_label: str, node_hash: str, tag_schema: Any = None
+            ) -> None:
                 events.append(("node_start", node_label))
 
-            def on_node_end(self, node_label, node_hash, **kwargs):
+            def on_node_end(self, node_label: str, node_hash: str) -> None:
                 events.append(("node_end", node_label))
 
-            def on_data_start(self, node_label, t, p):
-                pass
-
-            def on_data_end(self, node_label, t, ip, op, cached):
-                pass
-
-        result = node.execute(*node._input_streams, observer=Obs())
+        result = list(node.execute(*node._input_streams, observer=Obs()).iter_data())
         assert len(result) == 2
         assert events[0][0] == "node_start"
         assert events[1][0] == "node_end"
 
     def test_execute_without_observer(self):
         node = self._make_join_node()
-        result = node.execute(*node._input_streams)
+        result = list(node.execute(*node._input_streams).iter_data())
         assert len(result) == 2
 
 

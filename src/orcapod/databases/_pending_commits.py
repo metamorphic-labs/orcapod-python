@@ -4,14 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING
 
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
+import pyarrow as pa
 
 
 class PendingCommit:

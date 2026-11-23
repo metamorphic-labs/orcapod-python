@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Collection, Sequence
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
+
+import polars as pl
+import pyarrow as pa
 
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.data_tags import data_tag_names, data_tags_first
@@ -46,15 +49,7 @@ from orcapod.protocols.core_protocols import (
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash, Schema
 from orcapod.utils import arrow_utils, schema_utils
-from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.warning_utils import outside_orcapod_stacklevel
-
-if TYPE_CHECKING:
-    import polars as pl
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
-    pl = LazyModule("polars")
 
 # Row-number columns of the frames Polars matches, and the column of a row's occurrence
 # number; never a key (keys are columns of the inputs, and no input column starts so).

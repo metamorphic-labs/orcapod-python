@@ -22,14 +22,9 @@ because ``as_py()`` drops nanoseconds.
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
+import pyarrow as pa
 
 # The frozen form of a NaN value: equal to itself, as NaN is in Polars.
 _NAN = object()

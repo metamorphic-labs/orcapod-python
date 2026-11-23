@@ -8,7 +8,9 @@ with ``Table.filter``, so every value passes through bit for bit; no Polars.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
+
+import pyarrow as pa
 
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.data_tags import stream_data_tags
@@ -25,12 +27,6 @@ from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagPr
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash, Schema
 from orcapod.types.condition import Condition, check_condition_columns
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
 
 
 def _user_columns(
@@ -100,6 +96,15 @@ class Filter(UnaryOperator):
     def condition(self) -> Condition:
         """The condition every kept row satisfies."""
         return self._condition
+
+    def rows_dropped_text(
+        self,
+        position: int,
+        others: Sequence[str],
+        inputs: Sequence[StreamProtocol],
+    ) -> str | None:
+        """What the filter keeps, for ``explain()``: its condition's text."""
+        return self._condition.canonical_text()
 
     def identity_structure(self) -> Any:
         """Return the operator's identity: its class name and the canonical condition.

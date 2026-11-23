@@ -13,13 +13,18 @@ import dataclasses
 import datetime
 import logging
 from collections.abc import Callable, Collection, Iterator, Sequence
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
+import pyarrow as pa
 from typing_extensions import override
 
 from orcapod.core.base import TraceableBase
 from orcapod.core.nodes.staleness import RunHoldingNode
-from orcapod.core.nodes.function_node import _build_record_id_preimage, run_job_node
+from orcapod.core.nodes.function_node import (
+    _build_record_id_preimage,
+    rows_as_output_stream,
+    run_job_node,
+)
 from orcapod.core.streams.base import (
     StreamBase,
     check_head_size,
@@ -59,10 +64,8 @@ from orcapod.system_constants import (
 from orcapod.types import ColumnConfig
 from orcapod.utils import arrow_utils
 from orcapod.utils.database_errors import flush_best_effort
-from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
-    import pyarrow as pa
     from orcapod.channels import ReadableChannel, WritableChannel
     from orcapod.protocols.core_protocols import (
         DataProtocol,
@@ -74,8 +77,6 @@ if TYPE_CHECKING:
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
     from orcapod.contexts import DataContext
     from orcapod.types import ContentHash, Schema
-else:
-    pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
 
@@ -1228,7 +1229,7 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         observer: ExecutionObserverProtocol | None = None,
         run_id: str | None = None,
         load_only: bool = False,
-    ) -> list[tuple[TagProtocol, DataProtocol]]:
+    ) -> StreamProtocol:
         """Execute side-effect delivery for all rows in ``input_stream``.
 
         Args:
@@ -1242,7 +1243,10 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         delivering (ITL-1091). A run that raises leaves the node with no rows.
 
         Returns:
-            List of ``(tag, data)`` tuples — the pass-through rows.
+            The node's output stream: the rows it passed on, as the table
+            ``_rows_to_table`` builds from them, with this node's identity
+            (``StaticOutputOperatorPod._materialize_upstream``). The sync orchestrator
+            hands it to every successor (ITL-1347, stage 2).
 
         Raises:
             SideEffectLogDataContextError: If the invocation log holds deliveries
@@ -1257,7 +1261,7 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
                 self.clear_cache()
                 raise
             self._hold(rows, load_only=True)
-            return rows
+            return self._output_stream(rows)
         try:
             results = self._deliver_rows(input_stream, run_id=run_id)
         except BaseException:
@@ -1266,7 +1270,20 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
             self.clear_cache()
             raise
         self._hold(results)
-        return results
+        return self._output_stream(results)
+
+    def _output_stream(
+        self, rows: list[tuple[TagProtocol, DataProtocol]]
+    ) -> StreamProtocol:
+        """The output stream of a run that passed ``rows`` on.
+
+        What the sync orchestrator built from a node's rows for its successors
+        (``StaticOutputOperatorPod._materialize_upstream``, through
+        ``rows_as_output_stream``).
+        """
+        # A side-effect job node is a ``StreamBase``; the checker cannot match its
+        # mixin members against ``StreamProtocol``, so the cast goes through object.
+        return rows_as_output_stream(rows, cast("StreamProtocol", cast(object, self)))
 
     def _deliver_rows(
         self, input_stream: StreamProtocol, *, run_id: str | None
@@ -1334,6 +1351,14 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         no rows. ``run()`` or ``job.run()`` delivers.
         """
         yield from self._current_rows() or ()
+
+    def held_row_count(self) -> int:
+        """The number of rows the last run of this node passed on (``iter_data``'s count).
+
+        Returns:
+            The row count; 0 with no rows from a completed run, as ``iter_data``.
+        """
+        return len(self._current_rows() or ())
 
     @override
     def head(

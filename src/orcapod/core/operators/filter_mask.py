@@ -28,7 +28,10 @@ import math
 import struct
 from collections.abc import Sequence
 from datetime import date, datetime, timezone
-from typing import TYPE_CHECKING, Any, TypeAlias
+from typing import Any, TypeAlias
+
+import pyarrow as pa
+import pyarrow.compute as pc
 
 from orcapod.errors import InputValidationError
 from orcapod.types.condition import (
@@ -43,14 +46,6 @@ from orcapod.types.condition import (
 )
 from orcapod.utils import arrow_utils
 from orcapod.utils.datetime_utils import instant_microseconds
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-    import pyarrow.compute as pc
-else:
-    pa = LazyModule("pyarrow")
-    pc = LazyModule("pyarrow.compute")
 
 
 EQ, NE, LT, LE, GT, GE = "==", "!=", "<", "<=", ">", ">="

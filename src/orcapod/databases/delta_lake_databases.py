@@ -14,6 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+import polars as pl
+import pyarrow as pa
+import pyarrow.compute as pc
+
 from orcapod.databases._pending_commits import PendingCommit, PendingCommits
 from orcapod.databases._row_index import (
     KeyIndex,
@@ -63,21 +67,15 @@ from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
     import deltalake
+    import pyarrow.dataset as pa_ds
+    import pyarrow.fs as pa_fs
+    from upath import UPath
 
     from orcapod.logical_types.protocols import (
         TypeConverterProtocol as LogicalTypeConverterProtocol,
     )
-    import polars as pl
-    import pyarrow as pa
-    import pyarrow.compute as pc
-    import pyarrow.dataset as pa_ds
-    import pyarrow.fs as pa_fs
-    from upath import UPath
 else:
     deltalake = LazyModule("deltalake")
-    pa = LazyModule("pyarrow")
-    pl = LazyModule("polars")
-    pc = LazyModule("pyarrow.compute")
     pa_ds = LazyModule("pyarrow.dataset")
 
 # Module-level logger

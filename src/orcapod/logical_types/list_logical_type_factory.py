@@ -54,23 +54,20 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+import polars as pl
+import pyarrow as pa
+
 from orcapod.logical_types.base_logical_type import BaseLogicalType
 from orcapod.logical_types.registry import (
     make_arrow_extension_type,
     make_polars_extension_type,
 )
-from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
-    import polars as pl
-    import pyarrow as pa
     from orcapod.logical_types.protocols import (
         LogicalTypeProtocol,
         TypeConverterProtocol,
     )
-else:
-    pa = LazyModule("pyarrow")
-    pl = LazyModule("polars")
 
 logger = logging.getLogger(__name__)
 

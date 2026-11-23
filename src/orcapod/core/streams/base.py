@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import functools
+import inspect
 import logging
 from abc import abstractmethod
+from collections import deque
 from collections.abc import (
     AsyncIterator,
     Callable,
@@ -16,7 +19,13 @@ from contextvars import ContextVar
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 
+import pandas as pd
+import polars as pl
+import pyarrow as pa
+
 from orcapod.core.base import TraceableBase
+from orcapod.core.data_tags import data_tag_names
+from orcapod.core.streams.record_batch_input import SOURCE_BATCH_ROWS, InputChannel
 from orcapod.core.streams.view import (
     SCHEMA_NEEDS_POLL_NOTE,
     ViewStatus,
@@ -30,24 +39,76 @@ from orcapod.protocols.core_protocols import (
     StreamProtocol,
     TagProtocol,
 )
+from orcapod.protocols.core_protocols.streams import RecordBatchInput
+from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Condition, Schema
 from orcapod.utils import arrow_utils
-from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
-    import pandas as pd
-    import polars as pl
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
-    pl = LazyModule("polars")
-    pd = LazyModule("pandas")
-
+    from orcapod.types.explanation import Explanation
 
 # TODO: consider using this instead of making copy of dicts
 # from types import MappingProxyType
 
 logger = logging.getLogger(__name__)
+
+
+def reads_as_its_class(obj: object, cls: type) -> bool:
+    """Whether ``obj`` is exactly ``cls`` and reads only through ``cls``'s own members.
+
+    Exact, never by inspection of what a subclass overrides: ``type(obj) is cls``, and
+    ``obj`` holds no attribute of its own that shadows a method or a property of
+    ``cls`` (an ``iter_data`` replaced on the instance). A ``functools.cached_property``
+    keeps its value in the instance by design and is not a shadow. A subclass, however
+    small, is never ``cls`` here (ITL-1347).
+
+    Args:
+        obj: The object to check.
+        cls: The class whose reading is proven.
+
+    Returns:
+        Whether ``obj`` reads as ``cls`` does.
+    """
+    if type(obj) is not cls:
+        return False
+    own = getattr(obj, "__dict__", None)
+    if not own:
+        return True
+    missing = object()
+    for name in own:
+        member = inspect.getattr_static(cls, name, missing)
+        if member is missing or isinstance(member, functools.cached_property):
+            continue
+        if callable(member) or hasattr(type(member), "__get__"):
+            return False
+    return True
+
+
+def system_tags_as_rows_give(table: pa.Table) -> bool:
+    """Whether every system-tag column is what the row rebuild gives: non-null text.
+
+    ``main`` rebuilt a node's table from its rows, whose system tags are typed from
+    their values: a ``large_string`` field, non-nullable, with no field metadata (the
+    only kind library code makes). A whole table is its rows only when its system tags
+    are already so, in their values as in their fields: a narrow integer, a nullable
+    field, a null value (also in a field declared non-nullable) or field metadata (an
+    Arrow extension's, which a tag drops) is decided by the rows (ITL-1347).
+
+    Args:
+        table: The table.
+
+    Returns:
+        Whether every system-tag column is non-nullable ``large_string``, without
+        metadata, holding no null.
+    """
+    return all(
+        field.type == pa.large_string()
+        and not field.nullable
+        and not field.metadata
+        and table.column(field.name).null_count == 0
+        for field in table.schema
+        if field.name.startswith(constants.SYSTEM_TAG_PREFIX)
+    )
 
 
 def schema_requires_io(stream: object, config: ColumnConfig) -> bool:
@@ -189,6 +250,348 @@ def typed_zero_row_input(stream: object) -> pa.Table | None:
             ]
         ).with_metadata(table.schema.metadata or {})
     )
+
+
+def row_built_columns(
+    table: pa.Table, keys: tuple[Sequence[str], Sequence[str]]
+) -> pa.Table:
+    """Return ``table``'s columns as a table built from its rows lays them out.
+
+    Every step of F (``StaticOutputOperatorPod._row_built_form``) that each row decides on its own, so it
+    gives the same result on a whole table and on each slice of it:
+
+    1. The columns a row-built table holds: the user tags, the system tags, the data
+       columns that are not data-tags, and the source info of every data column (a
+       data-tag's included). ``table`` holds no context, meta or content-hash column
+       (``ZERO_ROW_INPUT_COLUMNS``).
+    2. In row order: user tags in tag order, system tags in table order, then the data
+       columns and their source info, both in the order of the data keys. A row's
+       ``Data`` lists its source info in the order of its data keys, data-tags first
+       in tag order (``Data._ensure_source_info_table``), so a data-tag's source info
+       comes before the other data columns' even when the data-tag is not the first
+       column of ``table``.
+    3. Normalized to the large types without keeping ``null``: each row's datagram
+       stores a ``null`` column as ``large_string`` (``Datagram._init_from_table``).
+    4. The system-tag and source-info fields as a row builds them from its values
+       (``row_built_provenance``): no field metadata, and a source-info list of the
+       form its tokens give.
+
+    Whether a system-tag or source-info field is nullable depends on its values over
+    the complete table (``StaticOutputOperatorPod._flag_by_values``), so it is not
+    decided here.
+
+    Args:
+        table: A table of user tags, system tags, data and source info.
+        keys: The tag keys and the data keys of the stream ``table`` belongs to
+            (``stream.keys()``).
+
+    Returns:
+        The same values, selected and ordered, in their large types.
+    """
+    return row_built_provenance(
+        arrow_utils.normalize_table_to_large_types(
+            table.select(row_built_names(table.column_names, keys))
+        )
+    )
+
+
+def _source_info_value_type(kind: pa.DataType) -> pa.DataType:
+    """The Arrow type a row gives a source-info column of type ``kind``.
+
+    A row's ``Data`` types its tokens from their Python values
+    (``arrow_utils.source_info_arrow_type``): a string as ``large_string``, a list as
+    ``large_list`` of its element's type, with the item field named ``item`` and
+    nullable. A type of any other kind is left as it is.
+    """
+    if (
+        pa.types.is_list(kind)
+        or pa.types.is_large_list(kind)
+        or pa.types.is_fixed_size_list(kind)
+    ):
+        return pa.large_list(_source_info_value_type(kind.value_type))  # pyright: ignore[reportAttributeAccessIssue, reportUnknownArgumentType, reportUnknownMemberType]  # a list type has a value type
+    if (
+        pa.types.is_string(kind)
+        or pa.types.is_large_string(kind)
+        or pa.types.is_null(kind)
+    ):
+        return pa.large_string()
+    return kind
+
+
+def row_built_provenance(table: pa.Table) -> pa.Table:
+    """Give ``table``'s system-tag and source-info fields the form a row builds.
+
+    A row rebuilds its system tags and its source info from their values, so their
+    fields carry no field metadata, and a source-info column has the type its tokens
+    give (``_source_info_value_type``): a list's item field named ``item`` and
+    nullable at every depth. The values are unchanged: a type that differs only in
+    its item fields is cast. The fields' nullability is left as it is
+    (``StaticOutputOperatorPod._flag_by_values`` decides it). Other fields are not
+    touched.
+
+    Args:
+        table: A table of user tags, system tags, data and source info.
+
+    Returns:
+        The same values under the rebuilt fields.
+    """
+    fields: list[pa.Field[pa.DataType]] = []
+    columns: list[Any] = []
+    changed = False
+    for field, column in zip(table.schema, table.columns, strict=True):
+        if field.name.startswith(constants.SOURCE_PREFIX):
+            kind = _source_info_value_type(field.type)
+            if kind != field.type:
+                column = column.cast(kind)
+            new_field = pa.field(field.name, kind, nullable=field.nullable)
+        elif field.name.startswith(constants.SYSTEM_TAG_PREFIX):
+            new_field = field.remove_metadata()
+        else:
+            new_field = field
+        changed = changed or not new_field.equals(field, check_metadata=True)
+        fields.append(new_field)
+        columns.append(column)
+    if not changed:
+        return table
+    return pa.Table.from_arrays(
+        columns,
+        schema=pa.schema(
+            fields, cast("dict[bytes | str, bytes | str] | None", table.schema.metadata)
+        ),
+    )
+
+
+def row_built_names(
+    names: Sequence[str], keys: tuple[Sequence[str], Sequence[str]]
+) -> list[str]:
+    """Return the columns of a table built from rows, in row order (F steps 1-2).
+
+    The table built from rows is ``StaticOutputOperatorPod._rows_to_table``'s; this and
+    ``row_built_columns`` are module functions so that a stream applies them without
+    importing the operators (ITL-1347).
+
+    The user tags in tag order, the system tags in the order of ``names``, the data
+    columns that are not data-tags or meta columns, then the source info of every
+    such data column and data-tag; data
+    and source info in the order of the data keys (a row's ``Data`` lists its source
+    info so, data-tags first in tag order: ``Data._ensure_source_info_table``).
+
+    Args:
+        names: The column names of a table of user tags, system tags, data and
+            source info.
+        keys: The tag keys and the data keys of the stream the table belongs to.
+
+    Returns:
+        The names a table built from rows holds, in its order.
+    """
+    tag_keys, data_keys = keys
+    present = set(names)
+    tags = set(tag_keys)
+    system_tags = [n for n in names if n.startswith(constants.SYSTEM_TAG_PREFIX)]
+    # A meta (``__``) column is never data: a row's ``Data`` holds it apart, and no
+    # node passes it on (ITL-1080).
+    data_keys = [n for n in data_keys if not n.startswith(constants.META_PREFIX)]
+    data = [n for n in data_keys if n not in tags]
+    source_info = [
+        f"{constants.SOURCE_PREFIX}{n}"
+        for n in data_keys
+        if f"{constants.SOURCE_PREFIX}{n}" in present
+    ]
+    return [*tag_keys, *system_tags, *data, *source_info]
+
+
+def keys_of_rows(
+    table: pa.Table, keys: tuple[Sequence[str], Sequence[str]]
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return the tag and data keys a source's rows have, given its table and ``keys()``.
+
+    A source's rows come from a stream over its table (``ArrowTableStream``), whose rows
+    list their tags in the stream's tag order and their data with the data-tags first,
+    in tag order, then the other data columns in the table's order. A source whose
+    ``keys()`` states its declared order (a ``PollingSource`` whose fetched table has
+    another column order) has rows in the table's order all the same, as a table built
+    from its rows does (Codex on PR #485).
+
+    Args:
+        table: The source's table, as its rows are read from it.
+        keys: The source's ``keys()``.
+
+    Returns:
+        The tag keys, and the data keys in the order of the rows.
+    """
+    tag_keys, data_keys = (tuple(keys[0]), tuple(keys[1]))
+    data_tags = data_tag_names(tag_keys, data_keys)
+    data = set(data_keys) - set(tag_keys)
+    in_table = tuple(name for name in table.column_names if name in data)
+    return tag_keys, (*data_tags, *in_table)
+
+
+def stream_arrow_schema(
+    stream: object,
+    keys: tuple[Sequence[str], Sequence[str]] | None = None,
+    *,
+    from_table: bool = True,
+) -> pa.Schema:
+    """Return ``stream``'s declared Arrow schema: what ``arrow_schema()`` answers (ITL-1347).
+
+    The schema of the columns a job node passes on, without reading, computing or
+    polling a row: the stream's zero-row input (``typed_zero_row_input``, the Arrow types
+    its rows have) with the columns of F, in F's order
+    (``row_built_names``: user tags, system tags, data, source
+    info, data and source info in data-key order), with no context and no meta column. A
+    stream that cannot type itself without rows answers with its Python schema
+    converted by its data context (``arrow_types_declared`` is then false), and one
+    whose schema is known only by polling (nothing declared, nothing polled:
+    ``schema_requires_io``) answers with no column. Each
+    system-tag and source-info field is stated nullable: a table decides its flag from
+    its values (F's last step). A source-info field's type is stated as the declared
+    token type; a complete table decides it from its tokens
+    (``StaticOutputOperatorPod._type_source_info_by_values``), so consumers must not
+    rely on it. A ``null`` column keeps the zero-row ``null`` type; rows
+    carry ``large_string`` (ITL-1319). ITL-1307 later reads it from ``Schema`` instead,
+    here.
+
+    Args:
+        stream: The stream, source or node.
+        keys: The tag and data keys of the stream's rows, when they differ from
+            ``keys()`` (a source slot gives its bound source's rows); default ``keys()``.
+        from_table: Take the stream's typed zero-row table (``typed_zero_row_input``);
+            ``False`` describes it from its declared Python schema only (a narrower
+            bind, whose rows ``main``'s row path places).
+
+    Returns:
+        The declared Arrow schema.
+    """
+    from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+
+    typed = cast(StreamProtocol, stream)
+    given_keys = keys
+    table = typed_zero_row_input(stream) if from_table else None
+    if table is None and schema_requires_io(stream, ColumnConfig(system_tags=True)):
+        # Nothing declared, nothing polled (a poller with no declared schema): the
+        # columns are known only from rows, and a description never polls. No column,
+        # as a head says (``SCHEMA_NEEDS_POLL_NOTE``); ``arrow_types_declared`` is false.
+        return pa.schema([])
+    if table is None:
+        # Only what the stream declares: asking for its source-info columns would make
+        # a source that has not polled poll (a description never computes, polls or
+        # reads). A source's tokens are strings, so each data column's source info is
+        # a string field.
+        tag_schema, data_schema = typed.output_schema(columns={"system_tags": True})
+        stated = getattr(stream, "arrow_schemas", None)
+        if isinstance(stated, tuple):
+            # The Arrow types the stream declares itself (a slot): never a conversion
+            # of its Python types, which may have no Arrow type of their own.
+            tag_arrow, data_arrow = cast("tuple[pa.Schema, pa.Schema]", stated)
+            fields = [
+                *tag_arrow,
+                *(
+                    pa.field(name, pa.large_string())
+                    for name in tag_schema
+                    if name not in tag_arrow.names
+                ),
+                *(f for f in data_arrow if f.name not in tag_arrow.names),
+            ]
+            table = pa.schema(fields).empty_table()
+        else:
+            converter = StaticOutputOperatorPod._upstream_context(typed).type_converter  # pyright: ignore[reportPrivateUsage]  # the one place that resolves an upstream's context
+            table = arrow_utils.make_empty_table(
+                {**tag_schema, **data_schema}, converter
+            )
+        for name in data_schema:
+            table = table.append_column(
+                pa.field(f"{constants.SOURCE_PREFIX}{name}", pa.large_string()),
+                pa.array([], pa.large_string()),
+            )
+    # The rows' keys: the data in the order of the stream's table (a poller that
+    # fetched its columns in another order than it declares lists them so).
+    keys = given_keys if given_keys is not None else keys_of_rows(table, typed.keys())
+    names = row_built_names(table.column_names, keys)
+    schema = row_built_provenance(table.select(names)).schema
+    prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
+    for index, field in enumerate(schema):
+        if field.name.startswith(prefixes):
+            schema = schema.set(index, field.with_nullable(True))  # pyright: ignore[reportUnknownMemberType]  # stubs leave Field unparametrized
+    return schema
+
+
+class CompleteStreamFeed:
+    """The record batches of a complete stream, read at one reader's own position.
+
+    The feed of a channel opened on a stream (``StreamBase.open_channel()``). Nothing
+    is read until the first ``next``; then the stream's table is read once (a fixed
+    snapshot: a stream that changes later is not read again), in the row-built form
+    (``row_built_columns``), and cut into record batches of at most
+    ``SOURCE_BATCH_ROWS`` rows. A batch is dropped by the feed once delivered. The
+    stream is complete, so nothing is queued and no producer waits on a reader.
+    """
+
+    def __init__(self, stream: StreamProtocol) -> None:
+        """Make a feed of ``stream``'s rows; nothing is read until the first ``next``.
+
+        Args:
+            stream: The complete stream to read.
+        """
+        self._stream = stream
+        self._batches: deque[pa.RecordBatch] | None = None
+        self._failure: BaseException | None = None
+
+    async def next(self) -> pa.RecordBatch | None:
+        """Return the stream's next record batch, or ``None`` at the end.
+
+        The stream's table is read on the first call, not when the channel is opened;
+        batches with no rows are skipped.
+        """
+        if self._failure is not None:
+            # The stream was read once and preparing its batches failed: the same
+            # error again, never a second read of the stream.
+            raise self._failure
+        if self._batches is None:
+            try:
+                self._batches = deque(
+                    batch
+                    for batch in self._row_built_table().to_batches(
+                        max_chunksize=SOURCE_BATCH_ROWS
+                    )
+                    if batch.num_rows
+                )
+            except BaseException as failure:
+                self._failure = failure
+                raise
+        return self._batches.popleft() if self._batches else None
+
+    def _row_built_table(self) -> pa.Table:
+        """The stream's table in the row-built form: its one read.
+
+        The table first: reading it is the stream's one read (an unpolled source polls
+        here), and its keys are then known without another. Its system tags must be
+        what rows give (``system_tags_as_rows_give``: non-null text, no field
+        metadata); otherwise, as on the eager routes of a job, the table is the one
+        its rows build (``main``'s row path), so a narrow or nullable system tag is
+        retyped as a row retypes it. Only a stream that holds such a column (a raw
+        ``ArrowTableStream``) is read that way, and its reads have no effect.
+        """
+        table = self._stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+        if not system_tags_as_rows_give(table):
+            from orcapod.core.operators.static_output_pod import (
+                StaticOutputOperatorPod,
+            )
+
+            rows = list(self._stream.iter_data())
+            built = StaticOutputOperatorPod._materialize_upstream(rows, self._stream)  # pyright: ignore[reportPrivateUsage]  # main's row path
+            table = built.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+        # The rows' keys: a source whose keys() states its declared order has rows in
+        # its table's order (``keys_of_rows``).
+        return row_built_columns(table, keys_of_rows(table, self._stream.keys()))
+
+    def close(self) -> None:
+        """Stop reading: the batches not read are dropped."""
+        self._batches = deque()
+
+    @property
+    def opened_on(self) -> StreamProtocol | None:
+        """The complete stream this feed reads."""
+        return self._stream
 
 
 def typed_arrow_schemas(
@@ -682,6 +1085,25 @@ class StreamBase(TraceableBase):
 
         return Filter(Condition.of(*conditions, **columns))(self, label=label)
 
+    def explain(self) -> Explanation:
+        """Say what each source applies itself, and what is applied after reading.
+
+        For every source this stream reads (through a job's input slot to its bound
+        source): its own restriction (``where``, ``limit``), or that it reads its whole
+        table; and the steps above it that drop rows after they are read (a ``Filter``, a
+        ``DropNulls``, a join's unmatched rows), nearest the source first. New in this
+        release (ITL-1402).
+
+        Nothing is computed, read, polled or written, and no user code runs: only what the
+        chain declares is read.
+
+        Returns:
+            An ``Explanation``: plain data, with ``text()`` (also its ``str``).
+        """
+        from orcapod.core.streams.explain import explain
+
+        return explain(self)
+
     def drop_nulls(
         self,
         columns: str | Collection[str] | None = None,
@@ -964,6 +1386,18 @@ class StreamBase(TraceableBase):
 
         return Index(column, i, out=out, fail_on_miss=fail_on_miss)(self, label=label)
 
+    def arrow_schema(self) -> pa.Schema:
+        """The Arrow schema of the columns this stream passes between job nodes.
+
+        See ``stream_arrow_schema`` (ITL-1347): never reads, computes or polls a row.
+        """
+        return stream_arrow_schema(self)
+
+    @property
+    def arrow_types_declared(self) -> bool:
+        """Whether ``arrow_schema()`` holds the rows' own Arrow types (ITL-1089, ITL-1347)."""
+        return typed_zero_row_table(self) is not None
+
     @abstractmethod
     def keys(
         self,
@@ -1039,6 +1473,21 @@ class StreamBase(TraceableBase):
     def iter_data(
         self,
     ) -> Iterator[tuple[TagProtocol, DataProtocol]]: ...
+
+    def open_channel(self) -> RecordBatchInput:
+        """Open an input channel on this stream, for async computation (ITL-1347).
+
+        The channel delivers this stream's rows as Arrow record batches of at most
+        ``SOURCE_BATCH_ROWS`` rows, in the row-built form, read once and in order; its
+        description is this stream (``channel.stream``). Several channels may be
+        opened on one stream, each with its own position, and the stream stays as it
+        is. Nothing is read until the channel is first read; then the stream is read
+        once, a fixed snapshot.
+
+        Returns:
+            The input channel.
+        """
+        return InputChannel(self, CompleteStreamFeed(self))
 
     async def async_iter_data(
         self,

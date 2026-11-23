@@ -1,13 +1,13 @@
-from orcapod.utils.lazy_module import LazyModule
-from typing import TYPE_CHECKING, Any, TypeVar
+import asyncio
 import logging
 from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, TypeVar
+
+from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
-    import asyncio
     import ray
 else:
-    asyncio = LazyModule("asyncio")
     ray = LazyModule("ray")
 
 logger = logging.getLogger(__name__)

@@ -4,6 +4,9 @@ import logging
 from collections.abc import Collection
 from typing import TYPE_CHECKING, Any, ClassVar
 
+import polars as pl
+import pyarrow as pa
+
 from orcapod.core.sources.base import RootSource
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
@@ -12,15 +15,9 @@ from orcapod.core.sources.stream_builder import (
 )
 from orcapod.utils import arrow_utils, polars_data_utils
 from orcapod.utils.schema_utils import _normalize_column_list
-from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
-    import polars as pl
-    import pyarrow as pa
     from polars._typing import FrameInitTypes
-else:
-    pl = LazyModule("polars")
-    pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +44,7 @@ class DataFrameSource(RootSource):
 
     # The config type key; also the kind prefix of the default source id.
     SOURCE_KIND: ClassVar[str] = "data_frame"
+    TABLE_IS_ROWS: ClassVar[bool] = True
 
     def __init__(
         self,

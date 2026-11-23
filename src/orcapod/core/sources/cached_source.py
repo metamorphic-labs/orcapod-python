@@ -6,6 +6,7 @@ from datetime import datetime
 from collections.abc import Iterator
 from typing import Any, ClassVar, TYPE_CHECKING
 
+import pyarrow as pa
 from typing_extensions import override
 
 from orcapod import contexts
@@ -40,13 +41,9 @@ from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import SOURCE_DB_SCHEMA_VERSION, constants
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import schema_utils
-from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
-    import pyarrow as pa
     from orcapod.protocols.database_protocols import DatabaseRegistryProtocol
-else:
-    pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +80,12 @@ class CachedSource(RootSource):
 
     SOURCE_KIND: ClassVar[str] = "cached"
     """Config type key and default source-id kind of this source (one vocabulary)."""
+    TABLE_IS_ROWS: ClassVar[bool] = True
 
     HASH_COLUMN_NAME = "_record_hash"
+
+    REPORTS_WHAT_IT_READS: ClassVar[bool] = False
+    """It reads its cache, which holds what earlier reads stored (``explain()``, ITL-1402)."""
 
     # Set once a read has reported the cached rows it skipped.
     _skipped_rows_reported: bool = False

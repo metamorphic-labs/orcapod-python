@@ -326,7 +326,7 @@ it. Check your result for `mouse_02, s1, imec1` against `units.csv`.
             return sum(1 for row in csv.DictReader(f) if row["unit"] == "0")
 
 
-    result = count_unit0.pod(spike_files.polars_filter(subject_id="mouse_02", session="s1"))
+    result = count_unit0.pod(spike_files.filter(subject_id="mouse_02", session="s1"))
     print(result.as_pandas_df())
     #   subject_id session  probe  n_spikes_unit0
     # 0   mouse_02      s1  imec0             321

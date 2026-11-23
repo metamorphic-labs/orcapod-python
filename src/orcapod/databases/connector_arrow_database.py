@@ -22,7 +22,10 @@ import re
 from collections import defaultdict
 from collections.abc import Collection, Mapping
 from contextlib import AbstractContextManager
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
+
+import pyarrow as pa
+import pyarrow.compute as pc
 
 from orcapod.databases._pending_commits import PendingCommit, PendingCommits
 from orcapod.databases.utils import (
@@ -42,14 +45,6 @@ from orcapod.utils.arrow_utils import (
     normalize_table_to_large_types,
     normalize_to_large_types,
 )
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-    import pyarrow.compute as pc
-else:
-    pa = LazyModule("pyarrow")
-    pc = LazyModule("pyarrow.compute")
 
 
 def _arrow_schema_to_column_infos(schema: pa.Schema) -> list[ColumnInfo]:
