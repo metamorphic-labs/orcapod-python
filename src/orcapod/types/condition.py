@@ -25,7 +25,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, NamedTuple, TypeAlias, TypeVar
 
@@ -255,6 +255,64 @@ def _require_condition_value(column: object, value: object) -> None:
             "convert it explicitly (a NumPy scalar with .item()): Orcapod "
             f"converts no value{membership}"
         )
+
+
+_UTC_ORIGIN = datetime(1, 1, 1, tzinfo=timezone.utc)
+"""0001-01-01 UTC, the origin of ``instant_microseconds``."""
+
+
+def _frozen(value: object) -> object:
+    """Return a condition value as a condition holds it: nothing in it calls back later.
+
+    A ``datetime`` is frozen when the condition is built (ITL-1374): an aware value
+    becomes its instant, in UTC (``timezone.utc``, immutable), so its own ``tzinfo`` is
+    read once, here, and never again: not when the condition is compared, hashed,
+    checked against a column, saved or applied. Its zone and the spelling of its offset
+    are gone; its instant is kept exactly, a fraction of a second in the offset
+    included, and ``fold`` is honoured. A naive value keeps its wall-time fields, without
+    a ``tzinfo`` and with ``fold`` 0 (naive values compare by wall time, ``fold`` aside).
+    Every other value is returned as it is.
+
+    An instant that has no UTC ``datetime`` (year 1 at a positive offset, year 9999 at
+    a negative one) keeps its wall time under its offset as a fixed ``timezone``.
+    """
+    if type(value) is not datetime:
+        return value
+    instant = instant_microseconds(value)
+    if instant is None:
+        return datetime(
+            value.year,
+            value.month,
+            value.day,
+            value.hour,
+            value.minute,
+            value.second,
+            value.microsecond,
+        )
+    try:
+        return _UTC_ORIGIN + timedelta(microseconds=instant)
+    except OverflowError:
+        # An instant with no UTC datetime (year 1 at a positive offset, year 9999 at a
+        # negative one) keeps its wall time under its offset, as a fixed, immutable
+        # timezone: still nothing calls the original tzinfo again.
+        offset = value.utcoffset()
+        assert offset is not None  # an instant was computed from it
+        return datetime(
+            value.year,
+            value.month,
+            value.day,
+            value.hour,
+            value.minute,
+            value.second,
+            value.microsecond,
+            tzinfo=timezone(offset),
+        )
+
+
+def _checked_value(column: str, value: object) -> object:
+    """Return ``value`` checked (``_require_condition_value``) and frozen (``_frozen``)."""
+    _require_condition_value(column, value)
+    return _frozen(value)
 
 
 def condition_value_type(arrow_type: pa.DataType) -> type | None:
@@ -654,8 +712,7 @@ class ColumnRef:
         if isinstance(value, ColumnRef):
             operand: object = ColumnOperand(value.path)
         else:
-            _require_condition_value(self._path.text(), value)
-            operand = value
+            operand = _checked_value(self._path.text(), value)
         return Condition._of_children((Term(self._path, operator, operand),))  # pyright: ignore[reportPrivateUsage]  # one module
 
     def is_in(self, values: Iterable[object]) -> Condition:
@@ -682,8 +739,8 @@ class ColumnRef:
                 f"[3, 7], not {values!r}"
             )
         unique: list[object] = []
-        for value in values:
-            _require_condition_value(name, value)
+        for given in values:
+            value = _checked_value(name, given)
             if unique and type(value) is not type(unique[0]):
                 raise TypeError(
                     f"column {name!r}: is_in values are of one type; got "
@@ -719,8 +776,9 @@ class ColumnRef:
             ValueError: If ``low`` is greater than ``high``.
         """
         name = self._path.text()
-        _require_condition_value(name, low)
-        _require_condition_value(name, high)
+        # Frozen first, so two aware datetimes compare as instants (fold honoured),
+        # never as wall times within one tzinfo.
+        low, high = _checked_value(name, low), _checked_value(name, high)
         if type(low) is not type(high):
             raise TypeError(
                 f"column {name!r}: between takes two values of one type; got "
@@ -1002,11 +1060,9 @@ class Condition:
                 a supported type.
             ValueError: If a value is ``None``.
         """
-        for column, value in values.items():
-            _require_condition_value(column, value)
         return cls._of_children(
             tuple(
-                Term(FieldPath(column), EQUALS, value)
+                Term(FieldPath(column), EQUALS, _checked_value(column, value))
                 for column, value in values.items()
             )
         )
@@ -1027,7 +1083,14 @@ class Condition:
         True for the empty condition. A field of a struct, or a comparison of two
         columns, is not an equality in this sense.
         """
-        return all(_is_plain_equality(node) for node in self._root.children)
+        columns = [
+            node.path.column
+            for node in self._root.children
+            if isinstance(node, Term) and _is_plain_equality(node)
+        ]
+        return len(columns) == len(self._root.children) and len(set(columns)) == len(
+            columns
+        )
 
     @property
     def equalities(self) -> Mapping[str, object]:
@@ -1203,10 +1266,12 @@ class Condition:
                     f"a saved condition with {_TREE_KEY!r} holds nothing else; got "
                     f"{sorted(saved)}"
                 )
-            root = _node_from_config(saved[_TREE_KEY])
-            if not isinstance(root, AllOf):
-                raise ValueError(f"a saved condition's tree is an 'all'; got {root!r}")
-            return cls._of_children(root.children)
+            tree = saved[_TREE_KEY]
+            if not isinstance(tree, Mapping) or set(tree) != {"all"}:
+                raise ValueError(f"a saved condition's tree is an 'all'; got {tree!r}")
+            # Rebuilt through the public builders, so a saved tree meets every check a
+            # built one does (two values required of one column are refused).
+            return _condition_from_config(tree)
         return cls._equal_to(
             {
                 column: _condition_value_from_config(value)
@@ -1451,36 +1516,44 @@ def _path_from_config(saved: object) -> FieldPath:
     return ColumnRef(saved.get("column"), tuple(fields)).path  # pyright: ignore[reportArgumentType]  # checked by ColumnRef
 
 
-def _node_from_config(saved: object) -> Node:
-    """Return the node ``_node_to_config`` wrote; the values checked as ``of`` checks."""
+def _condition_from_config(saved: object) -> Condition:
+    """Return the condition of the node ``_node_to_config`` wrote, rebuilt through the
+    builders (``col``, ``&``, ``|``, ``~``), so every construction check applies."""
     if not isinstance(saved, Mapping):
         raise ValueError(f"a saved condition node is a mapping; got {saved!r}")
     if set(saved) == {"not"}:
-        return Negation(_node_from_config(saved["not"]))
-    for key, kind in (("all", AllOf), ("any", AnyOf)):
+        return ~_condition_from_config(saved["not"])
+    for key in ("all", "any"):
         if set(saved) == {key}:
             children = saved[key]
-            if not isinstance(children, list):
-                raise ValueError(f"a saved {key!r} holds a list; got {children!r}")
-            return kind(tuple(_node_from_config(child) for child in children))
+            if not isinstance(children, list) or not children:
+                raise ValueError(
+                    f"a saved {key!r} holds a non-empty list; got {children!r}"
+                )
+            parts = [_condition_from_config(child) for child in children]
+            combined = parts[0]
+            for part in parts[1:]:
+                combined = combined & part if key == "all" else combined | part
+            return combined
     path = _path_from_config(saved)
+    ref = ColumnRef(path.column, path.fields)
     operator = saved.get("op")
     if operator not in _OPERATORS:
         raise ValueError(f"a saved condition term has an unknown operator {operator!r}")
-    if "other" in saved:
-        value: object = ColumnOperand(_path_from_config(saved["other"]))
-    elif operator == "is_in":
+    if operator == "is_null":
+        return ref.is_null()
+    if operator == "is_not_null":
+        return ref.is_not_null()
+    if operator == "is_in":
         values = saved.get("values")
         if not isinstance(values, list) or not values:
             raise ValueError(
                 f"a saved is_in term holds a list of values; got {values!r}"
             )
-        value = tuple(_condition_value_from_config(v) for v in values)
-        for one in value:
-            _require_condition_value(path.text(), one)
-    elif operator in NULL_TESTS:
-        value = None
+        return ref.is_in([_condition_value_from_config(v) for v in values])
+    if "other" in saved:
+        other = _path_from_config(saved["other"])
+        operand: object = ColumnRef(other.column, other.fields)
     else:
-        value = _condition_value_from_config(saved.get("value"))
-        _require_condition_value(path.text(), value)
-    return Term(path, operator, value)  # pyright: ignore[reportArgumentType]  # checked against _OPERATORS
+        operand = _condition_value_from_config(saved.get("value"))
+    return ref._term(operator, operand)  # pyright: ignore[reportPrivateUsage, reportArgumentType]  # one module; checked against _OPERATORS

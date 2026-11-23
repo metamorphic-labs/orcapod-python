@@ -341,7 +341,12 @@ class TestInstants:
         combined = Condition.of(at=_SECOND_0130, unit=106).combined(
             Condition.of(unit=106, at=other)
         )
-        assert dict(combined.equalities) == {"at": _SECOND_0130, "unit": 106}
+        # A condition holds an aware datetime as its UTC instant (ITL-1374): Python's
+        # == between zones calls a time of the overlap unequal to everything.
+        assert dict(combined.equalities) == {
+            "at": _SECOND_0130.astimezone(dt.timezone.utc),
+            "unit": 106,
+        }
         assert Condition.of({"at": _SECOND_0130}, at=other) == Condition.of(
             at=_SECOND_0130
         )

@@ -543,3 +543,247 @@ class TestCheckAgainstPython:
     def test_refused(self, condition, error, match):
         with pytest.raises(error, match=match):
             check_condition_columns(condition, self._PY)
+
+
+# --- Datetimes are frozen when a condition is built (ITL-1374, review of PR 497) -----
+
+
+class _MutableZone(dt.tzinfo):
+    """A tzinfo whose offset can change after the fact and that counts its calls."""
+
+    def __init__(self, hours: int) -> None:
+        self.hours = hours
+        self.calls = 0
+
+    def utcoffset(self, _value: dt.datetime | None) -> dt.timedelta:
+        self.calls += 1
+        return dt.timedelta(hours=self.hours)
+
+    def dst(self, _value: dt.datetime | None) -> dt.timedelta:
+        self.calls += 1
+        return dt.timedelta(0)
+
+    def tzname(self, _value: dt.datetime | None) -> str:
+        self.calls += 1
+        return f"MUTABLE{self.hours:+d}"
+
+
+_BUILDERS_OF_TWO: list[Callable[[dt.datetime, dt.datetime], Condition]] = [
+    lambda a, b: Condition.of(at=a),
+    lambda a, b: Condition.of({"at": a, "other": b}),
+    lambda a, b: (col("at") == a) & (col("other") >= b),
+    lambda a, b: col("at").is_in([a, b]),
+    lambda a, b: col("at").between(a, b),
+    lambda a, b: (col("at") < a) | ~(col("other") == b),
+]
+
+
+class TestDatetimesAreFrozen:
+    @pytest.mark.parametrize("build", _BUILDERS_OF_TWO)
+    def test_a_mutable_tzinfo_is_read_once(self, build):
+        """After the condition is built nothing calls the value's tzinfo, and changing
+        its offset changes neither the condition, its identity nor what it checks."""
+        zone = _MutableZone(0)
+        first = dt.datetime(2026, 11, 25, 9, 0, tzinfo=zone)
+        second = dt.datetime(2026, 11, 25, 10, 0, tzinfo=zone)
+        condition = build(first, second)
+        form, text, config = (
+            _canonical(condition),
+            condition.text(),
+            json.dumps(condition.to_config()),
+        )
+        zone.calls, zone.hours = 0, 1  # the offset moves after the build
+
+        schema = pa.schema(
+            [
+                pa.field("at", pa.timestamp("us", tz="UTC")),
+                pa.field("other", pa.timestamp("us", tz="UTC")),
+            ]
+        )
+        check_condition(condition, schema)
+        assert _canonical(condition) == form
+        assert condition.text() == text
+        assert json.dumps(condition.to_config()) == config
+        _ = hash(condition), condition == condition
+        assert zone.calls == 0  # building again (below) reads the tzinfo, as it should
+        rebuilt = build(
+            dt.datetime(2026, 11, 25, 9, 0, tzinfo=dt.timezone.utc),
+            dt.datetime(2026, 11, 25, 10, 0, tzinfo=dt.timezone.utc),
+        )
+        assert condition == rebuilt
+        assert _canonical(condition) == _canonical(rebuilt)
+
+    @pytest.mark.parametrize(
+        "spelling",
+        [
+            lambda v: Condition.of(at=v),
+            lambda v: Condition.of({"at": v}),
+            lambda v: col("at") == v,
+        ],
+        ids=["keyword", "mapping", "col"],
+    )
+    def test_an_aware_value_is_held_as_its_utc_instant(self, spelling):
+        value = dt.datetime(2026, 11, 1, 1, 30, fold=1, tzinfo=_NEW_YORK)
+        (term,) = spelling(value).root.children
+        assert isinstance(term, Term)
+        assert term.value == value.astimezone(dt.timezone.utc)
+        assert term.value.tzinfo is dt.timezone.utc  # pyright: ignore[reportAttributeAccessIssue]
+
+    def test_a_naive_value_keeps_its_wall_time_without_tzinfo(self):
+        class NoOffset(dt.tzinfo):
+            def utcoffset(self, _value: dt.datetime | None) -> None:
+                return None
+
+        value = dt.datetime(2026, 11, 25, 9, 0, fold=1, tzinfo=NoOffset())
+        (term,) = Condition.of(at=value).root.children
+        assert isinstance(term, Term)
+        assert term.value == dt.datetime(2026, 11, 25, 9, 0)
+        assert term.value.tzinfo is None  # pyright: ignore[reportAttributeAccessIssue]
+
+
+_EPOCH = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
+# The epoch's wall time at UTC-00:00:00.000001 names one microsecond after the epoch.
+_FRACTIONAL = dt.datetime(1970, 1, 1, tzinfo=dt.timezone(-dt.timedelta(microseconds=1)))
+_ONE_AFTER_EPOCH = _EPOCH + dt.timedelta(microseconds=1)
+_FIRST_0100 = dt.datetime(2025, 11, 2, 1, 0, tzinfo=_NEW_YORK)  # 05:00 UTC
+_SECOND_0100 = _FIRST_0100.replace(fold=1)  # 06:00 UTC
+
+
+class TestOneInstantOneIdentity:
+    @pytest.mark.parametrize(
+        "first, second",
+        [
+            (_FRACTIONAL, _ONE_AFTER_EPOCH),
+            (_SECOND_0100, _SECOND_0100.astimezone(dt.timezone.utc)),
+            (_FIRST_0100, _FIRST_0100.astimezone(dt.timezone(dt.timedelta(hours=-4)))),
+        ],
+        ids=["fractional offset", "second 01:00 of an overlap", "first 01:00"],
+    )
+    @pytest.mark.parametrize(
+        "spelling",
+        [
+            lambda v: Condition.of(at=v, unit=3),
+            lambda v: Condition.of({"unit": 3}, col("at") >= v),
+            lambda v: col("at").is_in([v, _EPOCH]),
+        ],
+        ids=["keyword", "col", "is_in"],
+    )
+    def test_two_spellings_of_an_instant(self, first, second, spelling):
+        """One identity, both accepted by the check, and the saved form reads back as
+        an equal condition with the same canonical form."""
+        a, b = spelling(first), spelling(second)
+        assert a == b and hash(a) == hash(b)
+        assert _canonical(a) == _canonical(b)
+        for zone in ("UTC", "America/New_York"):
+            schema = pa.schema(
+                [
+                    pa.field("at", pa.timestamp("us", tz=zone)),
+                    pa.field("unit", pa.int64()),
+                ]
+            )
+            check_condition(a, schema)
+            check_condition(b, schema)
+        for condition in (a, b):
+            saved = json.loads(json.dumps(condition.to_config()))
+            loaded = Condition.from_config(saved)
+            assert loaded == condition
+            assert _canonical(loaded) == _canonical(condition)
+
+    def test_the_two_times_of_an_overlap_stay_two(self):
+        assert Condition.of(at=_FIRST_0100) != Condition.of(at=_SECOND_0100)
+        assert _canonical(Condition.of(at=_FIRST_0100)) != _canonical(
+            Condition.of(at=_SECOND_0100)
+        )
+
+    def test_a_check_still_refuses_a_part_below_the_unit(self):
+        schema = pa.schema([pa.field("at", pa.timestamp("s", tz="UTC"))])
+        with pytest.raises(TypeError, match="exactly"):
+            check_condition(col("at") == _FRACTIONAL, schema)
+
+
+class TestBetweenComparesInstants:
+    def test_a_range_ending_before_it_starts_is_refused(self):
+        """01:00 fold=1 (06:00 UTC) .. 01:30 fold=0 (05:30 UTC): Python's wall-time
+        comparison within one tzinfo would accept it."""
+        low = _SECOND_0100
+        high = dt.datetime(2025, 11, 2, 1, 30, tzinfo=_NEW_YORK)
+        assert not low > high  # Python's own comparison: wall time, fold ignored
+        with pytest.raises(ValueError, match="low end above"):
+            col("at").between(low, high)
+
+    def test_a_range_across_the_overlap_is_taken(self):
+        low = dt.datetime(2025, 11, 2, 1, 30, tzinfo=_NEW_YORK)  # 05:30 UTC
+        condition = col("at").between(low, _SECOND_0100)  # .. 06:00 UTC
+        assert condition == (col("at") >= low.astimezone(dt.timezone.utc)) & (
+            col("at") <= _SECOND_0100.astimezone(dt.timezone.utc)
+        )
+
+
+class TestSavedTreesMeetTheBuildChecks:
+    @pytest.mark.parametrize(
+        "children",
+        [
+            [
+                {"column": "k", "fields": [], "op": "==", "value": 1},
+                {"column": "k", "fields": [], "op": "==", "value": 2},
+            ],
+            [
+                {"column": "k", "fields": [], "op": "==", "value": 2},
+                {"column": "x", "fields": [], "op": ">", "value": 1.0},
+                {"column": "k", "fields": [], "op": "==", "value": 1},
+            ],
+            [
+                {
+                    "any": [
+                        {
+                            "all": [
+                                {"column": "k", "fields": [], "op": "==", "value": 1},
+                                {"column": "k", "fields": [], "op": "==", "value": 2},
+                            ]
+                        },
+                        {"column": "x", "fields": [], "op": "is_null"},
+                    ]
+                }
+            ],
+        ],
+        ids=["two values", "two values around another term", "inside an or"],
+    )
+    def test_two_values_for_one_column_are_refused(self, children):
+        with pytest.raises(ValueError, match=r"'k'.*cannot also equal"):
+            Condition.from_config({":condition": {"all": children}})
+
+    @pytest.mark.parametrize(
+        "saved, error",
+        [
+            (
+                {
+                    "column": "k",
+                    "fields": [],
+                    "op": "is_in",
+                    "values": [1, {"float": "nan"}],
+                },
+                TypeError,
+            ),
+            ({"column": "k", "fields": [], "op": "<", "value": [1]}, TypeError),
+            ({"column": "", "fields": [], "op": "==", "value": 1}, ValueError),
+            ({"any": []}, ValueError),
+        ],
+        ids=["is_in of two types", "a list value", "an empty name", "an empty or"],
+    )
+    def test_a_term_no_builder_makes_is_refused(self, saved, error):
+        with pytest.raises(error):
+            Condition.from_config({":condition": {"all": [saved]}})
+
+    def test_a_repeated_requirement_is_kept_once(self):
+        term = {"column": "k", "fields": [], "op": "==", "value": 1}
+        other = {"column": "x", "fields": [], "op": ">", "value": 1.0}
+        loaded = Condition.from_config({":condition": {"all": [term, other, term]}})
+        assert loaded == Condition.of(col("x") > 1.0, k=1)
+        assert len(loaded.root.children) == 2
+
+    def test_where_never_sees_two_equalities_on_one_column_as_equalities(self):
+        """A tree holding two equalities of one column (which no builder makes) is not
+        'equalities only', so a source's where refuses it rather than keep one."""
+        one, two = (col("k") == 1).root.children, (col("k") == 2).root.children
+        condition = Condition._of_children((*one, *two))  # pyright: ignore[reportPrivateUsage]  # the state no public call reaches
+        assert not condition.only_equalities
