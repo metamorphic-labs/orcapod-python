@@ -424,8 +424,10 @@ column is allowed.
 
 `where` and `stream.filter` take the same equalities, written the same way, and keep the same
 rows (for a float column, `where` uses the table system's own equality for NaN and `-0.0`,
-`filter` Orcapod's: see [Filter](operators.md#filter)). The difference is where the selection
-lives:
+`filter` Orcapod's: see [Filter](operators.md#filter)). One spelling differs: `filter` takes
+`label=` (the step's label, as every stream method does), so a column named `label` is written
+`filter({"label": "x"})` or `filter(col("label") == "x")`, while `where(label="x")` restricts
+that column. The difference is where the selection lives:
 
 <!-- docs-test: skip -->
 ```python
@@ -444,7 +446,11 @@ late = events.filter(col("spike_time_us") >= 1_000_000, col("unit_id").is_in([10
 A filter directly over a source reads the whole table and then filters it; `where` reads only
 the matching rows. On a large table, keep `where` on the source for speed and put the same
 `filter` in the pipeline for its identity: the rows are the same, and the restriction rules
-above apply to the source.
+above apply to the source. This holds for equalities on integer, string, bytes, bool, date and
+timestamp columns. On a float column it does not when the value is a NaN or a signed zero:
+`where` matches by the table system's equality (a NaN may match no row), `filter` by
+Orcapod's (a NaN matches the NaN rows), so `where` can drop rows the `filter` alone would
+keep. For such a value, filter without the `where`.
 
 <!-- docs-test: skip -->
 ```python

@@ -139,8 +139,8 @@ print(v1_or_busy.as_table().num_rows)
 ```
 
 The order of the conditions, of the keywords and of the `is_in` values never matters. Write
-`&`, `|` and `~` between conditions, never `and`, `or` and `not`, and put each comparison in
-parentheses, as in Polars.
+`&` and `|` between two conditions and `~` before one (`~(col("probe") == "imec0")`), never
+`and`, `or` and `not`, and put each comparison in parentheses, as in Polars.
 
 A value must have its column's type: `n_spikes` holds integers, so `col("n_spikes") > 1200.0`
 is refused (`InputValidationError`), and `col("n_spikes") > 1200` is the way to write it.
