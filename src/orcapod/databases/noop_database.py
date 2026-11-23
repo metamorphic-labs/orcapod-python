@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
+from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, Any
 
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
     import pyarrow as pa
+    from orcapod.databases._pending_commits import PendingCommit
 else:
     pa = LazyModule("pyarrow")
 
@@ -28,6 +30,8 @@ class NoOpArrowDatabase:
     tags plain (``tag_only_columns``) or use the cache mode ``OFF`` to dry-run such a
     node.
     """
+
+    stores_records = False
 
     def __init__(
         self,
@@ -100,6 +104,28 @@ class NoOpArrowDatabase:
 
     def flush(self) -> None:
         pass
+
+    def fail_pending_result(self, record_path: tuple[str, ...]) -> None:
+        """There are no buffered writes to withdraw."""
+
+    def flush_result_batch(
+        self, record_path: tuple[str, ...], *, publish_records: bool
+    ) -> None:
+        """A discarded result leaves no batch to commit."""
+
+    def flush_batch(self, record_path: tuple[str, ...]) -> None:
+        """Flush the no-op store at the pipeline batch boundary."""
+        self.flush()
+
+    def pending_result(self, record_path: tuple[str, ...], record_id: bytes) -> None:
+        """Treat explicitly discarded outputs as resolved for bookkeeping."""
+        return None
+
+    def guard_record(
+        self, record_path: tuple[str, ...], record_id: bytes, dependency: PendingCommit
+    ) -> AbstractContextManager[None]:
+        """Accept the bookkeeping dependency without retaining the pipeline record."""
+        return nullcontext()
 
     def list_table_paths(self, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
         """Return no path: this no-op implementation never stores a table.

@@ -129,6 +129,13 @@ run and computes nothing on a second `run()`.
 A job created without a database can be recorded but not run. Give it one later with
 `job.bind(database=...)`; `run()` without a database raises `ValueError`.
 
+### Result commit ordering
+
+A function node publishes its pipeline records after the referenced results
+commit. Failed result batches withdraw their pending pipeline records.
+`NoOpArrowDatabase` explicitly discards results and still allows pipeline
+bookkeeping to be written.
+
 ### Connector databases
 
 A `ConnectorArrowDatabase` stores a column only when its connector can store it as written.
