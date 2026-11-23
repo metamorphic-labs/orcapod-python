@@ -706,19 +706,14 @@ def test_every_input_is_closed_when_one_close_fails() -> None:
     asyncio.run(go())
 
 
-# --- A prediction bug that refuses a valid result (ITL-1365) ---------------------------------
+# --- A description whose column order differs from its result's (ITL-1365) -----------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=ValueError,
-    reason="ITL-1365: DropTagColumns predicts its tags in another order than its result "
-    "has them (pre-existing on main), so the result's batches do not match the "
-    "description and send() refuses them; the result should be sent",
-)
 def test_drop_tag_columns_over_three_tags_sends_its_result() -> None:
     """Tags c, b, a with data-tags a and b; ``DropTagColumns(["a"])``: the channel
-    result is the table built from the sync rows."""
+    result is the table built from the sync rows. The operator predicts its tags in
+    another order than its result has them (ITL-1365); the send check compares
+    columns by name, so the order-only difference does not refuse the result."""
     stream = ArrowTableStream(
         pa.table(
             {
