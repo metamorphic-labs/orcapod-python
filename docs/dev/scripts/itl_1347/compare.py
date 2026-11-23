@@ -205,9 +205,29 @@ def compare(
     return problems
 
 
-def _as_multiset(array: Any) -> collections.Counter[str]:
-    """``array``'s values, bit for bit (``_bits``), counted without their positions."""
-    return collections.Counter(repr(value) for value in _bits(array).to_pylist())
+_NULL_KEY = b"\x00null"
+
+
+def _value_key(array: Any, index: int) -> bytes:
+    """The raw Arrow value at ``index``, as bytes: equal exactly when the values are.
+
+    The element is copied to an array of its own (``take``, so no offset or neighbour
+    enters the bytes) and written in the Arrow IPC format; a null is one fixed key.
+    Never a Python object: converting to Python loses what Arrow holds (a
+    ``time64[ns]`` becomes a microsecond ``time``, a NaN payload a NaN), which would
+    make two different values look equal (Codex on PR #510).
+    """
+    if not array[index].is_valid:
+        return _NULL_KEY
+    one = pa.RecordBatch.from_arrays([array.take([index])], ["v"])
+    return one.serialize().to_pybytes()
+
+
+def _as_multiset(array: Any) -> collections.Counter[bytes]:
+    """``array``'s raw values, bit for bit (``_bits``, then ``_value_key``), counted
+    without their positions."""
+    bits = _bits(array)
+    return collections.Counter(_value_key(bits, index) for index in range(len(bits)))
 
 
 def calibrate_tables(
