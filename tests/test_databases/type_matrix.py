@@ -1060,11 +1060,13 @@ would add a non-nullable struct field (the stored rows have no value for it) or 
 struct field inside a map (Delta cannot). A nested field the append makes nullable reads
 as nullable afterwards, as Delta stores it. A column whose Arrow type Delta keeps
 through a recorded type (the "(recorded type)" cells below, every list and map
-included) cannot gain a field: the record is the column's field metadata, which Delta
-(deltalake 1.5 and later) does not let a commit change, so such an append is refused,
-naming the column, before anything is queued. A struct column without a record still
-gains fields, and an append may still add a new column. Another logical type over a
-stored logical column's storage type is refused the same way.
+included) cannot gain a field, nor have a nested nullability change: the record is the
+column's field metadata, which Delta (deltalake 1.5 and later) does not let a commit
+change, so such an append is refused, naming the column, before anything is queued. A
+struct column without a record still gains fields, an append may still add a new column,
+and an untyped `null` column takes the stored type. Another logical type over a stored
+logical column (another extension name, or the same name with other extension metadata)
+is refused the same way.
 
 An append matches columns by name, exactly as Arrow matches them (`a` and `A` are two
 columns), never by position. Delta alone refuses two columns, or two fields of one
