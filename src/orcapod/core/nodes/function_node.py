@@ -3435,11 +3435,28 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 )
                 entries = entries.filter(mask)
         found: list[pa.Table] = []
-        for cached_pod in (self._cached_function_pod, self._ephemeral_cached_pod):
-            if cached_pod is None:
-                continue
-            stored = cached_pod.result_database.get_all_records(
-                cached_pod.record_path, record_id_column=constants.DATA_RECORD_ID
+        places: list[tuple[ArrowDatabaseProtocol, tuple[str, ...]]] = [
+            (
+                self._cached_function_pod.result_database,
+                self._cached_function_pod.record_path,
+            )
+        ]
+        if self._ephemeral_cached_pod is not None:
+            places.append(
+                (
+                    self._ephemeral_cached_pod.result_database,
+                    self._ephemeral_cached_pod.record_path,
+                )
+            )
+        elif self.ephemeral_result_database is not None:
+            # A loaded node has no pod to build an ephemeral cached pod from; its
+            # results are at the same path in the ephemeral database.
+            places.append(
+                (self.ephemeral_result_database, self._cached_function_pod.record_path)
+            )
+        for database, path in places:
+            stored = database.get_all_records(
+                path, record_id_column=constants.DATA_RECORD_ID
             )
             if stored is not None:
                 found.append(keep_rows_of_data_context(stored, context_key))

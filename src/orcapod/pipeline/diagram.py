@@ -386,13 +386,27 @@ def _build_model(
         )
 
     def lit(source: int, target: int, via: tuple[str, ...]) -> bool:
+        """Whether a displayed edge is emphasized: some highlighted path leads from
+        its start to its end through the steps folded into it (several folded paths
+        merge into one displayed edge, so their labels are not one chain)."""
         if highlight is None:
             return False
-        ends = (shown[source], shown[target])
+        start, end = shown[source], shown[target]
         if not via:
-            return ends in highlight.edges
-        chain = (ends[0], *via, ends[1])
-        return all(pair in highlight.edges for pair in zip(chain, chain[1:]))
+            return (start, end) in highlight.edges
+        inner = set(via)
+        frontier, seen = [start], {start}
+        while frontier:
+            current = frontier.pop()
+            for upstream, downstream in highlight.edges:
+                if upstream != current:
+                    continue
+                if downstream == end:
+                    return True
+                if downstream in inner and downstream not in seen:
+                    seen.add(downstream)
+                    frontier.append(downstream)
+        return False
 
     edge_list = [
         _Edge(

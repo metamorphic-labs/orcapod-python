@@ -17,7 +17,7 @@ import html
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 from orcapod.types.explanation import Step, plain_repr
 
@@ -27,6 +27,12 @@ def _value_text(value: Any) -> str:
     if isinstance(value, list):
         items = [_value_text(v) for v in value]  # pyright: ignore[reportUnknownVariableType]
         return "[" + ", ".join(items) + "]"
+    if isinstance(value, dict):
+        items = cast(dict[Any, Any], value)
+        inner = ", ".join(
+            f"{_value_text(k)}: {_value_text(items[k])}" for k in sorted(items, key=str)
+        )
+        return "{" + inner + "}"
     if isinstance(value, (str, bytes, bool, int, float)):
         return plain_repr(value)
     if value is None:
@@ -260,14 +266,22 @@ class Trace:
     def source_cells(self) -> tuple[SourceCell, ...]:
         """Return every source cell the value came from, once each, sorted.
 
-        Cells are told apart by where they are (source, record, column), never by
-        their values, so any value (a list, a struct) is fine.
+        Cells are told apart by where they are (source, record, column) and by their
+        value's text, so two versions of one record are both listed; no value is
+        hashed, so any value (a list, a struct) is fine.
         """
-        cells: dict[tuple[str, str, str, str], SourceCell] = {}
+        cells: dict[tuple[str, str, str, str, str], SourceCell] = {}
         for step in self.root.walk():
             cell = step.source
             if cell is not None:
-                key = (cell.source_id, cell.record_id, cell.column, cell.node)
+                # Two versions of one record (a cache holding both) are two cells.
+                key = (
+                    cell.source_id,
+                    cell.record_id,
+                    cell.column,
+                    cell.node,
+                    _value_text(cell.value),
+                )
                 cells.setdefault(key, cell)
         return tuple(cells[key] for key in sorted(cells))
 

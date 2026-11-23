@@ -46,6 +46,8 @@ CALLS: dict[str, int] = {"rates": 0, "means": 0}
 
 
 def units() -> ArrowTableSource:
+    """The units: three tags and two data columns (``UNITS``); ``row_0`` and
+    ``row_2`` share one result, ``row_5`` is filtered out, ``row_6`` has no session."""
     schema = pa.schema(
         [
             pa.field("unit", pa.large_string(), nullable=False),
@@ -67,6 +69,7 @@ def units() -> ArrowTableSource:
 
 
 def sessions() -> ArrowTableSource:
+    """The sessions: two tags and two data columns (``SESSIONS``); none for ``m3 s1``."""
     schema = pa.schema(
         [
             pa.field("session", pa.large_string(), nullable=False),
@@ -105,6 +108,18 @@ def build(
     fold: str = "group",
     name: str = "prov",
 ) -> PipelineJob:
+    """The test pipeline: units filtered (``depth_um < 500``, which removes ``row_5``),
+    joined with sessions (``row_6`` has no session), a per-unit function with two outputs
+    (``row_0`` and ``row_2`` have equal inputs and share one result), then a ``GroupBy``
+    of subject and session (``fold="group"``) or a ``Batch`` of two (``fold="batch"``),
+    then a per-group function.
+
+    Args:
+        root: The directory of the job's store.
+        sessions_first: Give the join its inputs in the other argument order.
+        fold: ``"group"`` or ``"batch"``.
+        name: The job's name.
+    """
     job = PipelineJob(name=name, database=DeltaTableDatabase(root / "store"))
     with job:
         kept = Filter(col("depth_um") < 500)(units())
@@ -130,6 +145,7 @@ def load(root: Path) -> PipelineJob:
 
 
 def run(job: PipelineJob, mode: str) -> None:
+    """Run ``job`` on the sync or the async orchestrator (``mode``)."""
     orchestrator = (
         AsyncPipelineOrchestrator() if mode == "async" else SyncPipelineOrchestrator()
     )
@@ -137,6 +153,7 @@ def run(job: PipelineJob, mode: str) -> None:
 
 
 def cells(trace: Any) -> set[tuple[str, str, str, Any]]:
+    """A trace's source cells as ``(source id, record id, column, value)``."""
     return {(c.source_id, c.record_id, c.column, c.value) for c in trace.source_cells()}
 
 
@@ -232,9 +249,12 @@ def test_trace_on_a_loaded_job(tmp_path: Path) -> None:
     ]
 
 
-def test_trace_through_a_batch(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_trace_through_a_batch(tmp_path: Path, mode: str) -> None:
+    """Each batch member is traced to its own unit, in the batch's member order, on
+    the sync and the async path (the async path batches in arrival order)."""
     job = build(tmp_path, fold="batch")
-    job.run()
+    run(job, mode)
     held = job.nodes["means"].as_table().to_pylist()
     # Batch keeps every tag, list-valued: the first batch's tags select it.
     first = held[0]
@@ -248,7 +268,16 @@ def test_trace_through_a_batch(tmp_path: Path) -> None:
     )
     members = [s for s in trace.root.walk() if s.node == "unit_rates"]
     assert [m.member for m in members] == [0, 1]
-    assert len({c for c in trace.source_cells() if c.source_id == "units"}) == 2
+    assert [dict(m.tags)["unit"] for m in members] == first["unit"]
+    grouped = [s for s in trace.root.walk() if s.node == "SelectDataColumns_3"]
+    held_batch = job.nodes["SelectDataColumns_3"].as_table().to_pylist()
+    (batch,) = [
+        b
+        for b in held_batch
+        if b["unit"] == first["unit"] and b["session"] == first["session"]
+    ]
+    assert [m.value for m in members] == batch["rate_hz"]
+    assert len(grouped) == 1
 
 
 def test_a_refold_that_disagrees_raises(
@@ -283,21 +312,25 @@ def test_trace_is_read_only_and_not_computed_before_a_run(tmp_path: Path) -> Non
     assert before.status == "not_computed"
     assert "not computed" in before.text()
     job.run()
-    store = DeltaTableDatabase(tmp_path / "store")
 
-    def row_counts() -> dict[tuple[str, ...], int]:
-        counts = {}
-        for path in store.list_table_paths():
-            table = store.get_all_records(path)
-            counts[path] = 0 if table is None else table.num_rows
-        return counts
+    def store_files() -> dict[str, tuple[int, int]]:
+        """Every file of the store with its size and modification time: a write,
+        an overwrite in place included, changes this."""
+        return {
+            str(path.relative_to(tmp_path)): (
+                path.stat().st_size,
+                path.stat().st_mtime_ns,
+            )
+            for path in sorted((tmp_path / "store").rglob("*"))
+            if path.is_file()
+        }
 
-    tables = row_counts()
+    files = store_files()
     calls = dict(CALLS)
     job.nodes["means"].trace({"subject": "m1", "session": "s1"}, "mean_hz")
     job.nodes["means"].why_missing("units", "row_5")
     assert CALLS == calls  # no function was called
-    assert row_counts() == tables  # nothing was written
+    assert store_files() == files  # nothing was written
 
 
 def test_row_selection_errors(tmp_path: Path) -> None:
@@ -421,3 +454,26 @@ def test_reader_keeps_the_nodes_own_entries(tmp_path: Path) -> None:
     # The trace of the first job reads only its own entries.
     trace = job.nodes["means"].trace({"subject": "m1", "session": "s1"}, "mean_hz")
     assert {c.source_id for c in trace.source_cells()} == {"units", "sessions"}
+
+
+def test_reader_of_a_loaded_node_reads_its_ephemeral_results(tmp_path: Path) -> None:
+    """A loaded node has no pod to build an ephemeral cached pod from; the provenance
+    reader still reads the attached ephemeral database (internal reader, CodeRabbit
+    thread on PR 530)."""
+    from orcapod.types import NodeConfig
+
+    job = build(tmp_path)
+    ephemeral = DeltaTableDatabase(tmp_path / "ephemeral")
+    job.set_ephemeral_database(ephemeral)
+    job.nodes["unit_rates"].node_config = NodeConfig(is_result_ephemeral=True)
+    job.run()
+    _, live = job.nodes["unit_rates"]._stored_provenance()
+    assert live is not None and live.num_rows == 4  # u0 and u2 share one
+    job.save(tmp_path / "job.json")
+    loaded = load(tmp_path)
+    loaded.set_ephemeral_database(ephemeral)
+    _, stored = loaded.nodes["unit_rates"]._stored_provenance()
+    assert stored is not None
+    assert sorted(stored.column("__data_id").to_pylist()) == sorted(
+        live.column("__data_id").to_pylist()
+    )

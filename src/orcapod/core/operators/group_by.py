@@ -505,12 +505,14 @@ class GroupBy(UnaryOperator):
         )
 
         def emitted(c: str) -> pa.Array[Any]:
+            """The scalar value of key ``c`` per group: the representative member's."""
             # Every member of a group holds the same key value except a float's
             # bits, so a non-float key is the first member's.
             rows = groups[bit_names.get(c, "first")].to_arrow().cast(pa.int64())
             return table.column(c).take(rows).combine_chunks()
 
         def folded(c: str) -> pa.Array[Any]:
+            """The fold of system-tag column ``c`` per group, over the members in order."""
             # The members' text values in member order, folded per group; text loses
             # nothing in Python.
             values = cast(list[Any], table.column(c).take(order).to_pylist())

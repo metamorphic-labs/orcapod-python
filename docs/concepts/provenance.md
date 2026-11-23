@@ -115,9 +115,12 @@ print([(label, run.computed_here) for label, run in trace.function_runs()])
 
 ## When there is nothing to trace
 
-A job node shows only the rows of its run in this process (see
+An operator or function node shows only the rows of its run in this process (see
 [Pipelines and Jobs](pipeline-job.md)). Before a run, and on a stale node, there is
-nothing to trace, and the trace says so rather than computing:
+nothing to trace, and the trace says so rather than computing. A source node is
+different: when its source keeps its rows in memory, a trace of the source node reads
+that snapshot, before a run too; any other source is reported `unavailable`. A function
+node before a run:
 
 ```python
 fresh = PipelineJob(name="behaviour", database=InMemoryArrowDatabase())

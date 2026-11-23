@@ -148,6 +148,42 @@ def _source_id(node: Any) -> str:
     return found if isinstance(found, str) else node.label
 
 
+def _library_class(obj: Any) -> bool:
+    """Whether ``obj`` is an instance of an Orcapod class itself, not of a subclass
+    defined elsewhere: only such an object's methods are called (no user code)."""
+    return type(obj).__module__.startswith("orcapod.")
+
+
+def _keys(node: Any) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """A node's tag and data column names, without calling a source.
+
+    A job's source node answers from the schema it declares (``SourceNodeBase``),
+    never from its bound source, whose ``output_schema`` may be user code.
+    """
+    if _kind(node) == "source":
+        from orcapod.core.nodes.source_node import SourceNodeBase
+
+        tags, data = SourceNodeBase.output_schema(node)
+        return tuple(tags), tuple(data)
+    tags, data = node.keys()
+    return tuple(tags), tuple(data)
+
+
+def _source_ids_of(node: Any) -> set[str]:
+    """The ids a source node's rows can carry: its own, and that of the source a
+    ``CachedSource`` wraps (which keeps the wrapped source's tokens and system tags)."""
+    from orcapod.core.sources.cached_source import CachedSource
+
+    ids = {_source_id(node)}
+    bound = getattr(node, "bound_source", None)
+    while type(bound) is CachedSource:
+        bound = vars(bound).get("_source")
+        found = getattr(bound, "source_id", None) if _library_class(bound) else None
+        if isinstance(found, str):
+            ids.add(found)
+    return ids
+
+
 def _source_snapshot(node: Any) -> pa.Table | None:
     """The rows a source keeps in memory, read without calling it; else ``None``.
 
@@ -159,8 +195,10 @@ def _source_snapshot(node: Any) -> pa.Table | None:
     from orcapod.core.sources.base import RootSource
     from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 
+    from orcapod.core.nodes.source_node import SourceNodeBase
+
     bound = getattr(node, "bound_source", None)
-    if not isinstance(bound, RootSource):
+    if not isinstance(bound, RootSource) or not _library_class(bound):
         return None
     cls = type(bound)
     if (
@@ -174,7 +212,7 @@ def _source_snapshot(node: Any) -> pa.Table | None:
     table = stream.as_table(columns=_COLUMNS)
     # The job's source node presents the system tags under the names of its declared
     # schema: one source-id and one record-id column, matched by prefix.
-    tag_schema, _ = node.output_schema(columns={"system_tags": True})
+    tag_schema, _ = SourceNodeBase.output_schema(node, columns={"system_tags": True})
     renamed: list[str] = []
     for name in table.column_names:
         for prefix in (
@@ -195,25 +233,35 @@ def _system_tags(row: Mapping[str, Any]) -> list[str]:
 
 
 def _source_id_column(record_column: str) -> str:
+    """The source-id system-tag column paired with a record-id one.
+
+    Args:
+        record_column: A record-id system-tag column name, with any extensions.
+
+    Returns:
+        The source-id column name with the same extensions.
+    """
     return record_column.replace(
         constants.SYSTEM_TAG_RECORD_ID_PREFIX, constants.SYSTEM_TAG_SOURCE_ID_PREFIX, 1
     )
 
 
-def _record_ids(row: Mapping[str, Any], source: str) -> set[Any]:
-    """The record ids of ``source`` a row names, under any extended column name."""
+def _record_ids(row: Mapping[str, Any], source: str | set[str]) -> set[Any]:
+    """The record ids of ``source`` (an id, or any of several) a row names, under any
+    extended column name."""
+    sources = {source} if isinstance(source, str) else source
     return {
         row[c]
         for c in row
         if c.startswith(constants.SYSTEM_TAG_RECORD_ID_PREFIX)
-        and row.get(_source_id_column(c)) == source
+        and row.get(_source_id_column(c)) in sources
     }
 
 
-def _names_source(row: Mapping[str, Any], source: str) -> bool:
-    """Whether a row's source-id system tags name ``source`` itself (not a fold)."""
+def _names_source(row: Mapping[str, Any], sources: set[str]) -> bool:
+    """Whether a row's source-id system tags name one of ``sources`` (not a fold)."""
     return any(
-        row[c] == source
+        row[c] in sources
         for c in row
         if c.startswith(constants.SYSTEM_TAG_SOURCE_ID_PREFIX)
     )
@@ -288,14 +336,37 @@ def _column_map(
     return mapping
 
 
-def _input_rows(row: Row, node: Any, index: int, up_rows: list[Row]) -> list[Row]:
-    """The rows of input ``index`` that ``row`` names by its system tags (row-wise)."""
+_Lookups = dict[Any, Any]
+"""Indexes built once per call: column maps, and rows by their system-tag values."""
+
+
+def _input_rows(
+    row: Row, node: Any, index: int, up_rows: list[Row], lookups: _Lookups
+) -> list[Row]:
+    """The rows of input ``index`` that ``row`` names by its system tags (row-wise).
+
+    The input's rows are indexed once per call by the mapped system-tag values, so a
+    trace through many rows does not scan them again for each row.
+    """
     if not up_rows:
         return []
-    mapping = _column_map(_system_tags(row), node, index, _system_tags(up_rows[0]))
+    out_columns, up_columns = tuple(_system_tags(row)), tuple(_system_tags(up_rows[0]))
+    map_key = ("map", id(node), index, out_columns, up_columns)
+    if map_key not in lookups:
+        lookups[map_key] = _column_map(out_columns, node, index, up_columns)
+    mapping: dict[str, str] = lookups[map_key]
     if not mapping:
         return []
-    return [r for r in up_rows if all(r[u] == row[o] for o, u in mapping.items())]
+    ordered = sorted(mapping.items())
+    up_names = tuple(u for _, u in ordered)
+    index_key = ("rows", id(up_rows), up_names)
+    if index_key not in lookups:
+        by_values: dict[tuple[Any, ...], list[Row]] = {}
+        for r in up_rows:
+            by_values.setdefault(tuple(r[u] for u in up_names), []).append(r)
+        lookups[index_key] = (up_rows, by_values)  # keeps the list alive with its id
+    _, by_values = lookups[index_key]
+    return list(by_values.get(tuple(row[o] for o, _ in ordered), []))
 
 
 def _one(rows: list[Row], node: Any, what: str) -> Row:
@@ -319,6 +390,7 @@ class _Reader:
     rows: dict[int, list[Row] | None] = field(default_factory=dict)
     stored: dict[int, tuple[list[Row], dict[bytes, Row]]] = field(default_factory=dict)
     folds: dict[int, dict[int, list[Row]] | None] = field(default_factory=dict)
+    lookups: _Lookups = field(default_factory=dict)
 
     def table(self, node: Any) -> pa.Table | None:
         """The rows the node holds, with system tags, tokens and row hashes.
@@ -376,10 +448,16 @@ class _Reader:
         upstream = node.upstreams[0]
         up_table = self.table(upstream)
         up_rows = self.held(upstream)
-        if rows is None or up_table is None or up_rows is None:
+        folding = _folding(node)
+        if (
+            rows is None
+            or up_table is None
+            or up_rows is None
+            or not _library_class(folding)
+        ):
+            # Not held, or a fold rule that is user code: not read.
             self.folds[key] = None
             return None
-        folding = _folding(node)
         mapping = _column_map(
             _system_tags(rows[0]) if rows else [],
             node,
@@ -387,18 +465,22 @@ class _Reader:
             _system_tags(up_rows[0]) if up_rows else [],
         )
         assigned: dict[int, list[Row]] = {}
-        for members in folding.fold_members(up_table, list(upstream.keys()[0])):
+        ordered = sorted(mapping.items())
+        by_folded: dict[tuple[Any, ...], list[Row]] = {}
+        for r in rows:
+            by_folded.setdefault(tuple(r[o] for o, _ in ordered), []).append(r)
+        for members in folding.fold_members(up_table, list(_keys(upstream)[0])):
             folded = {
                 column: fold_system_tag_values(
                     [up_rows[i][column] for i in members], label=folding.fold_label
                 )
                 for column in set(mapping.values())
             }
-            found = [
-                r
-                for r in rows
-                if mapping and all(folded[u] == r[o] for o, u in mapping.items())
-            ]
+            found = (
+                by_folded.get(tuple(folded[u] for _, u in ordered), [])
+                if mapping
+                else []
+            )
             if len(found) != 1 or id(found[0]) in assigned:
                 raise ProvenanceInconsistencyError(
                     f"node {node.label!r}: folding the system tags of the members of a "
@@ -422,7 +504,7 @@ class _Reader:
 
 
 def _tags_of(node: Any, row: Row) -> tuple[tuple[str, Any], ...]:
-    return tuple((t, row[t]) for t in node.keys()[0] if t in row)
+    return tuple((t, row[t]) for t in _keys(node)[0] if t in row)
 
 
 def _datetime(value: Any) -> datetime | None:
@@ -453,18 +535,25 @@ class _Cell:
 
 
 def _entries_for(node: Any, row: Row, column: str, reader: _Reader) -> list[Row]:
-    """The node's stored entries for a held row: its system tags and its result id."""
+    """The node's stored entries for a held row: its system tags and its result id.
+
+    The entries are indexed once per call by those system-tag values.
+    """
     entries, _ = reader.provenance(node)
     token = row.get(constants.SOURCE_PREFIX + column)
     result_hex = _parse_token(token)[1] if isinstance(token, str) else None
-    columns = _system_tags(row)
+    columns = tuple(_system_tags(row))
+    key = ("entries", id(node), columns)
+    if key not in reader.lookups:
+        by_tags: dict[tuple[Any, ...], list[Row]] = {}
+        for e in entries:
+            by_tags.setdefault(tuple(e.get(c) for c in columns), []).append(e)
+        reader.lookups[key] = by_tags
+    found: list[Row] = reader.lookups[key].get(tuple(row[c] for c in columns), [])
     return [
         e
-        for e in entries
-        if all(e.get(c) == row[c] for c in columns)
-        and (
-            result_hex is None or bytes(e[constants.DATA_RECORD_ID]).hex() == result_hex
-        )
+        for e in found
+        if result_hex is None or bytes(e[constants.DATA_RECORD_ID]).hex() == result_hex
     ]
 
 
@@ -541,6 +630,7 @@ class _Tracer:
         *,
         held: bool,
         member: int | None,
+        input_hash: str | None = None,
     ) -> TraceStep:
         """A source cell named by a token, checked against a held snapshot if any.
 
@@ -551,16 +641,32 @@ class _Tracer:
             held: Whether ``value`` is a value the run held; if not, the value is read
                 from the snapshot, and the step is ``unavailable`` without one.
             member: The cell's position in a folded or merged list, or ``None``.
+            input_hash: For a function that read the source directly, the input data
+                hash its stored entry holds: the snapshot row must have that hash.
         """
         source_id, record_id, source_column = _parse_token(token)
         snapshot = self.reader.held(source_node)
         status = "traced"
         if snapshot is not None:
-            rows = [r for r in snapshot if record_id in _record_ids(r, source_id)]
+            key = ("records", id(source_node))
+            if key not in self.reader.lookups:
+                by_record: dict[tuple[Any, Any], list[Row]] = {}
+                for r in snapshot:
+                    for c in r:
+                        if c.startswith(constants.SYSTEM_TAG_RECORD_ID_PREFIX):
+                            pair = (r.get(_source_id_column(c)), r[c])
+                            by_record.setdefault(pair, []).append(r)
+                self.reader.lookups[key] = by_record
+            rows = self.reader.lookups[key].get((source_id, record_id), [])
             if len(rows) != 1:
                 raise ProvenanceInconsistencyError(
                     f"source {source_id!r} holds {len(rows)} rows with record id "
                     f"{record_id!r}"
+                )
+            if input_hash is not None and rows[0].get(_ROW_HASH) != input_hash:
+                raise ProvenanceInconsistencyError(
+                    f"source {source_id!r} record {record_id!r} is not the input the "
+                    "stored entry was computed from (its content hash differs)"
                 )
             if source_column in rows[0]:
                 if not held:
@@ -591,7 +697,7 @@ class _Tracer:
         """The leaves of a cell for its input ``index``, a source node: the cell's
         tokens that name that source, each checked against the row's system tags."""
         upstream = node.upstreams[index]
-        source_id = _source_id(upstream)
+        source_ids = _source_ids_of(upstream)
         token, value = cell.token, cell.value
         pairs: list[tuple[str, Any, int | None]] = []
         if isinstance(token, list):
@@ -611,9 +717,9 @@ class _Tracer:
         out: list[TraceStep] = []
         for t, v, k in pairs:
             sid, record_id, _ = _parse_token(t)
-            if sid != source_id:
+            if sid not in source_ids:
                 continue
-            if record_id not in _record_ids(cell.row, source_id):
+            if record_id not in _record_ids(cell.row, sid):
                 raise ProvenanceInconsistencyError(
                     f"node {node.label!r}: the token {t!r} names a record the row's "
                     "system tags do not"
@@ -645,7 +751,7 @@ class _Tracer:
             if up_rows is None:
                 inputs.append(self.unread(upstream, cell.column, None, "not_computed"))
                 continue
-            matched = _input_rows(cell.row, node, index, up_rows)
+            matched = _input_rows(cell.row, node, index, up_rows, self.reader.lookups)
             if not matched:
                 continue
             for up_cell, link_member in self.links(node, upstream, cell, matched):
@@ -675,7 +781,7 @@ class _Tracer:
         if token is None:
             return []
         prefix = constants.SOURCE_PREFIX
-        data_columns = list(upstream.keys()[1])
+        data_columns = list(_keys(upstream)[1])
 
         def resolve(make: Callable[[Row, str], Link | None], what: str) -> list[Link]:
             found: list[Link] = []
@@ -784,7 +890,16 @@ class _Tracer:
                     if isinstance(token, str):
                         self.edges.add((upstream.label, node.label))
                         leaves.append(
-                            self.leaf(upstream, token, None, held=False, member=None)
+                            self.leaf(
+                                upstream,
+                                token,
+                                None,
+                                held=False,
+                                member=None,
+                                input_hash=_hash_text(
+                                    entry[constants.INPUT_DATA_HASH_COL]
+                                ),
+                            )
                         )
             return TraceStep(
                 node.label,
@@ -809,7 +924,7 @@ class _Tracer:
                 member,
                 inputs=(self.unread(upstream, column, None, "not_computed"),),
             )
-        matched = _input_rows(row, node, 0, up_rows)
+        matched = _input_rows(row, node, 0, up_rows, self.reader.lookups)
         if has_store:
             pairs = [
                 (r, e)
@@ -839,7 +954,7 @@ class _Tracer:
             run = None
         self.edges.add((upstream.label, node.label))
         inputs = tuple(
-            self.step(upstream, _Cell(up_row, c)) for c in sorted(upstream.keys()[1])
+            self.step(upstream, _Cell(up_row, c)) for c in sorted(_keys(upstream)[1])
         )
         return TraceStep(
             node.label,
@@ -865,7 +980,11 @@ class _Tracer:
         upstream = node.upstreams[0]
         assignment = self.reader.fold(node)
         if assignment is None:
-            status = "unavailable" if _kind(upstream) == "source" else "not_computed"
+            status = (
+                "unavailable"
+                if _kind(upstream) == "source" or not _library_class(_folding(node))
+                else "not_computed"
+            )
             return TraceStep(
                 node.label,
                 "operator",
@@ -879,6 +998,9 @@ class _Tracer:
         members = assignment[id(row)]
         values = row.get(column)
         tokens = row.get(constants.SOURCE_PREFIX + column)
+        folding = _folding(node)
+        if not isinstance(values, list) and column in getattr(folding, "by", ()):
+            return self.key_step(node, cell, member, tags, operator, members)
         wanted = range(len(members)) if cell.element is None else [cell.element]
         inputs: list[TraceStep] = []
         for i in wanted:
@@ -909,8 +1031,68 @@ class _Tracer:
             inputs=tuple(inputs),
         )
 
+    def key_step(
+        self,
+        node: Any,
+        cell: _Cell,
+        member: int | None,
+        tags: tuple[tuple[str, Any], ...],
+        operator: str | None,
+        members: list[Row],
+    ) -> TraceStep:
+        """A ``GroupBy`` key that is also data (a data-tag): one scalar, the value every
+        member holds, whose token is the fold of the members' tokens in member order."""
+        row, column = cell.row, cell.column
+        upstream = node.upstreams[0]
+        folding = _folding(node)
+        prefix = constants.SOURCE_PREFIX
+        for m in members:
+            if not same_value(m.get(column), row.get(column)):
+                raise ProvenanceInconsistencyError(
+                    f"node {node.label!r}: the key {column!r} is "
+                    f"{row.get(column)!r}, a member in {upstream.label!r} holds "
+                    f"{m.get(column)!r}"
+                )
+        token = row.get(prefix + column)
+        member_tokens = [m.get(prefix + column) for m in members]
+        if token is not None and token != fold_system_tag_values(
+            member_tokens, label=folding.fold_label
+        ):
+            raise ProvenanceInconsistencyError(
+                f"node {node.label!r}: the token of the key {column!r} is not the fold "
+                "of its members' tokens"
+            )
+        inputs: list[TraceStep] = []
+        for i, m in enumerate(members):
+            self.edges.add((upstream.label, node.label))
+            inputs.append(self.step(upstream, _Cell(m, column), member=i))
+        return TraceStep(
+            node.label,
+            "operator",
+            operator,
+            column,
+            cell.value,
+            tags,
+            member,
+            inputs=tuple(inputs),
+        )
+
 
 def _select_row(node: Any, rows: list[Row], row: Mapping[str, Any]) -> Row:
+    """The one held row whose values are the selector's (``same_value``).
+
+    Args:
+        node: The node, for the messages.
+        rows: The rows the node holds.
+        row: Column values that must select exactly one row.
+
+    Returns:
+        The selected row.
+
+    Raises:
+        ValueError: If a selector column is not a column of the rows, or the values
+            select no row or several rows.
+    """
     known = set(rows[0]) if rows else set()
     unknown = sorted(k for k in row if k not in known)
     if rows and unknown:
@@ -948,7 +1130,7 @@ def trace(node: Any, row: Mapping[str, Any], column: str) -> Trace:
         ProvenanceInconsistencyError: If a link cannot be proven from what the job
             holds and stores, or is ambiguous.
     """
-    if column not in node.keys()[1]:
+    if column not in _keys(node)[1]:
         raise ValueError(f"{column!r} is not a data column of node {node.label!r}")
     tracer = _Tracer()
     rows = tracer.reader.held(node)
@@ -1023,11 +1205,15 @@ def why_missing(node: Any, source: str, record_id: str) -> Absence:
         ProvenanceInconsistencyError: If a group's members cannot be proven.
     """
     ancestry = _ancestry(node)
+    # A source is named by its own id, or by the id of the source a cache wraps.
     sources = [
-        n for n in ancestry.values() if _kind(n) == "source" and _source_id(n) == source
+        n
+        for n in ancestry.values()
+        if _kind(n) == "source" and source in _source_ids_of(n)
     ]
     if not sources:
         raise ValueError(f"no source with id {source!r} feeds node {node.label!r}")
+    ids: set[str] = set().union(*(_source_ids_of(n) for n in sources))
     path = _topological(
         [n for n in ancestry.values() if any(id(s) in _ancestry(n) for s in sources)]
     )
@@ -1038,7 +1224,7 @@ def why_missing(node: Any, source: str, record_id: str) -> Absence:
     carried: dict[int, list[Row] | None] = {}
     try:
         for n in path:
-            carried[id(n)] = _carried(n, source, record_id, reader, carried, on_path)
+            carried[id(n)] = _carried(n, ids, record_id, reader, carried, on_path)
     except _NotHeld as unread:
         because = (
             "a node on the way holds no run"
@@ -1060,20 +1246,39 @@ def why_missing(node: Any, source: str, record_id: str) -> Absence:
         )
 
     def holds(n: Any) -> bool:
-        value = carried.get(id(n))
-        return value is None or bool(value)
+        """Proven: the node holds a row from the record."""
+        return bool(carried.get(id(n)))
 
+    def may_hold(n: Any) -> bool:
+        """Not disproven: it holds a row, or it is a source that is not read."""
+        return holds(n) or (_kind(n) == "source" and carried.get(id(n)) is None)
+
+    if _kind(node) == "source" and carried.get(id(node)) is None:
+        return Absence(
+            node.label,
+            source,
+            record_id,
+            True,
+            "unavailable",
+            None,
+            None,
+            (),
+            None,
+            f"source {source!r} is not read here, so whether it holds the record is "
+            "not known",
+            labels,
+        )
     present = tuple(n.label for n in path if holds(n))
     missing = not holds(node)
     function_node = next((n for n in path if _kind(n) == "function"), None)
-    reached = _reached(function_node, source, record_id, reader, carried)
+    reached = _reached(function_node, ids, record_id, reader, carried)
 
     removed_by: Step | None = None
     because = ""
     edges: set[tuple[str, str]] = set()
     if missing:
         removed_by, because, blamed = _blame(
-            node, source, record_id, reader, carried, on_path, holds
+            node, source, record_id, reader, carried, on_path, may_hold
         )
         edges |= blamed
     for n in path:
@@ -1099,7 +1304,7 @@ def why_missing(node: Any, source: str, record_id: str) -> Absence:
 
 def _carried(
     n: Any,
-    source: str,
+    source: set[str],
     record_id: str,
     reader: _Reader,
     carried: dict[int, list[Row] | None],
@@ -1146,14 +1351,14 @@ def _carried(
                     kept[id(r)] = r
             continue
         for r in rows:
-            if id(r) not in kept and _input_rows(r, n, index, up):
+            if id(r) not in kept and _input_rows(r, n, index, up, reader.lookups):
                 kept[id(r)] = r
     return list(kept.values())
 
 
 def _reached(
     function_node: Any,
-    source: str,
+    source: set[str],
     record_id: str,
     reader: _Reader,
     carried: dict[int, list[Row] | None],
@@ -1225,7 +1430,11 @@ def _blame(
         if i != position
     ]
     text = None
-    if producer is not None and hasattr(producer, "rows_dropped_text"):
+    if (
+        producer is not None
+        and _library_class(producer)
+        and hasattr(producer, "rows_dropped_text")
+    ):
         text = producer.rows_dropped_text(
             position, sorted(others), tuple(current.upstreams)
         )
@@ -1242,7 +1451,12 @@ def _blame(
     step = Step(
         operator=type(producer).__name__,
         label=current.label,
-        text=text or "its rows are not passed on",
+        text=text
+        or (
+            "its rows are not passed on"
+            if producer is None or _library_class(producer)
+            else "its rows are not passed on (a user-defined operator, not described)"
+        ),
     )
     because = step.text
     held_up = carried[id(holding[0])] or []
