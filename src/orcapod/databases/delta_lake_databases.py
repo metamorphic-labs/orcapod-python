@@ -639,74 +639,135 @@ def _non_null_violation(
 
 
 def _delta_identity_node(
-    delta_type: Any, metadata: Any, recorded: bool
+    delta_type: Any, metadata: Any, recorded: "pa.Field[Any] | None"
 ) -> IdentityNode:
     """What the Delta log reliably says of a stored column's logical type
     identifiers, at every depth (ITL-1371).
 
-    The log keeps the field metadata written with the column and with each struct
-    child, byte for byte, so an identifier there is known. "No identifier" is known
-    only when the column's Arrow type is recorded (``ARROW_TYPE_KEY``): a column
-    written from a dictionary of extension values is stored as plain values, losing
-    the identifier, and records no type (ITL-1372), so without a record the absence
-    proves nothing and the identity rule abstains. A list item and a map key or item
-    keep no metadata in the log (ITL-1372), and the column's recorded type is read
-    through the Arrow registry, which may give an identifier other than the one
-    stored: there the identifier is never known, while the children of a struct
-    beneath it are (``_unknown_place``).
+    A place's identifier is known from, in this order: the physical field's own
+    annotation (the log keeps the field metadata written with the column and with
+    each struct child, byte for byte); else the place inside the column's recorded
+    Arrow type (``ARROW_TYPE_KEY``), when the column records one: its annotation
+    there, or no logical type when the recorded place is plain; else it is unknown
+    and the identity rule abstains. Missing physical metadata alone proves nothing:
+    a list item or map key or item keeps none in the log (ITL-1372), a dictionary
+    child is written as plain values, and a column written from a dictionary of
+    extension values records no type. A recorded place that the Arrow registry read
+    back as an extension type is unknown too: the registry may give other bytes than
+    the ones stored.
 
     Args:
         delta_type: A ``deltalake.schema`` type from the log.
         metadata: Its field's metadata, as the log gives it.
-        recorded: Whether the column records its Arrow type.
+        recorded: The same place in the column's recorded Arrow type, or ``None``
+            when the column records none (or the record has no such place).
 
     Returns:
         The ``IdentityNode`` of the stored field.
     """
     from deltalake.schema import ArrayType, MapType, StructType
 
+    recorded_type = _recorded_storage(recorded)
     children: tuple[tuple[str, IdentityNode], ...] = ()
     if isinstance(delta_type, StructType):
+        by_name = (
+            {f.name: f for f in recorded_type}
+            if recorded_type is not None and pa.types.is_struct(recorded_type)
+            else {}
+        )
         children = tuple(
-            (f".{f.name}", _delta_identity_node(f.type, f.metadata, recorded))
+            (
+                f".{f.name}",
+                _delta_identity_node(f.type, f.metadata, by_name.get(f.name)),
+            )
             for f in delta_type.fields
         )
     elif isinstance(delta_type, ArrayType):
-        children = ((LIST_ITEM, _unknown_place(delta_type.element_type, recorded)),)
-    elif isinstance(delta_type, MapType):
+        item = (
+            recorded_type.value_field
+            if recorded_type is not None
+            and (
+                pa.types.is_list(recorded_type)
+                or pa.types.is_large_list(recorded_type)
+                or pa.types.is_fixed_size_list(recorded_type)
+            )
+            else None
+        )
         children = (
-            (MAP_KEY, _unknown_place(delta_type.key_type, recorded)),
-            (MAP_ITEM, _unknown_place(delta_type.value_type, recorded)),
+            (LIST_ITEM, _delta_identity_node(delta_type.element_type, None, item)),
+        )
+    elif isinstance(delta_type, MapType):
+        is_map = recorded_type is not None and pa.types.is_map(recorded_type)
+        children = (
+            (
+                MAP_KEY,
+                _delta_identity_node(
+                    delta_type.key_type,
+                    None,
+                    recorded_type.key_field if is_map else None,
+                ),
+            ),
+            (
+                MAP_ITEM,
+                _delta_identity_node(
+                    delta_type.value_type,
+                    None,
+                    recorded_type.item_field if is_map else None,
+                ),
+            ),
         )
     as_bytes = metadata_bytes(metadata)
     name = as_bytes.get(_EXTENSION_KEYS[0])
-    identifier = None if name is None else (name, as_bytes.get(_EXTENSION_KEYS[1], b""))
-    return IdentityNode(
-        known=identifier is not None or recorded,
-        identifier=identifier,
-        children=children,
+    if name is not None:
+        identifier = (name, as_bytes.get(_EXTENSION_KEYS[1], b""))
+        return IdentityNode(known=True, identifier=identifier, children=children)
+    if recorded is None or isinstance(recorded.type, pa.BaseExtensionType):
+        return IdentityNode(known=False, identifier=None, children=children)
+    recorded_metadata = metadata_bytes(recorded.metadata)
+    recorded_name = recorded_metadata.get(_EXTENSION_KEYS[0])
+    identifier = (
+        None
+        if recorded_name is None
+        else (recorded_name, recorded_metadata.get(_EXTENSION_KEYS[1], b""))
     )
+    return IdentityNode(known=True, identifier=identifier, children=children)
 
 
-def _unknown_place(delta_type: Any, recorded: bool) -> IdentityNode:
-    """A list item or map key or item as the Delta log gives it: its own identifier
-    is not known (the log keeps no metadata there, ITL-1372), but a struct beneath it
-    keeps its children's metadata in the log, byte for byte, so the walk goes on
-    through it to them."""
-    place = _delta_identity_node(delta_type, None, recorded)
-    return IdentityNode(known=False, identifier=None, children=place.children)
+def _recorded_storage(recorded: "pa.Field[Any] | None") -> Any:
+    """The recorded place's type to walk into: a dictionary's values (an encoding),
+    or ``None`` when there is no record or the place is an extension type (whose
+    children the registry has built)."""
+    if recorded is None:
+        return None
+    arrow_type = recorded.type
+    if pa.types.is_dictionary(arrow_type):
+        arrow_type = arrow_type.value_type
+    if isinstance(arrow_type, pa.BaseExtensionType):
+        return None
+    return arrow_type
+
+
+def _recorded_field(name: str, metadata: Any) -> "pa.Field[Any] | None":
+    """The column's recorded Arrow type as a field, or ``None`` when it records none
+    or the record cannot be read (a registered reader that refuses its metadata):
+    then the record proves nothing."""
+    try:
+        record = recorded_type(metadata)
+    except Exception:  # noqa: BLE001  # an unreadable record proves nothing
+        return None
+    return None if record is None else pa.field(name, record)
 
 
 def _stored_identities(
     delta_table: deltalake.DeltaTable,
 ) -> list[tuple[str, IdentityNode]]:
-    """Each stored column's ``_delta_identity_node``, from the log; no data is read
-    and no type is decoded."""
+    """Each stored column's ``_delta_identity_node``, from the log and the column's
+    recorded Arrow type; no data is read."""
     return [
         (
             f.name,
             _delta_identity_node(
-                f.type, f.metadata, ARROW_TYPE_KEY in metadata_bytes(f.metadata)
+                f.type, f.metadata, _recorded_field(f.name, f.metadata)
             ),
         )
         for f in delta_table.schema().fields

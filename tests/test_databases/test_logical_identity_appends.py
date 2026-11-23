@@ -1754,33 +1754,45 @@ def test_a_later_chunk_annotation_is_compared(
     tmp_path: Path, kind: str, state: str
 ) -> None:
     """Arrow keeps a nested field's annotation per chunk: a later chunk of another
-    annotated identifier is refused, with fresh ids and duplicate-only, in every
-    database; chunks of the same identifier are accepted."""
+    annotated identifier is refused, with fresh ids (either duplicate setting) and
+    duplicate-only (every id already held, ``skip_duplicates``), in every database;
+    chunks of the same identifier are accepted, and the same identifier
+    duplicate-only is a no-op (round 4, finding 2; round 5, finding 3)."""
     with _store(kind, tmp_path) as store:
         store.db.add_records(
             PATH,
-            _late_chunk_rows([b"m"], [b"1"]),
+            _late_chunk_rows([b"m", b"m"], [b"1", b"22"]),
             record_id_column="id",
             flush=state == "committed",
         )
-        mixed = _late_chunk_rows([b"m", b"n"], [b"1", b"22"])
-        assert [c.type.field("v").metadata[META] for c in mixed.column("x").chunks] == [
+        fresh = _late_chunk_rows([b"m", b"n"], [b"333", b"4444"])
+        duplicate_only = _late_chunk_rows([b"m", b"n"], [b"1", b"22"])
+        assert [c.type.field("v").metadata[META] for c in fresh.column("x").chunks] == [
             b"m",
             b"n",
         ]
-        for skip in (False, True):
+        for given, skip in ((fresh, False), (fresh, True), (duplicate_only, True)):
             with pytest.raises(InputValidationError, match="x.v is of logical type"):
                 store.db.add_records(
-                    PATH, mixed, record_id_column="id", skip_duplicates=skip
+                    PATH, given, record_id_column="id", skip_duplicates=skip
                 )
         store.db.add_records(
-            PATH, _late_chunk_rows([b"m", b"m"], [b"22", b"333"]), record_id_column="id"
+            PATH,
+            _late_chunk_rows([b"m", b"m"], [b"1", b"22"]),
+            record_id_column="id",
+            skip_duplicates=True,
+        )
+        store.db.add_records(
+            PATH,
+            _late_chunk_rows([b"m", b"m"], [b"333", b"4444"]),
+            record_id_column="id",
         )
         stored = store.stored()
         assert sorted(cast(list[bytes], stored.column("id").to_pylist())) == [
             b"1",
             b"22",
             b"333",
+            b"4444",
         ]
 
 
@@ -2187,3 +2199,164 @@ def test_delta_flush_refuses_after_another_writer_changed_the_identifier(
     stored = DeltaTableDatabase(root).get_all_records(PATH, record_id_column="id")
     assert stored is not None and stored.column("id").to_pylist() == [b"1"]
     assert identity_node(stored.schema.field("x")).identifier == (b"itl1371.a", b"n")
+
+
+# ---------------------------------------------------------------------------
+# Review round 5 (PR 492)
+# ---------------------------------------------------------------------------
+
+
+class _DictExt(pa.ExtensionType):
+    def __init__(self, meta: bytes) -> None:
+        self._meta = meta
+        super().__init__(pa.large_string(), "itl1371.dict")
+
+    def __arrow_ext_serialize__(self) -> bytes:
+        return self._meta
+
+    @classmethod
+    def __arrow_ext_deserialize__(cls, storage_type: Any, serialized: bytes) -> Any:
+        return cls(serialized)
+
+
+def _dictionary_child_rows(shape: str, meta: bytes, ids: list[bytes]) -> pa.Table:
+    """``x``: ``struct<v: dictionary<int8, itl1371.dict;<meta>>, u: uint16>`` under a
+    recorded container (``list-list``, ``map-list``, ``fixed``, ``map``) or alone
+    (``struct``). Delta writes ``v`` as plain text with no metadata in the log; the
+    column's recorded Arrow type keeps ``v``'s identifier."""
+    n = len(ids)
+    values = _DictExt(meta).wrap_array(
+        pa.array([f"s{i}" for i in range(n)], pa.large_string())
+    )
+    v = pa.DictionaryArray.from_arrays(pa.array(range(n), pa.int8()), values)
+    struct = pa.StructArray.from_arrays(
+        [v, pa.array(range(n), pa.uint16())], names=["v", "u"]
+    )
+    offsets = pa.array(range(n + 1), pa.int64())
+    keys = pa.array([f"k{i}" for i in range(n)], pa.large_string())
+    map_offsets: Any = pa.array(range(n + 1), pa.int32())
+    map_from: Any = pa.MapArray.from_arrays
+    x: Any
+    if shape == "struct":
+        x = struct
+    elif shape == "fixed":
+        x = pa.FixedSizeListArray.from_arrays(struct, 1)
+    elif shape == "map":
+        x = map_from(map_offsets, keys, struct)
+    else:
+        inner = pa.LargeListArray.from_arrays(offsets, struct)
+        x = (
+            pa.LargeListArray.from_arrays(offsets, inner)
+            if shape == "list-list"
+            else map_from(map_offsets, keys, inner)
+        )
+    return pa.table({"id": pa.array(ids, pa.large_binary()), "x": x})
+
+
+DICTIONARY_CHILD_PATHS = {
+    "list-list": "x[][].v",
+    "map-list": "x.item[].v",
+    "fixed": "x[].v",
+    "map": "x.item.v",
+    "struct": "x.v",
+}
+
+
+@pytest.mark.parametrize("shape", list(DICTIONARY_CHILD_PATHS))
+def test_delta_recorded_type_decides_a_child_the_log_keeps_plain(
+    tmp_path: Path, shape: str
+) -> None:
+    """A dictionary child is written as plain text with no metadata in the Delta log;
+    the column's recorded Arrow type keeps its identifier. The stored side is read
+    from the physical field's own annotation, else from the recorded type at that
+    place, else not known: missing physical metadata alone never proves 'no logical
+    type'. So the identical duplicate-only batch is a no-op and the same identifier
+    with fresh ids keeps main's verdict (main's field-metadata check refuses it), while
+    another identifier is refused naming both (round 5, finding 1)."""
+    root = tmp_path / "delta"
+    DeltaTableDatabase(root).add_records(
+        PATH,
+        _dictionary_child_rows(shape, b"old", [b"1", b"22"]),
+        record_id_column="id",
+        flush=True,
+    )
+    path = DICTIONARY_CHILD_PATHS[shape]
+    # The identical batch, duplicate-only: a no-op, as on main.
+    DeltaTableDatabase(root).add_records(
+        PATH,
+        _dictionary_child_rows(shape, b"old", [b"1", b"22"]),
+        record_id_column="id",
+        skip_duplicates=True,
+        flush=True,
+    )
+    # The same identifier, fresh ids: main's field-metadata check refuses it (the
+    # identity rule does not).
+    with pytest.raises(
+        InputValidationError, match=re.escape(f"{path} has other field metadata")
+    ):
+        DeltaTableDatabase(root).add_records(
+            PATH, _dictionary_child_rows(shape, b"old", [b"333"]), record_id_column="id"
+        )
+    # Another identifier, fresh or duplicate-only: refused naming both.
+    for ids, skip in (([b"333"], False), ([b"1", b"22"], True)):
+        with pytest.raises(InputValidationError) as refused:
+            DeltaTableDatabase(root).add_records(
+                PATH,
+                _dictionary_child_rows(shape, b"new", ids),
+                record_id_column="id",
+                skip_duplicates=skip,
+            )
+        assert f"{path} is of logical type 'itl1371.dict;6e6577'" in str(refused.value)
+        assert "the stored column's 'itl1371.dict;6f6c64'" in str(refused.value)
+    stored = DeltaTableDatabase(root).get_all_records(PATH, record_id_column="id")
+    assert stored is not None
+    assert sorted(cast(list[bytes], stored.column("id").to_pylist())) == [b"1", b"22"]
+
+
+def test_delta_stale_handle_after_delete_and_recreate_reuses_its_ids(
+    tmp_path: Path,
+) -> None:
+    """Pins a pre-existing limit, as on main (round 5, finding 2; ITL-1413): a held
+    handle whose table was deleted and recreated at the same path, at the same Delta
+    version, takes the new table's identifier on a reload but its duplicate scan
+    reuses the old version's cached ids, so a same-identifier append of an old id is
+    taken for a duplicate (nothing written) and one of a new id is written again."""
+    import shutil
+
+    import deltalake
+
+    root = tmp_path / "delta"
+    held = DeltaTableDatabase(root)
+    held.add_records(
+        PATH, _annotated_top(b"m", [b"a", b"b"]), record_id_column="id", flush=True
+    )
+    held.add_records(  # caches the version-0 ids
+        PATH, _annotated_top(b"m", [b"a"]), record_id_column="id", skip_duplicates=True
+    )
+    shutil.rmtree(root / "t")
+    deltalake.write_deltalake(
+        str(root / "t"),
+        _annotated_top(b"n", [b"c", b"d"]).rename_columns(["__record_id", "x"]),
+    )
+    assert deltalake.DeltaTable(str(root / "t")).version() == 0
+    held.add_records(
+        PATH,
+        _annotated_top(b"n", [b"a"]),
+        record_id_column="id",
+        skip_duplicates=True,
+        flush=True,
+    )
+    held.add_records(
+        PATH,
+        _annotated_top(b"n", [b"c"]),
+        record_id_column="id",
+        skip_duplicates=True,
+        flush=True,
+    )
+    stored = DeltaTableDatabase(root).get_all_records(PATH, record_id_column="id")
+    assert stored is not None
+    assert sorted(cast(list[bytes], stored.column("id").to_pylist())) == [
+        b"c",
+        b"c",
+        b"d",
+    ]
