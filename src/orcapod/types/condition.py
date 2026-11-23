@@ -428,10 +428,17 @@ def field_arrow_type(path: FieldPath, schema: pa.Schema) -> pa.DataType:
 
 
 def _large(arrow_type: pa.DataType) -> pa.DataType:
-    """Return ``arrow_type`` in its large-normalized form (two columns compare by it)."""
-    from orcapod.utils.arrow_utils import normalize_to_large_types
+    """Return a scalar Arrow type in its large variant (two columns compare by it).
 
-    return normalize_to_large_types(arrow_type, keep_null=True)
+    Only the scalar types a condition compares are concerned (``condition_value_type``
+    is not ``None``): ``string`` and ``binary`` become ``large_string`` and
+    ``large_binary``; every other type is returned unchanged.
+    """
+    if pa.types.is_string(arrow_type):
+        return pa.large_string()
+    if pa.types.is_binary(arrow_type):
+        return pa.large_binary()
+    return arrow_type
 
 
 def check_condition(condition: Condition, schema: pa.Schema) -> None:
@@ -469,15 +476,15 @@ def _check_term(term: Term, arrow_type: pa.DataType, schema: pa.Schema) -> None:
     value = term.value
     if isinstance(value, ColumnOperand):
         other_type = field_arrow_type(value.path, schema)
-        if not _large(arrow_type).equals(_large(other_type)):
-            raise TypeError(
-                f"columns {name!r} ({arrow_type}) and {value.path.text()!r} "
-                f"({other_type}) have different types; Orcapod converts no column"
-            )
         if condition_value_type(arrow_type) is None:
             raise TypeError(
                 f"column {name!r} holds {arrow_type}, which a comparison does not "
                 "support"
+            )
+        if not _large(arrow_type).equals(_large(other_type)):
+            raise TypeError(
+                f"columns {name!r} ({arrow_type}) and {value.path.text()!r} "
+                f"({other_type}) have different types; Orcapod converts no column"
             )
         return
     values = (
