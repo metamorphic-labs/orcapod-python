@@ -103,6 +103,8 @@ class ConnectorArrowDatabase:
             Defaults to 10, matching ``InMemoryArrowDatabase``.
     """
 
+    stores_records = True
+
     RECORD_ID_COLUMN = "__record_id"
     _ROW_INDEX_COLUMN = "__row_index"
 
@@ -661,6 +663,12 @@ class ConnectorArrowDatabase:
         """Commit all pending batches to the connector via upsert."""
         for record_key in list(self._pending_batches):
             self._flush_by_key(record_key)
+
+    def flush_result_batch(
+        self, record_path: tuple[str, ...], *, publish_records: bool
+    ) -> None:
+        """Commit a durable result table even if no pipeline records are stored."""
+        self.flush_batch(record_path)
 
     def flush_batch(self, record_path: tuple[str, ...]) -> None:
         """Commit one table's ready records."""

@@ -1,4 +1,3 @@
-from ._pending_commits import PendingCommit
 from .connector_arrow_database import ConnectorArrowDatabase
 from .delta_lake_databases import DeltaTableDatabase
 from .extension_aware_database import ExtensionAwareDatabase
@@ -15,7 +14,6 @@ __all__ = [
     "ExtensionAwareDatabase",
     "InMemoryArrowDatabase",
     "NoOpArrowDatabase",
-    "PendingCommit",
     "SpiralDBConnector",
     "SQLiteConnector",
     "PostgreSQLConnector",

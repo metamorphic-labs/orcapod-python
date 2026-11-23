@@ -131,21 +131,10 @@ A job created without a database can be recorded but not run. Give it one later 
 
 ### Result commit ordering
 
-When both stores support result commit guards, a function node publishes its
-pipeline records after the referenced results commit. Failed result batches
-withdraw their pending pipeline records. `DeltaTableDatabase`,
-`InMemoryArrowDatabase`, and `ConnectorArrowDatabase` support guards.
-`ExtensionAwareDatabase` forwards them when its underlying store does.
+A function node publishes its pipeline records after the referenced results
+commit. Failed result batches withdraw their pending pipeline records.
 `NoOpArrowDatabase` explicitly discards results and still allows pipeline
 bookkeeping to be written.
-
-Custom databases can opt in through `ResultCommitGuardingDatabaseProtocol`
-in `orcapod.protocols.database_protocols`. Its `pending_result` and
-`guard_record` methods connect a queued result's commit to the pipeline
-records that reference it. If either store implements only
-`ArrowDatabaseProtocol`, the job keeps the original unguarded writes and
-flush cadence. This fallback does not guarantee that a failed result write
-withdraws its pipeline records.
 
 ### Connector databases
 

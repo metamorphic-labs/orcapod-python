@@ -105,6 +105,18 @@ class NoOpArrowDatabase:
     def flush(self) -> None:
         pass
 
+    def fail_pending_result(self, record_path: tuple[str, ...]) -> None:
+        """There are no buffered writes to withdraw."""
+
+    def flush_result_batch(
+        self, record_path: tuple[str, ...], *, publish_records: bool
+    ) -> None:
+        """A discarded result leaves no batch to commit."""
+
+    def flush_batch(self, record_path: tuple[str, ...]) -> None:
+        """Flush the no-op store at the pipeline batch boundary."""
+        self.flush()
+
     def pending_result(self, record_path: tuple[str, ...], record_id: bytes) -> None:
         """Treat explicitly discarded outputs as resolved for bookkeeping."""
         return None

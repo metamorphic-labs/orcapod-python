@@ -23,7 +23,7 @@ Example::
 from __future__ import annotations
 
 from collections.abc import Callable, Collection, Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from orcapod.logical_types.database_hooks import register_discovered_logical_types
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
@@ -205,45 +205,36 @@ class ExtensionAwareDatabase:
         """
         return getattr(self._db, "batch_size")  # noqa: B009  # AttributeError when absent, by design
 
-    @property
-    def flush_batch(self) -> Callable[[tuple[str, ...]], None]:
-        """The wrapped database's ``flush_batch`` (commits one table's writes).
+    def flush_batch(self, record_path: tuple[str, ...]) -> None:
+        """Flush the wrapped pipeline batch."""
+        self._db.flush_batch(record_path)
 
-        Raises:
-            AttributeError: If the wrapped database has none (see ``batch_size``).
-        """
-        return getattr(self._db, "flush_batch")  # noqa: B009  # AttributeError when absent, by design
+    def flush_result_batch(
+        self, record_path: tuple[str, ...], *, publish_records: bool
+    ) -> None:
+        """Flush the wrapped result batch."""
+        self._db.flush_result_batch(record_path, publish_records=publish_records)
 
-    @property
-    def flush_pending_table(self) -> Callable[[tuple[str, ...]], None]:
-        """The wrapped database's in-memory table promotion, if supported."""
-        return getattr(self._db, "flush_pending_table")  # noqa: B009  # optional capability
-
-    @property
     def pending_result(
-        self,
-    ) -> Callable[[tuple[str, ...], bytes], PendingCommit | None]:
-        """The wrapped database's commit dependency lookup, if supported."""
-        return getattr(self._db, "pending_result")  # noqa: B009  # optional capability
+        self, record_path: tuple[str, ...], record_id: bytes
+    ) -> PendingCommit | None:
+        """Return the wrapped database's pending commit dependency."""
+        return self._db.pending_result(record_path, record_id)
 
-    @property
-    def fail_pending_result(self) -> Callable[[tuple[str, ...]], None]:
-        """The wrapped database's failure registration, if supported."""
-        return getattr(self._db, "fail_pending_result")  # noqa: B009  # optional capability
+    def fail_pending_result(self, record_path: tuple[str, ...]) -> None:
+        """Withdraw the wrapped result batch's dependent records."""
+        self._db.fail_pending_result(record_path)
 
-    @property
     def guard_record(
-        self,
-    ) -> Callable[
-        [tuple[str, ...], bytes, PendingCommit], AbstractContextManager[None]
-    ]:
-        """The wrapped database's guarded enqueue operation, if supported."""
-        return getattr(self._db, "guard_record")  # noqa: B009  # optional capability
+        self, record_path: tuple[str, ...], record_id: bytes, dependency: PendingCommit
+    ) -> AbstractContextManager[None]:
+        """Guard a queued record in the wrapped database."""
+        return self._db.guard_record(record_path, record_id, dependency)
 
     @property
     def stores_records(self) -> bool:
-        """Whether records are retained by the wrapped database."""
-        return getattr(self._db, "stores_records", True)
+        """Return whether the wrapped database retains records."""
+        return self._db.stores_records
 
     @property
     def storage_location(self) -> str:
@@ -313,3 +304,15 @@ class ExtensionAwareDatabase:
 
     def to_config(self) -> dict[str, Any]:
         return self._db.to_config()
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> ExtensionAwareDatabase:
+        """Rebuild the underlying store and wrap it with the default converter."""
+        from orcapod.contexts import get_default_type_converter
+        from orcapod.pipeline.serialization import resolve_database_from_config
+
+        database = cast(ArrowDatabaseProtocol, resolve_database_from_config(config))
+        converter = cast(
+            "TypeConverterProtocol", cast(object, get_default_type_converter())
+        )
+        return cls(database, converter)

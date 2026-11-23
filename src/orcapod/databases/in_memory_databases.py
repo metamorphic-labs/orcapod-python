@@ -13,7 +13,11 @@ from orcapod.databases.utils import (
     first_changed_column,
     in_held_column_order,
 )
-from orcapod.errors import InputValidationError
+from orcapod.errors import (
+    InputValidationError,
+    OrcapodDatabaseError,
+    OrcapodDatabaseWriteError,
+)
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -42,6 +46,8 @@ class InMemoryArrowDatabase:
     the committed rows, and each flush appends without copying the stored rows, so the
     cost of a per-row write, flush or lookup does not grow with the rows already stored.
     """
+
+    stores_records = True
 
     RECORD_ID_COLUMN = "__record_id"
 
@@ -365,6 +371,22 @@ class InMemoryArrowDatabase:
         """Promote the ready batches in the shared queue."""
         for record_key in list(self._pending_batches):
             self._flush_by_key(record_key)
+
+    def flush_result_batch(
+        self, record_path: tuple[str, ...], *, publish_records: bool
+    ) -> None:
+        """Promote the result table when pipeline records will reference it."""
+        if publish_records:
+            self.flush_pending_table(record_path)
+
+    def flush_batch(self, record_path: tuple[str, ...]) -> None:
+        """Flush the in-memory queue while honoring all pending guards."""
+        try:
+            self.flush()
+        except OrcapodDatabaseError:
+            raise
+        except Exception as exc:
+            raise OrcapodDatabaseWriteError(self.base_path, flush=True) from exc
 
     def flush_pending_table(self, record_path: tuple[str, ...]) -> None:
         """Promote one in-memory result table before publishing its references."""

@@ -13,6 +13,53 @@ if TYPE_CHECKING:
 
 @runtime_checkable
 class ArrowDatabaseProtocol(Protocol):
+    """Internal Arrow store interface, including ordered function commits.
+
+    A queued result provides a shared commit token. A guarded pipeline record
+    stays readable in its queue while its result is pending. Success makes it
+    eligible for publication. Failure withdraws it, even when result rows stay
+    queued for retry. Scoped views share their pending queues and commit tokens.
+    """
+
+    @property
+    def stores_records(self) -> bool:
+        """Return whether this store keeps records. Explicit discards return False."""
+        ...
+
+    def pending_result(
+        self, record_path: tuple[str, ...], record_id: bytes
+    ) -> PendingCommit | None:
+        """Return a queued result's token, or None for an already stored or explicitly discarded result."""
+        ...
+
+    def guard_record(
+        self, record_path: tuple[str, ...], record_id: bytes, dependency: PendingCommit
+    ) -> AbstractContextManager[None]:
+        """Bind a record to its result's token before enqueue can publish it."""
+        ...
+
+    def fail_pending_result(self, record_path: tuple[str, ...]) -> None:
+        """Withdraw records dependent on a failed result attempt."""
+        ...
+
+    def flush_result_batch(
+        self, record_path: tuple[str, ...], *, publish_records: bool
+    ) -> None:
+        """Commit this result batch and resolve its token.
+
+        Durable result stores commit even without pipeline records. In-memory stores
+        can leave results queued when the pipeline explicitly discards its records.
+        """
+        ...
+
+    def flush_batch(self, record_path: tuple[str, ...]) -> None:
+        """Flush this pipeline batch, keeping records whose results are pending queued.
+
+        Table-scoped stores commit only this table. In-memory stores may flush the
+        shared queue while honoring every record's guard.
+        """
+        ...
+
     def add_record(
         self,
         record_path: tuple[str, ...],
@@ -206,29 +253,6 @@ class ArrowDatabaseWithMetadataProtocol(
     """A protocol that combines ArrowDatabaseProtocol with metadata capabilities."""
 
     pass
-
-
-@runtime_checkable
-class ResultCommitGuardingDatabaseProtocol(Protocol):
-    """Optional support for publishing pipeline records after their results commit.
-
-    A result store returns a pending commit token for a buffered result and resolves
-    it when the write succeeds or fails. A pipeline store keeps a guarded record
-    readable in its queue until the token permits publication, and withdraws it if
-    the result write fails. The node uses this capability when both stores offer it.
-    """
-
-    def pending_result(
-        self, record_path: tuple[str, ...], record_id: bytes
-    ) -> PendingCommit | None:
-        """Return the result's pending commit, or None if it is already available."""
-        ...
-
-    def guard_record(
-        self, record_path: tuple[str, ...], record_id: bytes, dependency: PendingCommit
-    ) -> AbstractContextManager[None]:
-        """Guard a record by its result's commit while the caller queues the record."""
-        ...
 
 
 class TableCommittingDatabaseProtocol(Protocol):

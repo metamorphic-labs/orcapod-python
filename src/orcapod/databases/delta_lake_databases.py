@@ -1072,6 +1072,8 @@ class DeltaTableDatabase:
 
     # Class constants for internal column names
     ROW_INDEX_COLUMN = "__row_index"
+    stores_records = True
+
     RECORD_ID_COLUMN = "__record_id"
 
     def __init__(
@@ -2592,6 +2594,12 @@ class DeltaTableDatabase:
         return self._pending_commits.guard(
             self._get_record_key(record_path), record_id, dependency
         )
+
+    def flush_result_batch(
+        self, record_path: tuple[str, ...], *, publish_records: bool
+    ) -> None:
+        """Commit a durable result table even if no pipeline records are stored."""
+        self.flush_batch(record_path)
 
     def flush_batch(self, record_path: tuple[str, ...]) -> None:
         """

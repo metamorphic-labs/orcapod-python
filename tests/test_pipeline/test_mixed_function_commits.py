@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
+from contextlib import AbstractContextManager
 from pathlib import Path
-from typing import Any, Literal, TypedDict, cast
+from typing import Any, Literal, Self, TypedDict, cast
 
 import deltalake
 import pyarrow as pa
@@ -15,9 +16,11 @@ from orcapod import PipelineJob, function_pod
 from orcapod.databases import (
     ConnectorArrowDatabase,
     DeltaTableDatabase,
+    ExtensionAwareDatabase,
     InMemoryArrowDatabase,
     NoOpArrowDatabase,
 )
+from orcapod.databases._pending_commits import PendingCommit
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.sources import DictSource
 from orcapod.system_constants import (
@@ -380,8 +383,8 @@ def test_connector_result_failure_withdraws_its_pipeline_records(
     assert not pipeline.list_table_paths()
 
 
-class ProtocolOnlyDatabase:
-    """Delegate only the database API, without exposing commit extensions."""
+class DatabaseWithoutCommitGuards:
+    """Stand-in for the database interface without the required commit methods."""
 
     def __init__(self, inner: InMemoryArrowDatabase) -> None:
         self._inner = inner
@@ -413,8 +416,8 @@ class ProtocolOnlyDatabase:
     def base_path(self) -> tuple[str, ...]:
         return self._inner.base_path
 
-    def at(self, *path_components: str) -> ProtocolOnlyDatabase:
-        return ProtocolOnlyDatabase(self._inner.at(*path_components))
+    def at(self, *path_components: str) -> Self:
+        return type(self)(self._inner.at(*path_components))
 
     def table_exists(self, record_path: tuple[str, ...]) -> bool:
         return self._inner.table_exists(record_path)
@@ -426,23 +429,65 @@ class ProtocolOnlyDatabase:
         return self._inner.to_config()
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> ProtocolOnlyDatabase:
+    def from_config(cls, config: dict[str, Any]) -> Self:
         return cls(InMemoryArrowDatabase.from_config(config))
+
+
+class ProtocolDatabase(DatabaseWithoutCommitGuards):
+    """Forward the complete protocol without exposing unrelated backend methods."""
+
+    @property
+    def stores_records(self) -> bool:
+        return self._inner.stores_records
+
+    def pending_result(
+        self, record_path: tuple[str, ...], record_id: bytes
+    ) -> PendingCommit | None:
+        return self._inner.pending_result(record_path, record_id)
+
+    def guard_record(
+        self, record_path: tuple[str, ...], record_id: bytes, dependency: PendingCommit
+    ) -> AbstractContextManager[None]:
+        return self._inner.guard_record(record_path, record_id, dependency)
+
+    def fail_pending_result(self, record_path: tuple[str, ...]) -> None:
+        self._inner.fail_pending_result(record_path)
+
+    def flush_result_batch(
+        self, record_path: tuple[str, ...], *, publish_records: bool
+    ) -> None:
+        self._inner.flush_result_batch(record_path, publish_records=publish_records)
+
+    def flush_batch(self, record_path: tuple[str, ...]) -> None:
+        self._inner.flush_batch(record_path)
+
+
+def test_library_databases_conform_to_the_commit_protocol(tmp_path: Path) -> None:
+    """Built-in stores conform, and an incomplete store fails the runtime check."""
+    stores: list[ArrowDatabaseProtocol] = [
+        InMemoryArrowDatabase(),
+        DeltaTableDatabase(tmp_path),
+        ConnectorArrowDatabase(CommitConnector()),
+        NoOpArrowDatabase(),
+        ExtensionAwareDatabase.from_config(InMemoryArrowDatabase().to_config()),
+    ]
+    assert all(isinstance(store, ArrowDatabaseProtocol) for store in stores)
+    assert not isinstance(
+        DatabaseWithoutCommitGuards(InMemoryArrowDatabase()), ArrowDatabaseProtocol
+    )
 
 
 @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
 @pytest.mark.parametrize("placement", ["pipeline", "result", "both", "shared"])
-def test_protocol_only_database_preserves_main_rows_and_flushes(
+def test_complete_protocol_database_preserves_main_rows_and_flushes(
     monkeypatch: pytest.MonkeyPatch, asynchronous: bool, placement: str
 ) -> None:
-    """A user database can run jobs with just the original database methods."""
+    """The complete internal protocol is sufficient to run a job."""
     pipeline = InMemoryArrowDatabase().at("pipeline")
     result = InMemoryArrowDatabase().at("result")
-    pipeline_store = (
-        ProtocolOnlyDatabase(pipeline) if placement != "result" else pipeline
-    )
+    pipeline_store = ProtocolDatabase(pipeline) if placement != "result" else pipeline
     result_store = (
-        ProtocolOnlyDatabase(result) if placement in ("result", "both") else result
+        ProtocolDatabase(result) if placement in ("result", "both") else result
     )
     assert isinstance(pipeline_store, ArrowDatabaseProtocol)
     assert isinstance(result_store, ArrowDatabaseProtocol)
