@@ -518,8 +518,6 @@ class StaticOutputOperatorPod(TraceableBase):
         Returns:
             The same arrays under the new field flags, with no schema metadata.
         """
-        from orcapod.system_constants import constants
-
         prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
         fields = [
             field.with_nullable(table.column(i).null_count > 0)
@@ -557,7 +555,6 @@ class StaticOutputOperatorPod(TraceableBase):
                 the rows (``_rows_to_table``), which raises the error a table built from
                 rows raises.
         """
-        from orcapod.system_constants import constants
         from orcapod.utils import arrow_utils
 
         columns = list(table.columns)
@@ -1122,7 +1119,14 @@ class StaticOutputOperatorPod(TraceableBase):
         try:
             if self.ROW_BY_ROW:
                 (channel,) = inputs
+                # The input's source-info token types settle across its batches, as
+                # the sync path builds one table of the input: a batch that cannot
+                # settle with the earlier ones fails the output before it is
+                # processed (``settle_token_types``), even when the operator would
+                # drop the column.
+                token_types: dict[str, pa.DataType] = {}
                 async for batch in channel:
+                    token_types = settle_token_types(batch, token_types)
                     await self._send_processed([batch], channel.stream, output)
             else:
                 streams = await _streams_of(inputs)
@@ -1201,9 +1205,10 @@ async def close_inputs(
     """Close every input channel of an operator, also when one close fails.
 
     Each input is closed on its own, so a failing close never leaves another input's
-    producer waiting. When the operator already failed (``error``), a failing close is
-    added to that error as a note and the operator's error stays the one raised;
-    otherwise the first failing close is raised once every input is closed.
+    producer waiting, also when a close is cancelled (the cancellation propagates once
+    every input is closed). When the operator already failed (``error``), a failing
+    close is added to that error as a note and the operator's error stays the one
+    raised; otherwise the first failing close is raised once every input is closed.
 
     Args:
         inputs: The operator's input channels.
@@ -1213,14 +1218,21 @@ async def close_inputs(
         Exception: The first error of a close, when ``error`` is ``None``.
     """
     first: Exception | None = None
+    cancelled: asyncio.CancelledError | None = None
     for channel in inputs:
         try:
             await channel.close()
+        except asyncio.CancelledError as cancellation:
+            # Every other input is still closed, then the cancellation propagates.
+            if cancelled is None:
+                cancelled = cancellation
         except Exception as failure:  # noqa: BLE001  # every input is closed first
             if error is not None:
                 error.add_note(f"Closing an input channel also failed: {failure!r}")
             elif first is None:
                 first = failure
+    if cancelled is not None and error is None:
+        raise cancelled
     if first is not None:
         raise first
 
