@@ -376,9 +376,9 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
             The invocations to record, each after the steps it reads.
 
         Raises:
-            ValueError: If a stream is a function node with no function pod (a node
-                of a loaded job), or one step is reached under two different
-                assigned labels.
+            ValueError: If a step's function is not attached (a function node of a
+                loaded job whose function was not loadable or not loaded), or one
+                step is reached under two different assigned labels.
             TypeError: If a stream's producer is neither a function pod, a
                 side-effect pod nor an operator.
         """
@@ -406,10 +406,10 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
             if producer is None:
                 if isinstance(stream, FunctionNodeBase):
                     raise ValueError(
-                        f"Function node {stream.label!r} has no function pod (a node of a "
-                        "loaded job), so its steps cannot be brought into a pipeline. Use "
-                        "its stored results as a source, node.as_source(), or build the "
-                        "pipeline from its code."
+                        f"The function of step {stream.label!r} is not attached (it "
+                        "was not loadable, or not loaded), so the step cannot be "
+                        "brought into a pipeline. For its stored results use "
+                        "node.as_source()."
                     )
                 continue  # a leaf: the bind check decides when the pipeline compiles
             if not expanded:
@@ -460,8 +460,8 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
             ValueError: If no stream is given; a stream is a source (it has no step);
                 a keyword name starts with ``_``, names a step that already has
                 another label, or is taken by another node; one stream is given two
-                names; one step is reached under two different labels; or a node of
-                a loaded job has no function pod.
+                names; one step is reached under two different labels; or a step's
+                function is not attached (a node of a loaded job).
             TypeError: If a stream's producer is neither a function pod, a
                 side-effect pod nor an operator.
         """

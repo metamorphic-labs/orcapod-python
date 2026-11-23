@@ -366,12 +366,16 @@ without:
   the bind check refuses it with a misleading message ("a stream without system-tag columns (a
   raw ArrowTableStream) cannot be bound"), in both cases.
 
-Recommendation: under rule 2.1 a loaded function node is neither walkable nor a source, so it
-is refused when recorded, by name, with the two explicit remedies: its stored results through
-`loaded.nodes[name].as_source()`, or its steps by building the pipeline from code. Whether
-`PipelineJob.load` should attach the function when it is importable (so that a loaded job's
-nodes have producers and can be walked) is the save/load audit's question (ITL-1388); if it
-decides yes, the walk needs no change.
+Decided (developer, 2026-11-22): "If the function is loadable the node and upstream chain
+should be treated like just any stream whose upstream chain can be taken to construct pod and
+nodes into the absorbing pipeline. If any of the step is unloadable, I agree that likely
+should be errored out for now." Attaching a loadable function when a job is loaded is
+ITL-1407. As built here: a loaded node that has a producer (an operator node) is walked like
+any stream; a function node whose function is not attached is refused when it is recorded,
+naming the step: its function is not attached (not loadable, or not loaded), and
+`node.as_source()` gives its stored results. Once ITL-1407 attaches loadable functions, such
+a node has a producer and the walk takes it with no change
+(`test_a_loaded_operator_node_is_walked_and_an_unattached_function_refused`).
 
 **Restrictions** (`where`, ITL-1218): a restricted source is a root like any other. Its
 restriction travels in the bound source object, so it is carried, shown and saved exactly as
@@ -457,7 +461,7 @@ How a test proves it (section 8 has the plan):
 | `CachedSource` | handled, as a root | as by hand; a `CachedSource` over a restricted source is already refused at construction |
 | `PollingSource` | handled, as a root | registering never polls (identity is `impl.identity()`); a run checks it as by hand |
 | A node of another job | walked, with every upstream step (D7, revised) | section 5.1 |
-| A function node of a loaded job | refused by name: no producer (section 5.2), not a source | `as_source()` for its stored results; ITL-1388 may attach importable functions |
+| A function node of a loaded job | refused by name while its function is not attached (section 5.2) | `as_source()` for its stored results; ITL-1407 attaches loadable functions |
 | An operator node of a loaded job | walked (its operator is rebuilt), down to what lies beneath | section 5.2 |
 | A raw `ArrowTableStream` root, a joined stream as a root | refused, as today | the bind check; binding such a stream is ITL-1127 |
 | A bare root source registered alone | refused (D9) | there is no step to register, and no by-hand equivalent (a `with` block records only steps); the message says to register a stream built from it |
@@ -659,8 +663,9 @@ are ITL-1389.
 6. **D6** (built as recommended, not individually confirmed) Keyword names are exact: refused on collision, never suffixed, never for a root
    source; one step under two different assigned labels is refused. (Recommended.)
 7. **D7** REVISED (developer, 2026-11-22): a node of another job is walked with every
-   upstream step (5.1); a function node of a loaded job is refused by name until ITL-1388
-   decides whether loading attaches importable functions (5.2). (Recommended.)
+   upstream step (5.1); a loaded node with a loadable function is walked like any stream,
+   and a step whose function is not attached is refused (developer, 2026-11-22; attaching
+   loadable functions is ITL-1407) (5.2).
 8. **D8** (built as recommended, not individually confirmed) Side-effect pods are registered like any step (deliveries happen on `run()`), rather
    than refused. (Recommended; refusing is the cautious alternative.)
 9. **D9** (built as recommended, not individually confirmed) Registering a bare root source alone is refused. (Recommended.)

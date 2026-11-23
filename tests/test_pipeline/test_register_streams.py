@@ -504,7 +504,9 @@ def test_registering_computes_nothing_stores_nothing_and_changes_no_stream() -> 
 # ── loaded jobs, refused blocks, slots ──────────────────────────────────────
 
 
-def test_a_function_node_of_a_loaded_job_is_refused_by_name(tmp_path: Path) -> None:
+def test_a_loaded_operator_node_is_walked_and_an_unattached_function_refused(
+    tmp_path: Path,
+) -> None:
     db = DeltaTableDatabase(tmp_path / "db")
     (tmp_path / "data.csv").write_text("k,x\n1,1.0\n2,2.0\n")
     source = op.sources.CSVSource(
@@ -524,12 +526,17 @@ def test_a_function_node_of_a_loaded_job_is_refused_by_name(tmp_path: Path) -> N
     job.run()
     job.save(tmp_path / "job.json")
     loaded = PipelineJob.load(tmp_path / "job.json", database=db)
-    for stream in (loaded.doubled, loaded.renamed):
+    # A loaded operator node has its operator, so the walk goes through it to the
+    # function node beneath, whose function is not attached (ITL-1407 will attach a
+    # loadable one; the walk then needs no change).
+    assert loaded.renamed.producer is not None
+    assert loaded.doubled.producer is None
+    for stream, column in ((loaded.doubled, "y"), (loaded.renamed, "y2")):
         target, _ = _new_job()
-        with pytest.raises(ValueError, match="'doubled' has no function pod"):
-            target.register(
-                stream.map_data({"y2" if stream is loaded.renamed else "y": "w"})
-            )
+        with pytest.raises(
+            ValueError, match="function of step 'doubled' is not attached"
+        ):
+            target.register(MapData({column: "w"})(stream))
         assert target.nodes == {}
 
 
