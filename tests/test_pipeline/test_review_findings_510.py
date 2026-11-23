@@ -327,3 +327,39 @@ def test_an_arrow_table_source_channel_takes_the_whole_table() -> None:
     )
     delivered = pa.Table.from_batches(asyncio.run(source.open_channel().collect()))
     assert delivered["x"].to_pylist() == [10, 20]
+
+
+# ── job.py:1003 (declined): no route for the old ``run(held_rows=)`` override ─
+
+
+def test_a_sync_orchestrator_override_of_the_old_signature_is_not_supported() -> None:
+    """Declined: no compatibility shim (pre-v0.1.0). A ``SyncPipelineOrchestrator``
+    subclass whose ``run`` takes the old ``held_rows`` and not ``held`` fails with
+    ``TypeError`` before it runs; the override is updated instead."""
+    from orcapod import PipelineJob
+    from orcapod.databases import InMemoryArrowDatabase
+    from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
+
+    calls: list[int] = []
+
+    class OldSignature(SyncPipelineOrchestrator):
+        def run(  # pyright: ignore[reportIncompatibleMethodOverride]  # the old contract
+            self,
+            graph: Any,
+            *,
+            observer: Any = None,
+            materialize_results: bool = True,
+            run_id: str | None = None,
+            pipeline_uri: str = "",
+            load_only: bool = False,
+            held_rows: Any = None,
+        ) -> Any:
+            calls.append(1)
+            return super().run(graph, observer=observer)
+
+    job = PipelineJob(name="old_override", database=InMemoryArrowDatabase())
+    with job:
+        _plain().select_data_columns(["x"], label="selected")
+    with pytest.raises(TypeError, match="held"):
+        job.run(orchestrator=OldSignature())
+    assert calls == []
