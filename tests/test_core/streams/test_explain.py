@@ -29,7 +29,7 @@ from orcapod.core.operators import (
     PolarsFilter,
     SemiJoin,
 )
-from orcapod.core.sources import ArrowTableSource
+from orcapod.core.sources import ArrowTableSource, DictSource
 from orcapod.core.sources.cached_source import CachedSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
@@ -382,3 +382,46 @@ class TestReviewOfPr503:
     def test_explain_is_on_every_stream_type(self):
         stream: StreamProtocol = _units().filter(col("t") >= 1.0)
         assert stream.explain().sources[0].name == "units"
+
+
+class _Loud(str):
+    """A ``str`` subclass whose ``__str__`` and ``__repr__`` are user code."""
+
+    def __str__(self) -> str:
+        raise AssertionError("explain() ran user code")
+
+    def __repr__(self) -> str:
+        raise AssertionError("explain() ran user code")
+
+
+class TestSecondReviewOfPr503:
+    """CodeRabbit's second review of PR 503."""
+
+    def test_polars_filter_text_runs_no_user_code(self):
+        op = PolarsFilter(
+            predicates=[pl.col("t") > 1, _Loud("t > 1")],
+            constraints={"session": _Loud("s1"), "unit": 3},
+        )
+        (step,) = op(_units()).explain().sources[0].steps
+        assert (
+            step.text == 'session=<_Loud>, unit=3, <_Loud>, [(col("t")) > (dyn int: 1)]'
+        )
+
+    def test_a_dict_pick_lists_its_misses(self):
+        source = DictSource(
+            [{"k": 1, "m": {"a": 1}}, {"k": 2, "m": {"b": 2}}],
+            tag_columns=["k"],
+            data_schema={"k": int, "m": dict[str, int]},
+            tag_only_columns=True,
+            source_id="maps",
+        )
+        (step,) = source.pick("m", "a").explain().sources[0].steps
+        assert step.text == "rows whose 'm' has no key 'a' are dropped"
+
+    def test_a_slot_is_named_by_its_name_not_its_label(self):
+        tag_schema, data_schema = _units().output_schema()
+        slot = SourceNode(
+            name="units", tag_schema=tag_schema, data_schema=data_schema, label="shown"
+        )
+        (reading,) = Filter(col("t") >= 1.0)(slot).explain().sources
+        assert reading.name == "units"

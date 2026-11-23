@@ -1,5 +1,5 @@
 import logging
-from collections.abc import Collection, Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from typing import Any, ClassVar, TYPE_CHECKING, TypeAlias
 
 from orcapod.core.data_tags import stream_data_tags
@@ -23,6 +23,20 @@ else:
 logger = logging.getLogger(__name__)
 
 polars_predicate: TypeAlias = "pl_type.IntoExprColumn| Iterable[pl_type.IntoExprColumn]| bool| list[bool]| np.ndarray[Any, Any]"
+
+
+_SAFE_SCALARS: tuple[type, ...] = (bool, int, float, str, bytes, type(None))
+"""Values whose ``repr`` is the built-in one: written as they are by ``explain()``."""
+
+
+def _safe_text(value: object, write: Callable[[object], str]) -> str:
+    """Return ``value`` written by ``write`` when its type's writer is Polars' or the
+    built-in one (exactly ``pl.Expr`` or a built-in scalar); otherwise ``<type name>``,
+    so no user-defined ``__str__`` or ``__repr__`` runs (``explain()`` runs no user code).
+    """
+    if type(value) in _SAFE_SCALARS or type(value) is pl.Expr:
+        return write(value)
+    return f"<{type(value).__name__}>"
 
 
 class PolarsFilter(UnaryOperator):
@@ -176,9 +190,17 @@ class PolarsFilter(UnaryOperator):
 
     def rows_dropped_text(self, position: int, others: Sequence[str]) -> str | None:
         """What the filter keeps, for ``explain()``: its constraints and predicates as
-        text, each sorted (display only)."""
-        parts = sorted(f"{name}={value!r}" for name, value in self.constraints.items())
-        parts += sorted(str(predicate) for predicate in self.predicates)
+        text, each sorted (display only).
+
+        No user code runs: a Polars expression is written by Polars (``pl.Expr``
+        exactly), a constraint value by ``repr`` when it is exactly a built-in scalar,
+        and anything else by its type name only.
+        """
+        parts = sorted(
+            f"{name}={_safe_text(value, repr)}"
+            for name, value in self.constraints.items()
+        )
+        parts += sorted(_safe_text(predicate, str) for predicate in self.predicates)
         return ", ".join(parts) if parts else None
 
     def identity_structure(self) -> Any:

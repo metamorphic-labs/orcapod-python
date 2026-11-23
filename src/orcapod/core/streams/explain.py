@@ -53,7 +53,11 @@ def _beneath(
             bound = None
         if bound is None:
             return "unbound", SourceReading(
-                name=stream.label,
+                # A slot by its name, the key a source is bound under; a proxy by its
+                # label.
+                name=stream.name
+                if isinstance(stream, SourceNodeBase)
+                else stream.label,
                 kind=type(stream).__name__,
                 known=False,
                 bound=False,

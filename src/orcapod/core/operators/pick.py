@@ -86,9 +86,10 @@ class Pick(UnaryOperator):
         super().__init__(**kwargs)
 
     def rows_dropped_text(self, position: int, others: Sequence[str]) -> str | None:
-        """What the step drops, for ``explain()``: rows missing the key, unless a miss
-        raises."""
-        if self.fail_on_miss:
+        """What the step drops, for ``explain()``: rows missing the key of a ``dict``
+        column, unless a miss raises. A struct field is known to exist (checked when the
+        step is built), so a struct projection drops none."""
+        if self.fail_on_miss or self._mode != "map":
             return None
         return f"rows whose {self.column!r} has no key {self.key!r} are dropped"
 
