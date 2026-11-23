@@ -461,24 +461,21 @@ def test_a_function_without_source_works_in_a_job_and_stores_a_null(
 
 
 @pytest.mark.parametrize(
-    "database_kind",
-    [
-        pytest.param(
-            "in_memory",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason="ITL-1263: InMemoryArrowDatabase refuses rows whose columns "
-                + "are in another order than the stored table",
-            ),
-        ),
-        "delta",
-    ],
+    "orchestrator", [SyncPipelineOrchestrator, AsyncPipelineOrchestrator]
 )
+@pytest.mark.parametrize("database_kind", ["in_memory", "delta"])
 @pytest.mark.parametrize("name", ["same2", "same3"])
 def test_swapped_same_typed_keys_store_different_signature_hashes(
-    name: str, database_kind: str, tmp_path: Path
+    name: str, database_kind: str, orchestrator: type, tmp_path: Path
 ) -> None:
-    """One uri, one result table; each order's rows record their own signature."""
+    """One uri, one result table; each order's rows record their own signature.
+
+    The orders write the output columns (and their source-info columns) in other
+    orders into one result table: every database matches them by name (ITL-1263,
+    ITL-1367), on the sync and the async path. ``same3`` is written in three orders.
+    The connector databases cannot hold a result table (ITL-1162); they are covered
+    by ``tests/test_databases/test_append_by_name.py``.
+    """
     fn, keys = FUNCTIONS[name]
     database = (
         DeltaTableDatabase(tmp_path / "store")
@@ -486,6 +483,8 @@ def test_swapped_same_typed_keys_store_different_signature_hashes(
         else InMemoryArrowDatabase()
     )
     orders = [tuple(keys), tuple(reversed(keys))]
+    if len(keys) == 3:
+        orders.append((keys[1], keys[2], keys[0]))
     for index, order in enumerate(orders):
         job = PipelineJob(name="orders", database=database)
         with job:
@@ -499,15 +498,30 @@ def test_swapped_same_typed_keys_store_different_signature_hashes(
                 ),
                 label="fn",
             )
-        job.run()
+        job.run(orchestrator=orchestrator())
+        assert len(list(job.nodes["fn"].iter_data())) == 1
     result_paths = [p for p in database.list_table_paths() if "_result" in p]
     assert len(result_paths) == 1
     stored = database.get_all_records(result_paths[0])
     assert stored is not None
     signatures = stored.column("__pf_var_function_signature_hash").to_pylist()
     contents = stored.column("__pf_var_function_content_hash").to_pylist()
-    assert len(signatures) == 2 and len(set(signatures)) == 2
+    assert len(signatures) == len(orders) and len(set(signatures)) == len(orders)
     assert len(set(contents)) == 1
+    # Each row is its own order's: matched by that order's signature hash, it holds
+    # the function's values, for that order's input, under that order's keys. A row
+    # that took another row's signature, or an append that swapped two same-typed
+    # output columns, would fail here.
+    by_signature = {
+        row["__pf_var_function_signature_hash"]: row for row in stored.to_pylist()
+    }
+    for index, order in enumerate(orders):
+        expected_signature = _record(_build("from_fn", fn, list(order)))[
+            "function_signature_hash"
+        ]
+        row = by_signature[expected_signature]
+        values = fn(index + 1, 2)
+        assert {key: row[key] for key in order} == dict(zip(order, values)), order
 
 
 _PRINT_RECORD = """

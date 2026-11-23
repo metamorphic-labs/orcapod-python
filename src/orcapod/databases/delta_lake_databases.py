@@ -21,6 +21,7 @@ from orcapod.databases._row_index import (
 from orcapod.databases.utils import (
     appended_field_change,
     coerce_record_id,
+    in_held_column_order,
     metadata_bytes,
 )
 from orcapod.errors import (
@@ -1922,6 +1923,14 @@ class DeltaTableDatabase:
             # Check for conflicts - insert never allows duplicates when skip_duplicates=False
             # self._check_all_conflicts(record_path, deduplicated_table)
             filtered_table = deduplicated_table
+
+        # Columns match by name within a pending batch: rows with the pending
+        # batch's columns in another order, each field equal, are put in its order
+        # (ITL-1367). Only the pending batch: a stored table already takes an append
+        # by name (delta-rs), and the batch is left exactly as main holds it.
+        pending = self._pending_batches.get(self._get_record_key(record_path))
+        if pending is not None:
+            filtered_table = in_held_column_order(filtered_table, list(pending.schema))
 
         # Step 4: the rows' field attributes, compared as given: a merge or a
         # coercion casts them to the pending batch's schema, which would give them
