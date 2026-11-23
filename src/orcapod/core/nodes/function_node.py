@@ -236,7 +236,11 @@ def _concat_row_tables(tables: "list[pa.Table]") -> "pa.Table":
         for name, row_type in zip(table.schema.names, table.schema.types):
             expected = seen.setdefault(name, row_type)
             if arrow_utils.shared_arrow_type(expected, row_type) is None:
-                message = f"Rows disagree on the Arrow type of column {name!r}: {expected} and {row_type}"
+                message = (
+                    f"Rows disagree on the Arrow type of column {name!r}: "
+                    f"{arrow_utils.describe_arrow_type(expected)} and "
+                    f"{arrow_utils.describe_arrow_type(row_type)}"
+                )
                 raise InputValidationError(message)
     return arrow_utils.concat_tables_by_name(tables)
 

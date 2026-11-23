@@ -142,10 +142,18 @@ class TestCombined:
         "first, second",
         [(106, 107), (1, True), (1, 1.0), ("m1", "m2"), (_START, _AWARE)],
     )
-    def test_a_conflicting_value_is_refused(self, first, second):
-        """Another value (another type counts) for one column is refused, naming it."""
-        with pytest.raises(ValueError, match=r"unit.*already restricted"):
-            Condition.of(session=2, unit=first).combined(Condition.of(unit=second))
+    def test_a_conflicting_value_is_kept(self, first, second):
+        """Another value (another type counts) for one column is kept, never refused
+        (developer, 2026-11-22): the condition holds for no row and is not equalities
+        only, so a source's ``where`` refuses it."""
+        combined = Condition.of(session=2, unit=first).combined(
+            Condition.of(unit=second)
+        )
+        assert len(combined.root.children) == 3
+        assert not combined.only_equalities
+        assert combined == Condition.of(unit=second).combined(
+            Condition.of(session=2, unit=first)
+        )
 
     def test_combining_leaves_both_unchanged(self):
         """Conditions are immutable values."""
@@ -323,10 +331,12 @@ class TestInstants:
         [(_FIRST_0130, _SECOND_0130), (_SECOND_0130, _FIRST_0130)],
         ids=["first then second", "second then first"],
     )
-    def test_combining_the_two_times_of_an_overlap_is_refused(self, first, second):
-        with pytest.raises(ValueError, match="cannot also equal"):
-            Condition.of(at=first, unit=106).combined(Condition.of(unit=106, at=second))
-        with pytest.raises(ValueError, match="as a keyword"):
+    def test_combining_the_two_times_of_an_overlap_keeps_both(self, first, second):
+        combined = Condition.of(at=first, unit=106).combined(
+            Condition.of(unit=106, at=second)
+        )
+        assert len(combined.root.children) == 3  # unit once, the two instants
+        with pytest.raises(ValueError, match="named twice in one call"):
             Condition.of({"at": first}, at=second)
 
     @pytest.mark.parametrize(
@@ -341,7 +351,12 @@ class TestInstants:
         combined = Condition.of(at=_SECOND_0130, unit=106).combined(
             Condition.of(unit=106, at=other)
         )
-        assert dict(combined.equalities) == {"at": _SECOND_0130, "unit": 106}
+        # A condition holds an aware datetime as its UTC instant (ITL-1374): Python's
+        # == between zones calls a time of the overlap unequal to everything.
+        assert dict(combined.equalities) == {
+            "at": _SECOND_0130.astimezone(dt.timezone.utc),
+            "unit": 106,
+        }
         assert Condition.of({"at": _SECOND_0130}, at=other) == Condition.of(
             at=_SECOND_0130
         )
@@ -449,9 +464,10 @@ class TestNonFiniteFloats:
         [(math.inf, -math.inf), (math.nan, math.inf), (math.nan, 0.0)],
         ids=["inf and -inf", "NaN and inf", "NaN and 0.0"],
     )
-    def test_different_values_conflict(self, first, second):
-        with pytest.raises(ValueError, match="cannot also equal"):
-            Condition.of(x=first).combined(Condition.of(x=second))
+    def test_different_values_are_two_requirements(self, first, second):
+        combined = Condition.of(x=first).combined(Condition.of(x=second))
+        assert len(combined.root.children) == 2
+        assert not combined.only_equalities
 
 
 class TestRangeEndsAndAwareness:
