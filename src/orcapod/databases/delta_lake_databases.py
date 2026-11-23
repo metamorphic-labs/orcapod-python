@@ -75,8 +75,11 @@ _DELTA_LOG_DIRECTORY = "_delta_log"
 
 # How many times a flush tries to commit a table's pending rows when other writers
 # keep committing first; after the last attempt it raises the last conflict
-# (ITL-1377).
-_COMMIT_ATTEMPTS = 10
+# (ITL-1377). A writer that lost waits until the others pause: measured with 4
+# processes each committing 200 batches back to back, one commit took 97 attempts.
+# With the wait capped at 0.5 s (``_sleep_before_retry``), 200 attempts give up after
+# about 100 s of losing.
+_COMMIT_ATTEMPTS = 200
 
 
 class _LostCommitRace(Exception):

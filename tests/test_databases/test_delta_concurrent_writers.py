@@ -32,10 +32,15 @@ PATH = ("t",)
 SchemaHandling = Literal["error", "merge", "coerce"]
 
 
+BOUND = 4
+
+
 @pytest.fixture(autouse=True)
 def _no_wait_between_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The random wait before a retry only spaces attempts; tests skip it."""
+    """The random wait before a retry only spaces attempts; tests skip it, and use a
+    small bound so that reaching it takes a few commits."""
     monkeypatch.setattr(delta_lake_databases, "_sleep_before_retry", lambda _: None)
+    monkeypatch.setattr(delta_lake_databases, "_COMMIT_ATTEMPTS", BOUND)
 
 
 def _records(n: int, value: int, *, reordered: bool = False) -> pa.Table:
@@ -185,7 +190,7 @@ def test_a_writer_that_keeps_losing_stops_after_the_bound(tmp_path: Path) -> Non
     """After ``_COMMIT_ATTEMPTS`` lost commits the flush raises main's error; rows stay queued."""
     one, two = DeltaTableDatabase(tmp_path), DeltaTableDatabase(tmp_path)
     one.add_records(PATH, _records(1, 10), record_id_column="rid", flush=True)
-    others = iter(range(10, 10 + delta_lake_databases._COMMIT_ATTEMPTS))
+    others = iter(range(10, 10 + BOUND))
 
     def other_writer() -> None:
         two.add_records(
@@ -197,12 +202,12 @@ def test_a_writer_that_keeps_losing_stops_after_the_bound(tmp_path: Path) -> Non
         with pytest.raises(RuntimeError) as info:
             one.flush()
     assert isinstance(info.value.__cause__, CommitFailedError)
-    assert loads.call_count == delta_lake_databases._COMMIT_ATTEMPTS
+    assert loads.call_count == BOUND
     # The batch is still queued, and the next flush commits it.
     one.flush()
     stored = _stored(tmp_path)
     assert (b"\x02", 20) in stored
-    assert len(stored) == 2 + delta_lake_databases._COMMIT_ATTEMPTS
+    assert len(stored) == 2 + BOUND
 
 
 def test_a_writer_that_wins_after_losing_commits_within_the_bound(
@@ -211,7 +216,7 @@ def test_a_writer_that_wins_after_losing_commits_within_the_bound(
     """Losing every attempt but the last still commits."""
     one, two = DeltaTableDatabase(tmp_path), DeltaTableDatabase(tmp_path)
     one.add_records(PATH, _records(1, 10), record_id_column="rid", flush=True)
-    losses = delta_lake_databases._COMMIT_ATTEMPTS - 1
+    losses = BOUND - 1
     others = iter(range(10, 10 + losses))
 
     def other_writer() -> None:
@@ -224,7 +229,7 @@ def test_a_writer_that_wins_after_losing_commits_within_the_bound(
     one.add_records(PATH, _records(2, 20), record_id_column="rid")
     with _commit_after_load(one, other_writer, every_attempt=True) as loads:
         one.flush()
-    assert loads.call_count == delta_lake_databases._COMMIT_ATTEMPTS
+    assert loads.call_count == BOUND
     assert (b"\x02", 20) in _stored(tmp_path)
 
 
