@@ -440,3 +440,86 @@ def test_an_id_already_queued_is_refused_without_skip_duplicates(
     db.flush()
     expected = [(b"\x01", 10), (b"\x02", 20), (b"\x03", 30)]
     assert _stored(tmp_path) == sorted(expected + ([(b"\x09", 90)] if stored else []))
+
+
+@pytest.mark.parametrize("change", ["created again", "row deleted"])
+def test_a_row_is_skipped_as_stored_only_if_the_table_holds_it_now(
+    tmp_path: Path, change: str
+) -> None:
+    """Review of PR 511: the database holds a handle and ids of the table; another
+    writer creates the table again at the same version, or deletes a stored row. A
+    ``skip_duplicates`` add drops a row as stored only if the table at the path holds
+    its id now: the old id is stored, an id the table holds is skipped, a new id is
+    stored."""
+    import shutil
+
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(
+        PATH,
+        pa.concat_tables([_records(1, 10), _records(5, 50)]),
+        record_id_column="rid",
+        flush=True,
+    )
+    db.add_records(PATH, _records(1, 11), record_id_column="rid", skip_duplicates=True)
+    assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+    if change == "created again":
+        shutil.rmtree(tmp_path / "t")
+        DeltaTableDatabase(tmp_path).add_records(
+            PATH, _records(2, 20), record_id_column="rid", flush=True
+        )
+        kept = [(b"\x02", 20)]
+    else:
+        deltalake.DeltaTable(str(tmp_path / "t")).delete("__record_id = X'01'")
+        kept = [(b"\x05", 50)]
+    added = pa.concat_tables([_records(1, 12), _records(2, 22), _records(3, 30)])
+    db.add_records(
+        PATH, added, record_id_column="rid", skip_duplicates=True, flush=True
+    )
+    new = [(b"\x01", 12), (b"\x03", 30)]
+    if change == "row deleted":
+        new.append((b"\x02", 22))
+    assert _stored(tmp_path) == sorted(kept + new)
+
+
+@pytest.mark.parametrize("replaced", [True, False], ids=["replaced", "own table"])
+def test_a_create_followed_by_another_writers_table_is_not_seeded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replaced: bool
+) -> None:
+    """Review of PR 511: this database creates the table with ids 1 and 2; another
+    writer creates it again at the path (version 0, with id 7) before the reload. The
+    ids of the create are not taken for the reloaded table's: a later
+    ``skip_duplicates`` add of 1 is stored and of 7 skipped. Without the replacement,
+    the create's ids are kept, and the table is not read again for them."""
+    import shutil
+
+    real_write = deltalake.write_deltalake
+
+    def create(table_or_uri: Any, data: Any, *args: Any, **kwargs: Any) -> Any:
+        real_write(table_or_uri, data, *args, **kwargs)
+        if replaced and kwargs.get("mode") == "error":
+            shutil.rmtree(str(table_or_uri))
+            real_write(
+                str(table_or_uri),
+                _records(7, 70).rename_columns(["__record_id", "a", "z"]),
+            )
+
+    db = DeltaTableDatabase(tmp_path)
+    with monkeypatch.context() as patched:
+        patched.setattr(deltalake, "write_deltalake", create)
+        db.add_records(
+            PATH,
+            pa.concat_tables([_records(1, 10), _records(2, 20)]),
+            record_id_column="rid",
+            flush=True,
+        )
+    snapshot = db._snapshots["t"]  # pyright: ignore[reportPrivateUsage]
+    assert (snapshot.ids is None) == replaced
+    added = pa.concat_tables([_records(1, 11), _records(7, 71), _records(3, 30)])
+    db.add_records(
+        PATH, added, record_id_column="rid", skip_duplicates=True, flush=True
+    )
+    if replaced:
+        expected = [(b"\x01", 11), (b"\x03", 30), (b"\x07", 70)]
+    else:
+        expected = [(b"\x01", 10), (b"\x02", 20), (b"\x03", 30), (b"\x07", 71)]
+    assert _stored(tmp_path) == expected

@@ -6,6 +6,7 @@ import random
 import re
 import sys
 import time
+import uuid
 from collections import defaultdict
 from collections.abc import Callable, Collection, Mapping
 from contextlib import AbstractContextManager
@@ -1643,6 +1644,21 @@ def _database_error_to_raise(errors: list[Exception]) -> Exception | None:
     return None
 
 
+# The commit-info key under which a create records its token (``_CommittedSnapshot``).
+_CREATE_TOKEN_KEY = "orcapod.create_token"
+
+
+def _created_with(delta_table: deltalake.DeltaTable, token: str) -> bool:
+    """Whether ``delta_table`` is at version 0 and its create commit carries ``token``."""
+    if delta_table.version() != 0:
+        return False
+    try:
+        latest = delta_table.history(1)
+    except Exception:  # noqa: BLE001  # unknown: the ids are read again on first use
+        return False
+    return bool(latest) and latest[0].get(_CREATE_TOKEN_KEY) == token
+
+
 def _table_id(delta_table: deltalake.DeltaTable) -> str:
     """The Delta table's own id, which a table created again at the same path does
     not share."""
@@ -1663,6 +1679,10 @@ class _CommittedSnapshot:
             created), or ``""`` for a table this database has just created. A
             version describes one table only: a table removed and created again
             starts over at version 0 with another id (review of PR 511).
+        create_token: For a table this database has just created, the random token
+            its create commit carries (``_CREATE_TOKEN_KEY``): the table reloaded
+            after the create is extended only if its version 0 carries it, since
+            another writer may have created the table again in between.
         ids: The stored record ids (never null), or ``None`` until first needed.
         rows: Indexes over every stored row, read exactly as ``get_all_records``
             reads them, or ``None`` until first needed.
@@ -1675,6 +1695,7 @@ class _CommittedSnapshot:
 
     version: int
     table_id: str = ""
+    create_token: str = ""
     ids: set[bytes] | None = None
     rows: KeyIndex | None = None
     files: frozenset[str] = frozenset()
@@ -2837,6 +2858,14 @@ class DeltaTableDatabase:
             self._pending_record_ids[record_key]
         )
         existing_in_delta = input_ids.intersection(self._stored_ids(record_path))
+        if existing_in_delta:
+            # A row is dropped as stored only if the table at the path holds its id
+            # now: the cached handle may describe a table another writer has since
+            # replaced, or a version whose row was deleted, and a row dropped here is
+            # never written (review of PR 511). An add with no stored id costs no
+            # reload.
+            self._delta_table_cache.pop(record_key, None)
+            existing_in_delta &= self._stored_ids(record_path)
         all_existing = existing_in_pending.union(existing_in_delta)
 
         if not all_existing:
@@ -3681,6 +3710,9 @@ class DeltaTableDatabase:
             ) from load_error
 
         if delta_table is None:
+            # Tells this create's table from one another writer creates again at the
+            # path before it is reloaded (``_CommittedSnapshot.create_token``).
+            create_token = uuid.uuid4().hex
             try:
                 # mode="error": a table another writer created after the load above
                 # is never replaced; this attempt fails instead (ITL-1384). No commit
@@ -3694,7 +3726,10 @@ class DeltaTableDatabase:
                     storage_options=self._storage_options or None,
                     # Name the statistics columns once, at creation (ITL-1187).
                     configuration=statistics_configuration(combined_table.schema),
-                    commit_properties=deltalake.CommitProperties(max_commit_retries=0),
+                    commit_properties=deltalake.CommitProperties(
+                        max_commit_retries=0,
+                        custom_metadata={_CREATE_TOKEN_KEY: create_token},
+                    ),
                 )
             except Exception as create_error:
                 if self._table_exists_at(table_uri):
@@ -3705,7 +3740,7 @@ class DeltaTableDatabase:
             )
             return (
                 None,
-                _CommittedSnapshot(version=-1, ids=set()),
+                _CommittedSnapshot(version=-1, ids=set(), create_token=create_token),
                 self._non_null_ids(combined_table),
             )
 
@@ -3885,7 +3920,16 @@ class DeltaTableDatabase:
         """
         version = committed.version()
         table_id = _table_id(committed)
-        if version != base.version + 1 or base.table_id not in ("", table_id):
+        # Only the table the commit built on: after a create, the table reloaded may
+        # be another writer's, created again at the path in between, so it must carry
+        # this create's token; otherwise its ids are read on first use (review of
+        # PR 511).
+        same_table = (
+            _created_with(committed, base.create_token)
+            if base.create_token
+            else base.table_id == table_id
+        )
+        if version != base.version + 1 or not same_table:
             return _CommittedSnapshot(version, table_id)
         assert base.ids is not None
         snapshot = _CommittedSnapshot(version, table_id, ids=base.ids | inserted_ids)
