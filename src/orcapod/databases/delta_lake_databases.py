@@ -1213,9 +1213,10 @@ def _unmergeable_name_reason(name: str) -> str | None:
     """Say why Delta cannot commit to a table with a column named ``name``, or ``None``.
 
     delta-rs cannot MERGE a table with a top-level column whose name holds a backtick
-    (``Expected close delimiter``), and every commit to an existing table is a MERGE
-    (ITL-1377), so such a table would take only its first commit (ITL-1375). A
-    backtick in a nested field's name is merged as any other.
+    (``Expected close delimiter``) or is one its MERGE planner reserves
+    (``MERGE_RESERVED_COLUMNS``), and every commit to an existing table is a MERGE
+    (ITL-1377), so such a table would take only its first commit (ITL-1375). A nested
+    field's name is merged as any other.
 
     Args:
         name: A top-level column name.
@@ -1228,7 +1229,30 @@ def _unmergeable_name_reason(name: str) -> str | None:
             "the name holds a backtick, and delta-rs cannot MERGE a table with such a "
             "column; every commit to an existing Delta table is a MERGE"
         )
+    if name in MERGE_RESERVED_COLUMNS:
+        return (
+            "deltalake's MERGE reserves this name for a column of its own, and every "
+            "commit to an existing Delta table is a MERGE"
+        )
     return None
+
+
+# The top-level column names deltalake 1.6.6's MERGE planner uses for columns of its
+# own (``crates/core/src/operations/merge/mod.rs``): a table holding one takes its first
+# write, and every MERGE into it then fails (an ambiguous or duplicate field). Each is
+# provoked with deltalake by a test, so an upgrade that renames or adds one fails it.
+MERGE_RESERVED_COLUMNS = frozenset(
+    {
+        "__delta_rs_source",
+        "__delta_rs_target",
+        "__delta_rs_operation",
+        "__delta_rs_delete",
+        "__delta_rs_target_insert",
+        "__delta_rs_target_update",
+        "__delta_rs_target_delete",
+        "__delta_rs_target_copy",
+    }
+)
 
 
 def delta_unstorable_reason(field: "pa.Field[Any]") -> str | None:
