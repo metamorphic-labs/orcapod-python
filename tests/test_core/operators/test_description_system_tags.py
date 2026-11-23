@@ -5,99 +5,180 @@ input with no producer (a raw ``ArrowTableStream``) states its own pipeline hash
 operators that rename system tags (joins, folds) name them after it. A raw stream's meta
 (``__``) columns enter that hash while its zero-row table has none, so the description
 must take the input's own pipeline hash, never one re-derived from the zero-row table:
-its system-tag names then equal those of the operator's sync table.
+its system-tag names then equal those of the operator's sync table, and of its async
+result, whose record batches are checked against the description.
+
+Inputs come from the shared several-items family (``several_items``): two or more tags
+and two or more data columns, in every tag order and table layout, with plain, data-tag
+and mixed roles, with and without a meta column.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import asyncio
+from collections.abc import Callable, Sequence
 
 import pyarrow as pa
 import pytest
 
+from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators import Batch, GroupBy, Join, MergeJoin, SemiJoin
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+from orcapod.core.record_batch_channels import OutputChannel
 from orcapod.core.streams import ArrowTableStream
 from orcapod.core.streams.base import typed_zero_row_table
+from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import StreamProtocol
-from orcapod.sources import ArrowTableSource
+from tests.test_core.operators.several_items import (
+    MAIN,
+    P,
+    Q,
+    Arrangement,
+    Spec,
+    arrangements,
+    make_source,
+)
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore::orcapod.errors.ProvisionalHashWarning",
     "ignore::orcapod.errors.SemiJoinIgnoredColumnWarning",
 )
 
+SYSTEM_TAGS = {"system_tags": True}
 
-def _raw(source_id: str, value: str, *, meta: bool) -> ArrowTableStream:
-    """A raw stream over a source's table (its system tags and source info), with a
-    meta column when ``meta``: tags ``k`` and ``g``, data ``value``."""
-    source = ArrowTableSource(
-        pa.table(
-            {
-                "k": pa.array([1, 2, 3], pa.int64()),
-                "g": pa.array(["a", "a", "b"], pa.large_string()),
-                value: pa.array([0.5, 1.5, 2.5], pa.float64()),
-            }
-        ),
-        tag_columns=["k", "g"],
-        tag_only_columns=True,
-        source_id=source_id,
-    )
+
+def _raw(spec: Spec, arrangement: Arrangement, *, meta: bool) -> ArrowTableStream:
+    """``spec`` in ``arrangement`` as a raw stream over its source's table (system tags
+    and source info), with a meta column when ``meta``."""
+    source = make_source(spec, arrangement)
     table = source.as_table(columns={"system_tags": True, "source": True})
     if meta:
         table = table.append_column(
-            "__note", pa.array(["n1", "n2", "n3"], pa.large_string())
+            "__note",
+            pa.array([f"n{i}" for i in range(table.num_rows)], pa.large_string()),
         )
-    return ArrowTableStream(table, tag_columns=["k", "g"])
+    return ArrowTableStream(
+        table,
+        tag_columns=list(arrangement.tag_order),
+        data_tags=stream_data_tags(source),
+    )
 
 
-CASES: dict[
-    str,
-    tuple[
-        Callable[[], StaticOutputOperatorPod],
-        Callable[[bool], tuple[StreamProtocol, ...]],
-    ],
-] = {
-    "join": (Join, lambda meta: (_raw("a", "x", meta=meta), _raw("b", "y", meta=meta))),
-    "merge_join": (
-        MergeJoin,
-        lambda meta: (_raw("a", "x", meta=meta), _raw("b", "y", meta=meta)),
-    ),
-    "semi_join": (
-        SemiJoin,
-        lambda meta: (_raw("a", "x", meta=meta), _raw("b", "y", meta=meta)),
-    ),
-    "batch": (lambda: Batch(batch_size=2), lambda meta: (_raw("a", "x", meta=meta),)),
-    "group_by": (lambda: GroupBy(["g"]), lambda meta: (_raw("a", "x", meta=meta),)),
+def _paired(arrangement: Arrangement) -> Arrangement:
+    """The arrangement of Q matching ``arrangement`` of P: the same layout and roles,
+    Q's tags in the same direction (declared or reversed)."""
+    declared = arrangement.tag_order == P.tags
+    order = Q.tags if declared else tuple(reversed(Q.tags))
+    return Arrangement(order, arrangement.layout, arrangement.roles)
+
+
+def _id(arrangement: Arrangement) -> str:
+    return f"{'-'.join(arrangement.tag_order)}:{arrangement.layout}:{arrangement.roles}"
+
+
+# One operator over raw inputs built in one arrangement.
+Case = tuple[
+    Callable[[], StaticOutputOperatorPod],
+    Callable[[Arrangement, bool], Sequence[StreamProtocol]],
+]
+
+
+def _binary(arrangement: Arrangement, meta: bool) -> Sequence[StreamProtocol]:
+    return (
+        _raw(P, arrangement, meta=meta),
+        _raw(Q, _paired(arrangement), meta=meta),
+    )
+
+
+def _unary(arrangement: Arrangement, meta: bool) -> Sequence[StreamProtocol]:
+    return (_raw(MAIN, arrangement, meta=meta),)
+
+
+BINARY: dict[str, Callable[[], StaticOutputOperatorPod]] = {
+    "join": Join,
+    "merge_join": MergeJoin,
+    "semi_join": SemiJoin,
+}
+UNARY: dict[str, Callable[[], StaticOutputOperatorPod]] = {
+    "batch": lambda: Batch(batch_size=2),
+    "group_by_t1_t2": lambda: GroupBy(["t1", "t2"]),
+    "group_by_t2_t1": lambda: GroupBy(["t2", "t1"]),
 }
 
+CASES: list[tuple[str, Case, Arrangement]] = [
+    (name, (make_op, _binary), arrangement)
+    for name, make_op in BINARY.items()
+    for arrangement in arrangements(P)
+] + [
+    (name, (make_op, _unary), arrangement)
+    for name, make_op in UNARY.items()
+    for arrangement in arrangements(MAIN)
+]
 
-def _system_tags(names: list[str]) -> list[str]:
+PARAMS = [
+    pytest.param(case, arrangement, id=f"{name}[{_id(arrangement)}]")
+    for name, case, arrangement in CASES
+]
+
+
+def _system_tags(names: Sequence[str]) -> list[str]:
     return sorted(name for name in names if name.startswith("_tag"))
 
 
+def _sync_names(stream: StreamProtocol) -> list[str] | None:
+    """The sync table's system-tag names, or ``None`` when the sync path refuses."""
+    try:
+        return _system_tags(stream.as_table(columns=SYSTEM_TAGS).column_names)
+    except InputValidationError:
+        return None
+
+
 @pytest.mark.parametrize("meta", [True, False], ids=["with_meta", "without_meta"])
-@pytest.mark.parametrize("case", list(CASES))
-def test_the_description_names_system_tags_as_the_rows_do(
-    case: str, meta: bool
+@pytest.mark.parametrize(("case", "arrangement"), PARAMS)
+def test_the_description_names_system_tags_as_the_sync_rows_do(
+    case: Case, arrangement: Arrangement, meta: bool
 ) -> None:
-    """``arrow_schema()``'s system-tag names equal those of the sync table, over raw
-    streams with and without a meta column."""
-    make_op, make_inputs = CASES[case]
-    stream = make_op()(*make_inputs(meta))
-    described = _system_tags(stream.arrow_schema().names)
-    actual = _system_tags(stream.as_table(columns={"system_tags": True}).column_names)
-    assert described
-    assert described == actual
-
-
-@pytest.mark.parametrize("case", list(CASES))
-def test_the_zero_row_table_names_system_tags_as_the_rows_do(case: str) -> None:
-    """The typed zero-row table (what a head and a run with no rows show) has the sync
-    table's system-tag columns too, over inputs with a meta column."""
-    make_op, make_inputs = CASES[case]
-    stream = make_op()(*make_inputs(True))
+    """``arrow_schema()`` and the typed zero-row table (a head or a run with no rows)
+    name the system-tag columns as the sync table does; where the sync path refuses
+    the inputs, so does the description."""
+    make_op, make_inputs = case
+    stream = make_op()(*make_inputs(arrangement, meta))
+    actual = _sync_names(stream)
+    if actual is None:
+        with pytest.raises(InputValidationError):
+            _ = stream.arrow_schema()
+        return
+    assert actual
+    assert _system_tags(stream.arrow_schema().names) == actual
     zero_rows = typed_zero_row_table(stream)
     assert zero_rows is not None
-    actual = stream.as_table(columns={"system_tags": True}).column_names
-    assert _system_tags(zero_rows.column_names) == _system_tags(actual)
+    assert _system_tags(zero_rows.column_names) == actual
+
+
+@pytest.mark.parametrize(("case", "arrangement"), PARAMS)
+def test_the_async_result_names_system_tags_as_the_description_does(
+    case: Case, arrangement: Arrangement
+) -> None:
+    """The async path, where the description is used: the operator's record batches
+    pass the output channel's check against ``arrow_schema()``, and the result names
+    the system-tag columns as the description and the sync table do (inputs with a
+    meta column)."""
+    make_op, make_inputs = case
+    inputs = make_inputs(arrangement, True)
+    stream = make_op()(*inputs)
+    expected = _sync_names(stream)
+    if expected is None:
+        pytest.skip("the sync path refuses these inputs (checked above)")
+    op = make_op()
+
+    async def run() -> StreamProtocol:
+        output = OutputChannel(op(*inputs))
+        await op.async_execute_batches(
+            [stream_input.open_channel() for stream_input in inputs], output
+        )
+        return output.result()
+
+    result = asyncio.run(run())
+    names = _system_tags(result.as_table(columns=SYSTEM_TAGS).column_names)
+    assert names == expected
+    assert _system_tags(stream.arrow_schema().names) == names
