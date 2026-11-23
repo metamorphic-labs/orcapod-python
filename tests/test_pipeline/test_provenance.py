@@ -284,13 +284,20 @@ def test_trace_is_read_only_and_not_computed_before_a_run(tmp_path: Path) -> Non
     assert "not computed" in before.text()
     job.run()
     store = DeltaTableDatabase(tmp_path / "store")
-    tables = {p: store.get_all_records(p).num_rows for p in store.list_table_paths()}
+
+    def row_counts() -> dict[tuple[str, ...], int]:
+        counts = {}
+        for path in store.list_table_paths():
+            table = store.get_all_records(path)
+            counts[path] = 0 if table is None else table.num_rows
+        return counts
+
+    tables = row_counts()
     calls = dict(CALLS)
     job.nodes["means"].trace({"subject": "m1", "session": "s1"}, "mean_hz")
     job.nodes["means"].why_missing("units", "row_5")
     assert CALLS == calls  # no function was called
-    after = {p: store.get_all_records(p).num_rows for p in store.list_table_paths()}
-    assert after == tables  # nothing was written
+    assert row_counts() == tables  # nothing was written
 
 
 def test_row_selection_errors(tmp_path: Path) -> None:
@@ -374,3 +381,43 @@ def test_diagram_highlight(tmp_path: Path) -> None:
         job.diagram(highlight=Highlight(nodes=frozenset({"nowhere"})))
     # Without a highlight the model has no highlight fields.
     assert "note" not in job.diagram().to_dict()
+
+
+def test_reader_keeps_the_nodes_own_entries(tmp_path: Path) -> None:
+    """Two jobs of one name over sources of one schema share the pipeline tables; each
+    node reads only its own entries (``__node_content_hash``). The reader is internal:
+    this test is about it."""
+    job = build(tmp_path)
+    job.run()
+    other = PipelineJob(name="prov", database=DeltaTableDatabase(tmp_path / "store"))
+    renamed = units()
+    with other:
+        kept = Filter(col("depth_um") < 500)(
+            ArrowTableSource(
+                renamed.as_table(),
+                tag_columns=["unit", "session", "subject"],
+                tag_only_columns=True,
+                source_id="units_b",
+            )
+        )
+        left = SelectDataColumns(["n_spikes"])(kept)
+        right = SelectDataColumns(["duration_s"])(sessions())
+        rates.pod(Join()(left, right), label="unit_rates")
+    other.run()
+    mine, _ = job.nodes["unit_rates"]._stored_provenance()
+    theirs, _ = other.nodes["unit_rates"]._stored_provenance()
+    assert mine is not None and theirs is not None
+    assert mine.num_rows == theirs.num_rows == 5
+    assert set(mine.column("__pipeline_entry_id").to_pylist()).isdisjoint(
+        theirs.column("__pipeline_entry_id").to_pylist()
+    )
+    for column in (
+        "__pipeline_base_entry_id",
+        "__node_content_hash",
+        "__computed",
+        "__input_data_hash",
+    ):
+        assert column in mine.column_names
+    # The trace of the first job reads only its own entries.
+    trace = job.nodes["means"].trace({"subject": "m1", "session": "s1"}, "mean_hz")
+    assert {c.source_id for c in trace.source_cells()} == {"units", "sessions"}

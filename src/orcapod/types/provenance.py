@@ -347,7 +347,13 @@ class Absence:
         if not self.missing:
             return f"{record} reaches {self.node}"
         if self.removed_by is not None:
-            return f"{record} is removed by {self.removed_by.describe()}"
+            step = self.removed_by
+            name = (
+                step.operator
+                if step.label == step.operator
+                else f"{step.operator}[{step.label}]"
+            )
+            return f"{record} is removed by {name}: {step.text}"
         return f"{record} does not reach {self.node}: {self.because}"
 
     def text(self) -> str:
@@ -363,7 +369,8 @@ class Absence:
                 )
         if self.present_in:
             lines.append(f"  present in: {', '.join(self.present_in)}")
-        repeated = self.removed_by is not None and self.because == self.removed_by.text
+        # The headline states the reason when no step removed the record.
+        repeated = self.removed_by is None or self.because == self.removed_by.text
         if self.missing and self.because and not repeated:
             lines.append(f"  because: {self.because}")
         return "\n".join(lines)

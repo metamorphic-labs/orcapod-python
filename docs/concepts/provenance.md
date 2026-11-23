@@ -1,0 +1,190 @@
+# Provenance: tracing a value
+
+!!! note "In development"
+    `trace`, `why_missing` and `diagram(highlight=...)` are new: their interface and their
+    text may change in any release.
+
+A job keeps what it needs to answer "where did this value come from?" for every cell it
+holds. `node.trace(row, column)` follows one cell back, step by step, to the source cells it
+was made from. `node.why_missing(source, record_id)` says why a source row has no result. Both
+only read: they never compute a function, call your code, poll a source or write to the
+database.
+
+```python
+from orcapod import PipelineJob, function_pod
+from orcapod.databases import InMemoryArrowDatabase
+from orcapod.sources import DictSource
+
+trials = DictSource(
+    [
+        {"animal": "a1", "trial": 1, "hits": 8, "misses": 2},
+        {"animal": "a1", "trial": 2, "hits": 6, "misses": 4},
+        {"animal": "a2", "trial": 1, "hits": 8, "misses": 2},
+        {"animal": "a2", "trial": 2, "hits": 3, "misses": 7},
+    ],
+    tag_columns=["animal", "trial"],
+    tag_only_columns=True,
+    source_id="trials",
+    record_id_columns=["animal", "trial"],
+)
+
+
+@function_pod(output_keys=["accuracy", "n"])
+def score(hits: int, misses: int) -> tuple[float, int]:
+    return hits / (hits + misses), hits + misses
+
+
+@function_pod(output_keys="mean_accuracy")
+def average(accuracy: list[float]) -> float:
+    return sum(accuracy) / len(accuracy)
+
+
+job = PipelineJob(name="behaviour", database=InMemoryArrowDatabase())
+with job:
+    scores = score.pod(trials, label="scores")
+    average.pod(
+        scores.group_by(["animal"]).select_data_columns(["accuracy"]),
+        label="per_animal",
+    )
+job.run()
+
+trace = job.nodes["per_animal"].trace({"animal": "a2"}, "mean_accuracy")
+print(trace)
+# per_animal (animal='a2'): mean_accuracy = 0.55
+#   average v0.0 (body function_content_v1:...), computed here, computed ... on local
+#   GroupBy (animal='a2'): accuracy = [0.8, 0.3]  (via SelectDataColumns)
+#     [0] scores (animal='a2', trial=1): accuracy = 0.8
+#       score v0.0 (body function_content_v1:...), reused a stored result, computed ... on local
+#       trials {"animal":"a2","trial":1} hits = 8
+#       trials {"animal":"a2","trial":1} misses = 2
+#     [1] scores (animal='a2', trial=2): accuracy = 0.3
+#       score v0.0 (body function_content_v1:...), computed here, computed ... on local
+#       trials {"animal":"a2","trial":2} hits = 3
+#       trials {"animal":"a2","trial":2} misses = 7
+```
+
+## What a trace reads
+
+The `row` argument selects one row the node holds, by its tags (all of them, or enough to
+pick one row). The `column` is one of its data columns. Each step of the trace is a
+`TraceStep`; it is found from three records the job keeps.
+
+- **The system tags of each row.** Every row carries hidden tags naming the source rows it
+  came from (`as_table(columns={"system_tags": True})`). An operator that works row by row,
+  and a function pod, keep them unchanged. A join keeps those of each input, under names
+  extended with the input's place in the pipeline. So the input row of a row is the row
+  of the input with the same system tags.
+- **A function node's stored records.** For each input row a function node received, its
+  pipeline record names that row (by its tags and system tags), the result it was served,
+  and whether this row computed the result or reused one. The stored result says which
+  function ran: its name, version and body hash, the executor, the Python version and the
+  time. The trace shows these as a `FunctionRun`, and checks that the input row's content
+  hash is the one the record stored.
+- **The source-info tokens.** Each value carries `<source id>::<record id>::<column>`,
+  which names the source cell it came from. A trace ends in `SourceCell`s.
+
+A `GroupBy` or `Batch` folds its members' system tags into one digest, which cannot be
+read backwards. The trace finds the members with the operator's own rule:
+
+- for `GroupBy`, the input rows with the group's key, in member order;
+- for `Batch`, the rows at the batch's position.
+
+It then folds their system tags again; the result must equal the group's. If it does not,
+the trace raises `ProvenanceInconsistencyError` and never guesses. Member `i` fills
+position `i` of every list of the grouped row.
+
+**Equal inputs, one result.** Trial 1 of `a1` and of `a2` have the same hits and misses, so
+`score` ran once for the two and stored one result. The trace still follows each row to
+its own source record. The `FunctionRun` of trial 1 of `a2` says it reused the stored
+result (`computed_here` is `False`); that of `a1` says it computed it.
+
+`trace.source_cells()` lists the source cells, each once; `trace.function_runs()` lists
+every function step's `FunctionRun`. A trace of an operator node or of a source node works
+the same way: on a source node it is one cell.
+
+```python
+for cell in trace.source_cells():
+    print(cell.text())
+# trials {"animal":"a2","trial":1} hits = 8
+# trials {"animal":"a2","trial":1} misses = 2
+# trials {"animal":"a2","trial":2} hits = 3
+# trials {"animal":"a2","trial":2} misses = 7
+print([(label, run.computed_here) for label, run in trace.function_runs()])
+# [('per_animal', True), ('scores', False), ('scores', True)]
+```
+
+## When there is nothing to trace
+
+A job node shows only the rows of its run in this process (see
+[Pipelines and Jobs](pipeline-job.md)). Before a run, and on a stale node, there is
+nothing to trace, and the trace says so rather than computing:
+
+```python
+fresh = PipelineJob(name="behaviour", database=InMemoryArrowDatabase())
+with fresh:
+    fresh_scores = score.pod(trials, label="scores")
+print(fresh.nodes["scores"].trace({"animal": "a1", "trial": 1}, "accuracy"))
+# scores: accuracy = None
+#   not computed: run() the job first
+```
+
+A job loaded from its file (`PipelineJob.load`) traces the same once it has run with
+`load_only=True`, which reads the stored results and computes nothing. The function steps
+then show the same results, with the times they were computed.
+
+## Why a row is missing
+
+`why_missing(source, record_id)` takes the source id and a record id as they appear in a
+source-info token. It answers in two steps:
+
+- **From the stored records:** did the first function node on the way ever receive a row
+  from this record, in any run?
+- **From the rows the nodes hold:** which nodes have a row from it, and which step removed
+  it. The step is described in the words of `explain()`. For a join, the answer also gives
+  the key the other input lacks.
+
+```python
+answer = job.nodes["per_animal"].why_missing("trials", '{"animal":"a3","trial":1}')
+print(answer)
+# trials {"animal":"a3","trial":1} does not reach per_animal: source 'trials' holds no record '{"animal":"a3","trial":1}'
+#   never reached function node 'scores' (no entry in its pipeline store)
+```
+
+The result is an `Absence`. Its fields hold:
+
+- `missing`: whether the row is missing;
+- `reached_function` and `function_node`: the stored-record answer;
+- `present_in`: the nodes that hold a row from the record;
+- `removed_by`: the step that removed it, a `Step`;
+- `because`: the reason, in words.
+
+Tutorial [Part 8](../tutorial/08-inspecting-and-tracing.md) shows a row removed by a filter
+and one removed by a join.
+
+## On the diagram
+
+`trace.highlight()` and `answer.highlight()` give a `Highlight`: the nodes and streams on
+the path, with a note. `job.diagram(highlight=...)` draws them in an accent colour and dims
+the other nodes. Its text listing marks the highlighted nodes with `*`:
+
+```python
+print(job.diagram(highlight=trace.highlight()))
+# Job 'behaviour': 5 nodes
+#   highlight (*): trace of per_animal.mean_accuracy
+# * trials (source · DictSource · bound)
+# * scores (function pod · score · current) <- trials
+# * GroupBy (operator · current) <- scores
+# * SelectDataColumns (operator · current) <- GroupBy
+# * per_animal (function pod · average · current) <- SelectDataColumns
+```
+
+A `Highlight` can also be made by hand, from node labels and `(upstream, downstream)` label
+pairs. A label the job does not have is refused with `ValueError`.
+
+## Limits
+
+- Job nodes only. A plain stream keeps no stored records, so it cannot be traced this way.
+- `why_missing` does not read a `PollingSource`, because reading one polls it. Such a
+  source's records are assumed to exist.
+- A node the trace passes must hold its run. After a full run every node does; after
+  `node.run()` the nodes above it do.
