@@ -172,14 +172,16 @@ def test_an_append_changing_a_recorded_type_is_refused_once_at_flush(
         record_id_column="id",
         flush=True,
     )
-    with pytest.raises(InputValidationError, match="Delta refused the commit"):
-        db.add_records(
-            PATH,
-            _rows([b"2"], k=([7], pa.int64()), x=(appended_values, appended)),
-            record_id_column="id",
-            flush=flush,
-        )
-        db.flush()
+    rows = _rows([b"2"], k=([7], pa.int64()), x=(appended_values, appended))
+    if flush:
+        with pytest.raises(InputValidationError, match="Delta refused the commit"):
+            db.add_records(PATH, rows, record_id_column="id", flush=True)
+    else:
+        # Accepted when added (review of PR 504, round seven): only the flush raises.
+        db.add_records(PATH, rows, record_id_column="id")
+        assert db._pending_batches  # pyright: ignore[reportPrivateUsage]
+        with pytest.raises(InputValidationError, match="Delta refused the commit"):
+            db.flush()
     assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
     db.flush()  # a no-op
     back = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="id")

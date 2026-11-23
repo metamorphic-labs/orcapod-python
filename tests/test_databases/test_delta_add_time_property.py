@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Iterator
 from itertools import product
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pytest
@@ -107,7 +107,16 @@ def _variants() -> Iterator[tuple[str, Any, Any, Any, Any]]:
 
 
 VARIANTS = {label: rest for label, *rest in _variants()}
-LOGICAL_RULE = {"logical changed", "logical empty to value", "logical value to empty"}
+# Refused by the logical-identifier rule (ITL-1371, PR 492), an Orcapod rule by design:
+# another logical type identifier's values must not be read as the stored one's, also
+# for a null column that carries one. Delta itself may store these rows.
+LOGICAL_RULE = {
+    "logical changed",
+    "logical empty to value",
+    "logical value to empty",
+    "path null readable old",
+    "path null unknown",
+}
 
 
 def _rows(column: Any, ids: list[bytes], field: Any = None) -> pa.Table:
@@ -123,22 +132,66 @@ def _rows(column: Any, ids: list[bytes], field: Any = None) -> pa.Table:
     )
 
 
+def _stored_ids(root: Path) -> list[bytes]:
+    table = DeltaTableDatabase(root).get_all_records(PATH, record_id_column="rid")
+    return [] if table is None else cast(list[bytes], table.column("rid").to_pylist())
+
+
 def _run(
     root: Path, initial: pa.Table, incoming: pa.Table, evolve: bool
-) -> tuple[str, bool]:
-    """``(outcome, rows still queued)``: ``stored``, ``refused when added``, or
-    ``refused at flush``."""
+) -> tuple[str, bool, BaseException | None]:
+    """``(outcome, rows still queued, the error)``: ``stored``, ``refused when added``,
+    or ``refused at flush``. ``stored`` is read back through a fresh handle: every
+    incoming id is stored, each once (review of PR 504, round seven)."""
     db = DeltaTableDatabase(root, allow_schema_evolution=evolve)
     db.add_records(PATH, initial, record_id_column="rid", flush=True)
+    queued = lambda: bool(db._pending_batches)  # noqa: E731  # pyright: ignore[reportPrivateUsage]
     try:
         db.add_records(PATH, incoming, record_id_column="rid")
-    except Exception:  # noqa: BLE001  # the outcome is the subject
-        return "refused when added", bool(db._pending_batches)  # pyright: ignore[reportPrivateUsage]
+    except Exception as error:  # noqa: BLE001  # the outcome is the subject
+        return "refused when added", queued(), error
     try:
         db.flush()
-    except Exception:  # noqa: BLE001
-        return "refused at flush", bool(db._pending_batches)  # pyright: ignore[reportPrivateUsage]
-    return "stored", False
+    except Exception as error:  # noqa: BLE001
+        return "refused at flush", queued(), error
+    expected = set(cast(list[bytes], initial.column("rid").to_pylist())) | set(
+        cast(list[bytes], incoming.column("rid").to_pylist())
+    )
+    stored = _stored_ids(root)
+    assert sorted(stored) == sorted(expected), f"stored {stored}, not {expected}"
+    return "stored", queued(), None
+
+
+# Every check Orcapod makes when rows are added, and its stored-table check at the
+# flush: switched off, the rows reach Delta's commit, whose verdict is the reference.
+ADD_TIME_CHECKS = (
+    "require_storable",
+    "_refuse_untyped_null_columns",
+    "_refuse_case_clash_with_pending",
+    "_refuse_changed_attributes",
+    "_refuse_declared_nulls",
+    "_refuse_unmergeable_append",
+)
+
+
+def _without_orcapod_checks(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ADD_TIME_CHECKS:
+        monkeypatch.setattr(DeltaTableDatabase, name, lambda *args: None)
+    monkeypatch.setattr(DeltaTableDatabase, "_identity_refusal", lambda *args: None)
+    monkeypatch.setattr(dld, "_append_refusal", lambda *args: None)
+
+
+def _refused_by_delta(error: BaseException | None) -> bool:
+    """Whether the commit itself was refused: an error deltalake raised is in the
+    chain of the flush's error."""
+    from deltalake.exceptions import SchemaMismatchError
+
+    seen: BaseException | None = error
+    while seen is not None:
+        if isinstance(seen, SchemaMismatchError) or dld._is_delta_error(seen):  # pyright: ignore[reportPrivateUsage]
+            return True
+        seen = seen.__cause__
+    return False
 
 
 @pytest.fixture(autouse=True)
@@ -165,17 +218,19 @@ def test_orcapod_refuses_nothing_delta_stores(
     initial = _rows(a, [b"1"], field_a)
     incoming = _rows(b, [b"1", b"2"] if seen else [b"2"], field_b)
 
-    live, queued = _run(tmp_path / "live", initial, incoming, evolve)
+    live, queued, refusal = _run(tmp_path / "live", initial, incoming, evolve)
     assert not queued, f"{label}: rows still queued after the flush ({live})"
 
-    if live == "refused when added" and label not in LOGICAL_RULE:
-        # Delta's own verdict: the same rows with Orcapod's add-time checks off.
-        monkeypatch.setattr(dld, "_append_refusal", lambda *args: None)
-        monkeypatch.setattr(
-            DeltaTableDatabase, "_refuse_case_clash_with_pending", lambda *args: None
+    if live == "refused when added" and label in LOGICAL_RULE:
+        assert "of logical type" in str(refusal), f"{label}: {refusal!r}"
+    elif live == "refused when added":
+        # Delta's own verdict: the same rows with every Orcapod check off reach the
+        # commit, and Delta refuses it.
+        _without_orcapod_checks(monkeypatch)
+        raw, _, error = _run(tmp_path / "raw", initial, incoming, evolve)
+        assert raw == "refused at flush" and _refused_by_delta(error), (
+            f"{label}: Orcapod refused rows Delta does not refuse ({raw}: {error!r})"
         )
-        raw, _ = _run(tmp_path / "raw", initial, incoming, evolve)
-        assert raw != "stored", f"{label}: Orcapod refused rows Delta stores"
 
 
 def test_the_sweep_covers_every_kind() -> None:
@@ -199,12 +254,12 @@ def test_a_name_differing_in_case_from_a_stored_column(
     incoming = pa.table(
         {"rid": pa.array([b"2"], pa.large_binary()), "anchor": [2], "A": [22]}
     )
-    live, queued = _run(tmp_path / "live", initial, incoming, evolve)
+    live, queued, _ = _run(tmp_path / "live", initial, incoming, evolve)
     assert not queued
     if not evolve:
         assert live == "stored"
         return
     assert live == "refused when added"
-    monkeypatch.setattr(dld, "_append_refusal", lambda *args: None)
-    raw, _ = _run(tmp_path / "raw", initial, incoming, evolve)
-    assert raw != "stored"
+    _without_orcapod_checks(monkeypatch)
+    raw, _, error = _run(tmp_path / "raw", initial, incoming, evolve)
+    assert raw == "refused at flush" and _refused_by_delta(error)
