@@ -1,8 +1,10 @@
+from collections.abc import Sequence
 from typing import Any, ClassVar, cast
 
 import numpy as np
 import pyarrow as pa
 
+from orcapod.types.explanation import plain_repr
 from orcapod.core.operators.base import (
     BinaryOperator,
     require_matchable_key,
@@ -580,6 +582,16 @@ class MergeJoin(BinaryOperator):
             tag_columns=tuple(tag_cols),
             data_tags=data_tag_names(tag_schema, data_schema),
         )
+
+    def rows_dropped_text(
+        self,
+        position: int,
+        others: Sequence[str],
+        inputs: Sequence[StreamProtocol],
+    ) -> str | None:
+        """What the join drops, for ``explain()``: rows without a match in the others."""
+        names = ", ".join(plain_repr(name) for name in others)
+        return f"rows without a match in {names} are dropped"
 
     def identity_structure(self) -> Any:
         self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)

@@ -17,7 +17,7 @@ from collections.abc import (
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pandas as pd
 import polars as pl
@@ -43,6 +43,9 @@ from orcapod.protocols.core_protocols.streams import RecordBatchInput
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Condition, Schema
 from orcapod.utils import arrow_utils
+
+if TYPE_CHECKING:
+    from orcapod.types.explanation import Explanation
 
 # TODO: consider using this instead of making copy of dicts
 # from types import MappingProxyType
@@ -1052,6 +1055,25 @@ class StreamBase(TraceableBase):
         from orcapod.core.operators import Filter
 
         return Filter(Condition.of(*conditions, **columns))(self, label=label)
+
+    def explain(self) -> Explanation:
+        """Say what each source applies itself, and what is applied after reading.
+
+        For every source this stream reads (through a job's input slot to its bound
+        source): its own restriction (``where``, ``limit``), or that it reads its whole
+        table; and the steps above it that drop rows after they are read (a ``Filter``, a
+        ``DropNulls``, a join's unmatched rows), nearest the source first. New in this
+        release (ITL-1402).
+
+        Nothing is computed, read, polled or written, and no user code runs: only what the
+        chain declares is read.
+
+        Returns:
+            An ``Explanation``: plain data, with ``text()`` (also its ``str``).
+        """
+        from orcapod.core.streams.explain import explain
+
+        return explain(self)
 
     def drop_nulls(
         self,

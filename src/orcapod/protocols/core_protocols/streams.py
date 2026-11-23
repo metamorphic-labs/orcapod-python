@@ -17,6 +17,7 @@ from orcapod.protocols.hashing_protocols import PipelineElementProtocol
 from orcapod.types import ColumnConfig, Condition, Schema
 
 if TYPE_CHECKING:
+    from orcapod.types.explanation import Explanation
     import pandas as pd
     import polars as pl
     import pyarrow as pa
@@ -128,6 +129,13 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
 
         Returns:
             tuple[StreamProtocol, ...]: Upstream dependency streams (empty for sources)
+        """
+        ...
+
+    def explain(self) -> "Explanation":
+        """
+        Say what each source this stream reads applies itself (its restriction, or its
+        whole table) and which steps drop rows after reading; computes nothing.
         """
         ...
 

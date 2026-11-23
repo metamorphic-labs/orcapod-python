@@ -340,6 +340,15 @@ class Batch(UnaryOperator):
         }
         return config
 
+    def rows_dropped_text(
+        self,
+        position: int,
+        others: Sequence[str],
+        inputs: Sequence[StreamProtocol],
+    ) -> str | None:
+        """What the step drops, for ``explain()``: a last partial batch, if asked."""
+        return "a last partial batch is dropped" if self.drop_partial_batch else None
+
     def identity_structure(self) -> Any:
         self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         return (self.__class__.__name__, self.batch_size, self.drop_partial_batch)

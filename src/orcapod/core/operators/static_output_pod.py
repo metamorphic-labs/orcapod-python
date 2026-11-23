@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from abc import abstractmethod
 from collections.abc import (
@@ -53,6 +54,7 @@ from orcapod.core.streams.base import (
 )
 from orcapod.core.streams.view import (
     STALE_NOTE,
+    default_note,
     ViewStatus,
     StreamView,
     head_of,
@@ -739,6 +741,29 @@ class StaticOutputOperatorPod(TraceableBase):
             stream_data_tags(upstream),
             upstream,
         )
+
+    def rows_dropped_text(
+        self,
+        position: int,
+        others: Sequence[str],
+        inputs: Sequence[StreamProtocol],
+    ) -> str | None:
+        """What this operator drops of the rows of its input at ``position``, in words,
+        for ``explain()``; ``None`` when it drops none (the default).
+
+        Read from the operator's own arguments only: nothing is computed or read.
+
+        Args:
+            position: The input's position among the operator's inputs.
+            others: The names of the operator's other inputs, sorted.
+            inputs: The operator's inputs, in order; only their schemas (``keys()``)
+                may be read.
+
+        Returns:
+            A phrase (``t >= 1.0``; ``rows without a match in 'probes' are dropped``),
+            or ``None``.
+        """
+        return None
 
     def head_rows(self, stream: StreamProtocol, table: pa.Table) -> pa.Table | None:
         """The rows ``head`` may show of this operator over ``stream``, from the rows
@@ -2029,17 +2054,22 @@ class DynamicPodStream(StreamBase):
         had_result = self._cached_stream is not None
         self._update_cache_status()
         if self._cached_stream is not None and self._cached_time is not None:
-            return head_of(
+            view = head_of(
                 self._cached_stream.head(n, columns=config), self, origin="computed"
             )
-        matching = self._matching_head(n, config)
-        if matching is not None:
-            return matching
-        return self._head_without_rows(
-            config,
-            ViewStatus.NOT_COMPUTED,
-            note=STALE_NOTE if had_result else None,
-        )
+        else:
+            matching = self._matching_head(n, config)
+            # A view of no rows is falsy (``StreamView.__len__``): compared to None.
+            view = (
+                matching
+                if matching is not None
+                else self._head_without_rows(
+                    config,
+                    ViewStatus.NOT_COMPUTED,
+                    note=STALE_NOTE if had_result else None,
+                )
+            )
+        return _with_explain_line(view, self)
 
     def _matching_head(self, n: int, config: ColumnConfig) -> StreamView | None:
         """The head an operator shows from its input's head (``head_rows``), or ``None``.
@@ -2092,6 +2122,23 @@ class DynamicPodStream(StreamBase):
             f"{self.__class__.__name__}(label={self.label!r}, kernel={self.producer}, "
             f"upstreams=({upstreams}))"
         )
+
+
+def _with_explain_line(view: StreamView, stream: StreamProtocol) -> StreamView:
+    """Return ``view`` with the one-line split of ``explain()`` added to its header, for
+    a ``Filter`` directly over a source (ITL-1402); any other view unchanged."""
+    from orcapod.core.streams.explain import preview_line
+
+    line = preview_line(stream)
+    if line is None:
+        return view
+    if view.description is not None:
+        return dataclasses.replace(view, description=f"{view.description}; {line}")
+    if view.status in (ViewStatus.ROWS, ViewStatus.LOADED_ONLY, ViewStatus.PARTIAL):
+        note = f"{view.note}; {line}" if view.note else line
+    else:
+        note = f"{view.note or default_note(view.status)}; {line}"
+    return dataclasses.replace(view, note=note)
 
 
 def _upstream_state(stream: StreamProtocol) -> tuple[str, object]:

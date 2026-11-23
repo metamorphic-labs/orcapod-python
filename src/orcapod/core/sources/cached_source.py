@@ -84,6 +84,9 @@ class CachedSource(RootSource):
 
     HASH_COLUMN_NAME = "_record_hash"
 
+    REPORTS_WHAT_IT_READS: ClassVar[bool] = False
+    """It reads its cache, which holds what earlier reads stored (``explain()``, ITL-1402)."""
+
     # Set once a read has reported the cached rows it skipped.
     _skipped_rows_reported: bool = False
     # Set once a cache table found at the older layout has been accounted for.
