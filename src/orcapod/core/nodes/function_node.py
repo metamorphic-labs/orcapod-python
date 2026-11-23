@@ -2490,9 +2490,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         (``RowsOnRead``): the sync orchestrator builds it where a successor reads it,
         as ``main`` rebuilt the rows there, and a leaf's is never built (ITL-1347).
         """
-        from orcapod.core.operators.static_output_pod import rows_on_read
-
-        return rows_on_read(rows, self)
+        return rows_as_output_stream(rows, self)
 
     def execute_data(
         self,

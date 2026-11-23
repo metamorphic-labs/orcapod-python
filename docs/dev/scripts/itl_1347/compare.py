@@ -22,6 +22,7 @@ comparison could not complete.
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import sys
 from pathlib import Path
@@ -204,25 +205,51 @@ def compare(
     return problems
 
 
-def calibrate(a: Path, b: Path) -> dict[str, list[str]]:
-    """The columns whose values differ between two dumps of the same checkout."""
+def _as_multiset(array: Any) -> collections.Counter[str]:
+    """``array``'s values, bit for bit (``_bits``), counted without their positions."""
+    return collections.Counter(repr(value) for value in _bits(array).to_pylist())
+
+
+def calibrate_tables(
+    ta: dict[str, Any], tb: dict[str, Any]
+) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """The volatile columns of two dumps of one checkout, and their row-order variation.
+
+    A column is volatile only when its values differ as a multiset between the two
+    dumps (a run-made identifier, a timestamp). A column whose values are the same
+    multiset in another row order is not volatile: the row order varied, and later
+    drift in its values must still be found, so it is reported apart (CodeRabbit on
+    #510).
+
+    Args:
+        ta: The first dump's tables, by key.
+        tb: The second dump's tables, by key.
+
+    Returns:
+        The volatile columns by table, and the columns whose rows came in another
+        order by table.
+    """
     volatile: dict[str, list[str]] = {}
-    ta, tb = _tables(a), _tables(b)
+    reordered: dict[str, list[str]] = {}
     for key in sorted(set(ta) & set(tb)):
         x, y = ta[key], tb[key]
         if x.num_rows != y.num_rows:
             continue
         names = [n for n in x.column_names if n in y.column_names]
-        differing = [
-            n
-            for n in names
-            if not _bits(x.column(n).combine_chunks()).equals(
-                _bits(y.column(n).combine_chunks())
-            )
-        ]
-        if differing:
-            volatile[key] = differing
-    return volatile
+        for n in names:
+            cx, cy = x.column(n).combine_chunks(), y.column(n).combine_chunks()
+            if _bits(cx).equals(_bits(cy)):
+                continue
+            if _as_multiset(cx) == _as_multiset(cy):
+                reordered.setdefault(key, []).append(n)
+            else:
+                volatile.setdefault(key, []).append(n)
+    return volatile, reordered
+
+
+def calibrate(a: Path, b: Path) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """``calibrate_tables`` of two dumps of the same checkout."""
+    return calibrate_tables(_tables(a), _tables(b))
 
 
 def main(argv: list[str]) -> int:
@@ -234,9 +261,12 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--calibrate", type=Path)
     args = parser.parse_args(argv)
     if args.calibrate is not None:
-        found = calibrate(args.a, args.b)
+        found, reordered = calibrate(args.a, args.b)
         args.calibrate.write_text(json.dumps(found, indent=1, sort_keys=True))
         print(json.dumps(found, indent=1, sort_keys=True))
+        for key, names in sorted(reordered.items()):
+            # Not volatile: the values are the same, in another row order.
+            print(f"row order varied in {key}: {names}", file=sys.stderr)
         return 0
     volatile: dict[str, Any] = (
         json.loads(args.volatile.read_text()) if args.volatile is not None else {}

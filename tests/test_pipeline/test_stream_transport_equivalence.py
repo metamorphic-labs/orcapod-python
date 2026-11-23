@@ -69,9 +69,12 @@ def doubled(d1: int) -> int:
     return 2 * d1
 
 
+DELIVERED: list[int] = []
+
+
 @tap_pod
 def noted(d1_doubled: int, ctx: Any) -> None:
-    return None
+    DELIVERED.append(d1_doubled)
 
 
 def build_job(arrangement: Arrangement, database: Any = None) -> Any:
@@ -235,12 +238,18 @@ def test_a_held_node_hands_on_the_stream_built_from_its_rows(
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", ProvisionalHashWarning)
         job = build_job(arrangements(MAIN)[0])
+    DELIVERED.clear()
     _run(job)
+    first = sorted(DELIVERED)
+    assert first
     job.nodes["noted"].clear_cache()
     outputs.clear()
+    DELIVERED.clear()
     _run(job)
-    # Only the cleared side effect ran; its input came from the held function node.
+    # Only the cleared side effect ran; its input came from the held function node,
+    # and it delivered the same values again (CodeRabbit on #510).
     assert set(outputs) == {"noted"}
+    assert sorted(DELIVERED) == first
 
 
 def _without_exceptions(schema: pa.Schema) -> list[tuple[str, Any, bool, Any]]:
@@ -267,36 +276,9 @@ def _without_exceptions(schema: pa.Schema) -> list[tuple[str, Any, bool, Any]]:
     ]
 
 
-def _tag_schema_out_of_key_order(arrangement: Arrangement) -> bool:
-    """Whether the source's tag schema lists its tags in another order than its keys.
-
-    ITL-1365: ``ArrowTableStream`` builds its tag schema in the table's layout order,
-    while its keys and rows follow the declared tag order; an operator predicts its
-    keys from that schema, so its ``arrow_schema()`` lists the tags in the layout
-    order and its rows do not.
-    """
-    source = make_source(MAIN, arrangement)
-    return tuple(source.output_schema()[0]) != tuple(source.keys()[0])
-
-
-def _l7_arrangements() -> list[Any]:
-    return [
-        pytest.param(
-            arrangement,
-            id=arrangement.id,
-            marks=pytest.mark.xfail(
-                strict=True,
-                raises=AssertionError,
-                reason="ITL-1365: a tag schema in layout order, keys in declared order",
-            ),
-        )
-        if _tag_schema_out_of_key_order(arrangement)
-        else pytest.param(arrangement, id=arrangement.id)
-        for arrangement in arrangements(MAIN)[::4]
-    ]
-
-
-@pytest.mark.parametrize("arrangement", _l7_arrangements())
+@pytest.mark.parametrize(
+    "arrangement", arrangements(MAIN)[::4], ids=lambda arrangement: arrangement.id
+)
 def test_declared_arrow_schema_equals_the_output(
     arrangement: Arrangement, outputs: dict[str, Any]
 ) -> None:
@@ -438,19 +420,16 @@ def plus_one(d1_doubled: int) -> int:
     return d1_doubled + 1
 
 
-class _ClearsOnRunStart(NoOpObserver):
-    """Clears ``node`` when the run starts and counts ``label``'s data starts."""
+class _CountsDataStarts(NoOpObserver):
+    """Counts ``label``'s data starts; reads only (an observer that changes the job
+    during a run is unsupported, ITL-1369)."""
 
-    def __init__(self, node: Any, label: str) -> None:
-        self._node = node
+    def __init__(self, label: str) -> None:
         self._label = label
         self.data_starts = 0
 
-    def contextualize(self, *identity_path: str) -> _ClearsOnRunStart:
+    def contextualize(self, *identity_path: str) -> _CountsDataStarts:
         return self
-
-    def on_run_start(self, run_id: str, pipeline_uri: str = "") -> None:
-        self._node.clear_cache()
 
     def on_data_start(self, node_label: str, tag: Any, data: Any) -> None:
         if node_label == self._label:
@@ -458,11 +437,9 @@ class _ClearsOnRunStart(NoOpObserver):
 
 
 def test_an_async_held_node_sends_the_rows_the_plan_took() -> None:
-    """The async run sends a held node's rows as planned, not as read again later.
-
-    An observer clears the held node when the run starts; the rows the plan took still
-    feed the node after it, as on ``main`` (Codex on PR #485).
-    """
+    """The async run sends a held node's rows as planned: the node after it, cleared
+    before the run, receives every row of the held node (Codex on PR #485; the
+    observer only reads, CodeRabbit on #510)."""
     from orcapod.sources import DictSource
 
     job = PipelineJob(name="held_snapshot", database=InMemoryArrowDatabase())
@@ -476,7 +453,7 @@ def test_an_async_held_node_sends_the_rows_the_plan_took() -> None:
         plus_one.pod(doubled.pod(source, label="twice"), label="plus")
     job.run()
     job.nodes["plus"].clear_cache()
-    observer = _ClearsOnRunStart(job.nodes["twice"], "plus")
+    observer = _CountsDataStarts("plus")
     summary = job.run(orchestrator=AsyncPipelineOrchestrator(), observer=observer)
     assert summary.nodes["twice"].held == 3
     assert observer.data_starts == 3

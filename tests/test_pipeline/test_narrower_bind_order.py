@@ -89,14 +89,6 @@ def _row_path(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(SourceNodeBase, "execute", execute)
 
 
-def _outcome(layout: tuple[str, ...], tag_order: tuple[str, str], roles: Any) -> Any:
-    """The run's kept columns and raw stored schema, or the error it raised."""
-    try:
-        return _run(layout, tag_order, roles)
-    except ValueError as error:
-        return (type(error), str(error))
-
-
 @pytest.mark.parametrize("roles", list(ROLES), ids=list(ROLES))
 @pytest.mark.parametrize("tag_order", [("a", "b"), ("b", "a")], ids=["a-b", "b-a"])
 @pytest.mark.parametrize(
@@ -110,15 +102,13 @@ def test_a_narrower_bind_keeps_and_stores_as_the_row_path(
 ) -> None:
     """Kept columns and the raw stored schema equal the row path's, in order.
 
-    Where the row path raises (one data-tag of two, ITL-1366, a ``main`` bug), the
-    branch raises the same error.
+    Every arrangement completes, by both paths: ``main`` raised for one data-tag of
+    two (ITL-1366) until a tag schema followed the tag order (ITL-1365, ``main``
+    4d192bfc), so no run may stop at bind or at the row build (CodeRabbit on #510).
     """
-    got = _outcome(layout, tag_order, ROLES[roles])
+    got = _run(layout, tag_order, ROLES[roles])
     with monkeypatch.context() as patch:
         _row_path(patch)
-        expected = _outcome(layout, tag_order, ROLES[roles])
-    if isinstance(expected[1], str):
-        assert got == expected
-        return
+        expected = _run(layout, tag_order, ROLES[roles])
     assert got[0] == expected[0]
     assert got[1].equals(expected[1], check_metadata=True)
