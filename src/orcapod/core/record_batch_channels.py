@@ -462,6 +462,11 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
             # The flag says nothing about the values: a field marked non-nullable
             # may still hold nulls, which a reader of the stream never expects.
             return f"column {column.name!r} holds nulls, the stream's is not nullable"
+        if inner := _null_under_non_nullable(batch.column(index), carried):
+            return (
+                f"column {column.name!r} holds a null in {inner}, which the stream's "
+                + "type declares not nullable"
+            )
         if (expected.metadata or None) != (column.metadata or None) or not (
             column.type.equals(carried, check_metadata=True)
         ):
@@ -469,6 +474,66 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
                 f"column {column.name!r} has field metadata {column.metadata} (or in "
                 + f"its type {column.type}), the stream's is {expected.metadata}"
             )
+    return None
+
+
+def _null_under_non_nullable(
+    array: pa.Array[Any],  # pyright: ignore[reportExplicitAny]  # any column
+    kind: pa.DataType,
+    path: str = "",
+) -> str | None:
+    """Where a nested field ``kind`` declares not nullable holds a null, or ``None``.
+
+    Judged on the values the array carries: a struct child under a null struct row,
+    and the items of a null list, are not values. Struct children, list items (of
+    every list kind) and map items are followed to any depth.
+
+    Args:
+        array: A column as sent.
+        kind: Its declared type (the column's type, with its nested flags).
+        path: The path of ``array`` inside the column, for the answer.
+
+    Returns:
+        The path of the first such field (``.a``, ``[]``, ``{}``), or ``None``.
+    """
+    if isinstance(kind, pa.StructType):
+        children = cast("pa.StructArray", array).flatten()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        valid = pc.is_valid(array)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        for position in range(kind.num_fields):
+            field = kind.field(position)
+            child = children[position]  # pyright: ignore[reportUnknownVariableType]
+            where = f"{path}.{field.name}"
+            if (
+                not field.nullable
+                and pc.any(  # pyright: ignore[reportUnknownMemberType]
+                    pc.and_(pc.is_null(child), valid)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                ).as_py()
+            ):
+                return where
+            # A child under a null row reads as null in ``flatten``: keep only the
+            # rows where the struct is valid before looking deeper.
+            if inner := _null_under_non_nullable(
+                child.filter(valid), field.type, where
+            ):  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                return inner
+        return None
+    if isinstance(kind, pa.MapType):
+        item = kind.item_field
+        # A map's entries as a list of structs, which list_flatten reads.
+        entries = array.cast(pa.large_list(pa.struct([kind.key_field, item])))  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportUnknownArgumentType]
+        items = pc.list_flatten(entries)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportCallIssue, reportArgumentType]  # a list array
+        values = cast("pa.StructArray", items).flatten()[1]  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        where = f"{path}{{}}"
+        if not item.nullable and values.null_count:  # pyright: ignore[reportUnknownMemberType]
+            return where
+        return _null_under_non_nullable(values, item.type, where)  # pyright: ignore[reportUnknownArgumentType]
+    if isinstance(kind, (pa.ListType, pa.LargeListType, pa.FixedSizeListType)):
+        item = kind.value_field
+        values = pc.list_flatten(array)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        where = f"{path}[]"
+        if not item.nullable and values.null_count:  # pyright: ignore[reportUnknownMemberType]
+            return where
+        return _null_under_non_nullable(values, item.type, where)  # pyright: ignore[reportUnknownArgumentType]
     return None
 
 

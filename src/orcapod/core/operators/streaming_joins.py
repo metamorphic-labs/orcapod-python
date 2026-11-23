@@ -112,6 +112,7 @@ from orcapod.core.operators.semijoin import (
 from orcapod.core.operators.static_output_pod import (
     RowBuiltFormUnavailable,
     StaticOutputOperatorPod,
+    settle_token_types,
     tokens_as,
 )
 from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS, row_built_columns
@@ -433,6 +434,10 @@ class StreamingJoinKernel(ABC):
         )
         self._closed: list[bool] = [False] * len(self.inputs)
         self._received: list[bool] = [False] * len(self.inputs)
+        # Each input's source-info token types, as its batches so far settle them
+        # (``settle_token_types``): the input's complete table must still be buildable,
+        # as the sync path builds it before matching.
+        self._token_types: list[dict[str, pa.DataType]] = [{} for _ in self.inputs]
         self._emitted_any: bool = False
         # The sync path over no rows: its checks, and the output's columns.
         self.zero_row_result: StreamProtocol = operator.static_process(*self._zero_rows)
@@ -457,7 +462,9 @@ class StreamingJoinKernel(ABC):
 
         Raises:
             ValueError: If the input has closed, or the batch lacks a column of the
-                input's description or holds one of another Arrow type.
+                input's description or holds one of another Arrow type, or its
+                source-info tokens cannot make one table with the input's earlier
+                batches (``SourceInfoTypesDisagree``, a ``RowBuiltFormUnavailable``).
         """
         self._require_open(input_index)
         table = self._as_input_table(input_index, batch)
@@ -571,6 +578,10 @@ class StreamingJoinKernel(ABC):
         input's zero-row form (``null``): it holds no value.
         """
         layout = self._layouts[input_index]
+        # Tokens that cannot make one table with the input's earlier batches are
+        # refused here, as the sync path refuses the input before any match: the
+        # batch then changes nothing.
+        token_types = settle_token_types(batch, self._token_types[input_index])
         names = set(batch.schema.names)
         if missing := [name for name in layout.names if name not in names]:
             raise ValueError(
@@ -600,6 +611,7 @@ class StreamingJoinKernel(ABC):
                 + f"{input_index} is {actual.type} in a batch, but "
                 + f"{field.type} in its stream"
             )
+        self._token_types[input_index] = token_types
         if not table.num_rows:
             return layout.empty_table()
         return pa.Table.from_arrays(columns, schema=layout)

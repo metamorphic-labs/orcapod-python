@@ -195,7 +195,7 @@ class InputChannel:
         self._owner = task
         if task is not None:
             task.add_done_callback(
-                functools.partial(_owner_finished, weakref.ref(self))
+                functools.partial(_owner_finished, weakref.ref(self), self._feed)
             )
 
     def _owner_gone(self, task: asyncio.Task[Any]) -> None:  # pyright: ignore[reportExplicitAny]  # any task
@@ -394,20 +394,28 @@ class _Claim:
 
 def _owner_finished(
     channel_ref: weakref.ref[InputChannel],
+    feed: BatchFeed,
     task: asyncio.Task[Any],  # pyright: ignore[reportExplicitAny]  # any task
 ) -> None:
     """Release a reader whose consumer task finished between reads.
 
     A done callback of the owning task: the channel, if it still exists and the task
-    still owns it before its end, is closed (``InputChannel._owner_gone``).
+    still owns it before its end, is closed (``InputChannel._owner_gone``). A channel
+    freed before the callback runs (a reader opened in the task's own frame) can no
+    longer be asked; its feed, held here and never referring to the channel, is
+    closed, so its producer does not wait for a reader nobody holds. Closing a feed
+    that ended already does nothing.
 
     Args:
         channel_ref: The channel, held weakly.
+        feed: The channel's feed (its place in its producer).
         task: The finished task.
     """
     channel = channel_ref()
-    if channel is not None:
-        channel._owner_gone(task)  # pyright: ignore[reportPrivateUsage]  # the task's release
+    if channel is None:
+        feed.close()
+        return
+    channel._owner_gone(task)  # pyright: ignore[reportPrivateUsage]  # the task's release
 
 
 def _release_claim(feed: BatchFeed, channel_ref: weakref.ref[InputChannel]) -> None:

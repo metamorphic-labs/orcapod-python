@@ -668,3 +668,181 @@ def test_a_reader_whose_task_finishes_between_reads_releases_its_producer(
             _ = await reader.receive()
 
     asyncio.run(go())
+
+
+# --- Codex on PR 510 ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("ending", ["returns", "raises", "cancelled"])
+def test_a_reader_opened_in_a_finished_task_releases_its_producer(ending: str) -> None:
+    """Codex on PR 510: a task opens a reader in its own frame, takes one batch and
+    ends; the reader is freed before the task's done callback can ask it, so the
+    callback closes its feed directly and the producer of a one-slot output does
+    not wait for a reader nobody holds."""
+    stream = source(3)
+    first, second, third = batches_of(stream, 1)
+
+    async def go() -> None:
+        output = OutputChannel(stream, retain=False, buffer_size=1)
+
+        async def consume_one() -> None:
+            reader = output.open_reader()  # held by this frame only
+            _ = await reader.receive()
+            if ending == "raises":
+                raise RuntimeError("the consumer failed")
+            if ending == "cancelled":
+                await asyncio.Event().wait()  # cancelled below
+
+        task = asyncio.ensure_future(consume_one())
+        await asyncio.sleep(0)  # the reader is registered
+        await output.send(first)
+        await output.send(second)  # fills the reader's slot after it took the first
+        if ending == "cancelled":
+            await asyncio.sleep(0)
+            _ = task.cancel()
+        _ = await asyncio.gather(task, return_exceptions=True)
+        gc.collect()
+        async with asyncio.timeout(TIMEOUT):
+            await output.send(third)  # nothing waits for the gone reader
+
+    asyncio.run(go())
+
+
+def _token_batch(
+    stream: ArrowTableStream, tokens: list[Any], kind: pa.DataType
+) -> pa.RecordBatch:  # pyright: ignore[reportExplicitAny]  # tokens of any shape
+    """``stream``'s rows as sent, with ``_source_x``'s tokens replaced."""
+    from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+    from orcapod.core.operators.streaming_joins import TRANSPORT_COLUMNS
+
+    rebuilt = StaticOutputOperatorPod._materialize_upstream(  # pyright: ignore[reportPrivateUsage]  # the rows as a job hands them on
+        list(stream.iter_data()), stream
+    )
+    sent = rebuilt.as_table(columns=TRANSPORT_COLUMNS).combine_chunks()
+    index = sent.schema.get_field_index("_source_x")
+    return sent.set_column(
+        index, pa.field("_source_x", kind), pa.array(tokens, kind)
+    ).to_batches()[0]
+
+
+DEEP_TOKENS = pa.large_list(pa.large_list(pa.large_string()))
+SHALLOW_TOKENS = pa.large_list(pa.large_string())
+
+
+@pytest.mark.parametrize(
+    "shallow_first", [True, False], ids=["shallow_first", "deep_first"]
+)
+@pytest.mark.parametrize("kernel", ["join", "merge_join", "semi_join"])
+def test_tokens_that_cannot_make_one_input_table_are_refused(
+    kernel: str, shallow_first: bool
+) -> None:
+    """Codex on PR 510: one batch of an input whose source-info tokens are empty
+    lists (one list level) and another whose tokens hold strings two levels deep
+    cannot make one table: the sync path refuses the input when it rebuilds it,
+    before any match. A kernel refuses the second batch, also when no row would
+    match, instead of finishing with no row."""
+    from orcapod.core.operators import Join, MergeJoin, SemiJoin
+    from orcapod.core.operators.static_output_pod import SourceInfoTypesDisagree
+    from orcapod.core.operators.streaming_joins import (
+        StreamingJoin,
+        StreamingMergeJoin,
+        StreamingSemiJoin,
+    )
+
+    left = ArrowTableStream(
+        pa.table(
+            {
+                "k": pa.array([1, 2], pa.int64()),
+                "x": pa.array([10, 20], pa.int64()),
+                "_source_x": pa.array([[["a"]], [["b"]]], DEEP_TOKENS),
+            }
+        ),
+        tag_columns=["k"],
+    )
+    right = ArrowTableStream(
+        pa.table(
+            {"k": pa.array([7, 8], pa.int64()), "y": pa.array([5, 6], pa.int64())}
+        ),
+        tag_columns=["k"],
+    )
+    make = {
+        "join": lambda: StreamingJoin(Join(), (left, right)),
+        "merge_join": lambda: StreamingMergeJoin(MergeJoin(), (left, right)),
+        "semi_join": lambda: StreamingSemiJoin(SemiJoin(), (left, right)),
+    }[kernel]
+    shallow = _token_batch(left, [[], []], SHALLOW_TOKENS).slice(0, 1)
+    deep = _token_batch(left, [[["a"]], [["b"]]], DEEP_TOKENS).slice(1, 1)
+    batches = [shallow, deep] if shallow_first else [deep, shallow]
+    # The sync path: the same rows, rebuilt from rows before any match, refuse.
+    tokens = [[], [["b"]]] if shallow_first else [[["a"]], []]
+    mixed = ArrowTableStream(
+        pa.table(
+            {
+                "k": pa.array([1, 2], pa.int64()),
+                "x": pa.array([10, 20], pa.int64()),
+                "_source_x": pa.array(tokens, DEEP_TOKENS),
+            }
+        ),
+        tag_columns=["k"],
+    )
+    with pytest.raises((pa.ArrowInvalid, ValueError)):
+        _ = _token_batch(mixed, tokens, DEEP_TOKENS)
+    instance = make()
+    _ = instance.push(0, batches[0])
+    with pytest.raises(SourceInfoTypesDisagree):
+        _ = instance.push(0, batches[1])
+    # The refused batch changed nothing: the input still closes, with no row.
+    assert instance.close(0) == []
+
+
+NON_NULLABLE = pa.field("required", pa.int64(), nullable=False)
+NESTED_CASES: dict[str, tuple[pa.DataType, list[Any], list[Any]]] = {  # pyright: ignore[reportExplicitAny]  # values of any shape
+    # type, a refused value list, an accepted value list (nulls only where allowed)
+    "struct_child": (
+        pa.struct([NON_NULLABLE]),
+        [{"required": None}, {"required": 1}],
+        [None, {"required": 1}],
+    ),
+    "list_item": (
+        pa.large_list(pa.field("item", pa.int64(), nullable=False)),
+        [[1, None], [2]],
+        [None, [2]],
+    ),
+    "map_item": (
+        pa.map_(pa.large_string(), pa.field("value", pa.int64(), nullable=False)),  # pyright: ignore[reportArgumentType]  # pyarrow takes a field for the item
+        [[("a", None)], [("b", 2)]],
+        [None, [("b", 2)]],
+    ),
+    "struct_in_struct": (
+        pa.struct([pa.field("s", pa.struct([NON_NULLABLE]))]),
+        [{"s": {"required": None}}, {"s": None}],
+        [{"s": None}, None],
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(NESTED_CASES))
+def test_a_nested_null_under_a_non_nullable_field_is_refused(case: str) -> None:
+    """Codex on PR 510: a null nested under a field the stream's type declares not
+    nullable (a struct child, a list item, a map item, at any depth) is refused at
+    send; nulls the type allows (a null struct, list or map row, a nullable parent)
+    are taken."""
+    kind, refused, accepted = NESTED_CASES[case]
+    stream = ArrowTableStream(
+        pa.table(
+            {"k": pa.array([1, 2], pa.int64()), "v": pa.array(accepted, kind)},
+            schema=pa.schema([pa.field("k", pa.int64()), pa.field("v", kind)]),
+        ),
+        tag_columns=["k"],
+    )
+    (batch,) = batches_of(stream)
+    index = batch.schema.get_field_index("v")
+    bad = batch.set_column(index, batch.schema.field(index), pa.array(refused, kind))
+
+    async def write() -> None:
+        output = OutputChannel(stream)
+        with pytest.raises(ValueError, match="which the stream's type declares not"):
+            await output.send(bad)
+        await output.send(batch)
+
+    asyncio.run(write())
