@@ -448,3 +448,21 @@ def test_one_stream_given_twice_fails_to_run_in_a_job(
         operator()(a, a, label="repeat")
     with pytest.raises((ValueError, IndexError)):
         _run(job, mode)
+
+
+@pytest.mark.parametrize("operator", [MergeJoin, SemiJoin])
+def test_a_legacy_binary_operator_over_one_stream_is_refused(
+    operator: type, tmp_path: Path
+) -> None:
+    """CodeRabbit on PR 513: a legacy file holds one edge for ``SemiJoin()(a, a)`` (an
+    edge list cannot repeat an edge), so the operator would be rebuilt with one input
+    where it takes two. Its inputs cannot be restored, so the load refuses."""
+    a = _inputs(tmp_path)["a"]
+    db_path = tmp_path / "db"
+    job = PipelineJob(name="repeat", database=DeltaTableDatabase(db_path))
+    with job:
+        operator()(a, a, label="repeat")
+    job.save(tmp_path / "job.json")
+    _strip_inputs(tmp_path / "job.json")
+    with pytest.raises(ValueError, match=LEGACY_REFUSAL):
+        PipelineJob.load(tmp_path / "job.json", database=DeltaTableDatabase(db_path))

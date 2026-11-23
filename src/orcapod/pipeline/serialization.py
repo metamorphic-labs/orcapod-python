@@ -69,7 +69,8 @@ def require_positively_commutative(
     different inputs is accepted only when it is positively known to be fully
     commutative: the operator is available, and ``argument_symmetry``, called as its
     contract requires (on the rebuilt input streams), returns a flat ``frozenset`` of
-    exactly those inputs. Anything else (the call raises, a tuple, a nested group, an
+    exactly those inputs. A binary operator with other than two edges (one stream
+    given twice) cannot have its inputs restored and is refused too. Anything else (the call raises, a tuple, a nested group, an
     operator that is not available, an input not restored) is refused: when in doubt,
     refuse.
 
@@ -82,7 +83,13 @@ def require_positively_commutative(
     Raises:
         ValueError: If the operator is not positively known to be commutative.
     """
-    if len(set(input_keys)) < 2:
+    from orcapod.core.operators.base import BinaryOperator
+
+    # A binary operator given one stream twice has one edge in a legacy file (an edge
+    # list cannot repeat an edge), so its two inputs cannot be restored (CodeRabbit on
+    # PR 513): refused like an unknown order, never rebuilt with one input.
+    one_input_of_two = isinstance(operator, BinaryOperator) and len(input_keys) != 2
+    if len(set(input_keys)) < 2 and not one_input_of_two:
         return
     refusal = ValueError(
         f"The saved job's node {label!r} has several inputs, and the file does not say "
@@ -90,6 +97,13 @@ def require_positively_commutative(
         "argument order (ITL-1417), and the operator is not known to be commutative, "
         "so loading it could swap them. Build the job from its code and save it again."
     )
+    if one_input_of_two:
+        raise ValueError(
+            f"The saved job's node {label!r} takes two inputs, and the file does not "
+            "say in which order nor restore both: it was saved before Orcapod wrote "
+            "each operator's inputs in argument order (ITL-1417), and it holds one edge "
+            "for one stream given twice. Build the job from its code and save it again."
+        )
     if operator is None or len(input_streams) != len(input_keys):
         raise refusal
     try:
