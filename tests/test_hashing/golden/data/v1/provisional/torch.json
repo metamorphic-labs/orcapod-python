@@ -1,11 +1,11 @@
 {
-  "datagram.content_hash": "semantic_v1:88971c3631eb8b3847e7002a8c3245f2ee2757d11e99380b817eec5ba051f66b",
+  "datagram.content_hash": "semantic_v1:0895910e75d822db6cc0800bfcbbf3c4e15a7bd5ea2dbc5d82ea1008eb22cdb8",
   "datagram.pipeline_hash": "semantic_v1:d615e05221841730f43da12d4bd033e7ecdaa9aa7637666c2ff292beaee43ce9",
   "datagram.row[{\"k\":\"r1\"}]._tag_record_id::d615e05221841730f43da12d4bd033e7ecdaa9aa7637666c2ff292beaee43ce9": "row_0",
-  "datagram.row[{\"k\":\"r1\"}]._tag_source_id::d615e05221841730f43da12d4bd033e7ecdaa9aa7637666c2ff292beaee43ce9": "golden_torch_tensor",
+  "datagram.row[{\"k\":\"r1\"}]._tag_source_id::d615e05221841730f43da12d4bd033e7ecdaa9aa7637666c2ff292beaee43ce9": "dict_v1:golden_torch_tensor",
   "datagram.row[{\"k\":\"r1\"}].data_hash": "arrow_v1:000002873e61c65e46867df1d6374bda92f279cb67df1f41d4e31e4b766ed976ad276f",
   "datagram.row[{\"k\":\"r2\"}]._tag_record_id::d615e05221841730f43da12d4bd033e7ecdaa9aa7637666c2ff292beaee43ce9": "row_1",
-  "datagram.row[{\"k\":\"r2\"}]._tag_source_id::d615e05221841730f43da12d4bd033e7ecdaa9aa7637666c2ff292beaee43ce9": "golden_torch_tensor",
+  "datagram.row[{\"k\":\"r2\"}]._tag_source_id::d615e05221841730f43da12d4bd033e7ecdaa9aa7637666c2ff292beaee43ce9": "dict_v1:golden_torch_tensor",
   "datagram.row[{\"k\":\"r2\"}].data_hash": "arrow_v1:00000291db1a6c2aa90ac8a0c2001e1b5b99d952ba6ee40b360cb00a90528ba80fdf7a",
   "datagram.system_tag_columns": [
     "_tag_source_id::d615e05221841730f43da12d4bd033e7ecdaa9aa7637666c2ff292beaee43ce9",

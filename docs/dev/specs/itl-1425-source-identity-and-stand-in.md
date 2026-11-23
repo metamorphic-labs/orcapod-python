@@ -24,7 +24,7 @@ is still to be approved before any golden file changes.
 | 6 | Tokens, system tags and `source_id` show the full id. Record ids never hold the source id (unchanged; tested) | section 1.3 |
 | 7 | The class name leaves the content hash: identity `(source id, Arrow schema identity, key columns)` plus each kind's extras (SpiralDB `tags_as_data`; a restriction adds nothing). `PollingSource`: its source id is added to its identity. Plain `DerivedSource`: identity stays the origin's content hash; its default id is `derived_v1:semantic_v1:<hex>`. `CachedSource`: the wrapped source's identity **and id** (no `source_id` argument any more). `SourceProxy`: the saved hashes and the saved id | section 3.3 |
 | 8 | Out of scope, filed as **ITL-1426** (deferred): the explicit stand-in operation and the row-hash ledger. Sections 3.4 and 5 are their design | ITL-1426 |
-| 9 | Worker's decision, for the developer to confirm: a job slot (a `job.nodes` key and a `bind` key) is named by the source's **name**, not its full id, so `bind(sources={"units": ...})` is unchanged and a slot keeps its name whichever kind reads it | `SourceJobNode.from_stream` |
+| 9 | Confirmed by the developer (2026-11-23; proposed by the worker): a job slot (a `job.nodes` key and a `bind` key) is named by the source's **name**, not its full id, so `bind(sources={"units": ...})` is unchanged and a slot keeps its name whichever kind reads it | `SourceJobNode.from_stream` |
 
 **Before this decision** the developer's direction was stated as: every source id carries,
 explicitly and in one fixed place, the kind and implementation version that read the data;
@@ -340,8 +340,8 @@ row hashes, so every case that reads a source's rows moves, not only those that 
 
 ### 3.7a The implementation's moved list (for the developer's approval)
 
-`generate_golden_hashes.py --check` on the implementation (no golden file written): **659
-entries move**, every one listed with its pinned and live value and its explanation in
+`generate_golden_hashes.py --check` on the implementation, before main's Filter cases were
+merged in: **659 entries move**, every one listed with its pinned and live value and its explanation in
 `golden-moved-implementation.tsv` beside the scripts.
 
 | Group | Frozen-file | Provisional | Total |
@@ -366,6 +366,19 @@ Against the simulation (`K_always`, 703): 54 simulated moves do not happen, all 
 because a slot is named by the source's name, not its full id (Decisions, 9); 10 entries move
 that the simulation did not (`source_stream_builder`), because that golden case now passes the
 builder a kind part, as every source does.
+
+Approved and regenerated (developer, November 23, 2026). The 659 entries above were approved
+as listed. After main was merged in (021a565e), `--check` listed those 659, with the same
+values, and 25 more, from the provisional Filter golden cases main added in PR 498
+(`filter.keyword`, `filter.terms`, `filter.tree`, `filter_job`, all in
+`provisional/pipeline.json`): 16 source id texts (`dict_v1:` added), 8 content hashes and 1
+pipeline-table record ids, no pipeline hash. The developer approved the 25 too; they are the
+last 25 rows of the TSV. All 684 were removed with `--remove` and written again by the
+generator. `scripts/verify_regenerated_golden.py` compares every golden entry before and
+after: each approved entry was pinned with its TSV `pinned` value and now holds its TSV
+`live` value, every other entry is unchanged (output: `golden-regeneration-verification.txt`).
+Four regenerated entries are now in `pipeline-02.json` instead of `pipeline-01.json`, because
+the generator writes into a group's newest file; no v1 file is released.
 
 ### 3.8 How the design meets the requirements
 
