@@ -298,7 +298,11 @@ def test_writers_creating_one_table_at_once_store_an_id_once(tmp_path: Path) -> 
             except BaseException as e:  # noqa: BLE001  # reported below
                 errors.append(e)
 
-        threads = [threading.Thread(target=write, args=(v,)) for v in range(4)]
+        # Daemon threads: one stalled in ``flush`` fails the assertion below and
+        # never keeps the test process alive (review of PR 511).
+        threads = [
+            threading.Thread(target=write, args=(v,), daemon=True) for v in range(4)
+        ]
         for thread in threads:
             thread.start()
         for thread in threads:
@@ -522,4 +526,41 @@ def test_a_create_followed_by_another_writers_table_is_not_seeded(
         expected = [(b"\x01", 11), (b"\x03", 30), (b"\x07", 70)]
     else:
         expected = [(b"\x01", 10), (b"\x02", 20), (b"\x03", 30), (b"\x07", 71)]
+    assert _stored(tmp_path) == expected
+
+
+@pytest.mark.parametrize("queued_clash", [False, True], ids=["plain", "a queued x"])
+@pytest.mark.parametrize(
+    "order", [(1, 2), (2, 1)], ids=["cached id first", "new id first"]
+)
+def test_an_id_another_writer_added_is_skipped_once_the_table_is_reloaded(
+    tmp_path: Path, order: tuple[int, int], queued_clash: bool
+) -> None:
+    """Review of PR 511: the database holds ids 1 (cached); another writer adds 2. A
+    ``skip_duplicates`` add of 1 and 2, in either order, reloads the table for id 1
+    and skips every id it holds then, 2 included: nothing is queued. With a column
+    ``x`` queued for another id, rows holding ``X`` whose ids are all stored are
+    skipped, not refused for the case clash."""
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(PATH, _records(1, 10), record_id_column="rid", flush=True)
+    db.add_records(PATH, _records(1, 11), record_id_column="rid", skip_duplicates=True)
+    DeltaTableDatabase(tmp_path).add_records(
+        PATH, _records(2, 20), record_id_column="rid", flush=True
+    )
+    if queued_clash:
+        db.add_records(
+            PATH,
+            _records(3, 30).append_column("x", pa.array([1])),
+            record_id_column="rid",
+        )
+    added = pa.concat_tables([_records(n, 99) for n in order])
+    if queued_clash:
+        added = added.append_column("X", pa.array([1, 2]))
+    db.add_records(PATH, added, record_id_column="rid", skip_duplicates=True)
+    pending = db._pending_batches.get("t")  # pyright: ignore[reportPrivateUsage]
+    assert (0 if pending is None else pending.num_rows) == (1 if queued_clash else 0)
+    db.flush()
+    expected = [(b"\x01", 10), (b"\x02", 20)]
+    if queued_clash:
+        expected.append((b"\x03", 30))
     assert _stored(tmp_path) == expected

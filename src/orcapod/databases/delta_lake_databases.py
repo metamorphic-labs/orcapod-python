@@ -2879,10 +2879,11 @@ class DeltaTableDatabase:
             # A row is dropped as stored only if the table at the path holds its id
             # now: the cached handle may describe a table another writer has since
             # replaced, or a version whose row was deleted, and a row dropped here is
-            # never written (review of PR 511). An add with no stored id costs no
-            # reload.
+            # never written (review of PR 511). Every input id is checked against the
+            # table loaded again, so an id another writer added meanwhile is skipped
+            # too. An add with no stored id costs no reload.
             self._delta_table_cache.pop(record_key, None)
-            existing_in_delta &= self._stored_ids(record_path)
+            existing_in_delta = input_ids.intersection(self._stored_ids(record_path))
         all_existing = existing_in_pending.union(existing_in_delta)
 
         if not all_existing:
