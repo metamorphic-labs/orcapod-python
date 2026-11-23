@@ -576,13 +576,25 @@ _DUPLICATE_NAME = re.compile(r"Duplicate field name \(case-insensitive\): '([^']
 
 def _duplicate_name_in(error: BaseException) -> str | None:
     """The name delta-rs reports as a case-insensitive duplicate in ``error``'s chain."""
-    seen: BaseException | None = error
-    while seen is not None:
+    for seen in _error_chain(error):
         match = _DUPLICATE_NAME.search(str(seen))
         if match is not None:
             return match.group(1)
-        seen = seen.__cause__ or seen.__context__
     return None
+
+
+def _error_chain(error: BaseException) -> list[BaseException]:
+    """``error`` and its causes and contexts, each once: a chain may loop.
+
+    It does when an error is raised again inside the handler of an error that wraps
+    it (a lost commit's retry gives up with the error it lost to; ITL-1377).
+    """
+    chain: list[BaseException] = []
+    seen: BaseException | None = error
+    while seen is not None and all(seen is not e for e in chain):
+        chain.append(seen)
+        seen = seen.__cause__ or seen.__context__
+    return chain
 
 
 # Why a recorded column's record cannot change on Delta (ITL-1403).
