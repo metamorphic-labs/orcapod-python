@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import enum
 import logging
 import sys
 from collections.abc import Iterator
@@ -59,6 +60,17 @@ if TYPE_CHECKING:
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
 
 logger = logging.getLogger(__name__)
+
+
+class _Unchanged(enum.Enum):
+    """The default of ``PipelineJob.bind(result_database=...)``: keep the binding.
+
+    ``None`` there means something else: store results in the job's own database
+    again (ITL-1408).
+    """
+
+    UNCHANGED = "unchanged"
+
 
 _PENDING_BEFORE_RUN_NOTE = (
     "These writes were left pending in the database before this run started (written "
@@ -165,10 +177,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         super().__init__(name=name, tracker_manager=tracker_manager)
         self._database = database
         self._result_database: "ArrowDatabaseProtocol | None" = result_database
-        # True for a loaded job whose file names a separate result database that could
-        # not be rebuilt and none was given: its function nodes get no database rather
-        # than the job's own ``_result`` location, which holds none of their results.
-        self._result_database_missing: bool = False
+        # For a loaded job whose file names a separate result database that is not
+        # available (it could not be rebuilt, or it was in memory) and none was given:
+        # that saved configuration. Its function nodes get no database rather than the
+        # job's own ``_result`` location, which holds none of their results, and a save
+        # writes the configuration back as it was (ITL-1408).
+        self._unresolved_result_database: dict[str, Any] | None = None
         self._execution_context = execution_context
         self._auto_compile = auto_compile
         # name → bound concrete source (user-facing API: job.sources).
@@ -425,7 +439,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         database: "ArrowDatabaseProtocol | None" = None,
         execution_context: "ExecutionContext | None" = None,
         *,
-        result_database: "ArrowDatabaseProtocol | None" = None,
+        result_database: "ArrowDatabaseProtocol | None | _Unchanged" = _Unchanged.UNCHANGED,
     ) -> None:
         """Update bindings in place. Returns ``None``.
 
@@ -449,7 +463,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             database: Replaces the current database and triggers DB redistribution.
             execution_context: Replaces the current execution context.
             result_database: Replaces the separate database for function results
-                (see the constructor) and triggers DB redistribution.
+                (see the constructor) and triggers DB redistribution. Leave it out to
+                keep the current binding; pass ``None`` to store function results in
+                the job's own database again, at ``<name>/_result`` (ITL-1408).
 
         Raises:
             SourceSpecMismatchError: If any source's columns differ from its slot's
@@ -463,10 +479,15 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         """
         from orcapod.core.nodes.source_node import SourceNodeBase
 
+        result_database_given = not isinstance(result_database, _Unchanged)
         database_changed = (
             database is not None and database is not self._database
         ) or (
-            result_database is not None and result_database is not self._result_database
+            result_database_given
+            and (
+                result_database is not self._result_database
+                or self._unresolved_result_database is not None
+            )
         )
 
         if sources is not None:
@@ -503,7 +524,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         )
         new_database = database if database is not None else self._database
         new_result_database = (
-            result_database if result_database is not None else self._result_database
+            self._result_database
+            if isinstance(result_database, _Unchanged)
+            else result_database
         )
         if database_changed and new_database is not None:
             self._require_storable_tables(new_database, new_result_database)
@@ -512,8 +535,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # the job as it was, its database included (ITL-1112).
         self._database = new_database
         self._result_database = new_result_database
-        if result_database is not None:
-            self._result_database_missing = False
+        if result_database_given:
+            self._unresolved_result_database = None
 
         if sources is not None:
             # Update bound_source on SourceJobNodes and maintain both dicts.
@@ -589,7 +612,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         pipeline_db, result_db = self._database_views(database, result_database)
         for node in (self._persistent_node_map or {}).values():
             if isinstance(node, FunctionJobNode):
-                if not self._result_database_missing:
+                if self._unresolved_result_database is None:
                     node.require_storable_tables(pipeline_db, result_db)
             elif isinstance(node, OperatorJobNode):
                 node.require_storable_tables(pipeline_db, node.cache_mode)
@@ -622,7 +645,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         for node in (self._persistent_node_map or {}).values():
             if isinstance(node, FunctionJobNode):
-                if self._result_database_missing:
+                if self._unresolved_result_database is not None:
                     # Left without a database (see ``load``), never given ``_result``.
                     continue
                 node.attach_databases(
@@ -1593,7 +1616,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             database_block = self._database.to_config()
         # A separate result database (ITL-1408), saved by the same rule; ``None`` when
         # the results are in the job's own database (``<name>/_result``).
-        result_database_block = None
+        # A loaded job's binding that was not available is written back as it was, so
+        # the next load refuses it again rather than reading ``_result``.
+        result_database_block = self._unresolved_result_database
         if self._result_database is not None:
             result_database_block = self._result_database.to_config()
 
@@ -1859,10 +1884,21 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # pipeline directly as the compiled blueprint and set up source bindings.
         # Reconstruct the separate result database (ITL-1408), by the same rule.
         effective_result_database = result_database
-        result_database_missing = False
+        unresolved_result_database: dict[str, Any] | None = None
         if effective_result_database is None:
             result_config = data.get("bindings", {}).get("result_database")
-            if result_config:
+            if result_config and result_config.get("type") == "in_memory":
+                # An in-memory database holds nothing once its process ended: a new
+                # one would be empty, so it is not available, as a connector is not.
+                unresolved_result_database = result_config
+                logger.warning(
+                    "The job's separate result database (bindings.result_database) "
+                    "was an in-memory database, which keeps no data after its process "
+                    "ends. The function nodes' results cannot be read until it is "
+                    "given: PipelineJob.load(path, result_database=...) or "
+                    "job.bind(result_database=...)."
+                )
+            elif result_config:
                 try:
                     from orcapod.pipeline.serialization import (
                         resolve_database_from_config,
@@ -1872,7 +1908,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                         result_config
                     )
                 except Exception as exc:
-                    result_database_missing = True
+                    unresolved_result_database = result_config
                     logger.warning(
                         "Could not reconstruct the job's separate result database "
                         "(bindings.result_database) from its saved config: %s. The "
@@ -1887,7 +1923,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             database=effective_database,
             result_database=effective_result_database,
         )
-        job._result_database_missing = result_database_missing
+        job._unresolved_result_database = unresolved_result_database
         job._loaded = True
         job._compiled_pipeline = pipeline
         # Mark compiled so save() / compiled_pipeline can be accessed.

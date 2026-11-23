@@ -12,7 +12,10 @@ from orcapod.utils.lazy_module import LazyModule
 if TYPE_CHECKING:
     import pyarrow as pa
 
-    from orcapod.protocols.database_protocols import TableCommittingDatabaseProtocol
+    from orcapod.protocols.database_protocols import (
+        RefreshingDatabaseProtocol,
+        TableCommittingDatabaseProtocol,
+    )
 else:
     pa = LazyModule("pyarrow")
 
@@ -62,6 +65,29 @@ def as_table_committing(database: object) -> TableCommittingDatabaseProtocol | N
     if not callable(flush_batch):
         return None
     return cast("TableCommittingDatabaseProtocol", database)
+
+
+def as_refreshing(database: object) -> RefreshingDatabaseProtocol | None:
+    """Return ``database`` if it can refresh what it read of a table, else ``None``.
+
+    The one check for ``RefreshingDatabaseProtocol`` (ITL-1408). Like
+    ``as_table_committing``, it looks the attribute up on the object, so a wrapper
+    that forwards it only when the database it wraps has it qualifies exactly when
+    that database does.
+
+    Args:
+        database: Any database object.
+
+    Returns:
+        ``database``, typed as the protocol, or ``None``.
+    """
+    try:
+        refresh_table = getattr(database, "refresh_table")  # noqa: B009  # AttributeError means "no"
+    except AttributeError:
+        return None
+    if not callable(refresh_table):
+        return None
+    return cast("RefreshingDatabaseProtocol", database)
 
 
 _IDENTIFIER = r'(?:"[^"]+"|\w+)'

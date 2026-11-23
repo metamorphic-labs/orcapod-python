@@ -406,3 +406,378 @@ class TestSideEffectingFunctions:
             _ = self.notify_job("b", [1.0], old).run()
         assert delivered == []
         assert [path[-1] for path in info.value.record_paths] == ["rdb_v2"]
+
+
+# ---------------------------------------------------------------------------
+# Review findings (PR 507): each has a test that fails without its fix, or pins
+# the behaviour stated for it.
+# ---------------------------------------------------------------------------
+
+
+@function_pod(output_keys="doubled", function_name="double")
+def double_changed(x: float) -> float:
+    """``double``'s name, output schema and major with another body: one uri."""
+    calls.append(("double_changed", x))
+    return x * 3
+
+
+def one_step_job(
+    name: str,
+    database: ArrowDatabaseProtocol,
+    xs: list[float],
+    pod: Any = double,
+    result_database: ArrowDatabaseProtocol | None = None,
+    source_id: str = "s",
+) -> PipelineJob:
+    """A job of one function node, labelled ``out``."""
+    job = PipelineJob(name=name, database=database, result_database=result_database)
+    with job:
+        pod.pod(make_source(xs, source_id), label="out")
+    return job
+
+
+class TestEveryRunSeesCommittedResults:
+    """B1: two handles on one Delta directory; a warm handle sees the other's commits.
+
+    The run reads the result tables from the store's current version when it starts.
+    Parametrized over where the results are: a separate result database, or the job's
+    own database (one job name, two handles; the same staleness before ITL-1408).
+    """
+
+    @pytest.fixture(params=["result_database", "job_database"])
+    def placement(self, request: pytest.FixtureRequest) -> str:
+        return request.param
+
+    def handles_job(
+        self,
+        placement: str,
+        handle: DeltaTableDatabase,
+        name: str,
+        xs: list[float],
+        pod: Any = double,
+    ) -> PipelineJob:
+        if placement == "result_database":
+            return one_step_job(name, InMemoryArrowDatabase(), xs, pod, handle)
+        return one_step_job("shared", handle, xs, pod)
+
+    def test_a_changed_body_reuses_what_another_handle_committed(
+        self, tmp_path: pathlib.Path, placement: str, orchestrator: Orchestrator
+    ) -> None:
+        warm = DeltaTableDatabase(tmp_path / "store")
+        other = DeltaTableDatabase(tmp_path / "store")
+        _ = self.handles_job(placement, warm, "warm", [1.0]).run(
+            orchestrator=orchestrator
+        )
+        _ = self.handles_job(placement, other, "writer", [2.0, 3.0]).run(
+            orchestrator=orchestrator
+        )
+        calls.clear()
+        job = self.handles_job(placement, warm, "reader", [2.0, 3.0], double_changed)
+        _ = job.run(orchestrator=orchestrator)
+        # The stored results of the same uri are reused, not computed by the new body.
+        assert calls == []
+        assert rows(job, "out", "doubled") == [4.0, 6.0]
+
+    def test_a_ctx_function_does_not_deliver_again(
+        self, tmp_path: pathlib.Path, placement: str, orchestrator: Orchestrator
+    ) -> None:
+        warm = DeltaTableDatabase(tmp_path / "store")
+        other = DeltaTableDatabase(tmp_path / "store")
+        for handle, name, xs in (
+            (warm, "warm", [1.0]),
+            (other, "writer", [3.0]),
+            (warm, "reader", [3.0, 1.0]),
+        ):
+            _ = self.handles_job(placement, handle, name, xs, notify).run(
+                orchestrator=orchestrator
+            )
+        assert sorted(delivered) == [1.0, 3.0]
+
+
+class TestForeignCompletionsAfterTheFirstRun:
+    """M1: completions marked with another data context after a node's first run.
+
+    The check holds on every run, before anything is delivered. Parametrized over the
+    store kind and where the results are.
+    """
+
+    @pytest.mark.parametrize("store", ["in_memory", "delta"])
+    @pytest.mark.parametrize("separate", [True, False])
+    def test_a_later_run_refuses_before_delivering(
+        self,
+        tmp_path: pathlib.Path,
+        store: str,
+        separate: bool,
+        orchestrator: Orchestrator,
+    ) -> None:
+        def new_store(name: str) -> ArrowDatabaseProtocol:
+            if store == "delta":
+                return DeltaTableDatabase(tmp_path / name)
+            return InMemoryArrowDatabase()
+
+        database = new_store("db")
+        results = new_store("results") if separate else None
+        job = one_step_job("ctx", database, [1.0, 2.0], notify, results)
+        _ = job.run(orchestrator=orchestrator)
+        assert sorted(delivered) == [1.0, 2.0]
+        delivered.clear()
+
+        # Every stored completion is now marked with another data context.
+        holder = results if results is not None else database
+        (path,) = [p for p in holder.list_table_paths(()) if p[-1] == "rdb_v1"]
+        stored = holder.get_all_records(path, record_id_column="__rid")
+        assert stored is not None
+        column = stored.schema.get_field_index("__data_context")
+        foreign = stored.set_column(
+            column,
+            stored.schema.field(column),
+            pa.array(["std:v0.9:other"] * stored.num_rows, pa.large_string()),
+        )
+        if store == "delta":
+            # The Delta database appends; rewrite the table with the foreign rows.
+            import deltalake
+
+            deltalake.write_deltalake(
+                str(tmp_path / ("results" if separate else "db") / "/".join(path)),
+                foreign,
+                mode="overwrite",
+                schema_mode="overwrite",
+            )
+        else:
+            holder.add_records(path, foreign, record_id_column="__rid")
+            holder.flush()
+
+        job.bind(sources={"s": make_source([1.0, 2.0, 3.0], "new")})
+        with pytest.raises(SideEffectLogDataContextError):
+            _ = job.run(orchestrator=orchestrator)
+        assert delivered == []
+
+
+class TestUnavailableSavedResultDatabase:
+    """M2 and M3: a saved result database that is not available at load."""
+
+    @pytest.fixture(params=["unknown_type", "in_memory"])
+    def saved(
+        self, request: pytest.FixtureRequest, tmp_path: pathlib.Path
+    ) -> tuple[pathlib.Path, ArrowDatabaseProtocol]:
+        """A job file whose result database cannot be had from the file alone."""
+        if request.param == "in_memory":
+            results: ArrowDatabaseProtocol = InMemoryArrowDatabase()
+        else:
+            results = DeltaTableDatabase(tmp_path / "results")
+        job = one_step_job(
+            "a",
+            DeltaTableDatabase(tmp_path / "db"),
+            [1.0, 2.0],
+            result_database=results,
+        )
+        _ = job.run()
+        path = tmp_path / "job.json"
+        job.save(path)
+        if request.param == "unknown_type":
+            saved = json.loads(path.read_text())
+            saved["bindings"]["result_database"] = {"type": "no_such_database"}
+            _ = path.write_text(json.dumps(saved))
+        return path, results
+
+    def test_load_refuses_and_says_what_to_pass(
+        self,
+        saved: tuple[pathlib.Path, ArrowDatabaseProtocol],
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        path, results = saved
+        with caplog.at_level(logging.WARNING, logger="orcapod.pipeline.job"):
+            loaded = PipelineJob.load(path)
+        assert "bindings.result_database" in caplog.text
+        assert "result_database=" in caplog.text
+        assert loaded.result_database is None
+        with pytest.raises(RuntimeError):
+            _ = loaded.nodes["out"].as_source()
+        given = PipelineJob.load(path, result_database=results)
+        assert stored_rows(given, "out", "doubled") == [2.0, 4.0]
+
+    def test_saving_the_loaded_job_keeps_the_binding(
+        self,
+        saved: tuple[pathlib.Path, ArrowDatabaseProtocol],
+        tmp_path: pathlib.Path,
+    ) -> None:
+        path, _ = saved
+        before = json.loads(path.read_text())["bindings"]["result_database"]
+        loaded = PipelineJob.load(path)
+        again = tmp_path / "again.json"
+        loaded.save(again)
+        assert json.loads(again.read_text())["bindings"]["result_database"] == before
+        reloaded = PipelineJob.load(again)
+        with pytest.raises(RuntimeError):
+            _ = reloaded.nodes["out"].as_source()
+
+
+class TestClearingTheResultDatabase:
+    """M4: ``bind(result_database=None)`` puts the results back in the job's database."""
+
+    def test_before_a_run(self) -> None:
+        db = InMemoryArrowDatabase()
+        results = InMemoryArrowDatabase()
+        job = one_step_job("a", db, [1.0], result_database=results)
+        job.bind(result_database=None)
+        assert job.result_database is None
+        _ = job.run()
+        assert table_paths(results) == []
+        assert any(p.startswith("a/_result/") for p in table_paths(db))
+
+    def test_after_a_run(self) -> None:
+        db = InMemoryArrowDatabase()
+        results = InMemoryArrowDatabase()
+        job = one_step_job("a", db, [1.0], result_database=results)
+        _ = job.run()
+        calls.clear()
+        job.bind(result_database=None)
+        assert job.result_database is None
+        _ = job.run()
+        # The job's own database held no result: computed again, stored there.
+        assert calls == [("double", 1.0)]
+        assert any(p.startswith("a/_result/") for p in table_paths(db))
+        assert rows(job, "out", "doubled") == [2.0]
+
+    def test_leaving_it_out_keeps_the_binding(self) -> None:
+        results = InMemoryArrowDatabase()
+        job = one_step_job("a", InMemoryArrowDatabase(), [1.0], result_database=results)
+        job.bind(sources={"s": make_source([1.0])})
+        assert job.result_database is results
+
+
+class TestACachedSourceIsNotTheJobs:
+    """Docs item: a ``CachedSource`` keeps its cache where it was created to, for any job."""
+
+    def test_two_jobs_share_one_cached_source(self) -> None:
+        from orcapod.sources import CachedSource
+
+        db = InMemoryArrowDatabase()
+        cache = InMemoryArrowDatabase()
+        cached = CachedSource(
+            make_source([1.0, 2.0]), cache_database=cache, cache_path_prefix=("c",)
+        )
+        for name in ("a", "b"):
+            job = PipelineJob(
+                name=name, database=db, result_database=InMemoryArrowDatabase()
+            )
+            with job:
+                double.pod(cached, label="out")
+            _ = job.run()
+        cache_tables = table_paths(cache)
+        assert len(cache_tables) == 1 and cache_tables[0].startswith("c/")
+        assert not any(p.endswith("sdb_v1") for p in table_paths(db))
+
+
+# B2 and B3 are fixed on main for every case by ITL-1412; this PR merges after it.
+# Until then these pin the failures on the two-database form, strictly.
+
+
+def _dangling_record_ids(pipeline_root: pathlib.Path, result_root: pathlib.Path) -> int:
+    """Pipeline record ids, read through fresh handles, with no committed result."""
+    from orcapod.system_constants import constants
+
+    pipeline = DeltaTableDatabase(pipeline_root)
+    results = DeltaTableDatabase(result_root)
+    result_ids: set[Any] = set()
+    for path in results.list_table_paths(()):
+        if path[-1] == "rdb_v1":
+            stored = results.get_all_records(path, record_id_column="__rid")
+            assert stored is not None
+            result_ids.update(stored.column("__rid").to_pylist())
+    record_ids: set[Any] = set()
+    for path in pipeline.list_table_paths(()):
+        if path[-1] == "pdb_v1":
+            stored = pipeline.get_all_records(path)
+            assert stored is not None
+            record_ids.update(stored.column(constants.DATA_RECORD_ID).to_pylist())
+    return len(record_ids - result_ids)
+
+
+class TestCommitOrderAcrossTwoDatabases:
+    """B2 (async) and B3: results are committed before the records naming them."""
+
+    @pytest.mark.parametrize(
+        "mode",
+        [
+            "sync",
+            pytest.param(
+                "async",
+                marks=pytest.mark.xfail(
+                    strict=True,
+                    raises=AssertionError,
+                    reason="ITL-1412: a node's batch commit flushes the whole "
+                    "pipeline database, publishing a sibling's records first",
+                ),
+            ),
+        ],
+    )
+    def test_no_record_is_published_before_its_result(
+        self, tmp_path: pathlib.Path, mode: str
+    ) -> None:
+        from unittest.mock import patch
+
+        pipeline_root = tmp_path / "pipeline"
+        result_root = tmp_path / "results"
+        job = PipelineJob(
+            name="two",
+            database=DeltaTableDatabase(pipeline_root),
+            result_database=DeltaTableDatabase(result_root),
+        )
+        with job:
+            stream = make_source([0.0, 1.0, 2.0, 3.0])
+            double.pod(stream, label="first")
+            double_as_text.pod(stream, label="second")
+        flush = DeltaTableDatabase.flush
+        dangling: list[int] = []
+
+        def checked_flush(self: DeltaTableDatabase) -> None:
+            flush(self)
+            if self.to_config()["root_uri"] == str(pipeline_root):
+                dangling.append(_dangling_record_ids(pipeline_root, result_root))
+
+        orchestrator = (
+            SyncPipelineOrchestrator()
+            if mode == "sync"
+            else AsyncPipelineOrchestrator()
+        )
+        with patch.object(DeltaTableDatabase, "flush", checked_flush):
+            _ = job.run(orchestrator=orchestrator)
+        assert dangling and not any(dangling)
+
+    @pytest.mark.xfail(
+        strict=True,
+        raises=AssertionError,
+        reason="ITL-1412: a failed result commit still publishes the pipeline "
+        "records, and the error names the pipeline database",
+    )
+    def test_a_failed_result_commit_publishes_no_record(
+        self, tmp_path: pathlib.Path, orchestrator: Orchestrator
+    ) -> None:
+        from unittest.mock import patch
+
+        from orcapod.errors import OrcapodDatabaseWriteError
+
+        pipeline_root = tmp_path / "pipeline"
+        result_root = tmp_path / "results"
+        job = one_step_job(
+            "bad",
+            DeltaTableDatabase(pipeline_root),
+            [7.0, 8.0],
+            result_database=DeltaTableDatabase(result_root),
+        )
+        flush_by_key = DeltaTableDatabase._flush_by_key  # pyright: ignore[reportPrivateUsage]  # fault injection
+
+        def failing(self: DeltaTableDatabase, record_key: str) -> None:
+            if self.to_config()["root_uri"] == str(result_root):
+                raise OSError("result store unavailable")
+            flush_by_key(self, record_key)
+
+        with patch.object(DeltaTableDatabase, "_flush_by_key", failing):
+            with pytest.raises(OrcapodDatabaseWriteError) as info:
+                _ = job.run(orchestrator=orchestrator)
+        published = DeltaTableDatabase(pipeline_root)
+        assert [p for p in published.list_table_paths(()) if p[-1] == "pdb_v1"] == []
+        assert "result" in str(info.value) and "rdb_v1" in "/".join(
+            info.value.record_path
+        )

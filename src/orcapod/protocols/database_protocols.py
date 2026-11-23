@@ -227,6 +227,24 @@ class TableCommittingDatabaseProtocol(Protocol):
         ...
 
 
+class RefreshingDatabaseProtocol(Protocol):
+    """A database whose handle keeps what it read of a table between reads (ITL-1408).
+
+    Such a database (``DeltaTableDatabase``) serves reads from the version of a table
+    it loaded, so rows another handle or process commits later are not seen until it
+    looks at the store again. ``refresh_table`` makes it do that for one table. A
+    function node refreshes its result table once at the start of every run, so a
+    run sees every result committed before it started, also by other jobs sharing
+    the result database. A database that reads the store on every read (in memory,
+    a connector) has nothing to refresh and does not offer it. Check with
+    ``orcapod.databases.utils.as_refreshing``.
+    """
+
+    def refresh_table(self, record_path: tuple[str, ...]) -> None:
+        """Read the table at ``record_path`` from the store's current version next time."""
+        ...
+
+
 class ColumnCheckingDatabaseProtocol(Protocol):
     """A database that states which columns it can store (ITL-1162).
 

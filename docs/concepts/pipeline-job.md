@@ -167,14 +167,22 @@ print(sorted({path[0] for path in results.list_table_paths(())}))
 
 `study_2` computed nothing: both rows were in the result database. Without
 `result_database` (the default) the results are kept in the job's own database at
-`<job name>/_result/...`, as above.
+`<job name>/_result/...`, as above. `job.bind(result_database=other)` changes it, and
+`job.bind(result_database=None)` puts the results back in the job's own database.
 
-Only function results are shared. Everything else a job stores stays the job's own, under
+Only function results are shared. What the job's nodes store stays the job's own, under
 its database and name, whatever `result_database` is: each function node's pipeline records
-(which rows the job read), an operator's cache, a side-effect pod's log and a cached source.
-So a job still reads only its own rows: two jobs over different sources share one result
-table, and each job's nodes, their `as_source()` and a loaded job show the rows of that job's
-inputs only.
+(which rows the job read), an operator's cache and a side-effect pod's log. So a job still
+reads only its own rows: two jobs over different sources share one result table, and each
+job's nodes, their `as_source()` and a loaded job show the rows of that job's inputs only.
+A `CachedSource` is not a node of the job: its cache is kept in the cache database and at
+the path it was created with, whatever job reads it, so two jobs given one `CachedSource`
+(or one cache database and path) share its cache.
+
+Every run reads the result tables as they are when it starts: results that another job,
+or another handle on the same database (a second `DeltaTableDatabase` over the same
+directory, another process), committed before the run started are reused, not computed
+again. For a `DeltaTableDatabase` that costs one read of each result table's log per run.
 
 A function that takes the invocation context (`ctx_arg`) performs an external action, and
 its result table records which inputs it was performed for. Jobs that share a result

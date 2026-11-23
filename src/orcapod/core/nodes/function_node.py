@@ -98,7 +98,7 @@ from orcapod.protocols.core_protocols import (
     TagProtocol,
     TrackerManagerProtocol,
 )
-from orcapod.databases.utils import as_table_committing
+from orcapod.databases.utils import as_refreshing, as_table_committing
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.protocols.observability_protocols import (
     DataExecutionLoggerProtocol,
@@ -1511,20 +1511,46 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         )
 
     def _begin_run(self) -> None:
-        """Make a node that delivers side effects look for older completions again.
+        """Start a run: see the stored results as they are now, then check for stale ones.
 
-        Tables written before v0.3 can appear in a database between two runs of one
-        node object. Such a node must find them before it delivers anything, so it
-        looks for them at the start of every run, also when every input is already
-        held in memory; other nodes report once, when they first read the database.
+        The result tables are read from the store's current version
+        (``_refresh_result_tables``), so the run reuses every result committed before
+        it started, also through another database handle or by another job sharing
+        the result database (ITL-1408).
+
+        Tables written before v0.3, and completions of another data context, can
+        appear in a database between two runs of one node object. A node that
+        delivers side effects must find them before it delivers anything, so it looks
+        for them at the start of every run, its current tables included, also when
+        every input is already held in memory; other nodes report once, when they
+        first read the database.
 
         Raises:
             SideEffectLogDataContextError: If this node delivers side effects and
                 completions it cannot match exist; nothing has been delivered then.
         """
+        self._refresh_result_tables()
         if self._delivers_side_effects:
             self._stale_tables_checked = False
+            self._current_tables_checked = False
             self._account_for_stale_tables()
+
+    def _refresh_result_tables(self) -> None:
+        """Read this node's result tables from the store's current version (ITL-1408).
+
+        The one place a run looks at its result tables again: once per run and per
+        table, never per row. A database handle that keeps what it loaded of a table
+        (``RefreshingDatabaseProtocol``, the Delta database) would otherwise miss
+        results committed since through another handle; for it this costs one read of
+        each result table's log, and the table's index is rebuilt only when its
+        version moved. Other databases read the store on every read: nothing to do.
+        """
+        for pod in (self._cached_function_pod, self._ephemeral_cached_pod):
+            if pod is None:
+                continue
+            refreshing = as_refreshing(pod.result_database)
+            if refreshing is not None and pod.record_path:
+                refreshing.refresh_table(pod.record_path)
 
     def _account_for_stale_tables(self) -> None:
         """Report or refuse stored rows of other generations.
@@ -2039,6 +2065,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         try:
             if self.load_status == LoadStatus.UNAVAILABLE:
                 raise self._no_database_error()
+            self._refresh_result_tables()
             require_same_data_context(
                 input_stream.data_context_key, self._stored_data_context_key
             )
@@ -2087,6 +2114,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         try:
             if self.load_status == LoadStatus.UNAVAILABLE:
                 raise self._no_database_error()
+            self._refresh_result_tables()
             require_same_data_context(
                 self._input_stream.data_context_key, self._stored_data_context_key
             )

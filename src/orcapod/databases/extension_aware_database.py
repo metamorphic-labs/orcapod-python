@@ -212,6 +212,17 @@ class ExtensionAwareDatabase:
         return getattr(self._db, "flush_batch")  # noqa: B009  # AttributeError when absent, by design
 
     @property
+    def refresh_table(self) -> Callable[[tuple[str, ...]], None]:
+        """The wrapped database's ``refresh_table`` (ITL-1408).
+
+        Raises:
+            AttributeError: If the wrapped database has none, so this wrapper
+                satisfies ``RefreshingDatabaseProtocol`` only when the wrapped
+                database does.
+        """
+        return getattr(self._db, "refresh_table")  # noqa: B009  # AttributeError when absent, by design
+
+    @property
     def require_storable(self) -> Callable[[pa.Schema], None]:
         """The wrapped database's ``require_storable`` (ITL-1162).
 
