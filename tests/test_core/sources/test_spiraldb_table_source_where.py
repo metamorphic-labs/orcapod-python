@@ -2573,8 +2573,17 @@ class TestWhereTakesEqualitiesOnly:
             lambda: (col("subject_id") == "m1") | (col("subject_id") == "m2"),
             lambda: ~(col("subject_id") == "m1"),
             lambda: col("subject_id") != "m1",
+            lambda: (col("subject_id") == "m1") & (col("subject_id") == "m2"),
         ],
-        ids=["comparison", "is_in", "null test", "or", "not", "not equal"],
+        ids=[
+            "comparison",
+            "is_in",
+            "null test",
+            "or",
+            "not",
+            "not equal",
+            "two values",
+        ],
     )
     def test_a_condition_other_than_equality_is_refused(self, project, build):
         with pytest.raises(TypeError, match=r"equality conditions only.*filter"):
