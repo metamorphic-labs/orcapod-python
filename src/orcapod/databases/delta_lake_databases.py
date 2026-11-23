@@ -4,7 +4,7 @@ import logging
 import os
 import sys
 from collections import defaultdict
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -16,6 +16,7 @@ from orcapod.databases._row_index import (
     matching_rows,
     rows_at,
 )
+from orcapod.databases import utils as database_utils
 from orcapod.databases.utils import (
     appended_field_change,
     coerce_record_id,
@@ -587,6 +588,15 @@ def _column_change(held: "pa.Field[Any]", field: "pa.Field[Any]") -> str | None:
         arrow_utils.normalize_to_large_types(field.type, keep_null=True),
         field.name,
     )
+
+
+def _is_canonical(names: Sequence[str], record_id_column: str) -> bool:
+    """Whether a stored table's columns are in the canonical order (ITL-1370)."""
+    names = list(names)
+    return names == [
+        record_id_column,
+        *sorted(n for n in names if n != record_id_column),
+    ]
 
 
 def _by_name(table: pa.Table, schema: pa.Schema) -> pa.Table:
@@ -1784,6 +1794,18 @@ class DeltaTableDatabase:
                         "nothing was written."
                     )
 
+    def _takes_canonical_order(self, record_path: tuple[str, ...]) -> bool:
+        """Whether rows for this table are written in the canonical order (ITL-1370):
+        no table is stored, or it is stored in the canonical order. A table that
+        cannot be loaded is left to the flush to report; its rows keep their order."""
+        try:
+            delta_table = self._get_delta_table(record_path)
+        except OrcapodDatabaseReadError:
+            return False
+        return delta_table is None or _is_canonical(
+            delta_table.schema().to_arrow().names, self.RECORD_ID_COLUMN
+        )
+
     def _refuse_untyped_null_columns(
         self, record_path: tuple[str, ...], schema: pa.Schema
     ) -> None:
@@ -1905,16 +1927,21 @@ class DeltaTableDatabase:
 
         # Columns match by name within a pending batch: rows with the pending
         # batch's columns in another order, each field equal, are put in its order
-        # (ITL-1367). With nothing pending, the batch is put in the canonical order
-        # (ITL-1370), the order a new table is written in, so a canonical stored
-        # table takes it by append as main takes an aligned batch. No stored table
-        # is looked up: delta-rs takes an append by name.
+        # (ITL-1367). The first batch of a pending batch is queued in the order it
+        # will be committed in (ITL-1370): the canonical order for a new table or a
+        # table stored in it; as given for a table stored in another order (written
+        # before ITL-1370, or by another writer), so its commit is chosen exactly as
+        # main chooses it. The stored table is the one the append checks below load
+        # anyway (``_refuse_changed_attributes``): no extra lookup.
         pending = self._pending_batches.get(self._get_record_key(record_path))
-        filtered_table = in_held_column_order(
-            filtered_table,
-            None if pending is None else list(pending.schema),
-            self.RECORD_ID_COLUMN,
-        )
+        if pending is not None:
+            filtered_table = in_held_column_order(
+                filtered_table, list(pending.schema), self.RECORD_ID_COLUMN
+            )
+        elif self._takes_canonical_order(record_path):
+            filtered_table = database_utils.canonical_column_order(
+                filtered_table, self.RECORD_ID_COLUMN
+            )
 
         # Step 4: the rows' field attributes, compared as given: a merge or a
         # coercion casts them to the pending batch's schema, which would give them
@@ -2626,9 +2653,6 @@ class DeltaTableDatabase:
             original_table = arrow_utils.normalize_table_view_types(
                 pending_batch.combine_chunks()
             )
-            # A column whose type Delta would not give back is written in its
-            # integer form with its type recorded (ITL-928).
-            combined_table = to_delta_layout(original_table)
 
             # Ensure parent directory exists (local only)
             if not self._is_cloud:
@@ -2651,6 +2675,22 @@ class DeltaTableDatabase:
                 raise OrcapodDatabaseReadError(
                     table_uri, abs_path_components
                 ) from load_error
+
+            # The canonical order (ITL-1370), for a new table and for a table stored
+            # in it: a canonical table then takes the batch by append as main takes
+            # an aligned batch. A table stored in another order (written before
+            # ITL-1370, or by another writer) gets the rows as given, so the commit
+            # is chosen exactly as main chooses it (given order against stored
+            # order: append when they agree, MERGE otherwise).
+            if delta_table is None or _is_canonical(
+                delta_table.schema().to_arrow().names, self.RECORD_ID_COLUMN
+            ):
+                original_table = database_utils.canonical_column_order(
+                    original_table, self.RECORD_ID_COLUMN
+                )
+            # A column whose type Delta would not give back is written in its
+            # integer form with its type recorded (ITL-928).
+            combined_table = to_delta_layout(original_table)
 
             # Set when the rows were appended through ``delta_table``, which the
             # writer then moves to the version it committed (ITL-1173).

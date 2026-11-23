@@ -140,6 +140,7 @@ def _observe(database: Any) -> dict[str, Any]:
             seen[f"{label}.as_source"] = _table(source.as_table(all_info=True))
             seen[f"{label}.as_source.content_hash"] = source.content_hash().to_string()
         seen["cached.as_table"] = _table(cached.as_table(all_info=True))
+        seen["cached.get_all_records"] = _table(cached.get_all_records())
         seen["cached.content_hash"] = cached.content_hash().to_string()
         seen["cached outputs"] = _table(
             job.nodes["fn"]._cached_function_pod.get_all_cached_outputs()  # pyright: ignore[reportOptionalMemberAccess]  # the node's own result cache

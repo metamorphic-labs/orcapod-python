@@ -271,7 +271,11 @@ class LoggingObserver:
             return None
         if len(parts) == 1:
             return parts[0]
-        return pa.concat_tables(parts, promote_options="default")
+        # Ordered after the union: node tables carry different tags, and the
+        # concatenation lists them in the order the parts first name them (ITL-1370).
+        return arrow_utils.in_presented_order(
+            pa.concat_tables(parts, promote_options="default"), LOG_COLUMNS
+        )
 
     # -- serialization --
 

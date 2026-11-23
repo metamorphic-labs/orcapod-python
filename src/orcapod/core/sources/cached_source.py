@@ -461,7 +461,12 @@ class CachedSource(RootSource):
         records = self._read_cached_records_with_hashes()
         if records is None:
             return None
-        return records.drop([self.HASH_COLUMN_NAME, constants.DATA_CONTEXT_COL])
+        # In the wrapped source's layout, as ``as_table()`` presents them, whatever
+        # order the cache table is stored in (ITL-1370).
+        return arrow_utils.in_presented_order(
+            records.drop([self.HASH_COLUMN_NAME, constants.DATA_CONTEXT_COL]),
+            self._empty_table().column_names,
+        )
 
     def _read_cached_records_with_hashes(self) -> "pa.Table | None":
         """Read the cached rows written under the current data context, as stored.

@@ -142,7 +142,11 @@ def test_an_append_in_another_order_is_matched_by_name(
             ),
             [1, 2, 3, 4],
         )
-        db.flush()
+        # Delta creates the table at the flush: as before ITL-1370 in that generation.
+        with (
+            _first_write(generation) if when == "same pending batch" else nullcontext()
+        ):
+            db.flush()
         _check(
             db.get_all_records(PATH, record_id_column=ID),
             _given_order(database, first_order, generation),
@@ -959,13 +963,14 @@ def test_a_delta_table_created_again_in_another_order_takes_mains_commit(
 
 
 @pytest.mark.parametrize("schema_handling", ["error", "merge", "coerce"])
-def test_a_delta_table_stored_before_itl_1370_takes_batches_by_merge_with_right_rows(
+def test_a_delta_table_stored_before_itl_1370_takes_mains_commits(
     tmp_path: Path, schema_handling: str
 ) -> None:
-    """The one cost of ITL-1370: a Delta table stored in a first-write order that is
-    not canonical receives batches queued in the canonical order, so each commit is a
-    MERGE (main's commit for rows in another order than the stored table) instead of
-    an append. Every row and record id is stored as on main."""
+    """A Delta table stored in a first-write order that is not canonical (written
+    before ITL-1370, or by another writer) gets every batch as given, so each commit
+    is chosen exactly as main chooses it: an append for rows in the stored order, a
+    MERGE for rows in another order (codex review of PR 496). Every row and record
+    id is stored as on main."""
     from deltalake import DeltaTable
 
     db = DeltaTableDatabase(tmp_path)
@@ -978,7 +983,7 @@ def test_a_delta_table_stored_before_itl_1370_takes_batches_by_merge_with_right_
     db.add_records(PATH, _abc(2, ("b", "rid", "a")), flush=True, **kwargs)
     db.add_records(PATH, _abc(3), flush=True, **kwargs)
     operations = [entry["operation"] for entry in DeltaTable(tmp_path / "t").history()]
-    assert operations == ["MERGE", "MERGE", "WRITE"]
+    assert operations == ["MERGE", "WRITE", "WRITE"]  # newest first, as on main
     table = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="rid")
     assert table is not None
     assert table.column_names == ["b", "rid", "a"]

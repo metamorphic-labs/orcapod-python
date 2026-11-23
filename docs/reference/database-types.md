@@ -98,7 +98,9 @@ stores and reads every table in, whatever the order written (measured on SpiralD
 itself), so the order written and the order read are the same in every database; rows
 queued with nothing pending for their table are put in that order. A table written
 before Orcapod used the canonical order keeps the order of its first write and takes
-appends in any order (Delta commits such a table's batches by merge). No hash, record id
+appends in any order (Delta commits to it as before). A table holding a type the append
+comparison does not handle (a dictionary, a view type) keeps its first write's order. No
+hash, record id
 or stored path depends on a stored table's column order, and what Orcapod shows of
 stored rows (a node, a cached or derived source, an observer) is in the reader's own
 column order, whatever order they are stored in. An append that also

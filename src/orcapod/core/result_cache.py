@@ -339,7 +339,12 @@ class ResultCache:
         drop_cols = [RECORD_ID_COL] + [
             c for c in constraints if c in result_table.column_names
         ]
-        result_table = result_table.drop_columns(drop_cols)
+        # In the result table's layout, whatever order the table is stored in, as
+        # every reader of stored rows (ITL-1370): a hit gives the outputs, their
+        # source info and the bookkeeping in the order the first call gave them.
+        result_table = arrow_utils.in_presented_order(
+            result_table.drop_columns(drop_cols), self._layout
+        )
 
         return Data(
             result_table,

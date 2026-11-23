@@ -212,7 +212,9 @@ def canonical_column_order(records: "pa.Table", record_id_column: str) -> "pa.Ta
     or record id reads a stored table's column order, and every reader presents its
     rows in its own layout whatever the stored order
     (``utils.arrow_utils.in_presented_order``). Names that repeat, or rows without the
-    record id column, are returned as given, for the database's own rule.
+    record id column, or a column of a type the append comparison does not handle (a
+    dictionary, a view type, a union, ...: ``_handled``), are returned as given, for the
+    database's own rule: such a table keeps the order of its first write.
 
     Args:
         records: The rows that create the table.
@@ -223,6 +225,12 @@ def canonical_column_order(records: "pa.Table", record_id_column: str) -> "pa.Ta
     """
     names = records.column_names
     if len(set(names)) != len(names) or record_id_column not in names:
+        return records
+    # A column whose type the append comparison does not handle (``_handled``)
+    # could not be matched by name later: the rows keep their order, so a writer
+    # that never changes its order always matches its own first write (codex review
+    # of PR 496).
+    if not all(_handled(field.type) for field in records.schema):
         return records
     order = [record_id_column, *sorted(n for n in names if n != record_id_column)]
     if order == names:
