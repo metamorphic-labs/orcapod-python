@@ -304,3 +304,215 @@ def test_a_storage_typed_column_carrying_another_extension_name(tmp_path: Path) 
         _add(db, rows(b"2", "itl1403.two"))
     assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
     assert _stored_ids(tmp_path) == [b"1"]
+
+
+# ── Second review of PR 504 (N2-N5): refuse only what the commit would refuse ──────
+
+ROUTES = {
+    "append route (every id new)": [b"2"],
+    "MERGE route (a stored id among them)": [b"1", b"2"],
+}
+
+
+def _with_record_rewritten(root: Path, column: str, rewrite: Any) -> None:
+    """Rewrite one column's field metadata in the table's first log entry."""
+    log = root / "t" / "_delta_log" / "00000000000000000000.json"
+    actions = [json.loads(line) for line in log.read_text().splitlines()]
+    for action in actions:
+        if "metaData" in action:
+            schema = json.loads(action["metaData"]["schemaString"])
+            for field in schema["fields"]:
+                if field["name"] == column:
+                    rewrite(field["metadata"])
+            action["metaData"]["schemaString"] = json.dumps(schema)
+    log.write_text("\n".join(json.dumps(action) for action in actions) + "\n")
+
+
+@pytest.mark.parametrize(
+    "evolution", [False, True], ids=["evolution off", "evolution on"]
+)
+@pytest.mark.parametrize("route", sorted(ROUTES))
+def test_a_record_that_decodes_to_the_stored_type_is_not_a_change(
+    tmp_path: Path, route: str, evolution: bool
+) -> None:
+    """N2: a stored record serialized otherwise (a trailing newline in its base64)
+    decodes to the same ``uint8``: the append is accepted and sent as stored, on every
+    commit route, as main stored it."""
+    db = DeltaTableDatabase(tmp_path, allow_schema_evolution=evolution)
+    _add(db, _rows(b"1", x=pa.array([1], pa.uint8())), flush=True)
+
+    def add_newline(metadata: dict[str, Any]) -> None:
+        metadata["orcapod:arrow_type"] += "\n"
+
+    _with_record_rewritten(tmp_path, "x", add_newline)
+    db = DeltaTableDatabase(tmp_path, allow_schema_evolution=evolution)
+    ids = ROUTES[route]
+    db.add_records(
+        PATH,
+        pa.table(
+            {
+                "rid": pa.array(ids, pa.large_binary()),
+                "x": pa.array(list(range(1, len(ids) + 1)), pa.uint8()),
+            }
+        ),
+        record_id_column="rid",
+        skip_duplicates=len(ids) == 1,
+        flush=True,
+    )
+    back = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="rid")
+    assert back is not None
+    assert back.schema.field("x").type == pa.uint8()
+    assert sorted(cast(list[bytes], back.column("rid").to_pylist())) == [b"1", b"2"]
+
+
+@pytest.mark.parametrize(
+    "evolution", [False, True], ids=["evolution off", "evolution on"]
+)
+@pytest.mark.parametrize("route", sorted(ROUTES))
+def test_a_real_record_change_is_refused_only_where_the_commit_sends_it(
+    tmp_path: Path, route: str, evolution: bool
+) -> None:
+    """N2: list items widening to nullable (non-null values). A MERGE that evolves the
+    schema sends the new record, which deltalake refuses: refused when added. Without
+    schema evolution the MERGE keeps the stored schema and commits, as main did."""
+    stored = pa.large_list(pa.field("item", pa.uint8(), nullable=False))
+    wider = pa.large_list(pa.field("item", pa.uint8(), nullable=True))
+    db = DeltaTableDatabase(tmp_path, allow_schema_evolution=evolution)
+    _add(db, _rows(b"1", x=pa.array([[1]], stored)), flush=True)
+    ids = ROUTES[route]
+    rows = pa.table(
+        {
+            "rid": pa.array(ids, pa.large_binary()),
+            "x": pa.array([[n] for n in range(len(ids))], wider),
+        }
+    )
+
+    def add() -> None:
+        db.add_records(
+            PATH,
+            rows,
+            record_id_column="rid",
+            skip_duplicates=len(ids) == 1,
+            flush=True,
+        )
+
+    if evolution:
+        with pytest.raises(InputValidationError, match="recorded Arrow type"):
+            add()
+        assert _stored_ids(tmp_path) == [b"1"]
+    else:
+        add()
+        assert _stored_ids(tmp_path) == [b"1", b"2"]
+    assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize(
+    "evolution", [False, True], ids=["evolution off", "evolution on"]
+)
+@pytest.mark.parametrize("route", sorted(ROUTES))
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "no metadata",
+        "the stored identifier",
+        "a readable older identifier",
+        "another name",
+    ],
+)
+def test_a_null_column_is_checked_like_any_column(
+    tmp_path: Path, variant: str, route: str, evolution: bool
+) -> None:
+    """N3: a null column with no metadata takes the stored type; one carrying an
+    identifier the stored logical type reads is written under the stored identifier;
+    one carrying another type's identifier is refused when added wherever the commit
+    would send it (an evolving MERGE, or an append of new ids only), and stored where
+    the MERGE keeps the stored schema. Nothing reaches a flush that Delta refuses."""
+    field, column, _ = _path_column()
+    path_type = field.type
+    identifiers: dict[str, dict[str, Any] | None] = {
+        "no metadata": None,
+        "the stored identifier": {
+            "ARROW:extension:name": path_type.extension_name,
+            "ARROW:extension:metadata": path_type.__arrow_ext_serialize__(),
+        },
+        "a readable older identifier": {
+            "ARROW:extension:name": path_type.extension_name,
+            "ARROW:extension:metadata": b"",
+        },
+        "another name": {
+            "ARROW:extension:name": "itl1403.not.a.path",
+            "ARROW:extension:metadata": b"",
+        },
+    }
+    db = DeltaTableDatabase(tmp_path, allow_schema_evolution=evolution)
+    _add(db, _rows(b"1").append_column(field, column), flush=True)
+    ids = ROUTES[route]
+    null_field = pa.field("x", pa.null(), metadata=identifiers[variant])
+    rows = pa.table({"rid": pa.array(ids, pa.large_binary())}).append_column(
+        null_field, pa.nulls(len(ids))
+    )
+
+    def add() -> None:
+        db.add_records(
+            PATH,
+            rows,
+            record_id_column="rid",
+            skip_duplicates=len(ids) == 1,
+            flush=True,
+        )
+
+    sends = evolution or len(ids) == 1
+    if variant == "another name" and sends:
+        with pytest.raises(InputValidationError, match="itl1403.not.a.path"):
+            add()
+        assert _stored_ids(tmp_path) == [b"1"]
+    else:
+        add()
+        back = DeltaTableDatabase(tmp_path).get_all_records(
+            PATH, record_id_column="rid"
+        )
+        assert back is not None
+        assert back.schema.field("x").type == path_type
+        assert back.sort_by("rid").column("x").to_pylist() == ["/a", None]
+    assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("nested", [False, True], ids=["column", "struct field"])
+def test_an_all_duplicate_add_is_skipped_not_refused(
+    tmp_path: Path, nested: bool
+) -> None:
+    """N4: names are checked against the queued rows after duplicates are skipped: a
+    row whose id is stored, skipped with ``skip_duplicates``, queues nothing, whatever
+    its names."""
+    db = DeltaTableDatabase(tmp_path)
+
+    def add(name: str, rid: bytes, flush: bool = False) -> None:
+        data = {"s": pa.array([{name: 1}])} if nested else {name: pa.array([1])}
+        db.add_records(
+            PATH,
+            _rows(rid, **data),
+            record_id_column="rid",
+            schema_handling="merge",
+            skip_duplicates=True,
+            flush=flush,
+        )
+
+    add("a", b"stored", flush=True)
+    add("a", b"pending")
+    add("A", b"stored")  # a stored id: skipped, not refused
+    db.flush()
+    assert _stored_ids(tmp_path) == [b"pending", b"stored"]
+
+
+@pytest.mark.parametrize("suffix", ["'q", " space", '"dq', "(x)", "::y"])
+def test_the_backstop_names_the_column_whole(tmp_path: Path, suffix: str) -> None:
+    """N5: the column named by the flush's case-folding refusal is the batch's own
+    field, with its type, also when its name holds a quote."""
+    first, second = RUST_ONLY_FOLDS[0][0] + suffix, RUST_ONLY_FOLDS[0][1] + suffix
+    db = DeltaTableDatabase(tmp_path)
+    with pytest.raises(UnstorableColumnError) as info:
+        _add(
+            db, _rows(b"1", **{first: pa.array([1]), second: pa.array([2])}), flush=True
+        )
+    assert info.value.column in (first, second)
+    assert "int64" in str(info.value)
