@@ -24,6 +24,7 @@ from orcapod.utils.lazy_module import LazyModule
 if TYPE_CHECKING:
     import networkx as nx
     from orcapod.pipeline.diagram import PipelineDiagram
+    from orcapod.types.provenance import Highlight
     from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 else:
     nx = LazyModule("networkx")
@@ -342,6 +343,7 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         direction: Literal["LR", "TB"] = "LR",
         collapse: bool = False,
         max_nodes: int = 400,
+        highlight: Highlight | None = None,
     ) -> PipelineDiagram:
         """A diagram of the DAG, drawn in a notebook without Graphviz.
 
@@ -361,17 +363,25 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                 feed exactly one node into the edges they lie on.
             max_nodes: Above this many nodes, show the text listing instead of the
                 picture.
+            highlight: Nodes and edges to emphasize, with a note: a trace's path
+                (``node.trace(...).highlight()``) or a missing row's
+                (``node.why_missing(...).highlight()``).
 
         Returns:
             The diagram.
 
         Raises:
             RuntimeError: If the pipeline has not been compiled yet.
+            ValueError: If ``highlight`` names a node the pipeline does not have.
         """
         from orcapod.pipeline.diagram import PipelineDiagram
 
         return PipelineDiagram(
-            self, direction=direction, collapse=collapse, max_nodes=max_nodes
+            self,
+            direction=direction,
+            collapse=collapse,
+            max_nodes=max_nodes,
+            highlight=highlight,
         )
 
     def _repr_mimebundle_(

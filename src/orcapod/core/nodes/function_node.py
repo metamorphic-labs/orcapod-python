@@ -31,6 +31,7 @@ import polars as pl
 import pyarrow as pa
 
 from orcapod import contexts
+from orcapod.core.nodes.provenance_methods import ProvenanceMethods
 from orcapod.core.function_pod import (
     fall_through_tags,
     function_input,
@@ -1388,7 +1389,7 @@ def _joined_from_stored(
     return pa.Table.from_arrays(columns, names=names)
 
 
-class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
+class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
     """DB-backed execution node for function pod invocations.
 
     Created by ``PipelineJob`` at run time; never recorded inside a plain
@@ -3394,6 +3395,62 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
     # ------------------------------------------------------------------
     # Cache-only helpers (PLT-1156)
     # ------------------------------------------------------------------
+
+    def _stored_provenance(self) -> tuple[pa.Table | None, pa.Table | None]:
+        """Read this node's stored pipeline entries and results with every column.
+
+        The provenance reader (ITL-1432). Unlike ``get_all_records``, nothing is joined
+        and nothing is dropped: the pipeline entries keep their key
+        (``__pipeline_entry_id``), ``__pipeline_base_entry_id``, the recomputation
+        index, ``__node_content_hash`` and ``__computed``; the results keep their key
+        as ``__data_id``, the column the pipeline entries name it by. Only this node's
+        entries are kept (``__node_content_hash``, when the table is shared by the
+        nodes of one pipeline hash), and only rows of the current data context, of
+        both tables. Results are read from the persistent result database and, when
+        one is attached, the ephemeral one. Nothing is computed or written.
+
+        Returns:
+            The pipeline entries and the results, each ``None`` when nothing is
+            stored or no database is attached.
+        """
+        if self._pipeline_database is None or self._cached_function_pod is None:
+            return None, None
+        context_key = self._stored_data_context_key
+        entries = self._pipeline_database.get_all_records(
+            self._versioned_pipeline_path,
+            record_id_column=_PIPELINE_ENTRY_ID_COL,
+        )
+        if entries is not None:
+            entries = keep_rows_of_data_context(entries, context_key)
+            if self._table_scope == "pipeline_hash":
+                own_hash = self.content_hash().to_prefixed_digest()
+                mask = pa.array(
+                    [
+                        value == own_hash
+                        for value in entries.column(
+                            constants.NODE_CONTENT_HASH_COL
+                        ).to_pylist()
+                    ],
+                    pa.bool_(),
+                )
+                entries = entries.filter(mask)
+        found: list[pa.Table] = []
+        for cached_pod in (self._cached_function_pod, self._ephemeral_cached_pod):
+            if cached_pod is None:
+                continue
+            stored = cached_pod.result_database.get_all_records(
+                cached_pod.record_path, record_id_column=constants.DATA_RECORD_ID
+            )
+            if stored is not None:
+                found.append(keep_rows_of_data_context(stored, context_key))
+        results = (
+            None
+            if not found
+            else found[0]
+            if len(found) == 1
+            else pa.concat_tables(found, promote_options="default")
+        )
+        return entries, results
 
     def _fetch_joined_records(
         self,

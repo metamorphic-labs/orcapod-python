@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 import pyarrow as pa
 
 from orcapod import contexts
+from orcapod.core.nodes.provenance_methods import ProvenanceMethods
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
 from orcapod.core.datagrams import Data, Tag
@@ -1547,7 +1548,7 @@ class SourceNode(SourceNodeBase):
         return node
 
 
-class SourceJobNode(SourceNodeBase):
+class SourceJobNode(ProvenanceMethods, SourceNodeBase):
     """Execution-ready source node wrapping an optional concrete stream.
 
     Used inside ``PipelineJob._persistent_node_map``.  The ``_concrete``

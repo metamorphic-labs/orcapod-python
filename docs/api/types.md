@@ -25,3 +25,15 @@ Core type definitions used throughout Orcapod.
 ::: orcapod.types.SourceReading
 
 ::: orcapod.types.Step
+
+::: orcapod.types.Trace
+
+::: orcapod.types.TraceStep
+
+::: orcapod.types.FunctionRun
+
+::: orcapod.types.SourceCell
+
+::: orcapod.types.Absence
+
+::: orcapod.types.Highlight

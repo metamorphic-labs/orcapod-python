@@ -1184,3 +1184,14 @@ class SideEffectLogDataContextError(OrcapodDatabaseError):
             "completions, so on it the node performs every side effect again: use "
             "one only when a repeated delivery is acceptable."
         )
+
+
+class ProvenanceInconsistencyError(ValueError):
+    """What a job holds and what its databases store disagree about a row's provenance.
+
+    Raised by ``node.trace`` and ``node.why_missing`` (ITL-1432) when a link they follow
+    cannot be proven: a group's or batch's members whose system tags do not fold to the
+    group's folded values, a row with no stored pipeline entry while the node has a
+    database, or a stored entry whose input is not the row the node holds. The tools never
+    guess a link; the message names the node and what disagreed.
+    """
