@@ -29,6 +29,8 @@ class NoOpArrowDatabase:
     node.
     """
 
+    stores_records = False
+
     def __init__(
         self,
         _path_prefix: tuple[str, ...] = (),

@@ -29,7 +29,10 @@ from orcapod.logical_types.database_hooks import register_discovered_logical_typ
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 
 if TYPE_CHECKING:
+    from contextlib import AbstractContextManager
+
     import pyarrow as pa
+    from orcapod.databases._pending_commits import PendingCommit
     from orcapod.logical_types.protocols import TypeConverterProtocol
 
 
@@ -210,6 +213,37 @@ class ExtensionAwareDatabase:
             AttributeError: If the wrapped database has none (see ``batch_size``).
         """
         return getattr(self._db, "flush_batch")  # noqa: B009  # AttributeError when absent, by design
+
+    @property
+    def pending_result(
+        self,
+    ) -> Callable[[tuple[str, ...], bytes], PendingCommit | None]:
+        """The wrapped database's commit dependency lookup, if supported."""
+        return getattr(self._db, "pending_result")  # noqa: B009  # optional capability
+
+    @property
+    def fail_pending_result(self) -> Callable[[tuple[str, ...]], None]:
+        """The wrapped database's failure registration, if supported."""
+        return getattr(self._db, "fail_pending_result")  # noqa: B009  # optional capability
+
+    @property
+    def guard_record(
+        self,
+    ) -> Callable[
+        [tuple[str, ...], bytes, PendingCommit], AbstractContextManager[None]
+    ]:
+        """The wrapped database's guarded enqueue operation, if supported."""
+        return getattr(self._db, "guard_record")  # noqa: B009  # optional capability
+
+    @property
+    def stores_records(self) -> bool:
+        """Whether records are retained by the wrapped database."""
+        return getattr(self._db, "stores_records", True)
+
+    @property
+    def storage_location(self) -> str:
+        """The wrapped database's storage location, if it names one."""
+        return getattr(self._db, "storage_location")  # noqa: B009  # optional capability
 
     @property
     def require_storable(self) -> Callable[[pa.Schema], None]:
