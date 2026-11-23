@@ -22,7 +22,7 @@ import numpy as np
 import pyarrow as pa
 import pytest
 
-from orcapod import File, PipelineJob, function_pod
+from orcapod import Directory, File, PipelineJob, function_pod
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.nodes import function_node as function_node_module
 from orcapod.core.nodes.function_node import FunctionJobNode
@@ -505,22 +505,50 @@ def _read_and_change(x: int, f: File, ctx: InvocationContext) -> int:
     return before
 
 
-def test_a_file_is_hashed_once_per_row(tmp_path: Path) -> None:
-    """A ``File`` both rows reference changes while the first row is processed: the
-    second row's entry id, stored input data hash and pipeline record id all use the
-    digest of the file when the run prepared its rows, as ``main`` computed it once."""
-    path = tmp_path / "input.txt"
-    _ = path.write_text("old")
+@function_pod(output_keys="y", ctx_arg="ctx")
+def _list_and_add(x: int, d: Directory, ctx: InvocationContext) -> int:
+    path = Path(str(d))
+    before = len(list(path.iterdir()))
+    if x == 1:
+        _ = (path / "added.txt").write_text("new")
+    return before
+
+
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_a_content_hashed_value_is_hashed_once_per_row(
+    tmp_path: Path, kind: str
+) -> None:
+    """A value hashed by its content (a ``File``, a ``Directory``) that both rows
+    reference changes while the first row is processed: the second row's entry id,
+    stored input data hash and pipeline record id all use the digest of the value
+    when the run prepared its rows, as ``main`` computed it once per row."""
+    if kind == "file":
+        target = tmp_path / "input.txt"
+        _ = target.write_text("old")
+        value: Any = File(target)
+        pod: Any = _read_and_change
+        field = "f"
+    else:
+        target = tmp_path / "folder"
+        target.mkdir()
+        _ = (target / "first.txt").write_text("old")
+        value = Directory(target)
+        pod = _list_and_add
+        field = "d"
     source = DictSource(
-        [{"x": 1, "f": File(path)}, {"x": 2, "f": File(path)}], source_id="fixture"
+        [{"x": 1, field: value}, {"x": 2, field: value}], source_id="fixture"
     )
     expected = [
         data.content_hash().to_prefixed_digest() for _, data in source.iter_data()
     ]
+    entry_ids = sorted(
+        _node_for(pod, source).compute_base_entry_id(tag, data)
+        for tag, data in source.iter_data()
+    )
     database = InMemoryArrowDatabase()
-    job = PipelineJob(name="file_timing", database=database)
+    job = PipelineJob(name="content_timing", database=database)
     with job:
-        _read_and_change.pod(source, label="read")
+        pod.pod(source, label="read")
     job.run()
     node: Any = job.nodes["read"]
     joined = node._fetch_joined_records()  # pyright: ignore[reportPrivateUsage]  # the stored digests
@@ -530,10 +558,11 @@ def test_a_file_is_hashed_once_per_row(tmp_path: Path) -> None:
     )
     stored = joined.table.sort_by(record_id)  # row_0, row_1: the source's order
     assert stored["__input_data_hash"].to_pylist() == expected
-    tags_and_data = list(source.iter_data())
-    assert sorted(stored["__pipeline_base_entry_id"].to_pylist()) == sorted(
-        node.compute_base_entry_id(tag, data) for tag, data in tags_and_data
-    )
+    assert sorted(stored["__pipeline_base_entry_id"].to_pylist()) == entry_ids
+
+
+def _node_for(pod: Any, source: Any) -> FunctionJobNode:
+    return FunctionJobNode(pod.pod, source, pipeline_database=InMemoryArrowDatabase())
 
 
 def test_the_async_cache_only_path_keeps_no_old_rows() -> None:
@@ -577,3 +606,145 @@ def test_the_async_cache_only_path_keeps_no_old_rows() -> None:
         assert all(ref() is None for ref in earlier)
         earlier.append(weakref.ref(rows[0][1]))
         del rows
+
+
+# ── the classes the review findings name (developer, 2026-11-22: every finding
+# has a test; where it names a class, the test covers the class) ───────────────
+
+_EXT = {b"ARROW:extension:name": b"file", b"ARROW:extension:metadata": b""}
+
+# (id, Arrow type, values, field nullable, field metadata, slice path admitted)
+SYSTEM_TAG_KINDS: list[tuple[str, Any, list[Any], bool, Any, bool]] = [
+    ("large_string", pa.large_string(), ["a", "b"], False, None, True),
+    ("int8", pa.int8(), [1, 2], False, None, False),
+    ("int16", pa.int16(), [1, 2], False, None, False),
+    ("int32", pa.int32(), [1, 2], False, None, False),
+    ("int64", pa.int64(), [1, 2], False, None, False),
+    ("uint32", pa.uint32(), [1, 2], False, None, False),
+    ("float64", pa.float64(), [1.5, 2.5], False, None, False),
+    ("bool", pa.bool_(), [True, False], False, None, False),
+    # a stream normalizes ``string`` to ``large_string`` when it is built
+    ("string", pa.string(), ["a", "b"], False, None, True),
+    ("nullable_field", pa.large_string(), ["a", "b"], True, None, False),
+    ("nullable_with_null", pa.large_string(), ["a", None], True, None, False),
+    ("non_null_field_with_null", pa.large_string(), ["a", None], False, None, False),
+    ("extension_metadata", pa.large_string(), ["a", "b"], False, _EXT, False),
+    ("other_metadata", pa.large_string(), ["a", "b"], False, {b"k": b"v"}, False),
+]
+
+
+def _system_tag_stream(kind: tuple[str, Any, list[Any], bool, Any, bool]) -> Any:
+    _, arrow_type, values, nullable, metadata, _ = kind
+    schema = pa.schema(
+        [
+            pa.field("k", pa.large_string()),
+            pa.field("d1", pa.int64()),
+            pa.field("_tag_extra", arrow_type, nullable=nullable, metadata=metadata),
+        ]
+    )
+    table = pa.Table.from_arrays(
+        [
+            pa.array(["a", "b"], pa.large_string()),
+            pa.array([1, 2]),
+            pa.array(values, arrow_type),
+        ],
+        schema=schema,
+    )
+    return ArrowTableStream(table, tag_columns=["k"])
+
+
+def _admitted(stream: Any) -> bool:
+    return function_node_module._reads_as_a_table_stream(  # pyright: ignore[reportPrivateUsage]  # the precondition
+        stream
+    ) and function_node_module._slices_are_rows(  # pyright: ignore[reportPrivateUsage]
+        stream.as_table(columns={"system_tags": True})
+    )
+
+
+def _edge_outcome(stream: Any) -> Any:
+    """The side-effect pass-through edge, against ``main``'s row build of its rows."""
+    from orcapod.core.operators.static_output_pod import at_edge
+    from orcapod.side_effects import (
+        SideEffectJobNode,
+        SideEffectPodConfig,
+        side_effect_pod,
+    )
+
+    pod: Any = side_effect_pod(
+        _delivered, config=SideEffectPodConfig(track_completion=False)
+    )
+    node = SideEffectJobNode(pod, stream)
+
+    def table_of(edge: Any) -> Any:
+        table = edge.as_table(columns={"system_tags": True, "source": True})
+        return (str(table.schema), table.to_pylist())
+
+    edge = _outcome(lambda: table_of(at_edge(node.execute(stream, load_only=True))))
+    rows = list(stream.iter_data())
+    oracle = _outcome(
+        lambda: table_of(
+            StaticOutputOperatorPod._materialize_upstream(rows, node)  # pyright: ignore[reportPrivateUsage]  # main's row build
+        )
+    )
+    return edge, oracle
+
+
+@pytest.mark.parametrize("kind", SYSTEM_TAG_KINDS, ids=[k[0] for k in SYSTEM_TAG_KINDS])
+def test_system_tag_kinds_take_main_s_path(kind: Any) -> None:
+    """Every kind of system-tag column: only non-null ``large_string`` without field
+    metadata and holding no null takes the slice path; every kind gives ``main``'s
+    entry ids, and a side-effect edge gives ``main``'s row build (or its error)."""
+    stream = _system_tag_stream(kind)
+    assert _admitted(stream) is kind[5]
+    _assert_one_definition(stream)
+    edge, oracle = _edge_outcome(stream)
+    assert edge == oracle
+
+
+# (id, Arrow type, values, slice path admitted)
+DATA_KINDS: list[tuple[str, Any, list[Any], bool]] = [
+    ("large_string", pa.large_string(), ["a", "b"], True),
+    ("string", pa.string(), ["a", "b"], True),  # normalized when the stream is built
+    ("null", pa.null(), [None, None], False),
+    ("list_of_null", pa.large_list(pa.null()), [[None], []], False),
+    ("struct_of_null", pa.struct([pa.field("n", pa.null())]), [{"n": None}] * 2, False),
+]
+
+
+@pytest.mark.parametrize("kind", DATA_KINDS, ids=[k[0] for k in DATA_KINDS])
+def test_data_kinds_a_datagram_retypes_take_the_row_path(kind: Any) -> None:
+    """A data column a datagram normalizes to another type (``null`` at any depth) is
+    not its rows' table: the row path, ``main``'s ids."""
+    _, arrow_type, values, admitted = kind
+    table = pa.table({"k": [1, 2], "v": pa.array(values, arrow_type)})
+    stream = ArrowTableStream(table, tag_columns=["k"])
+    assert _admitted(stream) is admitted
+    _assert_one_definition(stream)
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [{"__a": [1, 2]}, {"__a": ["x", "y"]}, {"__a": [1, 2], "__b": ["x", "y"]}],
+    ids=["one_int", "one_string", "two"],
+)
+def test_meta_columns_take_the_row_path(meta: dict[str, list[Any]]) -> None:
+    """Any meta (``__``) column, of any type, alone or with others: the row path."""
+    table = pa.table({"k": [1, 2], "d1": [10, 20], **meta})
+    stream = ArrowTableStream(table, tag_columns=["k"])
+    assert not _admitted(stream)
+    _assert_one_definition(stream)
+
+
+@pytest.mark.parametrize("chunks", ["one_per_row", "uneven"])
+def test_chunked_tables_give_the_rows_ids(chunks: str) -> None:
+    """Entry ids from tables of many chunks (rows read batch by batch,
+    ``_one_row_tables``) equal the rows' own."""
+    whole = pa.table({"k": list(range(7)), "d1": [10 * i for i in range(7)]})
+    if chunks == "one_per_row":
+        parts = [whole.slice(i, 1) for i in range(7)]
+    else:
+        parts = [whole.slice(0, 3), whole.slice(3, 1), whole.slice(4, 3)]
+    stream = ArrowTableStream(pa.concat_tables(parts), tag_columns=["k"])
+    assert stream.as_table().column("d1").num_chunks > 1
+    assert _admitted(stream)
+    _assert_one_definition(stream)
