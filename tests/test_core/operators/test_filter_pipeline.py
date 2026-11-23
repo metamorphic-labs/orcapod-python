@@ -190,6 +190,9 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                     "timestamp": pa.array([1, 2, 3, 4, 5, 6], pa.uint64()),
                     "channel": pa.array([0, 1, 0, 1, 0, 1], pa.int16()),
                     "note": ["a", "b", "a", "b", "a", "b"],
+                    "reading": pa.array(
+                        [float("nan"), 1.0, float("nan"), -0.0, 0.0, 2.0], pa.float64()
+                    ),
                 }
             )
         )
@@ -233,3 +236,189 @@ class TestWhereAgainstFilter:
         both = events.where(subject_id="m2").filter(subject_id="m2")
         assert _timestamps(both) == _timestamps(events.filter(subject_id="m2"))
         assert both.pipeline_hash() == events.filter(subject_id="m2").pipeline_hash()
+
+
+# --- Review findings, pinned (developer, 2026-11-22: every finding gets a test) ---------
+
+
+def _limited(limit: int | None = None) -> SpiralDBTableSource:
+    return SpiralDBTableSource(_PROJECT, "event", source_id="events", limit=limit)
+
+
+@pytest.mark.parametrize(
+    "column, value, alone, together",
+    [
+        ("note", "b", [2], [2, 4]),
+        ("channel", 1, [2], [2, 4]),
+        ("subject_id", "m2", [], [4, 5]),
+    ],
+    ids=["string data", "int16 data", "key column"],
+)
+def test_a_limit_counts_the_rows_where_matches(project, column, value, alone, together):
+    """CodeRabbit on PR 498 (sources.md:449, Major) and on PR 493 (spec 465-466): over a
+    source with ``limit=2``, ``where`` plus the same ``filter`` keeps the first two
+    matching rows, the ``filter`` alone only the matches among the first two rows read."""
+    assert _timestamps(_limited(2).filter(**{column: value})) == alone
+    assert _timestamps(
+        _limited(2).where(**{column: value}).filter(**{column: value})
+    ) == (together)
+    assert _timestamps(_limited().filter(**{column: value})) == _timestamps(
+        _limited().where(**{column: value}).filter(**{column: value})
+    )
+
+
+@pytest.mark.parametrize(
+    "restriction, condition, expected",
+    [
+        ({"subject_id": "m1"}, Condition.of(channel=0), [1, 3]),
+        ({"note": "b"}, Condition.of(col("timestamp") >= 4), [4, 6]),
+        ({"subject_id": "m2", "channel": 0}, Condition.of(note="a"), [5]),
+    ],
+    ids=["key restriction", "data restriction", "two restrictions"],
+)
+def test_a_filter_reads_what_the_source_selects(
+    project, restriction, condition, expected
+):
+    """CodeRabbit on PR 498 (sources.md:446): a filter over a restricted source sees only
+    the rows the source's ``where`` selects, and its condition is not pushed into it."""
+    source = _events().where(**restriction)
+    filtered = source.filter(condition)
+    assert _timestamps(filtered) == expected
+    assert source.condition == Condition.of(restriction)  # nothing was pushed
+
+
+@pytest.mark.parametrize(
+    "value, alone, with_where",
+    [
+        (float("nan"), [1, 3], []),
+        (-0.0, [4, 5], [4, 5]),
+        (2.0, [6], [6]),
+    ],
+    ids=["NaN", "signed zero", "ordinary float"],
+)
+def test_where_and_filter_on_a_float_column(project, value, alone, with_where):
+    """CodeRabbit on PR 493 (spec 483, Major) and PR 498 (sources.md:447, operators.md:861):
+    ``filter`` matches floats by Orcapod's rule (NaN equals NaN); ``where`` by the table
+    system's equality (here IEEE: a NaN matches no row), so ``where`` plus ``filter`` can
+    keep fewer rows than the ``filter`` alone, and only for a NaN."""
+    assert _timestamps(_events().filter(reading=value)) == alone
+    assert (
+        _timestamps(_events().where(reading=value).filter(reading=value)) == with_where
+    )
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        (col("subject_id") == "m1") & (col("subject_id") == "m2"),
+        Condition.of(col("channel") == 1, channel=0),
+        Condition.of(col("note").is_in(["a"]), col("note").is_in(["b"])),
+    ],
+    ids=["two key values", "two data values", "disjoint memberships"],
+)
+@pytest.mark.parametrize("restricted", [False, True], ids=["plain", "where-restricted"])
+def test_a_contradiction_over_a_spiral_source_never_raises(
+    project, condition, restricted
+):
+    """CodeRabbit on PR 493 (spec 491, pushdown): a valid filter whose condition holds two
+    values for one column keeps zero rows over a SpiralDB source, restricted or not,
+    and never raises (version 1 pushes nothing)."""
+    source = _events().where(subject_id="m1") if restricted else _events()
+    assert _timestamps(source.filter(condition)) == []
+
+
+@pytest.mark.parametrize("orchestrator", [None, AsyncPipelineOrchestrator])
+def test_a_filter_after_a_where_still_warns_before_an_aggregate(
+    project, tmp_path, orchestrator
+):
+    """CodeRabbit on PR 493 (spec 440): a ``Filter`` does not clear the
+    ``RestrictedAggregationWarning`` of a ``where``-restricted source upstream of it."""
+
+    @function_pod(output_keys="n")
+    def count(channel: list[int | None]) -> int:
+        return len(channel)
+
+    job = PipelineJob(
+        name="restricted", database=DeltaTableDatabase(tmp_path / "store")
+    )
+    with job:
+        grouped = (
+            SpiralDBTableSource(
+                _PROJECT, "event", source_id="events", tag_only_columns=True
+            )
+            .where(note="b")
+            .filter(col("channel") >= 0)
+            .select_data_columns(["channel"])
+            .group_by(["subject_id"], label="by_subject")
+        )
+        count.pod(grouped, label="count")
+    with pytest.warns(RestrictedAggregationWarning):
+        job.run(orchestrator=orchestrator() if orchestrator else None)
+
+
+def _narrow(arrow_type: pa.DataType, values: list[object]) -> ArrowTableSource:
+    return ArrowTableSource(
+        pa.table(
+            {"k": pa.array([1, 2], pa.int64()), "x": pa.array(values, arrow_type)}
+        ),
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="narrow",
+    )
+
+
+_UNFIT = [
+    (pa.int8(), [1, 2], 300),
+    (pa.uint32(), [1, 2], -1),
+    (
+        pa.timestamp("us", tz="UTC"),
+        [dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)] * 2,
+        dt.datetime(2026, 1, 1),
+    ),
+    (
+        pa.timestamp("s"),
+        [dt.datetime(2026, 1, 1)] * 2,
+        dt.datetime(2026, 1, 1, 0, 0, 0, 1),
+    ),
+]
+_UNFIT_IDS = ["int8 range", "uint32 sign", "naive on zoned", "below the unit"]
+
+
+@pytest.mark.parametrize("arrow_type, values, literal", _UNFIT, ids=_UNFIT_IDS)
+class TestArrowChecksRunWhenApplied:
+    """CodeRabbit on PR 493 (spec 259): the Arrow-level checks (range, sign, zone, unit)
+    run when the filter meets its input, the same in a job and outside one."""
+
+    def test_outside_a_job(self, arrow_type, values, literal):
+        from orcapod.errors import InputValidationError
+
+        filtered = _narrow(arrow_type, values).filter(x=literal)  # builds
+        with pytest.raises(InputValidationError, match="'x'"):
+            filtered.as_table()
+
+    def test_in_a_job(self, tmp_path, arrow_type, values, literal):
+        from orcapod.errors import InputValidationError
+
+        job = PipelineJob(name="unfit", database=DeltaTableDatabase(tmp_path / "store"))
+        with job:
+            _narrow(arrow_type, values).filter(x=literal, label="unfit")  # builds
+        with pytest.raises(InputValidationError, match="'x'"):
+            job.run()
+
+
+@pytest.mark.parametrize("value", ["x", "y"])
+def test_a_column_named_label(value):
+    """CodeRabbit on PR 498 (sources.md:425): ``label=`` is the step's label, so a column
+    named ``label`` is filtered through a mapping or ``col``."""
+    source = ArrowTableSource(
+        pa.table({"k": [1, 2], "label": ["x", "y"], "v": [1.0, 2.0]}),
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="labelled",
+    )
+    by_mapping = source.filter({"label": value})
+    by_col = source.filter(col("label") == value)
+    assert by_mapping.as_table()["label"].to_pylist() == [value]
+    assert by_mapping.pipeline_hash() == by_col.pipeline_hash()
+    with pytest.raises(ValueError, match="at least one"):
+        source.filter(label=value)
