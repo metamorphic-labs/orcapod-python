@@ -228,7 +228,19 @@ class RootSource(StreamBase):
 
         Returns:
             The saved name, or ``None`` when the source was saved with its default.
+
+        Raises:
+            ValueError: If the config holds a ``source_id`` but no ``source_name``: it
+                was saved before source ids named their kind (ITL-1425) and is not read
+                as anything else.
         """
+        if "source_id" in config and "source_name" not in config:
+            raise ValueError(
+                f"the saved {cls.SOURCE_KIND} source config holds a source_id but no "
+                "source_name: it was saved before every source id named its kind and "
+                "implementation version (ITL-1425); build the source again and save "
+                "the job again"
+            )
         saved_version = config.get("source_version")
         if saved_version is not None and saved_version != cls.SOURCE_VERSION:
             warnings.warn(
