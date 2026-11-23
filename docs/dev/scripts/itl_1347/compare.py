@@ -128,17 +128,22 @@ def _without(table: pa.Table, volatile: set[str]) -> pa.Table:
     return table.drop_columns([c for c in table.column_names if c in volatile])
 
 
-def _rows_as_multiset(table: pa.Table) -> list[str]:
-    """The rows as a sorted list of their serialized values, duplicates kept.
+def _rows_as_multiset(table: pa.Table) -> list[bytes]:
+    """The rows as a sorted list of their raw Arrow values, duplicates kept.
 
-    Floats are taken by their bits (``_bitwise``), so NaN payloads stay distinct.
+    Each row is taken alone, its columns in name order and through ``_bits`` (so
+    NaN payloads and ``-0.0`` stay distinct), and written in the Arrow IPC format:
+    two rows are equal exactly when their Arrow values are. Never Python objects,
+    which lose what Arrow holds (``time64[ns]`` 1 and 2 become one microsecond
+    ``time``; CodeRabbit on PR #510).
     """
     table = _bitwise(table)
     names = sorted(table.column_names)
-    return sorted(
-        json.dumps([repr(row[n]) for n in names])
-        for row in table.select(names).to_pylist()
-    )
+    keys: list[bytes] = []
+    for batch in table.select(names).to_batches():
+        for index in range(batch.num_rows):
+            keys.append(batch.take(pa.array([index])).serialize().to_pybytes())
+    return sorted(keys)
 
 
 def compare(

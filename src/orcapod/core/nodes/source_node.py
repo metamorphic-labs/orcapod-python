@@ -491,10 +491,14 @@ class _ExecuteOutputFeed:
 
     @property
     def opened_on(self) -> StreamProtocol | None:
-        """The node's output stream, read on this first access (a conversion's first
-        read): a channel not read yet gives it as it is when it is a complete output
-        in the row-built form."""
-        return self._output_feed().opened_on
+        """The node's output stream once the channel's first read made it, else
+        ``None``.
+
+        Inspecting it never runs the node or takes its binding: the first read does
+        (``open_channel``'s guarantee). An unread source-node channel so answers
+        ``None``, and a conversion (``to_stream``) reads it like any other.
+        """
+        return self._feed.opened_on if self._feed is not None else None
 
 
 def _closed_feed(node: SourceNodeBase) -> CompleteStreamFeed:
@@ -1881,17 +1885,18 @@ class SourceJobNode(SourceNodeBase):
         Raises:
             UnboundSourceError: When no concrete source is attached.
         """
+        if not reads_as_its_class(self, SourceJobNode):
+            # A subclass, or a node with a member replaced on the instance, may read
+            # its rows its own way (an ``iter_data`` that filters, or rows of its own
+            # without a bound source): its rows, as main iterated them (ITL-1347, the
+            # one rule).
+            return None
         if self._bound_source is None:
             raise UnboundSourceError(
                 f"SourceJobNode '{self._name}' has no concrete source bound. "
                 "Call job.bind(sources={'<name>': source}) before running."
             )
         if self._declared_form is not None:
-            return None
-        if not reads_as_its_class(self, SourceJobNode):
-            # A subclass, or a node with a member replaced on the instance, may read
-            # its rows its own way (an ``iter_data`` that filters): its rows, as main
-            # iterated them (ITL-1347, the one rule).
             return None
         if (
             not table_is_rows(self._bound_source)

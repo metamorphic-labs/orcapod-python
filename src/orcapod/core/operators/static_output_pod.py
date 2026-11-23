@@ -518,8 +518,6 @@ class StaticOutputOperatorPod(TraceableBase):
         Returns:
             The same arrays under the new field flags, with no schema metadata.
         """
-        from orcapod.system_constants import constants
-
         prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
         fields = [
             field.with_nullable(table.column(i).null_count > 0)
@@ -557,7 +555,6 @@ class StaticOutputOperatorPod(TraceableBase):
                 the rows (``_rows_to_table``), which raises the error a table built from
                 rows raises.
         """
-        from orcapod.system_constants import constants
         from orcapod.utils import arrow_utils
 
         columns = list(table.columns)

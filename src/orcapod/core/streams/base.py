@@ -534,6 +534,7 @@ class CompleteStreamFeed:
         """
         self._stream = stream
         self._batches: deque[pa.RecordBatch] | None = None
+        self._failure: BaseException | None = None
 
     async def next(self) -> pa.RecordBatch | None:
         """Return the stream's next record batch, or ``None`` at the end.
@@ -541,19 +542,47 @@ class CompleteStreamFeed:
         The stream's table is read on the first call, not when the channel is opened;
         batches with no rows are skipped.
         """
+        if self._failure is not None:
+            # The stream was read once and preparing its batches failed: the same
+            # error again, never a second read of the stream.
+            raise self._failure
         if self._batches is None:
-            # The table first: reading it is the stream's one read (an unpolled
-            # source polls here), and its keys are then known without another.
-            table = self._stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
-            # The rows' keys: a source whose keys() states its declared order has
-            # rows in its table's order (``keys_of_rows``).
-            table = row_built_columns(table, keys_of_rows(table, self._stream.keys()))
-            self._batches = deque(
-                batch
-                for batch in table.to_batches(max_chunksize=SOURCE_BATCH_ROWS)
-                if batch.num_rows
-            )
+            try:
+                self._batches = deque(
+                    batch
+                    for batch in self._row_built_table().to_batches(
+                        max_chunksize=SOURCE_BATCH_ROWS
+                    )
+                    if batch.num_rows
+                )
+            except BaseException as failure:
+                self._failure = failure
+                raise
         return self._batches.popleft() if self._batches else None
+
+    def _row_built_table(self) -> pa.Table:
+        """The stream's table in the row-built form: its one read.
+
+        The table first: reading it is the stream's one read (an unpolled source polls
+        here), and its keys are then known without another. Its system tags must be
+        what rows give (``system_tags_as_rows_give``: non-null text, no field
+        metadata); otherwise, as on the eager routes of a job, the table is the one
+        its rows build (``main``'s row path), so a narrow or nullable system tag is
+        retyped as a row retypes it. Only a stream that holds such a column (a raw
+        ``ArrowTableStream``) is read that way, and its reads have no effect.
+        """
+        table = self._stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+        if not system_tags_as_rows_give(table):
+            from orcapod.core.operators.static_output_pod import (
+                StaticOutputOperatorPod,
+            )
+
+            rows = list(self._stream.iter_data())
+            built = StaticOutputOperatorPod._materialize_upstream(rows, self._stream)  # pyright: ignore[reportPrivateUsage]  # main's row path
+            table = built.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+        # The rows' keys: a source whose keys() states its declared order has rows in
+        # its table's order (``keys_of_rows``).
+        return row_built_columns(table, keys_of_rows(table, self._stream.keys()))
 
     def close(self) -> None:
         """Stop reading: the batches not read are dropped."""
