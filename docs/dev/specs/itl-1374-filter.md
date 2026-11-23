@@ -1,10 +1,7 @@
 # ITL-1374: `Filter`, a general row filter that is part of the pipeline
 
-Status: approved: decisions 2-13, developer, 2026-11-22; 1 and 15 pending (built as
-recommended; the operator is provisional, so the form can still change).
-Related: ITL-1265 (a `Filter` over a `Condition`, the earlier issue this one realizes),
-ITL-1218 / ITL-1219 (source restrictions), ITL-1266 (provisional operators), ITL-1251
-(floats: `0.0 == -0.0`, NaN equals NaN), ITL-1373 (exploring a dataset; findings fold in here).
+Status: approved: decisions 1 to 13 and 15, developer, 2026-11-22 (1 and 15 confirmed as
+built the same day).
 
 **Changed in revision 2 (2026-11-22), folding in findings F07-F13:**
 
@@ -215,13 +212,27 @@ Checked when the condition is built (`TypeError` / `ValueError`, as `Condition.o
 - `is_in` with no value, or with `None` among them: `ValueError`;
 - `between(lo, hi)` with `lo` and `hi` of different types, or `lo > hi`: `TypeError` /
   `ValueError`;
-- a column named twice with different values in keywords and mapping: `ValueError` (as now);
+- one column named twice with different values within one call (a mapping and a keyword,
+  or two mappings: `filter({"x": 1}, x=5)`): `ValueError` saying the column is named twice
+  in one call, as `where` does. That is an error in the arguments, not a contradiction;
+- a contradiction between conditions is NOT refused (developer, 2026-11-22: "how is it
+  that you could figure out if the condition is contradictory? If there is no
+  straightforward way to achieve, then the contradictory case should just be taken as is
+  and result in 0 rows."). There is no general way to tell one (`x == 1` with `x > 5`,
+  disjoint memberships, empty ranges, null tests), so `(col("x") == 1) & (col("x") == 5)`,
+  the same in several positional conditions, and the same in a saved tree, build and load
+  as written, keep both terms in their canonical form, and a filter over them keeps zero
+  rows. Equal duplicate terms still collapse (`a & a` is `a`). A source's `where` still
+  refuses two equalities on one column: such a condition is not equalities only, and a
+  restriction reads one value per column;
 - `filter()` with no condition: `ValueError` (a filter that keeps everything is not a step);
 - a list, NumPy array, Polars series or `bool` given as a positional condition (a mask by
   position, F04): `TypeError`;
 - a Polars or Arrow expression given as a condition: `TypeError`, pointing to `col(...)` and
   to `polars_filter` (until stretch 1 translates them);
 - an aggregate or anything that reads other rows: not expressible (`col` has no such method).
+- Python's `and` between two conditions cannot be refused (a condition that requires
+  something is true, so `a and b` is `b`): combine with `&`.
 - a column reference used as a truth value (`col("t") and col("u")`): `TypeError`,
   pointing to `&` (Polars does the same). Implementation note (piece A): a `Condition`'s
   own truth value stays "requires anything" (`Condition()` is false), as `where` and
@@ -602,7 +613,7 @@ the tree from piece A.
 
 ## 10. Decisions for the developer
 
-1. **Spelling.** Keywords and mapping for equality (as `where`), `col(...)` condition objects
+1. **Spelling.** CONFIRMED as built (developer, 2026-11-22). Keywords and mapping for equality (as `where`), `col(...)` condition objects
    for everything else. Alternative: keyword helpers (`t=ge(5)`), which cannot say OR.
 2. **Name of the column reference.** `orcapod.col`, mirroring `pl.col`. Alternative:
    `orcapod.column` or `C`, to avoid confusion with Polars in one notebook (passing a
@@ -646,7 +657,7 @@ the tree from piece A.
     `run()` or `where` on the source to look).
 14. **`PolarsFilter` positional masks** (F04): file a bug; refuse a positional mask inside
     a job (or everywhere). `Filter` never takes one.
-15. **Literals** (F11, section 2.6). A literal must be of the column's Python kind and is
+15. **Literals** (F11, section 2.6). CONFIRMED as built (developer, 2026-11-22). A literal must be of the column's Python kind and is
     accepted when the column's Arrow type holds it exactly (`7` against `uint32`), a float
     rounded to a `float32` column as `where` does; the identity holds the literal as
     written. Alternative: refuse a literal unless it is of the column's exact Arrow width
