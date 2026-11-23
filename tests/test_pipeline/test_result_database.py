@@ -611,6 +611,40 @@ class TestUnavailableSavedResultDatabase:
         with pytest.raises(RuntimeError):
             _ = reloaded.nodes["out"].as_source()
 
+    @pytest.mark.parametrize("candidate", ["original", "connector", "fresh_in_memory"])
+    def test_binding_a_replacement_is_checked_as_the_candidate(
+        self,
+        saved: tuple[pathlib.Path, ArrowDatabaseProtocol],
+        candidate: str,
+    ) -> None:
+        """CodeRabbit (PR 507): a bind is validated against what it binds.
+
+        The only job whose result database can be unavailable is a loaded one; its
+        function nodes carry no function and store nothing, so no candidate is
+        refused for them. Any candidate is bound, the unavailable binding is gone,
+        and reads go through the candidate.
+        """
+        from orcapod.databases import ConnectorArrowDatabase, SQLiteConnector
+
+        path, results = saved
+        replacement: ArrowDatabaseProtocol = {
+            "original": lambda: results,
+            "connector": lambda: ConnectorArrowDatabase(SQLiteConnector(":memory:")),
+            "fresh_in_memory": InMemoryArrowDatabase,
+        }[candidate]()
+        loaded = PipelineJob.load(path)
+        loaded.bind(result_database=replacement)
+        assert loaded.result_database is replacement
+        records = loaded.nodes["out"].get_all_records()
+        values = [] if records is None else records.column("doubled").to_pylist()
+        expected = [2.0, 4.0] if candidate == "original" else []
+        assert sorted(values) == expected
+        again = path.with_name("rebound.json")
+        loaded.save(again)
+        assert json.loads(again.read_text())["bindings"]["result_database"] == (
+            replacement.to_config()
+        )
+
 
 class TestClearingTheResultDatabase:
     """M4: ``bind(result_database=None)`` puts the results back in the job's database."""

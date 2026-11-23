@@ -612,8 +612,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         pipeline_db, result_db = self._database_views(database, result_database)
         for node in (self._persistent_node_map or {}).values():
             if isinstance(node, FunctionJobNode):
-                if self._unresolved_result_database is None:
-                    node.require_storable_tables(pipeline_db, result_db)
+                # Checked against the candidate databases only, never the job's
+                # current binding state: a loaded job (the only one whose result
+                # database can be unavailable) has function nodes without a function,
+                # which this check skips by itself.
+                node.require_storable_tables(pipeline_db, result_db)
             elif isinstance(node, OperatorJobNode):
                 node.require_storable_tables(pipeline_db, node.cache_mode)
             elif isinstance(node, SideEffectJobNode):
