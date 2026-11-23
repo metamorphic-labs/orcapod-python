@@ -1160,3 +1160,114 @@ def test_a_saved_comparison_holds_one_operand(operator, value):
     }
     with pytest.raises(ValueError, match="one operand"):
         Condition.from_config(saved)
+
+
+def _same_everywhere(a: Condition, b: Condition) -> None:
+    """Equal conditions agree in every form: equality, hash, canonical form and text,
+    the saved config (as JSON), and the condition the saved config loads as."""
+    assert a == b
+    assert hash(a) == hash(b)
+    assert a.canonical_form() == b.canonical_form()
+    assert a.canonical_text() == b.canonical_text()
+    saved_a = json.dumps(a.to_config(), sort_keys=True)
+    assert saved_a == json.dumps(b.to_config(), sort_keys=True)
+    reloaded = Condition.from_config(json.loads(saved_a))
+    assert reloaded == a
+    assert json.dumps(reloaded.to_config(), sort_keys=True) == saved_a
+
+
+class TestCodeRabbitBodiesOfPr497:
+    """CodeRabbit's review bodies on PR 497 (a72f9187): items outside the diff."""
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda z: col("x") == z,
+            lambda z: col("x") >= z,
+            lambda z: col("x") < z,
+            lambda z: col("x") != z,
+            lambda z: col("x").is_in([z, 1.0]),
+            lambda z: (col("x") == z) & (col("y") > 1),
+            lambda z: ~(col("x") <= z),
+            lambda z: Condition.of(x=z),
+        ],
+        ids=["eq", "ge", "lt", "ne", "is_in", "tree_eq", "not", "mapping"],
+    )
+    def test_signed_zero_is_saved_as_zero(self, build):
+        _same_everywhere(build(-0.0), build(0.0))
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda z: (col("x") >= z) & (col("x") >= -z),
+            lambda z: (col("x") == z) | (col("x") == -z),
+        ],
+        ids=["and", "or"],
+    )
+    def test_signed_zero_in_either_operand_order(self, build):
+        _same_everywhere(build(-0.0), build(0.0))
+
+    @pytest.mark.parametrize(
+        ("first", "second"),
+        [
+            (
+                dt.datetime(1, 1, 1, 0, 0, tzinfo=dt.timezone(dt.timedelta(hours=1))),
+                dt.datetime(1, 1, 1, 1, 0, tzinfo=dt.timezone(dt.timedelta(hours=2))),
+            ),
+            (
+                dt.datetime(1, 1, 1, 0, 30, tzinfo=dt.timezone(dt.timedelta(hours=5))),
+                dt.datetime(
+                    1,
+                    1,
+                    1,
+                    0,
+                    0,
+                    0,
+                    1,
+                    tzinfo=dt.timezone(
+                        dt.timedelta(hours=4, minutes=30, microseconds=1)
+                    ),
+                ),
+            ),
+            (
+                dt.datetime(
+                    9999, 12, 31, 23, 0, tzinfo=dt.timezone(-dt.timedelta(hours=1))
+                ),
+                dt.datetime(
+                    9999, 12, 31, 22, 0, tzinfo=dt.timezone(-dt.timedelta(hours=2))
+                ),
+            ),
+        ],
+        ids=["year_1_whole_hours", "year_1_fractional_offset", "year_9999"],
+    )
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda a, b: (col("t") == a, col("t") == b),
+            lambda a, b: (col("t").is_in([a, b]), col("t").is_in([b, a])),
+            lambda a, b: (col("t") >= a, col("t") >= b),
+        ],
+        ids=["equal", "is_in_orders", "order"],
+    )
+    def test_an_instant_outside_utc_range_has_one_representation(
+        self, first, second, build
+    ):
+        _same_everywhere(*build(first, second))
+
+    def test_combining_keeps_the_first_occurrence_and_contradictions(self):
+        wide = Condition.of({f"c{i}": i for i in range(2000)})
+        again = wide & Condition.of({f"c{i}": i for i in range(1000)})
+        assert again == wide
+        assert [t.path.column for t in again.terms()][:3] == ["c0", "c1", "c2"]
+        contradiction = (col("k") == 1) & (col("k") == 2) & (col("k") == 1)
+        assert sorted(repr(t.value) for t in contradiction.terms()) == ["1", "2"]
+
+    def test_a_contradiction_is_not_read_as_equalities(self):
+        contradiction = (col("k") == 1) & (col("k") == 2)
+        assert not contradiction.only_equalities
+        assert "k" in json.dumps(contradiction.to_config())
+        assert ":condition" in contradiction.to_config()
+
+    def test_two_binary_layouts_compare_as_one_type(self):
+        schema = pa.schema([("a", pa.binary()), ("b", pa.large_binary())])
+        check_condition(col("a") == col("b"), schema)

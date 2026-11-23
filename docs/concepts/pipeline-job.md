@@ -429,6 +429,14 @@ database that holds other rows than the file expects) are in
 
 `Pipeline.save(path)` and `Pipeline.load(path)` save and load a blueprint.
 
+The file lists each operator's inputs in the order they were given, so a loaded
+`MergeJoin(left, right)` or `SemiJoin(left, right)` takes `left` first, as the live job did.
+A file saved by an Orcapod older than this rule (before ITL-1417) cannot say which input
+comes first, so loading it raises `ValueError` when it holds an operator over two or more
+inputs that is not known to be commutative (`MergeJoin`, `SemiJoin`, or an operator that
+cannot be rebuilt in this process); build the job from its code and save it again. A file
+whose multi-input operators are all commutative (`Join`, `Rejoin`) loads as before.
+
 ## How it connects to other concepts
 
 - A job records applications of [Function Pods](function-pods.md) and
