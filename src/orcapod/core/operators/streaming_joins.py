@@ -109,7 +109,11 @@ from orcapod.core.operators.semijoin import (
     SemiJoin,
     _has_whole_key,  # pyright: ignore[reportPrivateUsage]  # SemiJoin's one rule
 )
-from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+from orcapod.core.operators.static_output_pod import (
+    RowBuiltFormUnavailable,
+    StaticOutputOperatorPod,
+    tokens_as,
+)
 from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS, row_built_columns
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.system_constants import constants
@@ -574,18 +578,31 @@ class StreamingJoinKernel(ABC):
                 + f"the column(s) {missing} its stream describes"
             )
         table = pa.Table.from_batches([batch]).select(layout.names)
-        for field, actual in zip(layout, table.schema):
-            if field.type != actual.type and (
-                table.num_rows or not pa.types.is_null(actual.type)
-            ):
-                raise ValueError(
-                    f"{type(self).__name__}: column {field.name!r} of input "
-                    + f"{input_index} is {actual.type} in a batch, but "
-                    + f"{field.type} in its stream"
-                )
+        columns = list(table.columns)
+        for index, (field, actual) in enumerate(zip(layout, table.schema)):
+            if field.type == actual.type:
+                continue
+            if not table.num_rows and pa.types.is_null(actual.type):
+                continue
+            if table.num_rows and field.name.startswith(constants.SOURCE_PREFIX):
+                # A batch's token type follows its own tokens and can be shallower
+                # than the layout's (a null or an empty list fixes fewer list
+                # levels): the tokens are converted, every value kept.
+                try:
+                    columns[index] = pa.chunked_array(
+                        [tokens_as(table.column(index).combine_chunks(), field.type)]
+                    )
+                    continue
+                except RowBuiltFormUnavailable:
+                    pass
+            raise ValueError(
+                f"{type(self).__name__}: column {field.name!r} of input "
+                + f"{input_index} is {actual.type} in a batch, but "
+                + f"{field.type} in its stream"
+            )
         if not table.num_rows:
             return layout.empty_table()
-        return pa.Table.from_arrays(table.columns, schema=layout)
+        return pa.Table.from_arrays(columns, schema=layout)
 
     def _emitted(self, tables: list[pa.Table]) -> list[pa.RecordBatch]:
         """The record batches of the output tables, holding ``output_columns``.
@@ -787,6 +804,10 @@ class StreamingMergeJoin(StreamingJoinKernel):
         left, right = inputs
         left_tags, left_data = left.keys()
         right_tags, right_data = right.keys()
+        # The data columns the batches carry: a raw stream lists its meta columns
+        # as data, and no operator carries them (they are not in the layouts).
+        left_data = [n for n in left_data if n in self._layouts[0].names]
+        right_data = [n for n in right_data if n in self._layouts[1].names]
         self._shared_tags = set(left_tags) & set(right_tags)
         merged = Join._merged_data_tags(  # pyright: ignore[reportPrivateUsage]  # Join's one rule
             left_tags, stream_data_tags(left), right_tags, stream_data_tags(right)

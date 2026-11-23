@@ -1,10 +1,12 @@
 """Streaming join kernels give the sync join's rows, whatever the batches and arrivals.
 
-ITL-1362 (ITL-1347, stage 5): ``Join``, ``MergeJoin`` and ``SemiJoin`` run on the async
-path as symmetric hash joins over Arrow record batches (``core/operators/streaming_joins``).
-Row order is not a result on the async path (developer, November 22, 2026), so a kernel
-must give the rows of the operator's sync ``static_process`` over the same inputs as a
-multiset, with the same columns and Arrow types.
+ITL-1362 (ITL-1347, stage 5): the streaming kernels of ``Join``, ``MergeJoin`` and
+``SemiJoin`` (``core/operators/streaming_joins``: symmetric hash joins over Arrow record
+batches) are exercised here directly, through ``push()`` and ``close()``, before they
+are wired into job execution. Row order is not a result on the async path (developer,
+November 22, 2026), so a kernel must give the rows of the operator's sync
+``static_process`` over the same inputs as a multiset, with the same columns and Arrow
+types.
 
 The oracle is the sync operator over its inputs as a job's edges carry them: each input
 rebuilt from its rows (``StaticOutputOperatorPod._materialize_upstream``, the row-built
@@ -228,7 +230,7 @@ def assert_same_rows(
         assert batch.schema.names == list(kernel.output_columns)
         # One schema for every batch of the run; the fields a complete table decides
         # by its values are declared nullable (``_flag_by_values`` settles them).
-        assert batch.schema == batches[0].schema
+        assert batch.schema.equals(batches[0].schema, check_metadata=True)
         for field in batch.schema:
             if field.name.startswith(SETTLED_PREFIXES):
                 assert field.nullable, field.name
@@ -899,10 +901,19 @@ def test_join_releases_the_steps_before_one_that_cannot_emit() -> None:
     # only reach that step, so none is held.
     sources = [make_source(MAIN), make_source(P), make_source(Q)]
     order = sorted(range(3), key=lambda i: sources[i].pipeline_hash().to_hex())
+    # The last input ends first: later arrivals of the others are not kept.
     kernel = StreamingJoin(Join(), sources)
     assert kernel.close(order[2]) == []
     for index in order[:2]:
         kernel.push(index, _sent(sources[index]).combine_chunks().to_batches()[0])
+    assert kernel.held_rows == 0
+    # The others' rows arrive first and are held; the last input then ends with no
+    # row, and every held row is released (CodeRabbit on PR 510).
+    kernel = StreamingJoin(Join(), sources)
+    for index in order[:2]:
+        kernel.push(index, _sent(sources[index]).combine_chunks().to_batches()[0])
+    assert kernel.held_rows > 0
+    assert kernel.close(order[2]) == []
     assert kernel.held_rows == 0
 
 
@@ -1115,3 +1126,127 @@ def test_the_oracle_tells_nested_temporal_values_apart() -> None:
         two = pa.table({"x": pa.array([wrap(2)], arrow_type)})
         assert _rows(one) != _rows(two)
         assert _rows(one) == _rows(pa.table({"x": pa.array([wrap(1)], arrow_type)}))
+
+
+# ---------------------------------------------------------------------------
+# CodeRabbit on PR 510
+# ---------------------------------------------------------------------------
+
+
+def _with_meta(spec: Spec, arrangement: Arrangement) -> ArrowTableStream:
+    """``spec`` in ``arrangement`` as a raw stream over its source's table, with a
+    meta (``__``) column, which a raw stream lists as data."""
+    from orcapod.core.data_tags import stream_data_tags
+
+    source = make_source(spec, arrangement)
+    table = source.as_table(columns={"system_tags": True, "source": True})
+    table = table.append_column(
+        "__note", pa.array([f"n{i}" for i in range(table.num_rows)], pa.large_string())
+    )
+    return ArrowTableStream(
+        table,
+        tag_columns=list(arrangement.tag_order),
+        data_tags=stream_data_tags(source),
+    )
+
+
+def _meta_arrangements() -> list[Any]:
+    from .several_items import arrangements
+
+    params = []
+    for arrangement in arrangements(P):
+        declared = arrangement.tag_order == P.tags
+        q_order = Q.tags if declared else tuple(reversed(Q.tags))
+        paired = Arrangement(q_order, arrangement.layout, arrangement.roles)
+        label = f"{'-'.join(arrangement.tag_order)}:{arrangement.layout}:{arrangement.roles}"
+        params.append(pytest.param(arrangement, paired, id=label))
+    return params
+
+
+@pytest.mark.parametrize(("left", "right"), _meta_arrangements())
+def test_merge_join_over_inputs_with_a_meta_column(
+    left: Arrangement, right: Arrangement
+) -> None:
+    """CodeRabbit on PR 510: a raw stream lists its meta columns as data, and both
+    inputs carry ``__note``; no operator carries a meta column, so it is not a
+    colliding data column (the kernel raised ``KeyError``). Every tag order, layout
+    and role."""
+    inputs = (_with_meta(P, left), _with_meta(Q, right))
+    _check(_merge_kernel, MergeJoin(), inputs, seeds=range(3))
+
+
+def _token_stream(tokens: list[Any], token_type: pa.DataType) -> ArrowTableStream:
+    """Tag ``k``, data ``x``, and ``x``'s source info as the given tokens."""
+    return ArrowTableStream(
+        pa.table(
+            {
+                "k": pa.array([1, 2], pa.int64()),
+                "x": pa.array([10, 20], pa.int64()),
+                "_source_x": pa.array(tokens, token_type),
+            }
+        ),
+        tag_columns=["k"],
+    )
+
+
+DEEP = pa.large_list(pa.large_list(pa.large_string()))
+SHALLOW = pa.large_list(pa.large_string())
+
+
+@pytest.mark.parametrize(
+    ("tokens", "token_type"),
+    [
+        ([None, None], pa.large_string()),
+        ([[], []], SHALLOW),
+        ([[None], []], SHALLOW),
+    ],
+    ids=["all_null", "empty_lists", "null_item_and_empty"],
+)
+@pytest.mark.parametrize(
+    "make_kernel",
+    [_join_kernel, _merge_kernel, _semi_kernel],
+    ids=["join", "merge_join", "semi_join"],
+)
+def test_shallower_source_info_tokens_are_taken_with_every_value(
+    tokens: list[Any],
+    token_type: pa.DataType,
+    make_kernel: Callable[[Sequence[StreamProtocol]], StreamingJoinKernel],
+) -> None:
+    """CodeRabbit on PR 510: a batch's source-info token type follows its own tokens,
+    so nulls and empty lists can give fewer list levels than the input's layout. Such
+    a batch is taken, every token kept; a token the layout cannot hold is refused."""
+    left = _token_stream([[["a"]], [["b"]]], DEEP)
+    right = ArrowTableStream(
+        pa.table(
+            {"k": pa.array([1, 2], pa.int64()), "y": pa.array([5, 6], pa.int64())}
+        ),
+        tag_columns=["k"],
+    )
+    kernel = make_kernel((left, right))
+    # The left input's rows as sent, with the tokens in their own, shallower type.
+    sent = _sent(left).combine_chunks()
+    index = sent.schema.get_field_index("_source_x")
+    batch = sent.set_column(
+        index, pa.field("_source_x", token_type), pa.array(tokens, token_type)
+    ).to_batches()[0]
+    assert batch.schema.field("_source_x").type != DEEP
+    out = kernel.push(0, batch)
+    out += kernel.push(1, _sent(right).combine_chunks().to_batches()[0])
+    out += kernel.close(0) + kernel.close(1)
+    from orcapod.core.operators.static_output_pod import concatenate_batches
+
+    # Emitted batches type their source info by their own tokens; the complete
+    # table settles them (``concatenate_batches``).
+    got = concatenate_batches(out)
+    assert got is not None
+    assert got.num_rows == 2
+    by_key = dict(zip(got.column("k").to_pylist(), got.column("_source_x").to_pylist()))
+    assert by_key == {1: tokens[0], 2: tokens[1]}
+    # A token the layout's type cannot hold is still refused.
+    refused = sent.set_column(
+        index,
+        pa.field("_source_x", pa.large_string()),
+        pa.array(["s::r0::x", "s::r1::x"], pa.large_string()),
+    ).to_batches()[0]
+    with pytest.raises(ValueError, match="_source_x"):
+        make_kernel((left, right)).push(0, refused)

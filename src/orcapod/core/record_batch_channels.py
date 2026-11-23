@@ -411,7 +411,8 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
     The batch must have the description's columns, compared by name (their order is
     not compared: the channel keeps one order of its own), each with exactly
     the description's type in its large variant (no other representation is taken and
-    converted: type strictness), the same nullability and the same field metadata. A
+    converted: type strictness), the same nullability (and no null where the
+    description's field is not nullable) and the same field metadata. A
     ``null`` type of the description (anywhere in a column's type) is carried as
     ``large_string``, as a row's datagram stores it, and only null values are taken
     there. Whether a system-tag or source-info field is nullable is not compared: it
@@ -457,6 +458,10 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
                 f"column {column.name!r} is {flags[column.nullable]}, the stream's is "
                 + flags[expected.nullable]
             )
+        if not expected.nullable and batch.column(index).null_count:
+            # The flag says nothing about the values: a field marked non-nullable
+            # may still hold nulls, which a reader of the stream never expects.
+            return f"column {column.name!r} holds nulls, the stream's is not nullable"
         if (expected.metadata or None) != (column.metadata or None) or not (
             column.type.equals(carried, check_metadata=True)
         ):
@@ -491,6 +496,12 @@ def _without_metadata(kind: pa.DataType) -> pa.DataType:
         return pa.struct(
             [_field_without_metadata(kind.field(i)) for i in range(kind.num_fields)]
         )  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+    if isinstance(kind, pa.MapType):
+        return pa.map_(  # pyright: ignore[reportCallIssue]  # pyarrow takes fields for the key and item; the stubs say types
+            _field_without_metadata(kind.key_field),  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+            _field_without_metadata(kind.item_field),  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+            keys_sorted=kind.keys_sorted,
+        )
     return kind
 
 

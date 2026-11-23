@@ -539,3 +539,132 @@ def test_a_channel_closed_raised_by_a_later_fetch_is_a_read_error(read: str) -> 
                 _ = await channel.to_stream()
 
     asyncio.run(go())
+
+
+# --- CodeRabbit on PR 510 -------------------------------------------------------------
+
+
+def _non_nullable_stream() -> ArrowTableStream:
+    """Tags ``k`` and ``g``, data ``x`` and ``y``, every field non-nullable."""
+    schema = pa.schema(
+        [
+            pa.field("k", pa.int64(), nullable=False),
+            pa.field("g", pa.large_string(), nullable=False),
+            pa.field("x", pa.float64(), nullable=False),
+            pa.field("y", pa.int64(), nullable=False),
+        ]
+    )
+    table = pa.table(
+        {
+            "k": pa.array([1, 2], pa.int64()),
+            "g": pa.array(["a", "b"], pa.large_string()),
+            "x": pa.array([1.5, 2.5], pa.float64()),
+            "y": pa.array([3, 4], pa.int64()),
+        },
+        schema=schema,
+    )
+    return ArrowTableStream(table, tag_columns=["k", "g"])
+
+
+@pytest.mark.parametrize("column", ["k", "g", "x", "y"])
+def test_a_null_in_a_column_declared_non_nullable_is_refused(column: str) -> None:
+    """CodeRabbit on PR 510 (major): the send check compared the nullability flag
+    only, so a batch whose field is also flagged non-nullable but holds a null passed
+    and reached readers of a stream that declares no null there. Tags and data."""
+    stream = _non_nullable_stream()
+    (batch,) = batches_of(stream)
+    assert not stream.arrow_schema().field(column).nullable
+    index = batch.schema.get_field_index(column)
+    values = batch.column(index).to_pylist()
+    values[0] = None
+    nulled = pa.RecordBatch.from_arrays(
+        [
+            *batch.columns[:index],
+            pa.array(values, batch.schema.field(index).type),
+            *batch.columns[index + 1 :],
+        ],
+        schema=batch.schema,  # the field still says non-nullable
+    )
+    assert not nulled.schema.field(column).nullable
+
+    async def write() -> None:
+        output = OutputChannel(stream)
+        with pytest.raises(ValueError, match=f"column '{column}' holds nulls"):
+            await output.send(nulled)
+        await output.send(batch)
+
+    asyncio.run(write())
+
+
+@pytest.mark.parametrize("where", ["key", "item"])
+def test_a_map_typed_system_tag_column_carries_no_nested_metadata(where: str) -> None:
+    """CodeRabbit on PR 510: the provenance check strips field metadata at every depth
+    to compare, and missed the key and item fields of a map: a system-tag column of
+    map type with metadata on its key or item passed. A map-typed source-info column
+    is not a token type at all and is refused."""
+    from orcapod.core.record_batch_channels import _schema_mismatch  # pyright: ignore[reportPrivateUsage]
+
+    plain = pa.map_(pa.large_string(), pa.large_string())
+    key = plain.key_field
+    item = plain.item_field
+    if where == "key":
+        tagged = pa.map_(key.with_metadata({"m": "1"}), item)  # pyright: ignore[reportArgumentType]  # a field for the key
+    else:
+        tagged = pa.map_(key, item.with_metadata({"m": "1"}))  # pyright: ignore[reportArgumentType]  # a field for the item
+    values = [[("a", "b")]]
+    declared = pa.schema([pa.field("k", pa.int64()), pa.field("_tag_m", plain)])
+    good = pa.RecordBatch.from_arrays(
+        [pa.array([1], pa.int64()), pa.array(values, plain)], schema=declared
+    )
+    assert _schema_mismatch(declared, good) is None
+    bad = pa.RecordBatch.from_arrays(
+        [pa.array([1], pa.int64()), pa.array(values, plain).cast(tagged)],
+        names=["k", "_tag_m"],
+    )
+    assert "carries field metadata" in str(_schema_mismatch(declared, bad))
+    source_declared = pa.schema(
+        [pa.field("k", pa.int64()), pa.field("_source_x", plain)]
+    )
+    source_batch = pa.RecordBatch.from_arrays(
+        [pa.array([1], pa.int64()), pa.array(values, plain)], schema=source_declared
+    )
+    assert "not a token type" in str(_schema_mismatch(source_declared, source_batch))
+
+
+@pytest.mark.parametrize("ending", ["returns", "raises", "cancelled"])
+def test_a_reader_whose_task_finishes_between_reads_releases_its_producer(
+    ending: str,
+) -> None:
+    """CodeRabbit on PR 510: a reader belongs to the task that first reads it. When
+    that task finishes between reads (returns, raises or is cancelled) without
+    reaching the end or closing it, the reader is closed, so the producer of a
+    bounded output does not wait for it; another task cannot read it either."""
+    from orcapod.channels import ChannelClosed
+
+    stream = source(3)
+    first, second, third = batches_of(stream, 1)
+
+    async def go() -> None:
+        output = OutputChannel(stream, retain=False, buffer_size=1)
+        reader = output.open_reader()
+        await output.send(first)
+
+        async def consume_one() -> None:
+            _ = await reader.receive()
+            if ending == "raises":
+                raise RuntimeError("the consumer failed")
+            if ending == "cancelled":
+                await asyncio.Event().wait()  # cancelled below
+
+        task = asyncio.ensure_future(consume_one())
+        await output.send(second)  # fills the reader's slot after the first is taken
+        if ending == "cancelled":
+            await asyncio.sleep(0)
+            _ = task.cancel()
+        _ = await asyncio.gather(task, return_exceptions=True)
+        async with asyncio.timeout(TIMEOUT):
+            await output.send(third)  # the reader is gone: nothing waits for it
+        with pytest.raises(ChannelClosed):
+            _ = await reader.receive()
+
+    asyncio.run(go())

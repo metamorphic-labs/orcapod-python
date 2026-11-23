@@ -124,9 +124,14 @@ def R(stream: StreamProtocol) -> pa.Table | None:
 
 
 def _same_value(value: Any, expected: Any) -> bool:
-    """Equality of two Python values of a cell, a NaN equal to a NaN."""
+    """Equality of two Python values of a cell: a NaN equal to a NaN, and ``0.0``
+    and ``-0.0`` told apart (a cell's value is the input's, bit for bit)."""
     if isinstance(value, float) and isinstance(expected, float):
-        return value == expected or (math.isnan(value) and math.isnan(expected))
+        if math.isnan(value) or math.isnan(expected):
+            return math.isnan(value) and math.isnan(expected)
+        if value == 0.0 and expected == 0.0:
+            return math.copysign(1.0, value) == math.copysign(1.0, expected)
+        return value == expected
     if isinstance(value, dict) and isinstance(expected, dict):
         return value.keys() == expected.keys() and all(
             _same_value(value[key], expected[key]) for key in value
@@ -203,11 +208,21 @@ def test_inputs_with_no_rows_give_the_typed_zero_row_result(case: Case) -> None:
     # same Arrow types (``large_list<item: int16>`` predicted ``list[int | None]``, read
     # ``list[int]``), with rows as without them; a stream rebuilt from Arrow reads them.
     assert result.pipeline_hash() == sync.pipeline_hash()
-    # The Arrow types are those of the sync result with no rows, column for column.
-    sync_table = sync.as_table(columns=ALL)
+    # The fields (Arrow types, nullability and metadata) are those of the sync result
+    # with no rows as a job hands it on (its zero-row input, ``_materialize_upstream``
+    # with no row), matched by name: column order is not compared.
+    sync_table = StaticOutputOperatorPod._materialize_upstream([], sync).as_table(  # pyright: ignore[reportPrivateUsage]  # the job's zero-row form
+        columns=ALL
+    )
     assert sorted(table.column_names) == sorted(sync_table.column_names)
-    for name in table.column_names:
-        assert table.schema.field(name).type == sync_table.schema.field(name).type, name
+    assert pa.schema(
+        [table.schema.field(name) for name in sorted(table.column_names)]
+    ).equals(
+        pa.schema(
+            [sync_table.schema.field(name) for name in sorted(sync_table.column_names)]
+        ),
+        check_metadata=True,
+    )
 
 
 def test_every_operator_is_in_the_matrix() -> None:
@@ -329,19 +344,24 @@ def test_batch_sends_each_full_batch_before_the_input_ends() -> None:
         reader = feed.open_reader()
         output = OutputChannel(op(source))
         results = output.open_reader()
-        task = asyncio.ensure_future(op.async_execute_batches([reader], output))
         rows = pa.Table.from_batches(await source.open_channel().collect())
         one_row = _cut(rows, (1,))
-        await feed.send(one_row[0])
-        await feed.send(one_row[1])
-        async with asyncio.timeout(TIMEOUT):
-            first = await results.receive()
-        assert not task.done()
-        await feed.send(one_row[2])
-        await feed.close()
-        async with asyncio.timeout(TIMEOUT):
-            rest = await results.collect()
-        await task
+        task = asyncio.ensure_future(op.async_execute_batches([reader], output))
+        try:
+            # One deadline for the whole sequence: sends, reads and the join.
+            async with asyncio.timeout(TIMEOUT):
+                await feed.send(one_row[0])
+                await feed.send(one_row[1])
+                first = await results.receive()
+                assert not task.done()
+                await feed.send(one_row[2])
+                await feed.close()
+                rest = await results.collect()
+                await task
+        finally:
+            if not task.done():
+                _ = task.cancel()
+            _ = await asyncio.gather(task, return_exceptions=True)
         return first.num_rows, sum(batch.num_rows for batch in rest)
 
     assert asyncio.run(go()) == (1, 1)
@@ -685,23 +705,38 @@ def test_a_failing_close_of_the_output_fails_it() -> None:
 
 def test_every_input_is_closed_when_one_close_fails() -> None:
     """A barrier operator over two inputs whose first close raises: the second input
-    is still closed, and the close error is raised once both are closed."""
+    is still closed (exactly once), the close error is raised once both are closed,
+    and the output fails with it: its inputs are closed before the output, so a
+    failing close never leaves a reader with a normal end (CodeRabbit on PR 510)."""
     left, right = source_a(), source_a()
     op = operators.SemiJoin()
 
     async def go() -> None:
         first, second = left.open_channel(), right.open_channel()
+        second_close = second.close
+        closes: list[None] = []
 
         async def failing_close() -> None:
             raise OSError("cannot close")
 
+        async def counted_close() -> None:
+            closes.append(None)
+            await second_close()
+
         first.close = failing_close  # a failing input
+        second.close = counted_close
         output = OutputChannel(op(left, right))
+        results = output.open_reader()
         with pytest.raises(OSError, match="cannot close"):
             await op.async_execute_batches([first, second], output)
+        assert len(closes) == 1  # the second input was closed, once
         with pytest.raises(ChannelClosed):
             _ = await second.receive()  # closed
-        assert output.result().as_table().num_rows > 0  # the output completed first
+        with pytest.raises(UpstreamFailedError, match="cannot close"):
+            async with asyncio.timeout(TIMEOUT):
+                _ = await results.collect()  # the output failed, not completed
+        with pytest.raises(RuntimeError, match="no result"):
+            _ = output.result()
 
     asyncio.run(go())
 
