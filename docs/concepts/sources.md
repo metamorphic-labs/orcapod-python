@@ -699,7 +699,10 @@ forms: its identity may change in a later release.
 [`PipelineJob`](function-pods.md#pipelinejob-database-backed-cached-execution) that has run
 and presents them as a new source. You get one by calling `as_source()` on the node, for
 example `job.nodes["bmi"].as_source()`. This is useful for chaining pipeline stages: run a
-job, then use one of its outputs as the input of a new pipeline. The `as_source()` of a node
+job, then use one of its outputs as the input of a new pipeline: this is how a pipeline is
+cut into parts on purpose, since a node itself given to a pipeline brings its steps with it
+(see [Streams built before the job](pipeline-job.md#streams-built-before-the-job)). The
+`as_source()` of a node
 downstream of a join cannot yet be bound as a source of a new `PipelineJob`: its rows carry
 the system tags of every joined source, and binding refuses it with `SourceSpecMismatchError`
 (support is planned, ITL-1127).

@@ -1195,6 +1195,75 @@ class TestRunsAndSavedJobs:
         rows = job.nodes["first"].as_table().column("timestamp").to_pylist()
         assert rows == [3]
 
+    def test_registered_streams_over_two_restrictions_are_refused(
+        self, project, tmp_path
+    ):
+        """Two registered streams reading one source under two restrictions are refused,
+        in either order and in one call or two, and the job is left unchanged
+        (ITL-1387)."""
+
+        @function_pod(output_keys="a")
+        def first(amplitude: float | None) -> float | None:
+            """Return ``amplitude``."""
+            return amplitude
+
+        @function_pod(output_keys="b")
+        def second(amplitude: float | None) -> float | None:
+            """Return ``amplitude``."""
+            return amplitude
+
+        events = _source(source_id="events", tag_only_columns=True)
+        m1 = first.pod(
+            events.where(subject_id="m1").select_data_columns(["amplitude"]),
+            label="first",
+        )
+        m2 = second.pod(
+            events.where(subject_id="m2").select_data_columns(["amplitude"]),
+            label="second",
+        )
+        for streams in ((m1, m2), (m2, m1)):
+            job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
+            with pytest.raises(ValueError, match="different rows in one pipeline"):
+                job.register(*streams)
+            assert job.nodes == {}
+            job.register(streams[0])
+            held = sorted(job.nodes)
+            with pytest.raises(ValueError, match="different rows in one pipeline"):
+                job.register(streams[1])
+            assert sorted(job.nodes) == held
+
+    def test_a_registered_restricted_source_is_reported_by_slot(
+        self, project, tmp_path
+    ):
+        """A registered stream over a restricted source reports the restriction in
+        ``RunSummary`` as the same pipeline written in a block does (ITL-1387)."""
+
+        @function_pod(output_keys="a")
+        def first(amplitude: float | None) -> float | None:
+            """Return ``amplitude``."""
+            return amplitude
+
+        def build() -> Any:
+            events = _source(source_id="events", tag_only_columns=True)
+            return first.pod(
+                events.where(subject_id="m1").select_data_columns(["amplitude"]),
+                label="first",
+            )
+
+        by_hand = PipelineJob(name="h", database=DeltaTableDatabase(tmp_path / "h"))
+        with by_hand:
+            build()
+        registered = PipelineJob(name="h", database=DeltaTableDatabase(tmp_path / "r"))
+        registered.register(build())
+        expected, summary = by_hand.run(), registered.run()
+        assert summary.conditions == expected.conditions
+        assert summary.conditions == {"events": Condition.of(subject_id="m1")}
+        assert summary.restricted_source_ids == expected.restricted_source_ids
+        assert (
+            registered.nodes["first"].as_table().to_pylist()
+            == by_hand.nodes["first"].as_table().to_pylist()
+        )
+
     def test_a_refused_invocation_records_nothing(self, project, tmp_path):
         """After the refusal the graph holds only what was captured before it."""
 

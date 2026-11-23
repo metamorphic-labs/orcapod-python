@@ -14,7 +14,6 @@ from orcapod.core.nodes import (
     SourceNode,
 )
 from orcapod.side_effects import SideEffectNode
-from orcapod.core.tracker import AutoRegisteringContextBasedTracker
 from orcapod.pipeline.base import AbstractPipelineBase
 from orcapod.pipeline.dag import OrcaDAG
 from orcapod.protocols import core_protocols as cp
@@ -94,14 +93,9 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
     # Context manager — respects auto_compile flag
     # ------------------------------------------------------------------
 
-    def __exit__(self, exc_type=None, exc_value=None, traceback=None):
-        # Call AutoRegisteringContextBasedTracker.__exit__ directly (deactivates the tracker)
-        # but NOT AbstractPipelineBase.__exit__ (which calls compile() unconditionally).
-        AutoRegisteringContextBasedTracker.__exit__(
-            self, exc_type, exc_value, traceback
-        )
-        if exc_type is None and self._auto_compile:
-            self.compile()
+    def _compiles_on_exit(self) -> bool:
+        """Whether a ``with`` block's end (and ``register``) compiles: not with ``auto_compile=False``."""
+        return self._auto_compile
 
     # ------------------------------------------------------------------
     # Serialization

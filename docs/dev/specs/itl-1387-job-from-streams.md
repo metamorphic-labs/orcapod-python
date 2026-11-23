@@ -225,10 +225,13 @@ once and nothing changes for code that builds everything inside the block.
 
 What counts as a source (a leaf): a `RootSource` (every source class, `CachedSource`,
 `DerivedSource` including a node's `as_source()`, `PollingSource`) and a `SourceJobNode` or
-`SourceNode` (a slot of any pipeline or job). Everything else has a producer and is walked,
-or has none and is not a source, and is refused when it is recorded, naming the stream and
-the explicit remedies (a raw `ArrowTableStream`: wrap its table as a source; a function node
-of a loaded job: section 5.2).
+`SourceNode` (a slot of any pipeline or job). Everything else with a producer is walked. A
+function node with no producer (a node of a loaded job) is refused when it is recorded, by
+name, with its remedies (section 5.2). As built: a raw `ArrowTableStream` (no producer, not
+a source) stays a leaf and is refused by the bind check when the job compiles, with today's
+message and exception (`SourceSpecMismatchError`); moving that refusal to recording time
+would change a tested exception for no gain, since a refused block now restores its state
+(2.2).
 
 ### 2.2 A refused `with` block leaves the job as it was
 
@@ -490,6 +493,11 @@ inside the block that is none, so the block's cost does not change).
 a stream with a producer has been walked when it was recorded, and a stream with neither has
 been refused there. So `compile()` never reaches case 3.
 
+As built, the implicit name is removed only for a stream that has a producer; a raw stream
+(no producer) keeps it, since a `SourceNode` of one is a schema-only slot and a
+`SourceJobNode` of one is refused by the bind check anyway
+(`test_source_node_from_stream_slot_name_uses_full_hash` is unchanged).
+
 Case 3 also has an explicit use: a user (or a test) builds a slot from a stream on purpose,
 naming it, `SourceJobNode.from_stream(stream, name="pick")`
 (`tests/test_core/sources/test_spiraldb_table_source_where.py` does), and binds streams to
@@ -520,13 +528,11 @@ fixed on `main` by #499) found:
 - **Direct `from_stream` calls without a name, which pin the implicit `<label>:<hash>` name**
   (they change, per D13: a stream that is neither a `RootSource` nor a slot needs an explicit
   `name`):
-  - `tests/test_core/nodes/test_source_node.py::TestFromStreamNonRootSource::test_source_node_from_stream_slot_name_uses_full_hash`
-    (a raw `ArrowTableStream`; not a probe hit, since that stream has no producer, but the
-    same implicit name);
   - `tests/test_core/nodes/test_source_node.py::TestFromStreamNonRootSource::test_source_job_node_from_stream_slot_name_uses_full_hash`
-    (a `map_data` stream).
-  Both become tests that the implicit name is refused and that an explicit `name` is used as
-  given.
+    (a `map_data` stream): renamed `test_source_job_node_from_a_pod_stream_needs_a_name`; it
+    now checks that the implicit name is refused and an explicit `name` is used as given.
+  - `test_source_node_from_stream_slot_name_uses_full_hash` (a raw `ArrowTableStream`, no
+    producer) is unchanged (9.2, as built).
 - **Direct `from_stream` calls WITH a name** (an explicit cut; unchanged):
   `tests/test_core/sources/test_spiraldb_table_source_where.py::TestBindingTwoSlotsOverOneSource`,
   12 cases over `test_conflicting_restrictions_are_refused_and_nothing_changes`,
@@ -609,8 +615,23 @@ alone). In risk:
   every test that is not about a single stream registers two or more, in more than one order,
   over inputs with two or more tag and two or more data columns in more than one arrangement,
   and asserts that names, hashes, paths and rows do not change with the order.
-- Order invariance (ITL-1271): `register` gets a case in `tests/test_core/test_order_invariance.py`
-  (a job built by registering the same streams in permuted orders and keyword orders).
+- Order invariance (ITL-1271): as built, the orders are tested in
+  `tests/test_pipeline/test_register_streams.py` (every operator case with its streams in
+  three registration orders; the function-pod forms in five orders split over two calls;
+  node names over every permutation of three registrations), against the hand-written job.
+
+### 10.1 Found while building (as built)
+
+- **Which node computes a shared result is not specified.** Two function nodes of one
+  function over inputs with equal data hashes share one result table: the first to run
+  computes (`__computed` true), the other reads. Which runs first follows the run order of
+  independent nodes, which is not specified: for one hand-written job alone it varies between
+  processes with the hash seed (measured: 10 seeds, two outcomes). The property test leaves
+  `__computed` out with that reason, as it leaves out `__pod_ts` and `__data_id` (a uuid7).
+- **The saved edge list follows recording order.** `job.save()` writes the hash graph's edges
+  in the order they were recorded; a load reads them as a set. A registered job's file equals
+  the hand-written one's with the edges compared as a set; everything else in the `pipeline`
+  and `bindings` sections is equal as written.
 - Refusals: each refusal of sections 3, 5 and 8 with the job unchanged afterwards (names,
   `job.nodes`, recorded state through a subsequent `with` block that succeeds).
 - Restrictions: one source restricted two ways across two registered streams refused; the

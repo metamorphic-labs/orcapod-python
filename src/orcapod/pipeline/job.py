@@ -17,7 +17,6 @@ from orcapod.core.nodes.source_node import SourceJobNode
 from orcapod.core.sources.derived_source import DerivedSource
 from orcapod.core.streams.base import StreamBase
 from orcapod.side_effects import SideEffectJobNode, SideEffectNode
-from orcapod.core.tracker import AutoRegisteringContextBasedTracker
 from orcapod.errors import (
     OrcapodDatabaseError,
     OrcapodDatabaseReadError,
@@ -184,13 +183,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
     # Context manager — respects auto_compile flag
     # ------------------------------------------------------------------
 
-    def __exit__(self, exc_type=None, exc_value=None, traceback=None) -> None:
-        """Exit the recording context, compiling if no exception occurred."""
-        AutoRegisteringContextBasedTracker.__exit__(
-            self, exc_type, exc_value, traceback
-        )
-        if exc_type is None and self._auto_compile:
-            self.compile()
+    def _compiles_on_exit(self) -> bool:
+        """Whether a ``with`` block's end (and ``register``) compiles: not with ``auto_compile=False``."""
+        return self._auto_compile
 
     def compile(self) -> None:
         """Compile recorded invocations into a frozen DAG of job nodes.

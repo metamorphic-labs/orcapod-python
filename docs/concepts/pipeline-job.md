@@ -50,8 +50,9 @@ The three stages:
 
 1. **Create** the job with a `name` and a `database`.
 2. **Record** inside the `with` block. Pods and operators applied there are not executed;
-   the job notes which step is applied to which stream. Sources may be created inside or
-   outside the block.
+   the job notes which step is applied to which stream. Sources, and any other step, may be
+   created inside or outside the block (see
+   [Streams built before the job](#streams-built-before-the-job)).
 3. **Run** with `job.run()`. The recorded steps execute in dependency order and each
    function result is written to the database. `run()` returns a `RunSummary` (also kept as
    `job.last_run`) that counts, per function node, the rows computed, read from the database
@@ -65,6 +66,47 @@ default policy skips failed rows and continues) and `observer=` (`StatusObserver
 `LoggingObserver`) to record what happened during the run. `load_only=True` fills the nodes
 from what is already stored and computes nothing; see
 [Loading without computing](function-pods.md#loading-without-computing-runload_onlytrue).
+
+## Streams built before the job
+
+Steps you applied while exploring, before any job existed, need not be written again. Give
+the streams to a job with **`job.register(...)`**: each comes in with its pod and every step
+above it, down to its sources, exactly as if those steps had been written inside a `with`
+block (the same nodes, hashes, stored tables and results). A keyword names that stream's node;
+a positional stream keeps the label its step was given.
+
+```python
+@function_pod(output_keys="ratio")
+def weight_per_height(weight: float, height: float) -> float:
+    return weight / height
+
+
+explored = mice(cohort_a)
+bmi = compute_bmi.pod(explored, label="bmi")
+ratios = weight_per_height.pod(explored)
+
+later = PipelineJob(name="explored", database=database)
+later.register(bmi, ratio=ratios)
+later.run()
+print(sorted(later.nodes))
+# ['bmi', 'mice', 'ratio']
+```
+
+A stream built before the job can also be used by a step inside a `with` block; it comes in
+the same way. Steps the job already holds are not added again, so registering a stream built
+on one of the job's nodes adds only its new steps, and a node of another job brings that
+job's steps with it. Registering computes nothing and stores nothing; `run()` does.
+
+**Cutting a pipeline into parts.** Nothing becomes a source unless you make it one. To start
+a pipeline from what another job stored, rather than from its steps, make the cut explicit:
+`job.nodes["bmi"].as_source()` is a source over the node's stored results, and a pipeline
+built on it begins there (see [Sources](sources.md)). A stream that is not a node becomes a
+source only when you build one from it, for example an `ArrowTableSource` over its table with
+a `source_id` you choose.
+
+Where an absorbed step's results are stored is decided by the job that runs it: its own
+database and name. Two jobs that share steps see each other's stored results only when they
+use the same database and the same job name.
 
 ## Nodes
 

@@ -1359,6 +1359,7 @@ class SourceNode(SourceNodeBase):
             if isinstance(stream, RootSource):
                 slot_name = stream.source_id
             else:
+                _require_name_for_pod_stream(stream)
                 slot_name = f"{stream.label}:{stream.content_hash().to_hex()}"
         if not isinstance(stream, SourceNodeBase):
             _require_stream_arrow_types(stream, slot_name)
@@ -1926,6 +1927,7 @@ class SourceJobNode(SourceNodeBase):
                     if isinstance(stream, RootSource):
                         slot_name = stream.source_id
                     else:
+                        _require_name_for_pod_stream(stream)
                         slot_name = f"{stream.label}:{stream.content_hash().to_hex()}"
                 _require_stream_arrow_types(stream, slot_name)
                 return cls(
@@ -1978,3 +1980,21 @@ class SourceJobNode(SourceNodeBase):
         )
         node._take_saved_state_of(self)
         return node
+
+
+def _require_name_for_pod_stream(stream: StreamProtocol) -> None:
+    """Refuse to make a slot from a stream made by a pod without a name (ITL-1387).
+
+    A stream becomes a source only by the user's explicit act: naming the slot made
+    from it is that act. A pipeline never makes one implicitly: a stream given to it
+    comes in with its pod and every upstream step.
+
+    Raises:
+        ValueError: If *stream* has a producer.
+    """
+    if stream.producer is not None:
+        raise ValueError(
+            f"{stream.label!r} is made by a pod, so it becomes a source slot only when "
+            "you name the slot (name=...). In a pipeline it comes in with its steps; to "
+            "cut a pipeline there, use a node's as_source() or a source object."
+        )
