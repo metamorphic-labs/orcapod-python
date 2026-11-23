@@ -1085,9 +1085,11 @@ another order): every value keeps its field's name, and an omitted field reads a
 in the appended rows. An append is refused, naming the column and the field, when it
 would add a non-nullable struct field (the stored rows have no value for it) or add a
 struct field inside a map (Delta cannot). A nested field the append makes nullable reads
-as nullable afterwards, as Delta stores it, when the appended rows hold no null in it; a
-null there, in a field stored non-nullable, is refused by deltalake 1.6 at the commit
-(1.0.2 stored it and made the field nullable).
+as nullable afterwards, as Delta stores it, when the appended rows hold no null in it. A
+null there, in a field stored non-nullable, is refused at the commit and those rows are
+not written: the table stays strict to the type it was first declared with (deltalake
+1.6; 1.0.2 stored the null and made the field nullable). Moving a stored table to a
+corrected type is not offered yet.
 
 On Delta, the commit is the point of truth. When rows are added, only what is certain is
 refused, before anything is queued: two names differing only in case (a name differing
