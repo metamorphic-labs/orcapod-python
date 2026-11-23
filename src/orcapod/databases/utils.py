@@ -363,6 +363,9 @@ def _same_type(given: Any, held: Any) -> bool:
             and given.extension_name == held.extension_name
             and given.__arrow_ext_serialize__() == held.__arrow_ext_serialize__()
             and _same_type(given.storage_type, held.storage_type)
+            # The storage's nested field names and metadata too: the append check
+            # does not look inside an extension type (CodeRabbit on PR 496).
+            and _nested_change(held.storage_type, given.storage_type, "") is None
         )
     if given != held:
         return False

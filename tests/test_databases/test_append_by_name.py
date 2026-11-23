@@ -18,7 +18,7 @@ import os
 import sqlite3
 import uuid
 from collections.abc import Iterator
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -1194,13 +1194,62 @@ def postgresql_database() -> Iterator[ConnectorArrowDatabase]:
     schema = f"test_{uuid.uuid4().hex[:12]}"
     with psycopg.connect(base_dsn, autocommit=True) as admin:
         admin.execute(f"CREATE SCHEMA {schema}")
-    connector = PostgreSQLConnector(f"{base_dsn} options=-csearch_path={schema}")
-    try:
-        yield ConnectorArrowDatabase(connector)
-    finally:
-        connector.close()
+
+    def drop() -> None:
         with psycopg.connect(base_dsn, autocommit=True) as admin:
             admin.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+
+    with _dropped_after(
+        lambda: PostgreSQLConnector(f"{base_dsn} options=-csearch_path={schema}"), drop
+    ) as connector:
+        yield ConnectorArrowDatabase(connector)
+
+
+@contextmanager
+def _dropped_after(connect: Any, drop: Any) -> Iterator[Any]:
+    """The connector ``connect`` makes, closed if it was made; ``drop`` always runs
+    afterwards, also when ``connect`` or the close raises (CodeRabbit on PR 496: the
+    schema used to stay behind when the connector could not be created)."""
+    connector = None
+    try:
+        connector = connect()
+        yield connector
+    finally:
+        try:
+            if connector is not None:
+                connector.close()
+        finally:
+            drop()
+
+
+class _Closing:
+    def __init__(self, fail: bool) -> None:
+        self.fail = fail
+
+    def close(self) -> None:
+        if self.fail:
+            raise RuntimeError("close failed")
+
+
+@pytest.mark.parametrize("failure", ["connect", "close", "none"])
+def test_the_postgresql_schema_is_dropped_whatever_fails(failure: str) -> None:
+    """The fixture's cleanup drops the schema when the connector cannot be created,
+    when closing it fails, and when nothing fails."""
+    dropped: list[bool] = []
+
+    def connect() -> Any:
+        if failure == "connect":
+            raise RuntimeError("connect failed")
+        return _Closing(fail=failure == "close")
+
+    if failure == "none":
+        with _dropped_after(connect, lambda: dropped.append(True)):
+            pass
+    else:
+        with pytest.raises(RuntimeError):
+            with _dropped_after(connect, lambda: dropped.append(True)):
+                pass
+    assert dropped == [True]
 
 
 @pytest.mark.postgres

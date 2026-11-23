@@ -378,3 +378,110 @@ def test_a_cached_pods_hit_presents_the_outputs_as_its_first_call_does() -> None
         assert [hit[k] for k in hit.keys()] == [miss[k] for k in miss.keys()]
         columns = hit.as_table(columns={"source": True}).column_names
         assert columns == miss.as_table(columns={"source": True}).column_names
+
+
+# ── PR 496, CodeRabbit (utils.py:303): metadata inside an extension type's storage ──
+
+
+class _MarkedStorage(pa.ExtensionType):
+    """One identifier over a storage struct whose child carries a marker in its field
+    metadata: two markers are one type to pyarrow and to the identifier."""
+
+    def __init__(self, marker: bytes) -> None:
+        storage = pa.struct(
+            [pa.field("value", pa.int64(), metadata={b"marker": marker})]
+        )
+        super().__init__(storage, "test.ports.storage_metadata")
+
+    def __arrow_ext_serialize__(self) -> bytes:
+        return b"same-identifier"
+
+    @classmethod
+    def __arrow_ext_deserialize__(cls, storage_type: Any, serialized: bytes) -> Any:
+        return cls(storage_type.field("value").metadata[b"marker"])
+
+
+def _marked_rows(n: int, marker: bytes, order: tuple[str, ...]) -> pa.Table:
+    ext_type = _MarkedStorage(marker)
+    values = pa.ExtensionArray.from_storage(
+        ext_type, pa.array([{"value": n}], ext_type.storage_type)
+    )
+    columns = {
+        "rid": pa.array([bytes([n])], pa.large_binary()),
+        "a": values,
+        "b": pa.array([n]),
+    }
+    return pa.table({name: columns[name] for name in order})
+
+
+@pytest.mark.parametrize(
+    ("database", "flushed", "error"),
+    [
+        ("in-memory", False, pa.ArrowInvalid),
+        ("in-memory", True, pa.ArrowInvalid),
+        ("Delta", False, ValueError),
+    ],
+    ids=["in-memory pending", "in-memory committed", "Delta pending"],
+)
+def test_a_permuted_append_with_other_metadata_inside_an_extension_is_refused(
+    tmp_path: Path, database: str, flushed: bool, error: type[BaseException]
+) -> None:
+    """An extension type whose storage struct child carries other field metadata: a
+    permuted append is not taken for the held column (its marker would be replaced by
+    the held one), so it is refused as main refused it before PR 491 (321284ae)
+    (PR 496 CodeRabbit, utils.py:303). A committed Delta table of such a type fails
+    to read on main too (pre-existing, not pinned here)."""
+    db = (
+        InMemoryArrowDatabase()
+        if database == "in-memory"
+        else DeltaTableDatabase(tmp_path)
+    )
+    db.add_records(
+        PATH,
+        _marked_rows(1, b"held", ("rid", "a", "b")),
+        record_id_column="rid",
+        flush=flushed,
+    )
+    with pytest.raises(error):
+        db.add_records(
+            PATH,
+            _marked_rows(2, b"incoming", ("b", "rid", "a")),
+            record_id_column="rid",
+        )
+        db.flush()
+
+
+# ── PR 496, CodeRabbit (function_node.py:3615), declined ─────────────────────────────
+
+
+def test_a_function_nodes_stored_rows_put_the_context_column_last_as_on_main() -> None:
+    """Declined: ``get_all_records`` puts ``_context_key`` last, after the source-info
+    columns, as main does; the node's ``as_table`` layout places it before them.
+    Moving it would change what a user sees beyond the two presentation changes the
+    developer approved. Pinned (PR 496 CodeRabbit, function_node.py:3615)."""
+    from orcapod import PipelineJob, function_pod
+    from orcapod.core.sources import ArrowTableSource
+
+    fields = [
+        pa.field(n, pa.int64(), nullable=False) for n in ["z_tag", "a_tag", "z", "a"]
+    ]
+    source = ArrowTableSource(
+        pa.Table.from_arrays([pa.array([1, 2])] * 4, schema=pa.schema(fields)),
+        tag_columns=["z_tag", "a_tag"],
+        tag_only_columns=True,
+        source_id="src",
+    )
+
+    @function_pod(output_keys=["w_out", "c_out"])
+    def outputs(z: int, a: int) -> tuple[int, int]:
+        return z + a, z - a
+
+    job = PipelineJob(name="context", database=InMemoryArrowDatabase())
+    with job:
+        outputs.pod(source, label="fn")
+    job.run()
+    node = job.nodes["fn"]
+    for config in ({"context": True}, {"context": True, "source": True}):
+        records = node.get_all_records(columns=config)
+        assert records is not None
+        assert records.column_names[-1] == "_context_key", config
