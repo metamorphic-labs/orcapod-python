@@ -37,7 +37,6 @@ from orcapod.databases.utils import (
     LIST_ITEM,
     MAP_ITEM,
     MAP_KEY,
-    UNKNOWN,
     IdentityNode,
     appended_field_change,
     coerce_record_id,
@@ -653,7 +652,8 @@ def _delta_identity_node(
     proves nothing and the identity rule abstains. A list item and a map key or item
     keep no metadata in the log (ITL-1372), and the column's recorded type is read
     through the Arrow registry, which may give an identifier other than the one
-    stored: there the identifier is never known.
+    stored: there the identifier is never known, while the children of a struct
+    beneath it are (``_unknown_place``).
 
     Args:
         delta_type: A ``deltalake.schema`` type from the log.
@@ -672,9 +672,12 @@ def _delta_identity_node(
             for f in delta_type.fields
         )
     elif isinstance(delta_type, ArrayType):
-        children = ((LIST_ITEM, UNKNOWN),)
+        children = ((LIST_ITEM, _unknown_place(delta_type.element_type, recorded)),)
     elif isinstance(delta_type, MapType):
-        children = ((MAP_KEY, UNKNOWN), (MAP_ITEM, UNKNOWN))
+        children = (
+            (MAP_KEY, _unknown_place(delta_type.key_type, recorded)),
+            (MAP_ITEM, _unknown_place(delta_type.value_type, recorded)),
+        )
     as_bytes = metadata_bytes(metadata)
     name = as_bytes.get(_EXTENSION_KEYS[0])
     identifier = None if name is None else (name, as_bytes.get(_EXTENSION_KEYS[1], b""))
@@ -683,6 +686,15 @@ def _delta_identity_node(
         identifier=identifier,
         children=children,
     )
+
+
+def _unknown_place(delta_type: Any, recorded: bool) -> IdentityNode:
+    """A list item or map key or item as the Delta log gives it: its own identifier
+    is not known (the log keeps no metadata there, ITL-1372), but a struct beneath it
+    keeps its children's metadata in the log, byte for byte, so the walk goes on
+    through it to them."""
+    place = _delta_identity_node(delta_type, None, recorded)
+    return IdentityNode(known=False, identifier=None, children=place.children)
 
 
 def _stored_identities(
@@ -1829,25 +1841,62 @@ class DeltaTableDatabase:
         Returns:
             The error message, or ``None``.
         """
-        held: list[list[tuple[str, IdentityNode]]] = []
+        found = None
         pending = self._pending_batches.get(self._get_record_key(record_path))
         if pending is not None:
-            held.append([(f.name, identity_node(f)) for f in pending.schema])
+            found = identity_refusal(
+                [(f.name, identity_node(f)) for f in pending.schema], rows
+            )
+        if found is None:
+            found = self._stored_identity_refusal(record_path, rows)
+        if found is None:
+            return None
+        return (
+            f"Cannot append to the stored table "
+            f"{self._get_table_uri(record_path)!r}: column {found[0]!r}: "
+            f"{found[1]}. The stored rows are unchanged and nothing was written."
+        )
+
+    def _stored_identity_refusal(
+        self, record_path: tuple[str, ...], rows: pa.Table
+    ) -> tuple[str, str] | None:
+        """``identity_refusal`` against the stored table, every refusal decided on
+        its freshly loaded version (ITL-1371).
+
+        The handle this instance holds is the one loaded at its last load or flush,
+        and accepting reads it as it is (no extra read per append: function nodes
+        append row by row). A refusal is never decided on it: when it shows a
+        difference, the table is loaded again and compared once more, so a held
+        handle never refuses what a reopened one accepts. An accept on a stale handle
+        is checked again at flush, against the version then loaded, before anything
+        is written; the one append it can leave different from a reopened handle
+        writes nothing either way (a duplicate-only append of the identifier the
+        stale version holds: a no-op here, refused there).
+
+        Args:
+            record_path: The table the rows are for.
+            rows: The rows to append, as given.
+
+        Returns:
+            The column and the reason, or ``None``.
+        """
         try:
             delta_table = self._get_delta_table(record_path)
         except OrcapodDatabaseReadError:
-            delta_table = None
-        if delta_table is not None:
-            held.append(_stored_identities(delta_table))
-        for given in held:
-            found = identity_refusal(given, rows)
-            if found is not None:
-                return (
-                    f"Cannot append to the stored table "
-                    f"{self._get_table_uri(record_path)!r}: column {found[0]!r}: "
-                    f"{found[1]}. The stored rows are unchanged and nothing was written."
-                )
-        return None
+            return None
+        if delta_table is None:
+            return None
+        if identity_refusal(_stored_identities(delta_table), rows) is None:
+            return None
+        # Decide the refusal on the version stored now.
+        self._delta_table_cache.pop(self._get_record_key(record_path), None)
+        try:
+            delta_table = self._get_delta_table(record_path)
+        except OrcapodDatabaseReadError:
+            return None
+        if delta_table is None:
+            return None
+        return identity_refusal(_stored_identities(delta_table), rows)
 
     def _refuse_changed_attributes(
         self, record_path: tuple[str, ...], schema: pa.Schema

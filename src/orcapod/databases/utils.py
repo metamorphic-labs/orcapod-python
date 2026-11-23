@@ -491,8 +491,10 @@ def given_identities(
 
     A column's field, and, for a table, each of its chunks: pyarrow lets the chunks of
     one column hold instances of one Python extension class with other serialized
-    metadata (it compares them by class), so each chunk's own exported identifier is
-    read too, and every one of them must be the held one.
+    metadata (it compares them by class), and nested fields with other field
+    metadata, an annotation included (it compares types without it), so every
+    chunk's own type is read too, in both forms, and every one of them must be the
+    held one.
 
     Args:
         given: The rows to append, or only their schema.
@@ -507,24 +509,12 @@ def given_identities(
         nodes = [identity_node(field)]
         seen = set(nodes)
         for chunk in column.chunks:
-            if _has_extension_part(chunk.type):
-                node = identity_node(field.with_type(chunk.type))
-                if node not in seen:
-                    seen.add(node)
-                    nodes.append(node)
+            node = identity_node(field.with_type(chunk.type))
+            if node not in seen:
+                seen.add(node)
+                nodes.append(node)
         out.append((field.name, nodes))
     return out
-
-
-def _has_extension_part(arrow_type: Any) -> bool:
-    if isinstance(arrow_type, pa.BaseExtensionType):
-        return True
-    if pa.types.is_dictionary(arrow_type):
-        return _has_extension_part(arrow_type.value_type)
-    return any(
-        _has_extension_part(arrow_type.field(i).type)
-        for i in range(arrow_type.num_fields)
-    )
 
 
 def identity_refusal(

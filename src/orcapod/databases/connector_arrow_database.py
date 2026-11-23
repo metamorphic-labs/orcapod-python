@@ -443,6 +443,9 @@ class ConnectorArrowDatabase:
         # Columns match by name: rows with the held columns in another order are
         # put in the held order, so the connector always receives the stored order
         # (ITL-1367).
+        # A column of another logical type is refused first, on the raw identifier
+        # bytes, before the reorder compares types (ITL-1371).
+        self._refuse_changed_columns(record_path, records, identity_only=True)
         records = in_held_column_order(records, self._held_column_order(record_path))
         self._refuse_changed_columns(record_path, records)
 
@@ -521,7 +524,11 @@ class ConnectorArrowDatabase:
         ]
 
     def _refuse_changed_columns(
-        self, record_path: tuple[str, ...], records: pa.Table
+        self,
+        record_path: tuple[str, ...],
+        records: pa.Table,
+        *,
+        identity_only: bool = False,
     ) -> None:
         """Refuse rows whose columns would not read back as written (ITL-1334).
 
@@ -532,6 +539,10 @@ class ConnectorArrowDatabase:
         metadata refuses metadata and nested types itself, so only one that keeps it
         is checked. The stored table's schema is read once per table
         (``_read_stored_schema``): an append the check accepts does not change it.
+
+        A column of another logical type identifier is refused first
+        (``first_logical_identity_change``, ITL-1371); ``identity_only`` checks only
+        that, so it can run before the rows are reordered by name.
 
         Raises:
             InputValidationError: For the first such column, naming it and the path.
@@ -551,9 +562,9 @@ class ConnectorArrowDatabase:
         if stored is not None:
             held.append(stored)
         # A column of another logical type would read back as the held one (ITL-1371).
-        changed = first_logical_identity_change(held, records) or first_changed_column(
-            held, records.schema
-        )
+        changed = first_logical_identity_change(held, records)
+        if changed is None and not identity_only:
+            changed = first_changed_column(held, records.schema)
         if changed is not None:
             raise InputValidationError(
                 f"Cannot append to the table at {record_path!r}: column "

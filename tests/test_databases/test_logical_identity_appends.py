@@ -1622,3 +1622,278 @@ def test_duplicate_only_append_of_the_same_identifier_is_a_no_op(
         )
         stored = store.stored().sort_by("id")
         assert stored.column("id").to_pylist() == [b"1", b"22"]
+
+
+# ---------------------------------------------------------------------------
+# Review round 4 (PR 492)
+# ---------------------------------------------------------------------------
+
+
+def _struct_beneath(shape: str, form: str, meta: bytes, ids: list[bytes]) -> pa.Table:
+    """``x``: a struct whose child ``v`` carries ``itl1371.a;<meta>`` (extension or
+    annotated), as a list item (``list``) or a map item (``map``)."""
+    field, leaf = _leaf(("itl1371.a", meta), form, [i.decode() for i in ids])
+    struct = pa.StructArray.from_arrays([leaf], fields=[field])
+    n = len(ids)
+    if shape == "list":
+        list_type = pa.large_list(pa.field("item", struct.type))
+        x: Any = pa.LargeListArray.from_arrays(
+            pa.array(range(n + 1), pa.int64()), struct, type=list_type
+        )
+    else:
+        map_type: Any = pa.map_(
+            pa.field("key", pa.large_string(), nullable=False),  # pyright: ignore[reportArgumentType]
+            pa.field("value", struct.type),  # pyright: ignore[reportArgumentType]
+        )
+        keys = pa.array([f"k{i}" for i in range(n)], pa.large_string())
+        offsets: Any = pa.array(range(n + 1), pa.int32())
+        from_arrays: Any = pa.MapArray.from_arrays
+        x = from_arrays(offsets, keys, struct, type=map_type)
+    return pa.table({"id": pa.array(ids, pa.large_binary()), "x": x})
+
+
+@pytest.mark.parametrize("state", ["committed", "reopened"])
+@pytest.mark.parametrize("form", FORMS)
+@pytest.mark.parametrize("shape", ["list", "map"])
+def test_delta_struct_children_beneath_lists_and_maps_are_compared(
+    tmp_path: Path, shape: str, form: str, state: str
+) -> None:
+    """A list item or map item keeps no metadata in the Delta log, but the children
+    of a struct beneath it do: the walk goes through the unknown item to them, so
+    another identifier there is refused, with fresh ids and duplicate-only, and the
+    same identifier is accepted."""
+    path = "x[].v" if shape == "list" else "x.item.v"
+    with _store("Delta", tmp_path) as store:
+        store.db.add_records(
+            PATH,
+            _struct_beneath(shape, form, b"m", [b"1", b"22"]),
+            record_id_column="id",
+            flush=True,
+        )
+        if state == "reopened":
+            store.reopen()
+        for ids, skip in (([b"333"], False), ([b"1", b"22"], True)):
+            with pytest.raises(
+                InputValidationError, match=re.escape(f"{path} is of logical type")
+            ):
+                store.db.add_records(
+                    PATH,
+                    _struct_beneath(shape, form, b"n", ids),
+                    record_id_column="id",
+                    skip_duplicates=skip,
+                )
+        stored = store.stored()
+        assert sorted(cast(list[bytes], stored.column("id").to_pylist())) == [
+            b"1",
+            b"22",
+        ]
+
+
+def _late_chunk_rows(metas: list[bytes], ids: list[bytes]) -> pa.Table:
+    """``x: struct<v>``, one chunk per id, ``v`` annotated ``itl1371.a;<meta>`` in its
+    own chunk: the column's field carries the first chunk's annotation only."""
+    chunks = []
+    for meta, i in zip(metas, ids):
+        field = pa.field(
+            "v", pa.large_string(), metadata={NAME: b"itl1371.a", META: meta}
+        )
+        chunks.append(
+            pa.StructArray.from_arrays(
+                [pa.array([i.decode()], pa.large_string())], fields=[field]
+            )
+        )
+    column = pa.chunked_array(chunks)
+    return pa.Table.from_arrays(
+        [pa.array(ids, pa.large_binary()), column],
+        schema=pa.schema(
+            [pa.field("id", pa.large_binary()), pa.field("x", chunks[0].type)]
+        ),
+    )
+
+
+@pytest.mark.parametrize("state", ["pending", "committed"])
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_later_chunk_annotation_is_compared(
+    tmp_path: Path, kind: str, state: str
+) -> None:
+    """Arrow keeps a nested field's annotation per chunk: a later chunk of another
+    annotated identifier is refused, with fresh ids and duplicate-only, in every
+    database; chunks of the same identifier are accepted."""
+    with _store(kind, tmp_path) as store:
+        store.db.add_records(
+            PATH,
+            _late_chunk_rows([b"m"], [b"1"]),
+            record_id_column="id",
+            flush=state == "committed",
+        )
+        mixed = _late_chunk_rows([b"m", b"n"], [b"1", b"22"])
+        assert [c.type.field("v").metadata[META] for c in mixed.column("x").chunks] == [
+            b"m",
+            b"n",
+        ]
+        for skip in (False, True):
+            with pytest.raises(InputValidationError, match="x.v is of logical type"):
+                store.db.add_records(
+                    PATH, mixed, record_id_column="id", skip_duplicates=skip
+                )
+        store.db.add_records(
+            PATH, _late_chunk_rows([b"m", b"m"], [b"22", b"333"]), record_id_column="id"
+        )
+        stored = store.stored()
+        assert sorted(cast(list[bytes], stored.column("id").to_pylist())) == [
+            b"1",
+            b"22",
+            b"333",
+        ]
+
+
+def _annotated_top(meta: bytes, ids: list[bytes]) -> pa.Table:
+    field = pa.field("x", pa.large_string(), metadata={NAME: b"itl1371.a", META: meta})
+    return pa.Table.from_arrays(
+        [
+            pa.array(ids, pa.large_binary()),
+            pa.array(["v"] * len(ids), pa.large_string()),
+        ],
+        schema=pa.schema([pa.field("id", pa.large_binary()), field]),
+    )
+
+
+def test_delta_refusals_are_decided_on_the_table_stored_now(tmp_path: Path) -> None:
+    """A handle kept open while the table is replaced (same ids, another identifier):
+    every refusal is decided on the version stored now, so the held handle never
+    refuses what a reopened one accepts. A fresh-id append the stale handle accepts is
+    refused at flush, against the version then loaded, before anything is written.
+    The one remaining difference writes nothing either way: a duplicate-only append
+    of the identifier the stale version holds is a no-op on the held handle, where a
+    reopened handle refuses it."""
+    import deltalake
+
+    root = tmp_path / "delta"
+    held = DeltaTableDatabase(root)
+    held.add_records(
+        PATH, _annotated_top(b"m", [b"1", b"22"]), record_id_column="id", flush=True
+    )
+    replacement = _annotated_top(b"n", [b"1", b"22"]).rename_columns(
+        ["__record_id", "x"]
+    )
+    deltalake.write_deltalake(
+        str(root / "t"), replacement, mode="overwrite", schema_mode="overwrite"
+    )
+    reopened = DeltaTableDatabase(root)
+
+    # The identifier stored now, duplicate-only: accepted (a no-op) by both handles;
+    # the held handle's stale log differs, so it decides on the version stored now.
+    for db in (held, reopened):
+        db.add_records(
+            PATH,
+            _annotated_top(b"n", [b"1", b"22"]),
+            record_id_column="id",
+            skip_duplicates=True,
+        )
+    # The replaced identifier, duplicate-only, on a reopened handle: refused.
+    with pytest.raises(
+        InputValidationError, match="the stored column's 'itl1371.a;6e'"
+    ):
+        reopened.add_records(
+            PATH,
+            _annotated_top(b"m", [b"1", b"22"]),
+            record_id_column="id",
+            skip_duplicates=True,
+        )
+
+    # A fresh handle opened before a second replacement, back to ``m``.
+    stale_handle = DeltaTableDatabase(root)
+    stale_handle.get_all_records(PATH, record_id_column="id")  # loads the ``n`` version
+    deltalake.write_deltalake(
+        str(root / "t"),
+        _annotated_top(b"m", [b"1", b"22"]).rename_columns(["__record_id", "x"]),
+        mode="overwrite",
+        schema_mode="overwrite",
+    )
+    # Duplicate-only ``n`` on the stale handle: a no-op (writes nothing); a reopened
+    # handle refuses it.
+    stale_handle.add_records(
+        PATH,
+        _annotated_top(b"n", [b"1", b"22"]),
+        record_id_column="id",
+        skip_duplicates=True,
+    )
+    with pytest.raises(InputValidationError):
+        DeltaTableDatabase(root).add_records(
+            PATH,
+            _annotated_top(b"n", [b"1", b"22"]),
+            record_id_column="id",
+            skip_duplicates=True,
+        )
+    # Duplicate-only ``m`` (stored now) on the stale handle: its stale log says ``n``,
+    # the refusal is decided on the version stored now, ``m``: accepted, a no-op.
+    stale_handle.add_records(
+        PATH,
+        _annotated_top(b"m", [b"1", b"22"]),
+        record_id_column="id",
+        skip_duplicates=True,
+    )
+    # A fresh id of ``n`` on a stale handle that accepts it: refused at flush.
+    other_stale = DeltaTableDatabase(root)
+    other_stale.get_all_records(PATH, record_id_column="id")
+    deltalake.write_deltalake(
+        str(root / "t"),
+        _annotated_top(b"n", [b"1", b"22"]).rename_columns(["__record_id", "x"]),
+        mode="overwrite",
+        schema_mode="overwrite",
+    )
+    other_stale.add_records(PATH, _annotated_top(b"m", [b"333"]), record_id_column="id")
+    with pytest.raises(
+        InputValidationError, match="the stored column's 'itl1371.a;6e'"
+    ):
+        other_stale.flush()
+    final = DeltaTableDatabase(root).get_all_records(PATH, record_id_column="id")
+    assert final is not None
+    assert sorted(cast(list[bytes], final.column("id").to_pylist())) == [b"1", b"22"]
+
+
+@pytest.mark.parametrize("kind", ["in-memory", "Delta"])
+def test_the_identity_is_refused_before_the_reorder_calls_a_serializer(
+    tmp_path: Path, kind: str
+) -> None:
+    """The rows are reordered by name (ITL-1367) after the identity rule, which reads
+    the bytes Arrow holds: a permuted batch of another identifier whose serializer
+    raises when asked again is refused naming both identifiers."""
+
+    class Raising(pa.ExtensionType):
+        def __init__(self, payload: bytes | None) -> None:
+            self.payload = payload
+            super().__init__(pa.large_string(), "itl1371.raising")
+
+        def __arrow_ext_serialize__(self) -> bytes:
+            if self.payload is None:
+                raise RuntimeError("serializer asked again")
+            return self.payload
+
+        @classmethod
+        def __arrow_ext_deserialize__(cls, storage_type: Any, serialized: bytes) -> Any:
+            return cls(serialized)
+
+    def rows(ext: Any, ids: list[bytes]) -> pa.Table:
+        x = ext.wrap_array(pa.array(["v"] * len(ids), pa.large_string()))
+        return pa.table(
+            {
+                "id": pa.array(ids, pa.large_binary()),
+                "x": x,
+                "z": pa.array(range(len(ids)), pa.int64()),
+            }
+        )
+
+    with _store(kind, tmp_path) as store:
+        store.db.add_records(
+            PATH, rows(Raising(b"old"), [b"1", b"22"]), record_id_column="id"
+        )
+        incoming = Raising(b"new")
+        permuted = rows(incoming, [b"1", b"22"]).select(["z", "id", "x"])
+        incoming.payload = None
+        with pytest.raises(InputValidationError) as refused:
+            store.db.add_records(
+                PATH, permuted, record_id_column="id", skip_duplicates=True
+            )
+        assert "'itl1371.raising;6e6577'" in str(refused.value)
+        assert "'itl1371.raising;6f6c64'" in str(refused.value)
