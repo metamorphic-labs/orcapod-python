@@ -309,7 +309,12 @@ class DropNulls(UnaryOperator):
             columns non-nullable. A result with no rows has the same schema.
         """
         table = stream.as_table(
-            columns={"source": True, "system_tags": True, "sort_by_tags": False}
+            columns={
+                "source": True,
+                "system_tags": True,
+                "context": True,
+                "sort_by_tags": False,
+            }
         )
         tag_columns, data_columns = stream.keys()
         return ArrowTableStream(
