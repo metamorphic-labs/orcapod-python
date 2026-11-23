@@ -363,7 +363,8 @@ class Absence:
                 )
         if self.present_in:
             lines.append(f"  present in: {', '.join(self.present_in)}")
-        if self.missing and self.because:
+        repeated = self.removed_by is not None and self.because == self.removed_by.text
+        if self.missing and self.because and not repeated:
             lines.append(f"  because: {self.because}")
         return "\n".join(lines)
 
