@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import (
     AsyncIterator,
+    Coroutine,
     Collection,
     Iterable,
     Iterator,
@@ -179,6 +180,43 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
         """
         ...
 
+    def arrow_schema(self) -> "pa.Schema":
+        """The Arrow schema of the columns the stream passes between job nodes.
+
+        The user tags, system tags, data and source-info columns, in row order (user
+        tags, system tags, data, source info; data and source info in data-key order),
+        with the Arrow types, nullability and field metadata of the rows; no context and
+        no meta column (ITL-1347). Known without reading, computing or polling a row.
+        Three properties are decided by the values of a complete table, not by the
+        description: whether a system-tag or source-info field is nullable (stated
+        nullable here), and a source-info field's type (stated as the declared token
+        type; a list of ``None`` or of empty lists shows fewer levels, so consumers must
+        not rely on it). And a ``null`` column keeps the ``null`` type a zero-row table
+        has (rows carry ``large_string``; ITL-1319).
+
+        Returns:
+            The declared Arrow schema.
+        """
+        ...
+
+    @property
+    def arrow_types_declared(self) -> bool:
+        """Whether ``arrow_schema()`` holds the rows' own Arrow types.
+
+        ``False`` when the stream cannot type itself without rows (an unbound slot
+        declared in Python types, a ``PollingSource`` never polled; ITL-1089), or its
+        rows decide its types (a narrower bind, an output held as its rows). An unbound
+        slot declared with explicit Arrow schemas answers ``True``: its rows will have
+        exactly those types, since a bind refuses a source of any other. Its schema is then the best
+        description available without reading a row: a slot's or source's explicit
+        Arrow declaration when it states one, otherwise its Python schema converted;
+        a source whose schema is known only by polling, and which has not polled, has
+        an empty schema. So a ``False`` description is not guaranteed to hold the
+        stream's column names, and the names it holds come in no guaranteed order; no
+        consumer relies on either (ITL-1347).
+        """
+        ...
+
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """
         Generates explicit iterator over (tag, data) pairs in the stream.
@@ -188,6 +226,19 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
 
         Yields:
             tuple[TagProtocol, DataProtocol]: Sequential (tag, data) pairs
+        """
+        ...
+
+    def open_channel(self) -> RecordBatchInput:
+        """Open an input channel on this stream, for async computation (ITL-1347).
+
+        The channel delivers the stream's rows as Arrow record batches, read once and
+        in order; its description is this stream. Several channels may be opened on
+        one stream, each with its own position (``to_stream()`` makes a stream of what
+        a channel delivers).
+
+        Returns:
+            The input channel.
         """
         ...
 
@@ -588,4 +639,110 @@ class StreamWithOperationsProtocol(StreamProtocol, Protocol):
         Returns:
             Self: New stream containing batched (tag, data) pairs.
         """
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Channels of Arrow record batches (ITL-1347): the stream is the description
+# ---------------------------------------------------------------------------
+
+
+class RecordBatchInput(Protocol):
+    """A single-pass reader of a stream's Arrow record batches.
+
+    The Arrow-record-batch form of ``ReadableChannel`` (``orcapod.channels``); ``InputChannel`` of
+    ``orcapod.core.streams.record_batch_input`` is the implementation. Its description is
+    its ``stream``, known before the first batch.
+    """
+
+    @property
+    def stream(self) -> StreamProtocol:
+        """The stream whose rows this channel delivers: the description."""
+        ...
+
+    async def receive(self) -> pa.RecordBatch:
+        """Return the next Arrow record batch.
+
+        Raises:
+            ChannelClosed: At the end, and after ``close``.
+            UpstreamFailedError: If the producer failed or was cancelled.
+        """
+        ...
+
+    def __aiter__(self) -> AsyncIterator[pa.RecordBatch]:
+        """Iterate over the remaining record batches, in arrival order."""
+        ...
+
+    async def collect(self) -> list[pa.RecordBatch]:
+        """Read to the end and return every remaining record batch, in arrival order."""
+        ...
+
+    @property
+    def unread(self) -> bool:
+        """Whether no read was called and the channel is not closed.
+
+        A reserved channel (``reserve()``) is not unread, even before its first read.
+        """
+        ...
+
+    @property
+    def opened_on(self) -> StreamProtocol | None:
+        """The complete stream this channel reads, when it was opened on one; else
+        ``None`` (a reader of an output channel, whatever its description)."""
+        ...
+
+    def reserve(self, claim: object | None = None) -> object:
+        """Take the channel for one consumer that will read all of it.
+
+        Without ``claim``, the unread channel is held for the returned claim, not for
+        the calling task: no task, the reserving one included, can read it until a
+        task takes it over with that claim (``reserve(claim)``), after which only
+        that task reads it. A claim is taken over once; a claim freed before it was
+        taken over closes the channel.
+
+        Raises:
+            RuntimeError: If a read was called on it already, or ``claim`` is not its
+                claim.
+            ChannelClosed: If it was closed.
+        """
+        ...
+
+    def to_stream(self) -> Coroutine[Any, Any, StreamProtocol]:
+        """Return what the channel delivers, as a stream: the one such conversion.
+
+        A plain method returning the conversion to await; it reserves the channel
+        when called. The conversion reads the channel to its end, raises every read
+        error before an operator runs, and builds a fixed snapshot through the one
+        settlement path; only an unread channel opened on a stream ``_output_stream``
+        built gives that stream as it is.
+
+        Raises:
+            RuntimeError: If a read of the channel was already called.
+            ChannelClosed: If the channel was closed.
+            UpstreamFailedError: If the producer failed or was cancelled.
+        """
+        ...
+
+    async def close(self) -> None:
+        """Stop reading. The producer no longer waits for this reader."""
+        ...
+
+
+class RecordBatchOutput(Protocol):
+    """The producer side of a stream's Arrow record batches.
+
+    The Arrow-record-batch form of ``WritableChannel`` (``orcapod.channels``); ``OutputChannel`` of
+    ``orcapod.core.record_batch_channels`` is the implementation.
+    """
+
+    async def send(self, batch: pa.RecordBatch) -> None:
+        """Send one Arrow record batch of the stream's transport columns."""
+        ...
+
+    async def close(self) -> None:
+        """Complete the output."""
+        ...
+
+    def fail(self, error: BaseException) -> None:
+        """End the output with the producer's failure or cancellation."""
         ...

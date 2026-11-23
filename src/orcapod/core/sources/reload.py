@@ -9,20 +9,12 @@ below the source run again.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import polars as pl
-    import pyarrow as pa
-    import pyarrow.compute as pc
-    import pyarrow.ipc as pa_ipc
-else:
-    pa = LazyModule("pyarrow")
-    pc = LazyModule("pyarrow.compute")
-    pa_ipc = LazyModule("pyarrow.ipc")
-    pl = LazyModule("polars")
+import polars as pl
+import pyarrow as pa
+import pyarrow.compute as pc
+import pyarrow.ipc as pa_ipc
 
 
 def keep_nullable_columns(read: pa.Table, held: pa.Schema) -> pa.Table:

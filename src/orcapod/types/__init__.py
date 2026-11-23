@@ -25,6 +25,7 @@ from enum import Enum
 from types import UnionType
 from typing import TYPE_CHECKING, Any, Generic, Self, TypeAlias, TypeVar
 
+import pyarrow as pa
 from typing_extensions import override
 
 # Re-exported: ``Condition`` is defined in its own module (ITL-1218).
@@ -38,13 +39,7 @@ from orcapod.types.explanation import SourceReading as SourceReading
 from orcapod.types.explanation import Step as Step
 
 if TYPE_CHECKING:
-    import pyarrow as pa
-
     from orcapod.protocols.core_protocols import DataFunctionExecutorProtocol
-else:
-    from orcapod.utils.lazy_module import LazyModule
-
-    pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
 

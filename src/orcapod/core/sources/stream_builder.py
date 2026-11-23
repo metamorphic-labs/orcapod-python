@@ -14,6 +14,8 @@ from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
+import pyarrow as pa
+
 from orcapod.core.sources.source_ids import hash_source_id
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import RowIdentifierError
@@ -22,16 +24,11 @@ from orcapod.system_constants import constants
 from orcapod.types import ContentHash
 from orcapod.utils import arrow_utils, schema_utils
 from orcapod.utils.schema_utils import compute_source_schema_hash
-from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
-    import pyarrow as pa
-
     from orcapod.config import OrcapodConfig
     from orcapod.contexts import DataContext
     from orcapod.protocols.hashing_protocols import ArrowHasherProtocol
-else:
-    pa = LazyModule("pyarrow")
 
 
 def normalize_record_id_columns(

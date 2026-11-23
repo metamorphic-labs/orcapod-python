@@ -1,25 +1,32 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, ClassVar, TYPE_CHECKING, cast
+from typing import Any, ClassVar, cast
+
+import numpy as np
+import pyarrow as pa
 
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
-from orcapod.channels import ReadableChannel, WritableChannel
+from orcapod.protocols.core_protocols.streams import (
+    RecordBatchInput,
+    RecordBatchOutput,
+)
+from orcapod.channels import (
+    ReadableChannel,
+    WritableChannel,
+)
 from orcapod.core.operators.base import UnaryOperator
+from orcapod.core.operators.static_output_pod import (
+    close_inputs,
+    concatenate_batches,
+    finish_operator,
+)
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.streams import ArrowTableStream
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash
 from orcapod.utils import arrow_utils
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import numpy as np
-    import pyarrow as pa
-else:
-    np = LazyModule("numpy")
-    pa = LazyModule("pyarrow")
 
 from orcapod.types import Schema
 
@@ -268,6 +275,56 @@ class Batch(UnaryOperator):
                     await output.send((out_tag, out_data))
         finally:
             await output.close()
+
+    async def async_execute_batches(
+        self, inputs: Sequence[RecordBatchInput], output: RecordBatchOutput
+    ) -> None:
+        """Batch the rows of an input channel as they arrive.
+
+        The Arrow-record-batch form of ``async_execute`` (ITL-1347). With a
+        ``batch_size``, every ``batch_size`` rows that have arrived are batched and
+        sent at once, whatever record batches they came in, so a batch holds
+        consecutive arrivals, as on the row path; the rows left at the end make the
+        last, smaller batch unless ``drop_partial_batch``. With ``batch_size == 0``
+        (every row in one batch) all of the input is read first.
+
+        Args:
+            inputs: The one input channel.
+            output: The channel the batched rows are sent into.
+        """
+        if self.batch_size == 0:
+            await super().async_execute_batches(inputs, output)
+            return
+        (channel,) = inputs
+        try:
+            waiting: list[pa.RecordBatch] = []
+            rows = 0
+            async for batch in channel:
+                if not batch.num_rows:
+                    continue  # nothing to batch, nothing to hold
+                waiting.append(batch)
+                rows += batch.num_rows
+                full = rows - rows % self.batch_size
+                if not full:
+                    continue
+                # Arrived batches may differ in their provenance fields: put them
+                # under one another as a complete table settles them.
+                arrived = concatenate_batches(waiting)
+                assert arrived is not None  # they hold rows
+                await self._send_processed(
+                    arrived.slice(0, full).to_batches(), channel.stream, output
+                )
+                waiting = arrived.slice(full).to_batches()
+                rows -= full
+            # The rows left over are fewer than one batch: the sync rule decides
+            # whether they make a last one.
+            if rows:
+                await self._send_processed(waiting, channel.stream, output)
+        except BaseException as error:
+            output.fail(error)
+            await close_inputs(inputs, error)
+            raise
+        await finish_operator(inputs, output)
 
     def to_config(self) -> dict[str, Any]:
         """Serialize this Batch operator to a config dict.

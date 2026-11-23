@@ -2,23 +2,19 @@ import logging
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from typing import Any, ClassVar, TYPE_CHECKING, TypeAlias
 
+import polars as pl
+import pyarrow as pa
+
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.streams import ArrowTableStream
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils
-from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
     import numpy as np
-    import polars as pl
     import polars._typing as pl_type
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
-    pl = LazyModule("polars")
-    pl_type = LazyModule("polars._typing")
 
 logger = logging.getLogger(__name__)
 

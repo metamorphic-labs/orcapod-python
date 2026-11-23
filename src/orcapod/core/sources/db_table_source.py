@@ -18,6 +18,7 @@ from collections.abc import Collection, Iterator
 from contextlib import contextmanager
 from typing import Any, ClassVar, TYPE_CHECKING
 
+import pyarrow as pa
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
@@ -30,17 +31,12 @@ from orcapod.core.sources.stream_builder import (
     SourceStreamResult,
 )
 from orcapod.utils import arrow_utils
-from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.schema_utils import _normalize_column_list
 
 if TYPE_CHECKING:
-    import pyarrow as pa
-
     from orcapod import contexts
     from orcapod.config import OrcapodConfig
     from orcapod.protocols.db_connector_protocol import DBConnectorProtocol
-else:
-    pa = LazyModule("pyarrow")
 
 
 class DBTableSource(RootSource):
@@ -85,6 +81,7 @@ class DBTableSource(RootSource):
 
     SOURCE_KIND: ClassVar[str] = "db_table"
     """Config type key and default source-id kind of this source (one vocabulary)."""
+    TABLE_IS_ROWS: ClassVar[bool] = True
     TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
     def __init__(

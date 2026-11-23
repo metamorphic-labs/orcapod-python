@@ -422,7 +422,7 @@ class TestDuplicateInputs:
         node = self._node(self._flaky_pod())
         received = sorted(
             (tag.as_dict()["k"], data.as_dict()["y"])
-            for tag, data in node.execute(node.upstreams[0])
+            for tag, data in list(node.execute(node.upstreams[0]).iter_data())
         )
         assert received == [(0, 6), (2, 8)]
         assert self._held(node) == received

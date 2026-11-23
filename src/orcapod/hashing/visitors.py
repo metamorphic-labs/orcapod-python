@@ -9,16 +9,14 @@ import struct
 import typing
 from typing import TYPE_CHECKING, Any
 
+import pyarrow as pa
+
 from orcapod.logical_types.identifier import arrow_type_identifier
 from orcapod.logical_types.ignore_list import IgnoreListHandler, parse_ignore_metadata
-from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
-    import pyarrow as pa
     from orcapod.semantic_types.universal_converter import UniversalTypeConverter
     from orcapod.protocols.hashing_protocols import SemanticHasherProtocol
-else:
-    pa = LazyModule("pyarrow")
 
 
 class ArrowTypeDataVisitor(ABC):

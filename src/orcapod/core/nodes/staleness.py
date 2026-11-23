@@ -73,6 +73,19 @@ class RunHoldingNode:
         """Whether the node holds the rows of a completed run good for such a run."""
         raise NotImplementedError
 
+    def held_row_count(self) -> int:
+        """The number of rows ``iter_data`` yields now, counted without building them.
+
+        A run's summary counts the rows of every node it holds (``plan_run``).
+        Iterating them would build a ``(Tag, Data)`` pair per row of an operator's
+        output (ITL-1351); each kind counts what it holds instead, with the same
+        result as ``sum(1 for _ in node.iter_data())``.
+
+        Returns:
+            The row count.
+        """
+        raise NotImplementedError
+
 
 def _job_upstreams(node: Any) -> list[RunHoldingNode]:
     """The direct upstreams of ``node`` that are job nodes holding run rows."""

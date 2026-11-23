@@ -3,7 +3,10 @@ import contextlib
 import warnings
 from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Collection, Sequence
-from typing import TYPE_CHECKING, Any, ClassVar, final
+from typing import Any, ClassVar, final
+
+import pyarrow as pa
+import pyarrow.compute as pc
 
 from orcapod.types.explanation import plain_repr
 from orcapod.channels import ChannelClosed, ReadableChannel, WritableChannel
@@ -23,21 +26,34 @@ from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagPr
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash, Schema
 from orcapod.utils import arrow_utils, schema_utils
-from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.warning_utils import outside_orcapod_stacklevel
-
-if TYPE_CHECKING:
-    import polars as pl
-    import pyarrow as pa
-    import pyarrow.compute as pc
-else:
-    pa = LazyModule("pyarrow")
-    pc = LazyModule("pyarrow.compute")
-    pl = LazyModule("polars")
 
 # The row-number column of the left frame Polars matches; a tag, so a key, never
 # starts with the meta prefix ``__``.
 _LEFT_ROW = "__semi_join_left_row"
+
+
+def _has_whole_key(
+    table: "pa.Table", keys: Sequence[str]
+) -> "pa.ChunkedArray[Any] | pa.BooleanArray":
+    """Whether each row's key holds no top-level null, as a boolean mask.
+
+    A row whose key holds a top-level null matches nothing in a semi-join: Polars
+    already applies that to scalar keys but treats a null struct or list as equal to
+    another, so such rows are dropped before the match (the sync path and the
+    streaming kernel alike).
+
+    Args:
+        table: The rows.
+        keys: The key columns, at least one.
+
+    Returns:
+        One boolean per row.
+    """
+    valid = table.column(keys[0]).is_valid()
+    for name in keys[1:]:
+        valid = pc.and_(valid, table.column(name).is_valid())
+    return valid
 
 
 class SemiJoin(BinaryOperator):
@@ -227,10 +243,7 @@ class SemiJoin(BinaryOperator):
         # Polars already applies that to scalar keys but treats a null struct or
         # list as equal to another, so drop right rows with a null key.
         right_keys = right_table.select(list(common_keys))
-        valid = right_keys.column(0).is_valid()
-        for index in range(1, right_keys.num_columns):
-            valid = pc.and_(valid, right_keys.column(index).is_valid())
-        right_keys = right_keys.filter(valid)
+        right_keys = right_keys.filter(_has_whole_key(right_keys, common_keys))
 
         # Polars, unlike Arrow's hash join, accepts nested (list, struct) keys.
         # It decides which left rows match from the prepared keys and the left

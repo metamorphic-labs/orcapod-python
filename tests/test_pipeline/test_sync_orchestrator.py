@@ -12,6 +12,7 @@ from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.pipeline import AsyncPipelineOrchestrator
+from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 from orcapod.pipeline.job import PipelineJob
 
@@ -337,7 +338,7 @@ class TestMaterializedStreamIdentity:
         )
         buf = list(node.iter_data())
 
-        stream = SyncPipelineOrchestrator._materialize_as_stream(buf, node)
+        stream = StaticOutputOperatorPod._materialize_upstream(buf, node)
         assert stream.pipeline_hash() == node.pipeline_hash()
 
     def test_materialized_stream_has_same_content_hash(self):
@@ -356,7 +357,7 @@ class TestMaterializedStreamIdentity:
         op_node.run()
         buf = list(op_node.iter_data())
 
-        stream = SyncPipelineOrchestrator._materialize_as_stream(buf, op_node)
+        stream = StaticOutputOperatorPod._materialize_upstream(buf, op_node)
         assert stream.content_hash() == op_node.content_hash()
 
     def test_materialized_stream_preserves_system_tags(self):
@@ -371,7 +372,7 @@ class TestMaterializedStreamIdentity:
         op_node.run()
         buf = list(op_node.iter_data())
 
-        stream = SyncPipelineOrchestrator._materialize_as_stream(buf, op_node)
+        stream = StaticOutputOperatorPod._materialize_upstream(buf, op_node)
 
         expected_tag_schema = op_node.output_schema(columns={"system_tags": True})[0]
         actual_tag_schema = stream.output_schema(columns={"system_tags": True})[0]

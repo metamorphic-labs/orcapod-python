@@ -9,6 +9,8 @@ from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
 from functools import update_wrapper, wraps
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
+import pyarrow as pa
+
 from orcapod import contexts
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
@@ -59,7 +61,6 @@ from orcapod.types import (
     resolve_concurrency,
 )
 from orcapod.utils import arrow_utils, schema_utils
-from orcapod.utils.lazy_module import LazyModule
 
 from datetime import datetime, timezone
 
@@ -75,12 +76,7 @@ from orcapod.hooks import (
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    import polars as pl
-    import pyarrow as pa
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
-else:
-    pa = LazyModule("pyarrow")
-    pl = LazyModule("polars")
 
 
 def _executor_supports_concurrent(

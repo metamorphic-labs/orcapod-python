@@ -32,18 +32,11 @@ which orders by ``sort_key``.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import numpy as np
-    import polars as pl
-    import pyarrow as pa
-else:
-    np = LazyModule("numpy")
-    pl = LazyModule("polars")
-    pa = LazyModule("pyarrow")
+import numpy as np
+import polars as pl
+import pyarrow as pa
 
 
 def is_list_kind(arrow_type: "pa.DataType") -> bool:
