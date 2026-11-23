@@ -199,6 +199,11 @@ pairs. A label the job does not have is refused with `ValueError`.
       whether the source holds the record.
 - A link is never guessed. Two rows that cannot be told apart by their system tags,
   tokens and values are refused with `ProvenanceInconsistencyError`.
+- Inputs of a `Join` with one pipeline hash (two sources of one schema) are told apart
+  by the values they hold. Two such joins joined again, whose sources sort in opposite
+  orders, cannot be told apart: the trace refuses the link rather than guess. A stored
+  entry that cannot tell two such inputs apart leaves `why_missing`'s stored answer
+  unknown (`reached_function` is `None`).
 - The `row` argument compares values strictly: `False` never selects `0`, and a NaN
   key selects the NaN group.
 - A node the trace passes must hold its run. After a full run every node does; after

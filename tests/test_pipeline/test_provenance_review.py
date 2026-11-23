@@ -1238,3 +1238,95 @@ def test_a_commutative_join_lists_its_inputs_in_one_order() -> None:
         job.run()
         texts.append(job.nodes["Join"].trace({"k": "x"}, "k").text())
     assert texts[0] == texts[1]
+
+
+# ---------------------------------------------------------------------------
+# Ninth review (head beae55fb)
+# ---------------------------------------------------------------------------
+
+
+@function_pod(output_keys="length")
+def key_length(k: str) -> int:
+    return len(k)
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_stored_history_of_tied_bindings_with_one_id_is_unknown(mode: str) -> None:
+    """Two bindings with one pipeline hash and one source id s at a Join: a stored
+    entry naming s::row_0 cannot tell which binding it came through, so the stored
+    answer for the binding whose row_0 the Join removed is unknown, not reached."""
+    a = DictSource(
+        [{"k": "unmatched", "i": 0}, {"k": "shared", "i": 1}],
+        tag_columns=["k", "i"],
+        source_id="s",
+    )
+    schema = pa.schema(
+        [
+            pa.field("k", pa.large_string(), nullable=False),
+            pa.field("i", pa.int64(), nullable=False),
+        ]
+    )
+    b = ArrowTableSource(
+        pa.Table.from_pylist([{"k": "shared", "i": 1}], schema=schema),
+        tag_columns=["k", "i"],
+        source_id="s",
+    )
+    job = PipelineJob(name=f"hist{mode}", database=InMemoryArrowDatabase())
+    with job:
+        key_length.pod(Join()(a, b), label="length")
+    run(job, mode)
+    left = next(
+        u.label
+        for u in job.nodes["Join"].upstreams
+        if type(u.bound_source) is DictSource
+    )
+    answer = job.nodes["length"].why_missing(left, "row_0")
+    assert answer.missing
+    assert answer.reached_function is None
+    assert "reached function" not in answer.text()
+
+
+def run(job: PipelineJob, mode: str) -> None:
+    from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+
+    job.run(
+        orchestrator=AsyncPipelineOrchestrator()
+        if mode == "async"
+        else SyncPipelineOrchestrator()
+    )
+
+
+@pytest.mark.parametrize("projection", [False, True])
+def test_a_selection_token_that_contradicts_the_operator_raises(
+    projection: bool,
+) -> None:
+    """Index("x", 0, out="picked") with x = y = [7]: a held token y[0] contradicts
+    the configured input column x, directly over the source and through a projection."""
+    source = DictSource(
+        [{"k": "x", "i": 0, "x": [7], "y": [7]}],
+        tag_columns=["k", "i"],
+        tag_only_columns=True,
+        source_id="a",
+    )
+    job = PipelineJob(name=f"tok{projection}", database=InMemoryArrowDatabase())
+    with job:
+        upstream = SelectDataColumns(["x", "y"])(source) if projection else source
+        Index("x", 0, out="picked")(upstream)
+    job.run()
+    node = job.nodes["Index"]
+    assert [
+        c.column for c in node.trace({"k": "x", "i": 0}, "picked").source_cells()
+    ] == ["x"]
+    held = vars(node)["_cached_output_stream"]
+    table = held.as_table(columns={"system_tags": True, "source": True})
+    at = table.schema.get_field_index("_source_picked")
+    changed = table.set_column(
+        at,
+        table.schema.field(at),
+        pa.array(["a::row_0::y[0]"], table.schema.field(at).type),
+    )
+    vars(node)["_cached_output_stream"] = ArrowTableStream(
+        changed, tag_columns=["k", "i"], data_context=held.data_context
+    )
+    with pytest.raises(ProvenanceInconsistencyError):
+        node.trace({"k": "x", "i": 0}, "picked")

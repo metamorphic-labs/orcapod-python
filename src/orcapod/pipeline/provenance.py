@@ -1172,17 +1172,26 @@ class _Tracer:
         """``Index`` or ``Pick``: the cell is part of the input's ``input_column``."""
         if input_column not in _keys(upstream)[1]:
             return []
+        # The output token is the input cell's token with the selection appended
+        # (``x[0]``, ``x['a']``), or, when the input token is a list (one per member),
+        # its element at the position.
+        suffix = f"[{selected!r}]" if isinstance(selected, str) else f"[{selected}]"
         if _kind(upstream) == "source":
-            # The output token is the source cell's token with the selection appended
-            # (``x[0]``, ``x['a']``): the source cell is the token without it.
-            suffix = f"[{selected!r}]" if isinstance(selected, str) else f"[{selected}]"
             token = cell.token
-            if not isinstance(token, str) or not token.endswith(suffix):
+            if token is None:
                 return []
+            base = token[: -len(suffix)] if isinstance(token, str) else None
+            if (
+                base is None
+                or not cast(str, token).endswith(suffix)
+                or _parse_token(base)[2] != input_column
+            ):
+                raise ProvenanceInconsistencyError(
+                    f"node {node.label!r}: the token {token!r} of {cell.column!r} is "
+                    f"not {input_column + suffix!r}, which the operator selects"
+                )
             within = (selected, *cell.path[_list_depth(cell) :])
-            return self.to_source(
-                node, index, cell.row, token[: -len(suffix)], cell.value, within, None
-            )
+            return self.to_source(node, index, cell.row, base, cell.value, within, None)
         up_rows = self.reader.held(upstream)
         if up_rows is None:
             return [self.unread(upstream, cell.column, None, "not_computed")]
@@ -1195,6 +1204,14 @@ class _Tracer:
                 size = len(cast(list[Any], whole))
                 step_at = selected + size if selected < 0 else selected
             up = _Cell(r, input_column, (step_at, *cell.path))
+            input_token = up.whole_token
+            expected = (
+                cast(list[Any], input_token)[cast(int, step_at)]
+                if isinstance(input_token, list)
+                else f"{input_token}{suffix}"
+            )
+            if cell.whole_token != expected:
+                continue  # the held output token is not the selection's
             try:
                 if same_value(up.value, cell.value):
                     good.append(up)
@@ -1205,7 +1222,7 @@ class _Tracer:
                 raise ProvenanceInconsistencyError(
                     f"node {node.label!r}: {cell.column!r} is a part of "
                     f"{input_column!r} of {upstream.label!r}, whose held row holds "
-                    "another value"
+                    "another value or token"
                 )
             return []
         chosen = _one(
@@ -1909,10 +1926,24 @@ def _carried(
 
 
 def _source_columns(
-    source_node: Any, node: Any, names: Sequence[str], reader: _Reader
+    source_node: Any,
+    node: Any,
+    names: Sequence[str],
+    reader: _Reader,
+    tied: list[bool] | None = None,
 ) -> set[str] | None:
     """The system-tag columns of ``node`` (named ``names``) that come from
     ``source_node``, followed through the column names of the held nodes between.
+
+    Args:
+        source_node: The source node.
+        node: The node whose columns are named.
+        names: The node's system-tag columns.
+        reader: The call's reader.
+        tied: When given, ``True`` is appended when the way crosses a commutative
+            ``Join`` whose input is tied with another (same pipeline hash): the
+            columns then include the other input's slots too, and names alone cannot
+            tell the two apart.
 
     Returns:
         The column names; ``None`` when a node between holds no run.
@@ -1930,14 +1961,13 @@ def _source_columns(
             if table is None:
                 return None
             up_names = _system_tags(dict.fromkeys(table.column_names))
-            up_columns = _source_columns(source_node, upstream, up_names, reader)
+            up_columns = _source_columns(source_node, upstream, up_names, reader, tied)
         if up_columns is None:
             return None
-        found |= set(
-            _column_map(
-                names, node, index, sorted(up_columns), _tied_positions(node, index)
-            )
-        )
+        positions = _tied_positions(node, index)
+        if positions is not None and tied is not None:
+            tied.append(True)
+        found |= set(_column_map(names, node, index, sorted(up_columns), positions))
     return found
 
 
@@ -1962,8 +1992,10 @@ def _reached(
         return None
     names = _system_tags(entries[0])
     direct = False
+    unknown = False
     for source_node in sources:
-        columns = _source_columns(source_node, function_node, names, reader)
+        tied: list[bool] = []
+        columns = _source_columns(source_node, function_node, names, reader, tied)
         if not columns:
             continue
         pairs = wanted[id(source_node)]
@@ -1972,7 +2004,13 @@ def _reached(
         if any(sid in ids for found in named for sid, _ in found):
             direct = True
             if any(found & pairs for found in named):
-                return True
+                if not tied:
+                    return True
+                # The columns include a tied input's slots: a stored entry names the
+                # record, but maybe through the other input; it cannot tell.
+                unknown = True
+    if unknown:
+        return None
     if direct:
         return False
     up = carried.get(id(function_node.upstreams[0]))
