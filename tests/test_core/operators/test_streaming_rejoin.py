@@ -186,7 +186,7 @@ def test_repeats_of_an_origin_row_pair_one_to_one_in_arrival_order() -> None:
             _check(_kernel, Rejoin().static_process, inputs)
 
 
-def test_thousands_of_repeats_stay_linear() -> None:
+def test_alternating_repeats_keep_only_unmatched_rows() -> None:
     # 3,000 rows of one origin row on each side, in one-row batches: each arriving row
     # pairs with one remaining row (never with every repeat), and the remaining set
     # holds at most the rows not paired yet.

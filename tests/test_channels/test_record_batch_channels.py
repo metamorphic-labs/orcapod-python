@@ -603,22 +603,34 @@ def test_a_feed_raising_stop_async_iteration_is_a_read_error() -> None:
 
 def test_a_barrier_leaves_no_conversion_behind_when_an_input_was_read() -> None:
     """A barrier whose second input was read already: its setup fails, and the first
-    input's conversion, already started, is cancelled and awaited, so no task fails
-    later with nobody to hear it."""
+    input's conversion, already started and waiting for more of its producer's
+    batches, is cancelled and awaited before the barrier raises: its reader is closed
+    and the producer released, so no task fails later with nobody to hear it."""
     left = source(2)
     right = source(2, source_id="other")
+    left_batches = batches_of(left, 1)
     unheard: list[Any] = []
 
     async def read() -> None:
         asyncio.get_running_loop().set_exception_handler(
             lambda _loop, context: unheard.append(context)
         )
-        first, second = left.open_channel(), right.open_channel()
+        producer = OutputChannel(left, retain=False, buffer_size=1)
+        first = producer.open_reader()
+        second = right.open_channel()
         _ = await second.receive()
+        await producer.send(left_batches[0])  # the conversion takes it and waits
         op = SemiJoin()
         output = OutputChannel(op(left, right))
         with pytest.raises(RuntimeError, match="read already"):
             await op.async_execute_batches([first, second], output)
+        # The conversion is done: its reader is closed and its producer no longer
+        # waits for it.
+        async with asyncio.timeout(TIMEOUT):
+            await producer.send(left_batches[1])
+            await producer.send(left_batches[1])
+        with pytest.raises(ChannelClosed):
+            _ = await first.receive()
         gc.collect()
         await asyncio.sleep(0.01)
 
@@ -1970,6 +1982,37 @@ def test_an_operator_fails_its_output_when_its_input_failed(
     run(downstream)
     with pytest.raises(RuntimeError, match="has no result"):
         _ = output.result()
+
+
+def test_a_barrier_that_read_part_of_a_failed_input_never_computes() -> None:
+    """CodeRabbit on PR 510: the barrier has started and taken the first batch when
+    its producer fails; it never computes over the part it received, and its output
+    fails."""
+    stream = source()
+    batches = batches_of(stream, 2)
+    op = PolarsFilter(constraints={})
+
+    async def go() -> None:
+        feed = OutputChannel(stream, retain=False, buffer_size=1)
+        reader = feed.open_reader()
+        output = OutputChannel(op(stream))
+        task = asyncio.ensure_future(op.async_execute_batches([reader], output))
+        await feed.send(batches[0])
+        # With one slot, this send returns once the barrier has taken the first
+        # batch: the barrier is running and holds part of its input.
+        await feed.send(batches[1])
+        feed.fail(OSError("disk gone"))
+        with pytest.raises(UpstreamFailedError):
+            async with asyncio.timeout(TIMEOUT):
+                await task
+        with pytest.raises(RuntimeError, match="has no result"):
+            _ = output.result()
+
+    with mock.patch.object(
+        type(op), "static_process", autospec=True, side_effect=type(op).static_process
+    ) as computed:
+        run(go)
+    assert computed.call_count == 0
 
 
 def test_a_cancelled_operator_fails_its_output_and_closes_its_input() -> None:

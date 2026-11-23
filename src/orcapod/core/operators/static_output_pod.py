@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, cast
 
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from orcapod.protocols.core_protocols.streams import (
     RecordBatchInput,
@@ -1055,9 +1056,10 @@ class StaticOutputOperatorPod(TraceableBase):
         came from. A predicate that reads a ``null`` column's type or the column order
         follows that form (documented behaviour, e5).
 
-        The output is closed when the operator is done. If it fails or is cancelled,
-        the output fails instead, so no reader takes it for complete; every input is
-        closed in either case.
+        When the operator is done its inputs are closed, then its output
+        (``finish_operator``), so a failing close fails the output. If the operator
+        fails or is cancelled, the output fails instead, so no reader takes it for
+        complete; every input is closed in either case.
 
         Args:
             inputs: One input channel per input stream, in the operator's order.
@@ -1071,12 +1073,11 @@ class StaticOutputOperatorPod(TraceableBase):
             else:
                 streams = await _streams_of(inputs)
                 await self._send_result(self.static_process(*streams), output)
-            await output.close()
         except BaseException as error:
             output.fail(error)
             await close_inputs(inputs, error)
             raise
-        await close_inputs(inputs)
+        await finish_operator(inputs, output)
 
     async def _send_processed(
         self,
@@ -1112,6 +1113,32 @@ class StaticOutputOperatorPod(TraceableBase):
         for batch in table.to_batches():
             if batch.num_rows:
                 await output.send(batch)
+
+
+async def finish_operator(
+    inputs: Sequence[RecordBatchInput], output: RecordBatchOutput
+) -> None:
+    """End an operator that has sent its result: close its inputs, then its output.
+
+    The inputs are closed first, so a failing close fails the output instead of
+    completing it: readers see the normal end only when the operator ended cleanly.
+
+    Args:
+        inputs: The operator's input channels.
+        output: Its output channel.
+
+    Raises:
+        Exception: The first error of an input's close, or the output's close; the
+            output then fails with it.
+    """
+    try:
+        await close_inputs(inputs)
+        await output.close()
+    except BaseException as error:
+        # A failing close of an input, or of the output itself: no reader takes the
+        # output for complete.
+        output.fail(error)
+        raise
 
 
 async def close_inputs(
@@ -1295,29 +1322,84 @@ def settle_token_types(
         if len(kinds) > 1:
             raise SourceInfoTypesDisagree(field.name)
         (kind,) = kinds
-        _ = _tokens_as(column, kind, field.name)  # representable, or refused
+        _ = _named_tokens_as(column, kind, field.name)  # representable, or refused
         settled[field.name] = kind
     return settled
 
 
-def _tokens_as(
-    column: pa.Array[Any],
-    kind: pa.DataType,
-    name: str,  # pyright: ignore[reportExplicitAny]  # any column
-) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny]  # any column
-    """``column``'s tokens as an array of ``kind``: the same array when it has that type.
+def tokens_as(column: pa.Array[Any], kind: pa.DataType) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny]  # any column
+    """``column``'s source-info tokens as an array of ``kind``, every value kept.
+
+    The same array when it has that type. A token type that one batch's values give
+    (``arrow_utils.source_info_arrow_type``) can be shallower than another's (a null
+    or an empty list fixes fewer list levels); converting keeps every token, and a
+    token that ``kind`` cannot hold is refused, never changed.
+
+    Args:
+        column: Source-info tokens.
+        kind: A token type (``large_string``, or ``large_list`` of a token type).
+
+    Returns:
+        The tokens as ``kind``.
+
+    Raises:
+        RowBuiltFormUnavailable: If a token cannot be represented as ``kind``.
+    """
+    return _tokens_into(column, kind)
+
+
+def _tokens_into(column: pa.Array[Any], kind: pa.DataType) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny]  # any column
+    """``tokens_as``, level by level, never reading a value as another shape.
+
+    A level whose values are all null (or that has none) takes ``kind`` as it is; two
+    list levels convert their values; any other difference is refused. A value is
+    never re-read in another type (pyarrow reads a string as a list of characters).
 
     Raises:
         RowBuiltFormUnavailable: If a token cannot be represented as ``kind``.
     """
     if column.type == kind:
         return column
+    if column.null_count == len(column):
+        return pa.nulls(len(column), kind)  # pyright: ignore[reportCallIssue, reportArgumentType]  # pyarrow takes any type; the stubs say an extension type
+    lists = (pa.ListType, pa.LargeListType)
+    if isinstance(column.type, lists) and isinstance(kind, lists):
+        # The slice's own lists: its values, and offsets from its lists' lengths (a
+        # null list holds none), so a sliced array converts as its rows say.
+        values = _tokens_into(pc.list_flatten(column), kind.value_type)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+        lengths = pc.fill_null(pc.list_value_length(column), 0)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportArgumentType]  # pyarrow takes a Python fill value
+        offset_type = pa.int64() if isinstance(kind, pa.LargeListType) else pa.int32()
+        offsets = pa.concat_arrays(
+            [
+                pa.array([0], offset_type),
+                pc.cumulative_sum(lengths).cast(offset_type),  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+            ]
+        )
+        build = (
+            pa.LargeListArray.from_arrays
+            if isinstance(kind, pa.LargeListType)
+            else pa.ListArray.from_arrays
+        )
+        return build(offsets, values, type=kind, mask=column.is_null())  # pyright: ignore[reportUnknownVariableType, reportCallIssue, reportArgumentType]  # the offsets' width follows ``kind``
+    raise RowBuiltFormUnavailable(
+        f"a token of type {column.type} cannot be represented as {kind}"
+    )
+
+
+def _named_tokens_as(
+    column: pa.Array[Any],  # pyright: ignore[reportExplicitAny]  # any column
+    kind: pa.DataType,
+    name: str,
+) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny]  # any column
+    """``tokens_as`` for the source-info column ``name``, whose name a refusal gives.
+
+    Raises:
+        RowBuiltFormUnavailable: If a token cannot be represented as ``kind``.
+    """
     try:
-        return pa.array(column.to_pylist(), type=kind)
-    except (pa.ArrowInvalid, pa.ArrowTypeError, TypeError, ValueError) as error:
-        raise RowBuiltFormUnavailable(
-            f"{name}: a token cannot be represented as {kind} ({error})"
-        ) from error
+        return tokens_as(column, kind)
+    except RowBuiltFormUnavailable as error:
+        raise RowBuiltFormUnavailable(f"{name}: {error}") from error
 
 
 def concatenate_batches(batches: Sequence[pa.RecordBatch]) -> pa.Table | None:
@@ -1355,7 +1437,7 @@ def concatenate_batches(batches: Sequence[pa.RecordBatch]) -> pa.Table | None:
         fields: list[pa.Field[Any]] = []  # pyright: ignore[reportExplicitAny]  # any field
         for field, column in zip(batch.schema, batch.columns, strict=True):
             if field.name in settled:
-                column = _tokens_as(column, settled[field.name], field.name)
+                column = _named_tokens_as(column, settled[field.name], field.name)
                 field = pa.field(field.name, settled[field.name])
             if field.name.startswith(prefixes):
                 field = field.with_nullable(True)

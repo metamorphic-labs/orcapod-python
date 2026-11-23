@@ -16,6 +16,7 @@ import cycle.
 from __future__ import annotations
 
 import asyncio
+import functools
 import weakref
 from collections.abc import AsyncIterator, Coroutine
 from typing import TYPE_CHECKING, Any, Protocol
@@ -143,7 +144,7 @@ class InputChannel:
                     f"The input channel of {_named(self._stream)} is claimed by "
                     + "another consumer."
                 )
-            self._owner = _current_task()
+            self._bind_owner(_current_task())
             self._drop_claim()  # redeemed: a later reserve(claim) is refused
             return claim
         if self._started or self._ended or self._owner is not None:
@@ -184,6 +185,29 @@ class InputChannel:
         self._ended = True
         self._owner = None
 
+    def _bind_owner(self, task: asyncio.Task[Any] | None) -> None:  # pyright: ignore[reportExplicitAny]  # any task
+        """Make ``task`` the channel's one consumer.
+
+        When the task finishes (or is cancelled) while it still owns the channel,
+        before the end and without closing it, the channel is closed: its consumer is
+        gone, and no producer may wait for it.
+        """
+        self._owner = task
+        if task is not None:
+            task.add_done_callback(
+                functools.partial(_owner_finished, weakref.ref(self))
+            )
+
+    def _owner_gone(self, task: asyncio.Task[Any]) -> None:  # pyright: ignore[reportExplicitAny]  # any task
+        """Close the channel if ``task`` still owns it: the consumer finished."""
+        if self._owner is not task or self._ended:
+            return
+        self._closed = True
+        self._ended = True
+        self._owner = None
+        self._drop_claim()
+        self._feed.close()
+
     def _belong_to_caller(self) -> None:
         """Bind the channel to the calling task on its first read; refuse any other.
 
@@ -197,7 +221,7 @@ class InputChannel:
                 + "conversion that has not started; no other read is taken."
             )
         if self._owner is None:
-            self._owner = task
+            self._bind_owner(task)
         elif self._owner is not task:
             raise RuntimeError(
                 f"The input channel of {_named(self._stream)} belongs to another "
@@ -366,6 +390,24 @@ class _Claim:
 
     A plain class, so that the channel can hold it weakly.
     """
+
+
+def _owner_finished(
+    channel_ref: weakref.ref[InputChannel],
+    task: asyncio.Task[Any],  # pyright: ignore[reportExplicitAny]  # any task
+) -> None:
+    """Release a reader whose consumer task finished between reads.
+
+    A done callback of the owning task: the channel, if it still exists and the task
+    still owns it before its end, is closed (``InputChannel._owner_gone``).
+
+    Args:
+        channel_ref: The channel, held weakly.
+        task: The finished task.
+    """
+    channel = channel_ref()
+    if channel is not None:
+        channel._owner_gone(task)  # pyright: ignore[reportPrivateUsage]  # the task's release
 
 
 def _release_claim(feed: BatchFeed, channel_ref: weakref.ref[InputChannel]) -> None:
