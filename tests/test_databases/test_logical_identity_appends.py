@@ -1533,7 +1533,10 @@ def _check_chunk_identifiers(
         PATH, rows([b"m"], [b"1"]), record_id_column="id", flush=state == "committed"
     )
     db.add_records(
-        PATH, rows([b"m", b"m"], [b"2", b"3"]), record_id_column="id", flush=True
+        PATH,
+        rows([b"m", b"m"], [b"2", b"3"]),
+        record_id_column="id",
+        flush=state == "committed",
     )
     ids = [b"2", b"3"] if skip_duplicates else [b"4", b"5"]
     mixed = rows([b"m", b"n"], ids)
@@ -2360,3 +2363,25 @@ def test_delta_stale_handle_after_delete_and_recreate_reuses_its_ids(
         b"c",
         b"d",
     ]
+
+
+def test_connector_lists_its_tables_once_per_append(tmp_path: Path) -> None:
+    """The identity check and the ordinary check share one gathering of the held
+    schemas: an append to a table not stored yet lists the backend's tables once, as
+    on main (CodeRabbit, 6eab211e)."""
+    with fake_pyspiral.install(tmp_path / "spiral"):
+        fake_pyspiral.FakeSpiral().project("p")
+        connector = SpiralDBConnector("p")
+        calls = {"n": 0}
+        listing = connector.get_table_names
+
+        def counted() -> list[str]:
+            calls["n"] += 1
+            return listing()
+
+        connector.get_table_names = counted  # pyright: ignore[reportAttributeAccessIssue]  # counts the listings
+        db = ConnectorArrowDatabase(connector)
+        for ids in ([b"1"], [b"22"]):
+            calls["n"] = 0
+            db.add_records(PATH, _annotated_top(b"m", ids), record_id_column="id")
+            assert calls["n"] == 1

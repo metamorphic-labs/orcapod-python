@@ -1891,9 +1891,10 @@ class DeltaTableDatabase:
         differ from the held one (``identity_refusal``, ITL-1371), or ``None``.
 
         Held is the pending batch, as given, and the stored table as its Delta log
-        gives it (``_stored_identities``): no stored type is decoded, so the
-        comparison comes before anything that decodes one (the duplicate scan, the
-        held columns' recorded types) and its error names the identifiers.
+        and its columns' recorded types give it (``_stored_identities``; a record
+        that cannot be decoded only makes its places unknown, it raises nothing),
+        so the comparison comes before the duplicate scan and the ordinary
+        held-column checks, and its error names the identifiers.
 
         Args:
             record_path: The table the rows are for.
