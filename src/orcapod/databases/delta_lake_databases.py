@@ -1164,16 +1164,21 @@ def _database_error_to_raise(errors: list[Exception]) -> Exception | None:
 
     A ``OrcapodDatabaseReadError`` is preferred, because it is the error that fails a run
     whatever the orchestrator's ``error_policy``; failing that, an
-    ``InputValidationError`` from a refused append.
+    ``InputValidationError`` from a refused append, then a
+    ``StoredTableSchemaError`` from a schema guard.
 
     Args:
         errors: The error of every batch that failed, in flush order.
 
     Returns:
-        The first ``OrcapodDatabaseReadError``, else the first ``InputValidationError``, or
-        ``None`` when no batch failed with a database error.
+        The first error of the highest-priority type listed above, or
+        ``None`` when no batch failed with one of those types.
     """
-    for kind in (OrcapodDatabaseReadError, InputValidationError):
+    for kind in (
+        OrcapodDatabaseReadError,
+        InputValidationError,
+        StoredTableSchemaError,
+    ):
         chosen = next((e for e in errors if isinstance(e, kind)), None)
         if chosen is not None:
             return chosen
@@ -2794,6 +2799,8 @@ class DeltaTableDatabase:
           (``_append_refusal``). The batch is dropped from the queue, since every later
           flush would refuse it too; the error says how many rows were not written.
           Correct the rows and add them again (ITL-1334).
+        - Refused by a schema guard (``StoredTableSchemaError``): the stored table
+          must be rebuilt before appending. The refused batch leaves the queue.
         - Any other failure (a table that cannot be loaded, a failed write): the batch
           stays queued, so a later flush tries it again.
 
@@ -2804,6 +2811,8 @@ class DeltaTableDatabase:
             InputValidationError: If no batch failed with ``OrcapodDatabaseReadError`` but a
                 batch was refused by its stored table (dropped from the queue, above).
                 Other failed batches are added to it as notes.
+            StoredTableSchemaError: If a schema guard refused an append and no batch
+                failed with either error above. Other failed batches are added as notes.
             RuntimeError: If batches failed with other errors only, naming the
                 failed batches, with the first failure as its ``__cause__``.
         """

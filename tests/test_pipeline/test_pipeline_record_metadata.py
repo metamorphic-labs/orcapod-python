@@ -23,14 +23,21 @@ from orcapod.databases import (
     DeltaTableDatabase,
     InMemoryArrowDatabase,
 )
-from orcapod.errors import OrcapodDatabaseError, UnstorableColumnError
+from orcapod.errors import (
+    OrcapodDatabaseError,
+    StoredTableSchemaError,
+    UnstorableColumnError,
+)
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.pipeline.observer import NoOpObserver
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 from orcapod.sources import DictSource
-from orcapod.system_constants import PIPELINE_DB_SCHEMA_VERSION
+from orcapod.system_constants import (
+    PIPELINE_DB_SCHEMA_VERSION,
+    RESULT_DB_SCHEMA_VERSION,
+)
 from orcapod.types import NodeConfig
 from tests.test_databases.test_connector_arrow_database import MockDBConnector
 
@@ -68,9 +75,12 @@ def job_and_node(
     count: int = 2,
     reverse: bool = False,
     ephemeral: InMemoryArrowDatabase | None = None,
+    result_database: ArrowDatabaseProtocol | None = None,
 ) -> tuple[PipelineJob, FunctionJobNode]:
     """Build a fresh job over the same function and pipeline table."""
-    job = PipelineJob(name="record_metadata", database=store)
+    job = PipelineJob(
+        name="record_metadata", database=store, result_database=result_database
+    )
     with job:
         _ = summarize.pod(source(count, reverse=reverse), label="summarize")
     if ephemeral is not None:
@@ -106,6 +116,44 @@ class RunObserver(NoOpObserver):
     def on_run_start(self, run_id: str, pipeline_uri: str = "") -> None:
         """Keep the ID of the job run."""
         self.run_id = run_id
+
+
+@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
+def test_separate_result_store_keeps_recording_metadata_in_the_pipeline(
+    orchestrator: str,
+) -> None:
+    """Two jobs sharing results each record the ID of their own run."""
+    results = InMemoryArrowDatabase()
+    first_run_id = None
+    original_result = None
+    for computed in (True, False):
+        store = InMemoryArrowDatabase()
+        job, node = job_and_node(store, result_database=results)
+        observer = RunObserver()
+        _ = job.run(orchestrator=ORCHESTRATORS[orchestrator](), observer=observer)
+        assert observer.run_id and observer.run_id != first_run_id
+        (path,) = store.list_table_paths()
+        assert path[-1] == PIPELINE_DB_SCHEMA_VERSION
+        entries = pipeline_rows(store)
+        assert entries[RUN_ID].to_pylist() == [observer.run_id] * 2
+        assert entries[RECORDED_AT].null_count == 0
+        assert entries["__computed"].to_pylist() == [computed] * 2
+        joined = node.get_all_records(columns={"meta": True})
+        assert joined is not None
+        assert joined[RUN_ID].to_pylist() == [observer.run_id] * 2
+
+        (result_path,) = results.list_table_paths()
+        assert result_path[-1] == RESULT_DB_SCHEMA_VERSION
+        result = results.get_all_records(result_path)
+        assert result is not None and result.num_rows == 2
+        assert (
+            RUN_ID not in result.column_names and RECORDED_AT not in result.column_names
+        )
+        if computed:
+            first_run_id = observer.run_id
+            original_result = result
+        else:
+            assert original_result is not None and result.equals(original_result)
 
 
 @pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
@@ -426,8 +474,13 @@ def test_the_same_node_refuses_a_restored_prerelease_schema(
 
 @pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
 @pytest.mark.parametrize("backend", ["memory", "delta"])
+@pytest.mark.parametrize("full_flush", [False, True], ids=["batch", "full"])
 def test_commit_refuses_legacy_schema_restored_after_queueing(
-    orchestrator: str, backend: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    orchestrator: str,
+    backend: str,
+    full_flush: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The commit checks the table it publishes to, even after a successful preflight."""
     seed = InMemoryArrowDatabase()
@@ -468,10 +521,17 @@ def test_commit_refuses_legacy_schema_restored_after_queueing(
             legacy,  # pyright: ignore[reportPrivateUsage]  # simulate replacing a table underneath the queue
         )
 
-    with pytest.raises(OrcapodDatabaseError, match="Rebuild the pipeline table"):
-        store.flush_batch(path)
+    def flush() -> None:
+        """Exercise both a table-scoped commit and a flush of the whole database."""
+        if full_flush:
+            store.flush()
+        else:
+            store.flush_batch(path)
+
+    with pytest.raises(StoredTableSchemaError, match="Rebuild the pipeline table"):
+        flush()
     assert pipeline_rows(store).equals(legacy)
-    store.flush_batch(path)  # The refused batch must not be retried.
+    flush()  # The refused batch must not be retried.
     assert pipeline_rows(store).equals(legacy)
 
 
