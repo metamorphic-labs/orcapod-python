@@ -16,6 +16,10 @@ import pyarrow as pa
 import pytest
 
 from orcapod import PipelineJob, function_pod
+from orcapod.core.nodes.function_node import (
+    PIPELINE_RECORDED_AT_COL,
+    PIPELINE_RUN_ID_COL,
+)
 from orcapod.core.operators import DropDataColumns, SelectDataColumns
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
@@ -27,8 +31,14 @@ STORES: dict[str, Callable[[Path], Any]] = {
 }
 
 # Columns that differ between two runs by design: the output datagram's uuid, the token
-# that carries it, and the time the row was computed.
-PER_RUN_COLUMNS = ("__data_id", "_source_y", "__pod_ts")
+# that carries it, the result's timestamp, and the entry's recording run and time.
+PER_RUN_COLUMNS = (
+    "__data_id",
+    "_source_y",
+    "__pod_ts",
+    PIPELINE_RUN_ID_COL,
+    PIPELINE_RECORDED_AT_COL,
+)
 
 
 @function_pod(output_keys="y")
