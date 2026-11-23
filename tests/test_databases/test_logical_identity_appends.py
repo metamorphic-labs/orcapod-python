@@ -1236,3 +1236,28 @@ def test_delta_identity_is_checked_before_recorded_types_are_decoded(
                 _rows(("itl1371.b", b"m"), "annotated", "struct", [b"22"]),
                 record_id_column="id",
             )
+
+
+@pytest.mark.parametrize("state", ["pending", "committed"])
+def test_extension_metadata_that_is_not_text(state: str) -> None:
+    """An extension type's serialized metadata is bytes, read from Arrow's export as
+    they are (none of it decoded): the same bytes are accepted, other bytes refused."""
+    db = InMemoryArrowDatabase()
+    db.add_records(
+        PATH,
+        _container_rows("list_view", b"\xff\xfe", [b"1"]),
+        record_id_column="id",
+        flush=state == "committed",
+    )
+    db.add_records(
+        PATH, _container_rows("list_view", b"\xff\xfe", [b"22"]), record_id_column="id"
+    )
+    with pytest.raises(InputValidationError, match="'itl1371.a;fffd', the stored"):
+        db.add_records(
+            PATH,
+            _container_rows("list_view", b"\xff\xfd", [b"333"]),
+            record_id_column="id",
+        )
+    db.flush()
+    stored = db.get_all_records(PATH, record_id_column="id")
+    assert stored is not None and stored.num_rows == 2

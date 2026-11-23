@@ -265,27 +265,65 @@ def _annotation(metadata: Mapping[Any, Any] | None) -> RawIdentifier | None:
 def _extension_identifier(arrow_type: Any) -> RawIdentifier | None:
     """The raw identifier an Arrow extension type holds.
 
-    Read from the type's C data interface export, where Arrow writes the extension
-    name and the serialized metadata it holds (arro3, which ``deltalake`` depends
-    on), never by calling ``__arrow_ext_serialize__`` again: a Python extension
-    type's serializer may give other bytes than the ones Arrow took when the type
-    was made, and the export is also the only way to read the bytes of an extension
-    type defined in Arrow's C++ library (``arrow.uuid``).
+    Read from the type's C data interface export (``__arrow_c_schema__``), where
+    Arrow writes the extension name and the serialized metadata it holds, as bytes
+    (``_exported_metadata``), never by calling ``__arrow_ext_serialize__`` again: a
+    Python extension type's serializer may give other bytes than the ones Arrow took
+    when the type was made, and the export is also the only way to read the bytes of
+    an extension type defined in Arrow's C++ library (``arrow.uuid``).
 
     Returns:
         The identifier, or ``None`` when Arrow cannot export the type (an extension
         type whose storage is itself an extension type): the bytes Arrow holds are
         then out of reach, and the serializer is not asked in their place.
     """
-    from arro3.core import Field as Arro3Field
-
     try:
-        exported = Arro3Field.from_arrow(pa.field("x", arrow_type)).metadata
+        capsule = pa.field("x", arrow_type).__arrow_c_schema__()
     except pa.ArrowNotImplementedError:
         return None
-    identifier = _annotation(exported)
+    identifier = _annotation(_exported_metadata(capsule))
     assert identifier is not None  # an extension type exports its name
     return identifier
+
+
+def _exported_metadata(capsule: Any) -> dict[bytes, bytes]:
+    """The metadata of an exported ``ArrowSchema``, as raw bytes.
+
+    Read as the Arrow C data interface lays it out (a stable ABI): the struct's
+    third member is the metadata, a 32-bit count, then for each pair a 32-bit
+    length and the key bytes, a 32-bit length and the value bytes, native byte
+    order. Keys and values are bytes: no text decoding, so metadata that is not
+    UTF-8 is read as it is. The capsule releases the schema when it is collected.
+    """
+    import ctypes
+    import struct
+
+    get_pointer = ctypes.pythonapi.PyCapsule_GetPointer
+    get_pointer.restype = ctypes.c_void_p
+    get_pointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
+    schema = get_pointer(capsule, b"arrow_schema")
+    # struct ArrowSchema { const char* format; const char* name;
+    #                      const char* metadata; ... }
+    metadata_pointer = ctypes.c_void_p.from_address(
+        schema + 2 * ctypes.sizeof(ctypes.c_void_p)
+    ).value
+    if not metadata_pointer:
+        return {}
+
+    def read(offset: int, size: int) -> bytes:
+        return ctypes.string_at(metadata_pointer + offset, size)
+
+    count = struct.unpack("=i", read(0, 4))[0]
+    offset = 4
+    pairs: dict[bytes, bytes] = {}
+    for _ in range(count):
+        key_length = struct.unpack("=i", read(offset, 4))[0]
+        key = read(offset + 4, key_length)
+        offset += 4 + key_length
+        value_length = struct.unpack("=i", read(offset, 4))[0]
+        pairs[key] = read(offset + 4, value_length)
+        offset += 4 + value_length
+    return pairs
 
 
 def identity_node(arrow_field: "pa.Field[Any]") -> IdentityNode:
