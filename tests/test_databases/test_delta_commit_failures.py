@@ -313,3 +313,53 @@ def test_a_failure_inside_an_unrelated_handler_is_classified_on_its_own(
     stored = DeltaTableDatabase(tmp_path).get_all_records(path, record_id_column="rid")
     assert stored is not None
     assert stored.column("x").to_pylist() == [11]
+
+
+@pytest.mark.parametrize(
+    "refusal", ["SchemaMismatchError", "duplicate name"], ids=lambda r: str(r)
+)
+def test_a_refused_result_batch_withdraws_the_records_waiting_on_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refusal: str
+) -> None:
+    """The flush's refusal goes through the pending-commit path (ITL-1412): a record
+    guarded on a result batch that Delta refuses permanently is withdrawn with it, and
+    a later, successful commit of the same table never publishes it."""
+    from deltalake.exceptions import SchemaMismatchError
+
+    real_write = deltalake.write_deltalake
+    refusals = [True]
+
+    def refuse_once(table_or_uri: Any, *args: Any, **kwargs: Any) -> None:
+        if refusals and "results" in str(table_or_uri):
+            refusals.pop()
+            if refusal == "SchemaMismatchError":
+                raise SchemaMismatchError("Schema error: refused for the test")
+            raise Exception(  # deltalake's own form of this refusal: a bare Exception
+                "External error: Schema error: Duplicate field name "
+                "(case-insensitive): 'v'"
+            )
+        real_write(table_or_uri, *args, **kwargs)
+
+    monkeypatch.setattr(deltalake, "write_deltalake", refuse_once)
+    db = DeltaTableDatabase(tmp_path)
+    results, records = ("results",), ("records",)
+
+    def row(rid: bytes, value: int) -> pa.Table:
+        return pa.table({"rid": pa.array([rid], pa.large_binary()), "v": [value]})
+
+    db.add_records(results, row(b"r1", 1), record_id_column="rid")
+    dependency = db.pending_result(results, b"r1")
+    assert dependency is not None
+    with db.guard_record(records, b"p1", dependency):
+        db.add_records(records, row(b"p1", 1), record_id_column="rid")
+    with pytest.raises((InputValidationError, UnstorableColumnError)):
+        db.flush_batch(results)
+    assert not db._pending_batches.get("results")  # pyright: ignore[reportPrivateUsage]
+    # A later result commits; the withdrawn record must not ride on it.
+    db.add_records(results, row(b"r2", 2), record_id_column="rid")
+    db.flush()
+    db.flush()  # anything the commit released is published by now
+    stored = DeltaTableDatabase(tmp_path).get_all_records(
+        records, record_id_column="rid"
+    )
+    assert stored is None or stored.num_rows == 0

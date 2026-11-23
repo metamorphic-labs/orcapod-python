@@ -46,7 +46,7 @@ from orcapod.pipeline.run_summary import (
 from orcapod.protocols import core_protocols as cp
 from orcapod.databases.utils import as_table_committing
 from orcapod.types import NodeConfig
-from orcapod.utils.database_errors import flush_best_effort
+from orcapod.utils.database_errors import database_write_path, flush_best_effort
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -975,8 +975,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 are flushed first, so rows stored before the failure are kept, and
                 re-running the job does not recompute stored function results.
                 A failed commit of a node's batch names the node but no row
-                (``flush=True``): the batch's writes stay pending and are retried
-                once by the flush that follows the failure.
+                (``flush=True``). When a result batch fails, its pending pipeline
+                records are withdrawn. The flush after the failure may retry the
+                result write if the database kept the batch.
             OrcapodDatabaseReadError: If a stored table exists but could not be read,
                 whatever the orchestrator's ``error_policy``, also when the read
                 was needed to write a node's results. Its rows are not recomputed
@@ -1335,9 +1336,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                         )
                 yield
         except BaseException as run_error:
-            # Commit the writes that did succeed before the failure, so their rows
-            # do not look dropped, then report the failure itself. A cancelled or
-            # interrupted run commits nothing more, but clears its nodes too.
+            # Retry remaining writes. Function records with failed results have
+            # been withdrawn, and pending results still gate their dependent records.
+            # A cancelled or interrupted run clears its nodes without flushing here.
             if isinstance(run_error, Exception) and not load_only:
                 flush_best_effort(run_error, prepared.pipeline_db, prepared.result_db)
             clear_run_rows(plan.to_run)
@@ -1380,12 +1381,14 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             + "cache_mode=LOG operator's output or a node's last records, may not "
             + "have been stored."
         )
+        database = pipeline_db
         try:
             if not load_only and plan.to_run:
                 # A load-only run writes nothing and commits nothing, and a run that
                 # ran no node touches no database (ITL-1095).
-                pipeline_db.flush()
-                result_db.flush()
+                database.flush()
+                database = result_db
+                database.flush()
         except OrcapodDatabaseReadError as exc:
             # A stored table could not be read: report the read failure itself.
             exc.add_note(pending_note)
@@ -1393,7 +1396,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             clear_run_rows(plan.to_run)
             raise
         except Exception as exc:
-            flush_error = OrcapodDatabaseWriteError(pipeline_db.base_path, flush=True)
+            flush_error = OrcapodDatabaseWriteError(
+                database_write_path(database), flush=True
+            )
             flush_error.add_note(pending_note)
             clear_run_rows(plan.to_run)
             raise flush_error from exc

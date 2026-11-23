@@ -203,6 +203,12 @@ class FailingCommits:
         """Commit one table's pending writes, unless commits fail by now."""
         self._commit(lambda: self._inner.flush_batch(record_path))
 
+    def flush_result_batch(
+        self, record_path: tuple[str, ...], *, publish_records: bool
+    ) -> None:
+        """Count the result-table commit through the same faulty write path."""
+        self.flush_batch(record_path)
+
     def __getattr__(self, name: str) -> Any:
         """Delegate everything else."""
         return getattr(self._inner, name)

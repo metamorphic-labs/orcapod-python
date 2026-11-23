@@ -296,3 +296,41 @@ def test_writers_creating_one_table_at_once_store_an_id_once(tmp_path: Path) -> 
         assert errors == []
         stored = _stored(root)
         assert [rid for rid, _ in stored] == [b"\x01"], trial
+
+
+def test_a_batch_that_keeps_losing_withdraws_the_records_waiting_on_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retry runs inside the pending-commit path (ITL-1412): a result batch that
+    loses every attempt raises after the bound, keeps its rows queued (a lost commit
+    is not permanent), and the records waiting on it are withdrawn, never published
+    by a later commit of other rows."""
+    from deltalake.exceptions import CommitFailedError
+
+    db = DeltaTableDatabase(tmp_path)
+    results, records = ("results",), ("records",)
+
+    def row(rid: bytes) -> pa.Table:
+        return pa.table({"rid": pa.array([rid], pa.large_binary()), "a": [1], "z": [1]})
+
+    db.add_records(results, row(b"r1"), record_id_column="rid", flush=True)
+    db.add_records(results, row(b"r2"), record_id_column="rid")
+    dependency = db.pending_result(results, b"r2")
+    assert dependency is not None
+    with db.guard_record(records, b"p2", dependency):
+        db.add_records(records, row(b"p2"), record_id_column="rid")
+
+    def always_lose(*args: Any) -> Any:
+        raise delta_lake_databases._LostCommitRace(CommitFailedError("lost"))  # pyright: ignore[reportPrivateUsage]
+
+    with monkeypatch.context() as patched:
+        patched.setattr(DeltaTableDatabase, "_commit_once", always_lose)
+        with pytest.raises(CommitFailedError):
+            db.flush_batch(results)
+    assert db._pending_batches.get("results") is not None  # pyright: ignore[reportPrivateUsage]
+    db.flush()
+    db.flush()
+    stored = DeltaTableDatabase(tmp_path).get_all_records(
+        records, record_id_column="rid"
+    )
+    assert stored is None or stored.num_rows == 0
