@@ -860,6 +860,16 @@ object that has already loaded the table until its own next commit to that table
 a new `DeltaTableDatabase` object reads them at once. This was already the case before
 batching; only the re-reading per lookup is gone.
 
+**Several writers.** Two jobs, or two processes, may write to the same
+`DeltaTableDatabase` directory at once. Each record id is stored once. A commit to an
+existing table is a Delta MERGE that inserts only the ids the table does not hold, and it
+fails when another writer added rows after the table was loaded. The database then loads
+the table again and retries, so the later writer finds the id stored and leaves it. That
+MERGE reads the stored rows, so a commit takes longer as the table grows, and longer still
+when the rows hold large values (arrays, images). Commit in batches (the default
+`commit_every_rows=100` is fine). Avoid `commit_every_rows=1`, or a node run on its own,
+against large tables.
+
 [Pipelines and Jobs](pipeline-job.md) covers jobs in full: nodes, databases, pipeline
 blueprints, and saving and loading.
 
