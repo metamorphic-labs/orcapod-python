@@ -563,8 +563,9 @@ A saved job whose slot came from a pre-built stream holds a slot with
 `source_config.source_type == "node"` named `<label>:<hash>` (`prebuilt_stream.py`). That
 form is not special: every slot of a saved `Pipeline` blueprint is saved as `"node"`, and the
 loader keeps reading it. So such a file loads as it does today: an unbound slot of that name
-and schema, its downstream nodes' stored results readable, the slot readable after
-`job.bind(sources=...)`. Nothing to migrate: nobody holds such a file (no users before the
+and schema, its downstream nodes' stored results readable through their stored view
+(`node.as_source()`; a loaded node's `as_table()` shows the current run, empty by design),
+the slot readable after `job.bind(sources=...)` (checked: a file written on `main` read here). Nothing to migrate: nobody holds such a file (no users before the
 workshop; v1 opens until 0.4.0), and P1 does not change the loader.
 
 ### 9.5 Documentation on cutting a pipeline
@@ -640,10 +641,10 @@ alone). In risk:
   test leaves `__computed` out with that reason, as it leaves out `__pod_ts` and `__data_id`
   (a uuid7), and gives each function-pod form its own function, so no two of its nodes share
   a result table. Filed as ITL-1404.
-- **The saved edge list follows recording order** (ITL-1404). `job.save()` writes the hash graph's edges
-  in the order they were recorded; a load reads them as a set. A registered job's file equals
-  the hand-written one's with the edges compared as a set; everything else in the `pipeline`
-  and `bindings` sections is equal as written.
+- **The saved edge list followed recording order** (ITL-1404), and a load gave a node its
+  inputs in that order, so a saved and loaded `MergeJoin` could swap its arguments (on `main`
+  too). Fixed in review round 1 (11.2): the saved list is canonical, each node's inputs in
+  argument order, and the loader keeps that order.
 - Refusals: each refusal of sections 3, 5 and 8 with the job unchanged afterwards (names,
   `job.nodes`, recorded state through a subsequent `with` block that succeeds).
 - Restrictions: one source restricted two ways across two registered streams refused; the
@@ -689,3 +690,39 @@ are ITL-1389.
     (Recommended.)
 14. **D14** A refused `with` block (its body or its compile) restores the recording state of
     its entry (2.2). (Recommended.)
+
+### 11.2 Review round 1 (independent Codex review, 2026-11-22): what changed
+
+Each finding has a test (the PR body has the table). Behaviour as built after the round:
+
+- **Restrictions on every way in.** One step over one source restricted two ways has one
+  identity, so the walk meets it once; `register` checks the restriction rule over every
+  stream it is given, also when all its steps are held. Refused on `register` (one call or
+  two), in a block, by reopening and by taking in another job's nodes.
+- **An ordered operator keeps its argument order through save and load.** `Pipeline.save`
+  writes the edges in a canonical order, each node's inputs in argument order; the job
+  loader takes each node's inputs in that order (a graph's predecessors do not keep it). This
+  was wrong on `main` too for a hand-written job; the walk made it visible.
+- **A refusal leaves the job exactly as it was** (D14): a refused block or `register`
+  restores the recorded steps, the compiled nodes (the same objects) and the bindings, also
+  when the refusal comes from compilation (a database that cannot store a result table).
+- **Bindings stay the job's own.** A slot of another pipeline is kept as a copy holding its
+  binding at the time it is taken in, and each recorded step keeps its inputs' keys as they
+  were, so a later bind of the other job changes nothing here.
+- **A keyword name is exact in every form**: refused when another step holds or would hold
+  the name (in a block, with `auto_compile=False`, across calls in either order); a later
+  step labelled with a name given exactly is refused on every way in.
+- **Registering held steps is a no-op**: nothing is recorded or compiled, so held runs stay.
+- **Labels**: a step held by the job keeps its label (no refusal); a block that builds one
+  step twice keeps the label recorded last, as before (ITL-1389). Within one `register`
+  call, an assigned label wins over none, in either order; two different assigned labels
+  are refused.
+- **A loaded job is read-only**: `register` refuses. A `with` block on a loaded job still
+  replaces its nodes, as on `main` (pre-existing; pinned by an expected failure, to be filed).
+- **A blueprint keeps a job's slot name**: `SourceNode.from_stream` of another job's slot
+  keeps its name, so `PipelineJob.from_pipeline` binds by it.
+- **A stream that is neither a source nor made by a pod** given to `register` is refused.
+- Pre-existing and not changed: reopening a job after a bind does not find the rebound
+  nodes as held (on `main` a `<label>:<hash>` leaf appears; here the steps appear twice);
+  pinned by an expected failure, to be filed. `MergeJoin(s, s)` (one stream twice) fails to
+  run, by hand as when registered (an execution-path issue).

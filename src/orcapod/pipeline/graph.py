@@ -273,13 +273,41 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             "orcapod_version": orcapod.__version__,
             "pipeline": {"name": list(self._name)},
             "nodes": nodes,
-            "edges": [list(edge) for edge in self._graph_edges],
+            "edges": [list(edge) for edge in self._edges_in_argument_order()],
         }
 
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
             _json.dump(output, f, indent=2)
+
+    def _edges_in_argument_order(self) -> list[tuple[str, str]]:
+        """The edges, each node's inputs in its argument order (ITL-1387).
+
+        ``load`` gives a node its inputs in the order its incoming edges are listed, so
+        an ordered operator (``MergeJoin``) must find them in argument order, never in
+        the order the steps were recorded. A node's position for each input is read
+        from its ``upstreams``; a node read without them (a loaded stub) keeps the order
+        its edges already have, which for a loaded job is the saved order. The list is
+        sorted by (argument position, downstream key, upstream key), so it does not
+        depend on recording order, and a loaded file saves again unchanged.
+        """
+        key_of = {id(node): key for key, node in self._persistent_node_map.items()}
+        position: dict[tuple[str, str], int] = {}
+        for key, node in self._persistent_node_map.items():
+            for index, upstream in enumerate(getattr(node, "upstreams", ())):
+                upstream_key = key_of.get(id(upstream))
+                if upstream_key is not None:
+                    position.setdefault((upstream_key, key), index)
+        seen_into: dict[str, int] = {}
+        for edge in self._graph_edges:
+            index = seen_into.get(edge[1], 0)
+            seen_into[edge[1]] = index + 1
+            position.setdefault(edge, index)
+        return sorted(
+            self._graph_edges,
+            key=lambda edge: (position[edge], edge[1], edge[0]),
+        )
 
     @classmethod
     def load(cls, path: str | Path) -> "Pipeline":

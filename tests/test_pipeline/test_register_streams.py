@@ -30,6 +30,7 @@ from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import SourceSpecMismatchError
 from orcapod.pipeline import PipelineJob
+from orcapod.side_effects import SideEffectPod
 from tests.test_core.operators.several_items import (
     DATA_TAGS,
     MAIN,
@@ -75,11 +76,9 @@ def _saved(job: PipelineJob, tmp_path: Path, name: str) -> dict[str, Any]:
     path = tmp_path / f"{name}.json"
     job.save(path)
     saved = json.loads(path.read_text())
-    pipeline = dict(saved["pipeline"])
-    # The edge list follows the order the steps were recorded in, which the file
-    # does not promise (a load reads it as a set).
-    pipeline["edges"] = sorted(map(json.dumps, pipeline["edges"]))
-    return {"pipeline": pipeline, "bindings": saved["bindings"]}
+    # Compared as written: the edge list is in a canonical order (each node's inputs
+    # in argument order), whatever order the steps were recorded in.
+    return {"pipeline": saved["pipeline"], "bindings": saved["bindings"]}
 
 
 def fingerprint(job: PipelineJob, db: Any, tmp_path: Path, name: str) -> dict[str, Any]:
@@ -571,3 +570,396 @@ def test_a_slot_is_made_from_a_pod_stream_only_when_named() -> None:
     with pytest.raises(ValueError, match="only when you name the slot"):
         SourceNode.from_stream(stream)
     assert SourceJobNode.from_stream(stream, name="cut").name == "cut"
+
+
+# ── review round 1 (independent Codex review of PR 500) ─────────────────────
+
+
+def _two_rows(name: str, start: int) -> Any:
+    return op.sources.DictSource(
+        [
+            {"id": 1, "x": start, "y": start + 10},
+            {"id": 2, "x": start + 1, "y": start + 11},
+        ],
+        source_id=name,
+        tag_columns=["id"],
+        tag_only_columns=True,
+    )
+
+
+@op.function_pod(output_keys="f")
+def doubled_x(x: int) -> int:
+    """``2 * x``."""
+    return 2 * x
+
+
+@pytest.mark.parametrize("way", ["register", "block"])
+@pytest.mark.parametrize("other_use_first", [False, True])
+def test_an_ordered_operator_keeps_its_argument_order_through_save_and_load(
+    other_use_first: bool, way: str, tmp_path: Path
+) -> None:
+    """Finding 2: ``MergeJoin(left, right)`` saved and loaded keeps ``left, right``
+    whatever order the steps were recorded in (another use of ``right`` recorded
+    first or after), and a job that takes in the loaded node gets the same rows."""
+    from orcapod.core.operators import MergeJoin
+
+    for name, shift in (("left", 1), ("right", 100)):
+        (tmp_path / f"{name}.csv").write_text(f"id,x,y\n1,{shift},0\n2,{shift + 1},0\n")
+    left, right = (
+        op.sources.CSVSource(
+            str(tmp_path / f"{name}.csv"),
+            tag_columns=["id"],
+            tag_only_columns=True,
+            source_id=name,
+        )
+        for name in ("left", "right")
+    )
+    other_use = right.select_data_columns(["y"], label="right_pick")
+    merged = MergeJoin()(left, right, label="merged")
+    db = DeltaTableDatabase(tmp_path / "db")
+    job = PipelineJob(name="ordered", database=db)
+    order = (other_use, merged) if other_use_first else (merged, other_use)
+    if way == "register":
+        job.register(*order)
+    else:
+        with job:  # recorded in a block: the merge and the other use rebuilt here
+            if other_use_first:
+                right.select_data_columns(["y"], label="right_pick")
+            MergeJoin()(left, right, label="merged")
+            if not other_use_first:
+                right.select_data_columns(["y"], label="right_pick")
+    job.run()
+    job.save(tmp_path / "job.json")
+    loaded = PipelineJob.load(tmp_path / "job.json", database=db)
+    assert [u.label for u in loaded.merged.upstreams] == ["left", "right"]
+    target, _ = _new_job()
+    target.register(loaded.merged)
+    target.run()
+    assert target.merged.as_table()["x"].to_pylist() == [[1, 100], [2, 101]]
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_saved_files_do_not_follow_registration_order(
+    mode: Mode, tmp_path: Path
+) -> None:
+    """Finding 2: the saved edge list is canonical, so jobs registered in two orders
+    save equal files (compared as written)."""
+    saved = []
+    for reverse in (False, True):
+        streams = _forms(_sources(), InMemoryArrowDatabase())
+        job, _ = _new_job()
+        labels = sorted(streams)
+        job.register(
+            *(streams[label] for label in (reversed(labels) if reverse else labels))
+        )
+        _run(job, mode)
+        saved.append(_saved(job, tmp_path, f"order{reverse}"))
+    assert saved[0] == saved[1]
+
+
+def _sqlite_job(tmp_path: Path) -> PipelineJob:
+    from orcapod.databases import ConnectorArrowDatabase, SQLiteConnector
+
+    return PipelineJob(
+        name="j",
+        database=ConnectorArrowDatabase(SQLiteConnector(str(tmp_path / "db.sqlite"))),
+    )
+
+
+def _state_of(job: PipelineJob) -> tuple[Any, ...]:
+    return (
+        sorted(job.nodes),
+        {label: id(node) for label, node in job.nodes.items()},
+        sorted(job.sources),
+        sorted(job.graph.nodes),
+    )
+
+
+@pytest.mark.parametrize("warm", [False, True], ids=["empty_job", "job_with_nodes"])
+@pytest.mark.parametrize(
+    "failure", ["block_unstorable", "register_unstorable", "register_name_taken"]
+)
+def test_a_refused_way_in_leaves_the_job_exactly_as_it_was(
+    failure: str, warm: bool, tmp_path: Path
+) -> None:
+    """Finding 3: a refusal raised after compilation began (a database that cannot
+    store a result table) or by a name check leaves the job's nodes (the same
+    objects), bindings and recorded steps as they were."""
+    from orcapod.errors import UnstorableColumnError
+
+    @op.function_pod(output_keys="f")
+    def nested(x: int) -> list[dict[str, int]]:
+        return [{"x": x}]
+
+    source = _two_rows("s", 1)
+    job = _sqlite_job(tmp_path) if failure != "register_name_taken" else _new_job()[0]
+    if warm:
+        job.register(source.select_data_columns(["x"], label="kept"))
+    before = _state_of(job)
+    if failure == "block_unstorable":
+        with pytest.raises(UnstorableColumnError):
+            with job:
+                nested.pod(source, label="nested")
+    elif failure == "register_unstorable":
+        with pytest.raises(UnstorableColumnError):
+            job.register(nested.pod(source, label="nested"))
+    else:
+        taken = source.select_data_columns(["y"], label="exact")
+        with pytest.raises(ValueError, match="taken by another node"):
+            job.register(taken, exact=source.map_data({"x": "z"}))
+    assert _state_of(job) == before
+
+
+def test_a_job_keeps_its_bindings_when_the_job_it_took_nodes_from_is_rebound() -> None:
+    """Finding 4: after the other job's slot is rebound, the absorbing job still reads
+    the source it took in, and can take new steps over its own nodes."""
+    other, _ = _new_job("other")
+    with other:
+        MapData({"x": "x2"})(_two_rows("s", 1), label="absorbed")
+    target, _ = _new_job("target")
+    target.register(other.absorbed)
+    other.bind(sources={"s": _two_rows("replacement", 10)})
+    target.register(MapData({"x2": "x3"})(target.absorbed, label="more"))
+    target.run()
+    assert target.more.as_table()["x3"].to_pylist() == [1, 2]
+    assert sorted(target.nodes) == ["absorbed", "more", "s"]
+    kept: Any = target.sources["s"]
+    assert kept.source_id == "s"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="pre-existing (main: a <label>:<hash> leaf): reopening a job after a bind "
+    "does not find the rebound nodes as held; to be filed",
+)
+def test_reopening_a_job_after_a_bind_adds_only_the_new_step() -> None:
+    """Finding 4, same job (pre-existing): after ``job.bind`` the job's own nodes have
+    new identities, so a step over them is not seen as built on held steps."""
+    job, _ = _new_job()
+    job.register(doubled_x.pod(_two_rows("s", 1), label="double"))
+    job.bind(sources={"s": _two_rows("new", 10)})
+    job.register(MapData({"f": "g"})(job.double, label="tail"))
+    assert sorted(job.nodes) == ["SelectDataColumns", "double", "s", "tail"]
+
+
+@pytest.mark.parametrize(
+    "form",
+    ["in_block", "auto_compile_off", "named_then_positional", "positional_then_named"],
+)
+def test_a_keyword_name_is_exact_in_every_form(form: str) -> None:
+    """Finding 5: a keyword name never takes a suffix: another step labelled the same
+    is refused, in a block, with ``auto_compile=False`` and across two calls in either
+    order."""
+    source = _two_rows("s", 1)
+    named = source.select_data_columns(["x"])
+    other = source.select_data_columns(["y"], label="exact")
+    job = PipelineJob(
+        name="j",
+        database=InMemoryArrowDatabase(),
+        auto_compile=form != "auto_compile_off",
+    )
+    with pytest.raises(ValueError, match="'exact'"):
+        if form == "in_block":
+            with job:
+                job.register(other, exact=named)
+        elif form == "auto_compile_off":
+            job.register(other, exact=named)
+        elif form == "named_then_positional":
+            job.register(exact=named)
+            job.register(other)
+        else:
+            job.register(other)
+            job.register(exact=named)
+    if form == "named_then_positional":
+        assert sorted(job.nodes) == ["exact", "s"]
+        assert job.exact.content_hash() == job.nodes["exact"].content_hash()
+
+
+@pytest.mark.parametrize("held_by", ["positional", "keyword"])
+def test_registering_held_steps_again_changes_nothing(held_by: str) -> None:
+    """Finding 6: registering a stream whose steps the job holds is a no-op: the
+    nodes, their objects and a held run stay (a side-effect node keeps its rows)."""
+    delivered: list[int] = []
+
+    def deliver(x: int, ctx: Any) -> None:
+        delivered.append(x)
+
+    picked = _two_rows("s", 1).select_data_columns(["x"], label="old")
+    end = SideEffectPod(deliver)(picked, label="side")
+    job, _ = _new_job()
+    if held_by == "keyword":
+        job.register(new=picked)
+    job.register(end)
+    job.run()
+    before = _state_of(job)
+    held_rows = len(job.side.as_table())
+    job.register(end)
+    job.register(picked)
+    assert _state_of(job) == before
+    assert len(job.side.as_table()) == held_rows == 2
+    assert job.last_run is not None
+
+
+def test_one_step_built_twice_in_a_block_keeps_the_label_recorded_last() -> None:
+    """Finding 7: a block that builds one step twice under two labels compiles as
+    before (the label recorded last; ITL-1389), even when the first stream is used
+    later."""
+    source = _two_rows("s", 1)
+    job, _ = _new_job()
+    with job:
+        first = source.select_data_columns(["x"], label="first")
+        source.select_data_columns(["x"], label="second")
+        MapData({"x": "z"})(first)
+    assert sorted(job.nodes) == ["MapData", "s", "second"]
+
+
+@pytest.mark.parametrize("assigned_first", [False, True])
+def test_an_assigned_label_wins_over_none_in_either_order(assigned_first: bool) -> None:
+    """Finding 7: one step registered once unlabelled and once labelled takes the
+    label, in either order."""
+    source = _two_rows("s", 1)
+    unlabelled = source.select_data_columns(["x"])
+    assigned = source.select_data_columns(["x"], label="assigned")
+    job, _ = _new_job()
+    job.register(
+        *((assigned, unlabelled) if assigned_first else (unlabelled, assigned))
+    )
+    assert sorted(job.nodes) == ["assigned", "s"]
+
+
+def _loaded_job(tmp_path: Path) -> PipelineJob:
+    db = DeltaTableDatabase(tmp_path / "db")
+    (tmp_path / "a.csv").write_text("id,x\n1,1\n2,2\n")
+    source = op.sources.CSVSource(
+        str(tmp_path / "a.csv"),
+        tag_columns=["id"],
+        tag_only_columns=True,
+        source_id="s",
+    )
+    job = PipelineJob(name="j", database=db)
+    with job:
+        doubled_x.pod(source, label="saved")
+    job.run()
+    job.save(tmp_path / "j.json")
+    return PipelineJob.load(tmp_path / "j.json", database=db)
+
+
+def test_register_on_a_loaded_job_is_refused(tmp_path: Path) -> None:
+    """Finding 8: a loaded job is read-only; ``register`` refuses and keeps its nodes."""
+    loaded = _loaded_job(tmp_path)
+    before = sorted(loaded.nodes)
+    with pytest.raises(ValueError, match="loaded job is read-only"):
+        loaded.register(_two_rows("t", 1).select_data_columns(["x"], label="new"))
+    assert sorted(loaded.nodes) == before
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="pre-existing (main too): a with block on a loaded job replaces its nodes; "
+    "to be filed",
+)
+def test_a_block_on_a_loaded_job_keeps_its_nodes(tmp_path: Path) -> None:
+    """Finding 8 (pre-existing): reopening a loaded job with a block."""
+    loaded = _loaded_job(tmp_path)
+    with loaded:
+        _two_rows("t", 1).select_data_columns(["x"], label="new")
+    assert {"s", "saved"} <= set(loaded.nodes)
+
+
+@pytest.mark.parametrize("target", ["Pipeline", "PipelineJob"])
+def test_a_pipeline_that_takes_in_a_job_node_keeps_the_slot_name(target: str) -> None:
+    """Finding 9: a job's slot keeps its name when another pipeline or job takes in
+    its nodes, so the blueprint binds by that name."""
+    other, _ = _new_job("other")
+    source = _two_rows("s", 1)
+    with other:
+        MapData({"x": "x2"})(source, label="mapped")
+    if target == "Pipeline":
+        blueprint = op.Pipeline(name="bp")
+        blueprint.register(other.mapped)
+        assert sorted(blueprint.nodes) == ["mapped", "s"]
+        job = PipelineJob.from_pipeline(blueprint, sources={"s": source})
+    else:
+        job, _ = _new_job()
+        job.register(other.mapped)
+    assert sorted(job.nodes) == ["mapped", "s"]
+
+
+@pytest.mark.parametrize("given_as", ["positional", "keyword"])
+def test_a_stream_that_is_neither_a_source_nor_made_by_a_pod_is_refused(
+    given_as: str,
+) -> None:
+    """Finding 10: a raw stream given to ``register`` is refused; it used to leave an
+    empty compiled job."""
+    raw = ArrowTableStream(pa.table({"id": [1, 2], "x": [3, 4]}), tag_columns=["id"])
+    job, _ = _new_job()
+    with pytest.raises(ValueError, match="neither a source nor made by a pod"):
+        if given_as == "positional":
+            job.register(raw)
+        else:
+            job.register(name=raw)
+    assert job.nodes == {}
+
+
+def test_a_job_saved_with_an_implicit_slot_still_loads(tmp_path: Path) -> None:
+    """Review round 1, saved form: a job saved with a ``<label>:<hash>`` slot (the old
+    implicit leaf, made here explicitly) loads with that slot unbound, its downstream
+    node's stored view readable, and the slot readable once bound (spec 9.4)."""
+    source = _two_rows("s", 1)
+    pre = source.select_data_columns(["x"], label="pre")
+    name = f"pre:{pre.content_hash().to_hex()}"
+    db = DeltaTableDatabase(tmp_path / "db")
+    job = PipelineJob(name="legacy", database=db)
+    with job:
+        doubled_x.pod(SourceJobNode.from_stream(pre, name=name), label="double")
+    job.run()
+    job.save(tmp_path / "job.json")
+    loaded = PipelineJob.load(tmp_path / "job.json", database=db)
+    slot: Any = loaded.nodes[name]
+    assert slot.bound_source is None
+    assert loaded.double.as_table().num_rows == 0  # the current run: none
+    assert sorted(loaded.double.as_source().as_table()["f"].to_pylist()) == [2, 4]
+    loaded.bind(sources={name: pre})
+    assert sorted(loaded.nodes[name].as_table()["x"].to_pylist()) == [1, 2]
+
+
+@pytest.mark.parametrize("way", ["register", "block"])
+def test_one_stream_given_twice_to_a_merge_join_is_refused_as_by_hand(way: str) -> None:
+    """Review round 1 (pre-existing, pinned): ``MergeJoin(s, s)`` does not run, by hand
+    as when registered; a change to that is noticed here."""
+    from orcapod.core.operators import MergeJoin
+
+    picked = _two_rows("s", 1).select_data_columns(["x"])
+    job, _ = _new_job()
+    if way == "register":
+        job.register(MergeJoin()(picked, picked, label="self_merge"))
+    else:
+        with job:
+            MergeJoin()(picked, picked, label="self_merge")
+    with pytest.raises(ValueError):
+        job.run()
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_a_prebuilt_side_effect_stream_delivers_when_the_job_runs(mode: Mode) -> None:
+    """Review round 1, behaviour change: a side-effect stream built before a block comes
+    in as a side-effect node: recording delivers nothing, the job's run delivers each
+    row once."""
+    delivered: list[int] = []
+
+    def deliver(x: int, ctx: Any) -> None:
+        delivered.append(x)
+
+    # A side-effect stream is a stream; its class is not typed as one (ITL-1387).
+    sink: Any = SideEffectPod(deliver)(
+        _two_rows("s", 1).select_data_columns(["x"]), label="sent"
+    )
+    job, _ = _new_job()
+    with job:
+        MapData({"x": "z"})(sink, label="after")
+    assert delivered == []
+    assert sorted(job.nodes) == ["SelectDataColumns", "after", "s", "sent"]
+    _run(job, mode)
+    assert sorted(delivered) == [1, 2]

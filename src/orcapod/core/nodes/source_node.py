@@ -1358,6 +1358,9 @@ class SourceNode(SourceNodeBase):
 
             if isinstance(stream, RootSource):
                 slot_name = stream.source_id
+            elif isinstance(stream, SourceNodeBase):
+                # A job's slot keeps its name in a blueprint (ITL-1387).
+                slot_name = stream.name
             else:
                 _require_name_for_pod_stream(stream)
                 slot_name = f"{stream.label}:{stream.content_hash().to_hex()}"

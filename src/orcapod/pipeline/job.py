@@ -187,6 +187,27 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         """Whether a ``with`` block's end (and ``register``) compiles: not with ``auto_compile=False``."""
         return self._auto_compile
 
+    #: A refused block or ``register`` also restores the job's bindings (ITL-1387).
+    _STATE_ATTRIBUTES = (
+        *AbstractPipelineBase._STATE_ATTRIBUTES,
+        "_sources",
+        "_sources_by_hash",
+        "_compiled_pipeline",
+    )
+
+    def _require_recordable(self) -> None:
+        """Refuse ``register`` on a loaded job, which is read-only (ITL-1387).
+
+        Raises:
+            ValueError: If the job was built by ``PipelineJob.load``.
+        """
+        if self._loaded:
+            raise ValueError(
+                "A loaded job is read-only: register() would replace its nodes. "
+                "Build the steps in a new job, or read its results with "
+                "node.as_source()."
+            )
+
     def compile(self) -> None:
         """Compile recorded invocations into a frozen DAG of job nodes.
 
@@ -1803,6 +1824,13 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # is the source of truth.
         expected_rows: dict[str, int] = run_block.get("expected_rows", {})
 
+        # Each node's inputs in the order its saved edges list them: its argument
+        # order (ITL-1387). A graph's predecessors do not keep that order (a copy
+        # reorders them), and an ordered operator (MergeJoin) depends on it.
+        ordered_inputs: dict[str, list[str]] = {}
+        for up_hash, down_hash in job._graph_edges:
+            ordered_inputs.setdefault(down_hash, []).append(up_hash)
+
         for node_hash in _nx.topological_sort(job._hash_graph):
             bp_node = pipeline._persistent_node_map.get(node_hash)
             if bp_node is None:
@@ -1819,7 +1847,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
             elif isinstance(bp_node, _FunctionNode):
                 descriptor = getattr(bp_node, "_descriptor", None) or {}
-                preds = list(job._hash_graph.predecessors(node_hash))
+                preds = ordered_inputs.get(node_hash, [])
                 input_stream = job._persistent_node_map.get(preds[0]) if preds else None
                 # Pass the live content hash (from the run) so the stub's
                 # content_hash() matches the _node_content_hash column in
@@ -1836,7 +1864,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
             elif isinstance(bp_node, _OperatorNode):
                 descriptor = getattr(bp_node, "_descriptor", None) or {}
-                preds = list(job._hash_graph.predecessors(node_hash))
+                preds = ordered_inputs.get(node_hash, [])
                 input_streams = tuple(
                     job._persistent_node_map[p]
                     for p in preds
@@ -1859,7 +1887,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             elif isinstance(bp_node, SideEffectNode):
                 # Read-only: it never delivers (ITL-1094). Its upstream is the restored
                 # job node, so the nodes below it keep their position in the graph.
-                preds = list(job._hash_graph.predecessors(node_hash))
+                preds = ordered_inputs.get(node_hash, [])
                 # JobNode predates side-effect nodes; compile() stores them in this map
                 # too, through the untyped side_effect_node_class.
                 job._persistent_node_map[node_hash] = LoadedSideEffectJobNode(  # pyright: ignore[reportArgumentType]
