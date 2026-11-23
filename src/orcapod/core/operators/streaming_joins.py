@@ -493,12 +493,22 @@ class StreamingJoinKernel(ABC):
         self._closed[input_index] = True
         emitted = self._emitted(self._close(input_index))
         if all(self._closed):
+            self._check_settled_against_empty_inputs()
             result = self._check_empty_inputs()
             if result is not None and not self._emitted_any and not emitted:
                 # No row: the output is the sync path's result over the inputs as
                 # they ended, whose types an empty input decides.
                 self.zero_row_result = result
         return emitted
+
+    def _check_settled_against_empty_inputs(self) -> None:
+        """Compare the settled token types with the inputs that delivered no rows.
+
+        Called once every input has closed. The sync path reads an input with no
+        rows in its zero-row form, whose source-info token types are the declared
+        ones, and the others with the types their rows settle to. The kernels whose
+        sync path accepts any token types accept every such run.
+        """
 
     def _check_empty_inputs(self) -> StreamProtocol | None:
         """Apply the sync path's checks to the inputs as they ended.
@@ -856,6 +866,34 @@ class StreamingMergeJoin(StreamingJoinKernel):
             left
         ).type_converter
         self._link = _BinaryLink(sorted(self._shared_tags), self._finish)
+
+    def _check_settled_against_empty_inputs(self) -> None:
+        """Refuse, when every input has closed, a run whose input with rows settled a
+        shared source-info column to another token type than an input with no rows
+        declares, as ``MergeJoin`` refuses the two Arrow types of one column.
+
+        The sync path reads the input with no rows in its zero-row form (its declared
+        token types) and the other one by its rows (their settled types); the two
+        inputs' settled types are compared as each batch arrives
+        (``_check_settled_token_types``).
+
+        Raises:
+            InputValidationError: If such a column's types differ.
+        """
+        pod = StaticOutputOperatorPod
+        for empty in (0, 1):
+            other = 1 - empty
+            if self._received[empty] or not self._received[other]:
+                continue
+            declared = (
+                pod._materialize_upstream([], self.inputs[empty])  # pyright: ignore[reportPrivateUsage]  # the operators' one form of an input
+                .as_table(columns=TRANSPORT_COLUMNS)
+                .schema
+            )
+            settled = self._token_types[other]
+            for name in sorted(settled.keys() & set(declared.names)):
+                types = {empty: declared.field(name).type, other: settled[name]}
+                _ = require_shared_arrow_type("MergeJoin", name, types[0], types[1])
 
     def _check_settled_token_types(
         self, input_index: int, token_types: Mapping[str, pa.DataType]

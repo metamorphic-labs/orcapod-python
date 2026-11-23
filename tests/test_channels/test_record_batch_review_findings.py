@@ -1069,3 +1069,72 @@ def test_batches_whose_tokens_cannot_make_one_input_table_fail_the_operator() ->
     output = asyncio.run(go())
     with pytest.raises(RuntimeError, match="has no result"):
         _ = output.result()
+
+
+# --- CodeRabbit on PR 520: an input with no rows -------------------------------------
+
+
+@pytest.mark.parametrize("tokens", ["one_level", "two_levels"])
+@pytest.mark.parametrize("empty", [0, 1], ids=["left_empty", "right_empty"])
+@pytest.mark.parametrize("kernel", ["join", "merge_join", "semi_join"])
+def test_settled_tokens_against_an_input_with_no_rows_decide_as_the_sync_path(
+    kernel: str, empty: int, tokens: str
+) -> None:
+    """CodeRabbit on PR 520: one input delivers no rows, the other's tokens settle
+    ``_source_x`` to one list level (``[]``) or to the two its type declares. The
+    sync path reads the empty input in its zero-row form (declared two levels) and
+    the other by its rows; ``MergeJoin`` refuses two types of one column. The kernel
+    decides as the sync path does when the last input closes: the same error, or the
+    same rows."""
+    from orcapod.core.operators import Join, MergeJoin, SemiJoin
+    from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+    from orcapod.core.operators.streaming_joins import (
+        TRANSPORT_COLUMNS,
+        StreamingJoin,
+        StreamingMergeJoin,
+        StreamingSemiJoin,
+    )
+
+    filled = _deep_token_stream(
+        [[], []] if tokens == "one_level" else [[["a"]], [["b"]]], [1, 2]
+    )
+    nothing = _deep_token_stream([], [])
+    if kernel == "join":
+        # Join needs disjoint data: the other input under other data names.
+        nothing = ArrowTableStream(
+            pa.table(
+                {
+                    "k": pa.array([], pa.int64()),
+                    "w": pa.array([], pa.int64()),
+                    "_source_w": pa.array([], DEEP_TOKENS),
+                }
+            ),
+            tag_columns=["k"],
+        )
+    inputs = (nothing, filled) if empty == 0 else (filled, nothing)
+    operator, make = {
+        "join": (Join(), StreamingJoin),
+        "merge_join": (MergeJoin(), StreamingMergeJoin),
+        "semi_join": (SemiJoin(), StreamingSemiJoin),
+    }[kernel]
+
+    def rebuilt(stream: ArrowTableStream) -> Any:  # pyright: ignore[reportExplicitAny]
+        return StaticOutputOperatorPod._materialize_upstream(  # pyright: ignore[reportPrivateUsage]  # the job's sync form
+            list(stream.iter_data()), stream
+        )
+
+    try:
+        sync: Any = operator.static_process(*map(rebuilt, inputs)).as_table().num_rows  # pyright: ignore[reportExplicitAny]
+    except Exception as error:  # noqa: BLE001  # the refusal is the outcome compared
+        sync = (type(error).__name__, str(error))
+
+    instance = make(operator, inputs)  # pyright: ignore[reportArgumentType]  # each kernel with its own operator, from one table
+    other = 1 - empty
+    sent = rebuilt(inputs[other]).as_table(columns=TRANSPORT_COLUMNS)
+    try:
+        out = instance.push(other, sent.combine_chunks().to_batches()[0])
+        out += instance.close(empty) + instance.close(other)
+        result: Any = sum(batch.num_rows for batch in out)  # pyright: ignore[reportExplicitAny]
+    except Exception as error:  # noqa: BLE001  # the refusal is the outcome compared
+        result = (type(error).__name__, str(error))
+    assert result == sync
