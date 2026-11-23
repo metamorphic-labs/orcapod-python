@@ -3094,8 +3094,12 @@ class DeltaTableDatabase:
             raise refused from e
         except BaseException as exc:
             logger.error(f"Error flushing batch for {record_key}: {exc}")
-            self._pending_commits.finish(record_key, committed=False)
-            self._pending_commits.restore(record_key, pending_batch, pending_ids)
+            # Requeue the ready rows before withdrawing dependents. Withdrawing
+            # the last blocked row would otherwise discard the table's schema check.
+            try:
+                self._pending_commits.restore(record_key, pending_batch, pending_ids)
+            finally:
+                self._pending_commits.finish(record_key, committed=False)
             raise
 
         # The rows are committed: nothing below may put them back in the queue.

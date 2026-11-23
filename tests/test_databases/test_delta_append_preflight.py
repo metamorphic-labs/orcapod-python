@@ -13,11 +13,16 @@ import datetime as dt
 from pathlib import Path
 from typing import Any, cast
 
+import deltalake
 import pyarrow as pa
 import pytest
 
 from orcapod.databases import DeltaTableDatabase
-from orcapod.errors import InputValidationError, UnstorableColumnError
+from orcapod.errors import (
+    InputValidationError,
+    StoredTableSchemaError,
+    UnstorableColumnError,
+)
 from tests.test_databases.type_matrix import map_of_fields
 
 PATH = ("t",)
@@ -41,6 +46,57 @@ def _struct(*fields: Any) -> Any:
     """A struct of exactly the fields given, in their order, each with its own name,
     type, nullability and metadata."""
     return pa.struct(list(fields))
+
+
+def test_retry_keeps_schema_check_when_a_dependent_row_is_withdrawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Retry the ready row after failure cancels the blocked row in the same table."""
+    db = DeltaTableDatabase(tmp_path, allow_schema_evolution=True)
+    legacy = _rows([b"stored"], v=(I64, [0]))
+    db.add_records(PATH, legacy, record_id_column="id", flush=True)
+    uri = str(tmp_path.joinpath(*PATH))
+    current = _rows([b"stored"], v=(I64, [0]), x=(I64, [10]))
+    deltalake.write_deltalake(
+        uri,
+        current.rename_columns({"id": "__record_id"}),
+        mode="overwrite",
+        schema_mode="overwrite",
+    )
+    db = DeltaTableDatabase(tmp_path, allow_schema_evolution=True)
+
+    def require_x(schema: pa.Schema) -> None:
+        """Refuse the legacy schema if a restore removes the recording field."""
+        if "x" not in schema.names:
+            raise StoredTableSchemaError("Rebuild the pipeline table")
+
+    with db.guard_table_schema(PATH, require_x):
+        ready = _rows([b"ready"], v=(I64, [1]), x=(I64, [11]))
+        db.add_records(PATH, ready, record_id_column="id")
+        attempt = db.pending_result(PATH, b"ready")
+        assert attempt is not None
+        blocked = _rows([b"blocked"], v=(I64, [2]), x=(I64, [12]))
+        with db.guard_record(PATH, b"blocked", attempt):
+            db.add_records(PATH, blocked, record_id_column="id")
+
+    def fail_write(*args: object, **kwargs: object) -> None:
+        """Fail the commit before publishing the ready row."""
+        raise OSError("temporary write failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(deltalake, "write_deltalake", fail_write)
+        with pytest.raises(OSError, match="temporary write failure"):
+            db.flush_batch(PATH)
+    queued = db.get_all_records(PATH, record_id_column="id")
+    assert queued is not None
+    assert sorted(cast(list[bytes], queued["id"].to_pylist())) == [b"ready", b"stored"]
+
+    _ = deltalake.DeltaTable(uri).restore(0)
+    with pytest.raises(StoredTableSchemaError, match="Rebuild the pipeline table"):
+        db.flush_batch(PATH)
+    db.flush_batch(PATH)
+    stored = db.get_all_records(PATH, record_id_column="id")
+    assert stored is not None and stored.equals(legacy)
 
 
 A_NOT_NULL = pa.field("a", I64, nullable=False)
