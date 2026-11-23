@@ -9,6 +9,9 @@ Requires the ``spiraldb`` optional extra: ``pip install orcapod[spiraldb]``.
 Authentication is handled externally — run ``spiral login`` once; pyspiral keeps
 the credentials in its per-user application directory
 (``~/Library/Application Support/pyspiral/`` on macOS, ``~/.config/pyspiral/`` on Linux).
+The SDK client is reused for reads and freshness checks, including on restricted copies.
+Use a new source after changing the SDK endpoint, credentials or options. Use the source
+as a context manager or call ``close()`` after its reads and jobs have finished.
 
 Example::
 
@@ -40,7 +43,8 @@ import asyncio
 import copy
 import dataclasses
 from collections.abc import AsyncIterator, Collection, Generator, Iterator, Mapping
-from contextlib import contextmanager
+from threading import Lock
+from types import TracebackType
 from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING
 
 import pyarrow as pa
@@ -59,7 +63,11 @@ from orcapod.core.sources.stream_builder import (
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import check_head_size
 from orcapod.core.streams.view import ViewStatus, StreamView
-from orcapod.databases.spiraldb_connector import SpiralDBConnector
+from orcapod.databases.spiraldb_connector import (
+    SpiralDBConnector,
+    SpiralDBTable,
+    SpiralDBTableNotFoundError,
+)
 from orcapod.errors import InputValidationError, RowIdentifierError, SourceTooLargeError
 from orcapod.types import ColumnConfig, Condition
 from orcapod.types.condition import check_equality_conditions
@@ -331,7 +339,10 @@ class SpiralDBTableSource(RootSource):
         self._project_id = project_id
         self._dataset = dataset
         self._table_name = table_name
-        self._overrides = overrides
+        self._overrides = None if overrides is None else dict(overrides)
+        self._connection: SpiralDBConnector | None = None
+        self._connection_lock = Lock()
+        self._closed = False
         self._condition = Condition()
         self._limit = limit
         self._max_rows = max_rows
@@ -340,13 +351,13 @@ class SpiralDBTableSource(RootSource):
         self._tags_as_data: dict[str, str] = dict(tags_as_data) if tags_as_data else {}
         location = f"SpiralDB project {project_id!r}, dataset {dataset!r}"
 
-        with self._connector() as connector:
-            if table_name not in connector.get_table_names():
+        try:
+            try:
+                table = self._connector().lookup_table(table_name)
+            except SpiralDBTableNotFoundError as exc:
                 raise ValueError(
                     f"{location}: Table {table_name!r} not found in database."
-                )
-            # One lookup for the key, id, schema and version (ITL-1350).
-            table = connector.lookup_table(table_name)
+                ) from exc
             primary_key = tuple(table.key_columns)
             self._key_columns: tuple[str, ...] = (
                 given_key if given_key is not None else primary_key
@@ -363,77 +374,82 @@ class SpiralDBTableSource(RootSource):
             # used as it is; a table that was never written has no version to pin.
             self._asof = asof if asof is not None else (table.version() or None)
 
-        # The default tags are the primary key, whatever identifies the rows.
-        resolved_tags = (
-            list(primary_key or self._key_columns)
-            if tag_columns is None
-            else _normalize_column_list(tag_columns)
-        )
-        key_problems = [
-            f"{c!r} is not a column"
-            if c not in schema.names
-            else f"{c!r} has type {schema.field(c).type}"
-            for c in self._key_columns
-            if c not in schema.names
-            or not key_column_type_allowed(schema.field(c).type)
-        ]
-        if key_problems:
-            raise ValueError(
-                f"{location}: table {table_name!r} cannot identify its rows by key "
-                f"columns {list(self._key_columns)}: {'; '.join(key_problems)}. A key "
-                "column must hold strings, integers, booleans, timestamps or dates."
+            # The default tags are the primary key, whatever identifies the rows.
+            resolved_tags = (
+                list(primary_key or self._key_columns)
+                if tag_columns is None
+                else _normalize_column_list(tag_columns)
             )
-        self._record_id_columns = given_key
-        if self._source_id is None:
-            self._source_id = location_source_id(
-                self.SOURCE_KIND,
-                spiraldb_table_address(project_id, dataset, table_name, self._table_id),
-            )
-        # Every declared tag is a data-tag unless kept tag-only (ITL-1023).
-        self._data_tags = source_data_tags(resolved_tags, tag_only_columns)
+            key_problems = [
+                f"{c!r} is not a column"
+                if c not in schema.names
+                else f"{c!r} has type {schema.field(c).type}"
+                for c in self._key_columns
+                if c not in schema.names
+                or not key_column_type_allowed(schema.field(c).type)
+            ]
+            if key_problems:
+                raise ValueError(
+                    f"{location}: table {table_name!r} cannot identify its rows by key "
+                    f"columns {list(self._key_columns)}: {'; '.join(key_problems)}. A key "
+                    "column must hold strings, integers, booleans, timestamps or dates."
+                )
+            self._record_id_columns = given_key
+            if self._source_id is None:
+                self._source_id = location_source_id(
+                    self.SOURCE_KIND,
+                    spiraldb_table_address(
+                        project_id, dataset, table_name, self._table_id
+                    ),
+                )
+            # Every declared tag is a data-tag unless kept tag-only (ITL-1023).
+            self._data_tags = source_data_tags(resolved_tags, tag_only_columns)
 
-        # A zero-row stream with the table's columns answers every schema question.
-        self._builder = SourceStreamBuilder(self.data_context, self.orcapod_config)
-        try:
-            template = self._builder.build(
-                schema.empty_table(),
-                tag_columns=resolved_tags,
-                source_id=self._source_id,
-                system_tag_columns=system_tag_columns,
-                data_tags=self._data_tags,
-            )
-        except ValueError as exc:
-            raise ValueError(f"{location}, table {table_name!r}: {exc}") from exc
-        self._table_schema: pa.Schema = arrow_utils.drop_system_columns(
-            schema.empty_table()
-        ).schema
-        if requested:
+            # A zero-row stream with the table's columns answers every schema question.
+            self._builder = SourceStreamBuilder(self.data_context, self.orcapod_config)
             try:
-                self._apply_restriction(requested)
-            except (ValueError, TypeError) as exc:
-                raise type(exc)(f"{location}, table {table_name!r}: {exc}") from exc
-        if self._tags_as_data:
-            try:
-                self._check_tags_as_data(template.stream.keys())
-            except InputValidationError as exc:
-                raise InputValidationError(
-                    f"{location}, table {table_name!r}: {exc}"
-                ) from exc
-            # The copies are columns of the schema: build the template with them.
-            template = self._builder.build(
-                self._with_tag_copies(self._table_schema.empty_table()),
-                tag_columns=template.tag_columns,
-                source_id=self._source_id,
-                system_tag_columns=template.system_tag_columns,
-                data_tags=self._data_tags,
+                template = self._builder.build(
+                    schema.empty_table(),
+                    tag_columns=resolved_tags,
+                    source_id=self._source_id,
+                    system_tag_columns=system_tag_columns,
+                    data_tags=self._data_tags,
+                )
+            except ValueError as exc:
+                raise ValueError(f"{location}, table {table_name!r}: {exc}") from exc
+            self._table_schema: pa.Schema = arrow_utils.drop_system_columns(
+                schema.empty_table()
+            ).schema
+            if requested:
+                try:
+                    self._apply_restriction(requested)
+                except (ValueError, TypeError) as exc:
+                    raise type(exc)(f"{location}, table {table_name!r}: {exc}") from exc
+            if self._tags_as_data:
+                try:
+                    self._check_tags_as_data(template.stream.keys())
+                except InputValidationError as exc:
+                    raise InputValidationError(
+                        f"{location}, table {table_name!r}: {exc}"
+                    ) from exc
+                # The copies are columns of the schema: build the template with them.
+                template = self._builder.build(
+                    self._with_tag_copies(self._table_schema.empty_table()),
+                    tag_columns=template.tag_columns,
+                    source_id=self._source_id,
+                    system_tag_columns=template.system_tag_columns,
+                    data_tags=self._data_tags,
+                )
+            self._stream = template.stream
+            self._schema_hash = template.schema_hash
+            self._tag_columns = template.tag_columns
+            self._tag_only_columns = tuple(
+                c for c in self._tag_columns if c not in self._data_tags
             )
-        self._stream = template.stream
-        self._schema_hash = template.schema_hash
-        self._tag_columns = template.tag_columns
-        self._tag_only_columns = tuple(
-            c for c in self._tag_columns if c not in self._data_tags
-        )
-        self._system_tag_columns = template.system_tag_columns
+            self._system_tag_columns = template.system_tag_columns
+        except BaseException:
+            self.close()
+            raise
 
     def _check_tags_as_data(
         self, keys: tuple[tuple[str, ...], tuple[str, ...]]
@@ -549,11 +565,12 @@ class SpiralDBTableSource(RootSource):
         try:
             restricted._apply_restriction(condition)
         except (ValueError, TypeError) as exc:
+            restricted.close()
             raise type(exc)(f"SpiralDB table {self._qualified!r}: {exc}") from exc
         return restricted
 
     def _copy(self) -> "SpiralDBTableSource":
-        """Return a new source object on the same table, sharing no mutable state.
+        """Return a new source on the same table and configured client.
 
         The future ``copy()`` (ITL-1219). No metadata is read again, so the copy
         reads the version this source pinned. Shared, because immutable: the table
@@ -561,15 +578,22 @@ class SpiralDBTableSource(RootSource):
         the data context and config, the condition (immutable) and limit, the tuples of
         tag, data-tag and key columns and the pinned version. Copied: the
         ``tags_as_data`` and ``overrides`` mappings. Reset: the content and pipeline
-        hash caches (they are recomputed, equal, on first use). The modified time is
-        carried over; ``_apply_restriction`` moves it. A SpiralDB source holds no row
-        it read, so there is nothing else to reset.
+        hash caches (they are recomputed, equal, on first use). Each source owns
+        a connector that holds the same SDK client and can be closed independently.
+        The modified time is carried over until ``_apply_restriction`` moves it.
+        A SpiralDB source holds no rows it read.
         """
-        duplicate = copy.copy(self)
+        with self._connection_lock:
+            connection = self._connection
+            if connection is None:
+                raise RuntimeError("SpiralDBTableSource is closed")
+            duplicate = copy.copy(self)
+            duplicate._connection = connection.share_client()
         duplicate._tags_as_data = dict(self._tags_as_data)
         duplicate._overrides = (
             None if self._overrides is None else dict(self._overrides)
         )
+        duplicate._connection_lock = Lock()
         duplicate._content_hash_cache = {}
         duplicate._pipeline_hash_cache = {}
         return duplicate
@@ -655,23 +679,56 @@ class SpiralDBTableSource(RootSource):
     # Reading
     # -------------------------------------------------------------------------
 
-    @contextmanager
-    def _connector(self) -> Iterator[SpiralDBConnector]:
-        """Open a connector to the source's dataset and close it afterwards."""
-        connector = SpiralDBConnector(
-            project_id=self._project_id,
-            dataset=self._dataset,
-            overrides=self._overrides,
-        )
-        try:
-            yield connector
-        finally:
-            connector.close()
+    def _connector(self) -> SpiralDBConnector:
+        """Return the connector owned by this source."""
+        with self._connection_lock:
+            if self._closed:
+                raise RuntimeError("SpiralDBTableSource is closed")
+            if self._connection is None:
+                self._connection = SpiralDBConnector(
+                    project_id=self._project_id,
+                    dataset=self._dataset,
+                    overrides=self._overrides,
+                )
+            return self._connection
+
+    def close(self) -> None:
+        """Release this source's reference to the SDK client after its reads finish."""
+        with self._connection_lock:
+            self._closed = True
+            if self._connection is not None:
+                self._connection.close()
+                self._connection = None
+
+    def __enter__(self) -> SpiralDBTableSource:
+        """Return this source for use as a context manager."""
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        """Release the client at context exit."""
+        self.close()
 
     @property
     def _qualified(self) -> str:
         """The table as error messages name it."""
         return f"{self._project_id}/{self._dataset}.{self._table_name}"
+
+    def _lookup_table(self) -> SpiralDBTable:
+        """Resolve the name and check that it still identifies this source's table."""
+        table = self._connector().lookup_table(self._table_name)
+        table_id = table.table_id
+        if table_id != self._table_id:
+            raise ValueError(
+                f"SpiralDB table {self._qualified!r} is now another table (id "
+                f"{table_id!r}; the source reads {self._table_id!r}): it was "
+                "dropped and created again. Build the source again to read it."
+            )
+        return table
 
     @property
     def row_count_estimate(self) -> int:
@@ -682,8 +739,8 @@ class SpiralDBTableSource(RootSource):
         account, and the count can be above what a scan returns when rows were
         deleted or overwritten and not yet compacted.
         """
-        with self._connector() as connector:
-            return connector.get_row_count_estimate(self._table_name, asof=self._asof)
+        asof = self._asof
+        return self._lookup_table().row_count_estimate(asof=asof)
 
     @override
     def check_for_new_data(self) -> bool:
@@ -708,27 +765,19 @@ class SpiralDBTableSource(RootSource):
         """
         if self._given_asof is not None:
             return False
-        with self._connector() as connector:
-            # One lookup per check (ITL-1350): a table dropped and created again since
-            # is found by this lookup, and its schema and version come from it.
-            table = connector.lookup_table(self._table_name)
-            table_id = table.table_id
-            if table_id != self._table_id:
-                raise ValueError(
-                    f"SpiralDB table {self._qualified!r} is now another table (id "
-                    f"{table_id!r}; the source reads {self._table_id!r}): it was "
-                    "dropped and created again. Build the source again to read it."
-                )
-            schema = arrow_utils.drop_system_columns(
-                table.arrow_schema().empty_table()
-            ).schema
-            if not schema.equals(self._table_schema, check_metadata=True):
-                raise ValueError(
-                    f"SpiralDB table {self._qualified!r}: "
-                    f"{_schema_difference(schema, self._table_schema)}. Build the "
-                    "source again to read it as it is now."
-                )
-            version = table.version() or None
+        # One lookup per check (ITL-1350): a table dropped and created again since
+        # is found by this lookup, and its schema and version come from it.
+        table = self._lookup_table()
+        schema = arrow_utils.drop_system_columns(
+            table.arrow_schema().empty_table()
+        ).schema
+        if not schema.equals(self._table_schema, check_metadata=True):
+            raise ValueError(
+                f"SpiralDB table {self._qualified!r}: "
+                f"{_schema_difference(schema, self._table_schema)}. Build the "
+                "source again to read it as it is now."
+            )
+        version = table.version() or None
         if version is None or (self._asof is not None and version <= self._asof):
             return False
         self._asof = version
@@ -772,16 +821,27 @@ class SpiralDBTableSource(RootSource):
             ValueError: If a batch's columns differ from the source's schema, or a
                 key column holds a null.
         """
-        return self._read_batches(limit=self._limit, max_rows=self._max_rows)
+        asof = self._asof
+        table = self._lookup_table()
+        yield from self._read_batches(
+            table, asof=asof, limit=self._limit, max_rows=self._max_rows
+        )
 
     def _read_batches(
-        self, *, limit: int | None, max_rows: int | None
+        self,
+        table: SpiralDBTable,
+        *,
+        asof: int | None,
+        limit: int | None,
+        max_rows: int | None,
     ) -> Generator["ArrowTableStream", None, None]:
         """Scan the table once, reading at most ``limit`` rows, in streams of ``batch_rows``.
 
         ``where`` and the pinned version apply as for every read.
 
         Args:
+            table: The handle resolved for this read, also used for the count.
+            asof: The pinned version for both the count and the scan.
             limit: Read at most this many rows, the first in key order.
             max_rows: Raise when the read would return more rows; ``None`` for no cap.
 
@@ -791,71 +851,67 @@ class SpiralDBTableSource(RootSource):
             ValueError: If a batch's columns differ from the source's schema, or a
                 key column holds a null.
         """
-        with self._connector() as connector:
-            if (
-                max_rows is not None
-                and not self._condition
-                and (limit is None or limit > max_rows)
-            ):
-                # Nothing but limit bounds the read, and the limit does not keep it
-                # under the cap: the table's recorded row count decides, before any
-                # row is read (so no row reaches a function of a job that would fail).
-                # The count can be above the rows a scan returns, never below.
-                recorded = connector.get_row_count_estimate(
-                    self._table_name, asof=self._asof
+        if (
+            max_rows is not None
+            and not self._condition
+            and (limit is None or limit > max_rows)
+        ):
+            # Nothing but limit bounds the read, and the limit does not keep it
+            # under the cap: the table's recorded row count decides, before any
+            # row is read (so no row reaches a function of a job that would fail).
+            # The count can be above the rows a scan returns, never below.
+            recorded = table.row_count_estimate(asof=asof)
+            bound = recorded if limit is None else min(limit, recorded)
+            if bound > max_rows:
+                raise self._too_large(
+                    f"the read may return up to {bound:,} rows: the table records "
+                    f"about {recorded:,} rows (SpiralDB's count, which can include "
+                    "deleted rows not yet compacted)"
                 )
-                bound = recorded if limit is None else min(limit, recorded)
-                if bound > max_rows:
-                    raise self._too_large(
-                        f"the read may return up to {bound:,} rows: the table records "
-                        f"about {recorded:,} rows (SpiralDB's count, which can include "
-                        "deleted rows not yet compacted)"
+        seen = 0
+        # Keys must be unique across the whole read, not only within a slice.
+        identifiers: set[str] = set()
+        for batch in table.scan_batches(
+            where=dict(self._condition.equalities) or None,
+            limit=limit,
+            asof=asof,
+        ):
+            for start in range(0, batch.num_rows, self._batch_rows):
+                rows = arrow_utils.drop_system_columns(
+                    pa.Table.from_batches([batch.slice(start, self._batch_rows)])
+                )
+                # Metadata too: field metadata is how a column's logical type is
+                # recorded, and the schema hash was computed at construction.
+                if not rows.schema.equals(self._table_schema, check_metadata=True):
+                    raise ValueError(
+                        f"SpiralDB table {self._qualified!r}: "
+                        f"{_schema_difference(rows.schema, self._table_schema)}. "
+                        "The table changed after the source was built; build the "
+                        "source again to read it as it is now."
                     )
-            seen = 0
-            # Keys must be unique across the whole read, not only within a slice.
-            identifiers: set[str] = set()
-            for batch in connector.scan_batches(
-                self._table_name,
-                where=dict(self._condition.equalities) or None,
-                limit=limit,
-                asof=self._asof,
-            ):
-                for start in range(0, batch.num_rows, self._batch_rows):
-                    rows = arrow_utils.drop_system_columns(
-                        pa.Table.from_batches([batch.slice(start, self._batch_rows)])
+                seen += rows.num_rows
+                if max_rows is not None and seen > max_rows:
+                    raise self._too_large("the read returned more rows")
+                # Tokens first: they refuse a null key before it is copied into
+                # a non-nullable column.
+                tokens = self._key_tokens(rows)
+                repeated = identifiers.intersection(tokens)
+                if repeated:
+                    raise RowIdentifierError(
+                        f"SpiralDB table {self._qualified!r}: key "
+                        f"{sorted(repeated)[0]} appears in two rows; key values "
+                        "must be unique, so each row has its own identifier"
                     )
-                    # Metadata too: field metadata is how a column's logical type is
-                    # recorded, and the schema hash was computed at construction.
-                    if not rows.schema.equals(self._table_schema, check_metadata=True):
-                        raise ValueError(
-                            f"SpiralDB table {self._qualified!r}: "
-                            f"{_schema_difference(rows.schema, self._table_schema)}. "
-                            "The table changed after the source was built; build the "
-                            "source again to read it as it is now."
-                        )
-                    seen += rows.num_rows
-                    if max_rows is not None and seen > max_rows:
-                        raise self._too_large("the read returned more rows")
-                    # Tokens first: they refuse a null key before it is copied into
-                    # a non-nullable column.
-                    tokens = self._key_tokens(rows)
-                    repeated = identifiers.intersection(tokens)
-                    if repeated:
-                        raise RowIdentifierError(
-                            f"SpiralDB table {self._qualified!r}: key "
-                            f"{sorted(repeated)[0]} appears in two rows; key values "
-                            "must be unique, so each row has its own identifier"
-                        )
-                    identifiers.update(tokens)
-                    yield self._builder.attach_provenance(
-                        self._with_tag_copies(rows),
-                        tag_columns=self._tag_columns,
-                        system_tag_columns=self._system_tag_columns,
-                        schema_hash=self._schema_hash,
-                        source_id=self.source_id,
-                        row_identifiers=tokens,
-                        data_tags=self._data_tags,
-                    )
+                identifiers.update(tokens)
+                yield self._builder.attach_provenance(
+                    self._with_tag_copies(rows),
+                    tag_columns=self._tag_columns,
+                    system_tag_columns=self._system_tag_columns,
+                    schema_hash=self._schema_hash,
+                    source_id=self.source_id,
+                    row_identifiers=tokens,
+                    data_tags=self._data_tags,
+                )
 
     def iter_data(self) -> Iterator["tuple[TagProtocol, DataProtocol]"]:
         """Scan the table and yield its ``(tag, data)`` pairs, one batch held at a time."""
@@ -939,14 +995,16 @@ class SpiralDBTableSource(RootSource):
             return _Head(schema_only, False, self.row_count_estimate, True)
         limit = self._limit
         head_limit = n if limit is None else min(n, limit)
+        asof = self._asof
+        table = self._lookup_table()
         rows = self._whole_table(
-            self._read_batches(limit=head_limit, max_rows=None),
+            self._read_batches(table, asof=asof, limit=head_limit, max_rows=None),
             columns=columns,
             all_info=all_info,
         )
         if rows.num_rows < head_limit or head_limit == limit:
             return _Head(rows, True, rows.num_rows, False)
-        recorded = self.row_count_estimate
+        recorded = table.row_count_estimate(asof=asof)
         if limit is not None and not self._condition:
             recorded = min(limit, recorded)
         return _Head(rows, True, recorded, True)
@@ -1023,8 +1081,8 @@ class SpiralDBTableSource(RootSource):
         """Read the whole table into memory and return a ``StreamView`` of every row.
 
         Does what ``as_table()`` does: one scan of every row the source reads (``where``,
-        ``limit``, ``max_rows`` and the pinned version applied), held in memory. Nothing
-        is kept on the source, so every call scans again. ``head(n)`` and the notebook
+        ``limit``, ``max_rows`` and the pinned version applied), held in memory. The
+        source holds no rows, so every call scans again. ``head(n)`` and the notebook
         preview are the bounded read: they read only the first ``n`` rows.
         """
         return super().run()
@@ -1050,7 +1108,7 @@ class SpiralDBTableSource(RootSource):
             "source_type": self.SOURCE_KIND,
             "project_id": self._project_id,
             "dataset": self._dataset,
-            "overrides": self._overrides,
+            "overrides": None if self._overrides is None else dict(self._overrides),
             "table_name": self._table_name,
             "table_id": self._table_id,
             "tag_columns": list(self._tag_columns),
@@ -1107,6 +1165,7 @@ class SpiralDBTableSource(RootSource):
         )
         saved_id = config.get("table_id")
         if saved_id is not None and saved_id != source.table_id:
+            source.close()
             raise ValueError(
                 f"SpiralDB table {source._qualified!r} was saved with table id "
                 f"{saved_id!r} but that name now leads to table id "
