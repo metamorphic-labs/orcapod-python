@@ -9,6 +9,8 @@ throughout the OrcaPod framework, including:
       a raw digest, with convenience conversions to hex, int, UUID, and base64.
     - ``Condition`` -- the row conditions of a restriction, defined in
       ``orcapod.types.condition``.
+    - ``Explanation``, ``SourceReading``, ``Step`` -- what ``stream.explain()`` returns,
+      defined in ``orcapod.types.explanation``.
 """
 
 from __future__ import annotations
@@ -29,6 +31,11 @@ from typing_extensions import override
 from orcapod.types.condition import ColumnRef as ColumnRef
 from orcapod.types.condition import Condition as Condition
 from orcapod.types.condition import col as col
+
+# Re-exported: what ``stream.explain()`` returns (ITL-1402).
+from orcapod.types.explanation import Explanation as Explanation
+from orcapod.types.explanation import SourceReading as SourceReading
+from orcapod.types.explanation import Step as Step
 
 if TYPE_CHECKING:
     import pyarrow as pa
