@@ -92,6 +92,12 @@ class InputChannel:
         self._owner: asyncio.Task[Any] | None = None
         self._claim: weakref.ref[_Claim] | None = None
         self._claim_release: weakref.finalize[Any, Any] | None = None
+        # A reader dropped before anyone reads it (no owner task, no claim): when it
+        # is freed, its feed is closed, so a bounded producer never waits for it. A
+        # feed never refers to its channel, so this holds nothing alive; a live
+        # unread reader stays registered and gets the first batch.
+        self._release_when_freed = weakref.finalize(self, feed.close)
+        self._release_when_freed.atexit = False
 
     @property
     def stream(self) -> StreamProtocol:

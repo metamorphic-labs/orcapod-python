@@ -78,7 +78,7 @@ except those the sync path still merges before it (``StreamingJoin._close``).
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, ClassVar
 
 import numpy as np
@@ -95,6 +95,7 @@ from orcapod.core.operators.join import (
     _matched_pairs,  # pyright: ignore[reportPrivateUsage]  # Join's one rule
     _with_common_key,  # pyright: ignore[reportPrivateUsage]  # Join's one rule
 )
+from orcapod.core.operators.base import require_shared_arrow_type
 from orcapod.core.operators.key_nullability import key_nullable
 from orcapod.core.operators.merge_join import (
     MergeJoin,
@@ -611,10 +612,26 @@ class StreamingJoinKernel(ABC):
                 + f"{input_index} is {actual.type} in a batch, but "
                 + f"{field.type} in its stream"
             )
+        self._check_settled_token_types(input_index, token_types)
         self._token_types[input_index] = token_types
         if not table.num_rows:
             return layout.empty_table()
         return pa.Table.from_arrays(columns, schema=layout)
+
+    def _check_settled_token_types(
+        self, input_index: int, token_types: Mapping[str, pa.DataType]
+    ) -> None:
+        """Refuse a batch whose settled source-info token types this operator refuses.
+
+        Called before the batch changes anything, with the token types its input
+        settles to with it (``settle_token_types``). The kernels whose sync path
+        accepts any token types (the plain join, the semi-join) accept every batch.
+
+        Args:
+            input_index: The batch's input, in call order.
+            token_types: The input's source-info token types, this batch included.
+        """
+        del input_index, token_types
 
     def _emitted(self, tables: list[pa.Table]) -> list[pa.RecordBatch]:
         """The record batches of the output tables, holding ``output_columns``.
@@ -839,6 +856,28 @@ class StreamingMergeJoin(StreamingJoinKernel):
             left
         ).type_converter
         self._link = _BinaryLink(sorted(self._shared_tags), self._finish)
+
+    def _check_settled_token_types(
+        self, input_index: int, token_types: Mapping[str, pa.DataType]
+    ) -> None:
+        """Refuse a batch when a source-info column both inputs carry settles to two
+        token types, as ``MergeJoin`` refuses inputs whose Arrow types for one column
+        disagree (``require_shared_arrow_type``).
+
+        The sync path types each input's tokens over its complete table before it
+        joins, so it refuses the run before any match, whether keys match or not.
+        A kernel learns an input's token type from its first batch with a token and
+        refuses at the batch that makes the two inputs disagree.
+
+        Raises:
+            InputValidationError: If the two inputs' token types for a shared
+                source-info column differ.
+        """
+        other = self._token_types[1 - input_index]
+        for name in sorted(token_types.keys() & other.keys()):
+            mine, theirs = token_types[name], other[name]
+            left, right = (mine, theirs) if input_index == 0 else (theirs, mine)
+            _ = require_shared_arrow_type("MergeJoin", name, left, right)
 
     @property
     def held_rows(self) -> int:

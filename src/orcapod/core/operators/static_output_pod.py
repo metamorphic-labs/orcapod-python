@@ -1122,7 +1122,12 @@ class StaticOutputOperatorPod(TraceableBase):
         try:
             if self.ROW_BY_ROW:
                 (channel,) = inputs
+                # The input's token types across its batches: a batch whose tokens
+                # cannot make one table with the earlier ones is refused, as the sync
+                # path refuses the whole input, never processed alone.
+                settled: dict[str, pa.DataType] = {}
                 async for batch in channel:
+                    settled = settle_token_types(batch, settled)
                     await self._send_processed([batch], channel.stream, output)
             else:
                 streams = await _streams_of(inputs)
@@ -1209,18 +1214,34 @@ async def close_inputs(
         inputs: The operator's input channels.
         error: The error the operator is failing with, if any.
 
+    A cancellation that arrives during one close does not stop the others: every
+    input's close is attempted, then the cancellation is raised (before any ordinary
+    close error); when the operator already failed, its error keeps precedence and
+    the cancellation is added to it as a note.
+
     Raises:
+        asyncio.CancelledError: If a close was cancelled, when ``error`` is ``None``.
         Exception: The first error of a close, when ``error`` is ``None``.
     """
     first: Exception | None = None
+    cancelled: asyncio.CancelledError | None = None
     for channel in inputs:
         try:
             await channel.close()
+        except asyncio.CancelledError as cancellation:
+            if error is not None:
+                error.add_note(
+                    f"Closing an input channel was cancelled: {cancellation!r}"
+                )
+            elif cancelled is None:
+                cancelled = cancellation
         except Exception as failure:  # noqa: BLE001  # every input is closed first
             if error is not None:
                 error.add_note(f"Closing an input channel also failed: {failure!r}")
             elif first is None:
                 first = failure
+    if cancelled is not None:
+        raise cancelled
     if first is not None:
         raise first
 

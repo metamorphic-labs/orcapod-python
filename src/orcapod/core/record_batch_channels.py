@@ -486,7 +486,7 @@ def _null_under_non_nullable(
 
     Judged on the values the array carries: a struct child under a null struct row,
     and the items of a null list, are not values. Struct children, list items (of
-    every list kind) and map items are followed to any depth.
+    every list kind), map keys and map items are followed to any depth.
 
     Args:
         array: A column as sent.
@@ -494,7 +494,8 @@ def _null_under_non_nullable(
         path: The path of ``array`` inside the column, for the answer.
 
     Returns:
-        The path of the first such field (``.a``, ``[]``, ``{}``), or ``None``.
+        The path of the first such field (``.a``, ``[]``, ``{key}``, ``{}``), or
+        ``None``.
     """
     if isinstance(kind, pa.StructType):
         children = cast("pa.StructArray", array).flatten()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
@@ -519,14 +520,14 @@ def _null_under_non_nullable(
         return None
     if isinstance(kind, pa.MapType):
         item = kind.item_field
-        # A map's entries as a list of structs, which list_flatten reads.
-        entries = array.cast(pa.large_list(pa.struct([kind.key_field, item])))  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportUnknownArgumentType]
-        items = pc.list_flatten(entries)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportCallIssue, reportArgumentType]  # a list array
-        values = cast("pa.StructArray", items).flatten()[1]  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        keys, values = _map_entries(cast("pa.MapArray[Any, Any]", array))  # pyright: ignore[reportExplicitAny]  # any map
+        # A key is never null; what it holds may be (a struct key's children).
+        if inner := _null_under_non_nullable(keys, kind.key_type, f"{path}{{key}}"):
+            return inner
         where = f"{path}{{}}"
-        if not item.nullable and values.null_count:  # pyright: ignore[reportUnknownMemberType]
+        if not item.nullable and values.null_count:
             return where
-        return _null_under_non_nullable(values, item.type, where)  # pyright: ignore[reportUnknownArgumentType]
+        return _null_under_non_nullable(values, item.type, where)
     if isinstance(kind, (pa.ListType, pa.LargeListType, pa.FixedSizeListType)):
         item = kind.value_field
         values = pc.list_flatten(array)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
@@ -535,6 +536,30 @@ def _null_under_non_nullable(
             return where
         return _null_under_non_nullable(values, item.type, where)  # pyright: ignore[reportUnknownArgumentType]
     return None
+
+
+def _map_entries(array: pa.MapArray) -> tuple[pa.Array[Any], pa.Array[Any]]:  # pyright: ignore[reportExplicitAny, reportMissingTypeArgument]  # any map
+    """The keys and the items of ``array``'s maps: of its valid rows, in its slice.
+
+    Read from the map's offsets, never by casting the entries (a cast refuses the
+    very nulls under a non-nullable field that are looked for).
+
+    Args:
+        array: A map column, possibly a slice.
+
+    Returns:
+        The keys and the items of the entries of the rows that are not null.
+    """
+    offsets = array.offsets.to_numpy(zero_copy_only=False)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    valid = array.is_valid().to_numpy(zero_copy_only=False)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    indices = [
+        position
+        for row, ok in enumerate(valid)  # pyright: ignore[reportUnknownArgumentType, reportUnknownVariableType]
+        if ok
+        for position in range(int(offsets[row]), int(offsets[row + 1]))  # pyright: ignore[reportUnknownArgumentType]
+    ]
+    taken = pa.array(indices, pa.int64())
+    return array.keys.take(taken), array.items.take(taken)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
 
 
 def _is_token_type(kind: pa.DataType) -> bool:
