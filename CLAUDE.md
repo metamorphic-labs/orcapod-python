@@ -1432,8 +1432,11 @@ data. The rules:
   `job.nodes` and `bind` key) is named by the source's name, not its full id, and two
   different sources with one name are refused in a job (`SourceSlotNameCollisionError`,
   `pipeline/base._refuse_sources_sharing_a_slot_name`). A `CachedSource` presents its
-  wrapped source's id and refuses, before reading the source's rows or writing, a cache table whose rows name
-  another id (`CachedSourceIdMismatchError`; never a silent move to another path); a
+  wrapped source's id and refuses, when the cache is first read or checked and before the
+  wrapped source is checked or read, a cache table whose rows name
+  another id (`CachedSourceIdMismatchError`; once found, no wrapped row is read or returned
+  and nothing written; building the wrapped source on load may read it; never a silent
+  move to another path); a
   `SourceProxy` the saved id (rebuilt from the saved name fields, or the `full_source_id`
   identity field). A legacy config (`source_id`, no `source_name`) is refused, also nested,
   by `PipelineJob.load`. The name-shaped-like-an-id warning is for a given name only, not a

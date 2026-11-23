@@ -597,3 +597,61 @@ class TestSecondReview3Claims:
         monkeypatch.setattr(reloaded.cached_source, "as_table", no_read)
         with pytest.raises(CachedSourceIdMismatchError):
             reloaded.as_table()
+
+
+# ---------------------------------------------------------------------------
+# Third review of PR 525 (head b0f00891)
+# ---------------------------------------------------------------------------
+
+
+class TestThirdReview:
+    def test_a_check_refuses_a_cache_of_another_id_before_checking_the_source(
+        self, tmp_path, csv_path, monkeypatch
+    ):
+        cached = CachedSource(
+            _csv(csv_path, source_id="subjects"),
+            cache_database=DeltaTableDatabase(tmp_path / "cache"),
+        )
+        cached.as_table()
+        config = cached.to_config()
+        monkeypatch.setattr(CSVSource, "SOURCE_VERSION", 2)
+        with pytest.warns(SourceVersionWarning):
+            reloaded = CachedSource.from_config(config)
+        # The file changes, so a check of the wrapped source would read it.
+        _write_csv(csv_path, OTHER_ROWS)
+
+        def no_refresh(*args, **kwargs):
+            raise AssertionError("the wrapped source was checked")
+
+        monkeypatch.setattr(reloaded.cached_source, "check_for_new_data", no_refresh)
+        monkeypatch.setattr(reloaded.cached_source, "as_table", no_refresh)
+        with pytest.raises(CachedSourceIdMismatchError):
+            reloaded.check_for_new_data()
+
+    @pytest.mark.parametrize("tags", TAG_ORDERS)
+    def test_derived_source_configs_say_whether_the_name_was_given(
+        self, tmp_path, csv_path, tags
+    ):
+        from orcapod.sources import DerivedSource
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ProvisionalHashWarning)
+            job = PipelineJob(name="calc", database=DeltaTableDatabase(tmp_path / "db"))
+            with job:
+                ratio.pod(_csv(csv_path, tags, source_id="subjects"), label="calc")
+            job.run()
+            plain = job.nodes["calc"].as_source().to_config()
+            assert plain["source_name"] is None
+            assert plain["source_name_given"] is False
+
+            named = DerivedSource(
+                _csv(csv_path, tags, source_id="subjects"),
+                tags_as_data={"session": "session_copy", "subject": "subject_copy"},
+                source_id="copied",
+            )
+            config = named.to_config()
+            assert config["source_name"] == "copied"
+            assert config["source_name_given"] is True
+            rebuilt = DerivedSource.from_config(config)
+            assert rebuilt.source_id == named.source_id == "derived_v1:copied"
+            assert rebuilt.to_config()["source_name_given"] is True

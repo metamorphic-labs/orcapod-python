@@ -349,8 +349,9 @@ class DerivedSource(RootSource):
             if self._record_id_columns is None
             else list(self._record_id_columns),
             # The plain form's default name is not written: it is recomputed from
-            # the origin.
+            # the origin. ``source_name_given`` says the same, as for every source.
             "source_name": self._explicit_source_id,
+            "source_name_given": self._explicit_source_id is not None,
             "source_version": self.SOURCE_VERSION,
         }
         # Every concrete source has to_config; the abstract RootSource does not

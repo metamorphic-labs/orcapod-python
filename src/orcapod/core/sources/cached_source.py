@@ -451,14 +451,20 @@ class CachedSource(RootSource):
 
         Returns:
             ``True`` if this source will present new rows at the next read.
+
+        Raises:
+            CachedSourceIdMismatchError: If the cache holds rows of another source
+                id; raised before the wrapped source is checked (ITL-1425).
         """
         if not isinstance(self._source, RootSource):
             return False
+        # The cache first: a cache of another source id is refused before the
+        # wrapped source is checked or read (ITL-1425).
+        self._require_rows_of_this_source()
         _ = self._source.check_for_new_data()
         seen = self._source_modified_time()
         if seen == self._source_seen:
             return False
-        self._require_rows_of_this_source()
         live = self._live_records().column(self.HASH_COLUMN_NAME).to_pylist()
         # The next read presents the cache's rows and the live rows together (the
         # cache keeps every row any source sharing it wrote).
@@ -525,9 +531,10 @@ class CachedSource(RootSource):
     def _require_rows_of_this_source(self) -> None:
         """Refuse a cache table holding rows of another source id (ITL-1425).
 
-        Called before the wrapped source's rows are read, so a refused cache reads no
-        row of the source and writes nothing (the wrapped source's own
-        ``check_for_new_data`` may still have run). The cache table is read once per
+        Called before the wrapped source is checked (``check_for_new_data``) or its rows
+        are read, so once a cache is found to hold another id no row of the wrapped
+        source is read or returned and nothing is written. Building the wrapped source
+        (``from_config``) may read it before the first check. The cache table is read once per
         source object, until it is found to hold this source's rows; a table not yet
         written holds no other id.
 
