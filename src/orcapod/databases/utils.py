@@ -7,15 +7,12 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
+import pyarrow as pa
+
 from orcapod.utils import arrow_utils
-from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
-    import pyarrow as pa
-
     from orcapod.protocols.database_protocols import TableCommittingDatabaseProtocol
-else:
-    pa = LazyModule("pyarrow")
 
 H = TypeVar("H")
 G = TypeVar("G")

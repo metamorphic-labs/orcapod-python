@@ -25,4 +25,4 @@ Everything else lives in subpackages:
 | [`orcapod.databases`](databases.md) | Persistent storage backends for computation results |
 | [`orcapod.nodes`](nodes.md) | Pipeline graph elements, including the DB-backed job nodes |
 | [`orcapod.streams`](streams.md) | Immutable (Tag, Data) sequences backed by PyArrow tables |
-| [`orcapod.types`](types.md) | Core type definitions: `Schema`, `ColumnConfig`, `ContentHash`, `Condition` |
+| [`orcapod.types`](types.md) | Core type definitions: `Schema`, `ColumnConfig`, `ContentHash`, `Condition`, `col`, `Explanation` |

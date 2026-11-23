@@ -3,7 +3,9 @@ from __future__ import annotations
 import itertools
 import logging
 from collections.abc import Collection, Iterator
-from typing import TYPE_CHECKING, Any
+from typing import Any
+
+import pyarrow as pa
 
 from orcapod.hashing.orcapod_table import OrcapodTable
 from orcapod import contexts
@@ -19,13 +21,6 @@ from orcapod.protocols.hashing_protocols import PipelineElementProtocol
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema, SourceInfoValue
 from orcapod.utils import arrow_utils, schema_utils
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
-
 
 logger = logging.getLogger(__name__)
 
@@ -466,40 +461,31 @@ class ArrowTableStream(StreamBase):
             source_columns = list(self._source_info_table.column_names)
             data_columns = list(self._data_columns) + source_columns
 
-            # The source-info table has its own chunk layout, so append its
-            # columns to the backing table and batch that once.
-            # ``Table.to_batches`` cuts at the union of the chunk boundaries of
-            # every column, so the tag, data and source-info columns of a batch
-            # always cover the same rows. Batching any of them separately and
-            # zipping the results drops or mis-pairs rows whenever they are
-            # chunked differently.
-            batching_table = self._table
+            # The source-info columns go beside the data columns they describe: the
+            # rows of this one table are read together, however each column is
+            # chunked (``rows_of`` reads batch by batch, cut at every column's chunk
+            # boundaries, so no row is dropped or paired with another's).
+            rows = self._table
             for name in source_columns:
-                batching_table = batching_table.append_column(
+                rows = rows.append_column(
                     self._source_info_table.schema.field(name),
                     self._source_info_table.column(name),
                 )
-            for batch in batching_table.to_batches():
-                tag_batch = batch.select(tag_columns)
-                data_batch = batch.select(data_columns)
-                for i in range(batch.num_rows):
-                    if tag_columns:
-                        tag = Tag(
-                            tag_batch.slice(i, 1),  # type: ignore
-                            data_context=self.data_context,
-                        )
-                    else:
-                        # A fresh empty tag per row, so rows never share one object.
-                        tag = Tag({})
+            # The table is prepared once for all of its rows (ITL-1348): building
+            # ``Tag(row)`` and ``Data(row)`` from one-row slices normalized every row
+            # three times and split its columns again.
+            tags = (
+                Tag.rows_of(rows.select(tag_columns), self.data_context)
+                if tag_columns
+                else None
+            )
+            for data in Data.rows_of(rows.select(data_columns), self.data_context):
+                # A fresh empty tag per row, so rows never share one object.
+                tag = next(tags) if tags is not None else Tag({})
 
-                    data = Data(
-                        data_batch.slice(i, 1),  # type: ignore
-                        data_context=self.data_context,
-                    )
+                yield tag, data
 
-                    yield tag, data
-
-                    cached_elements.append((tag, data))
+                cached_elements.append((tag, data))
             self._cached_elements = cached_elements
         else:
             yield from self._cached_elements

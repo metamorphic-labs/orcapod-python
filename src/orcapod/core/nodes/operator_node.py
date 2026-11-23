@@ -24,6 +24,9 @@ from abc import abstractmethod
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Literal, cast
 
+import pyarrow as pa
+import pyarrow.compute as pc
+
 from orcapod import contexts
 from orcapod.core.data_tags import (
     mark_data_tags,
@@ -35,13 +38,20 @@ from orcapod.core.data_tags import (
 )
 from orcapod.channels import Channel, ChannelClosed, ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
-from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+from orcapod.core.operators.static_output_pod import (
+    RowBuiltFormUnavailable,
+    StaticOutputOperatorPod,
+    produced_stream,
+    rows_on_read,
+)
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
     StreamBase,
     check_head_size,
+    reads_as_its_class,
     short_stream_repr,
+    system_tags_as_rows_give,
 )
 from orcapod.core.streams.view import (
     JOB_NODE_NOT_RUN_NOTE,
@@ -82,18 +92,11 @@ from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import OPERATOR_DB_SCHEMA_VERSION, constants
 from orcapod.types import CacheMode, ColumnConfig, ContentHash, Schema
 from orcapod.utils import arrow_utils
-from orcapod.utils.lazy_module import LazyModule
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    import pyarrow as pa
-    import pyarrow.compute as pc
-
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
-else:
-    pa = LazyModule("pyarrow")
-    pc = LazyModule("pyarrow.compute")
 
 
 async def _discard(channel: ReadableChannel[Any]) -> None:
@@ -1649,7 +1652,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         *input_streams: StreamProtocol,
         observer: ExecutionObserverProtocol | None = None,
         load_only: bool = False,
-    ) -> list[tuple[TagProtocol, DataProtocol]]:
+    ) -> StreamProtocol:
         """Execute input streams: compute, persist, and cache.
 
         Args:
@@ -1661,7 +1664,10 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
                 as in any run.
 
         Returns:
-            Materialized list of (tag, data) pairs.
+            The node's output stream: its rows as the table ``_rows_to_table`` builds
+            from them (``StaticOutputOperatorPod._output_stream``), with this node's
+            identity, built from the operator's result table without making rows
+            (ITL-1347, stage 2). The sync orchestrator hands it to every successor.
 
         Raises:
             ValueError: If the node caches (``LOG`` or ``REPLAY``) and a source
@@ -1689,20 +1695,84 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
             # Check REPLAY cache first
             cached_output = self.get_cached_output()
             if cached_output is not None:
-                output = list(cached_output.iter_data())
+                try:
+                    output = StaticOutputOperatorPod._output_stream(
+                        cached_output.as_table(columns=ZERO_ROW_INPUT_COLUMNS),
+                        cached_output.keys(),
+                        self,
+                    )
+                except RowBuiltFormUnavailable:
+                    # A stored table F cannot build from: its rows, built when read,
+                    # as main handed them on (ITL-1347).
+                    output = rows_on_read(cached_output.iter_data(), self)
                 ctx_obs.on_node_end(node_label, node_hash)
                 return output
 
             # Compute
             result_stream = self._operator.process(*input_streams)
+            produced = produced_stream(result_stream)
 
-            # Materialize
-            output = list(result_stream.iter_data())
+            output: StreamProtocol
+            # The result's table, as the table built from its rows would be, without
+            # making the rows (ITL-1347, stage 2), when it provably is its rows: the
+            # stream holding them is exactly an ``ArrowTableStream`` in the node's
+            # data context, whose system tags are what the rows give.
+            result_table: pa.Table | None = None
+            if (
+                reads_as_its_class(produced, ArrowTableStream)
+                and produced.data_context_key == self.data_context_key
+            ):
+                # From the captured stream: reading the wrapper again could run the
+                # operator again (an upstream with no modified time), so the table,
+                # the keys and the gate describe one computation.
+                result_table = produced.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+                if not system_tags_as_rows_give(result_table):
+                    result_table = None
+            if result_table is None:
+                # Otherwise (a custom stream kind, a replaced reader, rows of another
+                # data context, system tags the rows type otherwise): main's own row
+                # path, its rows read once and handed on unchanged, its table built
+                # where a successor reads it (ITL-1347).
+                # The rows of the computation already made (``produced``), read once.
+                rows = list(produced.iter_data())
+                self._cached_output_stream = StaticOutputOperatorPod._kept_output(
+                    result_stream, rows
+                )
+                output = rows_on_read(rows, self)
+            else:
+                # An exact ``ArrowTableStream``'s ``keys()`` are the keys its rows are
+                # read with (``iter_data``), so they are the order of the result's
+                # rows, to any depth of composition, never the prediction.
+                keys = produced.keys()
+                tag_keys = keys[0]
+                data_tags = data_tag_names(*keys)
 
-            # Cache, in row order with or without rows (ITL-1131, ITL-1133)
-            self._cached_output_stream = StaticOutputOperatorPod._kept_output(
-                result_stream, output
-            )
+                # Cache, in row order with or without rows (ITL-1131, ITL-1133).
+                if result_table.num_rows:
+                    try:
+                        kept_table = StaticOutputOperatorPod._row_built_form(
+                            result_table, keys
+                        )
+                    except RowBuiltFormUnavailable as error:
+                        StaticOutputOperatorPod._raise_as_rows_do(
+                            produced.iter_data(), error
+                        )
+                    self._cached_output_stream = ArrowTableStream(
+                        kept_table, tag_columns=tag_keys, data_tags=data_tags
+                    )
+                    # The output stream, built once the node holds its run (as the
+                    # sync orchestrator built a successor's input after ``execute``
+                    # returned).
+                    output = StaticOutputOperatorPod._as_upstream_stream(
+                        kept_table, tag_keys, data_tags, self
+                    )
+                else:
+                    self._cached_output_stream = (
+                        StaticOutputOperatorPod._zero_rows_in_row_order(result_stream)
+                    )
+                    # Its zero-row form is derived where a successor reads it, as on
+                    # main: the operator is not called again here (``RowsOnRead``).
+                    output = rows_on_read([], self)
 
             self._update_modified_time()
 
@@ -1926,6 +1996,18 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         if self._cached_output_stream is None or self.is_stale:
             return None
         return self._cached_output_stream
+
+    def held_row_count(self) -> int:
+        """The number of rows of the node's current run, from its output table.
+
+        The same count as ``iter_data`` (0 when the node holds no run), without building
+        a ``(Tag, Data)`` pair per row (ITL-1351).
+
+        Returns:
+            The row count.
+        """
+        current = self._current_output()
+        return 0 if current is None else current.as_table().num_rows
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """Return an iterator over the (tag, data) rows of the node's current run.

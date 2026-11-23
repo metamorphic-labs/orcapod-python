@@ -5,8 +5,9 @@ import math
 import os
 import re
 from collections.abc import Collection
-from typing import Any, ClassVar, TYPE_CHECKING
+from typing import Any, ClassVar
 
+import pyarrow as pa
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource, saved_tag_only_columns
@@ -20,13 +21,6 @@ from orcapod.core.sources.stream_builder import (
 )
 from orcapod.utils import arrow_utils
 from orcapod.utils.schema_utils import _normalize_column_list
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
-
 
 _INFINITY = re.compile(r"\s*[+-]?inf(inity)?\s*", re.IGNORECASE)
 """The texts pyarrow's CSV reader reads as an infinity: ``inf`` or ``infinity``, any
@@ -283,6 +277,7 @@ class CSVSource(RootSource):
 
     SOURCE_KIND: ClassVar[str] = "csv"
     """Config type key and default source-id kind of this source (one vocabulary)."""
+    TABLE_IS_ROWS: ClassVar[bool] = True
     TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
     def __init__(

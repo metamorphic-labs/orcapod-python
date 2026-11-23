@@ -62,7 +62,9 @@ Among `job.run()`'s optional arguments, the tutorial's
 [Part 9](../tutorial/09-when-things-go-wrong.md) demonstrates `orchestrator=` (for example
 `SyncPipelineOrchestrator(error_policy="fail_fast")` to stop at the first failing row; the
 default policy skips failed rows and continues) and `observer=` (`StatusObserver`,
-`LoggingObserver`) to record what happened during the run. `load_only=True` fills the nodes
+`LoggingObserver`) to record what happened during the run. An observer only watches: one
+that changes the job, its nodes or its bound sources during a run is unsupported, and what
+the run then does is undefined (ITL-1369). `load_only=True` fills the nodes
 from what is already stored and computes nothing; see
 [Loading without computing](function-pods.md#loading-without-computing-runload_onlytrue).
 

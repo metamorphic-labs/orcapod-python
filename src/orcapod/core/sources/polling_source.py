@@ -18,6 +18,8 @@ from collections.abc import Collection
 from math import floor
 from typing import Any, ClassVar, Generic, TYPE_CHECKING, TypeVar, cast
 
+import polars as pl
+import pyarrow as pa
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
@@ -45,7 +47,6 @@ from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Cursor, PollingConfig, Schema
 from orcapod.utils import arrow_utils, polars_data_utils
 from orcapod.utils.arrow_utils import system_tag_column_names
-from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.schema_utils import (
     _normalize_column_list,
     compute_source_schema_hash,
@@ -53,17 +54,11 @@ from orcapod.utils.schema_utils import (
 )
 
 if TYPE_CHECKING:
-    import polars as pl
-    import pyarrow as pa
     from polars._typing import FrameInitTypes
 
     from orcapod.core.streams.arrow_table_stream import ArrowTableStream
     from orcapod.protocols.core_protocols.sources import DynamicSourceProtocol
     from orcapod.types import Schema
-
-else:
-    pa = LazyModule("pyarrow")
-    pl = LazyModule("polars")
 
 T = TypeVar("T")
 

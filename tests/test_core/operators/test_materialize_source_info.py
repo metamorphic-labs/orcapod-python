@@ -1,7 +1,7 @@
 """Every materialized row keeps its own source info (ITL-845).
 
 ``StaticOutputOperatorPod._materialize_to_stream`` and
-``SyncPipelineOrchestrator._materialize_as_stream`` turn collected (Tag, Data)
+``StaticOutputOperatorPod._materialize_upstream`` turn collected (Tag, Data)
 pairs back into a stream. They used to read row 0's source info and stamp it on
 every row, so rows from index 1 onward were attributed to row 0. These tests
 send rows with distinct source-info tokens through every path that materializes
@@ -42,7 +42,6 @@ from orcapod.core.operators.pick import Pick
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.sources import ArrowTableSource, DictSource
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
-from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.system_constants import constants
@@ -136,9 +135,9 @@ def _materialize(rows: Sequence[Row]) -> StreamProtocol:
 
 
 def _materialize_buffer(buf: Sequence[Row], node: Any) -> StreamProtocol:
-    """Call ``SyncPipelineOrchestrator._materialize_as_stream``, the helper under test."""
+    """Call ``StaticOutputOperatorPod._materialize_upstream``, the helper under test."""
     # Non-public on purpose: these tests are about this helper itself.
-    return SyncPipelineOrchestrator._materialize_as_stream(list(buf), node)  # pyright: ignore[reportPrivateUsage]
+    return StaticOutputOperatorPod._materialize_upstream(list(buf), node)  # pyright: ignore[reportPrivateUsage]
 
 
 def _broadcast_row_zero(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -155,8 +154,28 @@ def _broadcast_row_zero(monkeypatch: pytest.MonkeyPatch) -> None:
             [(tag, data.with_source_info(**row_zero)) for tag, data in rows]
         )
 
+    original_form = StaticOutputOperatorPod._row_built_form  # pyright: ignore[reportPrivateUsage]
+
+    def broadcasting_form(
+        table: pa.Table, keys: tuple[Sequence[str], Sequence[str]]
+    ) -> pa.Table:
+        """Stamp row 0's source info on every row of the row-built form (ITL-1347)."""
+        formed = original_form(table, keys)
+        for i, name in enumerate(formed.column_names):
+            if name.startswith(constants.SOURCE_PREFIX):
+                column = formed.column(i)
+                first = column.slice(0, 1).combine_chunks()
+                repeated = pa.concat_arrays([first] * formed.num_rows)
+                formed = formed.set_column(i, formed.schema.field(i), repeated)
+        return formed
+
     monkeypatch.setattr(
         StaticOutputOperatorPod, "_rows_to_table", staticmethod(broadcasting)
+    )
+    # An operator node keeps the row-built form of its result's table, without
+    # making the rows (ITL-1347, stage 2).
+    monkeypatch.setattr(
+        StaticOutputOperatorPod, "_row_built_form", staticmethod(broadcasting_form)
     )
 
 
@@ -688,7 +707,7 @@ class TestStoreWrittenBeforeFix:
         assert _stored_source(old) == [tokens[0]] * 3
 
         new = self._node(db)
-        out = new.execute(_pin_source())
+        out = list(new.execute(_pin_source()).iter_data())
 
         # The run itself emits the corrected rows.
         assert _source_info_tokens(out) == tokens

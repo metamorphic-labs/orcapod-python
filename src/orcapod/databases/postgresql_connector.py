@@ -22,6 +22,8 @@ import uuid
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
+import pyarrow as pa
+
 from orcapod.databases.utils import is_direct_projection
 from orcapod.errors import UnstorableTableNameError
 from orcapod.types import ColumnInfo
@@ -29,10 +31,8 @@ from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
     import psycopg
-    import pyarrow as pa
 else:
     psycopg = LazyModule("psycopg")
-    pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
 

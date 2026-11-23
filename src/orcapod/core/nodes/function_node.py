@@ -25,7 +25,10 @@ import uuid
 from abc import abstractmethod
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
+from typing import Any, Literal, NamedTuple, cast
+
+import polars as pl
+import pyarrow as pa
 
 from orcapod import contexts
 from orcapod.core.function_pod import (
@@ -115,16 +118,8 @@ from orcapod.types import (
     Schema,
 )
 from orcapod.utils import arrow_utils, schema_utils
-from orcapod.utils.lazy_module import LazyModule
 
 logger = logging.getLogger(__name__)
-
-if TYPE_CHECKING:
-    import polars as pl
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
-    pl = LazyModule("polars")
 
 # Pipeline entry ID column name used when fetching records from the pipeline
 # database. Always present in the table returned by _fetch_joined_records.
@@ -288,6 +283,27 @@ def _with_datagram_id(data: Data, datagram_id: uuid.UUID) -> Data:
         record_uuid=datagram_id,
         data_context=data.data_context_key,
     )
+
+
+def rows_as_output_stream(
+    rows: Sequence[tuple[TagProtocol, DataProtocol]], node: StreamProtocol
+) -> StreamProtocol:
+    """Return ``rows`` as ``node``'s output stream: the rows, built when read.
+
+    For the job nodes whose output is still their rows (function and side-effect
+    nodes, until ITL-1347 stages 3 and 4): ``RowsOnRead``, built by ``main``'s row path
+    where a successor reads it. One place imports the operator module for them.
+
+    Args:
+        rows: The node's output rows, in order.
+        node: The node.
+
+    Returns:
+        The node's output stream.
+    """
+    from orcapod.core.operators.static_output_pod import rows_on_read
+
+    return rows_on_read(rows, node)
 
 
 def _executor_supports_concurrent(
@@ -2479,6 +2495,17 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
     # Data processing
     # ------------------------------------------------------------------
 
+    def _output_stream(
+        self, rows: list[tuple[TagProtocol, DataProtocol]]
+    ) -> StreamProtocol:
+        """The output stream of a run whose output rows are ``rows``.
+
+        The rows, their table built when read by ``main``'s row path
+        (``RowsOnRead``): the sync orchestrator builds it where a successor reads it,
+        as ``main`` rebuilt the rows there, and a leaf's is never built (ITL-1347).
+        """
+        return rows_as_output_stream(rows, self)
+
     def execute_data(
         self,
         tag: TagProtocol,
@@ -2508,7 +2535,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         error_policy: Literal["continue", "fail_fast"] = "continue",
         run_id: str | None = None,
         load_only: bool = False,
-    ) -> list[tuple[TagProtocol, DataProtocol]]:
+    ) -> StreamProtocol:
         """Execute all data from a stream: compute, persist, and cache.
 
         For each data: fire ``on_data_start``, check the in-memory cache
@@ -2534,8 +2561,10 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 this way.
 
         Returns:
-            Materialized list of (tag, output_data) pairs, excluding
-            ``None`` outputs and failed data.
+            The node's output stream: its output rows (no row for a ``None`` output or
+            a failed row) as the table ``_rows_to_table`` builds from them, with this
+            node's identity (``StaticOutputOperatorPod._materialize_upstream``). The sync
+            orchestrator hands it to every successor (ITL-1347, stage 2).
 
         Raises:
             RuntimeError: If the node was loaded by ``PipelineJob.load`` and so
@@ -2547,7 +2576,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         from orcapod.pipeline.observer import NoOpObserver
 
         if load_only:
-            return self._execute_load_only(input_stream, observer)
+            return self._output_stream(self._execute_load_only(input_stream, observer))
         if self._function_pod is None:
             raise self._cannot_compute_error()
 
@@ -2676,7 +2705,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             self.clear_cache()
             raise
 
-        return output
+        return self._output_stream(output)
 
     def _empty_data_cache_hit(
         self, tag: TagProtocol, data: EmptyData, base_entry_id: bytes
@@ -3973,6 +4002,38 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         Raises:
             RuntimeError: If ``load_status`` is UNAVAILABLE.
         """
+        self._prepare_held_read()
+        yield from self._held_pairs()
+
+    def held_row_count(self) -> int:
+        """The number of rows ``iter_data`` yields now, counted from the run's inputs.
+
+        The same count as ``iter_data`` (one row per input of the run that has an
+        output), without going through the rows (ITL-1351).
+
+        Returns:
+            The row count.
+
+        Raises:
+            RuntimeError: If ``load_status`` is UNAVAILABLE.
+        """
+        self._prepare_held_read()
+        counts = self._run_entry_counts
+        if counts is None:
+            return 0
+        return sum(
+            counts.get(entry_id, 0)
+            for entry_id, (_, data) in self._cached_output_datas.items()
+            if data is not None
+        )
+
+    def _prepare_held_read(self) -> None:
+        """What every read of the held rows does first: refuse a node with no database
+        to read, and drop rows that went stale.
+
+        Raises:
+            RuntimeError: If ``load_status`` is UNAVAILABLE.
+        """
         from orcapod.pipeline.serialization import LoadStatus
 
         status = self.load_status
@@ -3981,7 +4042,6 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         # A CACHE_ONLY node has no live input to be stale against.
         if status != LoadStatus.CACHE_ONLY and self.is_stale:
             self.clear_cache()
-        yield from self._held_pairs()
 
     def run(self, *, load_only: bool = False) -> StreamView:
         """Run the node as a job run would, and return a ``StreamView`` of its rows.
