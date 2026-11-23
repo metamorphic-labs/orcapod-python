@@ -619,7 +619,8 @@ def _case_reason(first: str, second: str, nested: bool = False) -> str:
 # (review of PR 504, round four).
 _DUPLICATE_NAME = re.compile(
     r"^(?:(?:External|Kernel|Generic DeltaTable) error: )*"
-    r"Schema error: Duplicate field name \(case-insensitive\): '(.*)'"
+    r"Schema error: Duplicate field name \(case-insensitive\): '(.*)'",
+    re.DOTALL,  # a name may hold a newline
 )
 
 
@@ -643,16 +644,17 @@ def _duplicate_name_in(error: BaseException) -> str | None:
 
 
 def _error_chain(error: BaseException) -> list[BaseException]:
-    """``error`` and its causes and contexts, each once: a chain may loop.
+    """``error`` and its explicit causes (``raise ... from``), each once.
 
-    It does when an error is raised again inside the handler of an error that wraps
-    it (a lost commit's retry gives up with the error it lost to; ITL-1377).
+    Never the implicit ``__context__``: that is whatever the caller was handling when
+    the commit failed, which says nothing about the commit (review of PR 504, round
+    five). Each error is taken once, so a chain that loops back ends.
     """
     chain: list[BaseException] = []
     seen: BaseException | None = error
     while seen is not None and all(seen is not e for e in chain):
         chain.append(seen)
-        seen = seen.__cause__ or seen.__context__
+        seen = seen.__cause__
     return chain
 
 
@@ -722,6 +724,12 @@ def _reported_field(error: BaseException, schema: pa.Schema) -> tuple[str, Any]:
             if named:
                 field = max(named, key=lambda c: len(c.name))
                 return prefix + field.name, field.type
+    # No struct of the batch is refused on its own: the pair is a batch column and a
+    # stored column. Name the batch's column, with its type.
+    top = [field for field in schema if quoted(field)]
+    if top:
+        field = max(top, key=lambda f: len(f.name))
+        return field.name, field.type
     return _duplicate_name_in(error) or "", pa.null()
 
 

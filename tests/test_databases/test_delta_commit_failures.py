@@ -23,7 +23,7 @@ import pytest
 
 from orcapod.databases import DeltaTableDatabase
 from orcapod.databases import delta_lake_databases as dld
-from orcapod.errors import InputValidationError
+from orcapod.errors import InputValidationError, UnstorableColumnError
 
 PATH = ("t",)
 
@@ -275,3 +275,41 @@ def test_an_unrecorded_struct_child_loosened_to_nullable_is_refused_once(
         db.flush()
     assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
     db.flush()  # a no-op
+
+
+# ── Review of PR 504, round five ────────────────────────────────────────────────────
+
+
+@pytest.mark.skipif(sys.platform == "win32" or os.geteuid() == 0, reason="permissions")
+def test_a_failure_inside_an_unrelated_handler_is_classified_on_its_own(
+    tmp_path: Path,
+) -> None:
+    """Finding 1: a flush called while the caller handles an unrelated Delta
+    duplicate-name error fails on a permission error. Only the commit's own error and
+    its explicit causes are classified, never the ambient context: the valid rows stay
+    queued, and a later flush commits them."""
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    path = ("parent", "good")
+    db = DeltaTableDatabase(tmp_path)
+    rows = pa.table({"rid": pa.array([b"1"], pa.large_binary()), "x": [11]})
+    db.add_records(path, rows, record_id_column="rid")
+    parent.chmod(0o500)
+    try:
+        try:
+            deltalake.Schema.from_arrow(
+                pa.schema([("x", pa.int64()), ("X", pa.int64())])
+            )
+        except Exception:  # noqa: BLE001  # the unrelated error being handled
+            with pytest.raises(Exception) as info:  # noqa: B017  # main's error
+                db.flush()
+            assert not isinstance(
+                info.value, (InputValidationError, UnstorableColumnError)
+            )
+            assert db._pending_batches  # pyright: ignore[reportPrivateUsage]
+    finally:
+        parent.chmod(0o700)
+    db.flush()
+    stored = DeltaTableDatabase(tmp_path).get_all_records(path, record_id_column="rid")
+    assert stored is not None
+    assert stored.column("x").to_pylist() == [11]
