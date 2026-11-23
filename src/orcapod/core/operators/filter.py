@@ -201,7 +201,9 @@ class Filter(UnaryOperator):
 
         Decision 13 of ITL-1374: a filter holds no user code, has no effect and keeps a
         row by that row alone, so its head may evaluate the condition over the rows its
-        input's head shows. Nothing is computed, polled or written. A condition that does
+        input's head shows. This is the plain stream's head: a filter captured
+        in a job is a job node, which shows its current run (ITL-1095) and so reads not
+        computed before its first run. Nothing is computed, polled or written. A condition that does
         not fit the input's Arrow types shows nothing here; its error appears at the run.
 
         Args:
@@ -234,8 +236,15 @@ class Filter(UnaryOperator):
             InputValidationError: If the condition does not fit the input's Arrow
                 types.
         """
+        # Every system column passes through: source info, system tags and each row's
+        # data context (a raw stream may hold several).
         table = stream.as_table(
-            columns={"source": True, "system_tags": True, "sort_by_tags": False}
+            columns={
+                "source": True,
+                "system_tags": True,
+                "context": True,
+                "sort_by_tags": False,
+            }
         )
         tag_columns, data_columns = stream.keys()
         self._check_arrow(table.schema, _user_columns(tag_columns, data_columns))
@@ -243,7 +252,7 @@ class Filter(UnaryOperator):
             filter_table(table, self._condition),
             tag_columns=tag_columns,
             data_tags=stream_data_tags(stream),
-            data_context=stream.data_context,  # pyright: ignore[reportAttributeAccessIssue]  # StreamProtocol omits data_context, which every concrete stream provides (ITL-844)
+            data_context=stream.data_context_key,
         )
 
     async def async_execute(
@@ -259,6 +268,13 @@ class Filter(UnaryOperator):
         one-row table, and the kernel of the sync path decides whether it is kept. A
         kept row is passed on as it arrived (without its meta columns), so its values,
         types and system tags are those of the sync path.
+
+        On this channel path the condition is checked against each row's Arrow types,
+        the only schema the channel carries: an input with no rows is never checked, and
+        a raw stream's Arrow ``null`` column arrives as ``large_string`` (``Data``'s null
+        convention, ITL-1319), so a condition its sync path refuses on either can pass
+        here. A job run (either orchestrator) checks its input's Arrow schema before any
+        row, as the sync path does, and refuses both; no source holds a ``null`` column.
 
         Args:
             inputs: Single-element sequence of readable channels.

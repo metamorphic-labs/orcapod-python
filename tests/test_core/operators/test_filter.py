@@ -17,7 +17,7 @@ import pyarrow as pa
 import pytest
 
 from orcapod import PipelineJob, col
-from orcapod.core.operators import PROVISIONAL_OPERATORS, Filter
+from orcapod.core.operators import PROVISIONAL_OPERATORS, Filter, SelectDataColumns
 from orcapod.core.operators.provisional import reset_provisional_operator_warnings
 from orcapod.core.sources import ArrowTableSource
 from orcapod.core.streams import ArrowTableStream
@@ -248,6 +248,25 @@ class TestPassThrough:
         assert out.column("dec").type == pa.decimal256(40, 1)
         assert out.column("dec").to_pylist() == [Decimal("1.5"), Decimal("3.5")]
 
+    def test_each_rows_data_context_passes_through(self):
+        """A raw stream may hold several data contexts; the kept rows keep theirs, as
+        ``SelectDataColumns`` keeps them (review of PR 497, finding 1)."""
+        table = pa.table(
+            {
+                "k": pa.array([1, 2, 3], pa.int64()),
+                "v": pa.array([10, 20, 30], pa.int64()),
+                "w": pa.array([4, 5, 6], pa.int64()),
+                "_context_key": pa.array(
+                    ["held-a", "held-b", "held-c"], pa.large_string()
+                ),
+            }
+        )
+        stream = ArrowTableStream(table, tag_columns=["k"])
+        kept = Filter(col("k") >= 2)(stream).as_table(all_info=True)
+        assert kept["_context_key"].to_pylist() == ["held-b", "held-c"]
+        selected = SelectDataColumns(["v", "w"])(stream).as_table(all_info=True)
+        assert kept.equals(selected.filter(pa.array([False, True, True])))
+
     def test_no_meta_columns(self):
         table = pa.table(
             {
@@ -422,6 +441,37 @@ class TestAsync:
 
 
 class TestInAJob:
+    @pytest.mark.parametrize(
+        "orchestrator", [SyncPipelineOrchestrator, AsyncPipelineOrchestrator]
+    )
+    def test_a_value_its_column_cannot_hold_raises_with_no_rows(self, orchestrator):
+        """The job path refuses what the sync path refuses, also with no rows to read a
+        type from (review of PR 497, finding 5): the node checks the input's Arrow schema."""
+        table = pa.table(
+            {"k": pa.array([1], pa.int8()), "v": pa.array([1], pa.int64())}
+        )
+        job = PipelineJob(name="narrow", database=InMemoryArrowDatabase())
+        with job:
+            source = ArrowTableSource(
+                table, tag_columns=["k"], tag_only_columns=True, source_id="narrow"
+            )
+            empty = source.filter(v=999, label="none")
+            Filter(Condition.of(k=300))(empty, label="kept")
+        with pytest.raises(InputValidationError, match="int8"):
+            job.run(orchestrator=orchestrator())
+
+    def test_a_job_node_reads_not_computed_before_its_first_run(self):
+        """A job node shows its current run (ITL-1095): before the first run its head
+        reads not computed, although the same filter outside a job shows its input's
+        matching rows (decision 13 is for the plain stream; review finding 6)."""
+        job = PipelineJob(name="head", database=InMemoryArrowDatabase())
+        with job:
+            stream = _units().filter(session="s1", label="kept")
+        assert stream.head().status.value == "rows"
+        assert job.nodes["kept"].head().status.value == "not_computed"
+        job.run()
+        assert _kept(job.nodes["kept"].head()) == S1
+
     @pytest.mark.parametrize(
         "orchestrator", [SyncPipelineOrchestrator, AsyncPipelineOrchestrator]
     )
