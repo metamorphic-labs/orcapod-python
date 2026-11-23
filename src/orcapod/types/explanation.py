@@ -84,7 +84,7 @@ class SourceReading:
         if not self.bound:
             # The steps are declared: show them although no source is bound yet.
             return [
-                f"slot {self.name!r}: no source bound",
+                f"slot {plain_repr(self.name)}: no source bound",
                 f"  applied after reading: {after}",
             ]
         if not self.known:

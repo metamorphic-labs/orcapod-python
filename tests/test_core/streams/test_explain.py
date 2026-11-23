@@ -662,3 +662,18 @@ class TestReviewOfPr498:
 
 def _units_filter_over(stream):
     return DropNulls("rate")(Filter(col("t") >= 1.0)(stream))
+
+
+class TestSecondReviewOfPr498:
+    """CodeRabbit's review of PR 498 at ce5371ab."""
+
+    @pytest.mark.parametrize(
+        ("name", "shown"),
+        [(_LoudName("units"), "'units'"), ("units", "'units'")],
+        ids=["str_subclass", "str"],
+    )
+    def test_a_slot_name_is_written_without_user_code(self, name, shown):
+        tag_schema, data_schema = _units().output_schema()
+        slot = SourceNode(name=name, tag_schema=tag_schema, data_schema=data_schema)
+        text = str(Filter(col("t") >= 1.0)(slot).explain())
+        assert f"slot {shown}: no source bound" in text
