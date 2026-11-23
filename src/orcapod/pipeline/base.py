@@ -459,19 +459,17 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
 
         source_node_cls = self.source_node_class
 
-        # 1. Source hashes: inputs that have no registered invocation.
-        source_hashes = set(self._source_streams.keys()) - set(
-            self._invocation_lut.keys()
+        # 1. Resolve source nodes in hash order, then insert them by their slot
+        # labels. The original stream hash breaks ties between identical labels.
+        sources = [
+            (h, source_node_cls.from_stream(self._source_streams[h]))
+            for h in sorted(self._source_streams.keys() - self._invocation_lut.keys())
+        ]
+        node_map: dict[str, Any] = dict(
+            sorted(sources, key=lambda item: (item[1].label, item[0]))
         )
 
-        # 2. Create source nodes keyed by the original stream hash.
-        node_map: dict[str, Any] = {
-            h: source_node_cls.from_stream(self._source_streams[h])
-            for h in source_hashes
-            if h in self._source_streams
-        }
-
-        # 2a. Validate source-node name uniqueness.
+        # 2. Validate source-node name uniqueness.
         # Source node names are identity-forming (used as bind() keys and
         # included in content_hash()).  Two distinct source nodes with the
         # same name indicate a source_id collision.  If their schemas also
@@ -505,8 +503,8 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                     f"so each slot has a unique, stable identity."
                 )
 
-        # 3. Topological pass — create function / operator nodes.
-        for key in _nx.topological_sort(self._hash_graph):
+        # 3. Topological pass with independent invocations ordered by hash.
+        for key in _nx.lexicographical_topological_sort(self._hash_graph):
             if key in node_map:
                 continue  # already added as a source node in step 2
             if key not in self._invocation_lut:
@@ -553,15 +551,15 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                 self._nodes[label] = nodes[0]
 
         # 5. Build node_graph (OrcaDAG with node objects as vertices).
+        graph_edges = sorted(self._hash_graph.edges())
         node_dag: OrcaDAG[NodeT] = OrcaDAG()
-        for up_hash, down_hash in self._hash_graph.edges():
+        for node in node_map.values():
+            node_dag.add_node(node)
+        for up_hash, down_hash in graph_edges:
             up_node = node_map.get(up_hash)
             down_node = node_map.get(down_hash)
             if up_node is not None and down_node is not None:
                 node_dag.add_edge(up_node, down_node)
-        for node in node_map.values():
-            if node not in node_dag:
-                node_dag.add_node(node)
         self._node_graph = node_dag
 
         # 6. Enrich hash_graph node attributes (used by serialization).
@@ -587,7 +585,7 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         self._upstreams = {
             h: n for h, n in node_map.items() if isinstance(n, source_node_cls)
         }
-        self._graph_edges = list(self._hash_graph.edges())
+        self._graph_edges = graph_edges
 
         self._compiled = True
 
@@ -678,7 +676,7 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                 )
 
         # Sort topologically using _hash_graph (node_hash keys match _hash_graph).
-        topo_keys = list(_nx.topological_sort(self._hash_graph))
+        topo_keys = _nx.lexicographical_topological_sort(self._hash_graph)
         ordered = [inv_by_node_hash[k] for k in topo_keys if k in inv_by_node_hash]
 
         return InvocationGraph(

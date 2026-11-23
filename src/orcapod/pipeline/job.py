@@ -761,7 +761,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         node_map: dict[str, object] = {}
 
-        for node_hash in _nx.topological_sort(self._hash_graph):
+        for node_hash in _nx.lexicographical_topological_sort(self._hash_graph):
             if node_hash not in persistent:
                 continue
             job_node = persistent[node_hash]
@@ -832,7 +832,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 dict(self._hash_graph.nodes[old_h]) if old_h in self._hash_graph else {}
             )
             bp_hash_graph.add_node(new_h, **old_attrs)
-        for up_h, down_h in self._hash_graph.edges():
+        for up_h, down_h in self._graph_edges:
             new_up = old_to_new.get(up_h)
             new_down = old_to_new.get(down_h)
             if new_up is not None and new_down is not None:
@@ -864,14 +864,13 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # Build _node_graph (OrcaDAG with node objects as vertices).
         # node_map here contains GraphNode objects (blueprint nodes).
         bp_dag: OrcaDAG = OrcaDAG()
-        for up_h, down_h in self._hash_graph.edges():
+        for node in node_map.values():
+            bp_dag.add_node(node)
+        for up_h, down_h in self._graph_edges:
             up_node = node_map.get(up_h)
             down_node = node_map.get(down_h)
             if up_node is not None and down_node is not None:
                 bp_dag.add_edge(up_node, down_node)
-        for node in node_map.values():
-            if node not in bp_dag:
-                bp_dag.add_node(node)
         pipeline._node_graph = bp_dag
 
         pipeline._compiled = True

@@ -84,27 +84,28 @@ def _reset_damage() -> Iterator[None]:
 
 
 def build_job(database_path: Path, keys: str, *, reader_first: bool) -> PipelineJob:
-    """Two sibling nodes over one source: ``rd`` (doubles) and ``wr`` (triples).
+    """Two independent nodes: ``rd`` (doubles) and ``wr`` (triples).
 
-    ``reader_first`` decides which node is added first, and so comes first in
-    node order.
+    ``reader_first`` decides which node reads the first source in slot order.
     """
-    source = ArrowTableSource(
-        pa.table({"k": list(keys), "x": list(range(1, len(keys) + 1))}),
-        tag_columns=["k"],
-        tag_only_columns=True,
-        infer_nullable=True,
+    table = pa.table({"k": list(keys), "x": list(range(1, len(keys) + 1))})
+    first, second = (
+        ArrowTableSource(
+            table,
+            source_id=name,
+            tag_columns=["k"],
+            tag_only_columns=True,
+            infer_nullable=True,
+        )
+        for name in ("first", "second")
     )
+    read_source, write_source = (first, second) if reader_first else (second, first)
     job = PipelineJob(
         name="together", database=DeltaTableDatabase(base_path=database_path)
     )
     with job:
-        if reader_first:
-            _ = double.pod(source, label="rd")
-            _ = triple.pod(source, label="wr")
-        else:
-            _ = triple.pod(source, label="wr")
-            _ = double.pod(source, label="rd")
+        _ = double.pod(read_source, label="rd")
+        _ = triple.pod(write_source, label="wr")
     return job
 
 

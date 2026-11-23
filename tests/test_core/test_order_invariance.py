@@ -40,8 +40,12 @@ import inspect
 import itertools
 import json
 import operator
+import os
 import re
 import sqlite3
+import subprocess
+import sys
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -59,6 +63,7 @@ from orcapod.core.nodes import SourceJobNode
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
+from orcapod.errors import RestrictedAggregationWarning
 from orcapod.types import Condition
 from orcapod.operators import (
     AddTags,
@@ -96,6 +101,7 @@ from orcapod.sources import (
     ListSource,
     PollingSource,
     SQLiteTableSource,
+    SpiralDBTableSource,
 )
 from orcapod.types import CacheMode, Cursor
 
@@ -1197,3 +1203,84 @@ def test_a_saved_job_records_the_declared_order_and_loads_the_same_hashes(
         assert loaded.nodes["pod"].content_hash() == original
         hashes.append(original)
     assert hashes[0] == hashes[1]
+
+
+@function_pod(output_keys="doubled")
+def _double_reading(reading: int | None) -> int:
+    """Double one reading."""
+    return (reading or 0) * 2
+
+
+def _restricted_job_run(root: Path, names: Sequence[str]) -> None:
+    """Print the node labels, summary lines and warning for one job in a child process."""
+    from tests.test_databases import fake_pyspiral
+
+    keys = pa.schema([pa.field("subject", pa.string())])
+    rows = pa.table({"subject": ["a", "b"], "reading": [1, 2]})
+    with fake_pyspiral.install(root):
+        project = fake_pyspiral.FakeSpiral().project("synthetic")
+        for name in sorted(names):
+            project.create_table(f"default.{name}", key_schema=keys).write(rows)
+
+        job = PipelineJob(name="restricted", database=InMemoryArrowDatabase())
+        with job:
+            for name in names:
+                source = SpiralDBTableSource(
+                    "synthetic", name, source_id=name, tag_only_columns=True
+                ).where(subject="a")
+                # The step labels run the opposite way to the source names.
+                _ = source.group_by(["subject"], label=f"group_{name[-1]}")
+                _ = _double_reading.pod(source, label=f"read_{name}")
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", RestrictedAggregationWarning)
+            summary = job.run()
+    (warning,) = (
+        str(item.message)
+        for item in caught
+        if item.category is RestrictedAggregationWarning
+    )
+    # Strip presentation indentation so the test can identify the restriction line.
+    summary_text = "\n".join(line.lstrip() for line in str(summary).splitlines())
+    print(
+        json.dumps(
+            {"nodes": list(job.nodes), "summary": summary_text, "warning": warning}
+        )
+    )
+
+
+def test_restricted_job_order_is_independent_of_hash_seed_and_definition_order(
+    tmp_path: Path,
+) -> None:
+    """Compare the full summary and warning across processes and branch orders."""
+    names = ("alpha3", "beta2", "gamma1")
+    results: dict[str, dict[str, Any]] = {}
+    for seed in ("1", "7", "42"):
+        for order in (names, names[::-1]):
+            variant = f"{seed}-{order[0]}"
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    f"from {__name__} import _restricted_job_run, Path; "
+                    "import sys; _restricted_job_run(Path(sys.argv[1]), sys.argv[2:])",
+                    str(tmp_path / variant),
+                    *order,
+                ],
+                env={**os.environ, "PYTHONHASHSEED": seed},
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            assert process.returncode == 0, process.stderr
+            results[variant] = json.loads(process.stdout)
+
+    assert_all_equal(results)
+    result = next(iter(results.values()))
+    assert result["nodes"][: len(names)] == list(names)
+    restrictions = next(
+        line
+        for line in result["summary"].splitlines()
+        if line.startswith("restricted sources:")
+    )
+    assert re.findall(r"(\w+) \(\w+\):", restrictions) == list(names)
+    assert re.findall(r"'(\w+)' feeds", result["warning"]) == list(names)
