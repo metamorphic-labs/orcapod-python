@@ -165,6 +165,14 @@ class ArrowDatabaseProtocol(Protocol):
         """
         ...
 
+    def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
+        """Read the current stored schema, including for an empty table.
+
+        The path is relative to this database view. A missing table gives
+        ``None``. This operation reads schema metadata without fetching rows.
+        """
+        ...
+
     def list_table_paths(self, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
         """List the paths of the tables stored under ``prefix``.
 

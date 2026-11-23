@@ -138,6 +138,11 @@ _PIPELINE_RECOMPUTATION_INDEX_COL = "__pipeline_recomputation_index"
 PIPELINE_RUN_ID_COL = "__pipeline_run_id"
 PIPELINE_RECORDED_AT_COL = "__recorded_at"
 
+_PIPELINE_RECORDING_FIELDS = (
+    pa.field(PIPELINE_RUN_ID_COL, pa.large_string()),
+    pa.field(PIPELINE_RECORDED_AT_COL, pa.timestamp("us", tz="UTC"), nullable=False),
+)
+
 
 def _pipeline_meta_schema() -> pa.Schema:
     """The bookkeeping columns of a function node's pipeline record (``pdb_v1``).
@@ -157,10 +162,7 @@ def _pipeline_meta_schema() -> pa.Schema:
             pa.field(constants.IS_EPHEMERAL_COL, pa.bool_()),
             pa.field(_PIPELINE_BASE_ENTRY_ID_COL, pa.large_binary()),
             pa.field(_PIPELINE_RECOMPUTATION_INDEX_COL, pa.int32()),
-            pa.field(PIPELINE_RUN_ID_COL, pa.large_string()),
-            pa.field(
-                PIPELINE_RECORDED_AT_COL, pa.timestamp("us", tz="UTC"), nullable=False
-            ),
+            *_PIPELINE_RECORDING_FIELDS,
         ]
     )
 
@@ -1417,8 +1419,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
     _stale_tables_checked: bool = False
     # Set once the rows of the current tables were counted by data context.
     _current_tables_checked: bool = False
-    # Check an attached table before the first potential write, even if it is pdb_v1.
-    _pipeline_write_schema_checked: bool = False
+    # Preflight the first miss before invoking user code. Each append checks again.
+    _pipeline_preflight_checked: bool = False
     # Set once a database that cannot list its tables was reported.
     _unlisted_store_reported: bool = False
     # Base entry ids of the inputs of the last completed run in this process, each with
@@ -1540,7 +1542,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         )
 
     def _begin_run(self) -> None:
-        """Make a node that delivers side effects look for older completions again.
+        """Reset schema preflight and check older completions for side effects.
 
         Tables written before v0.3 can appear in a database between two runs of one
         node object. Such a node must find them before it delivers anything, so it
@@ -1551,6 +1553,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             SideEffectLogDataContextError: If this node delivers side effects and
                 completions it cannot match exist; nothing has been delivered then.
         """
+        self._pipeline_preflight_checked = False
         if self._delivers_side_effects:
             self._stale_tables_checked = False
             self._account_for_stale_tables()
@@ -1704,7 +1707,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         # Another database has its own tables of other generations to account for.
         self._stale_tables_checked = False
         self._current_tables_checked = False
-        self._pipeline_write_schema_checked = False
+        self._pipeline_preflight_checked = False
         self._unlisted_store_reported = False
         self._skipped_rows_reported = False
         # ... and its own rows to compare with the job file's expected count.
@@ -2801,15 +2804,12 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         When ``node_config.is_result_ephemeral=True``:
         - Uses ``_ephemeral_cached_pod`` for both compute and storage.
         - Raises ``RuntimeError`` if no ephemeral database has been set.
-        - Calls ``add_pipeline_record`` which computes the next recomputation
-          index (``max_index + 1``) and writes with ``skip_duplicates=True``
-          so concurrent coroutines are safely serialised.
 
         When ``node_config.is_result_ephemeral=False`` (default):
         - Uses ``_cached_function_pod`` (persistent DB) or raw function pod.
-        - Calls ``add_pipeline_record`` which computes the next recomputation
-          index (``max_index + 1``) and writes with ``skip_duplicates=True``
-          so concurrent coroutines are safely serialised.
+
+        When a pipeline database is attached, a result produced here is recorded
+        at the next recomputation index, using ``skip_duplicates=True``.
 
         Returns:
             A ``(tag, output_data)`` 2-tuple.
@@ -2829,7 +2829,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         if isinstance(data, EmptyData):
             return self._empty_data_cache_hit(tag, data, base_entry_id)
 
-        self._require_current_pipeline_write_schema()
+        self._require_current_pipeline_write_schema(before_compute=True)
         ephemeral_result = bool(self._node_config.is_result_ephemeral)
 
         if ephemeral_result:
@@ -2970,7 +2970,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         if isinstance(data, EmptyData):
             return self._empty_data_cache_hit(tag, data, base_entry_id)
 
-        self._require_current_pipeline_write_schema()
+        self._require_current_pipeline_write_schema(before_compute=True)
         ephemeral_result = bool(self._node_config.is_result_ephemeral)
 
         if ephemeral_result:
@@ -3129,14 +3129,15 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         *,
         run_id: str | None = None,
     ) -> None:
-        """Add a pipeline record to the database for a processed data.
+        """Add a pipeline record for a row that produced output.
 
         Computes the next recomputation index by querying existing rows in the
         pipeline DB that share the same ``base_entry_id``, then writes at
-        ``max_index + 1``. The write uses ``skip_duplicates=True`` so that
-        concurrent asyncio coroutines competing for the same versioned entry ID
-        are safely serialised: the first writer lands, subsequent writers whose
-        compute happened to produce the same hash are silently no-oped.
+        ``max_index + 1``. The database skips duplicate versioned entry IDs.
+        Sync execution ordinarily reuses the first recorded result for an
+        identical input in the same run. Async execution can schedule both
+        copies of an identical input without system tags before either entry is
+        available, and can write separate entries with successive indices.
 
         The pipeline record stores:
 
@@ -3288,28 +3289,43 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                 tag=tag.as_dict(),
             ) from exc
 
-    def _require_current_pipeline_write_schema(self) -> None:
-        """Refuse to extend a prerelease pipeline table with the same layout name."""
+    def _require_current_pipeline_write_schema(
+        self, *, before_compute: bool = False
+    ) -> None:
+        """Check the stored schema before each append and before the first computation.
+
+        Args:
+            before_compute: Preflight before executing a function on a cache miss.
+                Only this early check can reuse a prior check from the same run.
+        """
         database = self._pipeline_database
-        if self._pipeline_write_schema_checked or database is None:
+        if database is None or (before_compute and self._pipeline_preflight_checked):
             return
         path = self._versioned_pipeline_path
-        existing = database.get_all_records(path)
+        existing = database.get_table_schema(path)
         if existing is not None:
-            missing = [
-                name
-                for name in (PIPELINE_RUN_ID_COL, PIPELINE_RECORDED_AT_COL)
-                if name not in existing.column_names
-            ]
-            if missing:
+            issues: list[str] = []
+            for expected in _PIPELINE_RECORDING_FIELDS:
+                index = existing.get_field_index(expected.name)
+                if index < 0:
+                    issues.append(f"missing {expected.name}")
+                    continue
+                actual_type = arrow_utils.normalize_to_large_types(
+                    existing.field(index).type, keep_null=True
+                )
+                if actual_type != expected.type:
+                    issues.append(
+                        f"{expected.name} has type {actual_type}, expected {expected.type}"
+                    )
+            if issues:
                 raise OrcapodDatabaseError(
                     f"Cannot append a pipeline record to the "
-                    f"{describe_database_table(database, path)}: missing bookkeeping "
-                    f"columns {', '.join(missing)}. Rebuild the pipeline table "
+                    f"{describe_database_table(database, path)}: "
+                    f"{', '.join(issues)}. Rebuild the pipeline table "
                     "with the current version of Orcapod.",
                     node_label=self.label,
                 )
-        self._pipeline_write_schema_checked = True
+        self._pipeline_preflight_checked = True
 
     # ------------------------------------------------------------------
     # Records and sources
@@ -4419,7 +4435,9 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                                 run_entry_ids.append(base_entry_id)
                                 await output.send((cached_tag, cached_data))
                             else:
-                                self._require_current_pipeline_write_schema()
+                                self._require_current_pipeline_write_schema(
+                                    before_compute=True
+                                )
                                 correlation_key = uuid.uuid4().bytes
                                 input_store[correlation_key] = (
                                     tag,

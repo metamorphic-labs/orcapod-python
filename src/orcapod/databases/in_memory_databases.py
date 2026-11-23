@@ -548,6 +548,11 @@ class InMemoryArrowDatabase:
     # Read helpers
     # ------------------------------------------------------------------
 
+    def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
+        """Return the committed table's schema, if present."""
+        table = self._tables.get(self._get_record_key(record_path))
+        return None if table is None else table.schema
+
     def _combined_table(self, record_key: str) -> "pa.Table | None":
         """Return pending + committed data for a key, or None if nothing exists."""
         parts = []

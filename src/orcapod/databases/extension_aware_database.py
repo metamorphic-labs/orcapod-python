@@ -76,6 +76,10 @@ class ExtensionAwareDatabase:
 
     # ── Read methods ──────────────────────────────────────────────────────────
 
+    def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
+        """Read the current stored schema from the wrapped database."""
+        return self._db.get_table_schema(record_path)
+
     def get_record_by_id(
         self,
         record_path: tuple[str, ...],

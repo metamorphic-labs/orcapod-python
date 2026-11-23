@@ -152,6 +152,10 @@ class NoOpArrowDatabase:
         """The current relative root of this database view (always () for root instances)."""
         return self._path_prefix
 
+    def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
+        """Return no schema because this database stores no tables."""
+        return None
+
     def at(self, *path_components: str) -> "NoOpArrowDatabase":
         """Return a new NoOpArrowDatabase scoped to the given sub-path.
 

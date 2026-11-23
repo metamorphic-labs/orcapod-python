@@ -7,19 +7,23 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import cast
 
+import deltalake
 import pyarrow as pa
 import pyarrow.compute as pc
 import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.channels import Channel
+from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes.function_node import FunctionJobNode
+from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import OrcapodDatabaseError, UnstorableColumnError
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.pipeline.observer import NoOpObserver
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 from orcapod.sources import DictSource
 from orcapod.system_constants import PIPELINE_DB_SCHEMA_VERSION
@@ -169,15 +173,27 @@ def test_job_records_keep_their_original_metadata(
         )
 
 
-async def execute_standalone_async(node: FunctionJobNode, stream: DictSource) -> None:
+async def execute_standalone_async(
+    node: FunctionJobNode, stream: StreamProtocol
+) -> int:
     """Run the standalone node through its channel interface."""
-    inputs = Channel[tuple[TagProtocol, DataProtocol]](buffer_size=2)
-    outputs = Channel[tuple[TagProtocol, DataProtocol]](buffer_size=2)
-    for row in stream.iter_data():
+    rows = list(stream.iter_data())
+    inputs = Channel[tuple[TagProtocol, DataProtocol]](buffer_size=len(rows))
+    outputs = Channel[tuple[TagProtocol, DataProtocol]](buffer_size=len(rows))
+    for row in rows:
         await inputs.writer.send(row)
     await inputs.writer.close()
     await node.async_execute(inputs.reader, outputs.writer)
-    assert len([row async for row in outputs.reader]) == 2
+    return len([row async for row in outputs.reader])
+
+
+def execute_standalone(
+    node: FunctionJobNode, stream: StreamProtocol, orchestrator: str
+) -> int:
+    """Execute over the supplied rows without changing the node's path."""
+    if orchestrator == "async":
+        return asyncio.run(execute_standalone_async(node, stream))
+    return len(list(node.execute(stream).iter_data()))
 
 
 @pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
@@ -196,7 +212,7 @@ def test_standalone_nodes_with_a_separate_result_database(orchestrator: str) -> 
             result_database=results,
         )
         if orchestrator == "async":
-            asyncio.run(execute_standalone_async(node, stream))
+            assert asyncio.run(execute_standalone_async(node, stream)) == 2
             results.flush()
             store.flush()
         else:
@@ -237,17 +253,36 @@ def test_attach_checks_pipeline_metadata_support(column: str) -> None:
 
 
 @pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
-def test_prerelease_pipeline_table_must_be_rebuilt(
-    orchestrator: str, tmp_path: Path
+@pytest.mark.parametrize("variant", ["nonempty", "empty", "wrong-type"])
+def test_pipeline_table_with_incompatible_schema_must_be_rebuilt(
+    orchestrator: str, variant: str, tmp_path: Path
 ) -> None:
     """Refuse an append even when the backend allows schema evolution."""
     store = InMemoryArrowDatabase()
     job, _ = job_and_node(store)
     _ = job.run()
     path = pipeline_path(store)
-    legacy = pipeline_rows(store).drop([RUN_ID, RECORDED_AT])
+    current = pipeline_rows(store)
+    if variant == "wrong-type":
+        legacy = current.set_column(
+            current.schema.get_field_index(RECORDED_AT),
+            pa.field(RECORDED_AT, pa.int64(), nullable=False),
+            pa.array([0, 1], type=pa.int64()),
+        )
+    else:
+        legacy = current.drop([RUN_ID, RECORDED_AT])
     destination = DeltaTableDatabase(tmp_path, allow_schema_evolution=True)
     destination.add_records(path, legacy, record_id_column=RECORD_ID, flush=True)
+    if variant == "empty":
+        delta = deltalake.DeltaTable(str(tmp_path.joinpath(*path)))
+        _ = delta.delete()
+        assert (
+            deltalake.DeltaTable(str(tmp_path.joinpath(*path)))
+            .to_pyarrow_table()
+            .num_rows
+            == 0
+        )
+        destination = DeltaTableDatabase(tmp_path, allow_schema_evolution=True)
 
     writer, _ = job_and_node(destination, count=3)
     with pytest.raises((OrcapodDatabaseError, ExceptionGroup)) as info:
@@ -256,6 +291,99 @@ def test_prerelease_pipeline_table_must_be_rebuilt(
     if isinstance(error, ExceptionGroup):
         (error,) = OrcapodDatabaseError.in_group(error)
     assert "Rebuild the pipeline table" in str(error)
-    assert RUN_ID in str(error) and RECORDED_AT in str(error)
-    assert pipeline_rows(destination).equals(legacy)
+    if variant == "wrong-type":
+        assert f"{RECORDED_AT} has type int64, expected timestamp[us, tz=UTC]" in str(
+            error
+        )
+    else:
+        assert RUN_ID in str(error) and RECORDED_AT in str(error)
+    if variant == "empty":
+        assert destination.get_all_records(path) is None
+    else:
+        assert pipeline_rows(destination).equals(legacy)
     assert destination.list_table_paths() == [path]
+
+
+@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
+def test_the_same_node_refuses_a_restored_prerelease_schema(
+    orchestrator: str, tmp_path: Path
+) -> None:
+    """Restoring version zero replaces the schema under a live writer."""
+    store = InMemoryArrowDatabase()
+    job, _ = job_and_node(store)
+    _ = job.run()
+    path = pipeline_path(store)
+    current = pipeline_rows(store)
+    legacy = current.drop([RUN_ID, RECORDED_AT])
+    destination = DeltaTableDatabase(tmp_path, allow_schema_evolution=True)
+    destination.add_records(path, legacy, record_id_column=RECORD_ID, flush=True)
+
+    uri = str(tmp_path.joinpath(*path))
+    deltalake.write_deltalake(uri, current, mode="overwrite", schema_mode="overwrite")
+    destination = DeltaTableDatabase(tmp_path, allow_schema_evolution=True)
+    writer, node = job_and_node(destination)
+    _ = writer.run(orchestrator=ORCHESTRATORS[orchestrator]())
+    delta = deltalake.DeltaTable(uri)
+    _ = delta.restore(0)
+
+    node.clear_cache()
+    with pytest.raises((OrcapodDatabaseError, ExceptionGroup)) as info:
+        _ = execute_standalone(node, source(3), orchestrator)
+    error = info.value
+    if isinstance(error, ExceptionGroup):
+        (error,) = OrcapodDatabaseError.in_group(error)
+    assert "Rebuild the pipeline table" in str(error)
+    assert RUN_ID in str(error) and RECORDED_AT in str(error)
+    restored = deltalake.DeltaTable(uri).to_pyarrow_table()
+    assert restored.num_rows == legacy.num_rows
+    assert (
+        RUN_ID not in restored.column_names and RECORDED_AT not in restored.column_names
+    )
+
+
+@function_pod(output_keys="total")
+def nullable_total(x: int, y: int) -> int | None:
+    """Return a null output value for these positive inputs."""
+    return x + y if y < 0 else None
+
+
+@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
+@pytest.mark.parametrize(
+    "produces_output", [False, True], ids=["no-output", "null-value"]
+)
+def test_pipeline_record_requires_an_output(
+    orchestrator: str, produces_output: bool
+) -> None:
+    """An absent output produces no entry, while a null output value does."""
+    store = InMemoryArrowDatabase()
+    job = PipelineJob(name="record_metadata", database=store)
+    with job:
+        _ = nullable_total.pod(source(), label="filtered")
+    data_function = nullable_total.pod.data_function
+    assert isinstance(data_function, PythonDataFunction)
+    data_function.set_active(produces_output)
+    try:
+        _ = job.run(orchestrator=ORCHESTRATORS[orchestrator]())
+    finally:
+        data_function.set_active()
+    if produces_output:
+        assert pipeline_rows(store).num_rows == 2
+    else:
+        assert store.list_table_paths() == []
+
+
+@pytest.mark.parametrize(
+    ("orchestrator", "indices"), [("sync", [0]), ("async", [0, 1])]
+)
+def test_identical_inputs_without_system_tags(
+    orchestrator: str, indices: list[int]
+) -> None:
+    """Sync reuses the first entry, while async can schedule both copies as misses."""
+    table = source().as_table().select(["site", "group", "x", "y"]).take([0, 0])
+    stream = ArrowTableStream(table, tag_columns=["site", "group"])
+    store = InMemoryArrowDatabase()
+    pod = summarize.pod
+    assert isinstance(pod, FunctionPod)
+    node = FunctionJobNode(pod, stream, pipeline_database=store)
+    assert execute_standalone(node, stream, orchestrator) == 2
+    assert pipeline_rows(store)[INDEX].to_pylist() == indices

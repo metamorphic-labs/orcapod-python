@@ -315,6 +315,17 @@ class ConnectorArrowDatabase:
 
     # ── Storable columns ──────────────────────────────────────────────────────
 
+    def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
+        """Read the connector's current column definitions without fetching rows."""
+        table_name = self._path_to_table_name(self._path_prefix + record_path)
+        self._require_table_name(table_name)
+        if table_name not in self._connector.get_table_names():
+            return None
+        return pa.schema(
+            pa.field(column.name, column.arrow_type, nullable=column.nullable)
+            for column in self._connector.get_column_info(table_name)
+        )
+
     def require_storable(self, schema: pa.Schema) -> None:
         """Refuse a table schema with a column the connector cannot store (ITL-1162).
 

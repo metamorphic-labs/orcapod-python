@@ -156,16 +156,23 @@ for the entry, including:
 | `__pipeline_run_id` | `large_string` | yes | The ID of the job run that recorded the entry. A node run outside a job stores null. |
 | `__recorded_at` | `timestamp[us, tz=UTC]` | no | The UTC time the node recorded the entry. |
 
-The node records an entry when it first sees an input, even when the function
-result already exists in the result database. Reusing a pipeline entry preserves
-its original run ID and recording time. If the result is lost and the node
-recomputes it, the new entry has its own run ID and recording time. A load-only
-run writes nothing. Neither column enters any hash.
+The node writes a pipeline entry only when processing yields an output. The
+output can come from a new function call or from a result already in the result
+database. A null value in a declared nullable output still counts as an output.
+Reusing a pipeline entry preserves its original run ID and recording
+time. If the result is lost and the node recomputes it, the new entry has its
+own run ID and recording time.
+
+During a sync run, a repeated identical input without system tags reuses the
+first entry. During an async run, both copies can be scheduled before either
+entry is available, producing two entries with successive recomputation indices.
+A load-only run writes nothing. Neither recording column enters any hash.
 
 Read these columns on joined records with
 `node.get_all_records(columns={"meta": True})` or `node.get_all_records(all_info=True)`.
 Pipeline tables written by 0.4.0rc1 through 0.4.0rc3 lack these columns. Rebuild
-those pipeline tables before appending to them. The layout name stays `pdb_v1`.
+those tables before appending, even if their rows have been deleted. The layout
+name stays `pdb_v1`.
 
 ## Where it is declared, and how a released declaration is kept
 

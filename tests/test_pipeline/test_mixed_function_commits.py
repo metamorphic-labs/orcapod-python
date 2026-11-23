@@ -436,6 +436,10 @@ class DatabaseWithoutCommitGuards:
 class ProtocolDatabase(DatabaseWithoutCommitGuards):
     """Forward the complete protocol without exposing unrelated backend methods."""
 
+    def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
+        """Read the wrapped store's current schema."""
+        return self._inner.get_table_schema(record_path)
+
     @property
     def stores_records(self) -> bool:
         return self._inner.stores_records

@@ -1589,6 +1589,22 @@ class DeltaTableDatabase:
         self._absent_tables.discard(self._get_record_key(record_path))
         return self._get_delta_table(record_path) is not None
 
+    def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
+        """Read the latest Delta schema from the log without loading data files."""
+        from deltalake.exceptions import TableNotFoundError
+
+        try:
+            table = deltalake.DeltaTable(
+                self._get_table_uri(record_path),
+                storage_options=self._storage_options or None,
+                without_files=True,
+            )
+            return pa.schema(_held_columns(table).values())
+        except TableNotFoundError:
+            return None
+        except Exception as exc:
+            raise self._read_failed(record_path) from exc
+
     def _ensure_record_id_column(
         self, arrow_data: pa.Table, record_id: str | bytes
     ) -> pa.Table:
