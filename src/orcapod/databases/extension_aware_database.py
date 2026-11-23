@@ -241,16 +241,9 @@ class ExtensionAwareDatabase:
         """The wrapped database's storage location, if it names one."""
         return getattr(self._db, "storage_location")  # noqa: B009  # optional capability
 
-    @property
-    def refresh_table(self) -> Callable[[tuple[str, ...]], None]:
-        """The wrapped database's ``refresh_table`` (ITL-1408).
-
-        Raises:
-            AttributeError: If the wrapped database has none, so this wrapper
-                satisfies ``RefreshingDatabaseProtocol`` only when the wrapped
-                database does.
-        """
-        return getattr(self._db, "refresh_table")  # noqa: B009  # AttributeError when absent, by design
+    def refresh_table(self, record_path: tuple[str, ...]) -> None:
+        """Refresh the wrapped database's table (ITL-1408)."""
+        self._db.refresh_table(record_path)
 
     @property
     def require_storable(self) -> Callable[[pa.Schema], None]:

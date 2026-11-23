@@ -690,6 +690,9 @@ class ConnectorArrowDatabase:
         for record_key in list(self._pending_batches):
             self._flush_by_key(record_key)
 
+    def refresh_table(self, record_path: tuple[str, ...]) -> None:
+        """Nothing to refresh: every read queries the connector's backend (ITL-1408)."""
+
     def flush_result_batch(
         self, record_path: tuple[str, ...], *, publish_records: bool
     ) -> None:

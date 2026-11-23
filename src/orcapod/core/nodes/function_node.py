@@ -98,7 +98,6 @@ from orcapod.protocols.core_protocols import (
     TagProtocol,
     TrackerManagerProtocol,
 )
-from orcapod.databases.utils import as_refreshing
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.protocols.observability_protocols import (
     DataExecutionLoggerProtocol,
@@ -1551,11 +1550,12 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         per table, never per row. Each node refreshes its own tables, so two nodes
         of one job that share a result table each look at it once in a run.
 
-        A database handle that keeps what it loaded of a table
-        (``RefreshingDatabaseProtocol``, the Delta database) would otherwise miss rows
+        Every database implements ``refresh_table`` (``ArrowDatabaseProtocol``). A
+        handle that keeps what it loaded of a table (the Delta database) would otherwise miss rows
         committed since through another handle; for it this costs one read of each
         table's log, and the table's index is rebuilt only when its version moved.
-        Other databases read the store on every read: nothing to do.
+        Other databases read the store on every read: their ``refresh_table`` does
+        nothing.
         """
         tables: list[tuple[ArrowDatabaseProtocol, tuple[str, ...]]] = []
         if self._pipeline_database is not None:
@@ -1564,9 +1564,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             if pod is not None and pod.record_path:
                 tables.append((pod.result_database, pod.record_path))
         for database, record_path in tables:
-            refreshing = as_refreshing(database)
-            if refreshing is not None:
-                refreshing.refresh_table(record_path)
+            database.refresh_table(record_path)
 
     def _account_for_stale_tables(self) -> None:
         """Report or refuse stored rows of other generations.
