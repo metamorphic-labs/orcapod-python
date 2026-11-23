@@ -30,6 +30,7 @@ from orcapod.databases.connector_arrow_database import ConnectorArrowDatabase
 from orcapod.databases.spiraldb_connector import SpiralDBConnector
 from orcapod.databases.utils import (
     first_logical_identity_change,
+    metadata_bytes,
     identity_node,
     logical_identity_change,
 )
@@ -484,9 +485,9 @@ def _struct_rows(form: str, unit: bytes, ids: list[bytes]) -> pa.Table:
 def test_delta_other_nested_metadata_beside_an_identifier_is_still_refused(
     tmp_path: Path, form: str, state: str
 ) -> None:
-    """Delta leaves the nested extension keys to the identity rule and compares the
-    rest of a nested field's metadata as before (ITL-1334): a struct child of the
-    same logical type with other non-extension metadata is refused."""
+    """The identity rule finds the same identifier on the struct child; the ITL-1334
+    comparison of nested field metadata, which is main's, still refuses the child's
+    other non-extension metadata."""
     with _store("Delta", tmp_path) as store:
         store.db.add_records(
             PATH,
@@ -736,30 +737,125 @@ def test_every_container_is_walked(tmp_path: Path, container: str, state: str) -
 
 
 def test_delta_dictionary_of_extension_values(tmp_path: Path) -> None:
-    """Delta decodes a dictionary column and stores its values as plain storage: a
-    pending batch is compared as given (another identifier refused); once stored, the
-    log names no identifier for the values, so the rule abstains and main's verdict
-    stands (accepted, read back as plain values)."""
+    """A dictionary is an encoding: its values' identifier stands where it stands. A
+    pending batch is compared as given (another identifier refused). Delta decodes a
+    dictionary column and stores its values as plain storage, with no identifier in
+    the log (as on main), so the stored column holds no logical type and a logical
+    append to it is refused, as over any plain column."""
     with _store("Delta", tmp_path) as store:
         store.db.add_records(
             PATH, _container_rows("dictionary", b"m", [b"1"]), record_id_column="id"
         )
-        with pytest.raises(InputValidationError, match="x\\{values\\}"):
+        with pytest.raises(InputValidationError, match="x is of logical type"):
             store.db.add_records(
                 PATH,
                 _container_rows("dictionary", b"n", [b"22"]),
                 record_id_column="id",
             )
         store.db.flush()
+        with pytest.raises(InputValidationError, match="stored column's no logical"):
+            store.db.add_records(
+                PATH,
+                _container_rows("dictionary", b"m", [b"333"]),
+                record_id_column="id",
+            )
+        stored = store.stored()
+        assert stored.column("id").to_pylist() == [b"1"]
+        assert identity_node(stored.schema.field("x")).identifier is None
+
+
+def _dictionary_layout(
+    ids: list[bytes], meta: bytes, *, encoded: bool, nested: bool, form: str
+) -> pa.Table:
+    """``x``: an identifier ``itl1371.a;<meta>`` (extension or annotated), directly
+    or as the child ``v`` of a struct, dictionary-encoded or not."""
+    field: Any
+    array: Any
+    field, array = _leaf(("itl1371.a", meta), form, [i.decode() for i in ids])
+    if nested:
+        array = pa.StructArray.from_arrays([array], fields=[field])
+        field = pa.field("x", array.type)
+    if encoded:
+        array = pa.DictionaryArray.from_arrays(
+            pa.array(range(len(ids)), pa.int8()), array
+        )
+        field = field.with_type(array.type)
+    return pa.Table.from_arrays(
+        [pa.array(ids, pa.large_binary()), array],
+        schema=pa.schema([pa.field("id", pa.large_binary()), field.with_name("x")]),
+    )
+
+
+@pytest.mark.parametrize("form", FORMS)
+@pytest.mark.parametrize("state", ["committed", "reopened"])
+def test_delta_dictionary_of_the_stored_type_is_accepted(
+    tmp_path: Path, state: str, form: str
+) -> None:
+    """A committed extension column, then a dictionary of that exact type: the same
+    identifier, accepted as on main, and every row reads back with it."""
+    with _store("Delta", tmp_path) as store:
         store.db.add_records(
-            PATH, _container_rows("dictionary", b"n", [b"333"]), record_id_column="id"
+            PATH,
+            _dictionary_layout(
+                [b"1", b"2"], b"m", encoded=False, nested=False, form=form
+            ),
+            record_id_column="id",
+            flush=True,
+        )
+        if state == "reopened":
+            store.reopen()
+        store.db.add_records(
+            PATH,
+            _dictionary_layout(
+                [b"3", b"4"], b"m", encoded=True, nested=False, form=form
+            ),
+            record_id_column="id",
         )
         stored = store.stored()
-        assert sorted(cast(list[bytes], stored.column("id").to_pylist())) == [
-            b"1",
-            b"333",
-        ]
-        assert identity_node(stored.schema.field("x")).identifier is None
+        assert stored.num_rows == 4
+        assert identity_node(stored.schema.field("x")).identifier == (
+            b"itl1371.a",
+            b"m",
+        )
+
+
+@pytest.mark.parametrize("state", ["committed", "reopened"])
+def test_delta_dictionary_of_structs_with_another_child_identifier_is_refused(
+    tmp_path: Path, state: str
+) -> None:
+    """A committed struct whose child is annotated ``m``, then a dictionary of structs
+    whose child is annotated ``n``: the log's raw bytes and the given ones differ,
+    refused; the stored rows keep ``m``. The same child identifier is accepted."""
+    with _store("Delta", tmp_path) as store:
+        store.db.add_records(
+            PATH,
+            _dictionary_layout(
+                [b"1"], b"m", encoded=False, nested=True, form="annotated"
+            ),
+            record_id_column="id",
+            flush=True,
+        )
+        if state == "reopened":
+            store.reopen()
+        with pytest.raises(InputValidationError, match="x.v is of logical type"):
+            store.db.add_records(
+                PATH,
+                _dictionary_layout(
+                    [b"2"], b"n", encoded=True, nested=True, form="annotated"
+                ),
+                record_id_column="id",
+            )
+        store.db.add_records(
+            PATH,
+            _dictionary_layout(
+                [b"3"], b"m", encoded=True, nested=True, form="annotated"
+            ),
+            record_id_column="id",
+        )
+        stored = store.stored().sort_by("id")
+        assert stored.column("id").to_pylist() == [b"1", b"3"]
+        child = stored.schema.field("x").type.field("v")
+        assert identity_node(child).identifier == (b"itl1371.a", b"m")
 
 
 @pytest.mark.parametrize("state", ["pending", "committed", "reopened"])
@@ -797,11 +893,12 @@ def test_other_nested_metadata_without_an_identifier_is_still_refused(
 @pytest.mark.parametrize("state", ["pending", "committed"])
 def test_identifiers_are_compared_as_bytes(state: str) -> None:
     """An extension name that is not UTF-8: identical bytes are one identifier (the
-    second append is accepted, as on main); other bytes are refused, the error
-    naming the name with replacement characters."""
+    second append is accepted, as on main); another name or other metadata is
+    refused, the error showing a name that is not text as its bytes in hex, so two
+    such names read apart."""
 
-    def rows(meta: bytes, ids: list[bytes]) -> pa.Table:
-        field = pa.field("x", pa.large_string(), metadata={NAME: b"\xff", META: meta})
+    def rows(name: bytes, meta: bytes, ids: list[bytes]) -> pa.Table:
+        field = pa.field("x", pa.large_string(), metadata={NAME: name, META: meta})
         return pa.Table.from_arrays(
             [
                 pa.array(ids, pa.large_binary()),
@@ -812,11 +909,17 @@ def test_identifiers_are_compared_as_bytes(state: str) -> None:
 
     db = InMemoryArrowDatabase()
     db.add_records(
-        PATH, rows(b"a", [b"1"]), record_id_column="id", flush=state == "committed"
+        PATH,
+        rows(b"\xff", b"a", [b"1"]),
+        record_id_column="id",
+        flush=state == "committed",
     )
-    db.add_records(PATH, rows(b"a", [b"22"]), record_id_column="id")
-    with pytest.raises(InputValidationError, match="\ufffd;62"):
-        db.add_records(PATH, rows(b"b", [b"333"]), record_id_column="id")
+    db.add_records(PATH, rows(b"\xff", b"a", [b"22"]), record_id_column="id")
+    with pytest.raises(InputValidationError) as refused:
+        db.add_records(PATH, rows(b"\xfe", b"a", [b"333"]), record_id_column="id")
+    assert "'0xfe;61', the stored column's '0xff;61'" in str(refused.value)
+    with pytest.raises(InputValidationError, match="'0xff;62'"):
+        db.add_records(PATH, rows(b"\xff", b"b", [b"4444"]), record_id_column="id")
     db.flush()
     stored = db.get_all_records(PATH, record_id_column="id")
     assert stored is not None and stored.num_rows == 2
@@ -854,3 +957,146 @@ def test_delta_untyped_null_over_a_logical_column(
             HELD[0].encode(),
             HELD[1],
         )
+
+
+@pytest.mark.parametrize("schema_handling", ["error", "merge", "coerce"])
+@pytest.mark.parametrize("state", ["committed", "reopened"])
+def test_delta_annotated_null_of_another_identifier_is_refused(
+    tmp_path: Path, state: str, schema_handling: str
+) -> None:
+    """Only a bare null claims no type: a null column annotated with another
+    identifier is a known different identifier, refused in every mode."""
+    with _store("Delta", tmp_path) as store:
+        store.db.add_records(
+            PATH,
+            _rows(HELD, "annotated", "top", [b"1"]),
+            record_id_column="id",
+            flush=True,
+        )
+        if state == "reopened":
+            store.reopen()
+        other = pa.field("x", pa.null(), metadata={NAME: b"itl1371.a", META: b"n"})
+        nulls = pa.Table.from_arrays(
+            [
+                pa.array([1], pa.int64()),
+                pa.array([b"22"], pa.large_binary()),
+                pa.nulls(1),
+            ],
+            schema=pa.schema(
+                [pa.field("a", pa.int64()), pa.field("id", pa.large_binary()), other]
+            ),
+        )
+        with pytest.raises(InputValidationError, match="'itl1371.a;6e'"):
+            store.db.add_records(
+                PATH, nulls, record_id_column="id", schema_handling=schema_handling
+            )
+        assert store.stored().column("id").to_pylist() == [b"1"]
+
+
+# The stubs type ``type_codes`` as an array; pyarrow takes a list.
+_TYPE_CODES: Any = [7, 9]
+
+
+def _duplicates(shape: str, first_meta: bytes, ids: list[bytes]) -> pa.Table:
+    """Two places named ``dup`` of different identifiers (``first_meta`` and
+    ``fixed``), as struct children, sparse or dense union members, or two top-level
+    columns; only the first one's metadata varies."""
+    n = len(ids)
+
+    def ext(meta: bytes, values: list[str | None]) -> Any:
+        return EXTENSIONS["itl1371.a"](meta).wrap_array(
+            pa.array(values, pa.large_string())
+        )
+
+    idcol = pa.array(ids, pa.large_binary())
+    if shape == "struct":
+        x = pa.StructArray.from_arrays(
+            [ext(first_meta, ["v"] * n), ext(b"fixed", ["w"] * n)], names=["dup", "dup"]
+        )
+        return pa.Table.from_arrays([idcol, x], names=["id", "x"])
+    if shape == "columns":
+        return pa.Table.from_arrays(
+            [idcol, ext(first_meta, ["v"] * n), ext(b"fixed", ["w"] * n)],
+            names=["id", "dup", "dup"],
+        )
+    codes = pa.array([7] * n, pa.int8())
+    if shape == "sparse union":
+        x = pa.UnionArray.from_sparse(
+            codes,
+            [ext(first_meta, ["v"] * n), ext(b"fixed", [None] * n)],
+            ["dup", "dup"],
+            type_codes=_TYPE_CODES,
+        )
+    else:
+        x = pa.UnionArray.from_dense(
+            codes,
+            pa.array(range(n), pa.int32()),
+            [ext(first_meta, ["v"] * n), ext(b"fixed", ["w"])],
+            ["dup", "dup"],
+            type_codes=_TYPE_CODES,
+        )
+    return pa.Table.from_arrays([idcol, x], names=["id", "x"])
+
+
+@pytest.mark.parametrize("state", ["pending", "committed"])
+@pytest.mark.parametrize("shape", ["struct", "sparse union", "dense union", "columns"])
+def test_repeated_names_pair_by_occurrence(shape: str, state: str) -> None:
+    """Arrow allows two struct children, union members or columns of one name. They
+    pair by occurrence, never by name alone: a change to the FIRST of two places
+    named ``dup`` is refused; the same identifiers are accepted."""
+    db = InMemoryArrowDatabase()
+    db.add_records(
+        PATH,
+        _duplicates(shape, b"a", [b"1"]),
+        record_id_column="id",
+        flush=state == "committed",
+    )
+    db.add_records(PATH, _duplicates(shape, b"a", [b"22"]), record_id_column="id")
+    with pytest.raises(
+        InputValidationError, match="'itl1371.a;62', the stored column's 'itl1371.a;61'"
+    ):
+        db.add_records(PATH, _duplicates(shape, b"b", [b"333"]), record_id_column="id")
+    db.flush()
+    stored = db.get_all_records(PATH, record_id_column="id")
+    assert stored is not None and stored.num_rows == 2
+
+
+@pytest.mark.parametrize("state", ["pending", "committed"])
+def test_the_bytes_arrow_holds_decide_not_the_serializer(state: str) -> None:
+    """A third-party extension type whose serializer's state changes after its array
+    was built: Arrow holds the bytes taken when the type was made (its C data
+    interface export), and those decide, as on main for the same bytes."""
+    from arro3.core import Field as Arro3Field
+
+    class Mutable(pa.ExtensionType):
+        def __init__(self, payload: bytes) -> None:
+            self.payload = payload
+            super().__init__(pa.large_string(), "itl1371.mutable")
+
+        def __arrow_ext_serialize__(self) -> bytes:
+            return self.payload
+
+        @classmethod
+        def __arrow_ext_deserialize__(cls, storage_type: Any, serialized: bytes) -> Any:
+            return cls(serialized)
+
+    def rows(ext: Any, rid: bytes) -> pa.Table:
+        x = ext.wrap_array(pa.array(["v"], pa.large_string()))
+        return pa.table({"id": pa.array([rid], pa.large_binary()), "x": x})
+
+    first, second = Mutable(b"original"), Mutable(b"original")
+    held, given = rows(first, b"1"), rows(second, b"22")
+    second.payload = b"changed"  # the callback now differs; Arrow's bytes do not
+    exported = Arro3Field.from_arrow(given.schema.field("x")).metadata
+    assert metadata_bytes(exported)[META] == b"original"
+    db = InMemoryArrowDatabase()
+    db.add_records(PATH, held, record_id_column="id", flush=state == "committed")
+    db.add_records(PATH, given, record_id_column="id")
+
+    third, fourth = Mutable(b"first"), Mutable(b"second")
+    held, given = rows(third, b"1"), rows(fourth, b"22")
+    fourth.payload = b"first"  # the callback now agrees; Arrow's bytes do not
+    db = InMemoryArrowDatabase()
+    db.add_records(PATH, held, record_id_column="id", flush=state == "committed")
+    with pytest.raises(InputValidationError, match="'itl1371.mutable;7365636f6e64'"):
+        db.add_records(PATH, given, record_id_column="id")

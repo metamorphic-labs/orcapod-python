@@ -4,7 +4,7 @@ import logging
 import os
 import sys
 from collections import defaultdict
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -23,6 +23,7 @@ from orcapod.databases.utils import (
     coerce_record_id,
     identity_node,
     logical_identity_change,
+    matched_pairs,
     metadata_bytes,
 )
 from orcapod.errors import (
@@ -654,16 +655,16 @@ def _delta_identity_node(delta_type: Any, metadata: Any) -> IdentityNode:
     """
     from deltalake.schema import ArrayType, MapType, StructType
 
-    children: dict[str, IdentityNode] = {}
+    children: tuple[tuple[str, IdentityNode], ...] = ()
     if isinstance(delta_type, StructType):
-        children = {
-            f".{f.name}": _delta_identity_node(f.type, f.metadata)
+        children = tuple(
+            (f".{f.name}", _delta_identity_node(f.type, f.metadata))
             for f in delta_type.fields
-        }
+        )
     elif isinstance(delta_type, ArrayType):
-        children = {"[]": UNKNOWN}
+        children = (("[]", UNKNOWN),)
     elif isinstance(delta_type, MapType):
-        children = {".key": UNKNOWN, ".item": UNKNOWN}
+        children = ((".key", UNKNOWN), (".item", UNKNOWN))
     as_bytes = metadata_bytes(metadata)
     name = as_bytes.get(_EXTENSION_KEYS[0])
     identifier = None if name is None else (name, as_bytes.get(_EXTENSION_KEYS[1], b""))
@@ -671,26 +672,27 @@ def _delta_identity_node(delta_type: Any, metadata: Any) -> IdentityNode:
 
 
 def _identity_refusal(
-    held: Mapping[str, IdentityNode], schema: pa.Schema
+    held: "Sequence[tuple[str, IdentityNode]]", schema: pa.Schema
 ) -> tuple[str, str] | None:
     """The first column of ``schema`` whose logical type identifier is known to
-    differ from the held one (``logical_identity_change``, ITL-1371)."""
-    for field in schema:
-        if field.name in held:
-            change = logical_identity_change(
-                held[field.name], identity_node(field), field.name
-            )
-            if change is not None:
-                return field.name, change
+    differ from the held one (``logical_identity_change``, ITL-1371); columns pair
+    as ``matched_pairs`` says (by name, or by occurrence where a name repeats)."""
+    given = [(f.name, identity_node(f)) for f in schema]
+    for name, held_node, node in matched_pairs(held, given):
+        change = logical_identity_change(held_node, node, name)
+        if change is not None:
+            return name, change
     return None
 
 
-def _stored_identities(delta_table: deltalake.DeltaTable) -> dict[str, IdentityNode]:
+def _stored_identities(
+    delta_table: deltalake.DeltaTable,
+) -> list[tuple[str, IdentityNode]]:
     """Each stored column's ``_delta_identity_node``, from the log; no data is read."""
-    return {
-        f.name: _delta_identity_node(f.type, f.metadata)
+    return [
+        (f.name, _delta_identity_node(f.type, f.metadata))
         for f in delta_table.schema().fields
-    }
+    ]
 
 
 def _append_refusal(
@@ -1821,11 +1823,11 @@ class DeltaTableDatabase:
             InputValidationError: For the first such column, naming it and the path.
         """
         held: list[dict[str, pa.Field[Any]]] = []
-        identities: list[dict[str, IdentityNode]] = []
+        identities: list[list[tuple[str, IdentityNode]]] = []
         pending = self._pending_batches.get(self._get_record_key(record_path))
         if pending is not None:
             held.append({f.name: f for f in pending.schema})
-            identities.append({f.name: identity_node(f) for f in pending.schema})
+            identities.append([(f.name, identity_node(f)) for f in pending.schema])
         try:
             delta_table = self._get_delta_table(record_path)
         except OrcapodDatabaseReadError:
