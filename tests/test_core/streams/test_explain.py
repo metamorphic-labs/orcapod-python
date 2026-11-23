@@ -9,6 +9,7 @@ read, polled or written, and no user code runs.
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Iterator, Mapping
 import itertools
 from pathlib import Path
 from typing import Any
@@ -456,6 +457,26 @@ class _LoudObject:
         raise AssertionError("explain() ran user code")
 
 
+class _LoudDict(dict[str, object]):
+    """A ``dict`` subclass whose ``items()`` is user code."""
+
+    def items(self):  # pyright: ignore[reportIncompatibleMethodOverride]  # raises on purpose
+        raise AssertionError("explain() ran user code")
+
+
+class _LoudMapping(Mapping[str, object]):
+    """A mapping whose every access is user code."""
+
+    def __getitem__(self, key: str) -> object:
+        raise AssertionError("explain() ran user code")
+
+    def __iter__(self) -> Iterator[str]:
+        raise AssertionError("explain() ran user code")
+
+    def __len__(self) -> int:
+        raise AssertionError("explain() ran user code")
+
+
 class TestSecondReviewOfPr503:
     """CodeRabbit's second review of PR 503."""
 
@@ -509,6 +530,16 @@ class TestSecondReviewOfPr503:
     )
     def test_a_predicate_is_written_only_by_polars(self, predicate, shown):
         assert PolarsFilter(predicates=[predicate]).rows_dropped_text(0, []) == shown
+
+    @pytest.mark.parametrize(
+        "constraints",
+        [_LoudDict(session="s1"), _LoudMapping(), {_Loud("session"): "s1"}],
+        ids=["dict_subclass", "mapping", "str_subclass_name"],
+    )
+    def test_constraints_are_read_only_as_an_exact_dict(self, constraints):
+        op = PolarsFilter(constraints=constraints)
+        name = type(constraints).__name__
+        assert op.rows_dropped_text(0, []) == f"<{name}>"
 
     def test_a_dict_pick_lists_its_misses(self):
         source = DictSource(

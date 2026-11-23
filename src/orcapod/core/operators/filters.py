@@ -194,12 +194,18 @@ class PolarsFilter(UnaryOperator):
 
         No user code runs: a Polars expression is written by Polars (``pl.Expr``
         exactly), a constraint value by ``repr`` when it is exactly a built-in scalar,
-        and anything else by its type name only.
+        and anything else by its type name only. The constraints are read only when
+        they are exactly a ``dict`` with ``str`` names (a mapping of another class could
+        run its own ``items()``); otherwise they are written as their type name.
         """
-        parts = sorted(
-            f"{name}={_safe_text(value, repr)}"
-            for name, value in self.constraints.items()
-        )
+        constraints = self.constraints
+        if type(constraints) is dict and all(type(name) is str for name in constraints):
+            parts = sorted(
+                f"{name}={_safe_text(value, repr)}"
+                for name, value in dict.items(constraints)
+            )
+        else:
+            parts = [f"<{type(constraints).__name__}>"]
         parts += sorted(_safe_text(predicate, str) for predicate in self.predicates)
         return ", ".join(parts) if parts else None
 
