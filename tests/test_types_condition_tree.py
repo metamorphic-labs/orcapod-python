@@ -170,9 +170,10 @@ class TestRefusedWhenBuilt:
         with pytest.raises(ValueError, match="every row"):
             _ = ~Condition()
 
-    def test_equal_to_two_values_is_refused(self):
-        with pytest.raises(ValueError, match="cannot also equal"):
-            _ = (col("u") == 3) & (col("u") == 7)
+    def test_equal_to_two_values_is_kept(self):
+        """A contradiction is kept, never refused (developer, 2026-11-22)."""
+        condition = (col("u") == 3) & (col("u") == 7)
+        assert len(condition.root.children) == 2
 
 
 # Each pair: two ways of writing one condition. Equal, equal hashes, one canonical form.
@@ -748,9 +749,15 @@ class TestSavedTreesMeetTheBuildChecks:
         ],
         ids=["two values", "two values around another term", "inside an or"],
     )
-    def test_two_values_for_one_column_are_refused(self, children):
-        with pytest.raises(ValueError, match=r"'k'.*cannot also equal"):
-            Condition.from_config({":condition": {"all": children}})
+    # (was: refused, before the developer's decision of 2026-11-22)
+    def test_two_values_for_one_column_load_as_saved(self, children):
+        """A saved contradiction loads as the same contradiction, never refused, and
+        saves again to the same form."""
+        saved = {":condition": {"all": children}}
+        loaded = Condition.from_config(saved)
+        assert not loaded.only_equalities
+        again = Condition.from_config(json.loads(json.dumps(loaded.to_config())))
+        assert again == loaded and _canonical(again) == _canonical(loaded)
 
     @pytest.mark.parametrize(
         "saved, error",
@@ -895,3 +902,103 @@ class TestReviewFindings:
         assert isinstance(term, Term) and term.value == tuple(range(5000))
         (floats,) = col("x").is_in([0.0, -0.0, math.nan, float("nan")]).root.children
         assert isinstance(floats, Term) and len(floats.value) == 2  # pyright: ignore[reportArgumentType]
+
+
+# --- Contradictions are kept, never refused (developer, 2026-11-22) -------------------
+
+
+_CONTRADICTIONS: list[tuple[Callable[[], Condition], Callable[[], Condition]]] = [
+    (
+        lambda: (col("k") == 1) & (col("k") == 5),
+        lambda: (col("k") == 5) & (col("k") == 1),
+    ),
+    (
+        lambda: Condition.of(col("k") == 1, col("k") == 5),
+        lambda: Condition.of(col("k") == 5, col("k") == 1),
+    ),
+    (
+        lambda: Condition.of(col("k") == 5, k=1),
+        lambda: Condition.of(col("k") == 1, k=5),
+    ),
+    (
+        lambda: (col("k") == 1) & (col("k") > 5),
+        lambda: (col("k") > 5) & (col("k") == 1),
+    ),
+    (
+        lambda: col("k").is_in([1, 2]) & col("k").is_in([3, 4]),
+        lambda: col("k").is_in([4, 3]) & col("k").is_in([2, 1]),
+    ),
+]
+
+
+class TestContradictionsAreKept:
+    @pytest.mark.parametrize("first, second", _CONTRADICTIONS)
+    def test_built_order_free_saved_and_reloaded(self, first, second):
+        a, b = first(), second()
+        assert a == b and hash(a) == hash(b)
+        assert _canonical(a) == _canonical(b)
+        terms = a.canonical_form()[1]
+        assert len(terms) == 2  # both requirements are in the identity
+        loaded = Condition.from_config(json.loads(json.dumps(a.to_config())))
+        assert loaded == a and _canonical(loaded) == _canonical(a)
+        assert not (a.only_equalities and len(a.equalities) < len(terms))
+
+    def test_equal_duplicates_still_collapse(self):
+        a = col("k") == 1
+        assert a & a == a
+        assert len((a & a).root.children) == 1
+        assert Condition.of(a, k=1) == a
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda: Condition.of({"k": 1}, k=5),
+            lambda: Condition.of({"k": 1}, {"k": 5}),
+        ],
+        ids=["mapping and keyword", "two mappings"],
+    )
+    def test_one_column_named_twice_in_one_call_is_refused(self, build):
+        with pytest.raises(ValueError, match=r"'k' is named twice in one call"):
+            build()
+
+
+class TestCanonicalText:
+    """``canonical_text()`` reads the same whatever the order given (ITL-1402 explain)."""
+
+    @pytest.mark.parametrize(
+        "first, second",
+        [
+            (
+                lambda: (col("t") >= 1.0) & (col("u") == 3),
+                lambda: (col("u") == 3) & (col("t") >= 1.0),
+            ),
+            (lambda: col("u").is_in([3, 7]), lambda: col("u").is_in([7, 3])),
+            (
+                lambda: Condition.of(col("t") > 1.0, s="a", u=3),
+                lambda: Condition.of({"u": 3}, col("t") > 1.0, s="a"),
+            ),
+            (
+                lambda: ~((col("a") == 1) | col("b").is_in([2, 1])),
+                lambda: ~(col("b").is_in([1, 2]) | (col("a") == 1)),
+            ),
+            (
+                lambda: (col("k") == 1) & (col("k") == 5),
+                lambda: (col("k") == 5) & (col("k") == 1),
+            ),
+        ],
+        ids=[
+            "and",
+            "is_in values",
+            "keywords and arguments",
+            "nested or and not",
+            "contradiction",
+        ],
+    )
+    def test_two_orders_read_the_same(self, first, second):
+        assert first().canonical_text() == second().canonical_text()
+
+    def test_the_words_are_those_of_text(self):
+        condition = col("u").is_in([3, 7]) & (col("t") >= 1.0)
+        assert condition.canonical_text() == "t >= 1.0, u in [3, 7]"
+        assert condition.text() == "u in [3, 7], t >= 1.0"  # text keeps the order given
+        assert Condition().canonical_text() == "no condition"
