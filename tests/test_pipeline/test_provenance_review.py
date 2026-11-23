@@ -620,7 +620,9 @@ def _rows_visited_tracing_a_batch(n: int, monkeypatch: pytest.MonkeyPatch) -> in
     source = table_source(rows_kgxy(*rows), TWO_BY_TWO, ["k", "g"], "src")
     job = PipelineJob(name=f"n{n}", database=InMemoryArrowDatabase())
     with job:
-        Batch(batch_size=0)(add.pod(source, label="sums"))
+        Batch(batch_size=0)(
+            add.pod(SelectDataColumns(["x", "y"])(source), label="sums")
+        )
     job.run()
     (row,) = job.nodes["Batch"].as_table().to_pylist()
 
@@ -1459,6 +1461,7 @@ FAILED_CALLS: list[int] = []
 
 @function_pod(output_keys="result")
 def fails_on_one(x: int) -> int:
+    """Record each call, then raise for x == 1 (so that input stores no entry)."""
     FAILED_CALLS.append(x)
     if x == 1:
         raise ValueError("fails on the first record")
@@ -1620,6 +1623,7 @@ def test_a_semi_join_right_edge_is_not_highlighted_as_row_flow() -> None:
 
 @function_pod(output_keys="z")
 def x_and_ys(x: int, y: list[int]) -> int:
+    """Add one scalar x (the direct branch) to the grouped y values (the other branch)."""
     return x + sum(y)
 
 
@@ -2036,3 +2040,83 @@ def test_every_held_version_of_a_record_gets_its_reason(
     assert answer.because == (
         "no row with k='new' in 'b' (reads b); no row with k='old' in 'c' (reads c)"
     )
+
+
+@function_pod(output_keys="length")
+def null_key_length(k: str | None) -> int:
+    """The length of k, or 0 for a null."""
+    return len(k or "")
+
+
+def test_a_null_join_key_matches_nothing_in_the_explanation() -> None:
+    """Both inputs hold k = null: the Join drops the row (a null key matches nothing),
+    so the other input is named as lacking the key, never passed over as a match."""
+    schema = pa.schema(
+        [pa.field("k", pa.large_string(), nullable=True), pa.field("x", pa.int64())]
+    )
+    other = pa.schema(
+        [pa.field("k", pa.large_string(), nullable=True), pa.field("y", pa.int64())]
+    )
+    a = ArrowTableSource(
+        pa.Table.from_pylist([{"k": None, "x": 1}], schema=schema),
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="a",
+    )
+    b = ArrowTableSource(
+        pa.Table.from_pylist([{"k": None, "y": 2}], schema=other),
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="b",
+    )
+    job = PipelineJob(name="nullkey", database=InMemoryArrowDatabase())
+    with job:
+        Join()(a, b)
+    job.run()
+    assert job.nodes["Join"].as_table().num_rows == 0
+    answer = job.nodes["Join"].why_missing("a", "row_0")
+    assert answer.missing
+    assert answer.because.startswith("no row with k=")
+    assert answer.because.endswith(" in 'b' (reads b)")
+
+
+@pytest.mark.parametrize("same_input", [True, False])
+def test_an_untied_witness_must_match_the_stored_input_hash(same_input: bool) -> None:
+    """No tied Join: the witness check runs. A load-only job whose group holds s's
+    row_0 with the system tags of a stored entry proves receipt only when the input
+    data hash is the stored one too."""
+    database = InMemoryArrowDatabase()
+    schema = pa.schema(
+        [
+            pa.field("k", pa.large_string(), nullable=False),
+            pa.field("g", pa.large_string(), nullable=False),
+            pa.field("x", pa.int64(), nullable=False),
+            pa.field("y", pa.int64(), nullable=False),
+        ]
+    )
+
+    def make(y: int, load_only: bool) -> Any:
+        source = table_source(
+            [
+                {"k": "a", "g": "1", "x": 1, "y": y},
+                {"k": "b", "g": "1", "x": 2, "y": 20},
+            ],
+            schema,
+            ["k", "g"],
+            "s",
+        )
+        job = PipelineJob(name="untiedwitness", database=database)
+        with job:
+            direct = SelectDataColumns(["x"])(Filter({"k": "b"})(source))
+            grouped = SelectDataColumns(["y"])(GroupBy(["g"])(source))
+            x_and_ys.pod(Join()(direct, grouped), label="z")
+        job.run(load_only=load_only)
+        return job.nodes["z"]
+
+    make(10, load_only=False)
+    node = make(10 if same_input else 11, load_only=True)
+    answer = node.why_missing("s", "row_0")
+    if same_input:
+        assert answer.reached_function is True and answer.entry_recorded is True
+    else:
+        assert answer.reached_function is None

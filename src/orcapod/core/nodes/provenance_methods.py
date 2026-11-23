@@ -74,12 +74,12 @@ class ProvenanceMethods:
 
         Returns:
             The answer; its status is ``"not_computed"`` when a node on the way holds no
-            run.
+            run. For a source node whose rows are not read, its status is
+            ``"unavailable"`` and the source id or label is not checked.
 
         Raises:
-            ValueError: If no source with that id or label feeds this node. Asked
-                about a source node whose rows are not read, the answer is
-                ``unavailable`` without checking the id.
+            ValueError: If no source with that id or label feeds this node, unless
+                this node is a source whose rows are not read.
             ProvenanceInconsistencyError: If a group's members cannot be proven.
         """
         from orcapod.pipeline.provenance import why_missing

@@ -2261,7 +2261,12 @@ def _missing_key_text(
             unread.append(other.label)
             continue
         if not any(
-            all(t in o and same_value(o[t], v) for t, v in key.items()) for o in rows
+            # The join's rule: a null key matches nothing, even another null.
+            all(
+                v is not None and o.get(t) is not None and same_value(o[t], v)
+                for t, v in key.items()
+            )
+            for o in rows
         ):
             proving.append(
                 f"no row with {_key_text(key)} in {other.label!r} "
