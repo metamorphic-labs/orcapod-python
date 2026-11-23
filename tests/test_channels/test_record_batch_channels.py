@@ -32,12 +32,18 @@ from orcapod.channels import (
     ReadableChannel,
     WritableChannel,
 )
-from orcapod.core.operators import MapData, PolarsFilter, SelectDataColumns, SemiJoin
+from orcapod.core.operators import (
+    Batch,
+    MapData,
+    PolarsFilter,
+    SelectDataColumns,
+    SemiJoin,
+)
 from orcapod.core.operators.static_output_pod import (
     ROW_BUILT_OUTPUT,
+    RowBuiltFormUnavailable,
     StaticOutputOperatorPod,
     stream_from_batches,
-    transport_schema,
 )
 from orcapod.core.record_batch_channels import (
     BATCH_BUFFER_SIZE,
@@ -306,14 +312,6 @@ def test_a_source_nodes_conversion_keeps_the_delivered_column_order() -> None:
     assert rebuilt == delivered
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=ValueError,
-    reason="ITL-1365: a source node whose plain tags are declared in another order "
-    "than their columns (x, j, k, y with tags k, j) describes itself in the slot's "
-    "order (keys() j, k; its zero-row input too, as on main), while its rows are in "
-    "the bound source's order, so its own description refuses its batches",
-)
 def test_a_source_nodes_description_takes_its_rows_in_their_own_order() -> None:
     """Plain tags declared ``k, j`` over physical columns ``x, j, k, y``: the node's
     own output channel takes the batches its channel delivers."""
@@ -1432,7 +1430,7 @@ def test_without_arrow_types_the_names_are_still_the_streams() -> None:
     stream = _UntypedStream(
         table, tag_columns=["subject", "trial"], data_tags=["trial"]
     )
-    assert transport_schema(stream) is None
+    assert not stream.arrow_types_declared  # no Arrow types without rows
     (batch,) = batches_of(stream)
     renamed = batch.rename_columns(
         ["other" if name == "note" else name for name in batch.schema.names]
@@ -1924,7 +1922,7 @@ def test_a_batch_with_a_duplicate_column_is_refused() -> None:
         output = OutputChannel(stream)
         await output.send(doubled)
 
-    with pytest.raises(ValueError, match="the stream's keys are"):
+    with pytest.raises(ValueError, match="a column more than once"):
         run(write)
 
 
@@ -1954,3 +1952,149 @@ def test_a_batch_whose_tokens_cannot_settle_with_accepted_ones_is_refused() -> N
 
     with pytest.raises(SourceInfoTypesDisagree, match=column):
         run(write)
+
+
+# --- Batches that settle together (Codex on PR #485, final check, findings 3-5) ------------
+
+TOKEN = pa.large_string()
+TOKENS = pa.large_list(TOKEN)
+TOKEN_LISTS = pa.large_list(TOKENS)
+
+
+def _with_amplitude_tokens(
+    batch: pa.RecordBatch, start: int, values: list[Any], kind: pa.DataType
+) -> pa.RecordBatch:
+    """Rows ``start ...`` of ``batch`` with ``_source_amplitude`` carried as ``kind``
+    holding ``values`` (tokens of one row each)."""
+    part = batch.slice(start, len(values))
+    index = part.schema.get_field_index("_source_amplitude")
+    return pa.RecordBatch.from_arrays(
+        [
+            *part.columns[:index],
+            pa.array(values, type=kind),
+            *part.columns[index + 1 :],
+        ],
+        schema=part.schema.set(index, pa.field("_source_amplitude", kind)),
+    )
+
+
+SETTLING_CASES: dict[
+    str, tuple[list[tuple[int, list[Any], pa.DataType]], pa.DataType, list[Any]]
+] = {
+    # An empty token list carried two levels deep, then a token list: both settle as
+    # one level of tokens.
+    "list_depth": ([(0, [[]], TOKEN_LISTS), (1, [["b"]], TOKENS)], TOKENS, [[], ["b"]]),
+    # A null token carried as a list, then a string token: both settle as strings.
+    "null_then_string": ([(0, [None], TOKENS), (1, ["b"], TOKEN)], TOKEN, [None, "b"]),
+    # Lists that differ only in their item field's nullability.
+    "item_nullability": (
+        [
+            (0, [["a"]], pa.large_list(pa.field("item", TOKEN, nullable=False))),
+            (1, [["b"]], TOKENS),
+        ],
+        TOKENS,
+        [["a"], ["b"]],
+    ),
+    # A batch with no rows has no token and fixes no type.
+    "zero_rows_first": (
+        [(0, [], TOKEN), (0, [["a"]], TOKENS), (1, [["b"]], TOKENS)],
+        TOKENS,
+        [["a"], ["b"]],
+    ),
+}
+
+
+@pytest.mark.parametrize("case", list(SETTLING_CASES))
+def test_batches_send_accepts_are_assembled(case: str) -> None:
+    """What ``send`` accepts can be assembled: ``result()`` and ``to_stream()`` build
+    the complete table, each source-info column of the type its tokens settle."""
+    stream = source(2)
+    (batch,) = batches_of(stream)
+    parts, settled, tokens = SETTLING_CASES[case]
+
+    async def write() -> tuple[Any, Any]:
+        output = OutputChannel(stream)
+        reader = output.open_reader()
+        for start, values, kind in parts:
+            await output.send(_with_amplitude_tokens(batch, start, values, kind))
+        await output.close()
+        return output.result(), await reader.to_stream()
+
+    result, converted = run(write)
+    for assembled in (result, converted):
+        table = assembled.as_table(columns=ALL)
+        assert table.schema.field("_source_amplitude").type == settled
+        assert table.column("_source_amplitude").to_pylist() == tokens
+
+
+def test_a_token_that_cannot_be_represented_is_refused_at_send() -> None:
+    """A token that has no place in its column's settled type (``[[], [[]]]`` carried
+    three levels deep) is refused at send; the channel takes valid batches after it."""
+    stream = source(2)
+    (batch,) = batches_of(stream)
+    deep = pa.large_list(TOKEN_LISTS)
+
+    async def write() -> list[Any]:
+        output = OutputChannel(stream)
+        with pytest.raises(RowBuiltFormUnavailable, match="cannot be represented"):
+            await output.send(_with_amplitude_tokens(batch, 0, [[[], [[]]]], deep))
+        await output.send(_with_amplitude_tokens(batch, 0, [["a"]], TOKENS))
+        await output.close()
+        return (
+            output.result()
+            .as_table(columns=ALL)
+            .column("_source_amplitude")
+            .to_pylist()
+        )
+
+    assert run(write) == [["a"]]
+
+
+def test_a_duplicate_system_tag_column_is_refused_on_a_declared_stream() -> None:
+    """A batch with a system-tag column twice is refused, whatever the description."""
+    stream = source(2)
+    (batch,) = batches_of(stream)
+    name = next(n for n in batch.schema.names if n.startswith("_tag"))
+    doubled = batch.append_column(batch.schema.field(name), batch.column(name))
+
+    async def write() -> None:
+        await OutputChannel(stream).send(doubled)
+
+    with pytest.raises(ValueError, match="a column more than once"):
+        run(write)
+
+
+def test_batch_puts_arrivals_with_differing_token_types_together() -> None:
+    """``Batch(2)`` over arrivals whose source-info tokens are carried in two types (an
+    empty list two levels deep, then a token list): it groups them, as a complete table
+    settles them."""
+    stream = source(2)
+    (batch,) = batches_of(stream)
+    op = Batch(batch_size=2)
+
+    async def go() -> Any:
+        feed = OutputChannel(stream)
+        reader = feed.open_reader()
+        await feed.send(_with_amplitude_tokens(batch, 0, [[]], TOKEN_LISTS))
+        await feed.send(_with_amplitude_tokens(batch, 1, [["b"]], TOKENS))
+        await feed.close()
+        output = OutputChannel(op(stream))
+        await op.async_execute_batches([reader], output)
+        return output.result()
+
+    table = run(go).as_table(columns=ALL)
+    assert table.num_rows == 1
+    assert table.column("_source_amplitude").to_pylist() == [[[], ["b"]]]
+
+
+def test_a_source_nodes_channel_gives_its_output_stream_as_it_is() -> None:
+    """A source node's channel reads its ``execute()`` output stream, a complete output
+    in the row-built form, which ``to_stream()`` gives as it is."""
+    node = SourceJobNode.from_stream(source(2), name="events")
+
+    async def read() -> Any:
+        return await node.open_channel().to_stream()
+
+    output = run(read)
+    assert getattr(output, ROW_BUILT_OUTPUT, False)
+    assert same(output.as_table(columns=ALL), R(node))

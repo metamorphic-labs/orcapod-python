@@ -7,7 +7,6 @@ Both share SourceNodeBase which provides schema-based identity.
 
 from __future__ import annotations
 
-from collections import deque
 
 import contextlib
 import dataclasses
@@ -30,16 +29,16 @@ from orcapod.core.sources.base import table_is_rows
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
+    CompleteStreamFeed,
     keys_of_rows,
     system_tags_as_rows_give,
-    row_built_columns,
     stream_arrow_schema,
     schema_requires_io,
     typed_arrow_schemas,
     typed_zero_row_input,
     typed_zero_row_table,
 )
-from orcapod.core.streams.record_batch_input import SOURCE_BATCH_ROWS, InputChannel
+from orcapod.core.streams.record_batch_input import InputChannel
 from orcapod.core.streams.view import (
     ViewStatus,
     StreamView,
@@ -427,42 +426,52 @@ def _require_stream_arrow_types(stream: Any, slot: str) -> None:
 class _ExecuteOutputFeed:
     """The record batches of a source node's own ``execute()`` output.
 
-    Built at the first read from the output stream ``execute()`` gives (ITL-1347,
-    stage 2: the table a job hands on, already in the row-built form). One binding is
-    read, at that moment. A batch is dropped once delivered.
+    The channel of the output stream ``execute()`` gives (ITL-1347, stage 2: the table
+    a job hands on, already in the row-built form), built at the first read: one
+    binding is read, at that moment. A batch is dropped once delivered.
     """
 
     def __init__(self, node: SourceNodeBase) -> None:
-        """Make the feed; nothing is read until the first ``next``.
+        """Make the feed; nothing is read until the first read.
 
         Args:
             node: The source node whose output it delivers.
         """
         self._node = node
-        self._batches: deque[pa.RecordBatch] | None = None
+        self._output: StreamProtocol | None = None
+        self._feed: CompleteStreamFeed | None = None
+
+    def _output_feed(self) -> CompleteStreamFeed:
+        """The feed of the node's output stream, made on the first read."""
+        if self._feed is None:
+            self._output = self._node.execute()
+            self._feed = CompleteStreamFeed(self._output)
+        return self._feed
 
     async def next(self) -> pa.RecordBatch | None:
         """Return the next record batch of the node's output, or ``None`` at the end."""
-        if self._batches is None:
-            output = self._node.execute()
-            table = row_built_columns(
-                output.as_table(columns=ZERO_ROW_INPUT_COLUMNS), output.keys()
-            )
-            self._batches = deque(
-                batch
-                for batch in table.to_batches(max_chunksize=SOURCE_BATCH_ROWS)
-                if batch.num_rows
-            )
-        return self._batches.popleft() if self._batches else None
+        return await self._output_feed().next()
 
     def close(self) -> None:
         """Stop reading: the batches not read are dropped."""
-        self._batches = deque()
+        if self._feed is not None:
+            self._feed.close()
+        else:
+            self._feed = _closed_feed(self._node)
 
     @property
     def opened_on(self) -> StreamProtocol | None:
-        """``None``: the node is not the stream its batches rebuild."""
-        return None
+        """The node's output stream, read on this first access (a conversion's first
+        read): a channel not read yet gives it as it is when it is a complete output
+        in the row-built form."""
+        return self._output_feed().opened_on
+
+
+def _closed_feed(node: SourceNodeBase) -> CompleteStreamFeed:
+    """A feed closed before its first read: it reads nothing and delivers nothing."""
+    feed = CompleteStreamFeed(node)
+    feed.close()
+    return feed
 
 
 class SourceNodeBase(TraceableBase, ABC):
