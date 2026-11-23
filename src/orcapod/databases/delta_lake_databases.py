@@ -16,7 +16,7 @@ from orcapod.databases._row_index import (
     matching_rows,
     rows_at,
 )
-from orcapod.databases import utils as database_utils
+import orcapod.databases.utils as database_utils
 from orcapod.databases.utils import (
     appended_field_change,
     coerce_record_id,
