@@ -177,6 +177,36 @@ def _keys(node: Any) -> tuple[tuple[str, ...], tuple[str, ...]]:
     return tuple(tags), tuple(data)
 
 
+def _merge_slot(node: Any, index: int) -> int | None:
+    """The element of a merged list that input ``index`` fills, or ``None``.
+
+    ``MergeJoin`` merges a colliding column into ``[first argument's value, second
+    argument's value]``: element ``i`` comes from argument ``i``, nothing else.
+    """
+    from orcapod.core.operators.merge_join import MergeJoin
+
+    if isinstance(getattr(node, "producer", None), MergeJoin):
+        return index
+    return None
+
+
+def _static_source_ids(node: Any) -> set[str]:
+    """The ids a source node's rows can carry, from stored structure only (no method or
+    property of the source is called): the node's label (a slot is named by its
+    source's id), the source's stored id, and, through each ``CachedSource``, the stored
+    id of the source it wraps (a cache keeps the wrapped source's ids in its rows)."""
+    from orcapod.core.sources.cached_source import CachedSource
+
+    ids = {node.label}
+    bound = getattr(node, "bound_source", None)
+    while bound is not None:
+        stored = vars(bound).get("_source_id")
+        if isinstance(stored, str):
+            ids.add(stored)
+        bound = vars(bound).get("_source") if type(bound) is CachedSource else None
+    return ids
+
+
 def _declared_system_tags(node: Any) -> list[str]:
     """A source node's system-tag columns, from the schema it declares."""
     from orcapod.core.nodes.source_node import SourceNodeBase
@@ -712,6 +742,8 @@ class _Tracer:
         tokens that name that source, each checked against the row's system tags."""
         upstream = node.upstreams[index]
         mine = _positional_pairs(cell.row, node, index, upstream)
+        slot = _merge_slot(node, index)
+        source_columns = set(_keys(upstream)[1])
         token, value = cell.token, cell.value
         pairs: list[tuple[str, Any, int | None]] = []
         if isinstance(token, list):
@@ -730,9 +762,16 @@ class _Tracer:
             pairs = [(token, value, None)]
         out: list[TraceStep] = []
         for t, v, k in pairs:
-            sid, record_id, _ = _parse_token(t)
+            sid, record_id, source_column = _parse_token(t)
             if (sid, record_id) not in mine:
                 continue
+            if slot is not None and k is not None and k != slot:
+                continue  # element k of a merged list is argument k's
+            if source_column not in source_columns and not any(
+                source_column.startswith(c + "[") or source_column.startswith(c + ".")
+                for c in source_columns
+            ):
+                continue  # the input does not have the token's column
             self.edges.add((upstream.label, node.label))
             out.append(self.leaf(upstream, t, v, held=True, member=k))
         return out
@@ -763,7 +802,9 @@ class _Tracer:
             matched = _input_rows(cell.row, node, index, up_rows, self.reader.lookups)
             if not matched:
                 continue
-            for up_cell, link_member in self.links(node, upstream, cell, matched):
+            for up_cell, link_member in self.links(
+                node, upstream, cell, matched, _merge_slot(node, index)
+            ):
                 self.edges.add((upstream.label, node.label))
                 inputs.append(self.step(upstream, up_cell, link_member))
         if not inputs and cell.token is not None:
@@ -781,7 +822,12 @@ class _Tracer:
         )
 
     def links(
-        self, node: Any, upstream: Any, cell: _Cell, matched: list[Row]
+        self,
+        node: Any,
+        upstream: Any,
+        cell: _Cell,
+        matched: list[Row],
+        slot: int | None = None,
     ) -> list[Link]:
         """The input cells one row-wise output cell came from, each checked by value.
 
@@ -857,6 +903,8 @@ class _Tracer:
             values = cast(list[Any], value) if isinstance(value, list) else []
             pieces: list[Link] = []
             for k, piece_token in enumerate(cast(list[Any], token)):
+                if slot is not None and k != slot:
+                    continue  # element k of a merged list is argument k's
 
                 def piece(
                     r: Row, column: str, piece_token: Any = piece_token, k: int = k
@@ -1148,7 +1196,12 @@ def trace(node: Any, row: Mapping[str, Any], column: str) -> Trace:
         status = "unavailable" if _kind(node) == "source" else "not_computed"
         return Trace(root=tracer.unread(node, column, None, status))
     if column not in _keys(node)[1]:
-        raise ValueError(f"{column!r} is not a data column of node {node.label!r}")
+        table = tracer.reader.table(node)
+        held_column = (
+            not rows and table is not None and column in table.column_names
+        )  # a completed run with no rows: the held table's schema has the column
+        if not held_column:
+            raise ValueError(f"{column!r} is not a data column of node {node.label!r}")
     root = tracer.step(node, _Cell(_select_row(node, rows, row), column))
     return Trace(root=root, edges=tuple(sorted(tracer.edges)))
 
@@ -1276,9 +1329,10 @@ def why_missing(node: Any, source: str, record_id: str) -> Absence:
     for n in all_nodes:
         if _kind(n) != "source":
             continue
+        static = _static_source_ids(n)
         emitted = _emitted_ids(n, all_nodes, reader)
-        if n.label == source or source in emitted:
-            ids = {source} | (emitted if n.label == source else set())
+        if source in static or source in emitted:
+            ids = {source} | (static | emitted if n.label == source else set())
             wanted[id(n)] = {(sid, record_id) for sid in ids}
             sources.append(n)
     if not sources:

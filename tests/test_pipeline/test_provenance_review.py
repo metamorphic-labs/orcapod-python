@@ -782,3 +782,74 @@ def test_a_source_root_without_the_record_says_so() -> None:
     answer = job.nodes["src"].why_missing("src", "row_9")
     assert answer.missing and answer.status == "read"
     assert answer.because == "source 'src' holds no record 'row_9'"
+
+
+# ---------------------------------------------------------------------------
+# Fourth review (head 68a269ae)
+# ---------------------------------------------------------------------------
+
+
+def test_a_source_known_by_structure_feeds_a_node_with_no_rows_from_it() -> None:
+    """A cache named ``alias`` over source ``s``, then a Filter rejecting every row:
+    no held row carries ``s``, yet ``s`` feeds the node (its stored id)."""
+    inner = DictSource(
+        [{"k": "a", "g": "1", "x": 1, "y": 0}],
+        tag_columns=["k", "g"],
+        tag_only_columns=True,
+        source_id="s",
+    )
+    cache = CachedSource(
+        inner, cache_database=InMemoryArrowDatabase(), source_id="alias"
+    )
+    job = PipelineJob(name="noneleft", database=InMemoryArrowDatabase())
+    with job:
+        SelectDataColumns(["x"])(Filter({"x": 999})(cache))
+    node = job.nodes["SelectDataColumns"]
+    assert node.why_missing("s", "row_0").status == "not_computed"
+    job.run()
+    for name in ("s", "alias"):
+        answer = node.why_missing(name, "row_0")
+        assert answer.status == "read" and answer.missing
+        assert answer.removed_by is None and "not known" in answer.because
+
+
+@pytest.mark.parametrize("left_first", [True, False])
+def test_merge_join_elements_come_from_their_own_argument(left_first: bool) -> None:
+    """Two caches keeping the same source id and record id: element i of a merged list
+    is attributed only to argument i."""
+
+    def cached(name: str, x: int, extra: bool) -> CachedSource:
+        row: dict[str, Any] = {"k": "a", "i": 0, "x": x, "y": 0}
+        if extra:
+            row["z"] = 1
+        inner = DictSource(
+            [row], tag_columns=["k", "i"], tag_only_columns=True, source_id="s"
+        )
+        return CachedSource(
+            inner, cache_database=InMemoryArrowDatabase(), source_id=name
+        )
+
+    left, right = cached("left", 1, False), cached("right", 100, True)
+    job = PipelineJob(name="slots", database=InMemoryArrowDatabase())
+    with job:
+        MergeJoin()(left, right) if left_first else MergeJoin()(right, left)
+    job.run()
+    node = job.nodes["MergeJoin"]
+    value = [1, 100] if left_first else [100, 1]
+    trace = node.trace({"x": value}, "x")
+    assert sorted((c.node, c.value) for c in trace.source_cells()) == [
+        ("left", 1),
+        ("right", 100),
+    ]
+
+
+def test_a_completed_run_with_no_rows_has_its_columns() -> None:
+    source = table_source(rows_kgxy(("a", "1", 1, 2)), TWO_BY_TWO, ["k", "g"], "src")
+    job = PipelineJob(name="empty", database=InMemoryArrowDatabase())
+    with job:
+        add.pod(Filter({"x": 999})(source), label="sums")
+    job.run()
+    with pytest.raises(ValueError, match="holds no row"):
+        job.nodes["sums"].trace({"k": "a", "g": "1"}, "s")
+    with pytest.raises(ValueError, match="not a data column"):
+        job.nodes["sums"].trace({"k": "a", "g": "1"}, "nowhere")
