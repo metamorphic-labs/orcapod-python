@@ -154,6 +154,16 @@ def assert_same_table(table: pa.Table, expected: pa.Table) -> None:
         # The storage of a logical type: its values as stored, not as decoded.
         column, wanted = (t.column(name).combine_chunks() for t in (table, expected))
         assert _same_value(column.to_pylist(), wanted.to_pylist()), name
+        # A float column is compared by its bits too, as stored: a NaN payload or a
+        # signed zero changed on the way is a different value (``_same_value`` reads
+        # Python values, which cannot tell NaN payloads apart).
+        if pa.types.is_floating(column.type):
+            bits = (
+                pa.uint16()
+                if pa.types.is_float16(column.type)
+                else (pa.uint32() if pa.types.is_float32(column.type) else pa.uint64())
+            )
+            assert column.view(bits).equals(wanted.view(bits)), name
 
 
 def assert_equals_sync(case: Case, sizes: tuple[int, ...] | None) -> None:

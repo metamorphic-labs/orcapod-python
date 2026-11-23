@@ -249,6 +249,21 @@ def _check(
     inputs: Sequence[StreamProtocol],
     seeds: Sequence[int] = SEEDS,
 ) -> None:
+    """Check a kernel against its operator's sync path over the same inputs.
+
+    The inputs are given to the oracle as a job's edges carry them, each rebuilt from
+    its rows (``_row_built``), and to the kernel cut into batches of random sizes in
+    random interleavings (one per seed). The kernel's constructor-time behaviour (its
+    zero-row result, its output columns) is checked separately from the rows. The
+    rows are compared as a multiset, with the oracle's columns and Arrow types: row
+    order and column order are not results on the async path.
+
+    Args:
+        make_kernel: Builds the kernel from the input streams.
+        sync: The operator's sync body (``static_process``).
+        inputs: The input streams, in call order.
+        seeds: The interleavings to run.
+    """
     rebuilt = [_row_built(stream) for stream in inputs]
     expected = _transport(sync(*rebuilt))
     # The kernel's zero-row result is the sync operator's over the inputs rebuilt from
@@ -465,9 +480,11 @@ def test_join_inputs_of_one_pipeline_hash_sort_their_system_tags() -> None:
     # inputs of one schema share their data columns, so only data-tags (merged by the
     # join, their tokens folded) can be joined.
     def keys_only(source_id: str, values: list[str]) -> ArrowTableSource:
+        # ``k`` is a data-tag (no tag-only column): only data-tags can be joined here.
         return ArrowTableSource(
             pa.table({"k": pa.array(values, pa.large_string())}),
             tag_columns=["k"],
+            tag_only_columns=(),
             source_id=source_id,
         )
 
@@ -818,6 +835,8 @@ def test_merge_join_over_a_join_of_inputs_of_one_pipeline_hash() -> None:
                 }
             ),
             tag_columns=["k", "g"],
+            # Both tags are data-tags (no tag-only column), stated, not the default.
+            tag_only_columns=(),
             source_id=source_id,
         )
 
@@ -1103,15 +1122,22 @@ def test_join_releases_every_step_once_an_input_ends_with_only_null_keys() -> No
             for i, name in enumerate("abc")
         ]
         kernel = StreamingJoin(Join(), sources)
-        kernel.push(
-            null_input, _sent(sources[null_input]).combine_chunks().to_batches()[0]
+        # A null key matches nothing: no push emits a row.
+        assert (
+            kernel.push(
+                null_input, _sent(sources[null_input]).combine_chunks().to_batches()[0]
+            )
+            == []
         )
         assert kernel.close(null_input) == []
         for index in range(3):
             if index != null_input:
-                kernel.push(
-                    index, _sent(sources[index]).combine_chunks().to_batches()[0]
-                )
+                assert (
+                    kernel.push(
+                        index, _sent(sources[index]).combine_chunks().to_batches()[0]
+                    )
+                    == []
+                ), (null_input, index)
         assert kernel.held_rows == 0, null_input
 
 

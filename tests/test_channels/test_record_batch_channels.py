@@ -79,7 +79,8 @@ def run(make: Callable[[], Awaitable[T]]) -> T:
 
 
 def source(n: int = 7, source_id: str = "events") -> ArrowTableSource:
-    """``n`` rows: tags ``subject`` and ``trial`` (a data-tag too), three data columns."""
+    """``n`` rows: tags ``subject`` and ``trial``, both data-tags too (stated: no
+    tag-only column), three data columns."""
     return ArrowTableSource(
         pa.table(
             {
@@ -93,6 +94,7 @@ def source(n: int = 7, source_id: str = "events") -> ArrowTableSource:
             }
         ),
         tag_columns=["subject", "trial"],
+        tag_only_columns=(),
         source_id=source_id,
     )
 
@@ -602,10 +604,12 @@ def test_a_feed_raising_stop_async_iteration_is_a_read_error() -> None:
 
 
 def test_a_barrier_leaves_no_conversion_behind_when_an_input_was_read() -> None:
-    """A barrier whose second input was read already: its setup fails, and the first
-    input's conversion, already started and waiting for more of its producer's
-    batches, is cancelled and awaited before the barrier raises: its reader is closed
-    and the producer released, so no task fails later with nobody to hear it."""
+    """A barrier whose second input was read already: the second input's setup fails
+    synchronously, before the first input's conversion (already scheduled) has begun.
+    That conversion is cancelled and awaited before the barrier raises, its reader is
+    closed and the producer released, so no task fails later with nobody to hear it.
+    A failure after a barrier has taken a batch is
+    ``test_a_barrier_that_read_part_of_a_failed_input_never_computes``."""
     left = source(2)
     right = source(2, source_id="other")
     left_batches = batches_of(left, 1)

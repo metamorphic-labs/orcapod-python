@@ -813,6 +813,14 @@ NESTED_CASES: dict[str, tuple[pa.DataType, list[Any], list[Any]]] = {  # pyright
         [[("a", None)], [("b", 2)]],
         [None, [("b", 2)]],
     ),
+    "map_key": (
+        pa.map_(
+            pa.field("key", pa.struct([NON_NULLABLE]), nullable=False),  # pyright: ignore[reportArgumentType]  # pyarrow takes a field for the key
+            pa.int64(),
+        ),
+        [[({"required": None}, 1)], [({"required": 2}, 3)]],
+        [None, [({"required": 2}, 3)]],
+    ),
     "struct_in_struct": (
         pa.struct([pa.field("s", pa.struct([NON_NULLABLE]))]),
         [{"s": {"required": None}}, {"s": None}],
@@ -846,3 +854,218 @@ def test_a_nested_null_under_a_non_nullable_field_is_refused(case: str) -> None:
         await output.send(batch)
 
     asyncio.run(write())
+
+
+# --- CodeRabbit on PR 510, final pass (365f2a08) ------------------------------------
+
+
+def _deep_token_stream(tokens: list[Any], keys: list[int]) -> ArrowTableStream:  # pyright: ignore[reportExplicitAny]  # tokens of any shape
+    """Tag ``k``, data ``x`` and ``y``, ``x``'s source info declared two list levels
+    deep."""
+    return ArrowTableStream(
+        pa.table(
+            {
+                "k": pa.array(keys, pa.int64()),
+                "x": pa.array([10 * k for k in keys], pa.int64()),
+                "y": pa.array([k + 0.5 for k in keys], pa.float64()),
+                "_source_x": pa.array(tokens, DEEP_TOKENS),
+            }
+        ),
+        tag_columns=["k"],
+    )
+
+
+@pytest.mark.parametrize(
+    "matching", [True, False], ids=["keys_match", "no_key_matches"]
+)
+@pytest.mark.parametrize("shallow", ["left", "right"])
+def test_merge_join_inputs_whose_tokens_settle_to_two_types_are_refused(
+    shallow: str, matching: bool
+) -> None:
+    """CodeRabbit on PR 510 (major): both inputs declare ``_source_x`` two list levels
+    deep, but one delivers ``[]`` (one level, as its rows type it) and the other
+    ``[["b"]]``. The sync path rebuilds each input from its rows and ``MergeJoin``
+    refuses the two types of one column; the kernel compares the inputs' settled token
+    types and refuses too, with the same error, whether or not a key matches."""
+    from orcapod.core.operators import MergeJoin
+    from orcapod.core.operators.streaming_joins import (
+        TRANSPORT_COLUMNS,
+        StreamingMergeJoin,
+    )
+    from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+    from orcapod.errors import InputValidationError
+
+    right_keys = [1, 2] if matching else [7, 8]
+    empty = _deep_token_stream([[], []], [1, 2])
+    deep = _deep_token_stream([[["b"]], [["c"]]], right_keys)
+    left, right = (empty, deep) if shallow == "left" else (deep, empty)
+
+    def rebuilt(stream: ArrowTableStream) -> Any:  # pyright: ignore[reportExplicitAny]
+        return StaticOutputOperatorPod._materialize_upstream(  # pyright: ignore[reportPrivateUsage]  # the rows as a job hands them on
+            list(stream.iter_data()), stream
+        )
+
+    with pytest.raises(InputValidationError) as sync_error:
+        _ = MergeJoin().static_process(rebuilt(left), rebuilt(right))
+    kernel = StreamingMergeJoin(MergeJoin(), (left, right))
+    batches = [
+        rebuilt(s).as_table(columns=TRANSPORT_COLUMNS).combine_chunks().to_batches()[0]
+        for s in (left, right)
+    ]
+    assert kernel.push(0, batches[0]) == []
+    with pytest.raises(InputValidationError) as kernel_error:
+        _ = kernel.push(1, batches[1])
+    assert str(kernel_error.value) == str(sync_error.value)
+
+
+def test_merge_join_inputs_whose_tokens_settle_to_one_type_are_joined() -> None:
+    """CodeRabbit on PR 510: both inputs settle to one list level: they join."""
+    from orcapod.core.operators import MergeJoin
+    from orcapod.core.operators.streaming_joins import (
+        TRANSPORT_COLUMNS,
+        StreamingMergeJoin,
+    )
+    from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+
+    left = _deep_token_stream([[], []], [1, 2])
+    right = _deep_token_stream([[], []], [1, 2])
+    kernel = StreamingMergeJoin(MergeJoin(), (left, right))
+    out: list[pa.RecordBatch] = []
+    for index, stream in enumerate((left, right)):
+        table = StaticOutputOperatorPod._materialize_upstream(  # pyright: ignore[reportPrivateUsage]  # the rows as a job hands them on
+            list(stream.iter_data()), stream
+        ).as_table(columns=TRANSPORT_COLUMNS)
+        out += kernel.push(index, table.combine_chunks().to_batches()[0])
+    out += kernel.close(0) + kernel.close(1)
+    assert sum(batch.num_rows for batch in out) == 2
+
+
+@pytest.mark.parametrize(
+    "queued", [False, True], ids=["nothing_queued", "a_batch_queued"]
+)
+def test_a_bounded_reader_dropped_before_its_first_read_releases_its_producer(
+    queued: bool,
+) -> None:
+    """CodeRabbit on PR 510 (major): a reader opened on a bounded output and dropped
+    before any read (no owner task, no claim) is closed when it is freed, so the
+    producer does not wait for it; a live reader still gets every batch."""
+    stream = source(3)
+    batches = batches_of(stream, 1)
+
+    async def go() -> list[int]:
+        output = OutputChannel(stream, retain=False, buffer_size=1)
+        live = output.open_reader()
+        dropped = output.open_reader()
+        if queued:
+            await output.send(batches[0])  # queued for both readers, never read
+            got = [_trial(await live.receive())]
+        else:
+            got = []
+        del dropped
+        gc.collect()
+        for batch in batches[1:] if queued else batches:
+            async with asyncio.timeout(TIMEOUT):
+                await output.send(batch)  # nothing waits for the dropped reader
+            got.append(_trial(await live.receive()))
+        return got
+
+    assert asyncio.run(go()) == [0, 1, 2]
+
+
+class _CancelledClose:
+    """An input channel whose close is cancelled."""
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    async def close(self) -> None:
+        self.closed = True
+        raise asyncio.CancelledError()
+
+
+@pytest.mark.parametrize("failing", [False, True], ids=["succeeding", "failing"])
+def test_a_cancelled_close_still_closes_every_other_input(failing: bool) -> None:
+    """CodeRabbit on PR 510 (outside the diff): a close cancelled while an operator
+    closes its inputs does not stop the others; the cancellation is raised once every
+    input is closed, and an operator error in flight keeps precedence (the
+    cancellation is noted on it)."""
+    stream = source(3)
+    first, second, _ = batches_of(stream, 1)
+
+    async def go() -> BaseException | None:
+        producer = OutputChannel(stream, retain=False, buffer_size=1)
+        reader = producer.open_reader()
+        await producer.send(first)
+        waiting = asyncio.ensure_future(producer.send(second))
+        await asyncio.sleep(0)
+        assert not waiting.done()
+        cancelled = _CancelledClose()
+        error = RuntimeError("the operator failed") if failing else None
+        raised: BaseException | None = None
+        try:
+            await close_inputs([cancelled, reader], error)  # pyright: ignore[reportArgumentType]  # a stand-in input
+        except asyncio.CancelledError as cancellation:
+            raised = cancellation
+        assert cancelled.closed
+        async with asyncio.timeout(TIMEOUT):
+            await waiting  # the second input was closed all the same
+        if error is not None:
+            assert any("cancelled" in note for note in error.__notes__)
+        return raised
+
+    raised = asyncio.run(go())
+    assert (raised is None) == failing
+
+
+class _ListFeed:
+    """A feed that delivers the given record batches, then ends."""
+
+    def __init__(self, batches: list[pa.RecordBatch]) -> None:
+        self._batches = list(batches)
+
+    async def next(self) -> pa.RecordBatch | None:
+        return self._batches.pop(0) if self._batches else None
+
+    def close(self) -> None:
+        self._batches.clear()
+
+    @property
+    def opened_on(self) -> Any:  # pyright: ignore[reportExplicitAny]
+        return None
+
+
+def test_batches_whose_tokens_cannot_make_one_input_table_fail_the_operator() -> None:
+    """CodeRabbit on PR 510: a row-by-row operator processes batches as they arrive;
+    a later batch whose source-info tokens cannot make one table with the earlier
+    ones (``[]``, then ``[["b"]]``) is refused, as the sync path refuses the whole
+    input, and the output fails instead of completing with part of the rows. The
+    operator drops the column, so its own output (whose send check settles token
+    types too) would not see the conflict."""
+    from orcapod.core.operators import SelectDataColumns
+    from orcapod.core.operators.static_output_pod import SourceInfoTypesDisagree
+    from orcapod.core.streams.record_batch_input import InputChannel
+
+    stream = _deep_token_stream([[], [["b"]]], [1, 2])  # its rows: sync refuses
+    clean = _deep_token_stream([[["a"]], [["b"]]], [1, 2])  # one schema, buildable
+    shallow = _token_batch(clean, [[], []], SHALLOW_TOKENS).slice(0, 1)
+    deep = _token_batch(clean, [[["a"]], [["b"]]], DEEP_TOKENS).slice(1, 1)
+    op = SelectDataColumns(["y"])
+    from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+
+    with pytest.raises((pa.ArrowInvalid, ValueError)):
+        # A job's sync path rebuilds the input from its rows first, and refuses.
+        _ = StaticOutputOperatorPod._materialize_upstream(  # pyright: ignore[reportPrivateUsage]  # the job's sync form
+            list(stream.iter_data()), stream
+        )
+
+    async def go() -> OutputChannel:
+        output = OutputChannel(op(clean))
+        with pytest.raises(SourceInfoTypesDisagree):
+            await op.async_execute_batches(
+                [InputChannel(clean, _ListFeed([shallow, deep]))], output
+            )
+        return output
+
+    output = asyncio.run(go())
+    with pytest.raises(RuntimeError, match="has no result"):
+        _ = output.result()
