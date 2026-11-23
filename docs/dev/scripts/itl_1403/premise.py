@@ -21,6 +21,15 @@ Cases (each where the Python schema may be equal but the Arrow record could diff
 - ``struct_gains_field``: a source data column, a struct with a recorded type
   (``uint8``), gaining a field between the runs, through a cached source, a function
   pod, an operator that logs and a side-effect pod.
+- ``operator_nested_nullability`` (the stated EXCEPTION, found by review): a custom
+  operator in a node that logs (``CacheMode.LOG``) whose result type depends on its
+  data, not on its input schemas: ``large_list<uint8>`` with non-nullable items in one
+  run and nullable items in the next. Its declared and observed Python schemas are
+  equal and its cache path is the same, but the recorded type differs (nested
+  nullability is part of the record), so the second run fails at the store. On
+  deltalake 1.0.2 both runs were stored and the table's recorded type changed
+  silently. Such an operator is a bug of the operator (an operator's output schema is
+  fully determined by its inputs' schemas); ITL-1410 is to refuse it at the operator.
 
 usage: uv run python docs/dev/scripts/itl_1403/premise.py WORKDIR
 """
@@ -38,6 +47,8 @@ import pyarrow as pa
 
 from orcapod import PipelineJob, function_pod
 from orcapod.core.operators import Join
+from orcapod.core.operators.base import UnaryOperator
+from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.sources import ArrowTableSource
 from orcapod.core.sources.cached_source import CachedSource
 from orcapod.databases import DeltaTableDatabase
@@ -138,6 +149,50 @@ def _case(store: Path, first: Callable[[], None], second: Callable[[], None]) ->
         f"no refusal; {len(before)} tables after run 1, {len(new)} new after run 2"
         + "".join(f"\n      new: {t[:110]}" for t in new)
     )
+
+
+class ShapeValues(UnaryOperator):
+    """Lists of one Python type whose items' Arrow nullability follows the values."""
+
+    def validate_unary_input(self, stream: Any) -> None:
+        pass
+
+    def identity_structure(self) -> Any:
+        return ("itl1403-shape-values",)
+
+    def unary_output_schema(self, stream: Any, **kwargs: Any) -> Any:
+        tags, _ = stream.output_schema(**kwargs)
+        values = pa.array([], type=pa.large_list(pa.field("item", pa.uint8())))
+        _, data = ArrowTableStream(pa.table({"v": values})).output_schema(**kwargs)
+        return tags, data
+
+    def unary_static_process(self, stream: Any) -> Any:
+        table = stream.as_table(columns={"source": True, "system_tags": True})
+        values = table["v"].to_pylist()
+        nullable = any(v > 10 for v in values)
+        shape = pa.large_list(pa.field("item", pa.uint8(), nullable=nullable))
+        wrapped = pa.array([[v] for v in values], shape)
+        table = table.set_column(table.schema.get_field_index("v"), "v", wrapped)
+        return ArrowTableStream(table, tag_columns=stream.keys()[0])
+
+
+def _operator_job(store: Path, rerun: bool) -> None:
+    database = DeltaTableDatabase(store)
+    source = ArrowTableSource(
+        pa.table(
+            {"k": [3, 4] if rerun else [1, 2], "v": [11, 12] if rerun else [1, 2]}
+        ),
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="input",
+        record_id_columns=["k"],
+    )
+    job = PipelineJob(name="premise-operator", database=database)
+    with job:
+        ShapeValues()(source, label="shape")
+    job.nodes["shape"].attach_databases(database, cache_mode=CacheMode.LOG)
+    job.run()
+    database.flush()
 
 
 def main(work: Path) -> None:
@@ -243,6 +298,13 @@ def main(work: Path) -> None:
 
     results["struct_gains_field"] = _case(
         work / "struct_gains_field", run_struct(False), run_struct(True)
+    )
+
+    # The known exception: the second run is refused.
+    results["operator_nested_nullability (known exception)"] = _case(
+        work / "operator_nested_nullability",
+        lambda: _operator_job(work / "operator_nested_nullability", False),
+        lambda: _operator_job(work / "operator_nested_nullability", True),
     )
 
     for name, outcome in results.items():
