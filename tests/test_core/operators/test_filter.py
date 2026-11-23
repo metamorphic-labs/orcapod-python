@@ -440,3 +440,82 @@ class TestInAJob:
     def test_drop_nulls_after_filter_narrows(self):
         stream = _units().filter(col("rate").is_not_null()).drop_nulls("rate")
         assert stream.output_schema()[1]["rate"] is float
+
+
+class TestHead:
+    """Decision 13 of ITL-1374: a Filter's head evaluates its condition over the rows its
+    input's head shows; it never computes, and the header says which rows it looked at."""
+
+    def test_over_a_source_shows_the_matching_rows(self):
+        stream = _units().filter(col("t") >= 1.0)
+        view = stream.head()
+        assert view.status.value == "rows"
+        assert _kept(view) == [("s1", 7), ("s1", 9), ("s2", 7), ("s3", 3)]
+        assert "all 4 matching rows of its input's 6" in view.header()
+
+    def test_matches_among_a_shorter_head_say_so(self):
+        view = _units().filter(col("t") >= 1.0).head(3)
+        assert _kept(view) == [("s1", 7), ("s1", 9)]
+        assert "2 matching rows among the 3 its input's head shows" in view.header()
+        assert "not computed" in view.header()
+
+    def test_no_match_shows_typed_columns(self):
+        source = _units()
+        view = source.filter(session="none").head()
+        assert view.table.num_rows == 0
+        assert view.table.schema == source.head().table.schema
+
+    def test_equals_the_computed_rows_with_every_column_group(self):
+        stream = _units().filter(col("unit").is_in([7, 9]))
+        for columns in (
+            None,
+            {"system_tags": True, "source": True},
+            {"sort_by_tags": True},
+        ):
+            head = stream.head(columns=columns).table
+            # A fresh stream, so the computed head is not the one above.
+            computed = _units().filter(col("unit").is_in([7, 9]))
+            computed.run()
+            expected = computed.head(columns=columns).table
+            # ``t`` holds a NaN, which ``equals`` never matches: compared as text.
+            assert head.schema == expected.schema
+            assert repr(head.to_pylist()) == repr(expected.to_pylist())
+
+    def test_does_not_compute_the_stream(self):
+        stream = _units().filter(session="s1")
+        _ = stream.head()
+        assert (
+            stream.head().header().endswith("not computed; run() computes every row)")
+            is False
+        )
+        assert stream._cached_stream is None  # pyright: ignore[reportAttributeAccessIssue,reportPrivateUsage]  # nothing was computed
+
+    def test_over_a_function_pod_reads_not_computed(self):
+        from orcapod import function_pod
+
+        calls: list[int] = []
+
+        @function_pod(output_keys="doubled")
+        def double(t: float | None) -> float:
+            calls.append(1)
+            return 2 * (t or 0.0)
+
+        stream = Filter(col("doubled") > 1.0)(
+            double.pod(_units().select_data_columns(["t"]))
+        )
+        view = stream.head()
+        assert view.status.value == "not_computed"
+        assert view.table.num_rows == 0
+        assert calls == []
+
+    def test_an_ill_typed_condition_shows_nothing_and_raises_at_the_run(self):
+        table = pa.table(
+            {"k": pa.array([1], pa.int8()), "v": pa.array([1], pa.int64())}
+        )
+        source = ArrowTableSource(
+            table, tag_columns=["k"], tag_only_columns=True, source_id="narrow"
+        )
+        stream = source.filter(k=300)
+        assert stream.head().status.value == "not_computed"
+        with pytest.raises(InputValidationError):
+            stream.run()

@@ -84,6 +84,9 @@ class Filter(UnaryOperator):
     # A filter chooses rows and never changes a column (ITL-912).
     OUTPUT_SCHEMA_IS_INPUT_SCHEMA: ClassVar[bool] = True
 
+    # Its head shows the matching rows of its input's head (decision 13, ITL-1374).
+    HEAD_FROM_INPUT_HEAD: ClassVar[bool] = True
+
     # Its identity is not frozen with data context v1 (ITL-1374).
     PROVISIONAL: ClassVar[bool] = True
 
@@ -192,6 +195,30 @@ class Filter(UnaryOperator):
         check_filter_condition(
             self._condition, pa.schema([schema.field(name) for name in names])
         )
+
+    def head_rows(self, stream: StreamProtocol, table: pa.Table) -> pa.Table | None:
+        """The rows of ``table`` (what ``stream``'s ``head`` shows) the condition keeps.
+
+        Decision 13 of ITL-1374: a filter holds no user code, has no effect and keeps a
+        row by that row alone, so its head may evaluate the condition over the rows its
+        input's head shows. Nothing is computed, polled or written. A condition that does
+        not fit the input's Arrow types shows nothing here; its error appears at the run.
+
+        Args:
+            stream: The input.
+            table: The rows its head shows.
+
+        Returns:
+            The matching rows, without meta columns, or ``None`` when the condition does
+            not fit ``table``.
+        """
+        names = _user_columns(*stream.keys())
+        try:
+            self._check_arrow(table.schema, names)
+        except InputValidationError:
+            return None
+        meta = [n for n in table.column_names if n.startswith(constants.META_PREFIX)]
+        return filter_table(table.drop_columns(meta), self._condition)
 
     def unary_static_process(self, stream: StreamProtocol) -> StreamProtocol:
         """Return the stream's rows that satisfy the condition, in input order.
