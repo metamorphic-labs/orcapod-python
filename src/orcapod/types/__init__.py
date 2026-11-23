@@ -26,7 +26,9 @@ from typing import TYPE_CHECKING, Any, Generic, Self, TypeAlias, TypeVar
 from typing_extensions import override
 
 # Re-exported: ``Condition`` is defined in its own module (ITL-1218).
+from orcapod.types.condition import ColumnRef as ColumnRef
 from orcapod.types.condition import Condition as Condition
+from orcapod.types.condition import col as col
 
 if TYPE_CHECKING:
     import pyarrow as pa
