@@ -84,6 +84,12 @@ class RootSource(StreamBase):
     # (ITL-1019): from format 0.3.0 on such a config always holds it.
     TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = False
 
+    REPORTS_WHAT_IT_READS: ClassVar[bool] = True
+    """Whether the source says what it reads (``explain()``, ITL-1402): its restriction
+    (``condition``, ``row_limit``), and with none, its whole table. ``False`` for a source
+    that reads rows stored elsewhere (``DerivedSource``, ``CachedSource``): what it reads
+    depends on what was stored there."""
+
     PROVISIONAL: ClassVar[bool] = False
     """Whether the source is provisional: its identity is not frozen (ITL-1314).
 

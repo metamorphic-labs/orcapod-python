@@ -464,6 +464,14 @@ class SemiJoin(BinaryOperator):
             values.append(value)
         return tuple(values)
 
+    def rows_dropped_text(self, position: int, others: Sequence[str]) -> str | None:
+        """What the semi-join does, for ``explain()``: the first input keeps the rows
+        that match the second; the second's rows only choose and do not flow on."""
+        names = ", ".join(repr(name) for name in others)
+        if position == 0:
+            return f"rows without a match in {names} are dropped"
+        return f"its rows only choose rows of {names} and do not flow on"
+
     def identity_structure(self) -> Any:
         return self.__class__.__name__
 

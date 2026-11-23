@@ -1368,6 +1368,11 @@ class Join(NonZeroInputOperator):
 
         return merged_sys
 
+    def rows_dropped_text(self, position: int, others: Sequence[str]) -> str | None:
+        """What the join drops, for ``explain()``: rows without a match in the others."""
+        names = ", ".join(repr(name) for name in others)
+        return f"rows without a match in {names} are dropped"
+
     def identity_structure(self) -> Any:
         return self.__class__.__name__
 

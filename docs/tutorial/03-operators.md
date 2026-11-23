@@ -155,6 +155,18 @@ print(busy.join(subjects).as_table().num_rows)
 # 3
 ```
 
+`filter` reads every row of its input and then keeps the matching ones. `explain()` (new in
+this release) shows what each source applies itself and what is applied after reading; it
+computes nothing:
+
+```python
+print(busy.explain())
+# DynamicPodStream[Filter] reads:
+#   source 'units' (CSVSource)
+#     applied by the source: nothing (the whole table is read)
+#     applied after reading: n_spikes > 1200 (Filter)
+```
+
 When `filter` cannot say what you need (arithmetic between columns, a string function), use
 `polars_filter` with a [Polars](https://docs.pola.rs/) expression:
 

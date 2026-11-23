@@ -101,6 +101,10 @@ class Filter(UnaryOperator):
         """The condition every kept row satisfies."""
         return self._condition
 
+    def rows_dropped_text(self, position: int, others: Sequence[str]) -> str | None:
+        """What the filter keeps, for ``explain()``: its condition's text."""
+        return self._condition.canonical_text()
+
     def identity_structure(self) -> Any:
         """Return the operator's identity: its class name and the canonical condition.
 

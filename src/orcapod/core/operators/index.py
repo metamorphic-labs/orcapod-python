@@ -83,6 +83,13 @@ class Index(UnaryOperator):
         self._element_arrow_type_error: str = ""
         super().__init__(**kwargs)
 
+    def rows_dropped_text(self, position: int, others: Sequence[str]) -> str | None:
+        """What the step drops, for ``explain()``: rows missing the element, unless a
+        miss raises."""
+        if self.fail_on_miss:
+            return None
+        return f"rows whose {self.column!r} has no element {self.i} are dropped"
+
     def identity_structure(self) -> Any:
         self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         return (self.__class__.__name__, self.column, self.i, self.out)
