@@ -1260,3 +1260,76 @@ def test_the_source_route_refuses_the_same_system_tags(case: str) -> None:
         schema=pa.schema([pa.field("k", pa.int64()), field]),
     )
     assert not system_tags_as_rows_give(table)
+
+
+# ── held rows that cannot make one table, without a store (they used to come from
+# a store written before ITL-928, which ITL-1412 now refuses to append to) ──────
+
+
+def _held_job() -> tuple[Any, Any, Any]:
+    """``selected`` (to be held) -> ``after``, and an independent source node."""
+    from orcapod import function_pod
+
+    @function_pod(output_keys="y")
+    def plus_one(x: int) -> int:
+        return x + 1
+
+    job = PipelineJob(name="held_unconvertible", database=InMemoryArrowDatabase())
+    with job:
+        selected = _plain().select_data_columns(["x"], label="selected")
+        plus_one.pod(selected, label="after")
+    other = PipelineJob(name="independent", database=InMemoryArrowDatabase())
+    with other:
+        _plain().select_data_columns(["x"], label="independent")
+    independent = next(
+        n for n in other.nodes.values() if type(n).__name__ == "SourceJobNode"
+    )
+    return job.nodes["selected"], job.nodes["after"], independent
+
+
+def test_held_rows_that_cannot_make_one_table_raise_at_the_successors_edge() -> None:
+    """Sync: a held node whose rows cannot make one table (source-info tokens of two
+    shapes) is built where its successor reads it, after an independent node has run,
+    and raises the rows' ``ArrowTypeError``, as ``main`` rebuilt the rows there."""
+    from orcapod.core.operators.static_output_pod import rows_on_read
+
+    held, after, independent = _held_job()
+    dag: OrcaDAG[Any] = OrcaDAG()
+    dag.add_node(held)
+    dag.add_node(independent)
+    dag.add_edge(held, after)
+    observer = _NodeEvents()
+    rows = list(_unconvertible().iter_data())
+    with pytest.raises(pa.ArrowTypeError, match="Expected bytes"):
+        SyncPipelineOrchestrator().run(
+            dag, observer=observer, held={held: rows_on_read(rows, held)}
+        )
+    starts = [label for event, label in observer.events if event == "start"]
+    assert starts == [independent.label]
+
+
+def test_held_rows_that_cannot_make_one_table_are_sent_on_async() -> None:
+    """Async: the held rows are sent on as the plan took them, never built into one
+    table first: the function node after the held node starts every row and ends,
+    and the run raises the rows' ``ArrowTypeError``. ``main`` ca1c35d6 gives the same
+    events and error."""
+    from orcapod.pipeline import AsyncPipelineOrchestrator
+
+    held, after, _ = _held_job()
+    dag: OrcaDAG[Any] = OrcaDAG()
+    dag.add_edge(held, after)
+    rows: list[Any] = list(_unconvertible().iter_data())
+
+    class DataStarts(_NodeEvents):
+        def on_data_start(self, node_label: str, tag: Any, data: Any) -> None:
+            self.events.append(("data", node_label))
+
+    observer = DataStarts()
+    with pytest.raises(pa.ArrowTypeError, match="Expected bytes"):
+        AsyncPipelineOrchestrator().run(dag, observer=observer, held_rows={held: rows})
+    assert observer.events == [
+        ("start", "after"),
+        ("data", "after"),
+        ("data", "after"),
+        ("end", "after"),
+    ]
