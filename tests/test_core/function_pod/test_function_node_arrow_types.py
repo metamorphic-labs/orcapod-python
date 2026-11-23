@@ -430,82 +430,47 @@ def test_an_async_run_over_a_store_written_before_the_fix_finishes(
         node.as_table()
 
 
-def test_a_second_async_run_holds_the_node_and_sends_its_rows(
-    tmp_path: pathlib.Path,
-) -> None:
-    """The plan builds no held stream for an async run: it sends the held rows as on main.
+def _stored_tags(root: pathlib.Path, node: str) -> list[int]:
+    """The tag ``k`` of every row stored in ``node``'s pipeline table under ``root``."""
+    import deltalake
 
-    Over a store written before ITL-928, the held ``double`` holds rows that cannot
-    make one table; a second async run (``increment`` cleared) holds it and sends its
-    three rows on, as on ``main`` (Codex on PR #485, round 2).
+    (log,) = [
+        log
+        for log in root.rglob("_delta_log")
+        if log.parent.name == "pdb_v1" and node in log.parent.parts
+    ]
+    values = deltalake.DeltaTable(str(log.parent)).to_pyarrow_table()["k"].to_pylist()
+    return sorted(int(value) for value in values if value is not None)
+
+
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+def test_a_run_mixing_new_rows_into_a_legacy_store_is_main_s(
+    tmp_path: pathlib.Path, asynchronous: bool
+) -> None:
+    """New ``uint32`` rows over a store written before ITL-928 (``int32``, no recorded
+    type), with stored rows of the same node: the outcome ``main`` ca1c35d6 gives.
+
+    ``double`` stores its new row; ``increment``'s input mixes ``double``'s stored
+    ``int32`` rows with the new ``uint32`` one. Sync: building that input raises
+    ``ArrowInvalid`` (the rows cannot make one table). Async: appending the new row to
+    ``increment``'s pending batch of ``int32`` rows is refused (``OrcapodDatabaseWriteError``,
+    ITL-1412, #509). Either way ``increment`` stores no row for the new input. Before
+    #509 these runs were the two tests of held rows that cannot make one table; that
+    case now lives in ``test_rows_on_read.py``, without a store.
     """
+    from orcapod.errors import OrcapodDatabaseWriteError
     from orcapod.pipeline import AsyncPipelineOrchestrator
-    from orcapod.pipeline.observer import NoOpObserver
-
-    class DataStarts(NoOpObserver):
-        def __init__(self) -> None:
-            self.count = 0
-
-        def contextualize(self, *identity_path: str) -> DataStarts:
-            return self
-
-        def on_data_start(self, node_label: str, tag: Any, data: Any) -> None:
-            if node_label == "increment":
-                self.count += 1
 
     _build(
         DeltaTableDatabase(tmp_path), _source_table("uint32").slice(0, 2), chained=True
     ).run()
     _as_written_before_the_fix(tmp_path)
     job = _build(DeltaTableDatabase(tmp_path), _source_table("uint32"), chained=True)
-    job.run(orchestrator=AsyncPipelineOrchestrator())
-    job.nodes["increment"].clear_cache()
-    observer = DataStarts()
-    summary = job.run(orchestrator=AsyncPipelineOrchestrator(), observer=observer)
-    assert summary.nodes["double"].held == 3
-    assert observer.count == 3
-
-
-def test_a_held_nodes_rows_are_built_at_its_successors_edge(
-    tmp_path: pathlib.Path,
-) -> None:
-    """A held node's rows are built where its successor reads them, as on ``main``.
-
-    A direct sync run: ``double`` held (its rows cannot make one table), an independent
-    source, then ``increment`` after ``double``. The independent source runs before
-    ``increment``'s input is built and raises (Codex on PR #485, round 3).
-    """
-    from orcapod.core.operators.static_output_pod import rows_on_read
-    from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
-    from orcapod.pipeline.dag import OrcaDAG
-    from orcapod.pipeline.observer import NoOpObserver
-
-    _build(
-        DeltaTableDatabase(tmp_path), _source_table("uint32").slice(0, 2), chained=True
-    ).run()
-    _as_written_before_the_fix(tmp_path)
-    job = _build(DeltaTableDatabase(tmp_path), _source_table("uint32"), chained=True)
-    job.run(orchestrator=AsyncPipelineOrchestrator())
-    double, increment = job.nodes["double"], job.nodes["increment"]
-    increment.clear_cache()
-    independent = _build(InMemoryArrowDatabase(), _source_table("uint32")).nodes["src"]
-
-    starts: list[str] = []
-
-    class Starts(NoOpObserver):
-        def contextualize(self, *identity_path: str) -> Starts:
-            return self
-
-        def on_node_start(
-            self, node_label: str, node_hash: str, tag_schema: Any = None
-        ) -> None:
-            starts.append(node_label)
-
-    dag: OrcaDAG[Any] = OrcaDAG()
-    dag.add_node(double)
-    dag.add_node(independent)
-    dag.add_edge(double, increment)
-    held = {double: rows_on_read(double.iter_data(), double)}
-    with pytest.raises(pa.ArrowInvalid):
-        SyncPipelineOrchestrator().run(dag, observer=Starts(), held=held)
-    assert starts == ["src"]
+    if asynchronous:
+        with pytest.raises(OrcapodDatabaseWriteError, match="'increment'"):
+            job.run(orchestrator=AsyncPipelineOrchestrator())
+    else:
+        with pytest.raises(pa.ArrowInvalid, match="Schema at index"):
+            job.run()
+    assert _stored_tags(tmp_path, "double") == [1, 2, 3]
+    assert 3 not in _stored_tags(tmp_path, "increment")
