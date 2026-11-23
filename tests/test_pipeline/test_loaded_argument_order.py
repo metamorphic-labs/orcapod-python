@@ -437,7 +437,7 @@ def test_a_loaded_read_only_node_keeps_its_inputs(
 def test_one_stream_given_twice_fails_to_run_in_a_job(
     operator: type, mode: str, tmp_path: Path
 ) -> None:
-    """Finding 5 (pre-existing on main, pinned; filed by the coordinator): a job's
+    """Finding 5 (pre-existing on main, pinned; ITL-1419): a job's
     graph has one edge for two argument slots of one stream, so ``MergeJoin()(a, a)``
     and ``SemiJoin()(a, a)`` fail when the job runs, though they run as plain
     streams. A fix makes this test fail; it is then changed to the fixed behaviour."""
