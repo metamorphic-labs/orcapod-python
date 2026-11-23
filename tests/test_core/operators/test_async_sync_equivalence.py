@@ -35,6 +35,7 @@ from orcapod.core.operators import (
     DropColumns,
     DropDataColumns,
     DropNulls,
+    Filter,
     DropTagColumns,
     GroupBy,
     Index,
@@ -62,6 +63,7 @@ from orcapod.protocols.core_protocols import (
     StreamProtocol,
     TagProtocol,
 )
+from orcapod.types import Condition, col
 from orcapod.utils import arrow_utils
 
 # The ``semijoin_shared_data_column`` case shares a data column name on purpose; SemiJoin
@@ -680,6 +682,30 @@ CASES = [
     Case("index", lambda: Index("l8", 0), lambda: (source_a(),)),
     Case("pick", lambda: Pick("d", "q"), lambda: (source_a(),)),
     Case("drop_nulls", lambda: DropNulls("nul"), lambda: (source_a(),)),
+    Case(
+        "filter",
+        lambda: Filter(Condition.of(col("nul").is_not_null(), col("k") >= 1)),
+        lambda: (source_a(),),
+    ),
+    Case(
+        "filter_many",
+        # A tag, a narrow integer, a string, a struct field, a null test and membership.
+        lambda: Filter(
+            Condition.of(
+                col("ta").is_in([5, 6]),
+                col("i8") < 3,
+                col("st").field("y") != "c",
+                col("p").is_not_null(),
+                s="a",
+            )
+        ),
+        lambda: (source_a(),),
+    ),
+    Case(
+        "filter_data_tags",
+        lambda: Filter(Condition.of(col("k") > 1)),
+        lambda: (source_a(with_data_tags=True),),
+    ),
     Case(
         "drop_nulls_many",
         # A nullable column with a null, one without, a tag, a non-nullable list.
