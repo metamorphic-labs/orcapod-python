@@ -547,7 +547,9 @@ def test_repeats_with_three_inputs_can_pair_by_arrival() -> None:
 
     assert pairs(whole) == {(1, 10), (2, 20)}
     assert pairs(one_by_one) == {(2, 10), (1, 20)}
-    others = [name for name in whole.column_names if name not in ("k", value)]
+    # Every other column with its key: a swap of the first two branches' values
+    # between k=1 and k=2 fails here.
+    others = [name for name in whole.column_names if name != value]
     assert _rows(one_by_one.select(others)) == _rows(whole.select(others))
 
 
