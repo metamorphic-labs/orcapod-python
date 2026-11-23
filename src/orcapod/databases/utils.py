@@ -237,12 +237,17 @@ class IdentityNode:
             union members of one name.
         encoded: Whether the place is dictionary-encoded as given (its values stand
             where it stands).
+        drops_dictionary_identifier: Whether the held place is in storage that
+            writes a dictionary of extension values as plain values, losing the
+            identifier (a stored Delta place): there "no identifier" is not known
+            against a dictionary-encoded place.
     """
 
     known: bool
     identifier: RawIdentifier | None
     claims: bool = True
     encoded: bool = False
+    drops_dictionary_identifier: bool = False
     children: "tuple[tuple[str, IdentityNode], ...]" = ()
 
 
@@ -257,7 +262,7 @@ def _annotation(metadata: Mapping[Any, Any] | None) -> RawIdentifier | None:
     return name, as_bytes.get(_EXTENSION_METADATA, b"")
 
 
-def _extension_identifier(arrow_type: Any) -> RawIdentifier:
+def _extension_identifier(arrow_type: Any) -> RawIdentifier | None:
     """The raw identifier an Arrow extension type holds.
 
     Read from the type's C data interface export, where Arrow writes the extension
@@ -265,18 +270,19 @@ def _extension_identifier(arrow_type: Any) -> RawIdentifier:
     on), never by calling ``__arrow_ext_serialize__`` again: a Python extension
     type's serializer may give other bytes than the ones Arrow took when the type
     was made, and the export is also the only way to read the bytes of an extension
-    type defined in Arrow's C++ library (``arrow.uuid``). Arrow cannot export an
-    extension type whose storage is itself an extension type; for that one, and
-    only that one, the Python serializer is asked.
+    type defined in Arrow's C++ library (``arrow.uuid``).
+
+    Returns:
+        The identifier, or ``None`` when Arrow cannot export the type (an extension
+        type whose storage is itself an extension type): the bytes Arrow holds are
+        then out of reach, and the serializer is not asked in their place.
     """
     from arro3.core import Field as Arro3Field
 
     try:
         exported = Arro3Field.from_arrow(pa.field("x", arrow_type)).metadata
     except pa.ArrowNotImplementedError:
-        if not isinstance(arrow_type, pa.ExtensionType):
-            raise
-        return arrow_type.extension_name.encode(), arrow_type.__arrow_ext_serialize__()
+        return None
     identifier = _annotation(exported)
     assert identifier is not None  # an extension type exports its name
     return identifier
@@ -316,6 +322,11 @@ def identity_node(arrow_field: "pa.Field[Any]") -> IdentityNode:
     elif isinstance(arrow_type, pa.BaseExtensionType):
         identifier = _extension_identifier(arrow_type)
         storage = arrow_type.storage_type
+        if identifier is None:
+            # Not exportable: this level's bytes are not known; its storage is.
+            return IdentityNode(
+                known=False, identifier=None, children=_children_of(storage)
+            )
     else:
         storage = arrow_type
     return IdentityNode(
@@ -403,8 +414,8 @@ def logical_identity_change(
     both sides have, the appended identifier must be the held one; no logical type is
     an identifier too. The rule refuses only where it knows: wherever the held
     identifier is not reliably known, where a dictionary-encoded place is given over
-    a held place with no identifier (Delta stores a dictionary of extension values
-    plain, losing it), or where a side is a bare untyped null, it abstains at that
+    a stored Delta place with no identifier (Delta stores a dictionary of extension
+    values plain, losing it), or where a side is a bare untyped null, it abstains at that
     place, and a place only one side has (struct evolution, another kind of
     type) is left to the database's other append checks. It compares raw bytes,
     never Arrow type equality: pyarrow's equality of two instances of one Python
@@ -424,7 +435,11 @@ def logical_identity_change(
     # A dictionary-encoded place over a stored place with no identifier: Delta stores
     # a dictionary of extension values as plain values, losing the identifier
     # (ITL-1372), so "none" there is not known; the identifier comparison abstains.
-    unknown_loss = incoming.encoded and held.identifier is None
+    unknown_loss = (
+        incoming.encoded
+        and held.identifier is None
+        and held.drops_dictionary_identifier
+    )
     if (
         held.known
         and incoming.known

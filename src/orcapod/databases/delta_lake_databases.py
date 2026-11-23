@@ -668,7 +668,14 @@ def _delta_identity_node(delta_type: Any, metadata: Any) -> IdentityNode:
     as_bytes = metadata_bytes(metadata)
     name = as_bytes.get(_EXTENSION_KEYS[0])
     identifier = None if name is None else (name, as_bytes.get(_EXTENSION_KEYS[1], b""))
-    return IdentityNode(known=True, identifier=identifier, children=children)
+    # Delta stores a dictionary of extension values as plain values, losing the
+    # identifier (ITL-1372): a place with none may be such a loss.
+    return IdentityNode(
+        known=True,
+        identifier=identifier,
+        children=children,
+        drops_dictionary_identifier=True,
+    )
 
 
 def _identity_refusal(
@@ -1822,20 +1829,18 @@ class DeltaTableDatabase:
         Raises:
             InputValidationError: For the first such column, naming it and the path.
         """
-        held: list[dict[str, pa.Field[Any]]] = []
         identities: list[list[tuple[str, IdentityNode]]] = []
         pending = self._pending_batches.get(self._get_record_key(record_path))
         if pending is not None:
-            held.append({f.name: f for f in pending.schema})
             identities.append([(f.name, identity_node(f)) for f in pending.schema])
         try:
             delta_table = self._get_delta_table(record_path)
         except OrcapodDatabaseReadError:
             delta_table = None
         if delta_table is not None:
-            held.append(_held_columns(delta_table))
             identities.append(_stored_identities(delta_table))
-        # A known different logical type identifier first (ITL-1371).
+        # A known different logical type identifier first (ITL-1371), from the log
+        # alone: before any recorded type is decoded, so the error names it.
         for given_identities in identities:
             identity = _identity_refusal(given_identities, schema)
             if identity is not None:
@@ -1845,6 +1850,11 @@ class DeltaTableDatabase:
                     f"{identity[1]}. The stored rows are unchanged and nothing was "
                     "written."
                 )
+        held: list[dict[str, pa.Field[Any]]] = []
+        if pending is not None:
+            held.append({f.name: f for f in pending.schema})
+        if delta_table is not None:
+            held.append(_held_columns(delta_table))
         for given in held:
             for field in schema:
                 if field.name not in given:

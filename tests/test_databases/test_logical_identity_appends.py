@@ -29,6 +29,7 @@ from orcapod.databases import (
 from orcapod.databases.connector_arrow_database import ConnectorArrowDatabase
 from orcapod.databases.spiraldb_connector import SpiralDBConnector
 from orcapod.databases.utils import (
+    IdentityNode,
     first_logical_identity_change,
     metadata_bytes,
     identity_node,
@@ -730,10 +731,21 @@ def test_every_container_is_walked(tmp_path: Path, container: str, state: str) -
     stored = db.get_all_records(PATH, record_id_column="id")
     assert stored is not None
     assert sorted(cast(list[bytes], stored.column("id").to_pylist())) == held_ids
-    assert (
-        stored.schema.field("x").type
-        == _container_rows(container, b"m", [b"1"]).schema.field("x").type
-    )
+    expected = _container_rows(container, b"m", [b"1"]).schema.field("x")
+    # The layout, by Arrow type equality, and the identifiers, as raw bytes: type
+    # equality alone would also hold for another payload.
+    assert stored.schema.field("x").type == expected.type
+    read_back = identity_node(stored.schema.field("x"))
+    assert read_back == identity_node(expected)
+    assert (b"itl1371.a", b"m") in _identifiers(read_back)
+
+
+def _identifiers(node: IdentityNode) -> list[Any]:
+    """Every identifier a node and its children carry, depth first."""
+    found = [node.identifier] if node.identifier is not None else []
+    for _, child in node.children:
+        found.extend(_identifiers(child))
+    return found
 
 
 def test_delta_dictionary_of_extension_values(tmp_path: Path) -> None:
@@ -1100,3 +1112,127 @@ def test_the_bytes_arrow_holds_decide_not_the_serializer(state: str) -> None:
     db.add_records(PATH, held, record_id_column="id", flush=state == "committed")
     with pytest.raises(InputValidationError, match="'itl1371.mutable;7365636f6e64'"):
         db.add_records(PATH, given, record_id_column="id")
+
+
+def test_an_unexportable_extension_level_is_not_compared() -> None:
+    """Arrow cannot export an extension type whose storage is another extension type,
+    so the bytes it holds for that outer level are out of reach: the outer level is
+    not compared (its serializer, which may have changed, is not asked), and its
+    storage still is."""
+
+    class MutableOuter(pa.ExtensionType):
+        def __init__(self, storage: Any, payload: bytes) -> None:
+            self.payload = payload
+            super().__init__(storage, "itl1371.mutable_outer")
+
+        def __arrow_ext_serialize__(self) -> bytes:
+            return self.payload
+
+        @classmethod
+        def __arrow_ext_deserialize__(cls, storage_type: Any, serialized: bytes) -> Any:
+            return cls(storage_type, serialized)
+
+    def rows(inner_meta: bytes, outer: bytes, rid: bytes) -> tuple[Any, pa.Table]:
+        inner = _wrapped(inner_meta, ["v"])
+        outer_type = MutableOuter(inner.type, outer)
+        x = outer_type.wrap_array(inner)
+        return outer_type, pa.table({"id": pa.array([rid], pa.large_binary()), "x": x})
+
+    db = InMemoryArrowDatabase()
+    _, held = rows(b"m", b"o", b"1")
+    db.add_records(PATH, held, record_id_column="id", flush=True)
+    # The outer serializer changed after its type was made: not asked, accepted.
+    outer_type, same = rows(b"m", b"o", b"22")
+    outer_type.payload = b"changed"
+    db.add_records(PATH, same, record_id_column="id")
+    # Another inner identifier is still refused.
+    _, other_inner = rows(b"n", b"o", b"333")
+    with pytest.raises(InputValidationError, match="x<storage> is of logical type"):
+        db.add_records(PATH, other_inner, record_id_column="id")
+    db.flush()
+    stored = db.get_all_records(PATH, record_id_column="id")
+    assert stored is not None and stored.num_rows == 2
+
+
+@pytest.mark.parametrize("state", ["pending", "committed"])
+def test_a_dictionary_over_a_plain_held_column_is_refused_outside_delta(
+    state: str,
+) -> None:
+    """The dictionary exception is Delta's alone (its storage loses a dictionary's
+    identifier): where the database holds the given schema, a dictionary of
+    extension values over a plain column is a known different identifier."""
+    db = InMemoryArrowDatabase()
+    plain = pa.table(
+        {
+            "id": pa.array([b"1"], pa.large_binary()),
+            "x": pa.array(["v"], pa.large_string()),
+        }
+    )
+    db.add_records(PATH, plain, record_id_column="id", flush=state == "committed")
+    with pytest.raises(InputValidationError, match="stored column's no logical"):
+        db.add_records(
+            PATH, _container_rows("dictionary", b"m", [b"22"]), record_id_column="id"
+        )
+
+
+def test_in_memory_duplicate_only_append_is_not_refused() -> None:
+    """With ``skip_duplicates``, an append whose every row is already stored writes
+    nothing and is not refused for another identifier, as in Delta; one with a new
+    row is."""
+    db = InMemoryArrowDatabase()
+    db.add_records(
+        PATH,
+        _container_rows("list_view", b"m", [b"1"]),
+        record_id_column="id",
+        flush=True,
+    )
+    db.add_records(
+        PATH,
+        _container_rows("list_view", b"n", [b"1"]),
+        record_id_column="id",
+        skip_duplicates=True,
+    )
+    with pytest.raises(InputValidationError, match="itl1371.a;6e"):
+        db.add_records(
+            PATH,
+            _container_rows("list_view", b"n", [b"1", b"22"]),
+            record_id_column="id",
+            skip_duplicates=True,
+        )
+    db.flush()
+    stored = db.get_all_records(PATH, record_id_column="id")
+    assert stored is not None
+    assert stored.column("id").to_pylist() == [b"1"]
+    assert (b"itl1371.a", b"m") in _identifiers(identity_node(stored.schema.field("x")))
+
+
+def test_delta_identity_is_checked_before_recorded_types_are_decoded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The identity rule reads the Delta log only, and runs before the stored
+    recorded types are decoded: a decode that would fail does not hide the
+    identifier the error names."""
+    import orcapod.databases.delta_lake_databases as delta_module
+
+    with _store("Delta", tmp_path) as store:
+        store.db.add_records(
+            PATH,
+            _rows(HELD, "annotated", "struct", [b"1"]),
+            record_id_column="id",
+            flush=True,
+        )
+
+        def undecodable(_: Any) -> Any:
+            raise RuntimeError(
+                "recorded types are not decoded before the identity rule"
+            )
+
+        monkeypatch.setattr(delta_module, "_held_columns", undecodable)
+        with pytest.raises(
+            InputValidationError, match="x.v is of logical type 'itl1371.b"
+        ):
+            store.db.add_records(
+                PATH,
+                _rows(("itl1371.b", b"m"), "annotated", "struct", [b"22"]),
+                record_id_column="id",
+            )
