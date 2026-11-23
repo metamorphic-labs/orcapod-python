@@ -121,13 +121,65 @@ lists every type for every database.
 
 On disk the layout is `<directory>/<job name>/<function name>/...` for each function, plus
 `<directory>/<job name>/_result/...`. The job's `name` is the top level, so jobs with
-different names over one directory do not see each other's results. Deleting the directory,
+different names over one directory do not see each other's results, unless they are given
+one result database (below). Deleting the directory,
 or a job's subdirectory, is safe: the next run of a newly built job, for example in a new
 Python session, recomputes what is missing. A job object that has already run holds its
 run and computes nothing on a second `run()`.
 
 A job created without a database can be recorded but not run. Give it one later with
 `job.bind(database=...)`; `run()` without a database raises `ValueError`.
+
+### Sharing function results between jobs
+
+A function's results depend only on the function and its input values, not on the job
+that computed them. Give several jobs one **result database** and they share them:
+`PipelineJob(name=..., database=..., result_database=...)`. The function results are
+stored in the result database as it is given, at `<function name>/...`, with no job name, so
+a job computes only the inputs no job sharing it has stored. Pass a view, such as
+`results.at("shared")`, to put them under a folder of your choice.
+
+```python
+results = InMemoryArrowDatabase()
+shared_calls = []
+
+
+@function_pod(output_keys="bmi")
+def shared_bmi(weight: float, height: float) -> float:
+    shared_calls.append(weight)
+    return weight / height**2
+
+
+for study_name in ["study_1", "study_2"]:
+    study = PipelineJob(
+        name=study_name, database=InMemoryArrowDatabase(), result_database=results
+    )
+    with study:
+        shared_bmi.pod(mice(cohort_a), label="bmi")
+    study.run()
+    print(study_name, study.nodes["bmi"].as_table().num_rows, len(shared_calls))
+# study_1 2 2
+# study_2 2 2
+
+print(sorted({path[0] for path in results.list_table_paths(())}))
+# ['shared_bmi']
+```
+
+`study_2` computed nothing: both rows were in the result database. Without
+`result_database` (the default) the results are kept in the job's own database at
+`<job name>/_result/...`, as above.
+
+Only function results are shared. Everything else a job stores stays the job's own, under
+its database and name, whatever `result_database` is: each function node's pipeline records
+(which rows the job read), an operator's cache, a side-effect pod's log and a cached source.
+So a job still reads only its own rows: two jobs over different sources share one result
+table, and each job's nodes, their `as_source()` and a loaded job show the rows of that job's
+inputs only.
+
+A function that takes the invocation context (`ctx_arg`) performs an external action, and
+its result table records which inputs it was performed for. Jobs that share a result
+database share that record too: a job performs the action only for inputs no job sharing
+the database has performed it for.
 
 ### Connector databases
 
@@ -192,8 +244,8 @@ except UnstorableColumnError as exc:
 ## What a re-run computes
 
 A stored result is reused when the function's identity (its name, its output schema and its
-**major** version), the input values of the row, and the job's name and database are all
-unchanged. Which source, and which steps before the function, the values came through does
+**major** version), the input values of the row, and the job's name and database (or the
+result database it shares, see above) are all unchanged. Which source, and which steps before the function, the values came through does
 not matter.
 
 ```python
@@ -373,11 +425,12 @@ the **Nodes** table below the picture for each node's columns and status.
 
 ## Saving and loading
 
-`job.save(path)` writes the job to a JSON file: the graph, the database's location and how
-each source was configured. `PipelineJob.load(path)` reads it back, for example in a later
+`job.save(path)` writes the job to a JSON file: the graph, the database's location (and the
+result database's, when one was given) and how each source was configured. `PipelineJob.load(path)` reads it back, for example in a later
 Python session. An `InMemoryArrowDatabase` has no location to record, so here the database
 is passed again; `PipelineJob.load(path, database=...)` is also how you point a loaded job
-at a database that has moved. The file records each node's own Arrow types, so saving types
+at a database that has moved, and `PipelineJob.load(path, result_database=...)` at a result
+database. The file records each node's own Arrow types, so saving types
 every node from its inputs' types, as previewing an empty job does, and costs what that
 preview costs: a pipeline whose joins keep many system-tag columns saves as slowly as it
 previews.

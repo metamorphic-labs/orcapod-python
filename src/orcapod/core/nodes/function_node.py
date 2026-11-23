@@ -2339,9 +2339,11 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         its own first means a crash between the two commits leaves results without
         pipeline records (found in the result cache on the rerun, so nothing is
         recomputed), never pipeline records pointing at results that were lost.
-        Only a database that commits table by table
-        (``TableCommittingDatabaseProtocol``, the Delta database) needs and offers this;
-        for another database the pipeline flush that follows commits everything.
+        A database that commits table by table (``TableCommittingDatabaseProtocol``,
+        the Delta database) commits the result table alone. Any other result database
+        is flushed whole: when it is the job's own database that commits the pipeline
+        records too, as the pipeline flush that follows would; when it is a separate
+        result database (ITL-1408), the pipeline flush would not commit it at all.
         """
         pod = self._cached_function_pod
         if not isinstance(pod, CachedFunctionPod):
@@ -2349,6 +2351,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         result_database = as_table_committing(pod.result_database)
         if result_database is not None:
             result_database.flush_batch(pod.record_path)
+        else:
+            pod.result_database.flush()
 
     def _commit_pending_writes(self) -> None:
         """Commit this node's pending writes, results first (see ``_batched_commits``).

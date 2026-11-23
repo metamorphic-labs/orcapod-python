@@ -130,11 +130,17 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
     Args:
         name: Pipeline name (string or tuple). Used as the path prefix for
             all cache/pipeline paths when the pipeline is run.
-        database: Database for result caching and operator records.
+        database: Database for the job's records: pipeline records, operator
+            caches, side-effect logs and, unless ``result_database`` is given,
+            function results (under ``<name>/_result``).
         execution_context: Optional execution configuration.
         tracker_manager: Optional tracker manager override.
         auto_compile: If ``True`` (default), ``compile()`` is called
             automatically when the context manager exits.
+        result_database: Optional database for function results, used as given (no
+            job name is added to its paths), so jobs that share it share function
+            results (ITL-1408). ``None`` (the default) stores them under the job's
+            own database, at ``<name>/_result``.
     """
 
     # ------------------------------------------------------------------
@@ -153,9 +159,16 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         execution_context: "ExecutionContext | None" = None,
         tracker_manager: cp.TrackerManagerProtocol | None = None,
         auto_compile: bool = True,
+        *,
+        result_database: "ArrowDatabaseProtocol | None" = None,
     ) -> None:
         super().__init__(name=name, tracker_manager=tracker_manager)
         self._database = database
+        self._result_database: "ArrowDatabaseProtocol | None" = result_database
+        # True for a loaded job whose file names a separate result database that could
+        # not be rebuilt and none was given: its function nodes get no database rather
+        # than the job's own ``_result`` location, which holds none of their results.
+        self._result_database_missing: bool = False
         self._execution_context = execution_context
         self._auto_compile = auto_compile
         # name → bound concrete source (user-facing API: job.sources).
@@ -298,8 +311,20 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
     @property
     def database(self) -> "ArrowDatabaseProtocol | None":
-        """The database used for result caching."""
+        """The job's database: pipeline records, operator caches, side-effect logs.
+
+        It also holds the function results unless ``result_database`` is set.
+        """
         return self._database
+
+    @property
+    def result_database(self) -> "ArrowDatabaseProtocol | None":
+        """The separate database for function results, or ``None`` when not given.
+
+        ``None`` means the results are stored in the job's own database, under
+        ``<name>/_result`` (ITL-1408).
+        """
+        return self._result_database
 
     @property
     def execution_context(self) -> "ExecutionContext | None":
@@ -317,6 +342,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         database: "ArrowDatabaseProtocol | None" = None,
         sources: "dict[str, cp.StreamProtocol] | None" = None,
         execution_context: "ExecutionContext | None" = None,
+        *,
+        result_database: "ArrowDatabaseProtocol | None" = None,
     ) -> "PipelineJob":
         """Create a runnable ``PipelineJob`` from a compiled ``Pipeline``.
 
@@ -332,6 +359,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             database: Database for result caching and operator records.
             sources: Mapping of ``SourceNode.name`` → concrete source.
             execution_context: Optional execution configuration.
+            result_database: Optional separate database for function results, as
+                for the constructor.
 
         Returns:
             A new ``PipelineJob`` ready to run (or ``bind()`` further).
@@ -376,6 +405,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         job = cls.from_invocations(pipeline.to_invocations(), name=pipeline._name)
         job._database = database  # pyright: ignore[reportAttributeAccessIssue]  # from_invocations is typed as the base class; the instance is a PipelineJob
         job._execution_context = execution_context
+        job._result_database = result_database  # pyright: ignore[reportAttributeAccessIssue]  # as for _database above
 
         # Bind concrete sources and distribute databases.
         if bound_sources:
@@ -394,6 +424,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         sources: "dict[str, cp.StreamProtocol] | None" = None,
         database: "ArrowDatabaseProtocol | None" = None,
         execution_context: "ExecutionContext | None" = None,
+        *,
+        result_database: "ArrowDatabaseProtocol | None" = None,
     ) -> None:
         """Update bindings in place. Returns ``None``.
 
@@ -408,14 +440,16 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         validated before anything is changed: a refused source leaves the job's
         bindings and database as they were.
 
-        When *database* is provided and differs from the current database,
-        ``_distribute_databases()`` is called so that all job nodes receive
-        live DB references immediately.
+        When *database* or *result_database* is provided and differs from the
+        current one, ``_distribute_databases()`` is called (once a database is set)
+        so that all job nodes receive live DB references immediately.
 
         Args:
             sources: Mapping of ``SourceNode.name`` → concrete source.
             database: Replaces the current database and triggers DB redistribution.
             execution_context: Replaces the current execution context.
+            result_database: Replaces the separate database for function results
+                (see the constructor) and triggers DB redistribution.
 
         Raises:
             SourceSpecMismatchError: If any source's columns differ from its slot's
@@ -424,12 +458,16 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 operator node that caches (``LOG`` or ``REPLAY``) would read a
                 restricted source, one this bind binds or one already bound
                 (ITL-1218); the job is left as it was.
-            UnstorableColumnError: If *database* cannot store a table of a node
-                (ITL-1162); the job is left as it was.
+            UnstorableColumnError: If *database* or *result_database* cannot store
+                a table of a node (ITL-1162); the job is left as it was.
         """
         from orcapod.core.nodes.source_node import SourceNodeBase
 
-        database_changed = database is not None and database is not self._database
+        database_changed = (
+            database is not None and database is not self._database
+        ) or (
+            result_database is not None and result_database is not self._result_database
+        )
 
         if sources is not None:
             source_names = {
@@ -463,13 +501,19 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         refuse_restriction_conflicts(
             (self._persistent_node_map or {}).values(), rebinding=rebinding
         )
-        if database_changed and database is not None:
-            self._require_storable_tables(database)
+        new_database = database if database is not None else self._database
+        new_result_database = (
+            result_database if result_database is not None else self._result_database
+        )
+        if database_changed and new_database is not None:
+            self._require_storable_tables(new_database, new_result_database)
 
         # Every source is validated before anything changes: a refused source leaves
         # the job as it was, its database included (ITL-1112).
-        if database is not None:
-            self._database = database
+        self._database = new_database
+        self._result_database = new_result_database
+        if result_database is not None:
+            self._result_database_missing = False
 
         if sources is not None:
             # Update bound_source on SourceJobNodes and maintain both dicts.
@@ -494,31 +538,59 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         if execution_context is not None:
             self._execution_context = execution_context
 
-        if database_changed:
+        if database_changed and self._database is not None:
             self._distribute_databases()
 
     # ------------------------------------------------------------------
     # _distribute_databases()
     # ------------------------------------------------------------------
 
-    def _require_storable_tables(self, database: "ArrowDatabaseProtocol") -> None:
-        """Refuse ``database`` if it cannot store a table of one of the job's nodes.
+    def _database_views(
+        self,
+        database: "ArrowDatabaseProtocol",
+        result_database: "ArrowDatabaseProtocol | None",
+    ) -> "tuple[ArrowDatabaseProtocol, ArrowDatabaseProtocol]":
+        """The job's two views: its pipeline database and its function-result database.
+
+        The one place that decides where a job stores (ITL-1408): the pipeline view is
+        ``database`` under the job's name; function results go to ``result_database``
+        as given, or, when none is given, under the pipeline view at ``_result``.
+
+        Args:
+            database: The job's database.
+            result_database: The separate database for function results, if any.
+
+        Returns:
+            ``(pipeline view, result view)``.
+        """
+        pipeline_db = database.at(*self._name)
+        if result_database is not None:
+            return pipeline_db, result_database
+        return pipeline_db, pipeline_db.at("_result")
+
+    def _require_storable_tables(
+        self,
+        database: "ArrowDatabaseProtocol",
+        result_database: "ArrowDatabaseProtocol | None",
+    ) -> None:
+        """Refuse databases that cannot store a table of one of the job's nodes.
 
         The same views as ``_distribute_databases`` gives the nodes. Nothing
         changes (ITL-1162).
 
         Args:
             database: The job database to check.
+            result_database: The separate function-result database to check, if any.
 
         Raises:
-            UnstorableColumnError: For the first node whose table the database
+            UnstorableColumnError: For the first node whose table a database
                 cannot store, naming the node.
         """
-        pipeline_db = database.at(*self._name)
-        result_db = pipeline_db.at("_result")
+        pipeline_db, result_db = self._database_views(database, result_database)
         for node in (self._persistent_node_map or {}).values():
             if isinstance(node, FunctionJobNode):
-                node.require_storable_tables(pipeline_db, result_db)
+                if not self._result_database_missing:
+                    node.require_storable_tables(pipeline_db, result_db)
             elif isinstance(node, OperatorJobNode):
                 node.require_storable_tables(pipeline_db, node.cache_mode)
             elif isinstance(node, SideEffectJobNode):
@@ -543,12 +615,16 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # leaves every node as it was (ITL-1162), and so is a caching operator over
         # a restricted source (ITL-1218).
         refuse_restricted_operator_caches((self._persistent_node_map or {}).values())
-        self._require_storable_tables(self._database)
-        pipeline_db = self._database.at(*self._name)
-        result_db = pipeline_db.at("_result")
+        self._require_storable_tables(self._database, self._result_database)
+        pipeline_db, result_db = self._database_views(
+            self._database, self._result_database
+        )
 
         for node in (self._persistent_node_map or {}).values():
             if isinstance(node, FunctionJobNode):
+                if self._result_database_missing:
+                    # Left without a database (see ``load``), never given ``_result``.
+                    continue
                 node.attach_databases(
                     pipeline_database=pipeline_db,
                     result_database=result_db,
@@ -1130,18 +1206,27 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # Until this run finishes, what the database holds for a node is not certain.
         self._last_run_finished = False
 
-        table_committing = as_table_committing(self._database)
-        if (
-            table_committing is not None
-            and commit_every_rows >= table_committing.batch_size
-        ):
-            raise ValueError(
-                f"commit_every_rows={commit_every_rows} must be smaller than the "
-                f"database's batch_size={table_committing.batch_size}: the database commits a "
-                "table by itself once it holds batch_size pending rows, which could "
-                "commit pipeline records before their results. Use a smaller "
-                "commit_every_rows, or create the database with a larger batch_size."
+        # The job's database, then a separate result database (ITL-1408): each one
+        # that commits table by table.
+        committing = [
+            committing_db
+            for committing_db in (
+                as_table_committing(self._database),
+                as_table_committing(self._result_database),
             )
+            if committing_db is not None
+        ]
+        table_committing = committing[0] if committing else None
+        for committing_db in committing:
+            if commit_every_rows >= committing_db.batch_size:
+                raise ValueError(
+                    f"commit_every_rows={commit_every_rows} must be smaller than the "
+                    + f"database's batch_size={committing_db.batch_size}: the database "
+                    + "commits a table by itself once it holds batch_size pending rows, "
+                    + "which could commit pipeline records before their results. Use a "
+                    + "smaller commit_every_rows, or create the database with a larger "
+                    + "batch_size."
+                )
         if self._database is None:
             raise ValueError(
                 "PipelineJob.run() requires a database. "
@@ -1260,8 +1345,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         snapshot_hash = hashlib.sha256("\n".join(leaf_hashes).encode()).hexdigest()[:16]
         pipeline_uri = "/".join(self._name) + "@" + snapshot_hash
 
-        pipeline_db = self._database.at(*self._name)
-        result_db = pipeline_db.at("_result")
+        pipeline_db, result_db = self._database_views(
+            self._database, self._result_database
+        )
 
         # A source read under two restrictions, or a caching operator over a restricted
         # source, is refused before any source is checked and before anything is
@@ -1282,17 +1368,24 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # A load-only run writes nothing, and a run that runs no node touches no database,
         # so neither commits anything, not even pending writes of earlier operations.
         if table_committing is not None and not load_only and plan.to_run:
-            try:
-                pipeline_db.flush()
-            except OrcapodDatabaseError as exc:
-                exc.add_note(_PENDING_BEFORE_RUN_NOTE)
-                raise
-            except Exception as exc:
-                flush_error = OrcapodDatabaseWriteError(
-                    pipeline_db.base_path, flush=True
-                )
-                flush_error.add_note(_PENDING_BEFORE_RUN_NOTE)
-                raise flush_error from exc
+            # A separate result database (ITL-1408) is committed too, results first.
+            pending_dbs = (
+                (result_db, pipeline_db)
+                if self._result_database is not None
+                else (pipeline_db,)
+            )
+            for pending_db in pending_dbs:
+                try:
+                    pending_db.flush()
+                except OrcapodDatabaseError as exc:
+                    exc.add_note(_PENDING_BEFORE_RUN_NOTE)
+                    raise
+                except Exception as exc:
+                    flush_error = OrcapodDatabaseWriteError(
+                        pending_db.base_path, flush=True
+                    )
+                    flush_error.add_note(_PENDING_BEFORE_RUN_NOTE)
+                    raise flush_error from exc
 
         return _PreparedRun(
             exec_dag=exec_dag,
@@ -1339,7 +1432,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             # do not look dropped, then report the failure itself. A cancelled or
             # interrupted run commits nothing more, but clears its nodes too.
             if isinstance(run_error, Exception) and not load_only:
-                flush_best_effort(run_error, prepared.pipeline_db, prepared.result_db)
+                flush_best_effort(run_error, prepared.result_db, prepared.pipeline_db)
             clear_run_rows(plan.to_run)
             raise
 
@@ -1384,8 +1477,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             if not load_only and plan.to_run:
                 # A load-only run writes nothing and commits nothing, and a run that
                 # ran no node touches no database (ITL-1095).
-                pipeline_db.flush()
+                # Results before pipeline records (ITL-919): with a separate result
+                # database (ITL-1408) these are two commits, and a crash between them
+                # must leave results without records, never records without results.
                 result_db.flush()
+                pipeline_db.flush()
         except OrcapodDatabaseReadError as exc:
             # A stored table could not be read: report the read failure itself.
             exc.add_note(pending_note)
@@ -1495,6 +1591,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         database_block = None
         if self._database is not None and hasattr(self._database, "to_config"):
             database_block = self._database.to_config()
+        # A separate result database (ITL-1408), saved by the same rule; ``None`` when
+        # the results are in the job's own database (``<name>/_result``).
+        result_database_block = None
+        if self._result_database is not None:
+            result_database_block = self._result_database.to_config()
 
         if not self._has_run:
             status = "pending"
@@ -1550,6 +1651,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             "bindings": {
                 "sources": sources_block,
                 "database": database_block,
+                "result_database": result_database_block,
             },
         }
 
@@ -1561,6 +1663,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         cls,
         path: "str | Path",
         database: "ArrowDatabaseProtocol | None" = None,
+        *,
+        result_database: "ArrowDatabaseProtocol | None" = None,
     ) -> "PipelineJob":
         """Deserialize a ``PipelineJob`` from a JSON file to read its stored results.
 
@@ -1584,6 +1688,14 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             path: Path to the JSON file produced by ``save()``.
             database: Optional database override. When provided, takes precedence
                 over any database configuration in the file.
+            result_database: Optional override of the separate function-result
+                database (ITL-1408). When provided, it is used whatever the file
+                says. Otherwise the one the file names is rebuilt from its saved
+                configuration, as the job's database is; a file that names none
+                keeps the results in the job's database (``<name>/_result``). When
+                the file names one that cannot be rebuilt, the function nodes get no
+                database (a warning says what to pass) rather than the job's own
+                ``_result`` location, which holds none of their results.
 
         Returns:
             A read-only ``PipelineJob`` whose nodes' stored views serve their stored
@@ -1745,7 +1857,37 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # that cannot compute content hashes, so the to_invocations() → from_invocations()
         # path used by from_pipeline() would fail.  Instead, attach the loaded
         # pipeline directly as the compiled blueprint and set up source bindings.
-        job = cls(name=pipeline._name, database=effective_database)
+        # Reconstruct the separate result database (ITL-1408), by the same rule.
+        effective_result_database = result_database
+        result_database_missing = False
+        if effective_result_database is None:
+            result_config = data.get("bindings", {}).get("result_database")
+            if result_config:
+                try:
+                    from orcapod.pipeline.serialization import (
+                        resolve_database_from_config,
+                    )
+
+                    effective_result_database = resolve_database_from_config(
+                        result_config
+                    )
+                except Exception as exc:
+                    result_database_missing = True
+                    logger.warning(
+                        "Could not reconstruct the job's separate result database "
+                        "(bindings.result_database) from its saved config: %s. The "
+                        "function nodes' results cannot be read until it is given: "
+                        "PipelineJob.load(path, result_database=...) or "
+                        "job.bind(result_database=...).",
+                        exc,
+                    )
+
+        job = cls(
+            name=pipeline._name,
+            database=effective_database,
+            result_database=effective_result_database,
+        )
+        job._result_database_missing = result_database_missing
         job._loaded = True
         job._compiled_pipeline = pipeline
         # Mark compiled so save() / compiled_pipeline can be accessed.
