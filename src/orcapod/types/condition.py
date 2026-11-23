@@ -28,17 +28,12 @@ import re
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import date, datetime, timedelta, timezone
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Literal, NamedTuple, TypeAlias, TypeVar
+from typing import Literal, NamedTuple, TypeAlias, TypeVar
 
+import pyarrow as pa
 from typing_extensions import override
 
 from orcapod.utils.datetime_utils import instant_microseconds
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
 
 
 # How a datetime, date or bytes value of a condition is written in a saved config, and a

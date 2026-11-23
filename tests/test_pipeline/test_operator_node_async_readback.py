@@ -287,7 +287,7 @@ def test_operator_node_cache_modes_keep_sync_async_readback_equivalent(
         )
 
     sync_node, async_node = make_node(), make_node()
-    sync_rows = sync_node.execute(source)
+    sync_rows = list(sync_node.execute(source).iter_data())
 
     async def run() -> list[tuple[TagProtocol, DataProtocol]]:
         """Drive the node's public channel interface and collect forwarded rows."""

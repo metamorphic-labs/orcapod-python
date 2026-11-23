@@ -43,6 +43,7 @@ from collections.abc import AsyncIterator, Collection, Generator, Iterator, Mapp
 from contextlib import contextmanager
 from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING
 
+import pyarrow as pa
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource, saved_tag_only_columns
@@ -63,19 +64,12 @@ from orcapod.errors import InputValidationError, RowIdentifierError, SourceTooLa
 from orcapod.types import ColumnConfig, Condition
 from orcapod.types.condition import check_equality_conditions
 from orcapod.utils import arrow_utils
-from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.schema_utils import _normalize_column_list
 
 if TYPE_CHECKING:
-    import polars as pl
-    import pyarrow as pa
-
     from orcapod import contexts
     from orcapod.config import OrcapodConfig
     from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
-else:
-    pa = LazyModule("pyarrow")
-    pl = LazyModule("polars")
 
 DEFAULT_MAX_ROWS = 100_000
 DEFAULT_BATCH_ROWS = 8_192
@@ -284,6 +278,7 @@ class SpiralDBTableSource(RootSource):
     """Config type key and the kind in the source id's kind part (one vocabulary)."""
     SOURCE_VERSION: ClassVar[int] = 1
     """The version of this kind's implementation, in the kind part (ITL-1425)."""
+    TABLE_IS_ROWS: ClassVar[bool] = True
     TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
     # Whether a notebook display reads the first rows. False shows the schema and the
@@ -352,7 +347,9 @@ class SpiralDBTableSource(RootSource):
                 raise ValueError(
                     f"{location}: Table {table_name!r} not found in database."
                 )
-            primary_key = tuple(connector.get_pk_columns(table_name))
+            # One lookup for the key, id, schema and version (ITL-1350).
+            table = connector.lookup_table(table_name)
+            primary_key = tuple(table.key_columns)
             self._key_columns: tuple[str, ...] = (
                 given_key if given_key is not None else primary_key
             )
@@ -362,15 +359,11 @@ class SpiralDBTableSource(RootSource):
                     "its rows cannot be identified: name key columns with "
                     "record_id_columns=[...]."
                 )
-            self._table_id = connector.get_spiral_table_id(table_name)
-            schema = connector.get_arrow_schema(table_name)
+            self._table_id = table.table_id
+            schema = table.arrow_schema()
             # One version for every read of this source object. A given version is
             # used as it is; a table that was never written has no version to pin.
-            self._asof = (
-                asof
-                if asof is not None
-                else (connector.get_table_version(table_name) or None)
-            )
+            self._asof = asof if asof is not None else (table.version() or None)
 
         # The default tags are the primary key, whatever identifies the rows.
         resolved_tags = (
@@ -719,7 +712,10 @@ class SpiralDBTableSource(RootSource):
         if self._given_asof is not None:
             return False
         with self._connector() as connector:
-            table_id = connector.get_spiral_table_id(self._table_name)
+            # One lookup per check (ITL-1350): a table dropped and created again since
+            # is found by this lookup, and its schema and version come from it.
+            table = connector.lookup_table(self._table_name)
+            table_id = table.table_id
             if table_id != self._table_id:
                 raise ValueError(
                     f"SpiralDB table {self._qualified!r} is now another table (id "
@@ -727,7 +723,7 @@ class SpiralDBTableSource(RootSource):
                     "dropped and created again. Build the source again to read it."
                 )
             schema = arrow_utils.drop_system_columns(
-                connector.get_arrow_schema(self._table_name).empty_table()
+                table.arrow_schema().empty_table()
             ).schema
             if not schema.equals(self._table_schema, check_metadata=True):
                 raise ValueError(
@@ -735,7 +731,7 @@ class SpiralDBTableSource(RootSource):
                     f"{_schema_difference(schema, self._table_schema)}. Build the "
                     "source again to read it as it is now."
                 )
-            version = connector.get_table_version(self._table_name) or None
+            version = table.version() or None
         if version is None or (self._asof is not None and version <= self._asof):
             return False
         self._asof = version

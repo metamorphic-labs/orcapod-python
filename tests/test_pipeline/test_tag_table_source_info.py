@@ -32,12 +32,13 @@ from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.operators import SelectDataColumns
-from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+from tests.test_core.operators.test_materialize_source_info import (
+    _broadcast_row_zero,  # pyright: ignore[reportPrivateUsage]  # the one re-creation of the pre-fix broadcast
+)
 from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline import AsyncPipelineOrchestrator
 from orcapod.pipeline.job import PipelineJob
-from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import PIPELINE_DB_SCHEMA_VERSION
 
@@ -158,24 +159,6 @@ def _output_source_info_tokens(job: PipelineJob, label: str, column: str) -> lis
         key=lambda row: str(row[0].as_dict()["id"]),
     )
     return [data.source_info()[column] for _, data in rows]
-
-
-def _broadcast_row_zero(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make every materialization stamp row 0's source info, as before ITL-845."""
-    original = StaticOutputOperatorPod._rows_to_table  # pyright: ignore[reportPrivateUsage]  # re-creating the pre-fix behaviour
-
-    def broadcasting(
-        rows: Sequence[tuple[TagProtocol, DataProtocol]],
-    ) -> tuple[pa.Table, tuple[str, ...], tuple[str, ...]]:
-        """Stamp row 0's source info on every row, then build the table."""
-        row_zero = rows[0][1].source_info()
-        return original(
-            [(tag, data.with_source_info(**row_zero)) for tag, data in rows]
-        )
-
-    monkeypatch.setattr(
-        StaticOutputOperatorPod, "_rows_to_table", staticmethod(broadcasting)
-    )
 
 
 @pytest.mark.parametrize("orchestrator", ["sync", "async"])

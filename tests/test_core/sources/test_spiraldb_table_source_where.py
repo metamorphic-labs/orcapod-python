@@ -1937,7 +1937,9 @@ class TestOperatorCacheEntryPoints:
             (("m2", 5), 5.5, 1),
         ]
 
-        logged = node.execute(_source(source_id="events", tag_only_columns=True))
+        logged = list(
+            node.execute(_source(source_id="events", tag_only_columns=True)).iter_data()
+        )
 
         assert self._keyed(logged) == expected
         stored = node.as_source().as_table().to_pylist()
@@ -1956,7 +1958,7 @@ class TestOperatorCacheEntryPoints:
             )
             scans = len(fake_pyspiral.scan_log)
 
-            replayed = node.execute(other)
+            replayed = list(node.execute(other).iter_data())
 
             assert self._keyed(replayed) == expected
             assert len(fake_pyspiral.scan_log) == scans

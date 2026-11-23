@@ -290,7 +290,7 @@ Use the source-info column of the `sessions` node.
     Row 5, counting data rows from 0: the sixth line after the header.
 
     Note the plain Polars filter on a table you have already taken out of Orcapod. Inside a
-    pipeline you would write the same test as `stream.polars_filter(...)` (Part 3).
+    pipeline you would write the same test as `stream.filter(...)` (Part 3).
 
 **3.** Using `as_source()`, compute the mean of the session means per animal (one row per
 `subject_id`). Reuse `group_by` from Part 4.

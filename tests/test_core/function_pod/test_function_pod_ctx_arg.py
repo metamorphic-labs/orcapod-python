@@ -156,14 +156,14 @@ class TestCtxArgDBBacked:
 
         node1 = FunctionJobNode(function_pod=pod, input_stream=stream)
         node1.attach_databases(pipeline_database=pipeline_db)
-        results1 = node1.execute(stream)
+        results1 = list(node1.execute(stream).iter_data())
         assert len(results1) == 2
         assert call_count == 2
 
         # Second run — same pod, same data, same DB — must NOT call fn again
         node2 = FunctionJobNode(function_pod=pod, input_stream=stream)
         node2.attach_databases(pipeline_database=pipeline_db)
-        results2 = node2.execute(stream)
+        results2 = list(node2.execute(stream).iter_data())
         assert len(results2) == 2
         assert call_count == 2  # NOT incremented
 

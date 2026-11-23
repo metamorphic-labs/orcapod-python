@@ -35,17 +35,13 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Literal
 
+import pyarrow as pa
+
 from orcapod.errors import InputValidationError
 from orcapod.types import Schema, SourceInfoValue
 
-from orcapod.utils.lazy_module import LazyModule
-
 if TYPE_CHECKING:
-    import pyarrow as pa
-
     from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
-else:
-    pa = LazyModule("pyarrow")
 
 # Diagnostic emitted when a structural operator materializes a data-tag (section 7.4).
 # ``"warn"`` emits a ``DataTagMaterializationWarning``; ``"silent"`` emits nothing. The

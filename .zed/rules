@@ -758,7 +758,7 @@ src/orcapod/
     arrow_data_utils.py       — System tag manipulation, source info, column helpers
     arrow_utils.py            — Arrow table utilities
     schema_utils.py           — Schema extraction, union, intersection, compatibility
-    lazy_module.py            — LazyModule for deferred heavy imports
+    lazy_module.py            — LazyModule for modules `import orcapod` does not load
 
 tests/
   test_core/
@@ -1080,8 +1080,12 @@ generation of hashing; rows of the current data context are the current entries.
 
 ### Key patterns
 
-- LazyModule("pyarrow") — deferred import for heavy deps. Used in
-  if TYPE_CHECKING: / else: blocks.
+- Imports: a module that `import orcapod` loads anyway (pyarrow, pyarrow.compute, polars,
+  numpy, pandas, asyncio) is imported directly (ITL-1349: every LazyModule attribute read is
+  a __getattr__ call, 42.9 million in one warm job.run()). LazyModule (if TYPE_CHECKING: /
+  else: blocks) only for a module `import orcapod` never loads (networkx, deltalake,
+  pyarrow.fs, pyarrow.dataset, git) and the optional extras (psycopg, ray, spiral);
+  tests/test_utils/test_lazy_module_use.py checks it.
 - Argument symmetry — operators return frozenset (commutative) or tuple (ordered).
 - StaticOutputPod.process() → DynamicPodStream — wraps static_process() with staleness
   detection and automatic recomputation.
@@ -1296,6 +1300,32 @@ data. The rules:
   datagrams' Arrow tables (as_table()), never from as_dict() values, and take the data
   context from those datagrams (data_context_key). Add new async operators to
   tests/test_core/operators/test_async_sync_equivalence.py.
+- Record-batch channels (ITL-1347, ITL-1362; not wired into nodes or orchestrators yet):
+  InputChannel (core/streams/record_batch_input.py) and OutputChannel
+  (core/record_batch_channels.py) carry a stream's rows as Arrow record batches; operators see
+  them only through the protocols RecordBatchInput / RecordBatchOutput of
+  protocols/core_protocols/streams.py (beside StreamProtocol), which imports no concrete core
+  module (keep modules interacting through protocols: basedpyright counts local and
+  TYPE_CHECKING imports as import cycles). A channel owns no description: an input channel
+  refers to its stream (stream.open_channel()), an output channel to the stream it produces,
+  and OutputChannel.result() closes it into that stream. The conversions are in one place,
+  core/operators/static_output_pod.py (stream_from_batches, transport_schema, and F,
+  _row_built_form); never build a stream from record batches elsewhere. channel.to_stream() is
+  the one conversion from an input channel to a stream (a plain method that reserves the
+  channel when called and returns the conversion to await; it imports the builder inside its
+  body, since the operators sit above the streams): it reads the channel to its end (one pass,
+  every read error raised before an operator runs) and rebuilds a fixed snapshot through
+  stream_from_batches; only an unread channel opened on a stream marked ROW_BUILT_OUTPUT
+  gives that stream as it is. The flag is set where a complete node output in the row-built
+  form is made, and nowhere else: _as_upstream_stream (the rows' rebuild, F's output, a
+  stored-table output) and the typed zero-row input of _materialize_upstream; to_stream()
+  reads it. An operator's record-batch
+  form (async_execute_batches, renamed async_execute when wired) applies its one
+  static_process body: per record batch when the class declares ROW_BY_ROW = True (each output
+  row comes from one input row), otherwise as a barrier over the whole input (to_stream());
+  Batch with a size has its own form, grouping rows by arrival. A new operator whose output
+  rows each come from one input row declares ROW_BY_ROW; write no other per-operator batch
+  code.
 - The type converter keys synthesized struct classes by the large-normalized struct, so
   struct<b: string> and struct<b: large_string> are one Python type (a workaround,
   TODO(ITL-841)).
@@ -1491,6 +1521,10 @@ data. The rules:
   are not concerned. The refusal is for now: how an operator node logs and replays is to be
   redesigned to load its cache and then apply the restriction (TODO(ITL-1219)).
 - Empty data → ArrowTableSource raises ValueError("Table is empty").
+- An observer only watches (developer, November 22, 2026, ITL-1369): an observer or callback
+  that changes the job, its nodes or its bound sources during a run is unsupported; what the
+  run then does is undefined and is not part of the equality with main. Preventing it (a
+  guard, then a read-only view) is ITL-1369; never chase a case that needs such a change.
 - A side-effect job node delivers only when it runs (developer, November 13, 2026, ITL-1091):
   job.run(), node.run() (state-driven, ITL-1095: a node holding a current run delivers
   nothing, so clear_cache() it first to deliver again; otherwise the job run's work for that

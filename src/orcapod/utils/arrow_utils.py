@@ -6,16 +6,14 @@ from collections import defaultdict
 from collections.abc import Callable, Iterator, Mapping, Collection, Sequence
 from typing import Any, TYPE_CHECKING, cast
 
+import pyarrow as pa
+
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, SourceInfoValue
-from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
-    import pyarrow as pa
     from orcapod.logical_types.identifier import LogicalTypeIdentifier
     from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
-else:
-    pa = LazyModule("pyarrow")
 
 
 def make_empty_table(

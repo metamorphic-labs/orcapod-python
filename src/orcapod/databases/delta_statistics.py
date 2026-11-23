@@ -46,14 +46,7 @@ The statistics serve other Delta readers that filter a table on its listed colum
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
+import pyarrow as pa
 
 STATS_COLUMNS_PROPERTY = "delta.dataSkippingStatsColumns"
 NUM_INDEXED_COLUMNS_PROPERTY = "delta.dataSkippingNumIndexedCols"

@@ -35,22 +35,18 @@ import threading
 from collections.abc import Callable, Collection, Iterable
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
+import polars as pl
+import pyarrow as pa
+
 from orcapod.logical_types.base_logical_type import BaseLogicalType
 from orcapod.logical_types.identifier import (
     LogicalTypeIdentifier,
     LogicalTypeIdentifierError,
 )
 from orcapod.types import ContentHash
-from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
-    import polars as pl
-    import pyarrow as pa
-
     from orcapod.protocols.hashing_protocols import SemanticHasherProtocol
-else:
-    pa = LazyModule("pyarrow")
-    pl = LazyModule("polars")
 
 _OPTION_NAME = re.compile(r"[a-z][a-z0-9_]*")
 

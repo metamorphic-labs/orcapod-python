@@ -5,20 +5,12 @@ import logging
 import sys
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from types import UnionType
-from typing import TYPE_CHECKING, Any, Union, get_args, get_origin, get_type_hints
+from typing import Any, Union, get_args, get_origin, get_type_hints
+
+import pyarrow as pa
 
 from orcapod.errors import InputValidationError
 from orcapod.types import ContentHash, Schema, SchemaLike
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    from orcapod.utils.lazy_module import LazyModule
-
-    pa = LazyModule("pyarrow")
-
-if TYPE_CHECKING:
-    import pyarrow as pa
 
 logger = logging.getLogger(__name__)
 

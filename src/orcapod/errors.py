@@ -805,6 +805,17 @@ class SemiJoinIgnoredColumnWarning(UserWarning):
     """
 
 
+class UpstreamFailedError(Exception):
+    """An input channel's producer failed before it finished (ITL-1347).
+
+    Raised by an ``InputChannel``'s next read once the node that writes into it has
+    failed or been cancelled, so a reader never takes a producer's failure for a normal
+    end: a barrier operator never computes over part of its input, and no node stores a
+    result as if its input were complete. The producer's own error is the cause
+    (``__cause__``), and it is the error a run raises: this one only stops the readers.
+    """
+
+
 class RejoinDifferingColumnWarning(UserWarning):
     """``Rejoin`` dropped rows of one origin row because a shared column differed.
 

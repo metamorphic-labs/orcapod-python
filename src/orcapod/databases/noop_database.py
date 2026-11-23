@@ -4,13 +4,10 @@ from collections.abc import Collection, Mapping
 from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, Any
 
-from orcapod.utils.lazy_module import LazyModule
+import pyarrow as pa
 
 if TYPE_CHECKING:
-    import pyarrow as pa
     from orcapod.databases._pending_commits import PendingCommit
-else:
-    pa = LazyModule("pyarrow")
 
 
 class NoOpArrowDatabase:

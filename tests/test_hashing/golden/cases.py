@@ -2621,6 +2621,112 @@ def pipeline_polars_filter_expr_job() -> dict[str, Any]:
     return out
 
 
+def _filter_conditions() -> dict[str, Any]:
+    """Build one representative ``Filter`` condition of each kind, keyed by name."""
+    from datetime import date, datetime, timezone
+
+    from orcapod.types import Condition, col
+
+    return {
+        "eq_keyword": Condition.of(cohort="a"),
+        "eq_int": col("x") == 5,
+        "eq_float": col("x") == 0.5,
+        "eq_bool": col("x") == True,  # noqa: E712  # the value True is the case
+        "eq_negative_zero": col("x") == -0.0,
+        "eq_nan": col("x") == float("nan"),
+        "ne_string": col("s") != "abc",
+        "lt_bytes": col("b") < b"\x01",
+        "le_date": col("d") <= date(2024, 12, 31),
+        "gt_datetime_aware": col("t") > datetime(2024, 1, 1, tzinfo=timezone.utc),
+        "ge_datetime_naive": col("t") >= datetime(2024, 1, 1, 9, 30),
+        "is_in_ints": col("x").is_in([3, 7]),
+        "between_floats": col("x").between(0.5, 2.0),
+        "is_null": col("x").is_null(),
+        "is_not_null": col("x").is_not_null(),
+        "struct_field": col("info").field("kind") == "a",
+        "column_operand": col("a") < col("b"),
+        "or": (col("s") == "a") | (col("x") < 0.5),
+        "not": ~col("x").is_in([3, 7]),
+        "several": Condition.of(col("x") > 0, col("s").is_in(["a", "b"]), cohort="a"),
+    }
+
+
+# Only Filter puts a condition's canonical form into an identity, so these hashes are as
+# provisional as Filter is (ITL-1374), although the case builds no operator.
+@case("semantic", "filter_condition", provisional=("Filter",))
+def semantic_filter_conditions() -> dict[str, Any]:
+    """Record the semantic hash of each representative condition's canonical form."""
+    hasher = _ctx().semantic_hasher
+    return {
+        k: hasher.hash_object(c.canonical_form()).to_string()
+        for k, c in _filter_conditions().items()
+    }
+
+
+@case("pipeline", "filter", provisional=("Filter",))
+def pipeline_filter() -> dict[str, Any]:
+    """Record filter streams: an equality, several terms, and or / not."""
+    from orcapod.types import col
+
+    out = _prefixed("keyword", stream_summary(_grouped().filter(cohort="a")))
+    out.update(
+        _prefixed(
+            "terms",
+            stream_summary(
+                _grouped().filter(
+                    col("weight") > 20.0, col("subject").is_in(["s1", "s3"])
+                )
+            ),
+        )
+    )
+    out.update(
+        _prefixed(
+            "tree",
+            stream_summary(
+                _grouped().filter((col("cohort") == "b") | ~(col("weight") >= 22.0))
+            ),
+        )
+    )
+    return out
+
+
+@case("pipeline", "filter_job", provisional=("Filter",))
+def pipeline_filter_job() -> dict[str, Any]:
+    """Record a job with a filter upstream of a join and a function pod."""
+    from orcapod import PipelineJob
+    from orcapod.databases import InMemoryArrowDatabase
+    from orcapod.operators import Join
+    from orcapod.types import col
+
+    db = InMemoryArrowDatabase()
+    job = PipelineJob(name="golden_filter_step_job", database=db)
+    with job:
+        older = _subjects().filter(col("age") > 3, label="older")
+        joined = Join(label="joined")(older, _scans())
+        golden_adjust.pod(joined, label="adjust")
+    job.run()
+
+    out: dict[str, Any] = {}
+    for label in sorted(job.nodes):
+        out.update(_prefixed(f"node[{label}]", stream_summary(job.nodes[label])))
+    paths = sorted(db.list_sources())
+    out["table_paths"] = ["/".join(p) for p in paths]
+    for path in paths:
+        name = "/".join(path)
+        records = db.get_all_records(path, record_id_column="__golden_record_id")
+        assert records is not None
+        if "__input_data_hash" in records.column_names and "_result" in path:
+            # Result-table record ids are UUIDv7 (volatile); pin the lookup key instead.
+            out[f"table[{name}].input_data_hashes"] = sorted(
+                _jsonable(v) for v in records.column("__input_data_hash").to_pylist()
+            )
+        else:
+            out[f"table[{name}].record_ids"] = sorted(
+                _jsonable(v) for v in records.column("__golden_record_id").to_pylist()
+            )
+    return out
+
+
 REJOIN_ROWS = [
     {
         "cohort": "a",

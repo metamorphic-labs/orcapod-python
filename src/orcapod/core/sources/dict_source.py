@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
+
+import pyarrow as pa
 
 from orcapod.core.sources.base import RootSource
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
@@ -12,13 +14,7 @@ from orcapod.core.sources.stream_builder import (
 from orcapod.types import DataValue, SchemaLike
 from orcapod.utils import arrow_utils
 from orcapod.utils.schema_utils import _normalize_column_list
-from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.tensor_conversions import warn_source_tensor_conversions
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
 
 
 class DictSource(RootSource):
@@ -46,6 +42,7 @@ class DictSource(RootSource):
     SOURCE_KIND: ClassVar[str] = "dict"
     # The version of this kind's implementation, in the kind part (ITL-1425).
     SOURCE_VERSION: ClassVar[int] = 1
+    TABLE_IS_ROWS: ClassVar[bool] = True
 
     def __init__(
         self,

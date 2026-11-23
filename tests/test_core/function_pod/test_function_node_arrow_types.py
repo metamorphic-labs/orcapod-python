@@ -303,7 +303,8 @@ def test_new_rows_over_a_store_written_before_the_fix_raise_naming_the_column(
 
     A Delta database written before ITL-928 gives a ``uint32`` tag back as ``int32``:
     rows served from it and rows computed now disagree, and the node says so instead
-    of picking a type. Such a database must be rebuilt.
+    of picking a type. Such a database must be rebuilt. A leaf's run completes (its
+    rows are never built into one table, ``RowsOnRead``), as on ``main``.
     """
     _build(DeltaTableDatabase(tmp_path), _source_table("uint32").slice(0, 2)).run()
     _as_written_before_the_fix(tmp_path)
@@ -317,6 +318,30 @@ def test_new_rows_over_a_store_written_before_the_fix_raise_naming_the_column(
     assert "'k'" in message
     assert "int32" in message
     assert "uint32" in message
+
+
+def test_rows_over_a_store_written_before_the_fix_fail_at_the_successor(
+    tmp_path: pathlib.Path,
+) -> None:
+    """With a successor, the run fails where the rows are built for it, as on ``main``.
+
+    The node's rows are built into one table where its successor reads them
+    (``at_edge``): the concatenation raises ``ArrowInvalid`` there, as ``main``'s row
+    rebuild does. The computed row is stored, as on ``main``.
+    """
+    _build(
+        DeltaTableDatabase(tmp_path), _source_table("uint32").slice(0, 2), chained=True
+    ).run()
+    _as_written_before_the_fix(tmp_path)
+    job = _build(DeltaTableDatabase(tmp_path), _source_table("uint32"), chained=True)
+
+    with pytest.raises(pa.ArrowInvalid):
+        job.run()
+
+    stored = _build(DeltaTableDatabase(tmp_path), _source_table("uint32"))
+    records = stored.nodes["double"].get_all_records()
+    assert records is not None
+    assert records.num_rows == 3
 
 
 def test_new_rows_over_a_store_written_after_the_fix_keep_the_tag_type(
@@ -376,3 +401,76 @@ def test_a_null_typed_row_is_compared_as_null() -> None:
 
     with pytest.raises(InputValidationError, match="'k': null and int64"):
         _concat_row_tables(rows)
+
+
+@pytest.mark.parametrize("materialize_results", [True, False])
+def test_an_async_run_over_a_store_written_before_the_fix_finishes(
+    materialize_results: bool, tmp_path: pathlib.Path
+) -> None:
+    """e9 is sync only: an async run over such a store finishes and holds its rows.
+
+    The async orchestrator builds a node's output stream when it is read
+    (``StreamsOnRead``), so the run finishes as on ``main`` with either value of
+    ``materialize_results``; reading the node's rows as one table raises, as it does
+    on ``main``.
+    """
+    from orcapod.pipeline import AsyncPipelineOrchestrator
+
+    _build(DeltaTableDatabase(tmp_path), _source_table("uint32").slice(0, 2)).run()
+    _as_written_before_the_fix(tmp_path)
+    job = _build(DeltaTableDatabase(tmp_path), _source_table("uint32"))
+    job.run(
+        orchestrator=AsyncPipelineOrchestrator(),
+        materialize_results=materialize_results,
+    )
+
+    node = job.nodes["double"]
+    assert len(list(node.iter_data())) == 3
+    with pytest.raises(InputValidationError, match="'k'"):
+        node.as_table()
+
+
+def _stored_tags(root: pathlib.Path, node: str) -> list[int]:
+    """The tag ``k`` of every row stored in ``node``'s pipeline table under ``root``."""
+    import deltalake
+
+    (log,) = [
+        log
+        for log in root.rglob("_delta_log")
+        if log.parent.name == "pdb_v1" and node in log.parent.parts
+    ]
+    values = deltalake.DeltaTable(str(log.parent)).to_pyarrow_table()["k"].to_pylist()
+    return sorted(int(value) for value in values if value is not None)
+
+
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+def test_a_run_mixing_new_rows_into_a_legacy_store_is_main_s(
+    tmp_path: pathlib.Path, asynchronous: bool
+) -> None:
+    """New ``uint32`` rows over a store written before ITL-928 (``int32``, no recorded
+    type), with stored rows of the same node: the outcome ``main`` ca1c35d6 gives.
+
+    ``double`` stores its new row; ``increment``'s input mixes ``double``'s stored
+    ``int32`` rows with the new ``uint32`` one. Sync: building that input raises
+    ``ArrowInvalid`` (the rows cannot make one table). Async: appending the new row to
+    ``increment``'s pending batch of ``int32`` rows is refused (``OrcapodDatabaseWriteError``,
+    ITL-1412, #509). Either way ``increment`` stores no row for the new input. Before
+    #509 these runs were the two tests of held rows that cannot make one table; that
+    case now lives in ``test_rows_on_read.py``, without a store.
+    """
+    from orcapod.errors import OrcapodDatabaseWriteError
+    from orcapod.pipeline import AsyncPipelineOrchestrator
+
+    _build(
+        DeltaTableDatabase(tmp_path), _source_table("uint32").slice(0, 2), chained=True
+    ).run()
+    _as_written_before_the_fix(tmp_path)
+    job = _build(DeltaTableDatabase(tmp_path), _source_table("uint32"), chained=True)
+    if asynchronous:
+        with pytest.raises(OrcapodDatabaseWriteError, match="'increment'"):
+            job.run(orchestrator=AsyncPipelineOrchestrator())
+    else:
+        with pytest.raises(pa.ArrowInvalid, match="Schema at index"):
+            job.run()
+    assert _stored_tags(tmp_path, "double") == [1, 2, 3]
+    assert 3 not in _stored_tags(tmp_path, "increment")

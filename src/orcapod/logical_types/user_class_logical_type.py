@@ -22,6 +22,9 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+import polars as pl
+import pyarrow as pa
+
 from orcapod.errors import RecursiveTypeError, TypeIdentityError
 import orcapod.logical_types.user_class_identity as uci
 from orcapod.logical_types.base_logical_type import BaseLogicalType
@@ -36,16 +39,9 @@ from orcapod.logical_types.registry import (
     make_arrow_extension_type,
     make_polars_extension_type,
 )
-from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
-    import polars as pl
-    import pyarrow as pa
-
     from orcapod.logical_types.protocols import TypeConverterProtocol
-else:
-    pa = LazyModule("pyarrow")
-    pl = LazyModule("polars")
 
 logger = logging.getLogger(__name__)
 

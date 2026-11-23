@@ -6,6 +6,9 @@ from collections.abc import Collection, Mapping
 from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, cast
 
+import pyarrow as pa
+import pyarrow.compute as pc
+
 from orcapod.databases._pending_commits import PendingCommit, PendingCommits
 from orcapod.databases._row_index import KeyIndex, compact_tail, matching_rows
 from orcapod.databases.utils import (
@@ -19,16 +22,9 @@ from orcapod.errors import (
     OrcapodDatabaseError,
     OrcapodDatabaseWriteError,
 )
-from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
-    import pyarrow as pa
-    import pyarrow.compute as pc
-
     from orcapod.pipeline.serialization import DatabaseRegistry
-else:
-    pa = LazyModule("pyarrow")
-    pc = LazyModule("pyarrow.compute")
 
 logger = logging.getLogger(__name__)
 

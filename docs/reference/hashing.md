@@ -6,7 +6,7 @@ orcapod-python framework. For conceptual background on the two identity chains
 Every hash listed here that Orcapod stores or embeds in a name is pinned as a golden value;
 how released values are protected is described in [Golden Hashes](golden-hashes.md). A
 release freezes every golden value except those of the provisional operators
-(`orcapod.operators.PROVISIONAL_OPERATORS`, today `PolarsFilter`) and of every step downstream
+(`orcapod.operators.PROVISIONAL_OPERATORS`, such as `PolarsFilter` and `Filter`) and of every step downstream
 of one: their identity may still change in a later release (see
 [Provisional operators](../concepts/operators.md#provisional-operators)).
 
