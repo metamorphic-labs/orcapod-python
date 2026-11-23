@@ -1109,6 +1109,17 @@ from that database, and no rows under that key is an empty result, not an error.
   `ArrowTableSource(stream.as_table(), tag_columns=[...])`.
 - The results are read from the database recorded in the file. Pass
   `PipelineJob.load(path, database=...)` if the database has moved.
+- A job given a separate result database
+  ([Sharing function results between jobs](pipeline-job.md#sharing-function-results-between-jobs))
+  records it in the file too, and loading rebuilds it the same way; pass
+  `PipelineJob.load(path, result_database=...)` if it has moved or cannot be rebuilt from
+  the file. An `InMemoryArrowDatabase` holds nothing after its process ends, so it is never
+  rebuilt (a new one would be empty), as a connector database is not. When the file names a
+  result database that is not available and none is given, the loaded job's function nodes
+  get no database (a warning says what to pass): they are never pointed at the job's own
+  `_result` location, which holds none of their results. `job.bind(result_database=...)`
+  gives it later, and saving the loaded job before that writes the saved result database
+  back as it was, so loading that file refuses it the same way.
 - The job file may also hold an optional, advisory section, `run.expected_rows`: for each
   node, how many rows the database held under its run's key when the job was saved (written
   only when that is certain: after a run that finished). Reading a loaded node's stored

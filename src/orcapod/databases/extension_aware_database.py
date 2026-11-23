@@ -251,6 +251,10 @@ class ExtensionAwareDatabase:
         """The wrapped database's storage location, if it names one."""
         return getattr(self._db, "storage_location")  # noqa: B009  # optional capability
 
+    def refresh_table(self, record_path: tuple[str, ...]) -> None:
+        """Refresh the wrapped database's table (ITL-1408)."""
+        self._db.refresh_table(record_path)
+
     @property
     def require_storable(self) -> Callable[[pa.Schema], None]:
         """The wrapped database's ``require_storable`` (ITL-1162).

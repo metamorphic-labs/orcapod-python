@@ -66,6 +66,18 @@ class ArrowDatabaseProtocol(Protocol):
         """
         ...
 
+    def refresh_table(self, record_path: tuple[str, ...]) -> None:
+        """Read the table at ``record_path`` from the store's current version next time.
+
+        A function node calls it for each of its stored tables at the start of every
+        run and at every read of what it stored, so it sees rows another handle,
+        job or process committed since (ITL-1408). A database whose handle keeps
+        what it loaded of a table (``DeltaTableDatabase``) looks at the store again;
+        one that reads the store on every read (in memory, connector-backed, no-op)
+        has nothing to refresh and does nothing.
+        """
+        ...
+
     def add_record(
         self,
         record_path: tuple[str, ...],

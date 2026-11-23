@@ -105,6 +105,9 @@ class NoOpArrowDatabase:
     def fail_pending_result(self, record_path: tuple[str, ...]) -> None:
         """There are no buffered writes to withdraw."""
 
+    def refresh_table(self, record_path: tuple[str, ...]) -> None:
+        """Nothing to refresh: the no-op store holds no table (ITL-1408)."""
+
     def flush_result_batch(
         self, record_path: tuple[str, ...], *, publish_records: bool
     ) -> None:

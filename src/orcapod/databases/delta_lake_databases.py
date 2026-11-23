@@ -2885,6 +2885,38 @@ class DeltaTableDatabase:
         record_key = self._get_record_key(record_path)
         self._flush_by_key(record_key)
 
+    def refresh_table(self, record_path: tuple[str, ...]) -> None:
+        """Read the table at ``record_path`` from the store's current version next time.
+
+        A handle keeps the table version it loaded (and an index of its rows) and
+        serves reads from it, so rows another handle or process committed since are
+        not seen (ITL-1408). This looks at the table's latest version once: when it
+        moved, the loaded table and its index are replaced (rebuilt on the next read);
+        when it did not, both are kept. A table remembered as absent is looked for
+        again. The cost is one read of the table's log; no data is read here.
+
+        Args:
+            record_path: Tuple of path components (relative to this instance's prefix)
+        """
+        record_key = self._get_record_key(record_path)
+        self._absent_tables.discard(record_key)
+        cached = self._delta_table_cache.get(record_key)
+        if cached is None:
+            return
+        try:
+            latest = deltalake.DeltaTable(
+                self._get_table_uri(record_path),
+                storage_options=self._storage_options or None,
+            )
+        except Exception:
+            # The next read loads the table again and reports a failure itself.
+            self._delta_table_cache.pop(record_key, None)
+            self._snapshots.pop(record_key, None)
+            return
+        if latest.version() != cached.version():
+            self._delta_table_cache[record_key] = latest
+            self._snapshots.pop(record_key, None)
+
     def _flush_by_key(self, record_key: str) -> None:
         """Flush a pending batch identified by its absolute record_key (prefix + path).
 
