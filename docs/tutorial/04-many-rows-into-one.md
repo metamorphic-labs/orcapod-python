@@ -263,7 +263,7 @@ filter, then narrow, then `batch()`.)
 
     for genotype in ["wildtype", "knockout"]:
         one_genotype = (
-            with_genotype.polars_filter(genotype=genotype)
+            with_genotype.filter(genotype=genotype)
             .select_data_columns(["mean_rate_hz"])
             .batch()
         )

@@ -39,9 +39,9 @@ An operator may add a tag, never data. A tag labels rows; it is not a data value
 [`AddTags`](#addtags) can add tags with constant values while every data column passes through
 unchanged.
 
-The filters are the operators that read data columns: `PolarsFilter` evaluates its predicate
-on values, and `DropNulls` reads only whether a value is present (its validity), never the
-value. Both decide which rows exist; neither synthesizes a value.
+The filters are the operators that read data columns: `Filter` and `PolarsFilter` evaluate
+their conditions on values, and `DropNulls` reads only whether a value is present (its
+validity), never the value. They decide which rows exist; none synthesizes a value.
 
 No operator carries its inputs' meta columns: the `__`-prefixed columns, such as a cached
 function pod's `__computed`, that describe how an input row was produced. An operator's
@@ -160,7 +160,9 @@ units = DictSource(
 )
 
 # Two branches of one stream: a filter in one, a rename in the other.
-fast = units.select_data_columns(["rate"]).polars_filter(pl.col("rate") > 3)
+from orcapod import col
+
+fast = units.select_data_columns(["rate"]).filter(col("rate") > 3.0)
 deep = units.select_data_columns(["depth"]).map_data({"depth": "depth_um"})
 
 rejoined = fast.rejoin(deep)
@@ -701,6 +703,142 @@ except InputValidationError as error:
 
 A new name already taken by a column that is not renamed is refused too.
 
+### Filter
+
+!!! warning "Provisional"
+    `Filter` is a [provisional operator](#provisional-operators): its identity is not frozen
+    with data context v1 and may change in a later release (ITL-1374). Building one issues
+    `ProvisionalHashWarning` once per process.
+
+`stream.filter(...)` (the operator `Filter`) keeps the rows that satisfy a condition. Every
+column, value and type passes through unchanged; only rows are dropped, in input order.
+Keywords and mappings are equalities, as a source's `where` takes them; every other
+condition is built from `col(name)`:
+
+```python
+import pyarrow as pa
+from orcapod import col
+from orcapod.sources import ArrowTableSource
+
+recorded = ArrowTableSource(
+    pa.table(
+        {
+            "session": ["s1", "s1", "s1", "s2", "s2", "s3"],
+            "unit": [3, 7, 9, 3, 7, 3],
+            "t": [0.5, 1.2, 2.0, 0.7, float("nan"), 3.1],
+            "rate": [4.0, None, 2.5, 6.1, 0.0, None],
+            "probe": ["imec0", "imec1", "imec0", "imec1", "imec0", "imec1"],
+        }
+    ),
+    tag_columns=["session", "unit"],
+    tag_only_columns=True,
+    source_id="recorded",
+)
+
+
+def kept(stream):
+    """The (session, unit) pairs a stream holds, sorted."""
+    return sorted((row["session"], row["unit"]) for row in stream.as_table().to_pylist())
+
+
+print(kept(recorded.filter(session="s1", probe="imec0")))
+# [('s1', 3), ('s1', 9)]
+print(kept(recorded.filter({"session": "s1", "probe": "imec0"})))
+# [('s1', 3), ('s1', 9)]
+print(kept(recorded.filter(col("unit").is_in([3, 7]), col("t") < 1.0)))
+# [('s1', 3), ('s2', 3)]
+print(kept(recorded.filter(col("t").between(0.5, 2.0))))
+# [('s1', 3), ('s1', 7), ('s1', 9), ('s2', 3)]
+print(kept(recorded.filter(col("rate").is_null())))
+# [('s1', 7), ('s3', 3)]
+print(kept(recorded.filter((col("session") == "s3") | (col("t") < 0.6))))
+# [('s1', 3), ('s3', 3)]
+print(kept(recorded.filter(~col("unit").is_in([3, 7]))))
+# [('s1', 9)]
+```
+
+The conditions are:
+
+| Condition | Written | Column types |
+|---|---|---|
+| equality | `column=value`, `{column: value}`, `col(c) == v`, `col(c) != v` | bool, integers, floats, strings, binary, dates, timestamps |
+| membership | `col(c).is_in([v1, v2, ...])` | the same |
+| comparison | `col(c) < v`, `<=`, `>`, `>=` | integers, floats, strings, binary, dates, timestamps |
+| range | `col(c).between(low, high)`, both ends included | the same |
+| null test | `col(c).is_null()`, `col(c).is_not_null()` | every type |
+| struct field | `col(c).field("f")`, then any condition above | a struct column |
+| two columns | `col(a) < col(b)` and the other comparisons | two columns of one Arrow type |
+| combined | several arguments and keywords (all hold), `a & b`, `a \| b`, `~a` | |
+
+Write `&`, `|` and `~`, never `and`, `or` and `not`, and put each comparison in parentheses
+when you combine it, as in Polars. A list given as a keyword value is refused: membership is
+`col(c).is_in([...])`.
+
+A tag column and a data column are filtered alike. A value must be exactly of its column's
+Python type, and fit its Arrow type: `7` is accepted for a `uint32` column, `-1` is not, and
+`1` is refused for a float column (write `1.0`). Orcapod converts no value:
+
+```python
+from orcapod.errors import InputValidationError
+
+try:
+    recorded.filter(col("t") > 1).as_table()
+except InputValidationError as error:
+    print(error)
+# Filter: column 't' holds float, but the value 1 is a int; convert it explicitly: Orcapod converts no value
+```
+
+**Nulls.** A comparison with a null is unknown, and a row whose condition is unknown is
+dropped, as in SQL and Polars. So `col("rate") != 4.0` and `~(col("rate") > 1.0)` both drop
+the rows where `rate` is null; to keep them, say so:
+
+```python
+print(kept(recorded.filter(col("rate") != 4.0)))
+# [('s1', 9), ('s2', 3), ('s2', 7)]
+print(kept(recorded.filter((col("rate") != 4.0) | col("rate").is_null())))
+# [('s1', 7), ('s1', 9), ('s2', 3), ('s2', 7), ('s3', 3)]
+```
+
+`filter` does not narrow a column's type: after `col("rate").is_not_null()` the column is
+still `float | None`. Use [DropNulls](#dropnulls) when a function needs a plain `float`.
+
+**Floats.** Floats match as Orcapod matches them everywhere: `0.0` equals `-0.0`, a NaN equals
+a NaN, and a NaN is greater than every number. So `col("t") >= 1.0` keeps the NaN row:
+
+```python
+print(kept(recorded.filter(col("t") >= 1.0)))
+# [('s1', 7), ('s1', 9), ('s2', 7), ('s3', 3)]
+```
+
+**A field of a struct column.** `col("info").field("kind")` reads the field `kind` of the
+struct column `info` (a struct inside a struct too: `.field("a").field("b")`). A null struct
+makes its fields null. An unknown field is refused with a message listing the fields the
+column has.
+
+**Identity.** The filter's identity is its condition in a canonical form: the order of the
+arguments, of the keywords, of `&` and `|` operands and of the `is_in` values never counts,
+and values keep their types (`1`, `1.0` and `True` are three conditions):
+
+```python
+first = recorded.filter(col("unit").is_in([3, 7]), session="s1")
+second = recorded.filter({"session": "s1"}, col("unit").is_in([7, 3]))
+print(first.pipeline_hash() == second.pipeline_hash())
+# True
+```
+
+The conditions are checked when the filter is built and when it meets its input, so a filter
+that works on a stream works the same inside a `PipelineJob`.
+
+**`where` and `filter`.** A source that can restrict what it reads (`where`, see
+[Restricting a source](sources.md#restricting-a-source-versus-filtering-in-the-pipeline)) takes the same equalities. The two give the
+same rows, but `where` is not a step of the pipeline: it changes no hash, while `filter` is a
+node whose condition enters the identity of every step after it. Explore with `where`; keep
+the selection with `filter` when it becomes part of what the pipeline computes. `where`
+takes only equalities today and refuses any other condition, pointing to `filter`.
+
+When `filter` cannot say what you need (arithmetic between columns, a string function), use
+[PolarsFilter](#polarsfilter).
+
 ### PolarsFilter
 
 !!! warning "Provisional"
@@ -776,7 +914,7 @@ except ValueError as exc:
 each named column from `T | None` to `T`. `DropNulls()`, with no names, does this for every
 tag and data column (see [Every column](#every-column) below). Use it when a column is nullable by specification
 but a function needs a value: a pod whose parameter is a plain `int` refuses an `int | None`
-column, and `PolarsFilter` can drop the null rows but leaves the type as it was.
+column, and `Filter` or `PolarsFilter` can drop the null rows but leave the type as it was.
 
 ```python
 import pyarrow as pa
@@ -999,7 +1137,7 @@ The provisional operators are listed in one place:
 from orcapod.operators import PROVISIONAL_OPERATORS
 
 print(sorted(PROVISIONAL_OPERATORS))
-# ['AddTags', 'Batch', 'GroupBy', 'Index', 'MapColumns', 'MapTags', 'MergeJoin', 'Pick', 'PolarsFilter', 'Rejoin', 'TagBy']
+# ['AddTags', 'Batch', 'Filter', 'GroupBy', 'Index', 'MapColumns', 'MapTags', 'MergeJoin', 'Pick', 'PolarsFilter', 'Rejoin', 'TagBy']
 ```
 
 They are the operators whose identity choice is not yet obvious and solid (developer,
@@ -1007,6 +1145,7 @@ November 19, 2026). Each name maps to the issue that decides its identity or out
 
 | Operator | What is still open |
 |---|---|
+| `Filter` | new: the canonical form of its condition, first used at the workshop; its spelling and literal rule await the developer's decision (ITL-1374) |
 | `GroupBy`, `Batch` | their output for a data-tag and its data column (ITL-1017) |
 | `MergeJoin` | its rules for data-tags (ITL-1018); it became ordered in this release |
 | `MapTags` | its rename rules for data-tags (ITL-1018) |
@@ -1135,12 +1274,10 @@ operators or function pods.
 Every stream also exposes the operators as methods, which reads well when chaining:
 `join`, `semi_join`, `batch`, `group_by`, `select_tag_columns`, `select_data_columns`,
 `drop_tag_columns`, `drop_data_columns`, `select_columns`, `drop_columns`, `map_tags`,
-`map_data`, `map_columns`, `add_tags`, `polars_filter`, `drop_nulls`, `pick` and `index`.
+`map_data`, `map_columns`, `add_tags`, `filter`, `polars_filter`, `drop_nulls`, `pick` and `index`.
 
 ```python
-import polars as pl
-
-adults = subjects.join(measurements).polars_filter(pl.col("age") > 10)
+adults = subjects.join(measurements).filter(col("age") > 10)
 for tag, data in adults:
     print(tag.as_dict(), "->", data.as_dict())
 # {'subject_id': 'mouse_01'} -> {'weight': 25.3, 'age': 12}

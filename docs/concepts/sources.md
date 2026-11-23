@@ -404,7 +404,7 @@ restriction through two read-only properties: `condition` (the empty `Condition`
 reads every row) and `row_limit` (`None` without a limit). A restriction is not an
 operator:
 
-- An operator (`SemiJoin`, `PolarsFilter`) is a step of the pipeline. It is a node of the
+- An operator (`Filter`, `SemiJoin`, `PolarsFilter`) is a step of the pipeline. It is a node of the
   graph and part of the pipeline's identity: a pipeline with a filter computes something
   else than one without, and its nodes have other hashes and other stored tables.
 - A restriction is attached to the source. It chooses which of the source's rows flow and
@@ -421,6 +421,30 @@ will later run on all of it: results computed under the restriction are stored u
 identities and reused by the full run. Use an operator when selecting rows is part of what
 the pipeline computes. Restrict on tag (key) columns where you can; a condition on a data
 column is allowed.
+
+`where` and `stream.filter` take the same equalities, written the same way, and keep the same
+rows (for a float column, `where` uses the table system's own equality for NaN and `-0.0`,
+`filter` Orcapod's: see [Filter](operators.md#filter)). The difference is where the selection
+lives:
+
+<!-- docs-test: skip -->
+```python
+from orcapod import col
+
+# Exploring: the source reads only these rows; no step is added and no hash moves.
+explore = events.where(unit_id=106, session_index=2)
+
+# The pipeline: the same selection as a step, part of every downstream identity.
+kept = events.filter(unit_id=106, session_index=2)
+
+# Anything but equality is a filter; where refuses it and points to filter.
+late = events.filter(col("spike_time_us") >= 1_000_000, col("unit_id").is_in([106, 107]))
+```
+
+A filter directly over a source reads the whole table and then filters it; `where` reads only
+the matching rows. On a large table, keep `where` on the source for speed and put the same
+`filter` in the pipeline for its identity: the rows are the same, and the restriction rules
+above apply to the source.
 
 <!-- docs-test: skip -->
 ```python
