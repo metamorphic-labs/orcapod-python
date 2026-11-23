@@ -129,13 +129,18 @@ def refuse_unloadable_inputs(node: Any) -> None:
 
 
 def _databases(nodes: list[Any]) -> list[ArrowDatabaseProtocol]:
-    """The distinct databases the given nodes write to: pipeline and result databases."""
+    """The distinct databases the given nodes write to, each node's results first.
+
+    A function node's result database comes before its pipeline database, so the
+    end-of-run commit stores results before the records that point at them (ITL-919),
+    also when the results are in a separate database (ITL-1408).
+    """
     found: list[ArrowDatabaseProtocol] = []
     for node in nodes:
         pipeline_database = getattr(node, "_pipeline_database", None)
         cached_pod = getattr(node, "_cached_function_pod", None)
         result_database = getattr(cached_pod, "result_database", None)
-        for database in (pipeline_database, result_database):
+        for database in (result_database, pipeline_database):
             if database is not None and not any(database is d for d in found):
                 found.append(database)
     return found

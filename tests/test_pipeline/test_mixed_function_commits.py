@@ -461,6 +461,9 @@ class ProtocolDatabase(DatabaseWithoutCommitGuards):
     def flush_batch(self, record_path: tuple[str, ...]) -> None:
         self._inner.flush_batch(record_path)
 
+    def refresh_table(self, record_path: tuple[str, ...]) -> None:
+        self._inner.refresh_table(record_path)
+
 
 def test_library_databases_conform_to_the_commit_protocol(tmp_path: Path) -> None:
     """Built-in stores conform, and an incomplete store fails the runtime check."""

@@ -413,6 +413,7 @@ class TestIdentity:
     def test_a_recreated_table_is_a_different_source(self, project):
         """A recreated table is a new source; only its pipeline hash is unchanged."""
         before = SpiralDBTableSource(_PROJECT, "event", tag_only_columns=True)
+        before_ids = _record_ids(before)
         project.drop_table("default.event")
         project.create_table("default.event", key_schema=_KEYS).write(
             _rows([1, 2, 3, 4, 5])
@@ -424,7 +425,9 @@ class TestIdentity:
         assert after.pipeline_hash() == before.pipeline_hash()
         # The record id is the row's key, not the source: the same key, the same id
         # (ITL-1154); the source-id system tag tells the two tables' rows apart.
-        assert _record_ids(after)[1] == _record_ids(before)[1]
+        assert _record_ids(after)[1] == before_ids[1]
+        with pytest.raises(ValueError, match="dropped and created again"):
+            before.as_table()
 
     def test_restrictions_do_not_change_identity(self, project):
         """Restrictions on the read leave the source id and both hashes unchanged."""

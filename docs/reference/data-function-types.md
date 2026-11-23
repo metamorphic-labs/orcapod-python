@@ -14,6 +14,9 @@ A function stores each result in its result table, at
 <job>/_result/<function>/<output schema hash>/v<function major>/python.function.v1/rev1/rdb_v1
 ```
 
+For a job given a separate result database (`PipelineJob(..., result_database=...)`), the
+path starts at `<function>`, in that database, with no `<job>/_result`.
+
 The first four components after `_result` are the function's uri. The last three each
 have one owner:
 
