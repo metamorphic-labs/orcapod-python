@@ -1513,10 +1513,11 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
     def _begin_run(self) -> None:
         """Start a run: see the stored results as they are now, then check for stale ones.
 
-        The result tables are read from the store's current version
-        (``_refresh_result_tables``), so the run reuses every result committed before
+        The stored tables are read from the store's current version
+        (``_refresh_stored_tables``), so the run reuses every result committed before
         it started, also through another database handle or by another job sharing
-        the result database (ITL-1408).
+        the result database, and the stale-completion check below reads what is
+        stored now (ITL-1408).
 
         Tables written before v0.3, and completions of another data context, can
         appear in a database between two runs of one node object. A node that
@@ -1529,36 +1530,49 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             SideEffectLogDataContextError: If this node delivers side effects and
                 completions it cannot match exist; nothing has been delivered then.
         """
-        self._refresh_result_tables()
+        self._refresh_stored_tables()
         if self._delivers_side_effects:
             self._stale_tables_checked = False
             self._current_tables_checked = False
             self._account_for_stale_tables()
 
-    def _refresh_result_tables(self) -> None:
-        """Read this node's result tables from the store's current version (ITL-1408).
+    def _refresh_stored_tables(self) -> None:
+        """Read this node's stored tables from the store's current version (ITL-1408).
 
-        The one place a run looks at its result tables again: once per run and per
-        table, never per row. A database handle that keeps what it loaded of a table
-        (``RefreshingDatabaseProtocol``, the Delta database) would otherwise miss
-        results committed since through another handle; for it this costs one read of
-        each result table's log, and the table's index is rebuilt only when its
-        version moved. Other databases read the store on every read: nothing to do.
+        The one place a node looks at its stored tables again: its pipeline table and
+        its result tables (persistent and ephemeral), every table its reads and its
+        stale-completion check read. Called at the start of every run (``_begin_run``,
+        and a load-only run) and at every read of what is stored
+        (``get_all_records``, so ``as_source()``): once per run or per read call and
+        per table, never per row. Each node refreshes its own tables, so two nodes
+        of one job that share a result table each look at it once in a run.
+
+        A database handle that keeps what it loaded of a table
+        (``RefreshingDatabaseProtocol``, the Delta database) would otherwise miss rows
+        committed since through another handle; for it this costs one read of each
+        table's log, and the table's index is rebuilt only when its version moved.
+        Other databases read the store on every read: nothing to do.
         """
+        tables: list[tuple[ArrowDatabaseProtocol, tuple[str, ...]]] = []
+        if self._pipeline_database is not None:
+            tables.append((self._pipeline_database, self._versioned_pipeline_path))
         for pod in (self._cached_function_pod, self._ephemeral_cached_pod):
-            if pod is None:
-                continue
-            refreshing = as_refreshing(pod.result_database)
-            if refreshing is not None and pod.record_path:
-                refreshing.refresh_table(pod.record_path)
+            if pod is not None and pod.record_path:
+                tables.append((pod.result_database, pod.record_path))
+        for database, record_path in tables:
+            refreshing = as_refreshing(database)
+            if refreshing is not None:
+                refreshing.refresh_table(record_path)
 
     def _account_for_stale_tables(self) -> None:
         """Report or refuse stored rows of other generations.
 
         Done once per node object; a node that delivers side effects does it at
-        the start of every run (``_begin_run``). Its current tables are read and
-        counted by data context the first time only: the later runs list the database
-        for tables at an older layout, which reads no table.
+        the start of every run (``_begin_run``), its current tables included: they are
+        read and counted by data context at every run, as they are stored then (the
+        run refreshes them first), so completions marked with another data context
+        since the last run are found before anything is delivered (ITL-1408). Other
+        nodes read their current tables the first time only.
 
         A pipeline table written by an earlier version of Orcapod (``pdb_v1``) holds
         no ``__data_context`` column: its rows are not read as results and are left
@@ -2065,7 +2079,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         try:
             if self.load_status == LoadStatus.UNAVAILABLE:
                 raise self._no_database_error()
-            self._refresh_result_tables()
+            self._refresh_stored_tables()
             require_same_data_context(
                 input_stream.data_context_key, self._stored_data_context_key
             )
@@ -2114,7 +2128,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         try:
             if self.load_status == LoadStatus.UNAVAILABLE:
                 raise self._no_database_error()
-            self._refresh_result_tables()
+            self._refresh_stored_tables()
             require_same_data_context(
                 self._input_stream.data_context_key, self._stored_data_context_key
             )
@@ -3294,6 +3308,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         """
         if self._function_pod is None:
             self._require_readable_stub()
+        # A read of what is stored reads the store as it is now (ITL-1408).
+        self._refresh_stored_tables()
         fetched = self._fetch_joined_records()
         if fetched is None:
             return None

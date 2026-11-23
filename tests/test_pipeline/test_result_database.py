@@ -781,3 +781,208 @@ class TestCommitOrderAcrossTwoDatabases:
         assert "result" in str(info.value) and "rdb_v1" in "/".join(
             info.value.record_path
         )
+
+
+# ---------------------------------------------------------------------------
+# Second review round (PR 507): R1-R5.
+# ---------------------------------------------------------------------------
+
+
+class TestForeignPipelineRowsFromAnotherHandle:
+    """R1: completions marked with another data context, written to the node's
+    PIPELINE table through another handle after its first run, are found before
+    anything is delivered: the run refreshes every table the check reads.
+    """
+
+    @pytest.mark.parametrize("separate", [True, False])
+    def test_a_later_run_refuses_before_delivering(
+        self, tmp_path: pathlib.Path, separate: bool, orchestrator: Orchestrator
+    ) -> None:
+        import uuid
+
+        pipeline = DeltaTableDatabase(tmp_path / "db")
+        results = InMemoryArrowDatabase() if separate else None
+        job = one_step_job("ctx", pipeline, [1.0, 2.0], notify, results)
+        _ = job.run(orchestrator=orchestrator)
+        delivered.clear()
+
+        (path,) = [p for p in pipeline.list_table_paths(()) if p[-1] == "pdb_v1"]
+        stored = pipeline.get_all_records(path, record_id_column="__rid")
+        assert stored is not None
+        context = stored.schema.get_field_index("__data_context")
+        foreign = stored.set_column(
+            context,
+            stored.schema.field(context),
+            pa.array(["std:v0.9:other"] * stored.num_rows, pa.large_string()),
+        )
+        ids = foreign.schema.get_field_index("__rid")
+        foreign = foreign.set_column(
+            ids,
+            foreign.schema.field(ids),
+            pa.array(
+                [uuid.uuid4().bytes for _ in range(foreign.num_rows)],
+                foreign.schema.field(ids).type,
+            ),
+        )
+        other_handle = DeltaTableDatabase(tmp_path / "db")
+        other_handle.add_records(path, foreign, record_id_column="__rid")
+        other_handle.flush()
+
+        job.bind(sources={"s": make_source([1.0, 2.0, 3.0])})
+        with pytest.raises(SideEffectLogDataContextError):
+            _ = job.run(orchestrator=orchestrator)
+        assert delivered == []
+
+
+class TestStoredViewsReadTheStoreNow:
+    """R2: a read of what is stored reads the store's current version, per read call."""
+
+    def test_both_views_before_and_after_an_external_append(
+        self, tmp_path: pathlib.Path
+    ) -> None:
+        pipeline_root = tmp_path / "db"
+        result_root = tmp_path / "results"
+        warm = DeltaTableDatabase(result_root)
+        # The warm handle has loaded the result table before the writer commits.
+        _ = one_step_job(
+            "warm", DeltaTableDatabase(pipeline_root), [1.0], result_database=warm
+        ).run()
+
+        def write(xs: list[float]) -> PipelineJob:
+            job = one_step_job(
+                "load",
+                DeltaTableDatabase(pipeline_root),
+                xs,
+                result_database=DeltaTableDatabase(result_root),
+                source_id="other",
+            )
+            _ = job.run()
+            return job
+
+        written = write([2.0, 3.0])
+        written.save(tmp_path / "job.json")
+        loaded = PipelineJob.load(tmp_path / "job.json", result_database=warm)
+        node = loaded.nodes["out"]
+
+        def views() -> tuple[list[Any], list[Any]]:
+            records = node.get_all_records()
+            assert records is not None
+            return (
+                sorted(node.as_source().as_table().column("doubled").to_pylist()),
+                sorted(records.column("doubled").to_pylist()),
+            )
+
+        assert views() == ([4.0, 6.0], [4.0, 6.0])
+        _ = write([2.0, 3.0, 5.0])  # appended through other handles
+        assert views() == ([4.0, 6.0, 10.0], [4.0, 6.0, 10.0])
+
+
+class TestRefreshIsPerNodePerRun:
+    """R3: each node refreshes its own tables once per run, never per row.
+
+    Two nodes of one job that share a result table each look at it once (the
+    documented cost); a job run does not share the refresh between nodes.
+    """
+
+    def test_two_nodes_sharing_a_result_table(self, tmp_path: pathlib.Path) -> None:
+        from unittest.mock import patch
+
+        results = DeltaTableDatabase(tmp_path / "results")
+        job = PipelineJob(
+            name="two", database=InMemoryArrowDatabase(), result_database=results
+        )
+        xs = [float(x) for x in range(50)]
+        with job:
+            double.pod(make_source(xs, "a"), label="first")
+            double.pod(make_source(xs, "b"), label="second")
+        refresh = DeltaTableDatabase.refresh_table
+        refreshed: list[tuple[str, ...]] = []
+
+        def counted(self: DeltaTableDatabase, record_path: tuple[str, ...]) -> None:
+            refreshed.append(record_path)
+            refresh(self, record_path)
+
+        with patch.object(DeltaTableDatabase, "refresh_table", counted):
+            _ = job.run()
+        (result_table,) = {p for p in refreshed if p[-1] == "rdb_v1"}
+        assert refreshed.count(result_table) == 2  # one per node, not per row
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="ITL-1413: a Delta table deleted and recreated at the same path with the "
+    "same version number is not seen by a handle that loaded the old one",
+)
+def test_a_recreated_table_at_the_same_version_is_seen(tmp_path: pathlib.Path) -> None:
+    """R4: the refresh compares versions, not the table's identity (limit, ITL-1413)."""
+    import shutil
+
+    import deltalake
+
+    warm = DeltaTableDatabase(tmp_path / "shared")
+    _ = one_step_job("warm", InMemoryArrowDatabase(), [1.0], result_database=warm).run()
+    replacement = DeltaTableDatabase(tmp_path / "replacement")
+    _ = one_step_job(
+        "write", InMemoryArrowDatabase(), [1.0], double_changed, replacement
+    ).run()
+    (path,) = [p for p in warm.list_table_paths(()) if p[-1] == "rdb_v1"]
+    old = tmp_path / "shared" / "/".join(path)
+    new = tmp_path / "replacement" / "/".join(path)
+    assert deltalake.DeltaTable(str(old)).version() == 0
+    assert deltalake.DeltaTable(str(new)).version() == 0
+    # Recreate the table at the old path (its old data files left behind).
+    _ = shutil.move(str(old / "_delta_log"), str(tmp_path / "old_log"))
+    for item in new.iterdir():
+        _ = shutil.move(str(item), str(old / item.name))
+    calls.clear()
+    job = one_step_job("read", InMemoryArrowDatabase(), [1.0], double_changed, warm)
+    _ = job.run()
+    assert calls == []
+    assert rows(job, "out", "doubled") == [3.0]  # the stored value now at that path
+
+
+class TestTwoOverlappingJobs:
+    """R5: a row another job commits after this node refreshed is not seen in this run.
+
+    The window opens when the node refreshes its tables at its start and closes at
+    its next refresh (its next run or stored read) or its own commit of that table.
+    A side-effecting function can be delivered by each of two overlapping jobs.
+    This pins that documented behaviour; reserving an input is not designed yet.
+    """
+
+    @pytest.mark.parametrize("separate", [True, False])
+    def test_a_ctx_action_committed_during_the_run_is_delivered_again(
+        self, tmp_path: pathlib.Path, separate: bool, orchestrator: Orchestrator
+    ) -> None:
+        from orcapod.pipeline.observer import NoOpObserver
+
+        warm = DeltaTableDatabase(tmp_path / "store")
+        writer = DeltaTableDatabase(tmp_path / "store")
+
+        def job(handle: DeltaTableDatabase, name: str, xs: list[float]) -> PipelineJob:
+            if separate:
+                return one_step_job(
+                    name, InMemoryArrowDatabase(), xs, notify, handle, source_id=name
+                )
+            return one_step_job("same", handle, xs, notify, source_id=name)
+
+        _ = job(warm, "warm", [1.0]).run(orchestrator=orchestrator)
+        reader = job(warm, "reader", [3.0])
+        other = job(writer, "writer", [3.0])
+
+        class CommitsAfterTheRefresh(NoOpObserver):
+            committed: bool = False
+
+            def contextualize(self, *identity_path: str) -> CommitsAfterTheRefresh:
+                return self
+
+            def on_node_start(
+                self, node_label: str, node_hash: str, tag_schema: Any = None
+            ) -> None:
+                if node_label == "out" and not self.committed:
+                    self.committed = True
+                    _ = other.run()
+
+        _ = reader.run(orchestrator=orchestrator, observer=CommitsAfterTheRefresh())
+        assert sorted(delivered) == [1.0, 3.0, 3.0]

@@ -179,10 +179,28 @@ A `CachedSource` is not a node of the job: its cache is kept in the cache databa
 the path it was created with, whatever job reads it, so two jobs given one `CachedSource`
 (or one cache database and path) share its cache.
 
-Every run reads the result tables as they are when it starts: results that another job,
-or another handle on the same database (a second `DeltaTableDatabase` over the same
-directory, another process), committed before the run started are reused, not computed
-again. For a `DeltaTableDatabase` that costs one read of each result table's log per run.
+Every run reads a function node's stored tables (its result table and its pipeline
+records) as they are when the node starts: results that another job, or another handle on
+the same database (a second `DeltaTableDatabase` over the same directory, another
+process), committed before then are reused, not computed again. A read of what is stored
+(`as_source()`, `get_all_records()`) likewise reads the tables as they are at that read.
+For a `DeltaTableDatabase` each costs one read of each of the node's tables' logs: once
+per node and run, or per read call, never per row. Each node looks at its own tables, so
+two nodes of one job that share a result table each read its log once in a run.
+
+Results committed **while** a node runs are another matter. The window opens when the node
+starts and reads its tables, and closes at its next run or stored read, or when it
+commits that table itself: a result another job commits in between is not seen by this
+run, which computes that input again. For an ordinary function this costs only time
+(both jobs store the same result). For a function that takes the invocation context, it
+means **each of two jobs that run at the same time over the same input can perform the
+action**: nothing reserves an input while it is being computed. Do not run two such jobs
+over the same inputs at once.
+
+A `DeltaTableDatabase` notices a newer version of a table, but not a table deleted and
+recreated at the same path that happens to have the same version number: a handle that
+had loaded the old table keeps reading it (ITL-1413). Open a new database object after
+replacing a table.
 
 A function that takes the invocation context (`ctx_arg`) performs an external action, and
 its result table records which inputs it was performed for. Jobs that share a result
