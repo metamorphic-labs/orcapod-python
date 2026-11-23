@@ -1763,9 +1763,14 @@ class _NotHeld(Exception):
     """A node on the way holds no run (``not_computed``), or reads a source that is not
     read here (``unavailable``)."""
 
-    def __init__(self, status: str = "not_computed") -> None:
+    def __init__(self, status: str = "not_computed", because: str = "") -> None:
         super().__init__(status)
         self.status = status
+        self.because = because or (
+            "a node on the way holds no run"
+            if status == "not_computed"
+            else "a step on the way reads a source that is not read here"
+        )
 
 
 def why_missing(node: Any, source: str, record_id: str) -> Absence:
@@ -1832,11 +1837,7 @@ def why_missing(node: Any, source: str, record_id: str) -> Absence:
         for n in path:
             carried[id(n)] = _carried(n, wanted, reader, carried, on_path)
     except _NotHeld as unread:
-        because = (
-            "a node on the way holds no run"
-            if unread.status == "not_computed"
-            else "a step on the way reads a source that is not read here"
-        )
+        because = unread.because
         return Absence(
             node.label,
             source,
@@ -1877,7 +1878,7 @@ def why_missing(node: Any, source: str, record_id: str) -> Absence:
     present = tuple(n.label for n in path if holds(n))
     missing = not holds(node)
     function_node = next((n for n in path if _kind(n) == "function"), None)
-    reached = _reached(function_node, sources, wanted, reader, carried)
+    reached, recorded = _reached(function_node, sources, wanted, reader, carried)
 
     removed_by: Step | None = None
     because = ""
@@ -1905,6 +1906,7 @@ def why_missing(node: Any, source: str, record_id: str) -> Absence:
         because=because if missing else "",
         path=labels,
         edges=tuple(sorted(edges)),
+        entry_recorded=recorded,
     )
 
 
@@ -1929,6 +1931,18 @@ def _carried(
     rows = reader.held(n)
     if rows is None:
         raise _NotHeld
+    if (
+        _kind(n) == "operator"
+        and _folding(n) is None
+        and _input_columns(n, 0, "") is None
+    ):
+        # An operator that is not one of Orcapod's own (a user operator, or a subclass
+        # of one, which may do anything): which rows come from which is not known.
+        raise _NotHeld(
+            "unavailable",
+            f"{n.label!r} is not one of Orcapod's own operators, so which of its rows "
+            "come from the record is not known",
+        )
     kept: dict[int, Row] = {}
     if _folding(n) is not None:
         upstream = n.upstreams[0]
@@ -2014,19 +2028,30 @@ def _reached(
     wanted: dict[int, set[tuple[Any, Any]]],
     reader: _Reader,
     carried: dict[int, list[Row] | None],
-) -> bool | None:
+) -> tuple[bool | None, bool | None]:
     """The stored answer of the first function node on the way.
 
-    The entries' system-tag columns that come from each matching source (by position)
-    name its records directly, which answers for every run. After a fold they hold
-    folded values: an entry for a group that holds the record now proves it reached
-    the function; otherwise the stored answer is unavailable (``None``), never a guess.
+    A function node stores an entry for each input it ran successfully (or served from
+    its store). The entries' system-tag columns that come from each matching source (by
+    position) name its records directly. After a fold they hold folded values: an entry
+    for a group that holds the record now proves it reached the function.
+
+    A stored entry proves the input reached the function. No entry proves nothing: the
+    function may have raised on the input (a failure stores no entry) or never received
+    it. So the answer is never "did not reach".
+
+    Returns:
+        ``(reached, recorded)``: ``reached`` is ``True`` when a stored entry proves the
+        input reached the function, else ``None`` (unknown); ``recorded`` is ``True``
+        when such an entry is stored, ``False`` when the entries name the source but
+        none this record, ``None`` when the entries cannot tell (a fold not held, tied
+        inputs, no entries).
     """
     if function_node is None or function_node._pipeline_database is None:  # pyright: ignore[reportPrivateUsage]
-        return None
+        return None, None
     entries, _ = reader.provenance(function_node)
     if not entries:
-        return None
+        return None, None
     names = _system_tags(entries[0])
     direct = False
     unknown = False
@@ -2042,21 +2067,21 @@ def _reached(
             direct = True
             if any(found & pairs for found in named):
                 if not tied:
-                    return True
+                    return True, True
                 # The columns include a tied input's slots: a stored entry names the
                 # record, but maybe through the other input; it cannot tell.
                 unknown = True
     if unknown:
-        return None
+        return None, None
     if direct:
-        return False
+        return None, False
     up = carried.get(id(function_node.upstreams[0]))
     if not up:
-        return None
+        return None, None
     keys = {tuple(r.get(c) for c in names) for r in up}
-    return (
-        True if any(tuple(e.get(c) for c in names) in keys for e in entries) else None
-    )
+    if any(tuple(e.get(c) for c in names) in keys for e in entries):
+        return True, True
+    return None, None
 
 
 def _blame(

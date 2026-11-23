@@ -368,10 +368,11 @@ class Absence:
         missing: ``False`` if the node holds a row from the record.
         status: ``"read"``; ``"not_computed"`` when a node on the way holds no run; or
             ``"unavailable"`` when a fold on the way reads a source that is not read here.
-        reached_function: For the first function node on the way from the source:
-            ``True`` if its stored pipeline entries hold an input row from the record,
-            ``False`` if none does (the record never reached it, in any run); ``None``
-            when there is no function node on the way or it stores nothing.
+        reached_function: ``True`` when a stored entry of the first function node on
+            the way proves that an input row from the record reached it; otherwise
+            ``None`` (unknown). Never ``False``: a function that raised on an input
+            stores no entry for it, so a missing entry does not prove the input never
+            reached the function.
         function_node: The label of that function node, or ``None``.
         present_in: The nodes on the way whose rows hold a row from the record, in
             topological order (ties by label).
@@ -380,6 +381,10 @@ class Absence:
         path: The nodes from the source to the asked node, in topological order.
         edges: The streams of the job's graph between the nodes holding a row from the
             record, and into the step that removed it, as ``(upstream, downstream)``.
+        entry_recorded: What that function node's store records: ``True`` when it
+            stores an entry for an input row from the record, ``False`` when it stores
+            entries of the source but none for the record (the function raised on it,
+            or never received it), ``None`` when the store cannot tell.
     """
 
     node: str
@@ -394,6 +399,7 @@ class Absence:
     because: str
     path: tuple[str, ...] = ()
     edges: tuple[tuple[str, str], ...] = ()
+    entry_recorded: bool | None = None
 
     def highlight(self) -> Highlight:
         """Return the path, the removing step included, for ``job.diagram``."""
@@ -408,7 +414,8 @@ class Absence:
         """Return the answer as one line."""
         record = f"{self.source} {self.record_id}"
         if self.status == "unavailable":
-            return f"{record}: not known: a step on the way reads a source that is not read here"
+            reason = self.because or "a step on the way is not read here"
+            return f"{record}: not known: {reason}"
         if self.status != "read":
             return f"{record}: not computed: run() the job first"
         if not self.missing:
@@ -426,13 +433,15 @@ class Absence:
     def text(self) -> str:
         """Return the answer, then the details, one per line."""
         lines = [self.headline()]
-        if self.function_node is not None and self.reached_function is not None:
-            if self.reached_function:
-                lines.append(f"  reached function node {self.function_node!r}")
+        if self.function_node is not None and self.entry_recorded is not None:
+            if self.entry_recorded:
+                lines.append(
+                    f"  reached function node {self.function_node!r} (a stored entry)"
+                )
             else:
                 lines.append(
-                    f"  never reached function node {self.function_node!r} "
-                    "(no entry in its pipeline store)"
+                    f"  no successful entry of function node {self.function_node!r} is "
+                    "stored for it (the function raised on it, or never received it)"
                 )
         if self.present_in:
             lines.append(f"  present in: {', '.join(self.present_in)}")

@@ -57,13 +57,19 @@ class ProvenanceMethods:
         reported unavailable or refused (the known limits are in the provenance concept
         page).
 
-        First, from the first function node's stored pipeline entries: whether the
-        record ever reached it, in any run. Then, from the rows the nodes hold: the
-        nodes that hold a row from the record, and the first step that removed it,
-        in ``explain()``'s words; for a join, the key missing from the other input.
+        It reads the run the job holds (``not_computed`` without one, even when the
+        store holds entries). From the rows the nodes hold: the nodes that hold a row
+        from the record, and the step that removed it, in ``explain()``'s words; for a
+        join, the key missing from the other input. From the first function node's
+        stored entries: a stored entry proves the record reached it
+        (``reached_function``); no entry proves nothing (a function that raised stores
+        none), so the answer is then unknown, and ``entry_recorded`` says what the store
+        holds. Past an operator that is not one of Orcapod's own (a subclass, or your
+        own), the answer is ``unavailable``.
 
         Args:
-            source: The source id (as in source-info tokens).
+            source: The source id (as in source-info tokens), or the source node's
+                label (which tells apart two bindings that carry one id).
             record_id: The record id (``row_<n>``, or the key columns as JSON).
 
         Returns:

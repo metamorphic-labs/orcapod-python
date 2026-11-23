@@ -348,17 +348,19 @@ with imec0:
 imec0.run()
 print(imec0.nodes["imec0_rates"].why_missing("units", "row_4"))
 # units row_4 is removed by Filter[...]: probe='imec0'
-#   never reached function node 'imec0_rates' (no entry in its pipeline store)
+#   no successful entry of function node 'imec0_rates' is stored for it (the function raised on it, or never received it)
 #   present in: units
 print(imec0.nodes["imec0_rates"].why_missing("units", "row_48"))
 # units row_48 is removed by Join: rows without a match in 'sessions' are dropped
-#   never reached function node 'imec0_rates' (no entry in its pipeline store)
+#   no successful entry of function node 'imec0_rates' is stored for it (the function raised on it, or never received it)
 #   present in: units, ...
 #   because: no row with session='s1', subject_id='mouse_04' in ... (reads sessions)
 ```
 
-The first line answers the question. "Never reached" is read from the stored records of
-`imec0_rates`, so it holds for every run of this job: the function never saw the row.
+The first line answers the question: which step removed the row. The second is read from
+the stored records of `imec0_rates`: no run of this job stored a result for the row. On
+its own that does not prove the function never saw it (a function that raised on a row
+stores no result for it); the first line says why it did not.
 `why_missing(...).highlight()` marks the path up to the step that removed the row.
 
 ## Starting a second pipeline from stored results

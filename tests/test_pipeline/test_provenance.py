@@ -359,7 +359,9 @@ def test_why_missing(tmp_path: Path, mode: str) -> None:
     assert present.present_in[-1] == "means"
 
     filtered = node.why_missing("units", "row_5")
-    assert filtered.missing and filtered.reached_function is False
+    # No stored entry proves nothing (the function might have raised): unknown.
+    assert filtered.missing and filtered.reached_function is None
+    assert filtered.entry_recorded is False
     assert filtered.function_node == "unit_rates"
     assert filtered.removed_by is not None
     assert filtered.removed_by.operator == "Filter"
@@ -367,7 +369,8 @@ def test_why_missing(tmp_path: Path, mode: str) -> None:
     assert filtered.present_in == ("units",)
 
     joined = node.why_missing("units", "row_6")
-    assert joined.missing and joined.reached_function is False
+    assert joined.missing and joined.reached_function is None
+    assert joined.entry_recorded is False
     assert joined.removed_by is not None and joined.removed_by.operator == "Join"
     assert "session='s1', subject='m3'" in joined.because
     assert "Join" in joined.text()

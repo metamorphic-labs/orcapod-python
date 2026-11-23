@@ -542,8 +542,8 @@ def test_no_user_code_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     calls.clear()
     blamed = other.nodes["SelectDataColumns"].why_missing("plain", "row_1")
     assert calls == []
-    assert blamed.removed_by is not None
-    assert "user-defined" in blamed.removed_by.text
+    # A subclass of a known operator may do anything: not followed, not blamed.
+    assert blamed.status == "unavailable" and blamed.removed_by is None
 
 
 def test_two_versions_of_one_record_are_both_source_cells(tmp_path: Path) -> None:
@@ -1416,3 +1416,80 @@ def test_an_input_row_must_keep_the_tags_the_step_keeps(
     trace = target.trace({"k": "new", "i": 0}, "x")
     (step,) = trace.root.inputs
     assert dict(step.tags)["k"] == "new"
+
+
+# ---------------------------------------------------------------------------
+# Eleventh review (head 38f666d7)
+# ---------------------------------------------------------------------------
+
+FAILED_CALLS: list[int] = []
+
+
+@function_pod(output_keys="result")
+def fails_on_one(x: int) -> int:
+    FAILED_CALLS.append(x)
+    if x == 1:
+        raise ValueError("fails on the first record")
+    return x
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_a_failed_call_is_not_reported_as_never_reached(mode: str) -> None:
+    """The function ran on x=1 and raised (continue on error): no successful entry is
+    stored for it, which does not prove the input never reached the function."""
+    FAILED_CALLS.clear()
+    source = DictSource(
+        [{"k": "x", "i": 0, "x": 1}, {"k": "x", "i": 1, "x": 2}],
+        tag_columns=["k", "i"],
+        tag_only_columns=True,
+        source_id="a",
+    )
+    job = PipelineJob(name=f"fails{mode}", database=InMemoryArrowDatabase())
+    with job:
+        fails_on_one.pod(source, label="may_fail")
+    run(job, mode)
+    assert sorted(FAILED_CALLS) == [1, 2]  # the function did receive x=1
+    answer = job.nodes["may_fail"].why_missing("a", "row_0")
+    assert answer.missing
+    assert answer.reached_function is None
+    assert answer.entry_recorded is False
+    assert "never reached" not in answer.text()
+    assert "no successful entry" in answer.text()
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_why_missing_does_not_follow_an_operator_subclass(mode: str) -> None:
+    """A user subclass of SemiJoin (unchanged): why_missing asked by the right binding
+    does not follow it by its system tags; the answer is unavailable."""
+
+    class CustomSemiJoin(SemiJoin):
+        pass
+
+    left = DictSource(
+        [{"k": "unmatched", "i": 1, "x": 7}, {"k": "shared", "i": 2, "x": 8}],
+        tag_columns=["k", "i"],
+        tag_only_columns=True,
+        source_id="same",
+    )
+    schema = pa.schema(
+        [
+            pa.field("k", pa.large_string(), nullable=False),
+            pa.field("i", pa.int64(), nullable=False),
+            pa.field("x", pa.int64(), nullable=False),
+        ]
+    )
+    right = ArrowTableSource(
+        pa.Table.from_pylist([{"k": "shared", "i": 2, "x": 90}], schema=schema),
+        tag_columns=["k", "i"],
+        tag_only_columns=True,
+        source_id="same",
+    )
+    job = PipelineJob(name=f"customsemi{mode}", database=InMemoryArrowDatabase())
+    with job:
+        CustomSemiJoin()(left, right)
+    run(job, mode)
+    node = job.nodes["CustomSemiJoin"]
+    assert node.trace({}, "x").status == "unavailable"
+    answer = node.why_missing(node.upstreams[1].label, "row_1")
+    assert answer.status == "unavailable"
+    assert "reaches" not in answer.text()

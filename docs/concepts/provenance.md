@@ -140,26 +140,32 @@ then show the same results, with the times they were computed.
 
 ## Why a row is missing
 
-`why_missing(source, record_id)` takes the source id and a record id as they appear in a
-source-info token. It answers in two steps:
+`why_missing(source, record_id)` takes a source, by its id as it appears in a source-info
+token or by its source node's label (which tells apart two bindings that carry one id),
+and a record id. It reads the run the job holds: before a run, and on a loaded job not
+yet run (`load_only=True`), it answers `not_computed`, even when the store holds entries.
+It answers in two steps:
 
-- **From the stored records:** did the first function node on the way ever receive a row
-  from this record, in any run?
 - **From the rows the nodes hold:** which nodes have a row from it, and which step removed
   it. The step is described in the words of `explain()`. For a join, the answer also gives
   the key the other input lacks.
+- **From the stored records of the first function node on the way:** a stored entry
+  proves that a row from the record reached the function, in some run
+  (`reached_function` is `True`). No entry proves nothing: a function that raised on an
+  input stores no entry for it. So `reached_function` is never `False`; `entry_recorded`
+  says what the store holds.
 
 ```python
 answer = job.nodes["per_animal"].why_missing("trials", '{"animal":"a3","trial":1}')
 print(answer)
 # trials {"animal":"a3","trial":1} does not reach per_animal: source 'trials' holds no record '{"animal":"a3","trial":1}'
-#   never reached function node 'scores' (no entry in its pipeline store)
+#   no successful entry of function node 'scores' is stored for it (the function raised on it, or never received it)
 ```
 
 The result is an `Absence`. Its fields hold:
 
 - `missing`: whether the row is missing;
-- `reached_function` and `function_node`: the stored-record answer;
+- `reached_function`, `entry_recorded` and `function_node`: the stored-record answer;
 - `present_in`: the nodes that hold a row from the record;
 - `removed_by`: the step that removed it, a `Step`;
 - `because`: the reason, in words.
@@ -202,18 +208,22 @@ pairs. A label the job does not have is refused with `ValueError`.
       whether the source holds the record.
 - A link is never guessed. Two rows that cannot be told apart by their system tags,
   tokens and values are refused with `ProvenanceInconsistencyError`.
-- Inputs of a `Join` with one pipeline hash (two sources of one schema) are told apart
-  by the values they hold. Two such joins joined again, whose sources sort in opposite
-  orders, cannot be told apart: the trace refuses the link rather than guess. A stored
-  entry that cannot tell two such inputs apart leaves `why_missing`'s stored answer
-  unknown (`reached_function` is `None`).
+- Inputs of a commutative `Join` with one pipeline hash are told apart by the values
+  they hold. Such inputs are two sources of one schema, or two upstream joins whose
+  outputs share a pipeline hash. When two such upstream joins hold their sources in
+  opposite orders, no assignment of the values fits, and the trace refuses the link
+  rather than guess. `why_missing`'s stored answer through such tied inputs is unknown
+  (`reached_function` is `None`), even when their source ids differ.
 - The `row` argument compares values strictly: `False` never selects `0`, and a NaN
   key selects the NaN group.
 - A node the trace passes must hold its run. After a full run every node does; after
   `node.run()` the nodes above it do.
 - Only Orcapod's own operators are followed, each by its own rule (which input column
   each output column comes from). A subclass of an Orcapod operator, and an operator of
-  your own, may do anything: their links are `unavailable`.
+  your own, may do anything: `trace` reports their links `unavailable`, and
+  `why_missing` past one answers `unavailable`.
+- `why_missing` reads the run the job holds. With only stored entries (before a run, or
+  on a loaded job not yet run with `load_only=True`) it answers `not_computed`.
 - A `SemiJoin`'s right input only chooses which left rows pass. Its rows never reach the
   SemiJoin's output, and `why_missing` says so.
 - The stored answer (`reached_function`) after a `GroupBy` or `Batch` is known only for
