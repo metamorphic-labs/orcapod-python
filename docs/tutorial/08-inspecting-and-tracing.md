@@ -101,7 +101,8 @@ Every stream carries hidden columns that record where its rows and values came f
 are left out by default. Ask for them with the `columns` argument of `as_table`.
 
 **Source-info columns.** For each data column there is a companion column named
-`_source_<column>`. On a source it holds the source's name, the row number and the column:
+`_source_<column>`. On the `units` source it holds the source's name, the row number and
+the column:
 
 ```python
 table = job.nodes["units"].as_table(columns={"source": True})
@@ -134,9 +135,19 @@ Two system-tag columns, because two sources feed `rates`; every row depends on o
 `sessions` and one row of `units`. The column names end in a long hash that identifies the
 source's position in the pipeline, which is why the sample selects them by prefix.
 
-The companion `_tag_record_id::...` columns identify the individual source row. They hold
-compact binary identifiers that Orcapod uses internally to tell rows apart; they are not
-meant to be read by eye.
+The companion `_tag_record_id::...` columns identify rows within each source. A record ID
+is text. By default it has the form `row_<n>`, with positions counted from zero. When you
+set `record_id_columns`, the ID is a canonical JSON object containing the key column names
+and values in the order you declared them.
+
+```python
+units_table = job.nodes["units"].as_table(columns={"system_tags": True})
+record_id_column = next(
+    name for name in units_table.column_names if name.startswith("_tag_record_id::")
+)
+print(units_table.column(record_id_column)[5].as_py())
+# row_5
+```
 
 !!! note "After `group_by`"
     A grouped row comes from many source rows. Its system tags are folded into a single
@@ -242,12 +253,12 @@ session; for a node whose results were never stored, it has no rows. It reads ev
 result of the node, including those of earlier runs over other inputs, like
 `get_all_records()` above; when you want only this run's output, use `as_table()`.
 
-!!! warning "Not yet: a stored joined result as the source of a new job"
-    The stage above runs in memory, so its own results are not stored. Recording it in a new
-    `PipelineJob` does not work yet for `session_means`, or for any node downstream of a
-    join: its rows still carry the provenance of both joined sources, and a job refuses such
-    a source with `SourceSpecMismatchError` when it is bound. Support is planned (ITL-1127).
-    Until then, to store a later stage, add it to the first job.
+!!! warning "Not yet: binding a plain derived source to a new job"
+    The stage above runs in memory. A plain `as_source()` call exposes the stored tag and
+    data columns with no system tags and null source-info tokens. Binding `session_means`
+    as an input to a new `PipelineJob` raises `SourceSpecMismatchError` because a job input
+    needs one source-id system tag and one record-id system tag. Support is planned
+    (ITL-1127). Until then, to store the later stage, add it to the first job.
 
 ## What to remember
 
