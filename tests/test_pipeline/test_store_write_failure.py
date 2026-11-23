@@ -703,13 +703,16 @@ class TestConcurrentFailures:
         """Several database errors raise the first node's, the same on both orchestrators."""
         faults = Faults(write_marker=RESULT_TABLE)
         job = build_siblings(FaultyStore(InMemoryArrowDatabase(), faults), triple_async)
+        first, second = sorted(
+            ("dbl", "other"),
+            key=lambda label: (job.nodes[label].pipeline_hash().to_string(), label),
+        )
 
         with caplog.at_level("WARNING"):
             with pytest.raises(OrcapodDatabaseWriteError) as exc_info:
                 job.run(orchestrator=orchestrator_cls())
 
-        # The sync orchestrator meets ``dbl`` first; the async one raises the same.
-        assert_database_error(exc_info.value, faults, node_label="dbl", names_row=True)
+        assert_database_error(exc_info.value, faults, node_label=first, names_row=True)
         if orchestrator_cls is AsyncPipelineOrchestrator:
             others = [
                 record
@@ -717,7 +720,7 @@ class TestConcurrentFailures:
                 if record.levelname == "WARNING"
                 and "Another database write failed" in record.getMessage()
             ]
-            assert any("node 'other'" in r.getMessage() for r in others), others
+            assert any(f"node {second!r}" in r.getMessage() for r in others), others
 
 
 # ---------------------------------------------------------------------------

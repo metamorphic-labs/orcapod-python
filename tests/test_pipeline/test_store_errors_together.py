@@ -83,13 +83,16 @@ def _reset_damage() -> Iterator[None]:
     _DAMAGE_ON_NEXT_CALL.clear()
 
 
-def build_job(database_path: Path, keys: str, *, reader_first: bool) -> PipelineJob:
+def build_job(
+    database_path: Path, keys: str, *, reader_first: bool | None
+) -> PipelineJob:
     """Two independent nodes: ``rd`` (doubles) and ``wr`` (triples).
 
     ``reader_first`` decides which node reads the first source in slot order.
+    With ``None``, both nodes read the same source.
     """
     table = pa.table({"k": list(keys), "x": list(range(1, len(keys) + 1))})
-    first, second = (
+    sources = [
         ArrowTableSource(
             table,
             source_id=name,
@@ -97,9 +100,10 @@ def build_job(database_path: Path, keys: str, *, reader_first: bool) -> Pipeline
             tag_only_columns=True,
             infer_nullable=True,
         )
-        for name in ("first", "second")
-    )
-    read_source, write_source = (first, second) if reader_first else (second, first)
+        for name in (("first",) if reader_first is None else ("first", "second"))
+    ]
+    read_source = sources[-1] if reader_first is False else sources[0]
+    write_source = sources[0] if reader_first is False else sources[-1]
     job = PipelineJob(
         name="together", database=DeltaTableDatabase(base_path=database_path)
     )
@@ -146,7 +150,7 @@ def run_with_both_failures(
     tmp_path: Path,
     make_orchestrator: Callable[[], Any],
     *,
-    reader_first: bool,
+    reader_first: bool | None,
 ) -> OrcapodDatabaseError:
     """Run a job in which ``rd``'s read and ``wr``'s write fail on the new row d.
 
@@ -173,9 +177,13 @@ def run_with_both_failures(
     return info.value
 
 
-@pytest.mark.parametrize("reader_first", [True, False], ids=["rd-first", "wr-first"])
+@pytest.mark.parametrize(
+    ("reader_first", "winner"),
+    [(True, "rd"), (False, "wr"), (None, "wr")],
+    ids=["rd-first", "wr-first", "broadcast"],
+)
 def test_sync_and_async_raise_the_same_error(
-    tmp_path: Path, reader_first: bool
+    tmp_path: Path, reader_first: bool | None, winner: str
 ) -> None:
     """Both orchestrators raise the error of the node that comes first."""
     raised = {
@@ -185,12 +193,12 @@ def test_sync_and_async_raise_the_same_error(
 
     expected_type, expected_node = (
         (OrcapodDatabaseReadError, "rd")
-        if reader_first
+        if winner == "rd"
         else (OrcapodDatabaseWriteError, "wr")
     )
     # rd's read failure surfaces when rd commits its batch, which names no row
     # (ITL-919); wr's failed write of row d names that row.
-    expected_tag = None if reader_first else {"k": "d"}
+    expected_tag = None if winner == "rd" else {"k": "d"}
     for name, err in raised.items():
         assert type(err) is expected_type, (name, err)
         assert err.node_label == expected_node, (name, err)

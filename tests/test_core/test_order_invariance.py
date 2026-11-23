@@ -57,13 +57,22 @@ import pyarrow.csv as pa_csv
 import pytest
 
 import orcapod
-from orcapod import PipelineJob, col, function_pod, operators, sources, streams
+from orcapod import (
+    Pipeline,
+    PipelineJob,
+    col,
+    function_pod,
+    operators,
+    sources,
+    streams,
+)
 from orcapod.channels import Channel
 from orcapod.core.nodes import SourceJobNode
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import RestrictedAggregationWarning
+from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.types import Condition
 from orcapod.operators import (
     AddTags,
@@ -1211,41 +1220,118 @@ def _double_reading(reading: int | None) -> int:
     return (reading or 0) * 2
 
 
+@pytest.mark.parametrize("first_source", ["a", "step_1"])
+def test_explicit_suffixes_remain_addressable_in_every_definition_order(
+    first_source: str,
+) -> None:
+    """A generated suffix never shadows a node with its own label."""
+    definitions = ((first_source, 1, "step"), ("b", 2, "step"), ("c", 3, "step_1"))
+    results: dict[str, dict[str, Any]] = {}
+    for order in itertools.permutations(definitions):
+        job = PipelineJob(name="labels", database=InMemoryArrowDatabase())
+        with job:
+            for name, value, label in order:
+                source = ListSource("reading", [value], source_id=name)
+                _ = _double_reading.pod(source, label=label)
+        summary = job.run()
+        assert set(summary.nodes) == {"step_1", "step_2", "step_3"}
+        assert job.nodes["step_1"].as_table()["doubled"].to_pylist() == [6]
+        results["".join(name for name, _, _ in order)] = {
+            "labels": list(job.nodes),
+            "rows": {
+                name: job.nodes[name].as_table()["doubled"].to_pylist()
+                for name in summary.nodes
+            },
+        }
+    assert_all_equal(results)
+
+
+@pytest.mark.parametrize("labels", [("label_z", "label_a"), (None, "label_a")])
+def test_identical_invocations_keep_the_smallest_explicit_label(
+    labels: tuple[str | None, str],
+) -> None:
+    """Invocations deduplicate whichever label was recorded first."""
+    for order in (labels, labels[::-1]):
+        source = ListSource("reading", [2], source_id="readings")
+        job = PipelineJob(name="labels", database=InMemoryArrowDatabase())
+        with job:
+            for label in order:
+                _ = _double_reading.pod(source, label=label)
+        assert list(job.nodes) == ["readings", "label_a"]
+        assert list(job.run().nodes) == ["label_a"]
+
+
 def _restricted_job_run(root: Path, names: Sequence[str]) -> None:
     """Print the node labels, summary lines and warning for one job in a child process."""
     from tests.test_databases import fake_pyspiral
 
     keys = pa.schema([pa.field("subject", pa.string())])
-    rows = pa.table({"subject": ["a", "b"], "reading": [1, 2]})
     with fake_pyspiral.install(root):
         project = fake_pyspiral.FakeSpiral().project("synthetic")
-        for name in sorted(names):
+        for value, name in enumerate(sorted(names)):
+            # Distinct readings avoid competing for the same cache entry in async.
+            rows = pa.table({"subject": ["a", "b"], "reading": [value, value + 1]})
             project.create_table(f"default.{name}", key_schema=keys).write(rows)
 
-        job = PipelineJob(name="restricted", database=InMemoryArrowDatabase())
-        with job:
-            for name in names:
-                source = SpiralDBTableSource(
-                    "synthetic", name, source_id=name, tag_only_columns=True
-                ).where(subject="a")
+        bindings: dict[str, StreamProtocol] = {
+            name: SpiralDBTableSource(
+                "synthetic", name, source_id=name, tag_only_columns=True
+            ).where(subject="a")
+            for name in names
+        }
+        pipeline = Pipeline(name="restricted")
+        with pipeline:
+            for name, source in bindings.items():
                 # The step labels run the opposite way to the source names.
-                _ = source.group_by(["subject"], label=f"group_{name[-1]}")
+                _ = GroupBy(["subject"])(source, label=f"group_{name[-1]}")
+                if name == "alpha3":
+                    _ = Batch(batch_size=2)(source, label="another_alpha")
                 _ = _double_reading.pod(source, label=f"read_{name}")
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always", RestrictedAggregationWarning)
-            summary = job.run()
-    (warning,) = (
-        str(item.message)
-        for item in caught
-        if item.category is RestrictedAggregationWarning
-    )
-    # Strip presentation indentation so the test can identify the restriction line.
-    summary_text = "\n".join(line.lstrip() for line in str(summary).splitlines())
-    print(
-        json.dumps(
-            {"nodes": list(job.nodes), "summary": summary_text, "warning": warning}
-        )
-    )
+        results = {}
+        path = root / "job.json"
+        for async_run in (False, True):
+            database = InMemoryArrowDatabase()
+            job = PipelineJob.from_pipeline(pipeline, database, sources=bindings)
+            labels = list(job.nodes)
+            summary_labels: list[str] = []
+            assert labels.index("group_3") < labels.index("another_alpha")
+            for load_only in (False, True):
+                if load_only:
+                    job = PipelineJob.load(path, database=database)
+                    assert list(job.nodes) == labels
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always", RestrictedAggregationWarning)
+                    summary = (
+                        asyncio.run(job.run_async(load_only=load_only))
+                        if async_run
+                        else job.run(load_only=load_only)
+                    )
+                (warning,) = (
+                    str(item.message)
+                    for item in caught
+                    if item.category is RestrictedAggregationWarning
+                )
+                if load_only:
+                    assert list(summary.nodes) == summary_labels
+                    assert all(node.reused == 1 for node in summary.nodes.values())
+                else:
+                    summary_labels = list(summary.nodes)
+                results[f"{async_run}-{load_only}"] = {
+                    "nodes": list(job.nodes),
+                    "summary": str(summary),
+                    "warning": warning,
+                }
+                if not load_only:
+                    job.save(path)
+                    saved = json.loads(path.read_text())
+                    assert list(saved["bindings"]["sources"]) == sorted(names)
+                    # Independently vary the serialized order, as in pre-fix files.
+                    saved["pipeline"]["edges"].reverse()
+                    saved["pipeline"]["nodes"] = dict(
+                        reversed(saved["pipeline"]["nodes"].items())
+                    )
+                    path.write_text(json.dumps(saved))
+    print(json.dumps(results))
 
 
 def test_restricted_job_order_is_independent_of_hash_seed_and_definition_order(
@@ -1275,12 +1361,17 @@ def test_restricted_job_order_is_independent_of_hash_seed_and_definition_order(
             results[variant] = json.loads(process.stdout)
 
     assert_all_equal(results)
-    result = next(iter(results.values()))
-    assert result["nodes"][: len(names)] == list(names)
-    restrictions = next(
-        line
-        for line in result["summary"].splitlines()
-        if line.startswith("restricted sources:")
-    )
-    assert re.findall(r"(\w+) \(\w+\):", restrictions) == list(names)
-    assert re.findall(r"'(\w+)' feeds", result["warning"]) == list(names)
+    for result in next(iter(results.values())).values():
+        assert result["nodes"][: len(names)] == list(names)
+        restrictions = next(
+            line
+            for line in result["summary"].splitlines()
+            if line.lstrip().startswith("restricted sources:")
+        )
+        assert re.findall(r"(\w+) \(\w+\):", restrictions) == list(names)
+        assert re.findall(r"'(\w+)' feeds \w+ '(\w+)'", result["warning"]) == [
+            ("alpha3", "another_alpha"),
+            ("alpha3", "group_3"),
+            ("beta2", "group_2"),
+            ("gamma1", "group_1"),
+        ]
