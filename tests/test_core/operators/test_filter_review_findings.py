@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from typing import Literal, TypeAlias
 
 import pyarrow as pa
 import pytest
@@ -29,11 +30,12 @@ from .several_items import async_rows
 
 pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
 
-UNITS = ("s", "ms", "us", "ns")
+TimeUnit: TypeAlias = Literal["s", "ms", "us", "ns"]
+UNITS: tuple[TimeUnit, ...] = ("s", "ms", "us", "ns")
 EPOCH = dt.datetime(1970, 1, 1, tzinfo=dt.timezone.utc)
 
 
-def _instants(unit: str) -> ArrowTableStream:
+def _instants(unit: TimeUnit) -> ArrowTableStream:
     """A stream with a zoned timestamp column at ``unit``: the epoch and one second on."""
     values = pa.array([0, 1], pa.int64()).cast(pa.timestamp("s", "UTC"))
     return ArrowTableStream(
