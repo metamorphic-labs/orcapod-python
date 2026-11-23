@@ -77,7 +77,9 @@ class ProvenanceMethods:
             run.
 
         Raises:
-            ValueError: If no source with that id feeds this node.
+            ValueError: If no source with that id or label feeds this node. Asked
+                about a source node whose rows are not read, the answer is
+                ``unavailable`` without checking the id.
             ProvenanceInconsistencyError: If a group's members cannot be proven.
         """
         from orcapod.pipeline.provenance import why_missing

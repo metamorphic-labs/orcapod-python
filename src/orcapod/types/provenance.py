@@ -252,7 +252,10 @@ class TraceStep:
         if self.status == "not_computed":
             out.append(f"{pad}  not computed: run() the job first")
         elif self.status == "unavailable":
-            out.append(f"{pad}  not read: the source's rows are not held")
+            if self.kind == "source":
+                out.append(f"{pad}  not read: the source's rows are not held")
+            else:
+                out.append(f"{pad}  not traced: this link cannot be proven here")
         if self.function is not None:
             out.append(f"{pad}  {self.function.text()}")
         for step in self.inputs:
@@ -369,7 +372,9 @@ class Absence:
         status: ``"read"``; ``"not_computed"`` when a node on the way holds no run; or
             ``"unavailable"`` when a fold on the way reads a source that is not read here.
         reached_function: ``True`` when a stored entry of the first function node on
-            the way proves that an input row from the record reached it; otherwise
+            the way (one of its own entries: this pipeline bound to these sources, in
+            any of its runs) proves that an input row from the record reached it;
+            otherwise
             ``None`` (unknown). Never ``False``: a function that raised on an input
             stores no entry for it, so a missing entry does not prove the input never
             reached the function.

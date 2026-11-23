@@ -150,8 +150,9 @@ It answers in two steps:
   it. The step is described in the words of `explain()`. For a join, the answer also gives
   the key the other input lacks.
 - **From the stored records of the first function node on the way:** a stored entry
-  proves that a row from the record reached the function, in some run
-  (`reached_function` is `True`). No entry proves nothing: a function that raised on an
+  of that node (this pipeline bound to these sources, in any of its runs) proves that a
+  row from the record reached the function (`reached_function` is `True`). Entries
+  stored under another binding of the pipeline are not read. No entry proves nothing: a function that raised on an
   input stores no entry for it. So `reached_function` is never `False`; `entry_recorded`
   says what the store holds.
 

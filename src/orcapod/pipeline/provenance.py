@@ -464,8 +464,6 @@ def _slot(row: Row, node: Any, index: int, reader: Any) -> str | None:
     Raises:
         ProvenanceInconsistencyError: If tied inputs cannot be told apart.
     """
-    import itertools
-
     tied = _tied(node, index)
     if len(tied) < 2:
         return None
@@ -474,16 +472,30 @@ def _slot(row: Row, node: Any, index: int, reader: Any) -> str | None:
         return reader.lookups[key]
     positions = _positions(node)
     slots = sorted(str(positions[j]) for j in tied)
-    fits = {j: {p for p in slots if _fits(node, j, row, p, reader)} for j in tied}
-    found = [
-        permutation
-        for permutation in itertools.permutations(slots)
-        if all(permutation[k] in fits[j] for k, j in enumerate(tied))
-    ]
+    fits = {j: [p for p in slots if _fits(node, j, row, p, reader)] for j in tied}
+    # Search the assignments of slots to inputs that fit (each input its own slot),
+    # stopping at a second one: one is the answer, none or several are refused.
+    found: list[tuple[str, ...]] = []
+    chosen: list[str] = []
+
+    def search(k: int) -> None:
+        if len(found) > 1:
+            return
+        if k == len(tied):
+            found.append(tuple(chosen))
+            return
+        for slot in fits[tied[k]]:
+            if slot not in chosen:
+                chosen.append(slot)
+                search(k + 1)
+                chosen.pop()
+
+    search(0)
     if len(found) != 1:
         raise ProvenanceInconsistencyError(
             f"node {node.label!r}: inputs {sorted(node.upstreams[j].label for j in tied)} "
-            f"have one pipeline hash and {len(found)} ways to hold this row's values; "
+            f"have one pipeline hash and {'several' if found else 'no'} ways to hold this "
+            "row's values; "
             "the link is ambiguous"
         )
     for k, j in enumerate(tied):
@@ -1115,6 +1127,19 @@ class _Tracer:
         ]
 
     def step(self, node: Any, cell: _Cell, member: int | None = None) -> TraceStep:
+        """The step at ``node`` for ``cell``, and the steps below it.
+
+        Args:
+            node: The node holding ``cell``'s row.
+            cell: A row the node holds, a column and a path into its value.
+            member: The cell's position in its parent's folded or merged list.
+
+        Returns:
+            A source step (a leaf); a function, fold or row-wise operator step with the
+            steps of the input cells it came from. A step whose input is not held is
+            ``not_computed``; one whose link cannot be proven (a source not read, an
+            operator that is not one of Orcapod's own) is ``unavailable``.
+        """
         kind = _kind(node)
         tags = _tags_of(node, cell.row)
         if kind == "source":
@@ -1131,6 +1156,8 @@ class _Tracer:
         operator = type(producer).__name__ if producer is not None else None
         if _folding(node) is not None:
             return self.fold_step(node, cell, member, tags, operator)
+        if _merged_key(node, cell.column) and not cell.path:
+            self.verify_merged_key(node, cell)
         inputs: list[TraceStep] = []
         for index in _input_order(node):
             upstream = node.upstreams[index]
@@ -1187,6 +1214,39 @@ class _Tracer:
             piece = _Cell(cell.row, column, (slot, *cell.path[1:]))
             return self.passed_on(node, index, upstream, piece, slot, drop_front=True)
         return self.passed_on(node, index, upstream, cell, None, drop_front=False)
+
+    def verify_merged_key(self, node: Any, cell: _Cell) -> None:
+        """A key several inputs of a join share has one token, the join's fold of the
+        inputs' own tokens (``join_v1``, sorted): rebuild it and compare. Inputs whose
+        token is not known here (not held) leave it unchecked."""
+        from orcapod.core.operators.join import _fold_members  # pyright: ignore[reportPrivateUsage]  # the join's own fold of merged tokens, ITL-1432
+
+        tokens: list[str | None] = []
+        sep = constants.BLOCK_SEPARATOR
+        for index, upstream in enumerate(node.upstreams):
+            up_tags, up_data = _keys(upstream)
+            if cell.column not in up_tags or cell.column not in up_data:
+                continue
+            if _kind(upstream) == "source":
+                pairs = _positional_pairs(cell.row, node, index, upstream, self.reader)
+                if len(pairs) != 1:
+                    return
+                ((sid, record_id),) = pairs
+                tokens.append(f"{sid}{sep}{record_id}{sep}{cell.column}")
+                continue
+            up_rows = self.reader.held(upstream)
+            if up_rows is None:
+                return
+            matched = _input_rows(cell.row, node, index, up_rows, self.reader)
+            found = {r.get(constants.SOURCE_PREFIX + cell.column) for r in matched}
+            if len(found) != 1:
+                return
+            tokens.append(found.pop())
+        if cell.whole_token != _fold_members(tokens):
+            raise ProvenanceInconsistencyError(
+                f"node {node.label!r}: the token of the key {cell.column!r} is not the "
+                "join's fold of its inputs' tokens"
+            )
 
     def merged(self, node: Any, column: str) -> bool:
         """Whether ``column`` is a column of both inputs of a ``MergeJoin`` (merged
@@ -1366,6 +1426,56 @@ class _Tracer:
             found.append(self.step(upstream, up_cell, slot))
         return found
 
+    def fallen_through(
+        self,
+        node: Any,
+        cell: _Cell,
+        member: int | None,
+        tags: tuple[tuple[str, Any], ...],
+    ) -> TraceStep:
+        """A data-tag that falls through a function pod: traced to the input row with
+        the row's system tags, verified by its token and value."""
+        upstream = node.upstreams[0]
+        if _kind(upstream) == "source":
+            inputs = self.to_source(
+                node,
+                0,
+                cell.row,
+                cell.token,
+                cell.value,
+                cell.path[_list_depth(cell) :],
+                None,
+            )
+        else:
+            up_rows = self.reader.held(upstream)
+            if up_rows is None:
+                inputs = [self.unread(upstream, cell.column, None, "not_computed")]
+            else:
+                matched = [
+                    r
+                    for r in _input_rows(cell.row, node, 0, up_rows, self.reader)
+                    if r.get(constants.SOURCE_PREFIX + cell.column) == cell.whole_token
+                ]
+                up_row = _one(matched, node, f"the input row in {upstream.label!r}")
+                up_cell = _Cell(up_row, cell.column, cell.path)
+                if not same_value(up_cell.value, cell.value):
+                    raise ProvenanceInconsistencyError(
+                        f"node {node.label!r}: the data-tag {cell.column!r} is not the "
+                        f"value its input row in {upstream.label!r} holds"
+                    )
+                self.edges.add((upstream.label, node.label))
+                inputs = [self.step(upstream, up_cell)]
+        return TraceStep(
+            node.label,
+            "function",
+            None,
+            cell.column,
+            cell.value,
+            tags,
+            member,
+            inputs=tuple(inputs),
+        )
+
     def function_step(
         self,
         node: Any,
@@ -1375,6 +1485,11 @@ class _Tracer:
     ) -> TraceStep:
         row, column = cell.row, cell.column
         upstream = node.upstreams[0]
+        up_tags, up_data = _keys(upstream)
+        if column in up_tags and column in up_data:
+            # A data-tag of the input falls through the function unchanged: it is
+            # the input's cell, not a result (its token names the source cell).
+            return self.fallen_through(node, cell, member, tags)
         has_store = node._pipeline_database is not None  # pyright: ignore[reportPrivateUsage]  # a node with no database stores no entry
         entries = _entries_for(node, row, column, self.reader) if has_store else []
         if has_store and not entries:
@@ -1890,8 +2005,8 @@ def why_missing(node: Any, source: str, record_id: str) -> Absence:
         edges |= blamed
     for n in path:
         if holds(n):
-            for u in n.upstreams:
-                if id(u) in on_path and holds(u):
+            for index, u in enumerate(n.upstreams):
+                if id(u) in on_path and holds(u) and _passes_rows(n, index):
                     edges.add((u.label, n.label))
     return Absence(
         node=node.label,
@@ -2071,17 +2186,65 @@ def _reached(
                 # The columns include a tied input's slots: a stored entry names the
                 # record, but maybe through the other input; it cannot tell.
                 unknown = True
+    # The held run's witness first: an entry for an input row the run holds from the
+    # record (a group that holds it, say) proves receipt, whatever the direct names.
+    up = carried.get(id(function_node.upstreams[0]))
+    if up:
+        keys = {tuple(r.get(c) for c in names) for r in up}
+        if any(tuple(e.get(c) for c in names) in keys for e in entries):
+            return True, True
     if unknown:
         return None, None
     if direct:
         return None, False
-    up = carried.get(id(function_node.upstreams[0]))
-    if not up:
-        return None, None
-    keys = {tuple(r.get(c) for c in names) for r in up}
-    if any(tuple(e.get(c) for c in names) in keys for e in entries):
-        return True, True
     return None, None
+
+
+def _missing_key_text(
+    node: Any, position: int, holding: Any, carried_row: Row, reader: _Reader
+) -> str | None:
+    """Which other inputs of a join prove the carried row's key absent.
+
+    Only an input whose held rows lack the key proves it; an input whose rows are not
+    held (an unread source) is unknown, never a miss. Every proving input is named, in
+    the join's canonical order (by pipeline hash, then label); when none proves it, the
+    inputs not read are named. Column names come from what the nodes declare or hold
+    (no source is called).
+
+    Returns:
+        The reason in words, or ``None`` when no input shares a key with the row.
+    """
+    proving: list[str] = []
+    unread: list[str] = []
+    holding_tags = set(_keys(holding)[0])
+    for i in _input_order(node):
+        if i == position:
+            continue
+        other = node.upstreams[i]
+        shared = [t for t in _keys(other)[0] if t in carried_row and t in holding_tags]
+        if not shared:
+            continue
+        key = {t: carried_row[t] for t in shared}
+        rows = reader.held(other)
+        if rows is None:
+            unread.append(other.label)
+            continue
+        if not any(
+            all(t in o and same_value(o[t], v) for t, v in key.items()) for o in rows
+        ):
+            proving.append(
+                f"no row with {_key_text(key)} in {other.label!r} "
+                f"(reads {', '.join(_source_labels(other))})"
+            )
+    if proving:
+        return "; ".join(proving)
+    if unread:
+        names = ", ".join(repr(label) for label in unread)
+        return (
+            "no held input proves the key missing; the rows of "
+            f"{names} are not read here"
+        )
+    return None
 
 
 def _blame(
@@ -2114,8 +2277,18 @@ def _blame(
             return None, f"source {source!r} holds no record {record_id!r}", set()
         return None, "no step on the way passes it on", set()
     edges = {(u.label, current.label) for u in holding}
-    position = list(current.upstreams).index(holding[0])
+    # By identity: node equality compares identities, which can reach a source.
+    position = next(i for i, u in enumerate(current.upstreams) if u is holding[0])
     producer = getattr(current, "producer", None)
+    if _kind(current) == "function" and carried.get(id(holding[0])) is None:
+        # A function straight after a source that is not read: that it received the
+        # record is not established, so it is not blamed.
+        return (
+            None,
+            f"{current.label!r} holds no row from it, and source {source!r} is not read "
+            "here, so whether it holds the record is not known",
+            edges,
+        )
     if _kind(current) == "function":
         step = Step(
             operator=type(producer).__name__ if producer is not None else "FunctionPod",
@@ -2167,23 +2340,8 @@ def _blame(
     because = step.text
     held_up = carried[id(holding[0])] or []
     if len(current.upstreams) > 1 and held_up:
-        carried_row = held_up[0]
-        for i, other in enumerate(current.upstreams):
-            if i == position:
-                continue
-            shared = [
-                t
-                for t in other.keys()[0]
-                if t in carried_row and t in holding[0].keys()[0]
-            ]
-            other_rows = reader.held(other) or []
-            key = {t: carried_row[t] for t in shared}
-            if key and not any(
-                all(t in o and same_value(o[t], v) for t, v in key.items())
-                for o in other_rows
-            ):
-                because = (
-                    f"no row with {_key_text(key)} in {other.label!r} "
-                    f"(reads {', '.join(_source_labels(other))})"
-                )
+        because = (
+            _missing_key_text(current, position, holding[0], held_up[0], reader)
+            or because
+        )
     return step, because, edges

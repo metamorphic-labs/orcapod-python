@@ -47,6 +47,7 @@ pytestmark = pytest.mark.filterwarnings("ignore::Warning")
 def table_source(
     rows: list[dict[str, Any]], schema: pa.Schema, tags: list[str], source_id: str
 ) -> ArrowTableSource:
+    """An Arrow table source whose listed tags are plain tags (``tag_only_columns``)."""
     return ArrowTableSource(
         pa.Table.from_pylist(rows, schema=schema),
         tag_columns=tags,
@@ -66,6 +67,7 @@ TWO_BY_TWO = pa.schema(
 
 
 def rows_kgxy(*values: tuple[str, str, int, int]) -> list[dict[str, Any]]:
+    """Rows of ``TWO_BY_TWO`` from value tuples in its column order (k, g, x, y)."""
     return [dict(zip(TWO_BY_TWO.names, v)) for v in values]
 
 
@@ -170,6 +172,7 @@ def test_two_cached_versions_of_one_record(tmp_path: Path) -> None:
     job.run()
     node = job.nodes["SelectDataColumns"]
     held = sorted(r["x"] for r in node.as_table().to_pylist())
+    assert held == [1, 2]  # both versions are held, so both are tested
     for x in held:
         trace = node.trace({"k": "a", "g": "1", "x": x}, "x")
         # The held version, never the other one.
@@ -597,9 +600,21 @@ def test_a_collapsed_edge_over_merged_paths_is_highlighted() -> None:
     assert ("src", "sums") in lit
 
 
-def _batch_trace_seconds(n: int) -> float:
-    """Seconds to trace one batch of ``n`` function outputs (best of three)."""
-    import time
+class _CountingRows(list):  # pyright: ignore[reportMissingTypeArgument]  # a test probe over row dicts
+    """A list of rows that counts every row a loop goes through."""
+
+    seen = 0
+
+    def __iter__(self):  # pyright: ignore[reportImplicitOverride]
+        for item in list.__iter__(self):  # pyright: ignore[reportUnknownVariableType]
+            _CountingRows.seen += 1
+            yield item
+
+
+def _rows_visited_tracing_a_batch(n: int, monkeypatch: pytest.MonkeyPatch) -> int:
+    """Rows a trace of one batch of ``n`` function outputs goes through (held rows and
+    stored entries, counted once per call each)."""
+    from orcapod.pipeline import provenance
 
     rows = [(f"k{i}", "1", i, 1) for i in range(n)]
     source = table_source(rows_kgxy(*rows), TWO_BY_TWO, ["k", "g"], "src")
@@ -608,23 +623,40 @@ def _batch_trace_seconds(n: int) -> float:
         Batch(batch_size=0)(add.pod(source, label="sums"))
     job.run()
     (row,) = job.nodes["Batch"].as_table().to_pylist()
-    best = float("inf")
-    cells = 0
-    for _ in range(3):
-        start = time.perf_counter()
-        trace = job.nodes["Batch"].trace({"g": row["g"]}, "s")
-        best = min(best, time.perf_counter() - start)
-        cells = len(trace.source_cells())
-    assert cells == 2 * n
-    return best
+
+    def held(self: Any, node: Any) -> Any:
+        key = id(node)
+        if key not in self.rows:
+            table = self.table(node)
+            self.rows[key] = None if table is None else _CountingRows(table.to_pylist())
+        return self.rows[key]
+
+    real_provenance = provenance._Reader.provenance
+
+    def stored(self: Any, node: Any) -> Any:
+        key = id(node)
+        if key not in self.stored:
+            entries, by_id = real_provenance(self, node)
+            self.stored[key] = (_CountingRows(entries), by_id)
+        return self.stored[key]
+
+    monkeypatch.setattr(provenance._Reader, "held", held)
+    monkeypatch.setattr(provenance._Reader, "provenance", stored)
+    _CountingRows.seen = 0
+    trace = job.nodes["Batch"].trace({"g": row["g"]}, "s")
+    assert len(trace.source_cells()) == 2 * n
+    return _CountingRows.seen
 
 
-def test_tracing_many_members_scales_linearly() -> None:
+def test_tracing_many_members_scales_linearly(monkeypatch: pytest.MonkeyPatch) -> None:
     """CodeRabbit thread on PR 530: each member's lookups (input rows, stored entries,
-    source records) are indexed once per call, not scanned again per member."""
-    small, large = _batch_trace_seconds(400), _batch_trace_seconds(1600)
-    # Linear work grows about 4x; scanning per member grows about 16x.
-    assert large / small < 8
+    source records) are indexed once per call, not scanned again per member. Work is
+    counted (rows gone through), not timed."""
+    n = 300
+    visited = _rows_visited_tracing_a_batch(n, monkeypatch)
+    # Each table is gone through a few times in all: linear. Scanning a table again
+    # for each of the n members would go through about n * n rows.
+    assert visited < 20 * n
 
 
 # ---------------------------------------------------------------------------
@@ -1493,3 +1525,334 @@ def test_why_missing_does_not_follow_an_operator_subclass(mode: str) -> None:
     answer = node.why_missing(node.upstreams[1].label, "row_1")
     assert answer.status == "unavailable"
     assert "reaches" not in answer.text()
+
+
+# ---------------------------------------------------------------------------
+# CodeRabbit review of 38f666d7
+# ---------------------------------------------------------------------------
+
+
+def _kg_source(source_id: str, rows: list[dict[str, Any]]) -> DictSource:
+    """A source whose tags k and i are data-tags (the default role) and its only data."""
+    return DictSource(rows, tag_columns=["k", "i"], source_id=source_id)
+
+
+def test_many_tied_join_inputs_are_resolved_without_trying_every_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ten inputs of one schema at a Join: each fits one slot, found by a search that
+    stops early, never by enumerating all 10! orders."""
+    import itertools
+    import time
+
+    def no_enumeration(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("every order of the tied inputs was enumerated")
+
+    monkeypatch.setattr(itertools, "permutations", no_enumeration)
+
+    sources = [_kg_source(f"s{n:02d}", [{"k": "x", "i": 0}]) for n in range(10)]
+    job = PipelineJob(name="tied10", database=InMemoryArrowDatabase())
+    with job:
+        Join()(*sources)
+    job.run()
+    start = time.perf_counter()
+    trace = job.nodes["Join"].trace({"k": "x", "i": 0}, "k")
+    assert time.perf_counter() - start < 20  # 10! orders would take minutes
+    assert sorted(c.source_id for c in trace.source_cells()) == [
+        f"s{n:02d}" for n in range(10)
+    ]
+
+
+def test_a_data_tag_falling_through_a_function_traces_to_its_input() -> None:
+    source = DictSource(
+        [{"k": "x", "i": 0, "x": 1, "y": 2}], tag_columns=["k", "i"], source_id="s"
+    )
+    job = PipelineJob(name="fallthrough", database=InMemoryArrowDatabase())
+    with job:
+        add.pod(source, label="sums")
+    job.run()
+    trace = job.nodes["sums"].trace({"k": "x", "i": 0}, "k")
+    assert [
+        (c.source_id, c.record_id, c.column, c.value) for c in trace.source_cells()
+    ] == [("s", "row_0", "k", "x")]
+
+
+def test_a_merged_key_token_is_verified() -> None:
+    a = _kg_source("a", [{"k": "x", "i": 0}])
+    b = _kg_source("b", [{"k": "x", "i": 0}])
+    job = PipelineJob(name="mergedtoken", database=InMemoryArrowDatabase())
+    with job:
+        MergeJoin()(a, b)
+    job.run()
+    node = job.nodes["MergeJoin"]
+    assert node.trace({"k": "x", "i": 0}, "k").status == "traced"
+    held = vars(node)["_cached_output_stream"]
+    table = held.as_table(columns={"system_tags": True, "source": True})
+    at = table.schema.get_field_index("_source_k")
+    changed = table.set_column(
+        at,
+        table.schema.field(at),
+        pa.array(["a::row_0::k"], table.schema.field(at).type),
+    )
+    vars(node)["_cached_output_stream"] = ArrowTableStream(
+        changed,
+        tag_columns=["k", "i"],
+        data_tags=["k", "i"],
+        data_context=held.data_context,
+    )
+    with pytest.raises(ProvenanceInconsistencyError, match="fold"):
+        node.trace({"k": "x", "i": 0}, "k")
+
+
+def test_a_semi_join_right_edge_is_not_highlighted_as_row_flow() -> None:
+    """One source feeds both SemiJoin inputs: its record reaches the SemiJoin through
+    the left only; the right edge carries no row."""
+    source = table_source(rows_kgxy(("a", "1", 1, 2)), TWO_BY_TWO, ["k", "g"], "s")
+    job = PipelineJob(name="semiedge", database=InMemoryArrowDatabase())
+    with job:
+        SemiJoin()(SelectDataColumns(["x"])(source), SelectDataColumns(["y"])(source))
+    job.run()
+    answer = job.nodes["SemiJoin"].why_missing("s", "row_0")
+    assert not answer.missing
+    right = job.nodes["SemiJoin"].upstreams[1].label
+    assert (right, "SemiJoin") not in answer.edges
+
+
+@function_pod(output_keys="z")
+def x_and_ys(x: int, y: list[int]) -> int:
+    return x + sum(y)
+
+
+def test_a_fold_witness_proves_receipt_despite_direct_names() -> None:
+    """The function's input names s's records directly through one branch (row_1)
+    and holds row_0 through a group on the other: row_0 reached it."""
+    schema = pa.schema(
+        [
+            pa.field("k", pa.large_string(), nullable=False),
+            pa.field("g", pa.large_string(), nullable=False),
+            pa.field("x", pa.int64(), nullable=False),
+            pa.field("y", pa.int64(), nullable=False),
+        ]
+    )
+    source = table_source(
+        [{"k": "a", "g": "1", "x": 1, "y": 10}, {"k": "b", "g": "1", "x": 2, "y": 20}],
+        schema,
+        ["k", "g"],
+        "s",
+    )
+    job = PipelineJob(name="witness", database=InMemoryArrowDatabase())
+    with job:
+        direct = SelectDataColumns(["x"])(Filter({"k": "b"})(source))
+        grouped = SelectDataColumns(["y"])(GroupBy(["g"])(source))
+        x_and_ys.pod(Join()(direct, grouped), label="z")
+    job.run()
+    answer = job.nodes["z"].why_missing("s", "row_0")
+    assert not answer.missing
+    assert answer.reached_function is True and answer.entry_recorded is True
+
+
+def test_a_function_after_an_unread_source_is_not_blamed(tmp_path: Path) -> None:
+    cache = DeltaTableDatabase(tmp_path / "cache")
+    inner = table_source(rows_kgxy(("a", "1", 1, 2)), TWO_BY_TWO, ["k", "g"], "s")
+    cached = CachedSource(inner, cache_database=cache, source_id="cached")
+    job = PipelineJob(name="cachedfn", database=InMemoryArrowDatabase())
+    with job:
+        add.pod(cached, label="sums")
+    job.run()
+    answer = job.nodes["sums"].why_missing("s", "row_99")
+    assert answer.missing and answer.removed_by is None
+    assert "not known" in answer.because
+
+
+def test_a_join_diagnostic_calls_no_source_method() -> None:
+    a = _Armed(
+        [{"k": "x", "i": 0, "x": 1, "y": 0}],
+        tag_columns=["k", "i"],
+        tag_only_columns=True,
+        source_id="a",
+    )
+    b = DictSource(
+        [{"k": "z", "i": 0, "p": 5}],
+        tag_columns=["k", "i"],
+        tag_only_columns=True,
+        source_id="b",
+    )
+    job = PipelineJob(name="armedjoin", database=InMemoryArrowDatabase())
+    with job:
+        Join()(a, b)
+    job.run()
+    a.armed = True
+    answer = job.nodes["Join"].why_missing("b", "row_0")
+    assert answer.missing and answer.removed_by is not None
+
+
+def test_an_unread_join_input_is_not_named_as_lacking_the_key(tmp_path: Path) -> None:
+    """Three inputs: the first lacks the key, an unread cached input may hold it, the
+    third holds the record. Only the first is named."""
+    a = DictSource(
+        [{"k": "B", "p": 1}], tag_columns=["k"], tag_only_columns=True, source_id="a"
+    )
+    cached = CachedSource(
+        DictSource(
+            [{"k": "A", "q": 2}],
+            tag_columns=["k"],
+            tag_only_columns=True,
+            source_id="b",
+        ),
+        cache_database=DeltaTableDatabase(tmp_path / "cache"),
+        source_id="bc",
+    )
+    c = DictSource(
+        [{"k": "A", "r": 3}], tag_columns=["k"], tag_only_columns=True, source_id="c"
+    )
+    job = PipelineJob(name="threejoin", database=InMemoryArrowDatabase())
+    with job:
+        Join()(a, cached, c)
+    job.run()
+    answer = job.nodes["Join"].why_missing("c", "row_0")
+    assert answer.missing
+    assert "'a'" in answer.because and "'bc'" not in answer.because
+
+
+def test_an_unproven_operator_link_is_not_called_an_unread_source() -> None:
+    class OwnSelect(SelectDataColumns):
+        pass
+
+    source = table_source(rows_kgxy(("a", "1", 1, 2)), TWO_BY_TWO, ["k", "g"], "s")
+    job = PipelineJob(name="ownselect", database=InMemoryArrowDatabase())
+    with job:
+        OwnSelect(["x"])(source)
+    job.run()
+    text = job.nodes["OwnSelect"].trace({"k": "a", "g": "1"}, "x").text()
+    assert "source's rows are not held" not in text
+    assert "cannot be proven" in text
+
+
+# ---------------------------------------------------------------------------
+# Twelfth review (head c3c0d81d): the Join diagnostic
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("order", ["acb", "abc", "bac", "cab"])
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_an_unread_join_input_is_unknown_never_a_miss(order: str, mode: str) -> None:
+    """a's record is removed by a Join: c's held rows prove the key absent; b, an
+    unread cache that does hold the key, is never named, wherever it stands."""
+    a = DictSource(
+        [{"k": "wanted", "i": 0, "x": 7}],
+        tag_columns=["k", "i"],
+        tag_only_columns=True,
+        source_id="a",
+    )
+    b = CachedSource(
+        DictSource(
+            [{"k": "wanted", "z": 4}],
+            tag_columns=["k"],
+            tag_only_columns=True,
+            source_id="b",
+        ),
+        cache_database=InMemoryArrowDatabase(),
+    )
+    c = DictSource(
+        [{"k": "other", "w": 5}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="c",
+    )
+    inputs = {"a": a, "b": b, "c": c}
+    job = PipelineJob(name=f"unread{order}{mode}", database=InMemoryArrowDatabase())
+    with job:
+        Join()(*(inputs[name] for name in order))
+    run(job, mode)
+    answer = job.nodes["Join"].why_missing("a", "row_0")
+    assert answer.missing
+    assert "in 'c'" in answer.because
+    assert "in 'b'" not in answer.because
+
+
+def test_an_unread_join_input_alone_is_named_as_not_read() -> None:
+    """No held input proves the key missing: the unread input is named as not read."""
+    a = DictSource(
+        [{"k": "wanted", "i": 0, "x": 7}],
+        tag_columns=["k", "i"],
+        tag_only_columns=True,
+        source_id="a",
+    )
+    b = CachedSource(
+        DictSource(
+            [{"k": "other", "z": 4}],
+            tag_columns=["k"],
+            tag_only_columns=True,
+            source_id="b",
+        ),
+        cache_database=InMemoryArrowDatabase(),
+    )
+    job = PipelineJob(name="unreadalone", database=InMemoryArrowDatabase())
+    with job:
+        Join()(a, b)
+    job.run()
+    answer = job.nodes["Join"].why_missing("a", "row_0")
+    assert answer.missing and "not read here" in answer.because
+
+
+def test_every_join_input_proving_the_miss_is_named() -> None:
+    a = DictSource(
+        [{"k": "wanted", "i": 0, "x": 7}],
+        tag_columns=["k", "i"],
+        tag_only_columns=True,
+        source_id="a",
+    )
+    c = DictSource(
+        [{"k": "other", "w": 5}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="c",
+    )
+    d = DictSource(
+        [{"k": "other", "v": 6}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="d",
+    )
+    job = PipelineJob(name="twoprove", database=InMemoryArrowDatabase())
+    with job:
+        Join()(a, c, d)
+    job.run()
+    because = job.nodes["Join"].why_missing("a", "row_0").because
+    assert "in 'c'" in because and "in 'd'" in because
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_the_join_diagnostic_calls_no_method_of_the_other_source(mode: str) -> None:
+    class Armed(DictSource):
+        armed = False
+
+        def output_schema(self, *args: Any, **kwargs: Any) -> Any:
+            if self.armed:
+                raise RuntimeError("why_missing called the source's schema")
+            return super().output_schema(*args, **kwargs)
+
+        def keys(self, *args: Any, **kwargs: Any) -> Any:
+            if self.armed:
+                raise RuntimeError("why_missing called the source's keys")
+            return super().keys(*args, **kwargs)
+
+    a = DictSource(
+        [{"k": "wanted", "i": 0, "x": 7}],
+        tag_columns=["k", "i"],
+        tag_only_columns=True,
+        source_id="a",
+    )
+    b = Armed(
+        [{"k": "other", "z": 4}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="b",
+    )
+    job = PipelineJob(name=f"armedright{mode}", database=InMemoryArrowDatabase())
+    with job:
+        Join()(a, b)
+    run(job, mode)
+    b.armed = True
+    answer = job.nodes["Join"].why_missing("a", "row_0")
+    assert answer.missing and answer.removed_by is not None
