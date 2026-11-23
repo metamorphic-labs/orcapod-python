@@ -19,6 +19,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import functools
+import inspect
 import logging
 import sys
 import uuid
@@ -55,8 +57,10 @@ from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
     StreamBase,
     check_head_size,
+    reads_as_its_class,
     row_built_columns,
     short_stream_repr,
+    system_tags_as_rows_give,
 )
 from orcapod.core.streams.view import (
     BLUEPRINT_NOTE,
@@ -67,6 +71,8 @@ from orcapod.core.streams.view import (
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
 from orcapod.core.nodes.staleness import RunHoldingNode
+from orcapod.core.datagrams.datagram import data_table_content_hash
+from orcapod.utils.observer_rows import reads_no_rows
 from orcapod.core.datagrams.tag_data import Data, EmptyData, Tag
 from orcapod.errors import (
     EphemeralResultMissingError,
@@ -211,6 +217,41 @@ def _with_input_data_hash(
     )
 
 
+def _reads_as_a_table_stream(stream: object) -> bool:
+    """Whether ``stream`` is exactly a stream over its table, reading only through it.
+
+    ``ArrowTableStream``, or the row-built stream a job hands a node whose upstream has
+    no producer (``_RowsOfStream``, which only reports another pipeline hash), with no
+    member replaced on the instance (``reads_as_its_class``): its rows are then made
+    from slices of its table (ITL-1361).
+    """
+    from orcapod.core.operators.static_output_pod import _RowsOfStream  # pyright: ignore[reportPrivateUsage]  # the stream a job hands a node
+
+    kind = type(stream)
+    return kind in (ArrowTableStream, _RowsOfStream) and reads_as_its_class(
+        stream, kind
+    )
+
+
+def _slices_are_rows(table: "pa.Table") -> bool:
+    """Whether a row's datagrams hold exactly the slices of ``table`` (ITL-1361).
+
+    A row's tag rebuilds its system tags from their values (non-null ``large_string``
+    is what that gives: ``system_tags_as_rows_give``), and every datagram normalizes
+    its table to the large layouts with ``null`` as ``large_string``: the slices are
+    the rows' own tables only when that normalization changes nothing.
+
+    Args:
+        table: The stream's table: user tags, system tags and data.
+
+    Returns:
+        Whether the entry ids may be taken from the table's slices.
+    """
+    return system_tags_as_rows_give(
+        table.schema
+    ) and arrow_utils.normalize_table_to_large_types(table).schema.equals(table.schema)
+
+
 def _large_layout(table: "pa.Table") -> "pa.Table":
     """Return ``table`` with every column in its large layout, ``null`` kept ``null``.
 
@@ -332,11 +373,13 @@ def passed_rows_output_stream(
     """Return the output stream of a node that passes on some of its input rows.
 
     ``rows`` are input rows themselves (a side-effect node passes a row on unchanged),
-    so for an input over an Arrow table the output is F of the input's table taken at
-    the rows' positions (``passed``; all rows when ``None``), with ``node``'s identity:
-    the table a row-by-row rebuild of ``rows`` gives (``rows_as_output_stream``), made
-    without making the rows again (ITL-1361, stage 4). Any other input, and a table F
-    cannot build, hands on the rows, built when read (``RowsOnRead``).
+    so for an input whose table is provably its rows' (exactly a stream over its
+    table, in the node's data context, ``_slices_are_rows``) the output is F of the
+    input's table taken at the rows' positions (``passed``; all rows when ``None``),
+    with ``node``'s identity: the table a row-by-row rebuild of ``rows`` gives
+    (``rows_as_output_stream``), made without making the rows again (ITL-1361, stage
+    4). Any other input, and a table F cannot build, hands on the rows, built when
+    read by main's row path (``RowsOnRead``).
 
     Args:
         input_stream: The node's input.
@@ -353,9 +396,16 @@ def passed_rows_output_stream(
         rows_on_read,
     )
 
-    if not rows or not isinstance(input_stream, ArrowTableStream):
+    if not rows or not (
+        _reads_as_a_table_stream(input_stream)
+        and input_stream.data_context_key == node.data_context_key
+    ):
         return rows_on_read(rows, node)
     table = input_stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+    if not _slices_are_rows(table):
+        # System tags or columns the rows type otherwise: the rows, built when read
+        # by main's row path (main's types, main's error at the edge).
+        return rows_on_read(rows, node)
     if passed is not None:
         table = table.take(pa.array(passed, type=pa.int64()))
     keys = input_stream.keys()
@@ -394,18 +444,26 @@ class _RowView:
 
     Every attribute is the datagram's: the first read makes the input's rows
     (``_LazyRows``). The observers a job installs read no input row, so a run over
-    stored results makes none (ITL-1361).
+    stored results makes none (ITL-1361). A view is a tag (``_TagView``) or a data
+    (``_DataView``) for every public check: each member of its protocol is declared on
+    its class, so ``isinstance(view, TagProtocol)`` holds on every supported Python
+    (a runtime protocol check looks members up on the class, not through
+    ``__getattr__``); equality, hashing and ``repr`` are the datagram's, and a pickle
+    or copy of a view is the datagram itself. What differs from the datagram: its
+    concrete class (``isinstance(view, Tag)`` is false).
     """
 
     __slots__ = ("_index", "_part", "_rows")
 
-    def __init__(self, rows: _LazyRows, index: int, part: int) -> None:
+    _PART = 0
+
+    def __init__(self, rows: _LazyRows, index: int) -> None:
         self._rows = rows
         self._index = index
-        self._part = part
+        self._part = self._PART
 
     def datagram(self) -> Any:
-        """The row's datagram (its tag for part 0, its data for part 1)."""
+        """The row's datagram (its tag for a tag view, its data for a data view)."""
         return self._rows.get()[self._index][self._part]
 
     def __getattr__(self, name: str) -> Any:
@@ -436,6 +494,61 @@ class _RowView:
 
     def __str__(self) -> str:
         return str(self.datagram())
+
+    def __reduce__(self) -> tuple[Any, tuple[Any]]:
+        # A pickle or copy of a view is the row's datagram itself.
+        return (_same, (self.datagram(),))
+
+
+def _same(value: Any) -> Any:
+    """``value`` (what a pickled ``_RowView`` loads as: its datagram)."""
+    return value
+
+
+class _TagView(_RowView):
+    """An input row's tag, made only when it is read (``_RowView``)."""
+
+    __slots__ = ()
+    _PART = 0
+
+
+class _DataView(_RowView):
+    """An input row's data, made only when it is read (``_RowView``)."""
+
+    __slots__ = ()
+    _PART = 1
+
+
+def _protocol_members(protocol: Any) -> list[str]:
+    """The public members ``protocol`` declares, its bases' included."""
+    names: set[str] = set()
+    for base in cast(type, protocol).__mro__:
+        if base is object or base.__name__ in ("Protocol", "Generic"):
+            continue
+        names.update(name for name in vars(base) if not name.startswith("_"))
+    return sorted(names)
+
+
+def _view_member(datagram_class: type, name: str) -> Any:
+    """A member of a row view that is its datagram's: a property or a method."""
+    member = inspect.getattr_static(datagram_class, name, None)
+    if isinstance(member, (property, functools.cached_property)):
+        return property(lambda self: getattr(self.datagram(), name))
+
+    def delegate(self: _RowView, *args: Any, **kwargs: Any) -> Any:
+        return getattr(self.datagram(), name)(*args, **kwargs)
+
+    delegate.__name__ = name
+    return delegate
+
+
+for _view, _protocol, _kind in (
+    (_TagView, TagProtocol, Tag),
+    (_DataView, DataProtocol, Data),
+):
+    for _member in _protocol_members(_protocol):
+        if _member not in vars(_view):
+            setattr(_view, _member, _view_member(_kind, _member))
 
 
 def _datagram(value: Any) -> Any:
@@ -2227,7 +2340,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             )
             tag_schema = input_stream.output_schema(columns={"system_tags": True})[0]
             ctx_obs.on_node_start(node_label, node_hash, tag_schema=tag_schema)
-            inputs = self._input_entries(input_stream)
+            inputs = self._input_entries(input_stream, row_views=reads_no_rows(ctx_obs))
             _ = self.get_cached_results(base_entry_ids=[eid for _, _, eid in inputs])
             for tag, data, entry_id in inputs:
                 entry = self._stored_entry(entry_id)
@@ -2681,7 +2794,8 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         info and flag the provenance fields by their values (ITL-1361).
 
         Returns:
-            The output stream, or ``None`` when no row is a stored result, or when the
+            The output stream, or ``None`` when no row is a stored result, when a
+            stored table is not what its rows give (``_slices_are_rows``), or when the
             pieces cannot be concatenated: the rows' own build then gives the stream,
             or raises what it raises.
         """
@@ -2717,6 +2831,10 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             for piece in pieces:
                 if isinstance(piece, tuple):
                     stored = self._stored_hit_tables[piece[0]]
+                    if not _slices_are_rows(stored.table):
+                        # A stored table its rows would type otherwise: the rows'
+                        # own build, as on main.
+                        return None
                     table = row_built_columns(stored.table, stored.keys).take(
                         pa.array(piece[1], type=pa.int64())
                     )
@@ -2836,7 +2954,9 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         try:
             # Collect upstream entries and resolve base_entry_ids (stable across
             # recomputation)
-            upstream_entries = self._input_entries(input_stream)
+            upstream_entries = self._input_entries(
+                input_stream, row_views=reads_no_rows(ctx_obs)
+            )
             base_entry_ids = [eid for _, _, eid in upstream_entries]
 
             # Hot-load any already-computed results from DB into _cached_output_datas.
@@ -3296,35 +3416,45 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         ).to_prefixed_digest()
 
     def _input_entries(
-        self, input_stream: StreamProtocol
+        self, input_stream: StreamProtocol, *, row_views: bool = False
     ) -> list[tuple[TagProtocol, DataProtocol, bytes]]:
         """Return ``input_stream``'s rows, each with its base entry id.
 
-        The id is ``compute_base_entry_id`` of the row. For a stream over an Arrow
-        table (every stream a job hands a node, ITL-1347), each row's preimage is
-        taken from slices of the stream's table instead of tables built from the
-        row's values: the tag side is its user tags and system tags, the system-tag
-        field flags set by their values as a row's are (``_flag_by_values``), and the
-        input data hash is ``hash_table`` of its data columns, which is the data
-        datagram's content hash (``Datagram.identity_structure``). The same ids,
-        without building each row's tables (ITL-1361). The rows are then views
-        (``_RowView``), made only when one is read.
+        The id is ``compute_base_entry_id`` of the row. Where the stream's slices are
+        provably the rows' own tables (``_reads_as_a_table_stream`` and
+        ``_slices_are_rows``: exactly a stream over its table, in this node's data
+        context, with system tags a row would not retype and no column a datagram
+        would retype), each row's id is taken from one-row slices of the stream's
+        table by the same definitions (``_base_entry_id_of_slices``), without
+        building each row's tables (ITL-1361); any other input computes each id from
+        its row, as before. The rows are then views made only when one is read
+        (``_TagView``, ``_DataView``) when ``row_views`` (the node's observers read no
+        input row, ``reads_no_rows``), and otherwise the rows themselves.
 
         Args:
             input_stream: The node's input.
+            row_views: Whether the rows may be handed on as views.
 
         Returns:
             ``(tag, data, base entry id)`` for each row, in the stream's order.
         """
         from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 
-        if not isinstance(input_stream, ArrowTableStream):
+        table = (
+            input_stream.as_table(columns={"system_tags": True})
+            if _reads_as_a_table_stream(input_stream)
+            and input_stream.data_context_key == self.data_context_key
+            else None
+        )
+        if table is None or not _slices_are_rows(table):
+            # Not provably the rows' own tables (another stream kind, a replaced
+            # reader, another data context, system tags or columns a row would type
+            # otherwise): each row's id from the row, as on main.
             return [
                 (tag, data, self.compute_base_entry_id(tag, data))
                 for tag, data in input_stream.iter_data()
             ]
         tag_keys, data_keys = input_stream.keys()
-        table = input_stream.as_table(columns={"system_tags": True})
         # The rows themselves are made only when one is read (``_RowView``).
         lazy = _LazyRows(input_stream)
         system_tags = [
@@ -3338,33 +3468,51 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         data_side = table.select(list(data_keys))
         # A row view stands for the row's datagram (``_RowView``): the checker cannot
         # see that through its delegation, so the cast goes through object.
-        return [
-            (
-                cast(TagProtocol, cast(object, _RowView(lazy, index, 0))),
-                cast(DataProtocol, cast(object, _RowView(lazy, index, 1))),
-                self._base_entry_id_of_slices(
-                    tag_side.slice(index, 1), data_side.slice(index, 1)
-                ),
+        rows_context = contexts.resolve_context(input_stream.data_context_key)
+        ids = [
+            self._base_entry_id_of_slices(
+                tag_side.slice(index, 1), data_side.slice(index, 1), rows_context
             )
             for index in range(table.num_rows)
         ]
+        if not row_views:
+            # An observer that may read the rows receives the rows themselves.
+            return [
+                (tag, data, entry_id)
+                for (tag, data), entry_id in zip(lazy.get(), ids, strict=True)
+            ]
+        return [
+            (
+                cast(TagProtocol, cast(object, _TagView(lazy, index))),
+                cast(DataProtocol, cast(object, _DataView(lazy, index))),
+                entry_id,
+            )
+            for index, entry_id in enumerate(ids)
+        ]
 
-    def _base_entry_id_of_slices(self, tag_row: pa.Table, data_row: pa.Table) -> bytes:
+    def _base_entry_id_of_slices(
+        self, tag_row: pa.Table, data_row: pa.Table, rows_context: contexts.DataContext
+    ) -> bytes:
         """One row's base entry id from its one-row tag and data slices.
 
-        ``compute_base_entry_id`` of the row, from its table (``_input_entries``): the
-        tag side with its system tags, and the hash of its data columns.
+        ``compute_base_entry_id`` of the row, from its table (``_input_entries``), by
+        the same definitions: the preimage is the tag side with its system tags and
+        the input data hash (``_with_input_data_hash``), and the input data hash is
+        the content hash a datagram of the data columns has
+        (``data_table_content_hash``, in the rows' data context, as each row's data
+        is hashed); only the tables come from slices instead of the row's datagrams.
 
         Args:
             tag_row: The row's user tags and system tags, flags as a row has them.
             data_row: The row's data columns.
+            rows_context: The data context the stream's rows are in.
 
         Returns:
             The base entry id.
         """
-        hasher = self.data_context.arrow_hasher
-        return hasher.hash_table(
-            _with_input_data_hash(tag_row, hasher.hash_table(data_row))
+        data_hash = data_table_content_hash(data_row, rows_context)
+        return self.data_context.arrow_hasher.hash_table(
+            _with_input_data_hash(tag_row, data_hash)
         ).to_prefixed_digest()
 
     def compute_pipeline_entry_id(

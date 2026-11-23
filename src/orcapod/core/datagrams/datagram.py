@@ -38,10 +38,40 @@ from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
 from orcapod.semantic_types import infer_python_schema_from_pylist_data
 from orcapod.semantic_types.canonical_order import canonical_python_value
 from orcapod.system_constants import constants
-from orcapod.types import ColumnConfig, DataType, DataValue, Schema, SchemaLike
+from orcapod.types import (
+    ColumnConfig,
+    ContentHash,
+    DataType,
+    DataValue,
+    Schema,
+    SchemaLike,
+)
 from orcapod.utils import arrow_utils
 
 logger = logging.getLogger(__name__)
+
+
+def data_table_content_hash(
+    table: pa.Table, data_context: str | contexts.DataContext | None = None
+) -> ContentHash:
+    """Return the content hash of a datagram whose data table is ``table``.
+
+    The one definition of a datagram's content hash: ``content_hash()`` is the semantic
+    hash of ``identity_structure()``, ``OrcapodTable(<data table>)``
+    (``Datagram.identity_structure``), which the data context's Arrow hasher hashes
+    (``hash_table``). A caller that holds the data table a datagram would hold, without
+    the datagram, hashes it here (a function node's input rows, ITL-1361).
+
+    Args:
+        table: The data table, as a datagram of these columns holds it (normalized to
+            its large layouts, no meta or context column).
+        data_context: The data context whose semantic hasher hashes it.
+
+    Returns:
+        The content hash ``content_hash()`` of such a datagram returns.
+    """
+    hasher = contexts.resolve_context(data_context).semantic_hasher
+    return hasher.hash_object(OrcapodTable(table))
 
 
 def _data_and_meta_tables(table: pa.Table) -> tuple[pa.Table, pa.Table | None]:

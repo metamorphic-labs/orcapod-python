@@ -325,7 +325,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 | schema identity | the `arrow_schema_v1` hashes of a source's or slot's Arrow tag and data schemas, or of a function's output Arrow schema | a source's content and pipeline identity, system-tag column names, the function `uri` | the `ContentHash` objects, nested | `utils/schema_utils.py:arrow_schema_identity`, `utils/schema_utils.py:compute_schema_hash`, `core/data_function.py:DataFunctionBase.output_data_schema_hash` |
 | union and generic alias arguments | argument type hashes, sorted by digest, then label (ordering only) | the type hash, via the nested form | as above | `hashing/semantic_hashing/builtin_handlers.py:_sorted_hashes`, `hashing/semantic_hashing/builtin_handlers.py:_sorted_hashes.<locals>.<lambda>` |
 | logical-type cell, scalar and container | a value-hashed cell's value hash | the Arrow table hash | `<identifier>::<label>:<digest>`; a container cell: count, then per element a marker, a u64 length and the element token | `hashing/visitors.py:SemanticHashingVisitor.visit_extension` |
-| entry-id preimage | the input row's data hash | entry ids, pipeline record id, side-effect log key | `b"<label>:" + digest` | `core/nodes/function_node.py:_build_record_id_preimage` |
+| entry-id preimage | the input row's data hash | entry ids, pipeline record id, side-effect log key | `b"<label>:" + digest` | `core/nodes/function_node.py:_build_record_id_preimage`, `core/nodes/function_node.py:_with_input_data_hash` |
 | operator-cache row | the node content hash | `_record_hash` | `b"<label>:" + digest` | `core/nodes/operator_node.py:OperatorJobNode._store_output_stream` |
 | raw-stream tie-break | the Arrow hash (`arrow_v1`) of each row of a tie group | the canonical row order of a raw stream's identity table (compared as bytes, then the table is hashed whole) | `b"<label>:" + digest` | `utils/arrow_utils.py:canonical_identity_row_order` |
 | run snapshot | sink nodes' content hashes | the snapshot | `"<label>:<hex>"` | `pipeline/job.py:PipelineJob._prepare_run.<locals>.<genexpr>` |
@@ -339,7 +339,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 |---|---|
 | `__input_data_hash`, `__output_data_hash` | `core/result_cache.py:ResultCache.store`, `core/result_cache.py:ResultCache.lookup`, `core/nodes/function_node.py:FunctionJobNode._add_pipeline_record` |
 | `__node_content_hash` | `core/nodes/function_node.py:FunctionJobNode._add_pipeline_record`, `core/nodes/function_node.py:FunctionJobNode._fetch_joined_records`, `core/nodes/function_node.py:FunctionJobNode._stored_record_count`, `core/nodes/operator_node.py:OperatorJobNode._store_output_stream`, `core/nodes/operator_node.py:OperatorJobNode._filter_by_content_hash` |
-| `__pipeline_base_entry_id`, the pipeline record id | `core/nodes/function_node.py:FunctionJobNode.compute_base_entry_id`, `core/nodes/function_node.py:FunctionJobNode.compute_pipeline_entry_id` |
+| `__pipeline_base_entry_id`, the pipeline record id | `core/nodes/function_node.py:FunctionJobNode.compute_base_entry_id`, `core/nodes/function_node.py:FunctionJobNode._base_entry_id_of_slices`, `core/nodes/function_node.py:FunctionJobNode.compute_pipeline_entry_id` |
 | `_record_hash` of operator-cache and cached-source tables | `core/nodes/operator_node.py:OperatorJobNode._store_output_stream`, `core/sources/cached_source.py:CachedSource._live_records` |
 | side-effect log `record_id`, `record_id_hash` | `side_effects.py:_execute_side_effect_row` |
 | the `_content_hash` column | `core/streams/arrow_table_stream.py:ArrowTableStream._assemble_table.<locals>.hashes`, `core/function_pod.py:FunctionPodStream.as_table.<locals>.all_content_hashes`, `core/function_pod.py:FunctionPodStream.head.<locals>.shown_content_hashes`, `core/function_pod.py:FunctionPodStream.head.<locals>.<lambda>`, `core/nodes/function_node.py:FunctionNodeBase.as_table.<locals>.all_content_hashes`, `core/nodes/function_node.py:FunctionNodeBase._head_of_pairs.<locals>.<lambda>`, `side_effects.py:_table_of_rows` |
@@ -1192,6 +1192,19 @@ stored `__input_data_hash` column keeps: a hash fed into another hash carries it
 Because `tag.as_table(columns={"system_tags": True})` includes all chained system tag
 columns (see §2, site 6), the preimage implicitly captures the full join provenance of
 the row.
+
+One definition, two ways to read the row (ITL-1361). The preimage's last column is
+appended by one statement, `_with_input_data_hash`, and the input data hash is one
+definition, `data_table_content_hash` (`core/datagrams/datagram.py`): the content hash a
+data datagram has, the semantic hash of `OrcapodTable(<data table>)`. A function job node
+on the sync path computes a row's base entry id either from the row's datagrams
+(`compute_base_entry_id`), or, when its input is exactly an `ArrowTableStream` (or the
+row-built stream a job hands it) whose slices are provably the rows' own tables (system
+tags non-null `large_string`, no column a datagram would retype: `_slices_are_rows`),
+from one-row slices of the input's table (`_base_entry_id_of_slices`), without building
+each row's tables. Both give the same bytes; any other input takes the row path.
+`compute_base_entry_id` stays for every other caller (the async path, the side-effect log,
+a stream of another kind).
 
 ---
 

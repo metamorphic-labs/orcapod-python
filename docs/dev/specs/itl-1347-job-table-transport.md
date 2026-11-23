@@ -816,6 +816,18 @@ Counted on `origin/main`, by file, excluding database cursors' own `execute`:
 
 The function is still called once per row. Everything around the call is Arrow data.
 
+**The one precondition (stage 2's, ITL-1361 review).** Every fast path of stages 3 and 4
+(the entry ids from the input table's slices, the output's rows of stored results taken
+from their stored table, a side-effect node's pass-through as F of its input table) is
+used only where the table is provably its rows': the stream is exactly an
+`ArrowTableStream` (or the row-built stream a job hands a node), with no member replaced on
+the instance, in the node's data context, with system tags that are non-null
+`large_string` (`system_tags_as_rows_give`) and no column a datagram would retype
+(`_slices_are_rows`; a stored table is checked the same way). Anything else takes
+`main`'s row path. The entry id has one definition on both paths: the preimage's last
+column is `_with_input_data_hash`, and the input data hash is `data_table_content_hash`, a
+data datagram's content hash.
+
 1. **Input as Arrow data.** For each input row, the node computes the base entry id from that
    row's slice of the Arrow table or record batch: the tag side with system tags, plus the
    input data hash. This is the same one-row preimage `_build_record_id_preimage` builds
@@ -872,10 +884,11 @@ view**: one internal class, `RowView`, that satisfies `TagProtocol` or `DataProt
 Arrow table or record batch and a row index. It builds the datagram only when it is first
 read.
 
-- `RunCountingObserver` reads only the label and the `cached` flag, so it makes no row.
-- The status and logging observers read tag values, so they make the tag datagram of the
-  rows they report.
-- A user's observer gets what it gets today.
+- Only the library observers that read no input row (`READS_NO_ROWS` declared on their own
+  class: `NoOpObserver`, `RunCountingObserver`, and a `CompositeObserver` of only such;
+  `reads_no_rows`) receive row views (`_TagView`, `_DataView`, every protocol member
+  declared on the class). Every other observer, a subclass included, receives the rows
+  themselves, as on `main` (ITL-1361 review: a view is not a `Tag`).
 
 Event order stays as today:
 - sync: input order;

@@ -12,7 +12,7 @@ import json
 import threading
 import traceback
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import ClassVar, TYPE_CHECKING, Any
 
 from orcapod.core.result_cache import ResultCache
 from orcapod.pipeline.observer import NoOpLogger
@@ -397,6 +397,9 @@ class RunCountingObserver:
     this observer itself, so all nodes count into one place. Hooks may be called from
     several threads, so the counts are updated under a lock.
     """
+
+    READS_NO_ROWS: ClassVar[bool] = True
+    """It counts rows by their output's flag and reads no input row (``reads_no_rows``)."""
 
     def __init__(self) -> None:
         """Start with no counts."""
