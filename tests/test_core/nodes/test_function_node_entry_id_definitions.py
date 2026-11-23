@@ -673,7 +673,7 @@ def _edge_outcome(stream: Any) -> Any:
     pod: Any = side_effect_pod(
         _delivered, config=SideEffectPodConfig(track_completion=False)
     )
-    node = SideEffectJobNode(pod, stream)
+    node: Any = SideEffectJobNode(pod, stream)
 
     def table_of(edge: Any) -> Any:
         table = edge.as_table(columns={"system_tags": True, "source": True})

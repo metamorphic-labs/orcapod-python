@@ -149,15 +149,18 @@ def test_duplicate_inputs_give_one_row_each(compared: list[int]) -> None:
         table, tag_columns=["k"], system_tag_columns=["sid", "rid"]
     )
     database = InMemoryArrowDatabase()
-    for _ in range(2):
-        node = FunctionJobNode(
+    nodes = [
+        FunctionJobNode(
             tripled.pod,  # pyright: ignore[reportArgumentType]  # a function pod
             stream,
             pipeline_database=database,
         )
+        for _ in range(2)
+    ]
+    for node in nodes:  # cold, then warm over the same store
         output = node.execute(stream)
         assert output.as_table()["tripled"].to_pylist() == [30, 60, 30, 60]
-    entries = node._input_entries(stream)  # pyright: ignore[reportPrivateUsage]  # the ids repeat
+    entries = nodes[-1]._input_entries(stream)  # pyright: ignore[reportPrivateUsage]  # the ids repeat
     assert len({entry_id for _, _, entry_id in entries}) == 2
     assert compared == [4, 4]
 
