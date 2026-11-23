@@ -3,18 +3,34 @@
 A decision document. Nothing is implemented. Every statement about today's behaviour is
 measured by a script in [`itl-1425-source-identity/scripts/`](itl-1425-source-identity/scripts/),
 run on `main` at `8ee6c6d4` (identity code unchanged at `83c54764`) with the public API, from
-that folder: `uv run python -m scripts.<name>`. Synthetic data only. A design that is not
+that folder: `uv run python -m scripts.<name>`. Synthetic data only. The measurements of
+"today" are of `main` before this PR; run on the PR branch, `identity_today` and
+`stand_in_job` show the implemented ids, and `golden_moves` runs only at `8ee6c6d4`. A design that is not
 implemented is simulated by patching the library inside the script's own process; nothing
 under `src/` changes.
 
-**The developer's direction (2026-11-23), to be confirmed with the moved golden list:**
-every source id carries, explicitly and in one fixed place, the kind and implementation
-version that read the data: `<kind>_v<N>:<name>` (`delta_v1:units`). Orcapod always adds
-that part, to a given id as to a default. The record id never depends on the source id. A
-source stands in for another, also of another kind or another version of the same kind, by
-an explicit operation that keeps the name and swaps only the kind part, after the rows are
-verified equal (ledger row hashes). Section 3 works this design out; section 4 compares the
-other alternatives with it.
+## Decisions (developer, 2026-11-23; implemented in this PR)
+
+The moved golden list (section 3.7, regenerated against the implementation in the PR body)
+is still to be approved before any golden file changes.
+
+| # | Decision | Where |
+|---|---|---|
+| 1 | Every source id is `<kind>_v<N>:<name>`. The name is the given `source_id` or the default (a location, a qualified table, `<hash label>:<hex>`). Orcapod always adds the kind part, to given ids too (`units` read by Delta v1 is `delta_table_v1:units`). This reverses "a given id is used exactly as given" (ITL-957, ITL-1154) to "a given **name** is used exactly as given" | `source_ids.build_source_id`, `RootSource.source_id` |
+| 2 | Kind words stay today's `SOURCE_KIND` names (`delta_table`, `sqlite_table`, `csv`, ...); each class declares `SOURCE_VERSION` beside it (all 1). Bump it when a row read before a change could read differently after it | every source class |
+| 3 | A given name that starts like `<registered kind>_v<N>:` is accepted as the name (nested: `csv_v1:delta_table_v1:units`) with `SourceNameWarning`; never refused | `source_ids.warn_if_name_looks_like_an_id` |
+| 4 | The kind part is the text before the first `:` and never holds one; the name may. No `::`, no `:` at either end of the name, no empty name | `source_ids.parse_source_id`, `require_source_name` |
+| 5 | Saved configs hold `source_name` and `source_version` apart (kind = `source_type`); the id is rebuilt, never parsed. Loaded under another declared version, the source has the installed version's id and `SourceVersionWarning` says so; nothing is rewritten. A config saved before this change (a `source_id`, no `source_name`) is refused | `RootSource._source_id_config`, `saved_source_name`, `serialization.saved_source_id` |
+| 6 | Tokens, system tags and `source_id` show the full id. Record ids never hold the source id (unchanged; tested) | section 1.3 |
+| 7 | The class name leaves the content hash: identity `(source id, Arrow schema identity, key columns)` plus each kind's extras (SpiralDB `tags_as_data`; a restriction adds nothing). `PollingSource`: its source id is added to its identity. Plain `DerivedSource`: identity stays the origin's content hash; its default id is `derived_v1:semantic_v1:<hex>`. `CachedSource`: the wrapped source's identity **and id** (no `source_id` argument any more). `SourceProxy`: the saved hashes and the saved id | section 3.3 |
+| 8 | Out of scope, filed as **ITL-1426** (deferred): the explicit stand-in operation and the row-hash ledger. Sections 3.4 and 5 are their design | ITL-1426 |
+| 9 | Worker's decision, for the developer to confirm: a job slot (a `job.nodes` key and a `bind` key) is named by the source's **name**, not its full id, so `bind(sources={"units": ...})` is unchanged and a slot keeps its name whichever kind reads it | `SourceJobNode.from_stream` |
+
+**Before this decision** the developer's direction was stated as: every source id carries,
+explicitly and in one fixed place, the kind and implementation version that read the data;
+the record id never depends on the source id; a source stands in for another by an explicit
+operation that keeps the name and swaps only the kind part, after the rows are verified
+equal. Section 3 works this design out; section 4 compares the other alternatives with it.
 
 | Script | What it measures |
 |---|---|
@@ -237,7 +253,7 @@ entries that move are the same whichever spelling is chosen.
 | Question | Options | Recommendation |
 |---|---|---|
 | Is a given id prefixed? | (a) always: `units` read by Delta v1 is `delta_v1:units` (developer, settled); (b) defaults only | (a), as settled: the id always names the implementation that read the data, and one grammar holds for every id. It reverses ITL-957/ITL-1154 ("a given id is used exactly as given"): what the user gives is now the **name**, used exactly as given |
-| A given id that already starts with something shaped like a kind part (`delta_v1:units`, also `run_v2:x`) | refuse; nest (`csv_v1:delta_v1:units`); strip | **refuse**, with `ValueError` saying the kind part is Orcapod's and pointing to the stand-in operation: nesting would make a stand-in look like it was spelled by hand, and the rule is ours and certain ("when in doubt, refuse"). The cost: a user cannot name a source `run_v2:x`; the message says so |
+| A given id that already starts with something shaped like a kind part (`delta_v1:units`, also `run_v2:x`) | refuse; nest (`csv_v1:delta_v1:units`); strip | **Decided otherwise: nest, with a warning when the prefix is a registered kind (Decisions, 3).** This document had recommended: refuse, with `ValueError` saying the kind part is Orcapod's and pointing to the stand-in operation: nesting would make a stand-in look like it was spelled by hand, and the rule is ours and certain ("when in doubt, refuse"). The cost: a user cannot name a source `run_v2:x`; the message says so |
 | An empty name, `::`, a trailing `:` | refuse (as today) | unchanged |
 
 ### 3.3 Identity
@@ -259,6 +275,8 @@ What remains in a datum's identity: the source id (kind part and name), the sche
 columns. The kind enters exactly once, in the kind part.
 
 ### 3.4 The explicit stand-in
+
+Not implemented here: filed as ITL-1426 (deferred). This section is its design.
 
 | Question | Recommendation |
 |---|---|
@@ -476,6 +494,8 @@ is added to given ids too. Two consequences: a default name no longer repeats th
 given" becomes "a given name is used exactly as given" (R5).
 ## 5. The ledger, concretely
 
+Not implemented here: filed as ITL-1426 (deferred). This section is its design.
+
 Under K the ledger is what makes a stand-in verifiable and an implementation change
 visible; its columns are those of alternative D (section 4).
 
@@ -560,7 +580,7 @@ and a stand-in across kinds should be keyed (a database may not return rows in f
 | Provenance showcase (ITL-1421) | scenario 4 (prove a result) takes the traced records' row hashes from the ledger; scenario 7 (new data) takes new and changed records from it (5.7) |
 | Data context and the freeze | v1 is open until 0.4.0; a pre-release freezes nothing (RELEASING.md, ITL-1329); 0.4.0 freezes. K moves 355 frozen-file and 348 provisional entries: the developer approves the exact list (`golden-moves-K_always.txt`), then `--remove` and regenerate. After 0.4.0, K needs a new data context version. The stand-in operation and the ledger move no existing value (new pins only) and can land in any release |
 
-## 7. Recommendation
+## 7. Recommendation (as written before the decisions; see "Decisions" at the top)
 
 **Adopt K (the developer's direction) with the ledger.** Before 0.4.0, land everything that
 moves a hash: the class name out of the source identity, the kind part in every source id,
@@ -572,7 +592,7 @@ existing value), the ledger and the explicit stand-in.
 | # | Decision | Recommendation | Commits to |
 |---|---|---|---|
 | 1 | Confirm K against its moved list | confirm: 703 entries, 355 frozen-file and 348 provisional (`golden-moves-K_always.txt`) | the reversal of "a given id is used exactly as given" (ITL-957, ITL-1154) to "a given name is used exactly as given" |
-| 2 | Kind words | one vocabulary for the kind part and the config type key; choose short words (`delta`, `sqlite`, `postgresql`, `spiraldb`, `csv`, `polling`) or today's `SOURCE_KIND` (`delta_table`, ...). Recommend the short words, renaming `SOURCE_KIND` and the config keys with them (no users) | every default id and saved config; no extra golden move beyond decision 1 |
+| 2 | Kind words | one vocabulary for the kind part and the config type key; choose short words (`delta`, `sqlite`, `postgresql`, `spiraldb`, `csv`, `polling`) or today's `SOURCE_KIND` (`delta_table`, ...). Recommended the short words; **decided: today's `SOURCE_KIND` words** (Decisions, 2) | every default id and saved config; no extra golden move beyond decision 1 |
 | 3 | A given id that already has a kind-part shape | refuse (3.2) | users cannot name a source `x_v2:...` |
 | 4 | Parsing | the kind part never holds `:`; split at the first `:`; the name may hold `:`; no `::`, no trailing `:`, no empty name | one parser, used by the saved-job reader and the ledger |
 | 5 | Class name out of the identity; root identity `(Arrow schema identity, source id, key columns)` for every root source, `PollingSource` included | adopt | part of decision 1's list |

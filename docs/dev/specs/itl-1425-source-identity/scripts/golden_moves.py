@@ -21,6 +21,11 @@ Variants:
 
 Run from ``docs/dev/specs/itl-1425-source-identity``:
 ``uv run python -m scripts.golden_moves`` (all variants) or ``... golden_moves C``.
+
+The patches simulate the variants against ``main`` at ``8ee6c6d4``, before ITL-1425 was
+implemented (``hash_source_id`` and ``location_source_id`` existed then); check that commit
+out to run it. The moved list of the implementation itself is
+``generate_golden_hashes.py --check`` on the PR branch.
 """
 
 from __future__ import annotations
@@ -74,7 +79,9 @@ def _patch_default_ids(suffix: str) -> None:
     """Make every default id start with ``<kind><suffix>:``."""
     from orcapod.core.sources import source_ids
 
-    orig_hash, orig_loc = source_ids.hash_source_id, source_ids.location_source_id
+    # Functions of main at 8ee6c6d4, before ITL-1425 replaced them (see the docstring).
+    orig_hash = getattr(source_ids, "hash_source_id")  # noqa: B009
+    orig_loc = getattr(source_ids, "location_source_id")  # noqa: B009
 
     def hash_source_id(kind, content_hash, hexdigits=None):  # type: ignore[no-untyped-def]
         return orig_hash(f"{kind}{suffix}", content_hash, hexdigits)
