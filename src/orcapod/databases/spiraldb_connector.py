@@ -448,6 +448,10 @@ def _holds_nested_field_metadata(arrow_type: pa.DataType) -> bool:
     )
 
 
+class SpiralDBTableNotFoundError(ValueError):
+    """An exact table lookup found no matching table."""
+
+
 class SpiralDBTable:
     """One SpiralDB table, looked up once (``SpiralDBConnector.lookup_table``).
 
@@ -487,6 +491,7 @@ class SpiralDBTable:
         """
         import pyarrow as _pa  # noqa: PLC0415
 
+        self._connector._require_open()  # pyright: ignore[reportPrivateUsage]  # owns the handle
         declared = self._table.schema().to_arrow()
         empty = _pa.RecordBatch.from_pylist([], schema=declared)
         preparer = self._connector._batch_preparer(self._table, self._table_name)  # pyright: ignore[reportPrivateUsage]  # the connector's own preparer
@@ -494,7 +499,38 @@ class SpiralDBTable:
 
     def version(self) -> int:
         """The table's current version (``get_table_version``)."""
+        self._connector._require_open()  # pyright: ignore[reportPrivateUsage]  # owns the handle
         return int(self._table.last_modified_at())
+
+    def scan_batches(
+        self,
+        *,
+        where: Mapping[str, object] | None = None,
+        limit: int | None = None,
+        asof: int | None = None,
+    ) -> Iterator[pa.RecordBatch]:
+        """Yield prepared Arrow batches from this resolved table in key order."""
+        connector = self._connector
+        connector._require_open()  # pyright: ignore[reportPrivateUsage]  # owns the handle
+        table = self._table
+        prepare = connector._batch_preparer(table, self._table_name)  # pyright: ignore[reportPrivateUsage]  # owns the handle
+        predicate = None
+        for column, value in (where or {}).items():
+            equals = table[column] == value
+            predicate = equals if predicate is None else predicate & equals
+        scan = connector._spiral.scan(  # pyright: ignore[reportPrivateUsage]  # owns the handle
+            table.select(), where=predicate, limit=limit, asof=asof
+        )
+        for batch in scan.to_record_batches():
+            yield prepare(batch)
+
+    def row_count_estimate(self, asof: int | None = None) -> int:
+        """Return this resolved table's manifest row count at the requested version."""
+        connector = self._connector
+        connector._require_open()  # pyright: ignore[reportPrivateUsage]  # owns the handle
+        snapshot = self._table.core.get_snapshot(asof=asof)
+        stats = connector._spiral.core.manifest_stats(snapshot)  # pyright: ignore[reportPrivateUsage]  # owns the handle
+        return int(stats.key_space_stats.total_rows)
 
 
 class SpiralDBConnector:
@@ -563,9 +599,16 @@ class SpiralDBConnector:
             The table: its id and key columns, and its schema and version when asked.
         """
         self._require_open()
-        return SpiralDBTable(
-            self, self._project.table(self._table_id(table_name)), table_name
-        )
+        identifier = self._table_id(table_name)
+        try:
+            table = self._project.table(identifier)
+        except ValueError as exc:
+            # pyspiral raises this exact ValueError for an empty name lookup. Preserve
+            # other failures, including errors in loading the returned table handle.
+            if str(exc) != f"Table not found: {self._project_id}.{identifier}":
+                raise
+            raise SpiralDBTableNotFoundError(str(exc)) from exc
+        return SpiralDBTable(self, table, table_name)
 
     def get_pk_columns(self, table_name: str) -> list[str]:
         """Return primary-key column names in declaration order.
@@ -783,16 +826,9 @@ class SpiralDBConnector:
             NullInNonNullableColumnError: If a batch holds a null in a recorded
                 non-nullable column (naming the table and the column).
         """
-        self._require_open()
-        tbl = self._project.table(self._table_id(table_name))
-        prepare = self._batch_preparer(tbl, table_name)
-        predicate = None
-        for column, value in (where or {}).items():
-            equals = tbl[column] == value
-            predicate = equals if predicate is None else predicate & equals
-        scan = self._spiral.scan(tbl.select(), where=predicate, limit=limit, asof=asof)
-        for batch in scan.to_record_batches():
-            yield prepare(batch)
+        yield from self.lookup_table(table_name).scan_batches(
+            where=where, limit=limit, asof=asof
+        )
 
     def get_arrow_schema(self, table_name: str) -> pa.Schema:
         """Return the schema of the batches ``scan_batches`` yields, without scanning.
@@ -850,10 +886,7 @@ class SpiralDBConnector:
         Returns:
             The recorded row count.
         """
-        self._require_open()
-        tbl = self._project.table(self._table_id(table_name))
-        stats = self._spiral.core.manifest_stats(tbl.core.get_snapshot(asof=asof))
-        return int(stats.key_space_stats.total_rows)
+        return self.lookup_table(table_name).row_count_estimate(asof=asof)
 
     def delete_table(self, table_name: str) -> None:
         """Drop a table from SpiralDB, if it exists.
@@ -1181,8 +1214,12 @@ class SpiralDBConnector:
         """No-op: ``SpiralDBConnector`` preserves Arrow field metadata via the native KV store."""
 
     def close(self) -> None:
-        """Mark this connector as closed. Idempotent. No network teardown needed."""
-        self._closed = True
+        """Close this connector and release its SDK client. Idempotent."""
+        if not self._closed:
+            self._closed = True
+            # pyspiral exposes no close method. Drop both owning references.
+            del self._project
+            del self._spiral
 
     def __enter__(self) -> SpiralDBConnector:
         return self

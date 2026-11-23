@@ -473,7 +473,7 @@ class FakeTable:
     def __init__(self, store: _Store, project_id: str, identifier: str) -> None:
         """Open table ``identifier`` of ``project_id`` in ``store``."""
         if not store.exists(project_id, identifier):
-            raise ValueError(f"Table not found: {project_id}/{identifier}")
+            raise ValueError(f"Table not found: {project_id}.{identifier}")
         self._store = store
         self._project_id = project_id
         self._identifier = identifier
@@ -821,14 +821,14 @@ class FakeSpiral:
     def core(self) -> Any:
         """The client's low-level handle; only ``manifest_stats`` is modelled."""
 
-        def manifest_stats(snapshot: FakeTable) -> Any:
-            """Return stats whose ``key_space_stats.total_rows`` counts rows."""
-            rows = snapshot._read_all().num_rows
-            return types.SimpleNamespace(
-                key_space_stats=types.SimpleNamespace(total_rows=rows)
-            )
+        return types.SimpleNamespace(manifest_stats=self.manifest_stats)
 
-        return types.SimpleNamespace(manifest_stats=manifest_stats)
+    def manifest_stats(self, snapshot: FakeTable) -> Any:
+        """Return stats whose ``key_space_stats.total_rows`` counts rows."""
+        rows = snapshot._read_all().num_rows
+        return types.SimpleNamespace(
+            key_space_stats=types.SimpleNamespace(total_rows=rows)
+        )
 
 
 fake_spiral_module = types.SimpleNamespace(Spiral=FakeSpiral)
