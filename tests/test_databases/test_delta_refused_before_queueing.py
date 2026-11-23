@@ -703,3 +703,102 @@ def test_a_clash_with_a_cached_version_is_checked_against_the_stored_one(
             _add(db, _rows(b"2", **anchor, **added))
         assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
         assert _stored_ids(tmp_path) == [b"1"]
+
+
+@pytest.mark.parametrize(
+    "names",
+    [["a", "A", "A"], ["A", "a", "a"], ["a", "b", "A", "b"]],
+    ids=lambda names: "".join(names),
+)
+def test_a_case_clash_beside_a_repeated_name_names_the_column(
+    tmp_path: Path, names: list[str]
+) -> None:
+    """Review of PR 504 (round eight) and PR 511: with a name repeated, the case clash
+    is still refused with ``UnstorableColumnError``, naming the column and the type at
+    its position."""
+    types = [pa.int8(), pa.int16(), pa.int32(), pa.int64()][: len(names)]
+    table = pa.Table.from_arrays(
+        [pa.array([b"1"], pa.large_binary())] + [pa.array([1], t) for t in types],
+        names=["rid", *names],
+    )
+    db = DeltaTableDatabase(tmp_path)
+    with pytest.raises(UnstorableColumnError) as info:
+        _add(db, table)
+    position = next(
+        i
+        for i, n in enumerate(names)
+        if any(m.lower() == n.lower() and m != n for m in names[:i])
+    )
+    assert info.value.column == names[position]
+    assert str(types[position]) in str(info.value)
+    assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("trigger", ["a case clash", "a logical identifier"])
+def test_a_table_reopened_for_a_refusal_is_read_as_the_table_stored_now(
+    tmp_path: Path, unit_type: Any, trigger: str
+) -> None:
+    """Review of PR 504, round eight: the database read a table (its handle and the
+    snapshot of its rows are cached); another writer creates the table again at the
+    same version with other rows. An add refused against the cached version reopens
+    the table, which takes the rows; reads then show the table stored now, never the
+    old table's rows from the snapshot kept by version. Both reopen paths: the stored
+    case clash and the logical identifier (ITL-1371)."""
+    import shutil
+
+    def unit(value: int, serial: bytes) -> Any:
+        return pa.ExtensionArray.from_storage(
+            unit_type(serial), pa.array([value], pa.int64())
+        )
+
+    if trigger == "a case clash":
+        first = {"anchor": pa.array([1]), "a": pa.array([11])}
+        other = {"anchor": pa.array([99])}
+        added = {"anchor": pa.array([2]), "A": pa.array([22])}
+    else:
+        first = {"anchor": pa.array([1]), "x": unit(11, b"old")}
+        other = {"anchor": pa.array([99]), "x": unit(99, b"new")}
+        added = {"anchor": pa.array([2]), "x": unit(22, b"new")}
+    db = DeltaTableDatabase(tmp_path, allow_schema_evolution=True)
+    _add(db, _rows(b"1", **first), flush=True)
+    before = db.get_record_by_id(PATH, b"1")
+    assert before is not None and before.column("anchor").to_pylist() == [1]
+    shutil.rmtree(tmp_path / "t")
+    DeltaTableDatabase(tmp_path, allow_schema_evolution=True).add_records(
+        PATH, _rows(b"1", **other), record_id_column="rid", flush=True
+    )
+    assert deltalake.DeltaTable(str(tmp_path / "t")).version() == 0
+    _add(db, _rows(b"2", **added))  # accepted against the table stored now
+    after = db.get_record_by_id(PATH, b"1")
+    assert after is not None
+    assert after.column("anchor").to_pylist() == [99]
+    db.flush()
+    assert _stored_ids(tmp_path) == [b"1", b"2"]
+
+
+@pytest.mark.parametrize("evolve", [True, False], ids=["evolution on", "evolution off"])
+@pytest.mark.parametrize(
+    "new", [["b", "C", "d"], ["d", "C", "b"]], ids=["one order", "another order"]
+)
+def test_new_columns_are_checked_against_every_stored_name(
+    tmp_path: Path, new: list[str], evolve: bool
+) -> None:
+    """Review of PR 504, round eight (the stored names are folded once per check):
+    several new columns, one of them differing only in case from a stored one, in two
+    orders. With schema evolution the clashing column is refused, named with the
+    stored one; without it Delta leaves the unknown columns out and the rows are
+    stored."""
+    stored = {"a": pa.array([1]), "c": pa.array([2])}
+    db = DeltaTableDatabase(tmp_path, allow_schema_evolution=evolve)
+    _add(db, _rows(b"1", **stored), flush=True)
+    # The rows omit the stored ``c``: their own names never clash.
+    rows = _rows(b"2", a=pa.array([1]), **{n: pa.array([3]) for n in new})
+    if evolve:
+        with pytest.raises(
+            InputValidationError, match="'c' and 'C' differ only in case"
+        ):
+            _add(db, rows)
+        assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+    else:
+        _add(db, rows, flush=True)
+        assert _stored_ids(tmp_path) == [b"1", b"2"]
