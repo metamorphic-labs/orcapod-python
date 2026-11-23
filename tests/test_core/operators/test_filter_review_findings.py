@@ -243,3 +243,34 @@ class TestFinding7SavedTreesLoadAsBuilt:
         assert rebuilt.to_config() == saved
         assert rebuilt(source).as_table().num_rows == 0
         assert rebuilt.content_hash() == op.content_hash()
+
+
+class TestChangelogClaimOfPr497:
+    """CodeRabbit (PR 497 review body): a row is dropped when its WHOLE condition is
+    false or unknown, so ``is_null() | ...`` keeps the null rows the changelog names."""
+
+    @pytest.mark.parametrize(
+        ("condition", "kept"),
+        [
+            (col("rate").is_null() | (col("rate") > 1.0), [1, 2, 3]),
+            (col("rate") > 1.0, [1, 3]),
+            (~(col("rate") > 1.0), [4]),
+            ((col("rate") > 1.0) | (col("k") == 2), [1, 2, 3]),
+        ],
+        ids=["null_or_value", "value_alone", "not_value", "value_or_other_column"],
+    )
+    def test_a_row_is_kept_when_its_whole_condition_holds(self, condition, kept):
+        stream = ArrowTableStream(
+            pa.table(
+                {
+                    "k": [1, 2, 3, 4],
+                    "rate": pa.array([4.0, None, 2.5, 0.5], pa.float64()),
+                }
+            ),
+            tag_columns=["k"],
+        )
+        assert sorted(_ids_by(Filter(condition)(stream), "k")) == kept
+
+
+def _ids_by(stream, name: str) -> list[int]:
+    return stream.as_table()[name].to_pylist()
