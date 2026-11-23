@@ -9,23 +9,29 @@ import pyarrow as pa
 import pytest
 
 from orcapod.core.operators.filter_mask import (
-    AllOf,
-    AnyOf,
-    ColumnRef,
-    FieldRef,
-    NotOf,
-    Term,
     check_against_schema,
     condition_mask,
     filter_table,
+)
+from orcapod.types.condition import (
+    AllOf,
+    AnyOf,
+    ColumnOperand,
+    FieldPath,
+    Negation,
+    Term,
 )
 from orcapod.errors import InputValidationError
 
 NAN = float("nan")
 
 
-def c(name: str) -> ColumnRef:
-    return ColumnRef(name)
+def c(name: str, *fields: str) -> FieldPath:
+    return FieldPath(name, fields)
+
+
+def other(name: str) -> ColumnOperand:
+    return ColumnOperand(FieldPath(name))
 
 
 def mask(table: pa.Table, node) -> list[bool | None]:
@@ -95,7 +101,7 @@ class TestSpecExamples:
         assert len(kept(units, Term(c("rate"), "is_not_null", None))) == 4
 
     def test_negation(self, units):
-        assert kept(units, NotOf(Term(c("unit"), "is_in", (3, 7)))) == [("s1", 9)]
+        assert kept(units, Negation(Term(c("unit"), "is_in", (3, 7)))) == [("s1", 9)]
 
     def test_or(self, units):
         node = AnyOf((Term(c("session"), "==", "s3"), Term(c("t"), "<", 0.6)))
@@ -117,7 +123,7 @@ class TestKleene:
         assert mask(t, Term(c("x"), "is_in", (1,))) == [True, None, False]
 
     def test_not_of_unknown_is_unknown(self, t):
-        assert mask(t, NotOf(Term(c("x"), ">", 1))) == [True, None, False]
+        assert mask(t, Negation(Term(c("x"), ">", 1))) == [True, None, False]
 
     def test_and_or(self, t):
         unknown_or_false = Term(c("x"), "==", 1)
@@ -373,21 +379,21 @@ class TestStructFields:
         )
 
     def test_field(self, t):
-        kind = FieldRef(c("info"), "kind")
+        kind = c("info", "kind")
         assert mask(t, Term(kind, "!=", "noise")) == [True, False, None, None]
         assert mask(t, Term(kind, "is_null", None)) == [False, False, True, True]
 
     def test_field_of_field(self, t):
-        um = FieldRef(FieldRef(c("info"), "depth"), "um")
+        um = c("info", "depth", "um")
         assert mask(t, Term(um, ">", 15.0)) == [False, True, None, None]
 
     def test_missing_field_lists_fields(self, t):
         with pytest.raises(InputValidationError, match="kind: large_string"):
-            condition_mask(t, Term(FieldRef(c("info"), "kinds"), "==", "x"))
+            condition_mask(t, Term(c("info", "kinds"), "==", "x"))
 
     def test_field_of_non_struct(self):
         with pytest.raises(InputValidationError, match="is not a struct"):
-            condition_mask(pa.table({"x": [1]}), Term(FieldRef(c("x"), "f"), "==", 1))
+            condition_mask(pa.table({"x": [1]}), Term(c("x", "f"), "==", 1))
 
 
 class TestColumnAgainstColumn:
@@ -398,7 +404,7 @@ class TestColumnAgainstColumn:
                 "b": pa.array([2.0, 1.0, 2.0, 1.0, NAN, 0.0]),
             }
         )
-        assert mask(t, Term(c("a"), "<", c("b"))) == [
+        assert mask(t, Term(c("a"), "<", other("b"))) == [
             True,
             False,
             False,
@@ -406,7 +412,7 @@ class TestColumnAgainstColumn:
             False,
             False,
         ]
-        assert mask(t, Term(c("a"), "<=", c("b"))) == [
+        assert mask(t, Term(c("a"), "<=", other("b"))) == [
             True,
             False,
             True,
@@ -414,7 +420,7 @@ class TestColumnAgainstColumn:
             True,
             True,
         ]
-        assert mask(t, Term(c("a"), "==", c("b"))) == [
+        assert mask(t, Term(c("a"), "==", other("b"))) == [
             False,
             False,
             True,
@@ -422,11 +428,13 @@ class TestColumnAgainstColumn:
             True,
             True,
         ]
-        assert mask(t, Term(c("b"), ">", c("a"))) == mask(t, Term(c("a"), "<", c("b")))
+        assert mask(t, Term(c("b"), ">", other("a"))) == mask(
+            t, Term(c("a"), "<", other("b"))
+        )
 
     def test_null_never_greater_than_nan(self):
         t = pa.table({"a": pa.array([None], pa.float64()), "b": pa.array([NAN])})
-        assert mask(t, Term(c("a"), "<=", c("b"))) == [None]
+        assert mask(t, Term(c("a"), "<=", other("b"))) == [None]
 
     def test_layouts_of_one_type(self):
         t = pa.table(
@@ -435,12 +443,12 @@ class TestColumnAgainstColumn:
                 "b": pa.array(["x", "z"], pa.large_string()),
             }
         )
-        assert mask(t, Term(c("a"), "==", c("b"))) == [True, False]
+        assert mask(t, Term(c("a"), "==", other("b"))) == [True, False]
 
     def test_different_types_refused(self):
         t = pa.table({"a": pa.array([1], pa.int32()), "b": pa.array([1], pa.int64())})
         with pytest.raises(InputValidationError, match="one type"):
-            condition_mask(t, Term(c("a"), "==", c("b")))
+            condition_mask(t, Term(c("a"), "==", other("b")))
 
 
 def test_check_against_schema_reads_no_rows():

@@ -29,9 +29,19 @@ import math
 import struct
 from collections.abc import Sequence
 from datetime import date, datetime
-from typing import TYPE_CHECKING, NamedTuple, TypeAlias
+from typing import TYPE_CHECKING
 
 from orcapod.errors import InputValidationError
+from orcapod.types.condition import (
+    COMPARISONS,
+    ORDER_COMPARISONS,
+    AllOf,
+    ColumnOperand,
+    FieldPath,
+    Negation,
+    Node,
+    Term,
+)
 from orcapod.utils import arrow_utils
 from orcapod.utils.datetime_utils import instant_microseconds
 from orcapod.utils.lazy_module import LazyModule
@@ -44,66 +54,8 @@ else:
     pc = LazyModule("pyarrow.compute")
 
 
-# ---------------------------------------------------------------------------
-# The condition tree the kernel reads
-# ---------------------------------------------------------------------------
-
-
-class ColumnRef(NamedTuple):
-    """A user column of the stream, by name."""
-
-    name: str
-
-
-class FieldRef(NamedTuple):
-    """The child ``name`` of the struct that ``parent`` refers to."""
-
-    parent: Ref
-    name: str
-
-
-Ref: TypeAlias = "ColumnRef | FieldRef"
-
-
-class Term(NamedTuple):
-    """One requirement: ``ref <op> value``.
-
-    ``value`` is a literal for ``==``, ``!=``, ``<``, ``<=``, ``>``, ``>=``; a tuple of
-    literals for ``is_in``; ``None`` for ``is_null`` and ``is_not_null``; a ``ColumnRef``
-    or ``FieldRef`` for a comparison of two columns.
-    """
-
-    ref: Ref
-    op: str
-    value: object
-
-
-class AllOf(NamedTuple):
-    """Every child holds (Kleene AND)."""
-
-    children: tuple[Node, ...]
-
-
-class AnyOf(NamedTuple):
-    """Some child holds (Kleene OR)."""
-
-    children: tuple[Node, ...]
-
-
-class NotOf(NamedTuple):
-    """The child does not hold (Kleene NOT)."""
-
-    child: Node
-
-
-Node: TypeAlias = "Term | AllOf | AnyOf | NotOf"
-
 EQ, NE, LT, LE, GT, GE = "==", "!=", "<", "<=", ">", ">="
 IS_IN, IS_NULL, IS_NOT_NULL = "is_in", "is_null", "is_not_null"
-COMPARISONS = frozenset({LT, LE, GT, GE})
-EQUALITIES = frozenset({EQ, NE})
-VALUE_OPS = COMPARISONS | EQUALITIES
-NULL_TESTS = frozenset({IS_NULL, IS_NOT_NULL})
 
 # The comparison ``value <op> column`` is ``column <swapped op> value``.
 _SWAPPED = {LT: GT, LE: GE, GT: LT, GE: LE, EQ: EQ, NE: NE}
@@ -112,27 +64,11 @@ _EPOCH_MICROSECONDS = (date(1970, 1, 1).toordinal() - 1) * 86_400_000_000
 _MICROSECONDS_PER_UNIT = {"s": 1_000_000, "ms": 1_000, "us": 1}
 
 
-def ref_text(ref: Ref) -> str:
-    """Return how a reference is written: ``col('info').field('kind')``."""
-    if isinstance(ref, FieldRef):
-        return f"{ref_text(ref.parent)}.field({ref.name!r})"
-    return f"col({ref.name!r})"
-
-
-def root_column(ref: Ref) -> str:
-    """Return the name of the column a reference reads."""
-    while isinstance(ref, FieldRef):
-        ref = ref.parent
-    return ref.name
-
-
-def iter_terms(node: Node) -> list[Term]:
-    """Return every term of ``node``, depth first."""
-    if isinstance(node, Term):
-        return [node]
-    if isinstance(node, NotOf):
-        return iter_terms(node.child)
-    return [term for child in node.children for term in iter_terms(child)]
+def path_text(path: FieldPath) -> str:
+    """Return how a path is written: ``col('info').field('kind')``."""
+    return "".join(
+        (f"col({path.column!r})", *(f".field({name!r})" for name in path.fields))
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -200,46 +136,47 @@ def _compute_form(values: pa.ChunkedArray | pa.Array) -> pa.ChunkedArray | pa.Ar
 # ---------------------------------------------------------------------------
 
 
-def _resolve(table: pa.Table, ref: Ref) -> pa.ChunkedArray:
-    """Return the values ``ref`` names in ``table``.
+def _resolve(table: pa.Table, path: FieldPath) -> pa.ChunkedArray:
+    """Return the values ``path`` names in ``table``.
 
     Raises:
         InputValidationError: If the column is missing, or a field is asked of a value
             that is not a struct, or of a struct without that field.
     """
-    if isinstance(ref, ColumnRef):
-        if ref.name not in table.column_names:
-            raise InputValidationError(
-                f"Filter: {ref_text(ref)}: the stream has no column {ref.name!r}"
+    if path.column not in table.column_names:
+        raise InputValidationError(
+            f"Filter: {path_text(path)}: the stream has no column {path.column!r}"
+        )
+    values = table.column(path.column)
+    for depth, name in enumerate(path.fields):
+        parent_text = path_text(FieldPath(path.column, path.fields[:depth]))
+        parent_type = values.type
+        if isinstance(parent_type, pa.ExtensionType) and pa.types.is_struct(
+            parent_type.storage_type
+        ):
+            # A user class column: its storage struct holds its declared fields.
+            values = pa.chunked_array(
+                [chunk.storage for chunk in values.chunks],
+                type=parent_type.storage_type,
             )
-        return table.column(ref.name)
-    parent = _resolve(table, ref.parent)
-    parent_type = parent.type
-    if isinstance(parent_type, pa.ExtensionType) and pa.types.is_struct(
-        parent_type.storage_type
-    ):
-        # A user class column: its storage struct holds its declared fields.
-        parent = pa.chunked_array(
-            [chunk.storage for chunk in parent.chunks],
-            type=parent_type.storage_type,
-        )
-        parent_type = parent.type
-    if not pa.types.is_struct(parent_type):
-        raise InputValidationError(
-            f"Filter: {ref_text(ref)}: {ref_text(ref.parent)} is not a struct "
-            f"(its type is {parent_type}), so it has no field {ref.name!r}"
-        )
-    index = parent_type.get_field_index(ref.name)
-    if index < 0:
-        fields = ", ".join(
-            f"{parent_type.field(i).name}: {parent_type.field(i).type}"
-            for i in range(parent_type.num_fields)
-        )
-        raise InputValidationError(
-            f"Filter: {ref_text(ref)}: {ref_text(ref.parent)} has no field "
-            f"{ref.name!r}; its fields are {fields}"
-        )
-    return pc.struct_field(parent, [index])
+            parent_type = values.type
+        if not pa.types.is_struct(parent_type):
+            raise InputValidationError(
+                f"Filter: {path_text(path)}: {parent_text} is not a struct "
+                f"(its type is {parent_type}), so it has no field {name!r}"
+            )
+        index = parent_type.get_field_index(name)
+        if index < 0:
+            fields = ", ".join(
+                f"{parent_type.field(i).name}: {parent_type.field(i).type}"
+                for i in range(parent_type.num_fields)
+            )
+            raise InputValidationError(
+                f"Filter: {path_text(path)}: {parent_text} has no field "
+                f"{name!r}; its fields are {fields}"
+            )
+        values = pc.struct_field(values, [index])
+    return values
 
 
 # ---------------------------------------------------------------------------
@@ -247,7 +184,9 @@ def _resolve(table: pa.Table, ref: Ref) -> pa.ChunkedArray:
 # ---------------------------------------------------------------------------
 
 
-def _literal_scalar(ref: Ref, arrow_type: pa.DataType, value: object) -> pa.Scalar:
+def _literal_scalar(
+    ref: FieldPath, arrow_type: pa.DataType, value: object
+) -> pa.Scalar:
     """Return ``value`` as a scalar of ``arrow_type``, checked as section 2.6 says.
 
     Raises:
@@ -257,19 +196,19 @@ def _literal_scalar(ref: Ref, arrow_type: pa.DataType, value: object) -> pa.Scal
     kind = _python_kind(arrow_type)
     if kind is None:
         raise InputValidationError(
-            f"Filter: {ref_text(ref)} has type {arrow_type}, which takes no value "
+            f"Filter: {path_text(ref)} has type {arrow_type}, which takes no value "
             "condition (only is_null and is_not_null)"
         )
     if type(value) is not kind:
         raise InputValidationError(
-            f"Filter: {ref_text(ref)} has type {arrow_type}, whose values are "
+            f"Filter: {path_text(ref)} has type {arrow_type}, whose values are "
             f"{kind.__name__}; the value {value!r} is a {type(value).__name__}. "
             f"Orcapod converts no value: give a {kind.__name__}"
         )
 
     def refuse(reason: str) -> InputValidationError:
         return InputValidationError(
-            f"Filter: {ref_text(ref)} has type {arrow_type}: the value {value!r} "
+            f"Filter: {path_text(ref)} has type {arrow_type}: the value {value!r} "
             f"{reason}"
         )
 
@@ -403,26 +342,26 @@ def _compare(
     return _null_where_any_null(result, *operands)  # pyright: ignore[reportArgumentType]  # compute results are arrays
 
 
-def _require_op_allowed(ref: Ref, arrow_type: pa.DataType, op: str) -> None:
+def _require_op_allowed(ref: FieldPath, arrow_type: pa.DataType, op: str) -> None:
     """Refuse an ordering of an unordered type, or an equality of an untyped one."""
-    if op in COMPARISONS and not _ordered(arrow_type):
+    if op in ORDER_COMPARISONS and not _ordered(arrow_type):
         raise InputValidationError(
-            f"Filter: {ref_text(ref)} has type {arrow_type}, which has no order "
+            f"Filter: {path_text(ref)} has type {arrow_type}, which has no order "
             f"in a filter; {op} is refused"
         )
 
 
 def _term_mask(table: pa.Table, term: Term) -> pa.ChunkedArray | pa.Array:
     """Return the mask of one term over ``table``."""
-    values = _resolve(table, term.ref)
-    if term.op == IS_NULL:
+    values = _resolve(table, term.path)
+    if term.operator == IS_NULL:
         return pc.is_null(values)
-    if term.op == IS_NOT_NULL:
+    if term.operator == IS_NOT_NULL:
         return pc.is_valid(values)
     arrow_type = values.type
-    if term.op == IS_IN:
+    if term.operator == IS_IN:
         assert isinstance(term.value, tuple)
-        scalars = [_literal_scalar(term.ref, arrow_type, v) for v in term.value]
+        scalars = [_literal_scalar(term.path, arrow_type, v) for v in term.value]
         computed = _compute_form(values)
         if pa.types.is_floating(arrow_type):
             result = None
@@ -436,38 +375,38 @@ def _term_mask(table: pa.Table, term: Term) -> pa.ChunkedArray | pa.Array:
                 computed = computed.cast(set_type)
             result = pc.is_in(computed, value_set=value_set)
         return _null_where_any_null(result, values)  # pyright: ignore[reportArgumentType]  # an array
-    if term.op not in VALUE_OPS:
-        raise ValueError(f"Filter: unknown operator {term.op!r}")
-    if isinstance(term.value, (ColumnRef, FieldRef)):
-        other = _resolve(table, term.value)
+    if term.operator not in COMPARISONS:
+        raise ValueError(f"Filter: unknown operator {term.operator!r}")
+    if isinstance(term.value, ColumnOperand):
+        other = _resolve(table, term.value.path)
         left_type = arrow_utils.normalize_to_large_types(arrow_type, keep_null=True)
         right_type = arrow_utils.normalize_to_large_types(other.type, keep_null=True)
         if left_type != right_type:
             raise InputValidationError(
-                f"Filter: {ref_text(term.ref)} {term.op} {ref_text(term.value)}: the "
+                f"Filter: {path_text(term.path)} {term.operator} {path_text(term.value.path)}: the "
                 f"columns have types {arrow_type} and {other.type}; two columns "
                 "compared must have one type (Orcapod converts no value)"
             )
         if _python_kind(arrow_type) is None:
             raise InputValidationError(
-                f"Filter: {ref_text(term.ref)} has type {arrow_type}, which takes no "
+                f"Filter: {path_text(term.path)} has type {arrow_type}, which takes no "
                 "value condition (only is_null and is_not_null)"
             )
-        _require_op_allowed(term.ref, arrow_type, term.op)
+        _require_op_allowed(term.path, arrow_type, term.operator)
         left = _compute_form(values)
         right = _compute_form(other)
         if left.type != right.type:
             left = left.cast(left_type)
             right = right.cast(right_type)
-        return _compare(term.op, left, right, pa.types.is_floating(arrow_type))
-    scalar = _literal_scalar(term.ref, arrow_type, term.value)
-    _require_op_allowed(term.ref, arrow_type, term.op)
+        return _compare(term.operator, left, right, pa.types.is_floating(arrow_type))
+    scalar = _literal_scalar(term.path, arrow_type, term.value)
+    _require_op_allowed(term.path, arrow_type, term.operator)
     computed = _compute_form(values)
     if computed.type != scalar.type:
         # A string, binary or float32-compared column against its literal's type: a
         # change of layout or an exact widening, for the mask only.
         computed = computed.cast(scalar.type)
-    return _compare(term.op, computed, scalar, pa.types.is_floating(arrow_type))
+    return _compare(term.operator, computed, scalar, pa.types.is_floating(arrow_type))
 
 
 # ---------------------------------------------------------------------------
@@ -478,7 +417,7 @@ def _term_mask(table: pa.Table, term: Term) -> pa.ChunkedArray | pa.Array:
 def _node_mask(table: pa.Table, node: Node) -> pa.ChunkedArray | pa.Array:
     if isinstance(node, Term):
         return _term_mask(table, node)
-    if isinstance(node, NotOf):
+    if isinstance(node, Negation):
         return pc.invert(_node_mask(table, node.child))
     if not node.children:
         # An empty AND holds everywhere; an empty OR nowhere.
@@ -522,14 +461,4 @@ def check_against_schema(schema: pa.Schema, node: Node) -> None:
     condition_mask(schema.empty_table(), node)
 
 
-__all__: Sequence[str] = (
-    "AllOf",
-    "AnyOf",
-    "ColumnRef",
-    "FieldRef",
-    "NotOf",
-    "Term",
-    "condition_mask",
-    "filter_table",
-    "check_against_schema",
-)
+__all__: Sequence[str] = ("condition_mask", "filter_table", "check_against_schema")
