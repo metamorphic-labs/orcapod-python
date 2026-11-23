@@ -1,7 +1,8 @@
 # Build a pipeline job from streams made while exploring (ITL-1387)
 
-Status: DESIGN ONLY, for the developer's approval. Measured on `origin/main` fc1df420
-(2026-11-22). No library code changes with this document.
+Status: APPROVED TO PROCEED (developer, 2026-11-22), on the decisions D4 and D7 as revised
+and rule 2.1. D1-D3, D5, D6, D8, D9, D13 and D14 are built as recommended, not individually
+confirmed (section 11). Measured on `origin/main` fc1df420 (2026-11-22).
 
 Developer's words (2026-11-22): "we can build a feature whereby we can register one or more
 streams against a pipeline job and it will create a full pipeline based off of the passed on
@@ -11,6 +12,28 @@ separating exploration code from proper executable research code so the need to 
 steps plainly in a pipeline_job is actually acceptable", and reopening `with pipeline_job:` to
 add steps over the nodes so far should still work. Nice to have for the workshop
 (2026-11-25), not a blocker.
+
+**Changed in revision 2** (developer, 2026-11-22):
+
+- **D7 reversed.** "Every node in a pipeline simply captures some basic orcapod pipeline
+  underlying it so there is no reason that one pipeline cannot absorb/share part of the
+  pipeline as another. Generally, if any stream/node is to be added to a pipeline (e.g. by
+  register) it ought to add that pod as well as all of its upstream operations up to and
+  including source." A node of another job is now walked like any stream (section 5.1),
+  with the property proven on it. What the two jobs share and do not share is stated with
+  its condition: tables live under each job's OWN database and job name (section 5.1). A
+  node of a LOADED job is answered with a script, function importable and not (section 5.2).
+- **One rule for both ways in** (section 2.1): a stream is treated as a source only when the
+  user says so (`as_source()`, or an explicit source object). A `with` block over a
+  pre-built stream takes in its upstreams exactly as `register` does. On the
+  `<label>:<hash>` slot the developer asked: "that's only if you are treating that stream as
+  source, no?" Then (2026-11-22): "yes move D4 into first version. A stream used in pipeline
+  should try to use it as is as part of a pipeline, without auto-invoking as_source. In fact
+  treating a stream as source is something that a user must explicitly do to intentionally
+  cut pipelines into parts." Section 9 is the plan with this in the first version: what
+  replaces the implicit leaf, the refused-block residue, every existing test that pins the
+  implicit leaf, old saved jobs and the docs on cutting a pipeline.
+- D11 and D12 (pre-existing naming issues) are filed as **ITL-1389**.
 
 Evidence. Every claim below about today's behaviour is backed by a script run against
 fc1df420. The scripts are kept with the ITL-1387 working notes, outside the repository:
@@ -23,6 +46,10 @@ fc1df420. The scripts are kept with the ITL-1387 working notes, outside the repo
 | `same_step_two_labels.py` | one step recorded under two labels: the last recorded wins |
 | `prototype_register.py` | a prototype of the walk, OUTSIDE the library, and the property checked on it |
 | `edge_cases.py` | raw-stream roots, side-effect pods, another job's nodes under the prototype walk |
+| `walk.py` (rev 2) | the prototype walk used by the rev-2 scripts: it classifies a step by its producer, so job nodes are walked |
+| `absorb_other_job.py` (rev 2) | a job absorbs another job's nodes: equal to the hand-written job; when the two see each other's stored results |
+| `loaded_job_walk.py` (rev 2) | nodes of a loaded job, function importable and not: what has a producer, what the walk does |
+| `leaf_probe_plugin.py` (rev 2) | a pytest plugin, run once over `tests/` (one process, before the implementation started), listing every test that compiles a stream with a producer as a leaf or calls `from_stream` on one |
 
 ## 1. What exists today
 
@@ -104,12 +131,13 @@ over a join.
 - `same_step_two_labels.py`: one step (same content hash) recorded twice in one `with` block
   as `label="x_label"` then `label="y_label"` gives one node named `y_label`; in the other
   order, `x_label`. The name follows recording order (the later invocation overwrites the
-  earlier in `_invocation_lut`). This is a pre-existing departure from "order never counts";
-  not logged yet (decision D12).
+  earlier in `_invocation_lut`). This is a pre-existing departure from "order never counts",
+  filed as ITL-1389.
 - `edge_cases.py`: a step over a raw `ArrowTableStream` is refused by the bind check
   (`SourceSpecMismatchError`), in a `with` block and under the prototype walk alike.
 - `edge_cases.py`: a node of ANOTHER job used in a `with` block today becomes a leaf named
-  `doubled:<hash>` bound to that job node, the F07 shape again.
+  `doubled:<hash>` bound to that job node, the F07 shape again; when that node lies over a
+  join, the `with` block is refused (`absorb_other_job.py`: `SourceSpecMismatchError`).
 
 ### 1.5 The walk is enough (prototype)
 
@@ -162,9 +190,8 @@ job.run()
   and any number of times. A stream built outside any block over a job node
   (`plus.pod(job.doubled)`) registers only its new steps.
 - **All or nothing**: a refused `register` leaves the job exactly as it was (recorded state,
-  compiled nodes, bindings). Today's `with` block does not have this property (1.3, the
-  refused join stays recorded); `register` must, by planning and checking everything before
-  recording anything (section 9).
+  compiled nodes, bindings), by planning and checking everything before recording anything
+  (section 9). A `with` block gets the same property (section 2.2).
 - Returns `None`, like `bind`; the nodes are read from `job.nodes` / `job.<name>`.
 
 Alternatives weighed:
@@ -173,12 +200,48 @@ Alternatives weighed:
   shot and does not meet reopening. It can be a two-line wrapper over `register` later; not
   in the first version (D3).
 - `job.add(...)`: "add" reads as adding one node; `register` is the developer's word.
-- **No new call: make a `with` block take in a pre-built stream's upstreams** (fix F07 in
-  place). Attractive, because the trap in 1.3 then disappears for everyone, and it is the same
-  walk. But it changes what a `with` block records for an existing pattern, and is a separate
-  decision. Recommended as a second piece (D4), after `register` lands with its tests.
+- **No new call, only the `with` block walking pre-built streams.** Decided as part of the
+  first version (section 2.1), but not instead of `register`: `register` is the way in when
+  the end streams already exist and no new step is to be written, and it takes keyword names.
 - A `Pipeline`-only call (blueprint) then `from_pipeline`: possible with the same method on
   the base class; no separate API needed.
+
+### 2.1 One rule for both ways in (decided, revision 2)
+
+Developer (2026-11-22): "A stream used in pipeline should try to use it as is as part of a
+pipeline, without auto-invoking as_source. In fact treating a stream as source is something
+that a user must explicitly do to intentionally cut pipelines into parts."
+
+> **A stream given to a pipeline or job, by `register` or as an input of a step recorded in
+> a `with` block, comes in with its pod and every upstream step down to its sources. A
+> stream becomes a source only by the user's explicit act: a source object (any
+> `RootSource`), or a node's `as_source()`.**
+
+So the `<label>:<hash>` slot of 1.3 disappears: nothing turns a stream made by a pod into a
+source slot implicitly. Both ways in call one function, the walk of section 9, from
+`_record_invocation` (for each input of a recorded step that has a producer and is not held)
+and from `register`. A stream built inside the block is already held, so the walk stops at
+once and nothing changes for code that builds everything inside the block.
+
+What counts as a source (a leaf): a `RootSource` (every source class, `CachedSource`,
+`DerivedSource` including a node's `as_source()`, `PollingSource`) and a `SourceJobNode` or
+`SourceNode` (a slot of any pipeline or job). Everything else has a producer and is walked,
+or has none and is not a source, and is refused when it is recorded, naming the stream and
+the explicit remedies (a raw `ArrowTableStream`: wrap its table as a source; a function node
+of a loaded job: section 5.2).
+
+### 2.2 A refused `with` block leaves the job as it was
+
+Today a refused block leaves its invocations recorded, so the next compile of that job fails
+again (1.3, `prebuilt_stream.py`: an empty second `with` block is refused). With the walk at
+recording time, a stream that cannot be bound is refused when the step over it is recorded,
+before anything of that step is recorded. A refusal can still come later (in `compile()`: two
+sources with one name and different schemas, a restriction conflict through a slot rebound
+meanwhile). Recommendation: `__enter__` keeps a copy of the recording state
+(`_invocation_lut`, `_source_streams`, `_hash_graph`; plain dicts and an `nx.DiGraph`), and
+when the block's body or its `compile()` raises, `__exit__` restores it, so a refused block
+leaves the job exactly as before the block (its compiled nodes untouched, since compile
+replaces them only on success). `register` uses the same restore.
 
 ## 3. Node names
 
@@ -211,10 +274,10 @@ call (CLAUDE.md, ITL-1271).
 5. One step (one content hash) reached under two DIFFERENT assigned labels (1.4: built twice
    as `label="x"` and `label="y"`): refused, naming both labels. Today's `with` block keeps the
    last recorded, which is order-dependent; `register` must not inherit that. The `with` block
-   itself is D12.
+   itself is ITL-1389.
 
 The suffix renumbering of 1.2 (a node's suffix can change when the job grows) is inherited,
-not fixed here (D11). An explicit keyword name is the remedy a user has today: named nodes
+not fixed here (ITL-1389). An explicit keyword name is the remedy a user has today: named nodes
 never take a suffix.
 
 ## 4. Shared upstreams and steps the job holds
@@ -239,18 +302,73 @@ column, declared types, Arrow types by `hash_schema`) decides. A raw `ArrowTable
 is refused as today (`edge_cases.py`); so is any other stream with no producer that is not a
 bindable source.
 
-What is a root: a `RootSource` (every source class, `CachedSource`, `DerivedSource`,
-`PollingSource`), a `SourceJobNode` of this job, or a stream with no producer. The walk never
-goes beneath a root (a `DerivedSource`'s origin and a `CachedSource`'s source are not steps of
-this job), as the `with` block never records them.
+What is a root is stated once, in 2.1. The walk never goes beneath a root (a
+`DerivedSource`'s origin and a `CachedSource`'s source are not steps of this job), as the
+`with` block never records them.
 
-Under the first version, the walk does NOT go through a node of ANOTHER job, nor a node of a
-loaded job: it refuses, naming the node, with the remedies `other.nodes[name].as_source()`
-(take its stored results as a source) or building in one job by reopening it. Walking through
-would replicate the other job's steps (their producers and upstreams are the same identities),
-but whether to read another job's nodes as steps or as stored results is a choice the user
-should make, and today's behaviour (a `<label>:<hash>` leaf bound to the node) is the F07
-trap. D7.
+### 5.1 A node of another job is walked (revision 2)
+
+A function, operator or side-effect job node has a producer (its pod) and upstreams (the
+other job's nodes), with the same identities as the steps that built it. So the walk takes
+it like any stream: its step and every upstream step down to the other job's slots become
+steps of THIS job. The other job's `SourceJobNode`s are roots: `compile()` copies each
+(`SourceJobNode.from_stream`, case 1), keeping its name and its bound source. The walk
+classifies a step by its producer (function pod, side-effect pod, operator), never by the
+stream's class, since a job node is not a pod stream (`walk.py`).
+
+Proven (`absorb_other_job.py`): job `other` holds two sources, an automatic join, an
+automatic select, labelled and unlabelled steps and two `map_data` steps, and has run. A new
+job is built from `final.pod(other.renamed.join(other.nodes["MapData"]), label="final")`, the
+step written outside any block, then registered. Against the whole pipeline written by hand in
+one `with` block, sync and async: same node names, node types, content and pipeline hashes,
+stored table paths and rows. (Today the same step in a `with` block is refused, because
+`other.renamed` lies over a join.)
+
+What the two jobs then have in common, and what not:
+
+- **Identities**: every absorbed step has the same content hash and pipeline hash in both
+  jobs.
+- **Stored tables: only under a condition.** An absorbed step's tables live under THIS job's
+  own database and its path prefix (the job name), at the same path relative to that
+  database: the path is derived from the step's identity (function, output schema, pipeline
+  hash) under the job's prefix. So the two jobs see each other's stored results if and only if
+  they use the same database location and the same job name. Measured: same database object
+  and same name, the absorbing job's run calls only its own new step (`final`) and reads the
+  other's stored results; same database but another job name, or same name but another
+  database, every function runs again.
+- **Per job**: node names (the other job had `Join`; the absorbing job, with a second join,
+  has `Join_1` and `Join_2`), node objects (distinct; the other job's names and nodes are
+  unchanged and its node still reads its own run), bindings (the slot copy holds the bound
+  source at absorption; a later `other.bind(...)` changes only `other`), held runs and run
+  summaries.
+- **Stored results instead of steps**: a user who wants what the other job STORED, not its
+  steps, cuts the pipeline explicitly with `other.nodes[name].as_source()` (a
+  `DerivedSource`, a root). Limitation: `as_source()` of a node downstream of a join cannot
+  yet be bound (ITL-1127), so such a cut is refused today.
+
+### 5.2 A node of a loaded job (revision 2; overlaps ITL-1388)
+
+`loaded_job_walk.py` saves a job (`CSVSource` -> function `double` -> `map_data`) on a Delta
+database, then loads it in a new process, once with the function's module importable and once
+without:
+
+- A loaded **function node has no producer in both cases** (`producer is None`):
+  `PipelineJob.load` (through `Pipeline.load`) always builds function nodes with
+  `function_pod=None`, whether or not the function could be imported. There is nothing to
+  walk.
+- A loaded **operator node has a producer**: operators are rebuilt from their saved config.
+  The walk records it and reaches the function node beneath it.
+- The loaded **slot** (`CSVSource`) is rebuilt and bound.
+- Today's walk (and today's `with` block) takes the producer-less function node as a leaf and
+  the bind check refuses it with a misleading message ("a stream without system-tag columns (a
+  raw ArrowTableStream) cannot be bound"), in both cases.
+
+Recommendation: under rule 2.1 a loaded function node is neither walkable nor a source, so it
+is refused when recorded, by name, with the two explicit remedies: its stored results through
+`loaded.nodes[name].as_source()`, or its steps by building the pipeline from code. Whether
+`PipelineJob.load` should attach the function when it is importable (so that a loaded job's
+nodes have producers and can be walked) is the save/load audit's question (ITL-1388); if it
+decides yes, the walk needs no change.
 
 **Restrictions** (`where`, ITL-1218): a restricted source is a root like any other. Its
 restriction travels in the bound source object, so it is carried, shown and saved exactly as
@@ -271,9 +389,12 @@ hashes as in a `with` block. Nothing distinguishes it.
 
 ## 6. THE PROPERTY
 
-> A job built by `register` has exactly the node names, node types, content hashes, pipeline
-> hashes, stored table paths, stored tables, record ids, results and saved file (`pipeline`
-> and `bindings` sections) of the same pipeline written by hand in a `with` block.
+> A job built by `register`, by a `with` block over pre-built streams, or by absorbing
+> another job's nodes, in every registration order, has exactly the node names, node types,
+> content hashes, pipeline hashes, stored table paths, stored tables, record ids, results and
+> saved file (`pipeline` and `bindings` sections) of the same pipeline written by hand in one
+> `with` block, on the sync and the async path. No golden value moves
+> (`generate_golden_hashes.py --check`).
 
 It holds by construction when the walk records the same invocations the tracker would:
 same pod objects, same input stream objects (the stream's `upstreams` are the objects the pod
@@ -292,6 +413,9 @@ How a test proves it (section 8 has the plan):
   duplicate-label steps, keyword names, and the several-item inputs of
   `tests/test_core/operators/several_items.py` (two or more tags and data columns, several
   arrangements).
+- Each builder also runs in the two other ways in: built with no job active, then used as the
+  inputs of a last step recorded in a `with` block (rule 2.1); and built in another job, run,
+  and absorbed through that job's nodes (5.1).
 - Each builder runs with its end streams registered in at least two orders and split over two
   `register` calls, and mixed with reopening (half in a `with` block, half registered).
 - Compared, by one helper: `sorted(job.nodes)`; per label, node type, `content_hash()`,
@@ -329,39 +453,151 @@ How a test proves it (section 8 has the plan):
 | `DerivedSource` (plain, `tags_as_data`) | handled, as a root | bound as a source; its origin is not walked; `ProvisionalHashWarning` as when built |
 | `CachedSource` | handled, as a root | as by hand; a `CachedSource` over a restricted source is already refused at construction |
 | `PollingSource` | handled, as a root | registering never polls (identity is `impl.identity()`); a run checks it as by hand |
-| A node of another job, or of a loaded job | refused (D7) | section 5 |
+| A node of another job | walked, with every upstream step (D7, revised) | section 5.1 |
+| A function node of a loaded job | refused by name: no producer (section 5.2), not a source | `as_source()` for its stored results; ITL-1388 may attach importable functions |
+| An operator node of a loaded job | walked (its operator is rebuilt), down to what lies beneath | section 5.2 |
 | A raw `ArrowTableStream` root, a joined stream as a root | refused, as today | the bind check; binding such a stream is ITL-1127 |
 | A bare root source registered alone | refused (D9) | there is no step to register, and no by-hand equivalent (a `with` block records only steps); the message says to register a stream built from it |
 | A stream whose producer is none of the three pod kinds | refused | the walk classifies by producer: a function pod, a side-effect pod or an operator; anything else has no invocation to record |
 
-## 9. Implementation plan
+## 9. Implementation plan (D4 decided into the first version)
 
-One function does the walk, beside the recording code in `pipeline/base.py`:
+### 9.1 The walk
 
-1. **Plan** (no mutation): walk every registered stream depth first; collect, in topological
-   order, `(key, invocation kind, pod, inputs, label)` for each step not held; collect leaves;
-   classify each producer (function, side effect, operator) or refuse; apply the naming rules
-   of section 3 against the job's current labels and the plan; refuse other jobs' nodes.
+One function does the walk, beside the recording code in `pipeline/base.py`. `register`
+calls it with the registered streams; `_record_invocation` calls it with the inputs of the
+step being recorded (only inputs that have a producer and are not held; for a step built
+inside the block that is none, so the block's cost does not change).
+
+1. **Plan** (no mutation): walk depth first; collect, in topological order,
+   `(key, invocation kind, pod, inputs, label)` for each step not held; collect leaves;
+   classify each producer (function pod, side-effect pod, operator; anything else refused);
+   refuse a stream that has no producer and is not a source (rule 2.1: a raw
+   `ArrowTableStream`, a function node of a loaded job), by name with its remedy; apply the
+   naming rules of section 3 against the job's current labels and the plan.
 2. **Check** (no mutation): `require_one_restriction` over held streams plus every planned
-   input; bind-check each new leaf (`SourceNodeBase.validate` through the same construction
+   input; bind-check each new leaf (`SourceNodeBase.validate`, through the construction
    `compile()` uses, without keeping the node); `refuse_restricted_operator_cache` where a
    cache mode is already set.
-3. **Record**: `_record_invocation` for each planned step, in plan order; keyword names set
-   the invocation's label.
-4. **Compile** unless inside a `with` block or `auto_compile=False`. If `compile()` raises
-   anyway, restore the recorded state taken before step 3 (the three recording structures are
-   plain dicts and an `nx.DiGraph`, copied cheaply).
+3. **Record** each planned step, in plan order; keyword names set the invocation's label.
+4. **Compile** (`register` outside a block, unless `auto_compile=False`; a block at its exit).
+   If anything raises, the recording state is restored (2.2).
 
-Pieces, with agent-time estimates:
+### 9.2 What replaces the implicit leaf (`from_stream`, case 3)
+
+`SourceNode.from_stream` and `SourceJobNode.from_stream` have one caller in the library,
+`compile()` (step 2). Under rule 2.1 every leaf `compile()` sees is a `RootSource` or a slot:
+a stream with a producer has been walked when it was recorded, and a stream with neither has
+been refused there. So `compile()` never reaches case 3.
+
+Case 3 also has an explicit use: a user (or a test) builds a slot from a stream on purpose,
+naming it, `SourceJobNode.from_stream(stream, name="pick")`
+(`tests/test_core/sources/test_spiraldb_table_source_where.py` does), and binds streams to
+slots with `job.bind(sources={...})`. Both are explicit acts of treating a stream as a
+source, so they stay. Recommendation: keep case 3 for an explicit `name`, and remove only the
+IMPLICIT name: without `name`, a stream that is neither a `RootSource` nor a slot is refused
+(`ValueError`: "a stream made by a pod becomes a source slot only when you name it"). The
+`<label>:<content hash>` slot name disappears, and with it the comment in `compile()` step 2a
+about colliding `label:hash` names.
+
+### 9.3 Existing tests and documentation that pin the implicit leaf
+
+Found by running the whole test suite once with `leaf_probe_plugin.py` (a pytest plugin that
+records every test in which `compile()` meets a leaf that has a producer, and every direct
+`from_stream` call on such a stream), plus a search of `docs/` for streams built before a
+`with` block. Each listed test changes in P1 (its expectation becomes the walked pipeline, or
+the refusal moves to recording time):
+
+The probe run (36,543 passed, 189 skipped for want of a PostgreSQL or SpiralDB server or an
+optional package, 258 expected failures; the 8 failures, all in
+`tests/test_core/test_tag_schema_order.py`, belong to the measured base fc1df420 and are
+fixed on `main` by #499) found:
+
+- **No test and no documentation sample compiles a pipeline or job over a stream that has a
+  producer.** Every documentation page whose samples run (`tests/test_docs`) was in the run.
+  So no existing test or sample relies on a pre-built stream becoming a slot inside
+  `compile()`; the walk changes none of their results.
+- **Direct `from_stream` calls without a name, which pin the implicit `<label>:<hash>` name**
+  (they change, per D13: a stream that is neither a `RootSource` nor a slot needs an explicit
+  `name`):
+  - `tests/test_core/nodes/test_source_node.py::TestFromStreamNonRootSource::test_source_node_from_stream_slot_name_uses_full_hash`
+    (a raw `ArrowTableStream`; not a probe hit, since that stream has no producer, but the
+    same implicit name);
+  - `tests/test_core/nodes/test_source_node.py::TestFromStreamNonRootSource::test_source_job_node_from_stream_slot_name_uses_full_hash`
+    (a `map_data` stream).
+  Both become tests that the implicit name is refused and that an explicit `name` is used as
+  given.
+- **Direct `from_stream` calls WITH a name** (an explicit cut; unchanged):
+  `tests/test_core/sources/test_spiraldb_table_source_where.py::TestBindingTwoSlotsOverOneSource`,
+  12 cases over `test_conflicting_restrictions_are_refused_and_nothing_changes`,
+  `test_equivalent_restrictions_for_both_slots_are_accepted`,
+  `test_one_slot_changed_away_from_the_other_is_refused` and
+  `test_one_slot_changed_to_an_equal_restriction_is_accepted`.
+- **Tests that hand a pre-built stream to a step in a block, found by reading** (not probe
+  hits, because the stream never reaches `compile()` as a leaf):
+  `test_spiraldb_table_source_where.py::...::test_a_stream_with_the_hash_of_a_captured_output_is_checked`
+  (a pre-built stream over another restriction: refused today at recording by
+  `require_one_restriction`; under the walk refused by the same check when the walk records
+  its select step, so the expectation holds, with the docstring's reason updated) and
+  `...::test_a_stream_with_the_hash_of_an_equal_captured_output_is_accepted` (its hash equals
+  a held step, so the walk stops at once: unchanged).
+
+### 9.4 A job saved under the old behaviour
+
+A saved job whose slot came from a pre-built stream holds a slot with
+`source_config.source_type == "node"` named `<label>:<hash>` (`prebuilt_stream.py`). That
+form is not special: every slot of a saved `Pipeline` blueprint is saved as `"node"`, and the
+loader keeps reading it. So such a file loads as it does today: an unbound slot of that name
+and schema, its downstream nodes' stored results readable, the slot readable after
+`job.bind(sources=...)`. Nothing to migrate: nobody holds such a file (no users before the
+workshop; v1 opens until 0.4.0), and P1 does not change the loader.
+
+### 9.5 Documentation on cutting a pipeline
+
+Proposed wording for `docs/concepts/pipeline-job.md` (a new section after the recording
+stages), with a sample that builds the steps first and records them by using them in the
+block and by `register`:
+
+> **Streams built before the job.** A stream you built while exploring can be used in a
+> `with` block, or given to `job.register(...)`: it comes into the job with its pod and every
+> step above it, down to its sources, exactly as if you had written those steps inside the
+> block. Nothing becomes a source unless you make it one.
+>
+> **Cutting a pipeline into parts.** To start a new pipeline from what another job stored,
+> rather than from its steps, make that cut explicit: `job.nodes["bmi"].as_source()` is a
+> source over the node's stored results, and a pipeline built on it begins there. A stream
+> that is not a node (an exploration stream) becomes a source only when you build one from
+> it, for example an `ArrowTableSource` over its table with a `source_id` you choose.
+
+`docs/concepts/sources.md` ("Reading a job's results") gets one sentence linking to it, and
+stage 2 of the job page ("Sources may be created inside or outside the block") gains "and so
+may any other step".
+
+### 9.6 Pieces, risk and estimates
 
 | Piece | Content | Estimate |
 |---|---|---|
-| P1 (smallest useful version) | `register(*streams, **named)` on `AbstractPipelineBase`; plan, check, record, compile; the refusals of sections 3, 5 and 8; the property test over the operator and function-pod builders, sync and async, saved and loaded; the "must not happen" tests; one docs section in the job concepts page with a several-stream sample; changelog fragment | 1.5 to 2 days |
-| P2 | a `with` block takes in a pre-built stream's upstreams through the same walk (F07 goes away), if D4 is yes; the 1.3 refused-join residue fixed by the same all-or-nothing recording | 0.5 to 1 day |
-| P3 | `PipelineJob.from_streams` wrapper (D3); a tutorial page on the exploration-to-job step | 0.5 day |
+| P1 | `register(*streams, **named)` on `AbstractPipelineBase`; the walk in `_record_invocation` and `register` (rule 2.1); the refusal at recording of producer-less non-sources; the restore of a refused block (2.2); `from_stream` case 3 removed (9.2); the tests of 9.3 changed; the property test (section 6) for `register`, for a `with` block over pre-built streams and for absorbed job nodes, sync and async, saved and loaded; the "must not happen" tests; docs (9.5); changelog fragment (`### Changed`: a stream used in a block is no longer a source slot) | 2.5 to 3 days |
+| P2 | `PipelineJob.from_streams` wrapper (D3); a tutorial page on the exploration-to-job step | 0.5 day |
 
-P1 alone answers the developer's request: explore freely, then one `register` call gives the
-full pipeline, saved, stored and loadable, identical to the hand-written one.
+What D4 adds to the first version, in work: the walk's call from `_record_invocation`, the
+block restore, the removal of case 3 and the changed tests (about one day over `register`
+alone). In risk:
+
+- **Code that used a pre-built stream in a block now gets more nodes.** The steps that were
+  hidden inside a slot become nodes: they are stored on `run()` (new tables), named (and may
+  renumber an existing node's suffix, ITL-1389), and their hashes upstream now equal the
+  hand-written pipeline's. Results do not change; that is the point.
+- **A pre-built side-effect stream** used as an input: today a slot bound to a standalone
+  stream that delivers on every read; after, a side-effect job node that delivers when the job
+  runs, under the job's invocation log. A fix, but a change in when effects happen.
+- **Refusals move**: a pre-built stream over a join, refused today at compile with the
+  ITL-1127 message, is now accepted (walked); a raw stream or a loaded function node is
+  refused at recording, with a message that names it.
+- **Restrictions become visible**: a caching operator over a restricted source that was hidden
+  inside a slot is now a node, so `refuse_restricted_operator_cache` refuses it at run.
+- **No hash, golden value or stored layout changes** for pipelines written inside the block;
+  the probe shows which tests exercise the other case.
 
 ## 10. Test plan (CLAUDE.md conventions)
 
@@ -383,28 +619,38 @@ full pipeline, saved, stored and loadable, identical to the hand-written one.
 - Golden hashes: none move; no golden case is added (the property is a comparison, not a new
   hash).
 
-## 11. Decisions for the developer
+## 11. Decisions
 
-1. **D1** The call is `job.register(*streams, **named_streams)`, returning `None`, usable
+Decided by the developer (2026-11-22): D4 (in P1), D7 (revised), rule 2.1, and that
+absorbed steps share storage only under one database and job name (5.1). Built as
+recommended, NOT individually confirmed: D1, D2, D3, D5, D6, D8, D9, D13, D14. D11 and D12
+are ITL-1389.
+
+1. **D1** (built as recommended, not individually confirmed) The call is `job.register(*streams, **named_streams)`, returning `None`, usable
    outside and inside a `with` block, mixing freely with reopening. (Recommended.)
-2. **D2** `register` lives on `AbstractPipelineBase`, so `Pipeline` has it too. (Recommended.)
-3. **D3** No `PipelineJob.from_streams` in the first version; a wrapper later if wanted.
+2. **D2** (built as recommended, not individually confirmed) `register` lives on `AbstractPipelineBase`, so `Pipeline` has it too. (Recommended.)
+3. **D3** (built as recommended, not individually confirmed) No `PipelineJob.from_streams` in the first version; a wrapper later if wanted.
    (Recommended.)
-4. **D4** Later piece P2: a `with` block over a pre-built stream takes in its upstreams too,
-   replacing the `<label>:<hash>` leaf of F07. (Recommended yes, after P1.)
-5. **D5** Unlabelled steps are accepted with computed labels and today's content-hash suffixes,
+4. **D4** DECIDED (developer, 2026-11-22), in P1: one rule for `register` and a `with`
+   block (2.1); a stream becomes a source only by the user's explicit act.
+5. **D5** (built as recommended, not individually confirmed) Unlabelled steps are accepted with computed labels and today's content-hash suffixes,
    because the property requires the by-hand names. (Recommended.)
-6. **D6** Keyword names are exact: refused on collision, never suffixed, never for a root
+6. **D6** (built as recommended, not individually confirmed) Keyword names are exact: refused on collision, never suffixed, never for a root
    source; one step under two different assigned labels is refused. (Recommended.)
-7. **D7** A node of another job or of a loaded job is refused, with `as_source()` or reopening
-   as remedies, rather than walked through. (Recommended for the first version.)
-8. **D8** Side-effect pods are registered like any step (deliveries happen on `run()`), rather
+7. **D7** REVISED (developer, 2026-11-22): a node of another job is walked with every
+   upstream step (5.1); a function node of a loaded job is refused by name until ITL-1388
+   decides whether loading attaches importable functions (5.2). (Recommended.)
+8. **D8** (built as recommended, not individually confirmed) Side-effect pods are registered like any step (deliveries happen on `run()`), rather
    than refused. (Recommended; refusing is the cautious alternative.)
-9. **D9** Registering a bare root source alone is refused. (Recommended.)
+9. **D9** (built as recommended, not individually confirmed) Registering a bare root source alone is refused. (Recommended.)
 10. **D10** P1 is the smallest useful version and the workshop target if time allows; the
     workshop does not wait for it.
-11. **D11** The suffix renumbering when a job grows (1.2) is inherited and not fixed here: log
-    it as a design issue? (Pre-existing; ask before logging, per CLAUDE.md.)
-12. **D12** The `with` block keeping the LAST label recorded for one step (1.4) depends on
-    recording order: log it as a design issue and a Linear issue? (Pre-existing; `register`
-    refuses the case itself.)
+11. **D11** The suffix renumbering when a job grows (1.2): filed as ITL-1389, not fixed here.
+12. **D12** The `with` block keeping the LAST label recorded for one step (1.4): filed as
+    ITL-1389; `register` refuses the case itself.
+13. **D13** `from_stream` keeps case 3 only with an explicit `name` (an explicit cut); its
+    implicit `<label>:<hash>` name is removed (9.2). No `as_source()` is added to plain
+    streams in P1 (an exploration stream is cut by building a source from it, 9.5).
+    (Recommended.)
+14. **D14** A refused `with` block (its body or its compile) restores the recording state of
+    its entry (2.2). (Recommended.)
