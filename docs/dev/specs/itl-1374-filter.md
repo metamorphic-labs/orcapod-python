@@ -463,7 +463,10 @@ needs a new data context version.
   `Filter` and must not trigger the warning: the source it reads is not restricted by the
   user, and the `Filter` still evaluates its whole condition.
 - **`filter` directly over a source versus `where`**: the same rows (except NaN and signed
-  zero on float columns, 2.4), different identities: `where` leaves the source's identity
+  zero on float columns, 2.4, and on a source with a `limit`: the limit counts the rows its
+  `where` matches, while a `filter` sees only the first rows the source reads, so with rows
+  `x = [1, 2]` and `limit=1`, `where(x=2)` reads `2` and `filter(x=2)` keeps none), different
+  identities: `where` leaves the source's identity
   unchanged and adds no node; `filter` adds a node. A pipeline that started from
   `source.where(session="s1")` and moves to `source.filter(session="s1")` gets new hashes for
   every node downstream. That is the intended difference.

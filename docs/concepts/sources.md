@@ -443,8 +443,9 @@ kept = events.filter(unit_id=106, session_index=2)
 late = events.filter(col("spike_time_us") >= 1_000_000, col("unit_id").is_in([106, 107]))
 ```
 
-A filter directly over a source reads the whole table and then filters it; `where` reads only
-the matching rows. On a large table, keep `where` on the source for speed and put the same
+A filter directly over a source reads every row the source reads (the whole table, or what
+the source's own `where` and `limit` select) and then filters them; its condition is never
+pushed into the source. `where` reads only the matching rows. On a large table, keep `where` on the source for speed and put the same
 `filter` in the pipeline for its identity: the rows are the same, and the restriction rules
 above apply to the source. This holds for equalities on integer, string, bytes, bool, date and
 timestamp columns, on a source without a `limit`. With a `limit` it does not: the source
