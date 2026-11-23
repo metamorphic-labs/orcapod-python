@@ -1156,7 +1156,6 @@ November 19, 2026). Each name maps to the issue that decides its identity or out
 
 | Operator | What is still open |
 |---|---|
-| `Filter` | new: the canonical form of its condition, first used at the workshop; its spelling and literal rule await the developer's decision (ITL-1374) |
 | `GroupBy`, `Batch` | their output for a data-tag and its data column (ITL-1017) |
 | `MergeJoin` | its rules for data-tags (ITL-1018); it became ordered in this release |
 | `MapTags` | its rename rules for data-tags (ITL-1018) |
@@ -1164,7 +1163,7 @@ November 19, 2026). Each name maps to the issue that decides its identity or out
 | `Pick`, `Index` | the policy for a miss, which changes the output (ITL-439) |
 | `PolarsFilter` | whether the order of its predicates belongs to its identity (ITL-1247) |
 | `TagBy`, `AddTags` | days old, their identities just changed: the review of the tag operators (ITL-1290) |
-| `Filter` | new: a row filter over a condition, provisional until its first use has shown what the canonical form of a condition must hold (ITL-1374) |
+| `Filter` | new: a row filter over a condition, provisional until its first use has shown what the canonical form of a condition must hold; its spelling and literal rule await the developer's decision (ITL-1374) |
 | `Rejoin` | new: puts the branches of one stream back together by matching system tags (ITL-1336); its matching rule changed in this release (ITL-1355) |
 
 Every other operator is frozen with data context v1: `Join`, `SemiJoin`, `MapData`, the
