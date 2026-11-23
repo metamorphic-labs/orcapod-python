@@ -145,8 +145,8 @@ def test_index_reads_a_list_valued_data_tag_as_a_data_column(
     first = [data[f"first_{column}"] for _, data in indexed.iter_data()]
     assert first == {"t1": ["b", "b"], "t3": [1, 2], "d1": [10, 40]}[column]
     # The data-tag itself is unchanged: still a tag and a data column, with its lists;
-    # Index keeps its input's tag order as its input presents it (that Batch presents
-    # the source's tag order is ITL-1249, below), and nothing else depends on the
+    # Index keeps its input's tag order as its input presents it (Batch presents
+    # the source's tag order, below), and nothing else depends on the
     # arrangement.
     assert presentation(indexed)[0] == presentation(batched)[0]
     control = Index(column, 0, out=f"first_{column}")(
@@ -164,11 +164,7 @@ def test_index_reads_a_list_valued_data_tag_as_a_data_column(
     ) == rows_fingerprint(list(indexed.iter_data()))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="ITL-1249: an operator presents its output tags in the input table's "
-    + "physical column order, not in the input stream's tag order",
-)
+# Resolved by ITL-1365: a stream's tag schema follows its tag order.
 @pytest.mark.parametrize("role", [DATA_TAGS, MIXED])
 def test_batch_presents_its_input_streams_tag_order(role: str) -> None:
     """The source's tags are (t3, t2, t1); its table holds them as t1, t2, t3."""

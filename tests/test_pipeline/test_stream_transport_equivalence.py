@@ -529,11 +529,6 @@ def test_describing_a_poller_that_has_not_polled_reads_nothing() -> None:
     assert not poller.arrow_types_declared
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="ITL-1365: a tag schema in layout order, keys in declared order",
-)
 def test_an_operator_stream_declares_its_tags_in_its_rows_order() -> None:
     """A plain operator stream's ``arrow_schema()`` lists its tags as its rows do.
 

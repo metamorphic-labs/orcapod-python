@@ -2,12 +2,12 @@
 
 A source slot declared from a source whose ``x`` is ``int | None``, bound to the same
 table with ``x: int`` (a narrower source, given as the declared schema), feeding an
-operator. On ``main`` the run raises ``ValueError`` ("Duplicate column name") where the
-source's rows are rebuilt for its successor, when exactly one of the two tags is a
-data-tag and the tags are declared ``j, k`` (ITL-1366, a ``main`` bug fixed there
-separately). A narrower bind hands on its rows as ``main`` gives them (``RowsOnRead``),
-built where the successor reads them: the branch raises the same error at the same
-point, on the sync and the async path, and completes every other arrangement.
+operator. ``main`` before 4d192bfc raised ``ValueError`` ("Duplicate column name") where
+the source's rows were rebuilt for its successor, when exactly one of the two tags was a
+data-tag and the tags were declared ``j, k`` (ITL-1366); since a tag schema follows the
+tag order (ITL-1365, #486), ``main`` completes every arrangement. A narrower bind hands on
+its rows as ``main`` gives them (``RowsOnRead``): the branch completes every arrangement
+with the bound table's rows, on the sync and the async path, as ``main`` 4d192bfc does.
 """
 
 from __future__ import annotations
@@ -73,15 +73,10 @@ def _rows(job: PipelineJob) -> list[dict[str, Any]]:
 def test_the_run_is_as_on_main(
     order: tuple[str, str], roles: str, asynchronous: bool
 ) -> None:
-    """Raises where ``main`` raises (ITL-1366), else gives the bound table's rows."""
+    """Gives the bound table's rows in every arrangement, as ``main`` 4d192bfc does."""
     job = _bound_job(order, ROLES[roles])
     kwargs: dict[str, Any] = (
         {"orchestrator": AsyncPipelineOrchestrator()} if asynchronous else {}
     )
-    raises_on_main = order == ("j", "k") and roles in ("k_data_tag", "j_data_tag")
-    if raises_on_main:
-        with pytest.raises(ValueError, match="Duplicate column name"):
-            job.run(**kwargs)
-    else:
-        job.run(**kwargs)
-        assert _rows(job) == ROWS
+    job.run(**kwargs)
+    assert _rows(job) == ROWS

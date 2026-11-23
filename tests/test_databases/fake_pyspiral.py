@@ -560,7 +560,8 @@ class FakeTable:
             ValueError: If a key column is missing, a column name is one SpiralDB
                 reserves (a ``.`` anywhere, or a ``__`` prefix on a value column), a
                 struct value is null without ``push_down_nulls``, or the column set
-                differs from the stored table.
+                differs from the stored table (live SpiralDB adds a new column: the
+                fake does not model it).
         """
         b = self._store.behaviour
         keys = self.key_schema
@@ -607,6 +608,13 @@ class FakeTable:
             fields.append(sf)
             arrays.append(_cast_storage(col, sf.type))
         incoming = pa.Table.from_arrays(arrays, schema=pa.schema(fields))
+        # SpiralDB matches a write's columns by name and stores them in its own
+        # order, whatever the order written: the key columns in key-schema order,
+        # then the value columns sorted by name, by code point (observed live,
+        # ITL-1367). Struct children are sorted live too; the fake keeps them as
+        # written (struct field order: ITL-1368).
+        values = sorted(n for n in incoming.column_names if n not in keys.names)
+        incoming = incoming.select([*keys.names, *values])
         existing = self._store.read(self._project_id, self._identifier)
         if existing is not None:
             if existing.schema.names != incoming.schema.names:

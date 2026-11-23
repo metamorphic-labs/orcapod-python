@@ -460,3 +460,84 @@ class TestReservedNamesRefusedLive:
         finally:
             if table in connector.get_table_names():
                 connector.delete_table(table)
+
+
+def _ordered_rows(order: list[str], ns: list[int]) -> pa.Table:
+    """Rows ``ns`` with the columns in ``order``; ``a`` and ``c`` are both ``int64``,
+    so a positional match would swap them."""
+    columns = {
+        "__record_id": pa.array([f"r{n}".encode() for n in ns], pa.large_binary()),
+        "a": pa.array(ns, pa.int64()),
+        "c": pa.array([100 + n for n in ns], pa.int64()),
+        "b": pa.array([f"b{n}" for n in ns], pa.large_string()),
+    }
+    return pa.table({name: columns[name] for name in order})
+
+
+def _by_name(table: pa.Table) -> list[dict[str, object]]:
+    return sorted(
+        table.select(["__record_id", "a", "c", "b"]).to_pylist(), key=lambda r: r["a"]
+    )
+
+
+class TestColumnOrderLive:
+    """SpiralDB matches a write's columns by name and keeps an order of its own: the
+    key columns, then the value columns sorted by name, whatever the order written
+    (ITL-1367; the fake does the same)."""
+
+    def test_a_raw_write_in_another_order_is_matched_by_name(self, connector):
+        table = _unique_table("itl1367_raw")
+        try:
+            first = ["__record_id", "a", "c", "b"]
+            connector.create_table_if_not_exists(
+                table,
+                [
+                    ColumnInfo(n, _ordered_rows(first, [1]).schema.field(n).type)
+                    for n in first
+                ],
+                pk_column="__record_id",
+            )
+            connector.upsert_records(table, _ordered_rows(first, [1, 2]), "__record_id")
+            connector.upsert_records(
+                table,
+                _ordered_rows(["b", "c", "__record_id", "a"], [3, 4]),
+                "__record_id",
+            )
+            read = pa.Table.from_batches(
+                list(connector.iter_batches(f'SELECT * FROM "{table}"'))
+            )
+            assert read.column_names == ["__record_id", "a", "b", "c"]
+            assert _by_name(read) == _by_name(_ordered_rows(first, [1, 2, 3, 4]))
+        finally:
+            if table in connector.get_table_names():
+                connector.delete_table(table)
+
+    @pytest.mark.parametrize("when", ["after a flush", "same pending batch"])
+    def test_the_database_matches_an_append_in_another_order_by_name(
+        self, connector, when
+    ):
+        path = (_unique_table("itl1367_db"),)
+        db = ConnectorArrowDatabase(connector)
+        try:
+            first = ["__record_id", "a", "c", "b"]
+            db.add_records(
+                path, _ordered_rows(first, [1, 2]), flush=when == "after a flush"
+            )
+            db.add_records(
+                path,
+                _ordered_rows(["b", "c", "__record_id", "a"], [3, 4]),
+                record_id_column="__record_id",
+            )
+            db.add_records(
+                path,
+                _ordered_rows(["c", "__record_id", "b", "a"], [5]),
+                record_id_column="__record_id",
+            )
+            db.flush()
+            read = db.get_all_records(path, record_id_column="__record_id")
+            assert read is not None
+            assert read.column_names == ["__record_id", "a", "b", "c"]
+            assert _by_name(read) == _by_name(_ordered_rows(first, [1, 2, 3, 4, 5]))
+        finally:
+            if path[0] in connector.get_table_names():
+                connector.delete_table(path[0])

@@ -160,6 +160,14 @@ _RECORDED = pa.schema(
 _TABLE = "p/default/t"
 
 
+def _spiral_order(schema: pa.Schema, keys: list[str]) -> pa.Schema:
+    """``schema`` in the order SpiralDB stores and reads a table's columns, whatever
+    the order written: the key columns in key order, then the value columns sorted
+    by name (observed live, ITL-1367)."""
+    values = sorted(f.name for f in schema if f.name not in keys)
+    return pa.schema([schema.field(n) for n in [*keys, *values]])
+
+
 def _rows(schema: pa.Schema = _RECORDED, **override) -> pa.Table:
     """Return three rows of ``schema`` (``override`` replaces whole columns)."""
     columns = {
@@ -209,12 +217,14 @@ class TestNullabilityRecord:
         """The first write records nullability; get_column_info and iter_batches restore it."""
         connector = SpiralDBConnector("p")
         connector.upsert_records("t", _rows(), id_column="k")
+        # In SpiralDB's order: the key column, then the value columns by name
+        # (ITL-1367).
         expected = pa.schema(
             [
                 pa.field(
                     f.name, arrow_utils.normalize_to_large_types(f.type), f.nullable
                 )
-                for f in _RECORDED
+                for f in _spiral_order(_RECORDED, ["k"])
             ]
         )
         assert self._batches_schema(connector) == expected
@@ -466,7 +476,8 @@ class TestResultStoreOnSpiral:
         records = db.get_all_records(_PATH)
         assert records is not None
         assert records.num_rows == 2
-        assert records.schema == _RESULT
+        # In SpiralDB's order: the value columns by name (ITL-1367).
+        assert records.schema == _spiral_order(_RESULT, [])
 
     def test_result_table_written_before_the_record_keeps_todays_behaviour(
         self, db, monkeypatch

@@ -706,7 +706,7 @@ def test_every_input_is_closed_when_one_close_fails() -> None:
     asyncio.run(go())
 
 
-# --- A description whose column order differs from its result's (ITL-1365) -----------------
+# --- A prediction that once refused a valid result (ITL-1365, fixed on main) --------------------
 
 
 def test_drop_tag_columns_over_three_tags_sends_its_result() -> None:

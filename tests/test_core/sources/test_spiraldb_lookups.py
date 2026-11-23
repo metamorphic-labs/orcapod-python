@@ -203,7 +203,12 @@ def test_the_connector_getters_answer_as_the_handle_does(
         assert connector.get_arrow_schema("t").equals(
             table.arrow_schema(), check_metadata=True
         )
-        assert table.arrow_schema().names == _ARRANGED["layout"]
+        # SpiralDB stores a table's columns in its own order, whatever the order written:
+        # the key columns in key order, then the value columns by name (ITL-1367; the
+        # fake models it since main 4d192bfc).
+        keys = _ARRANGED["keys"]
+        values = sorted(name for name in _ARRANGED["layout"] if name not in keys)
+        assert table.arrow_schema().names == [*keys, *values]
         assert connector.get_table_version("t") == table.version()
 
 
