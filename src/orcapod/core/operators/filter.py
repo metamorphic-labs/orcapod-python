@@ -13,18 +13,18 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators.base import UnaryOperator
-from orcapod.core.operators.filter_mask import condition_mask, filter_table
+from orcapod.core.operators.filter_mask import (
+    check_filter_condition,
+    condition_mask,
+    filter_table,
+)
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash, Schema
-from orcapod.types.condition import (
-    Condition,
-    check_condition,
-    check_condition_columns,
-)
+from orcapod.types.condition import Condition, check_condition_columns
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -189,11 +189,9 @@ class Filter(UnaryOperator):
             InputValidationError: If a field is missing, or a value or a column's
                 type does not fit its term.
         """
-        user_schema = pa.schema([schema.field(name) for name in names])
-        try:
-            check_condition(self._condition, user_schema)
-        except (TypeError, ValueError) as error:
-            raise InputValidationError(f"Filter: {error}") from error
+        check_filter_condition(
+            self._condition, pa.schema([schema.field(name) for name in names])
+        )
 
     def unary_static_process(self, stream: StreamProtocol) -> StreamProtocol:
         """Return the stream's rows that satisfy the condition, in input order.
@@ -215,7 +213,7 @@ class Filter(UnaryOperator):
         tag_columns, data_columns = stream.keys()
         self._check_arrow(table.schema, _user_columns(tag_columns, data_columns))
         return ArrowTableStream(
-            filter_table(table, self._condition.root),
+            filter_table(table, self._condition),
             tag_columns=tag_columns,
             data_tags=stream_data_tags(stream),
             data_context=stream.data_context,  # pyright: ignore[reportAttributeAccessIssue]  # StreamProtocol omits data_context, which every concrete stream provides (ITL-844)
@@ -243,13 +241,15 @@ class Filter(UnaryOperator):
         """
         try:
             output = WithoutMetaWriter(output)
-            checked: set[pa.Schema] = set()
+            # Schemas already checked; a list, since a schema holding a logical type
+            # is not hashable.
+            checked: list[pa.Schema] = []
             async for tag, data in inputs[0]:
                 row = self._row_table(tag, data)
-                if row.schema not in checked:
+                if not any(row.schema.equals(seen) for seen in checked):
                     self._check_arrow(row.schema, row.column_names)
-                    checked.add(row.schema)
-                mask = condition_mask(row, self._condition.root)
+                    checked.append(row.schema)
+                mask = condition_mask(row, self._condition)
                 if mask.to_pylist() == [True]:
                     await output.send((tag, data))
         finally:
