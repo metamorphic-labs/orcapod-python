@@ -444,7 +444,7 @@ class ConnectorArrowDatabase:
         # put in the held order, so the connector always receives the stored order
         # (ITL-1367).
         records = in_held_column_order(records, self._held_column_order(record_path))
-        self._refuse_changed_columns(record_path, records.schema)
+        self._refuse_changed_columns(record_path, records)
 
         records = self._deduplicate_within_table(records)
         input_ids = set(cast(list[bytes], records[self.RECORD_ID_COLUMN].to_pylist()))
@@ -521,7 +521,7 @@ class ConnectorArrowDatabase:
         ]
 
     def _refuse_changed_columns(
-        self, record_path: tuple[str, ...], schema: pa.Schema
+        self, record_path: tuple[str, ...], records: pa.Table
     ) -> None:
         """Refuse rows whose columns would not read back as written (ITL-1334).
 
@@ -551,8 +551,8 @@ class ConnectorArrowDatabase:
         if stored is not None:
             held.append(stored)
         # A column of another logical type would read back as the held one (ITL-1371).
-        changed = first_logical_identity_change(held, schema) or first_changed_column(
-            held, schema
+        changed = first_logical_identity_change(held, records) or first_changed_column(
+            held, records.schema
         )
         if changed is not None:
             raise InputValidationError(

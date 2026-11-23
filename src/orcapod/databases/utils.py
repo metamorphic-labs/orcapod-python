@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import dataclasses
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -18,7 +17,8 @@ if TYPE_CHECKING:
 else:
     pa = LazyModule("pyarrow")
 
-T = TypeVar("T")
+H = TypeVar("H")
+G = TypeVar("G")
 
 
 def coerce_record_id(record_id: str | bytes) -> bytes:
@@ -235,19 +235,11 @@ class IdentityNode:
             directly as another's storage, ``.name`` for the other children of a
             nested type). Labels may repeat: Arrow allows two struct children or
             union members of one name.
-        encoded: Whether the place is dictionary-encoded as given (its values stand
-            where it stands).
-        drops_dictionary_identifier: Whether the held place is in storage that
-            writes a dictionary of extension values as plain values, losing the
-            identifier (a stored Delta place): there "no identifier" is not known
-            against a dictionary-encoded place.
     """
 
     known: bool
     identifier: RawIdentifier | None
     claims: bool = True
-    encoded: bool = False
-    drops_dictionary_identifier: bool = False
     children: "tuple[tuple[str, IdentityNode], ...]" = ()
 
 
@@ -347,8 +339,7 @@ def identity_node(arrow_field: "pa.Field[Any]") -> IdentityNode:
     """
     arrow_type = arrow_field.type
     if pa.types.is_dictionary(arrow_type):
-        values = identity_node(arrow_field.with_type(arrow_type.value_type))
-        return dataclasses.replace(values, encoded=True)
+        return identity_node(arrow_field.with_type(arrow_type.value_type))
     identifier = _annotation(arrow_field.metadata)
     if pa.types.is_null(arrow_type):
         # A bare null claims nothing; an annotated one claims its annotation.
@@ -396,23 +387,23 @@ def _children_of(arrow_type: Any) -> "tuple[tuple[str, IdentityNode], ...]":
     return tuple((f"{prefix}{child.name}", identity_node(child)) for child in children)
 
 
-def _name_text(name: bytes) -> str:
-    try:
-        return name.decode()
-    except UnicodeDecodeError:
-        return f"0x{name.hex()}"  # not text: shown as its bytes
-
-
 def _identifier_text(identifier: RawIdentifier | None) -> str:
+    """An identifier as the error shows it: ``'<name>;<metadata hex>'`` (a quoted
+    text) when the name is text; a name that is not UTF-8 as a bytes literal,
+    ``b'\\xff';<metadata hex>``, which no text can be shown as, so two names never
+    read alike."""
     if identifier is None:
         return "no logical type"
     name, metadata = identifier
-    return repr(f"{_name_text(name)};{metadata.hex()}")
+    try:
+        return repr(f"{name.decode()};{metadata.hex()}")
+    except UnicodeDecodeError:
+        return f"{name!r};{metadata.hex()}"
 
 
 def matched_pairs(
-    held: "Sequence[tuple[str, T]]", incoming: "Sequence[tuple[str, T]]"
-) -> "list[tuple[str, T, T]]":
+    held: "Sequence[tuple[str, H]]", incoming: "Sequence[tuple[str, G]]"
+) -> "list[tuple[str, H, G]]":
     """Pair the labelled places of two sides (ITL-1371).
 
     A label that occurs once on each side pairs by label. Where a label repeats on
@@ -428,11 +419,11 @@ def matched_pairs(
     Returns:
         ``(label, held place, given place)`` for every pair, in the given order.
     """
-    by_label: dict[str, list[T]] = {}
+    by_label: dict[str, list[H]] = {}
     for label, place in held:
         by_label.setdefault(label, []).append(place)
     seen: dict[str, int] = {}
-    pairs: list[tuple[str, T, T]] = []
+    pairs: list[tuple[str, H, G]] = []
     for label, place in incoming:
         k = seen.get(label, 0)
         seen[label] = k + 1
@@ -451,10 +442,8 @@ def logical_identity_change(
     A table holds one logical type per column and per nested field, so at every place
     both sides have, the appended identifier must be the held one; no logical type is
     an identifier too. The rule refuses only where it knows: wherever the held
-    identifier is not reliably known, where a dictionary-encoded place is given over
-    a stored Delta place with no identifier (Delta stores a dictionary of extension
-    values plain, losing it), or where a side is a bare untyped null, it abstains at that
-    place, and a place only one side has (struct evolution, another kind of
+    identifier is not reliably known (``IdentityNode.known``), or a side is a bare
+    untyped null, it abstains at that place, and a place only one side has (struct evolution, another kind of
     type) is left to the database's other append checks. It compares raw bytes,
     never Arrow type equality: pyarrow's equality of two instances of one Python
     extension class ignores their serialized metadata. Places pair as
@@ -470,20 +459,7 @@ def logical_identity_change(
     """
     if not (held.claims and incoming.claims):
         return None
-    # A dictionary-encoded place over a stored place with no identifier: Delta stores
-    # a dictionary of extension values as plain values, losing the identifier
-    # (ITL-1372), so "none" there is not known; the identifier comparison abstains.
-    unknown_loss = (
-        incoming.encoded
-        and held.identifier is None
-        and held.drops_dictionary_identifier
-    )
-    if (
-        held.known
-        and incoming.known
-        and not unknown_loss
-        and held.identifier != incoming.identifier
-    ):
+    if held.known and incoming.known and held.identifier != incoming.identifier:
         return (
             f"{path} is of logical type {_identifier_text(incoming.identifier)}, the "
             f"stored column's {_identifier_text(held.identifier)}"
@@ -495,33 +471,90 @@ def logical_identity_change(
     return None
 
 
-def first_logical_identity_change(
-    held: "Iterable[pa.Schema]", schema: "pa.Schema"
-) -> tuple[str, str] | None:
-    """The first column of ``schema`` that carries another logical type identifier
-    than the column the database holds in its place, as given (``identity_node``).
+def given_identities(
+    given: "pa.Table | pa.Schema",
+) -> "list[tuple[str, list[IdentityNode]]]":
+    """The identifiers the rows to append carry, column by column (ITL-1371).
 
-    For a database that holds what it was given (in-memory, a pending batch, a
-    connector's stored schema). Columns pair as ``matched_pairs`` says: by name, or
-    by occurrence where a name repeats; the order of columns of distinct names plays
-    no part.
+    A column's field, and, for a table, each of its chunks: pyarrow lets the chunks of
+    one column hold instances of one Python extension class with other serialized
+    metadata (it compares them by class), so each chunk's own exported identifier is
+    read too, and every one of them must be the held one.
 
     Args:
-        held: The schemas the database holds for the table (stored, pending).
-        schema: The schema of the rows to append, as given.
+        given: The rows to append, or only their schema.
+
+    Returns:
+        ``(column name, identity nodes)`` in column order; the field's node first.
+    """
+    if isinstance(given, pa.Schema):
+        return [(f.name, [identity_node(f)]) for f in given]
+    out: list[tuple[str, list[IdentityNode]]] = []
+    for field, column in zip(given.schema, given.columns):
+        nodes = [identity_node(field)]
+        for chunk in column.chunks:
+            if _has_extension_part(chunk.type):
+                node = identity_node(field.with_type(chunk.type))
+                if node not in nodes:
+                    nodes.append(node)
+        out.append((field.name, nodes))
+    return out
+
+
+def _has_extension_part(arrow_type: Any) -> bool:
+    if isinstance(arrow_type, pa.BaseExtensionType):
+        return True
+    if pa.types.is_dictionary(arrow_type):
+        return _has_extension_part(arrow_type.value_type)
+    return any(
+        _has_extension_part(arrow_type.field(i).type)
+        for i in range(arrow_type.num_fields)
+    )
+
+
+def identity_refusal(
+    held: "Sequence[tuple[str, IdentityNode]]", given: "pa.Table | pa.Schema"
+) -> tuple[str, str] | None:
+    """The first column of ``given`` known to carry another logical type identifier
+    than the one held in its place (``logical_identity_change``).
+
+    Columns pair as ``matched_pairs`` says: by name, or by occurrence where a name
+    repeats; the order of columns of distinct names plays no part.
+
+    Args:
+        held: The held columns, in order, with what is known of their identifiers.
+        given: The rows to append (``given_identities``), or their schema.
 
     Returns:
         The column's name and the reason, or ``None``.
     """
-    incoming = [(f.name, f) for f in schema]
-    for given in held:
-        pairs = matched_pairs([(f.name, f) for f in given], incoming)
-        for name, held_field, given_field in pairs:
-            reason = logical_identity_change(
-                identity_node(held_field), identity_node(given_field), name
-            )
+    for name, held_node, nodes in matched_pairs(held, given_identities(given)):
+        for node in nodes:
+            reason = logical_identity_change(held_node, node, name)
             if reason is not None:
                 return name, reason
+    return None
+
+
+def first_logical_identity_change(
+    held: "Iterable[pa.Schema]", given: "pa.Table | pa.Schema"
+) -> tuple[str, str] | None:
+    """The first column of ``given`` that carries another logical type identifier
+    than the column the database holds in its place (``identity_refusal``), for a
+    database that holds what it was given (in-memory, a pending batch, a connector's
+    stored schema): every held identifier is known.
+
+    Args:
+        held: The schemas the database holds for the table (stored, pending).
+        given: The rows to append, or their schema.
+
+    Returns:
+        The column's name and the reason, or ``None``.
+    """
+    for schema in held:
+        found = identity_refusal([(f.name, identity_node(f)) for f in schema], given)
+        if found is not None:
+            return found
     return None
 
 

@@ -281,20 +281,18 @@ class InMemoryArrowDatabase:
             if table is not None
         ]
         # A column of another logical type would read back as the held one
-        # (ITL-1371). An append that writes nothing (every row a duplicate, with
-        # skip_duplicates) is not refused for it, as in Delta.
-        writes_nothing = (
-            skip_duplicates
-            and self._filter_existing_records(
-                record_key, self._deduplicate_within_table(records)
-            ).num_rows
-            == 0
-        )
-        changed = (
-            None
-            if writes_nothing
-            else first_logical_identity_change(held, records.schema)
-        ) or first_changed_column(held, records.schema)
+        # (ITL-1371); refused before the other checks, so the error names the
+        # identifiers. An append that writes nothing (with skip_duplicates, every
+        # record id already held) is not refused for it, as in Delta; the ordinary
+        # check below keeps main's place and priority.
+        identity = first_logical_identity_change(held, records)
+        if identity is not None and skip_duplicates:
+            given_ids = set(records[self.RECORD_ID_COLUMN].to_pylist())
+            held_ids = self._pending_record_ids[record_key]
+            committed = self._committed_id_index(record_key)
+            if all(i in held_ids or i in committed for i in given_ids):
+                identity = None
+        changed = identity or first_changed_column(held, records.schema)
         if changed is not None:
             raise InputValidationError(
                 f"Cannot append to the table at {record_path!r}: column "

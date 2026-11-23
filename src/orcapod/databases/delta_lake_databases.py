@@ -4,7 +4,7 @@ import logging
 import os
 import sys
 from collections import defaultdict
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -39,9 +39,8 @@ from orcapod.databases.utils import (
     appended_field_change,
     coerce_record_id,
     identity_node,
+    identity_refusal,
     in_held_column_order,
-    logical_identity_change,
-    matched_pairs,
     metadata_bytes,
 )
 from orcapod.errors import (
@@ -637,19 +636,26 @@ def _non_null_violation(
     return None
 
 
-def _delta_identity_node(delta_type: Any, metadata: Any) -> IdentityNode:
+def _delta_identity_node(
+    delta_type: Any, metadata: Any, recorded: bool
+) -> IdentityNode:
     """What the Delta log reliably says of a stored column's logical type
     identifiers, at every depth (ITL-1371).
 
     The log keeps the field metadata written with the column and with each struct
-    child, byte for byte, so the identifier there is known. A list item and a map key
-    or item keep no metadata in the log (ITL-1372), and the column's recorded type is
-    read through the Arrow registry, which may give an identifier other than the one
-    stored: there the identifier is not known, and the identity rule abstains.
+    child, byte for byte, so an identifier there is known. "No identifier" is known
+    only when the column's Arrow type is recorded (``ARROW_TYPE_KEY``): a column
+    written from a dictionary of extension values is stored as plain values, losing
+    the identifier, and records no type (ITL-1372), so without a record the absence
+    proves nothing and the identity rule abstains. A list item and a map key or item
+    keep no metadata in the log (ITL-1372), and the column's recorded type is read
+    through the Arrow registry, which may give an identifier other than the one
+    stored: there the identifier is never known.
 
     Args:
         delta_type: A ``deltalake.schema`` type from the log.
         metadata: Its field's metadata, as the log gives it.
+        recorded: Whether the column records its Arrow type.
 
     Returns:
         The ``IdentityNode`` of the stored field.
@@ -659,7 +665,7 @@ def _delta_identity_node(delta_type: Any, metadata: Any) -> IdentityNode:
     children: tuple[tuple[str, IdentityNode], ...] = ()
     if isinstance(delta_type, StructType):
         children = tuple(
-            (f".{f.name}", _delta_identity_node(f.type, f.metadata))
+            (f".{f.name}", _delta_identity_node(f.type, f.metadata, recorded))
             for f in delta_type.fields
         )
     elif isinstance(delta_type, ArrayType):
@@ -669,36 +675,25 @@ def _delta_identity_node(delta_type: Any, metadata: Any) -> IdentityNode:
     as_bytes = metadata_bytes(metadata)
     name = as_bytes.get(_EXTENSION_KEYS[0])
     identifier = None if name is None else (name, as_bytes.get(_EXTENSION_KEYS[1], b""))
-    # Delta stores a dictionary of extension values as plain values, losing the
-    # identifier (ITL-1372): a place with none may be such a loss.
     return IdentityNode(
-        known=True,
+        known=identifier is not None or recorded,
         identifier=identifier,
         children=children,
-        drops_dictionary_identifier=True,
     )
-
-
-def _identity_refusal(
-    held: "Sequence[tuple[str, IdentityNode]]", schema: pa.Schema
-) -> tuple[str, str] | None:
-    """The first column of ``schema`` whose logical type identifier is known to
-    differ from the held one (``logical_identity_change``, ITL-1371); columns pair
-    as ``matched_pairs`` says (by name, or by occurrence where a name repeats)."""
-    given = [(f.name, identity_node(f)) for f in schema]
-    for name, held_node, node in matched_pairs(held, given):
-        change = logical_identity_change(held_node, node, name)
-        if change is not None:
-            return name, change
-    return None
 
 
 def _stored_identities(
     delta_table: deltalake.DeltaTable,
 ) -> list[tuple[str, IdentityNode]]:
-    """Each stored column's ``_delta_identity_node``, from the log; no data is read."""
+    """Each stored column's ``_delta_identity_node``, from the log; no data is read
+    and no type is decoded."""
     return [
-        (f.name, _delta_identity_node(f.type, f.metadata))
+        (
+            f.name,
+            _delta_identity_node(
+                f.type, f.metadata, ARROW_TYPE_KEY in metadata_bytes(f.metadata)
+            ),
+        )
         for f in delta_table.schema().fields
     ]
 
@@ -728,7 +723,7 @@ def _append_refusal(
     Returns:
         ``(column, reason)``, or ``None`` when the rows can be appended.
     """
-    identity = _identity_refusal(_stored_identities(delta_table), rows.schema)
+    identity = identity_refusal(_stored_identities(delta_table), rows)
     if identity is not None:
         return identity
     held = _held_columns(delta_table)
@@ -1807,6 +1802,44 @@ class DeltaTableDatabase:
                 "unchanged and nothing was written."
             )
 
+    def _identity_refusal(
+        self, record_path: tuple[str, ...], rows: pa.Table
+    ) -> str | None:
+        """Why ``rows`` cannot be appended for a logical type identifier known to
+        differ from the held one (``identity_refusal``, ITL-1371), or ``None``.
+
+        Held is the pending batch, as given, and the stored table as its Delta log
+        gives it (``_stored_identities``): no stored type is decoded, so the
+        comparison comes before anything that decodes one (the duplicate scan, the
+        held columns' recorded types) and its error names the identifiers.
+
+        Args:
+            record_path: The table the rows are for.
+            rows: The rows to append, as given.
+
+        Returns:
+            The error message, or ``None``.
+        """
+        held: list[list[tuple[str, IdentityNode]]] = []
+        pending = self._pending_batches.get(self._get_record_key(record_path))
+        if pending is not None:
+            held.append([(f.name, identity_node(f)) for f in pending.schema])
+        try:
+            delta_table = self._get_delta_table(record_path)
+        except OrcapodDatabaseReadError:
+            delta_table = None
+        if delta_table is not None:
+            held.append(_stored_identities(delta_table))
+        for given in held:
+            found = identity_refusal(given, rows)
+            if found is not None:
+                return (
+                    f"Cannot append to the stored table "
+                    f"{self._get_table_uri(record_path)!r}: column {found[0]!r}: "
+                    f"{found[1]}. The stored rows are unchanged and nothing was written."
+                )
+        return None
+
     def _refuse_changed_attributes(
         self, record_path: tuple[str, ...], schema: pa.Schema
     ) -> None:
@@ -1818,10 +1851,8 @@ class DeltaTableDatabase:
         attributes: the rows would then be stored, and read back, with another
         column's attributes. So the field tree of each column (``_column_change``) is
         compared as given, against the pending batch and the stored table, in every
-        mode, as an append without schema handling is. Before it, a logical type
-        identifier known to differ from the held one is refused
-        (``logical_identity_change``, ITL-1371; the stored side as the Delta log
-        gives it, ``_delta_identity_node``).
+        mode, as an append without schema handling is. (A logical type identifier is
+        compared before, by ``_identity_refusal``.)
 
         Args:
             record_path: The table the rows are for.
@@ -1830,27 +1861,11 @@ class DeltaTableDatabase:
         Raises:
             InputValidationError: For the first such column, naming it and the path.
         """
-        identities: list[list[tuple[str, IdentityNode]]] = []
         pending = self._pending_batches.get(self._get_record_key(record_path))
-        if pending is not None:
-            identities.append([(f.name, identity_node(f)) for f in pending.schema])
         try:
             delta_table = self._get_delta_table(record_path)
         except OrcapodDatabaseReadError:
             delta_table = None
-        if delta_table is not None:
-            identities.append(_stored_identities(delta_table))
-        # A known different logical type identifier first (ITL-1371), from the log
-        # alone: before any recorded type is decoded, so the error names it.
-        for given_identities in identities:
-            identity = _identity_refusal(given_identities, schema)
-            if identity is not None:
-                raise InputValidationError(
-                    f"Cannot append to the stored table "
-                    f"{self._get_table_uri(record_path)!r}: column {identity[0]!r}: "
-                    f"{identity[1]}. The stored rows are unchanged and nothing was "
-                    "written."
-                )
         held: list[dict[str, pa.Field[Any]]] = []
         if pending is not None:
             held.append({f.name: f for f in pending.schema})
@@ -1971,15 +1986,24 @@ class DeltaTableDatabase:
         # A column Delta cannot hold is refused before anything is buffered (ITL-1334).
         self.require_storable(records.schema)
         self._refuse_untyped_null_columns(record_path, records.schema)
+        # A logical type identifier known to differ from the held one (ITL-1371),
+        # found from the Delta log before anything decodes a stored type; raised
+        # once the duplicate scan shows the append writes something.
+        identity = self._identity_refusal(record_path, records)
 
         # Step 2: Deduplicate within input table (keep last occurrence)
         deduplicated_table = self._deduplicate_within_table(records)
 
         # Step 3: Handle conflicts based on skip_duplicates setting
         if skip_duplicates:
-            filtered_table = self._filter_existing_records(
-                record_path, deduplicated_table
-            )
+            try:
+                filtered_table = self._filter_existing_records(
+                    record_path, deduplicated_table
+                )
+            except OrcapodDatabaseReadError as error:
+                if identity is not None:
+                    raise InputValidationError(identity) from error
+                raise
             if filtered_table.num_rows == 0:
                 logger.debug("All records were duplicates, nothing to insert")
                 return None
@@ -1987,6 +2011,8 @@ class DeltaTableDatabase:
             # Check for conflicts - insert never allows duplicates when skip_duplicates=False
             # self._check_all_conflicts(record_path, deduplicated_table)
             filtered_table = deduplicated_table
+        if identity is not None:
+            raise InputValidationError(identity)
 
         # Columns match by name within a pending batch: rows with the pending
         # batch's columns in another order, each field equal, are put in its order
