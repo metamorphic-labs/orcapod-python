@@ -5,6 +5,7 @@ import os
 import sys
 from collections import defaultdict
 from collections.abc import Callable, Collection, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -13,6 +14,7 @@ import polars as pl
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from orcapod.databases._pending_commits import PendingCommit, PendingCommits
 from orcapod.databases._row_index import (
     KeyIndex,
     compact_tail,
@@ -1221,6 +1223,8 @@ class DeltaTableDatabase:
 
     # Class constants for internal column names
     ROW_INDEX_COLUMN = "__row_index"
+    stores_records = True
+
     RECORD_ID_COLUMN = "__record_id"
 
     def __init__(
@@ -1291,6 +1295,16 @@ class DeltaTableDatabase:
         self._pending_indexes: dict[str, KeyIndex] = (
             _shared_pending_indexes if _shared_pending_indexes is not None else {}
         )
+        self._pending_commits = (
+            _root._pending_commits
+            if _root is not None
+            else PendingCommits(
+                self.RECORD_ID_COLUMN,
+                self._pending_batches,
+                self._pending_record_ids,
+                on_empty=self._discard_pending_index,
+            )
+        )
         # Record keys whose table was found absent (ITL-1173), so lookups do not try
         # to open it again on every row. Family-wide like the loaded tables, and
         # forgotten on any flush of the family and on a flush of the key: a table
@@ -1300,11 +1314,9 @@ class DeltaTableDatabase:
             _shared_absent_tables if _shared_absent_tables is not None else set()
         )
 
-    def _clear_pending(self):
-        """Clear all pending state."""
-        self._pending_batches = {}
-        self._pending_record_ids = defaultdict(set)
-        # Note: next_row_index continues incrementing
+    def _discard_pending_index(self, key: str) -> None:
+        """Release a discarded batch's cached read index."""
+        self._pending_indexes.pop(key, None)
 
     def _get_record_key(self, record_path: tuple[str, ...]) -> str:
         """Generate cache key for source storage.
@@ -2805,6 +2817,38 @@ class DeltaTableDatabase:
                 f"Failed to flush {len(errors)} batch(es): {failed_keys}"
             ) from errors[0][1]
 
+    def pending_result(
+        self, record_path: tuple[str, ...], record_id: bytes
+    ) -> PendingCommit | None:
+        """Return a commit dependency for a buffered result, or verify it is stored."""
+        key = self._get_record_key(record_path)
+        if record_id in self._pending_record_ids.get(key, ()):
+            return self._pending_commits.attempt(key)
+        if record_id not in self._stored_ids(record_path):
+            raise ValueError("The referenced result is neither stored nor pending.")
+        return None
+
+    def fail_pending_result(self, record_path: tuple[str, ...]) -> None:
+        """Withdraw records depending on this table's current commit attempt."""
+        self._pending_commits.finish(self._get_record_key(record_path), committed=False)
+
+    def guard_record(
+        self,
+        record_path: tuple[str, ...],
+        record_id: bytes,
+        dependency: PendingCommit,
+    ) -> AbstractContextManager[None]:
+        """Prevent this record's publication until its result commits."""
+        return self._pending_commits.guard(
+            self._get_record_key(record_path), record_id, dependency
+        )
+
+    def flush_result_batch(
+        self, record_path: tuple[str, ...], *, publish_records: bool
+    ) -> None:
+        """Commit a durable result table even if no pipeline records are stored."""
+        self.flush_batch(record_path)
+
     def flush_batch(self, record_path: tuple[str, ...]) -> None:
         """
         Flush pending batch for a specific source path.
@@ -2825,15 +2869,10 @@ class DeltaTableDatabase:
         logger.debug("Flushing triggered!!")
         self._absent_tables.discard(record_key)
 
-        if (
-            record_key not in self._pending_batches
-            or not self._pending_batches[record_key]
-        ):
+        ready = self._pending_commits.take_ready(record_key)
+        if ready is None:
             return
-
-        # Get all pending records
-        pending_batch = self._pending_batches.pop(record_key)
-        pending_ids = self._pending_record_ids.pop(record_key, set())
+        pending_batch, pending_ids = ready
 
         # Derive the absolute table URI directly from the key (already includes prefix).
         abs_path_components = tuple(record_key.split("/"))
@@ -2969,16 +3008,19 @@ class DeltaTableDatabase:
                 f"{record_key!r} were not written and are no longer queued: correct "
                 "them and add them again."
             )
+            self._pending_commits.forget(record_key, pending_ids)
+            self._pending_commits.finish(record_key, committed=False)
             logger.error(f"Refused batch for {record_key}: {refused}")
             raise refused from e
-        except Exception as e:
-            logger.error(f"Error flushing batch for {record_key}: {e}")
-            # Put the tables back in the pending queue
-            self._pending_batches[record_key] = pending_batch
-            self._pending_record_ids[record_key] = pending_ids
+        except BaseException as exc:
+            logger.error(f"Error flushing batch for {record_key}: {exc}")
+            self._pending_commits.finish(record_key, committed=False)
+            self._pending_commits.restore(record_key, pending_batch, pending_ids)
             raise
 
         # The rows are committed: nothing below may put them back in the queue.
+        self._pending_commits.forget(record_key, pending_ids)
+        self._pending_commits.finish(record_key, committed=True)
         try:
             committed = (
                 delta_table
@@ -3341,6 +3383,11 @@ class DeltaTableDatabase:
                     continue
             return field.name, held, incoming
         return None
+
+    @property
+    def storage_location(self) -> str:
+        """The URI of this database's storage root."""
+        return self._root_uri
 
     @property
     def base_path(self) -> tuple[str, ...]:

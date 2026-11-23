@@ -21,11 +21,13 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from collections.abc import Collection, Mapping
+from contextlib import AbstractContextManager
 from typing import Any, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from orcapod.databases._pending_commits import PendingCommit, PendingCommits
 from orcapod.databases.utils import (
     coerce_record_id,
     first_changed_column,
@@ -97,6 +99,8 @@ class ConnectorArrowDatabase:
             Defaults to 10, matching ``InMemoryArrowDatabase``.
     """
 
+    stores_records = True
+
     RECORD_ID_COLUMN = "__record_id"
     _ROW_INDEX_COLUMN = "__row_index"
 
@@ -135,6 +139,21 @@ class ConnectorArrowDatabase:
             if _shared_pending_skip_existing is not None
             else {}
         )
+
+        self._pending_commits = (
+            _root._pending_commits
+            if _root is not None
+            else PendingCommits(
+                self.RECORD_ID_COLUMN,
+                self._pending_batches,
+                self._pending_record_ids,
+                on_empty=self._discard_pending_duplicate_policy,
+            )
+        )
+
+    def _discard_pending_duplicate_policy(self, key: str) -> None:
+        """Forget the duplicate policy when an entire queued batch is discarded."""
+        self._pending_skip_existing.pop(key, None)
 
     # ── Path helpers ──────────────────────────────────────────────────────────
 
@@ -635,16 +654,61 @@ class ConnectorArrowDatabase:
 
     # ── Flush ─────────────────────────────────────────────────────────────────
 
+    def pending_result(
+        self, record_path: tuple[str, ...], record_id: bytes
+    ) -> PendingCommit | None:
+        """Return a commit dependency for a buffered result, or verify it is stored."""
+        key = self._get_record_key(record_path)
+        if record_id in self._pending_record_ids.get(key, ()):
+            return self._pending_commits.attempt(key)
+        if self.get_record_by_id(record_path, record_id) is None:
+            raise ValueError("The referenced result is neither stored nor pending.")
+        return None
+
+    def fail_pending_result(self, record_path: tuple[str, ...]) -> None:
+        """Withdraw records depending on this table's current commit attempt."""
+        self._pending_commits.finish(self._get_record_key(record_path), committed=False)
+
+    def guard_record(
+        self,
+        record_path: tuple[str, ...],
+        record_id: bytes,
+        dependency: PendingCommit,
+    ) -> AbstractContextManager[None]:
+        """Prevent this record's publication until its result commits."""
+        return self._pending_commits.guard(
+            self._get_record_key(record_path), record_id, dependency
+        )
+
     def flush(self) -> None:
         """Commit all pending batches to the connector via upsert."""
-        for record_key in list(self._pending_batches.keys()):
-            record_path = tuple(record_key.split("/"))
-            table_name = self._path_to_table_name(record_path)
-            self._require_table_name(table_name)
-            pending = self._pending_batches.pop(record_key)
-            self._pending_record_ids.pop(record_key, None)
-            skip_existing = self._pending_skip_existing.pop(record_key, False)
+        for record_key in list(self._pending_batches):
+            self._flush_by_key(record_key)
 
+    def flush_result_batch(
+        self, record_path: tuple[str, ...], *, publish_records: bool
+    ) -> None:
+        """Commit a durable result table even if no pipeline records are stored."""
+        self.flush_batch(record_path)
+
+    def flush_batch(self, record_path: tuple[str, ...]) -> None:
+        """Commit one table's ready records."""
+        self._flush_by_key(self._get_record_key(record_path))
+
+    def _flush_by_key(self, record_key: str) -> None:
+        """Commit the ready records at a key shared by all views."""
+        ready = self._pending_commits.take_ready(record_key)
+        if ready is None:
+            return
+        pending, ids = ready
+        record_path = tuple(record_key.split("/"))
+        table_name = self._path_to_table_name(record_path)
+        skip_existing = self._pending_skip_existing.get(record_key, False)
+        if record_key not in self._pending_batches:
+            self._pending_skip_existing.pop(record_key, None)
+
+        try:
+            self._require_table_name(table_name)
             columns = _arrow_schema_to_column_infos(pending.schema)
 
             # Schema validation: if the table already exists, confirm the column
@@ -691,6 +755,13 @@ class ConnectorArrowDatabase:
                 id_column=self.RECORD_ID_COLUMN,
                 skip_existing=skip_existing,
             )
+        except BaseException:
+            self._pending_commits.finish(record_key, committed=False)
+            raise
+        else:
+            self._pending_commits.finish(record_key, committed=True)
+        finally:
+            self._pending_commits.forget(record_key, ids)
 
     # ── Read methods ──────────────────────────────────────────────────────────
 
