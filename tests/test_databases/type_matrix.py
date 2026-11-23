@@ -1055,6 +1055,23 @@ in the appended rows. An append is refused, naming the column and the field, whe
 would add a non-nullable struct field (the stored rows have no value for it) or add a
 struct field inside a map (Delta cannot). A nested field the append makes nullable reads
 as nullable afterwards, as Delta stores it.
+
+An append matches columns by name, exactly as Arrow matches them (`a` and `A` are two
+columns), never by position. Rows whose columns are the held table's columns in another
+order, each field equal to the held one (the same type at every depth, the same logical
+type, the same field attributes), are put in the held order, whether the table was
+flushed in between or not. The in-memory database matches them to the rows still pending,
+else the stored table; Delta to the rows still pending (it matches a stored table by name
+itself); a connector database (SQLite, PostgreSQL, SpiralDB) to the rows it has pending,
+and to the stored table when it writes or reads them, checking them first against the
+table as it is then, by exact name and type (a column with field metadata stays in its
+queued order at a flush; SpiralDB, which keeps field metadata, matches a write by name
+itself). A table keeps the column
+order the database gave its first write: the first write's order, except in SpiralDB,
+which stores and reads a table's key columns first and then its other columns sorted by
+name, whatever the order written (measured on SpiralDB itself). An append that also
+adds, omits or retypes a column keeps each database's own rule. The order of a struct's
+fields is not covered: a struct whose fields are in another order is another type here.
 """
 
 

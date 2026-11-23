@@ -6,7 +6,11 @@ from collections.abc import Collection, Mapping
 from typing import TYPE_CHECKING, Any, cast
 
 from orcapod.databases._row_index import KeyIndex, compact_tail, matching_rows
-from orcapod.databases.utils import coerce_record_id, first_changed_column
+from orcapod.databases.utils import (
+    coerce_record_id,
+    first_changed_column,
+    in_held_column_order,
+)
 from orcapod.errors import InputValidationError
 from orcapod.utils.lazy_module import LazyModule
 
@@ -254,6 +258,16 @@ class InMemoryArrowDatabase:
             )
 
         record_key = self._get_record_key(record_path)
+        # Columns match by name: rows with the held columns in another order are
+        # put in the held order, the pending batch's, else the stored table's
+        # (ITL-1367).
+        held_table = self._pending_batches.get(record_key)
+        if held_table is None:
+            held_table = self._tables.get(record_key)
+        records = in_held_column_order(
+            records,
+            None if held_table is None else list(held_table.schema),
+        )
         # The table holds one type per column: rows whose field metadata or nested
         # field attributes differ would read back with the held ones (ITL-1334).
         held = [

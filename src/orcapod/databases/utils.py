@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 from orcapod.utils import arrow_utils
@@ -201,3 +201,138 @@ def first_changed_column(
             if reason is not None:
                 return field.name, reason
     return None
+
+
+def in_held_column_order(
+    records: "pa.Table", held: "Sequence[pa.Field[Any]] | None"
+) -> "pa.Table":
+    """``records`` with its columns in the order the database holds them (ITL-1367).
+
+    An append matches columns by name, never by position: when ``records`` has
+    exactly the held columns in another order, and each of its fields equals the held
+    field of its name, its columns are put in the held order. Equal is one rule
+    (``_same_field``): the same type at every depth (in the large variants, a logical
+    type with its own name and metadata, at any depth) and no change the append
+    check reports (``appended_field_change``: field metadata and nested field
+    attributes at every depth). Names are matched exactly, as Arrow matches them:
+    ``a`` and ``A`` are two columns.
+
+    Anything else is returned exactly as given, so the database's own rule applies
+    as before: no held table, a column added or missing, a field that differs in any
+    way (a struct whose children are in another order included: ITL-1368), a name that
+    repeats.
+
+    Args:
+        records: The rows to append, the record id column already named as held.
+        held: The held columns, in the held order, or ``None`` when nothing is held.
+
+    Returns:
+        ``records``, reordered or as given.
+    """
+    if held is None:
+        return records
+    names = records.column_names
+    held_names = [field.name for field in held]
+    if names == held_names:
+        return records
+    if len(set(names)) != len(names) or len(set(held_names)) != len(held_names):
+        return records
+    if set(names) != set(held_names):
+        return records
+    held_fields = {field.name: field for field in held}
+    if not all(_same_field(field, held_fields[field.name]) for field in records.schema):
+        return records
+    return records.select(held_names)
+
+
+def _same_field(given: "pa.Field[Any]", held: "pa.Field[Any]") -> bool:
+    """Whether rows of ``given`` would be held as ``held`` holds them: the same type at
+    every depth, in the large variants (a logical type is equal only to itself: its
+    name, metadata and storage), and no change ``appended_field_change`` reports."""
+    # Eligibility is decided on the types as given, before normalization turns a
+    # view type into its large variant.
+    if not (_handled(given.type) and _handled(held.type)):
+        return False
+    large = arrow_utils.normalize_to_large_types
+    if not _same_type(
+        large(given.type, keep_null=True), large(held.type, keep_null=True)
+    ):
+        return False
+    return appended_field_change(held, given) is None
+
+
+def _handled(arrow_type: Any) -> bool:
+    """Whether every type in ``arrow_type``'s tree is one the comparison handles
+    (``_same_type``): a leaf kind of ``_LEAF_KINDS``, a struct, a map, a list, large
+    list or fixed-size list, or an extension type over those."""
+    t = pa.types
+    if isinstance(arrow_type, pa.ExtensionType):
+        return _handled(arrow_type.storage_type)
+    if t.is_struct(arrow_type):
+        return all(
+            _handled(arrow_type.field(i).type) for i in range(arrow_type.num_fields)
+        )
+    if t.is_map(arrow_type):
+        return _handled(arrow_type.key_type) and _handled(arrow_type.item_type)
+    if (
+        t.is_list(arrow_type)
+        or t.is_large_list(arrow_type)
+        or t.is_fixed_size_list(arrow_type)
+    ):
+        return _handled(cast(Any, arrow_type).value_type)
+    return any(getattr(t, kind)(arrow_type) for kind in _LEAF_KINDS)
+
+
+_LEAF_KINDS = (
+    "is_null",
+    "is_boolean",
+    "is_integer",
+    "is_floating",
+    "is_decimal",
+    "is_string",
+    "is_large_string",
+    "is_binary",
+    "is_large_binary",
+    "is_fixed_size_binary",
+    "is_date",
+    "is_time",
+    "is_timestamp",
+    "is_duration",
+)
+"""The leaf types the comparison handles. Eligibility is positive: a type of any
+other kind anywhere in a column's tree (a list view, a union, a dictionary, a
+run-end-encoded type, an interval, a view type, anything pyarrow adds later) makes
+the column not eligible, and the table is left as given for the database's own
+rule (codex review of PR 491, round 4)."""
+
+
+def _same_type(given: Any, held: Any) -> bool:
+    """Whether two Arrow types are equal at every depth, for a type tree the
+    comparison handles entirely: the leaf kinds of ``_LEAF_KINDS``, a struct, a map,
+    a list, large list or fixed-size list, and an extension type over those, equal
+    only to one of its own name and serialized metadata (pyarrow compares a Python
+    extension type by its class and storage, not by its metadata). Any other type
+    anywhere in either tree gives ``False``."""
+    t = pa.types
+    if isinstance(given, pa.ExtensionType) or isinstance(held, pa.ExtensionType):
+        return (
+            isinstance(given, pa.ExtensionType)
+            and isinstance(held, pa.ExtensionType)
+            and given.extension_name == held.extension_name
+            and given.__arrow_ext_serialize__() == held.__arrow_ext_serialize__()
+            and _same_type(given.storage_type, held.storage_type)
+        )
+    if given != held:
+        return False
+    if t.is_struct(given):
+        return all(
+            _same_type(given.field(i).type, held.field(i).type)
+            for i in range(given.num_fields)
+        )
+    if t.is_map(given):
+        return _same_type(given.key_type, held.key_type) and _same_type(
+            given.item_type, held.item_type
+        )
+    if t.is_list(given) or t.is_large_list(given) or t.is_fixed_size_list(given):
+        return _same_type(cast(Any, given).value_type, cast(Any, held).value_type)
+    return any(getattr(t, kind)(given) for kind in _LEAF_KINDS)
