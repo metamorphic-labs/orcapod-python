@@ -3,9 +3,14 @@
 Schema evolution is on by default: an append may add struct fields, omit some, or give
 them in another order. Delta's MERGE matches struct fields by position, so the rows are
 first given the stored struct layout by name (``_conformed_to_stored``), and a column
-whose Arrow type is recorded has its record describe the merged column (``merged_type``),
-which a read restores by name. Every read path, on a fresh database object, gives each
-value under the name it was written with: never swapped, never dropped.
+whose Arrow type is recorded keeps its record, which a read restores by name. Every read
+path, on a fresh database object, gives each value under the name it was written with:
+never swapped, never dropped.
+
+An append that would CHANGE a recorded column's record (a field added to a recorded
+struct) is refused before anything is buffered: deltalake 1.5 and later refuses a commit
+that changes a column's field metadata, and the record is field metadata (ITL-1403). A
+struct with no record still gains fields, and a new column is still added.
 
 A ``null``-typed part with nothing stored at its path (a new struct field, the items of a
 new list) is refused naming the column and the path, before anything is buffered.
@@ -88,19 +93,28 @@ CASES: dict[str, tuple[Any, list[Any], Any, list[Any], list[Any]]] = {
         [{"a": 3.0}],
         [{"a": 1.0, "b": 2}, {"a": 3.0, "b": None}],
     ),
+    "added, unrecorded": (
+        _struct(("a", I64)),
+        [{"a": 1}],
+        _struct(("a", I64), ("c", I64)),
+        [{"a": 3, "c": 5}],
+        [{"a": 1, "c": None}, {"a": 3, "c": 5}],
+    ),
+}
+
+# Appends that would change a recorded column's record: refused (ITL-1403).
+RECORD_CHANGES: dict[str, tuple[Any, list[Any], Any, list[Any]]] = {
     "added, recorded": (
         _struct(("a", F16)),
         [{"a": 1.0}],
         _struct(("a", F16), ("c", pa.list_(pa.int16(), 2))),
         [{"a": 3.0, "c": [5, 6]}],
-        [{"a": 1.0, "c": None}, {"a": 3.0, "c": [5, 6]}],
     ),
     "reordered and added, in a list": (
         pa.large_list(_struct(("a", pa.uint8()), ("b", I64))),
         [[{"a": 1, "b": 2}]],
         pa.large_list(_struct(("c", I64), ("b", I64), ("a", pa.uint8()))),
         [[{"c": 9, "b": 4, "a": 3}]],
-        [[{"a": 1, "b": 2, "c": None}], [{"a": 3, "b": 4, "c": 9}]],
     ),
 }
 
@@ -139,6 +153,61 @@ def test_an_evolved_struct_keeps_every_value_under_its_name(
     back = back.sort_by("id")
     for name in ("x", "y"):
         assert back.column(name).to_pylist() == expected, name
+
+
+@pytest.mark.parametrize("flush", [True, False], ids=["flushed", "queued"])
+@pytest.mark.parametrize("case", sorted(RECORD_CHANGES))
+def test_an_append_changing_a_recorded_type_is_refused_before_buffering(
+    tmp_path: pathlib.Path, case: str, flush: bool
+) -> None:
+    first, first_values, appended, appended_values = RECORD_CHANGES[case]
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(
+        PATH,
+        _rows([b"1"], k=([7], pa.int64()), x=(first_values, first)),
+        record_id_column="id",
+        flush=True,
+    )
+    with pytest.raises(
+        InputValidationError,
+        match=r"column 'x': the append would change the column's recorded Arrow type",
+    ):
+        db.add_records(
+            PATH,
+            _rows([b"2"], k=([7], pa.int64()), x=(appended_values, appended)),
+            record_id_column="id",
+            flush=flush,
+        )
+    db.flush()  # nothing was queued
+    back = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="id")
+    assert back is not None
+    assert back.column("id").to_pylist() == [b"1"]
+    assert back.column("x").to_pylist() == first_values
+
+
+def test_a_new_column_is_still_added(tmp_path: pathlib.Path) -> None:
+    """A column the table does not hold changes no stored record: it is added."""
+    recorded = _struct(("a", F16))
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(
+        PATH,
+        _rows([b"1"], x=([{"a": 1.0}], recorded)),
+        record_id_column="id",
+        flush=True,
+    )
+    db.add_records(
+        PATH,
+        _rows(
+            [b"2"], x=([{"a": 2.0}], recorded), z=([[1, 2]], pa.list_(pa.int16(), 2))
+        ),
+        record_id_column="id",
+        flush=True,
+    )
+    back = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="id")
+    assert back is not None
+    back = back.sort_by("id")
+    assert back.column("z").to_pylist() == [None, [1, 2]]
+    assert back.schema.field("z").type == pa.list_(pa.int16(), 2)
 
 
 def test_omitting_a_non_nullable_stored_field_is_refused(
@@ -317,28 +386,31 @@ def test_adding_a_non_nullable_struct_field_is_refused(
 def test_adding_a_nullable_field_with_a_non_nullable_child_appends(
     tmp_path: pathlib.Path,
 ) -> None:
-    """The stored rows read the new field as null, so its child needs no value."""
+    """The stored rows read the new field as null, so its child needs no value.
+
+    An unrecorded struct (a recorded one cannot gain a field on Delta: ITL-1403).
+    """
     added = pa.struct(
-        [pa.field("a", F16), pa.field("b", pa.struct([pa.field("c", F16, False)]))]
+        [pa.field("a", I64), pa.field("b", pa.struct([pa.field("c", I64, False)]))]
     )
     db = DeltaTableDatabase(tmp_path)
     db.add_records(
         PATH,
-        _rows([b"1"], x=([{"a": 1.0}], _struct(("a", F16)))),
+        _rows([b"1"], x=([{"a": 1}], _struct(("a", I64)))),
         record_id_column="id",
         flush=True,
     )
     db.add_records(
         PATH,
-        _rows([b"2"], x=([{"a": 2.0, "b": {"c": 3.0}}], added)),
+        _rows([b"2"], x=([{"a": 2, "b": {"c": 3}}], added)),
         record_id_column="id",
         flush=True,
     )
     back = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="id")
     assert back is not None
     assert back.sort_by("id").column("x").to_pylist() == [
-        {"a": 1.0, "b": None},
-        {"a": 2.0, "b": {"c": 3.0}},
+        {"a": 1, "b": None},
+        {"a": 2, "b": {"c": 3}},
     ]
 
 
@@ -458,3 +530,34 @@ def test_a_new_column_keeps_every_other_columns_type(
     for name in ("items", "u", "s", "p"):
         assert str(back.schema.field(name).type) == str(first.schema.field(name).type)
     assert back.sort_by("id").column("added").to_pylist() == [None, "a"]
+
+
+def test_struct_fields_differing_only_in_case_are_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Delta field names are case-insensitive at every depth (ITL-1403): a struct
+    holding ``x`` and ``X`` is refused, and so is an evolution that would add ``X``
+    beside a stored ``x``, before anything is queued."""
+    db = DeltaTableDatabase(tmp_path)
+    with pytest.raises(UnstorableColumnError, match="'x' and 'X' differ only in case"):
+        db.add_records(
+            PATH,
+            _rows([b"1"], s=([{"x": 1, "X": 2}], _struct(("x", I64), ("X", I64)))),
+            record_id_column="id",
+        )
+    db.add_records(
+        PATH,
+        _rows([b"1"], s=([{"x": 1}], _struct(("x", I64)))),
+        record_id_column="id",
+        flush=True,
+    )
+    with pytest.raises(InputValidationError, match="'x' and 'X' differ only in case"):
+        db.add_records(
+            PATH,
+            _rows([b"2"], s=([{"X": 2}], _struct(("X", I64)))),
+            record_id_column="id",
+            flush=True,
+        )
+    back = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="id")
+    assert back is not None
+    assert back.column("s").to_pylist() == [{"x": 1}]

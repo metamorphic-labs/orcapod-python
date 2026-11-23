@@ -482,26 +482,98 @@ def _with_merged_records(
         own = original.schema.field(field.name).type
         if position < 0 or isinstance(own, pa.ExtensionType):
             continue
-        stored_record = stored_records.get(field.name)
-        incoming_record = recorded_type(field.metadata)
-        if stored_record is None and incoming_record is None:
+        merged = _merged_record(
+            stored.field(position).type, stored_records.get(field.name), own, field
+        )
+        if merged is None:
             continue
-        base = (
-            stored_record
-            if stored_record is not None
-            else arrow_utils.normalize_to_large_types(stored.field(position).type)
-        )
-        incoming = (
-            incoming_record
-            if incoming_record is not None
-            else arrow_utils.normalize_to_large_types(own)
-        )
         written = written.set_column(
-            index,
-            with_recorded_type(field, merged_type(base, incoming)),
-            written.column(index),
+            index, with_recorded_type(field, merged), written.column(index)
         )
     return written
+
+
+def _merged_record(
+    stored_type: pa.DataType,
+    stored_record: pa.DataType | None,
+    own: pa.DataType,
+    written: "pa.Field[Any]",
+) -> pa.DataType | None:
+    """The record a column has after an append, or ``None`` when it has none.
+
+    A column recorded on either side (stored or incoming) is recorded as the merge of
+    its stored type (its record, else its stored type) and the incoming rows' type
+    (``merged_type``).
+
+    Args:
+        stored_type: The column's type as Delta stores it.
+        stored_record: The column's stored record, or ``None``.
+        own: The incoming rows' own type for the column.
+        written: The incoming column as it is written (``to_delta_layout``).
+
+    Returns:
+        The merged record, or ``None`` when neither side is recorded.
+    """
+    incoming_record = recorded_type(written.metadata)
+    if stored_record is None and incoming_record is None:
+        return None
+    base = (
+        stored_record
+        if stored_record is not None
+        else arrow_utils.normalize_to_large_types(stored_type)
+    )
+    incoming = (
+        incoming_record
+        if incoming_record is not None
+        else arrow_utils.normalize_to_large_types(own)
+    )
+    return merged_type(base, incoming)
+
+
+# Why Delta refuses names that differ only in case (ITL-1403).
+_CASE_INSENSITIVE = (
+    "Delta column names are case-insensitive, so a Delta table cannot hold both"
+)
+
+
+def _differ_only_in_case(names: list[str]) -> tuple[str, str] | None:
+    """The first two of ``names`` that differ only in case, or ``None``."""
+    seen: dict[str, str] = {}
+    for name in names:
+        other = seen.setdefault(name.lower(), name)
+        if other != name:
+            return other, name
+    return None
+
+
+def _nested_names_differing_in_case(arrow_type: pa.DataType) -> tuple[str, str] | None:
+    """Two field names of one struct inside ``arrow_type`` that differ only in case."""
+    if isinstance(arrow_type, pa.ExtensionType):
+        return _nested_names_differing_in_case(arrow_type.storage_type)
+    if pa.types.is_struct(arrow_type):
+        found = _differ_only_in_case(
+            [arrow_type.field(i).name for i in range(arrow_type.num_fields)]
+        )
+        if found is not None:
+            return found
+    for i in range(arrow_type.num_fields):
+        found = _nested_names_differing_in_case(arrow_type.field(i).type)
+        if found is not None:
+            return found
+    return None
+
+
+def _case_reason(first: str, second: str, nested: bool = False) -> str:
+    where = "struct fields" if nested else "columns"
+    return f"{where} {first!r} and {second!r} differ only in case: {_CASE_INSENSITIVE}"
+
+
+# Why a recorded column's record cannot change on Delta (ITL-1403).
+_RECORD_CHANGE = (
+    "the append would change the column's recorded Arrow type, and a recorded "
+    "column's type cannot change on a Delta table: deltalake refuses a commit that "
+    "changes a column's field metadata (deltalake 1.5 and later)"
+)
 
 
 _EXTENSION_KEYS = (b"ARROW:extension:name", b"ARROW:extension:metadata")
@@ -666,6 +738,74 @@ def _non_null_violation(
     return None
 
 
+def _changed_record(
+    delta_table: deltalake.DeltaTable, rows: pa.Table
+) -> tuple[str, str] | None:
+    """The first stored column whose record (or nested names) the append would change.
+
+    deltalake (1.5 and later) refuses a commit that changes a column's field metadata,
+    and a recorded column's record is its field metadata: an append whose merged
+    record (``_merged_record``, what the commit would write) is not the stored one is
+    refused here, before anything is queued. An append that leaves the record as it
+    is, a column with no record on either side (a plain struct still evolves), and a
+    new column are not concerned. A struct evolution that would put two field names
+    differing only in case into one struct is refused too.
+
+    Args:
+        delta_table: The loaded stored table.
+        rows: The rows to append, with their own types.
+
+    Returns:
+        ``(column, reason)``, or ``None``.
+    """
+    stored = _stored_arrow_schema(delta_table)
+    stored_metadata = {f.name: f.metadata for f in delta_table.schema().fields}
+    stored_records = {
+        name: recorded_type(metadata) for name, metadata in stored_metadata.items()
+    }
+    for field in rows.schema:
+        position = stored.get_field_index(field.name)
+        if position < 0:
+            continue
+        # A logical column's type is named in its field metadata: another logical
+        # type over the same storage type would change it.
+        stored_extension = stored_metadata[field.name].get("ARROW:extension:name")
+        incoming_extension = (
+            field.type.extension_name
+            if isinstance(field.type, pa.ExtensionType)
+            else None
+        )
+        if stored_extension != incoming_extension:
+            return field.name, (
+                f"it is stored as logical type {stored_extension!r} and the rows hold "
+                f"{incoming_extension!r}: a column's field metadata cannot change on a "
+                "Delta table (deltalake 1.5 and later refuses such a commit)"
+            )
+        if incoming_extension is not None:
+            continue
+        stored_type = stored.field(position).type
+        stored_record = stored_records.get(field.name)
+        merged = _merged_record(
+            stored_type, stored_record, field.type, written_field(field)
+        )
+        if merged is not None and (
+            stored_record is None
+            or not stored_record.equals(merged, check_metadata=True)
+        ):
+            return field.name, _RECORD_CHANGE
+        try:
+            evolved = merged_type(
+                arrow_utils.normalize_to_large_types(stored_type),
+                arrow_utils.normalize_to_large_types(field.type),
+            )
+        except Exception:  # noqa: BLE001  # a type change: the type check reports it
+            continue
+        nested = _nested_names_differing_in_case(evolved)
+        if nested is not None:
+            return field.name, _case_reason(*nested, nested=True)
+    return None
+
+
 def _append_refusal(
     delta_table: deltalake.DeltaTable, rows: pa.Table
 ) -> tuple[str, str] | None:
@@ -702,6 +842,13 @@ def _append_refusal(
             change = _column_change(held[field.name], field)
             if change is not None:
                 return field.name, change
+        else:
+            clash = _differ_only_in_case([*held, field.name])
+            if clash is not None:
+                return field.name, _case_reason(*clash)
+    changed = _changed_record(delta_table, rows)
+    if changed is not None:
+        return changed
     violation = _non_null_violation(held, rows)
     if violation is not None:
         name, omitted = violation
@@ -887,11 +1034,12 @@ def delta_unstorable_reason(field: "pa.Field[Any]") -> str | None:
     column already stored with a type, and a column with no stored type yet is
     refused by ``add_records``, which knows the stored table.
 
+    A top-level name holding a backtick is refused too (``_unmergeable_name_reason``,
+    ITL-1375), and so are two fields of one struct whose names differ only in case
+    (ITL-1403).
+
     Args:
         field: A column, as given to the database.
-
-    A top-level name holding a backtick is refused too (``_unmergeable_name_reason``,
-    ITL-1375).
 
     Returns:
         Delta's reason (``Invalid data type for Delta Lake: Decimal256(40, 2)``), or
@@ -900,6 +1048,9 @@ def delta_unstorable_reason(field: "pa.Field[Any]") -> str | None:
     name_reason = _unmergeable_name_reason(field.name)
     if name_reason is not None:
         return name_reason
+    nested = _nested_names_differing_in_case(field.type)
+    if nested is not None:
+        return _case_reason(*nested, nested=True)
     if arrow_utils.holds_renamed_map(field.type):
         # The recorded type goes through Arrow IPC, which renames them (ITL-1334).
         return "a map's key and item fields read back as 'key' and 'value'"
@@ -1695,10 +1846,21 @@ class DeltaTableDatabase:
         Args:
             schema: The Arrow schema of a table this database is to hold.
 
+        Two columns whose names differ only in case are refused too: Delta column
+        names are case-insensitive (ITL-1403).
+
         Raises:
             UnstorableColumnError: For the first column Delta cannot hold, naming the
                 column, its Arrow type and Delta's reason.
         """
+        clash = _differ_only_in_case(schema.names)
+        if clash is not None:
+            raise UnstorableColumnError(
+                database_kind=type(self).__name__,
+                column=clash[1],
+                arrow_type=schema.field(clash[1]).type,
+                reason=_case_reason(*clash),
+            )
         for field in schema:
             reason = delta_unstorable_reason(field)
             if reason is not None:
@@ -1708,6 +1870,31 @@ class DeltaTableDatabase:
                     arrow_type=field.type,
                     reason=reason,
                 )
+
+    def _refuse_case_clash_with_pending(
+        self, record_path: tuple[str, ...], schema: pa.Schema
+    ) -> None:
+        """Refuse a column whose name differs only in case from a queued one (ITL-1403).
+
+        Checked before the schema handling, which would otherwise report the queued
+        and the new columns as a mismatch. A stored table's columns are checked by
+        ``_append_refusal``.
+
+        Raises:
+            InputValidationError: Naming both columns.
+        """
+        pending = self._pending_batches.get(self._get_record_key(record_path))
+        if pending is None:
+            return
+        queued = pending.schema.names
+        clash = _differ_only_in_case(
+            [*queued, *(n for n in schema.names if n not in queued)]
+        )
+        if clash is not None:
+            raise InputValidationError(
+                f"Cannot add rows to {self._get_table_uri(record_path)!r}: column "
+                f"{clash[1]!r}: {_case_reason(*clash)}. Nothing was queued."
+            )
 
     def _refuse_unmergeable_append(
         self,
@@ -1944,6 +2131,7 @@ class DeltaTableDatabase:
 
         # A column Delta cannot hold is refused before anything is buffered (ITL-1334).
         self.require_storable(records.schema)
+        self._refuse_case_clash_with_pending(record_path, records.schema)
         self._refuse_untyped_null_columns(record_path, records.schema)
 
         # Step 2: Deduplicate within input table (keep last occurrence)
@@ -2803,7 +2991,10 @@ class DeltaTableDatabase:
         if delta_table is None:
             try:
                 # mode="error": a table another writer created after the load above
-                # is never replaced; this attempt fails instead (ITL-1384).
+                # is never replaced; this attempt fails instead (ITL-1384). No commit
+                # retry: deltalake 1.6 would otherwise commit this create on top of
+                # the other writer's, as an append (measured: two of four concurrent
+                # creates succeeded), and an id both hold would be stored twice.
                 deltalake.write_deltalake(
                     table_uri,
                     combined_table,
@@ -2811,6 +3002,7 @@ class DeltaTableDatabase:
                     storage_options=self._storage_options or None,
                     # Name the statistics columns once, at creation (ITL-1187).
                     configuration=statistics_configuration(combined_table.schema),
+                    commit_properties=deltalake.CommitProperties(max_commit_retries=0),
                 )
             except Exception as create_error:
                 if self._table_exists_at(table_uri):
@@ -2856,8 +3048,12 @@ class DeltaTableDatabase:
             # commit Delta checks against rows another writer added meanwhile
             # (ITL-1377). The table object moves to the version it committed, so
             # it is not loaded again (ITL-1173).
+            source = _merge_source_in_stored_layout(delta_table, combined_table)
             delta_table.merge(
-                source=_merge_source_in_stored_layout(delta_table, combined_table),
+                # Every array from offset zero: deltalake 1.6's MERGE panics on a
+                # sliced map column (arrow-rs, "range start index ... out of range").
+                # ``take`` copies the values as they are.
+                source=source.take(pa.array(range(source.num_rows), pa.int64())),
                 predicate=f"target.{self.RECORD_ID_COLUMN} = source.{self.RECORD_ID_COLUMN}",
                 source_alias="source",
                 target_alias="target",

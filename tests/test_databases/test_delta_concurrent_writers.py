@@ -258,3 +258,36 @@ def test_writers_in_other_processes_store_each_id_once(tmp_path: Path) -> None:
         assert process.exitcode == 0
     stored = _stored(tmp_path)
     assert [rid for rid, _ in stored] == [bytes([n]) for n in ids]
+
+
+def test_writers_creating_one_table_at_once_store_an_id_once(tmp_path: Path) -> None:
+    """Four writers create the same table at the same moment, all with one id.
+
+    deltalake 1.6 commits a create that lost the race on top of the winner's, as an
+    append, unless the create is committed without retries; the losers then load the
+    table and MERGE, which finds the id stored (ITL-1384, ITL-1377).
+    """
+    import threading
+
+    for trial in range(10):
+        root = tmp_path / str(trial)
+        start = threading.Barrier(4)
+        errors: list[BaseException] = []
+
+        def write(value: int) -> None:
+            db = DeltaTableDatabase(root)
+            db.add_records(PATH, _records(1, value), record_id_column="rid")
+            start.wait()
+            try:
+                db.flush()
+            except BaseException as e:  # noqa: BLE001  # reported below
+                errors.append(e)
+
+        threads = [threading.Thread(target=write, args=(v,)) for v in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert errors == []
+        stored = _stored(root)
+        assert [rid for rid, _ in stored] == [b"\x01"], trial

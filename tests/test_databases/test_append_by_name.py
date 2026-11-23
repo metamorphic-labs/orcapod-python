@@ -37,7 +37,6 @@ from orcapod.databases import (
 from orcapod.databases.utils import in_held_column_order
 from orcapod.errors import (
     InputValidationError,
-    OrcapodDatabaseReadError,
     UnstorableColumnError,
 )
 from tests.test_databases.type_matrix import open_database
@@ -440,13 +439,13 @@ def test_the_step_leaves_anything_else_as_given(
     assert in_held_column_order(given, held) is given
 
 
-@pytest.mark.parametrize("database", ["in-memory", "Delta"])
+@pytest.mark.parametrize("database", ["in-memory"])
 @pytest.mark.parametrize("when", ["after a flush", "same pending batch"])
 def test_names_differing_in_case_only_are_two_columns(
     tmp_path: Path, database: str, when: str
 ) -> None:
-    """The in-memory and Delta databases hold ``a`` and ``A`` apart; an append of them
-    in another order is matched by exact name."""
+    """The in-memory database holds ``a`` and ``A`` apart; an append of them in another
+    order is matched by exact name. (Delta refuses them: below.)"""
     with open_database(database, tmp_path) as db:
         _add(db, _table_with_id(b"r1", [ID, "a", "A"]), flush=when == "after a flush")
         _add(db, _table_with_id(b"r2", ["A", ID, "a"]))
@@ -457,6 +456,31 @@ def test_names_differing_in_case_only_are_two_columns(
             {ID: b"r1", "a": 1, "A": 2},
             {ID: b"r2", "a": 1, "A": 2},
         ]
+
+
+@pytest.mark.parametrize("when", ["after a flush", "same pending batch"])
+def test_delta_refuses_names_differing_only_in_case(tmp_path: Path, when: str) -> None:
+    """Delta column names are case-insensitive (deltalake 1.5.1 and later refuses
+    such a table): ``a`` and ``A`` in one table are refused before anything is
+    queued, in one batch and as a column added beside a held one (ITL-1403)."""
+    db = DeltaTableDatabase(tmp_path)
+    with pytest.raises(UnstorableColumnError, match="differ only in case") as info:
+        _add(db, _table_with_id(b"r1", [ID, "a", "A"]))
+    assert info.value.column == "A"
+    _add(db, _table_with_id(b"r1", [ID, "a"]), flush=when == "after a flush")
+    with pytest.raises(InputValidationError, match="'a' and 'A' differ only in case"):
+        # ``merge``: a new column beside a pending batch is otherwise refused by the
+        # schema check before the name is looked at.
+        db.add_records(
+            PATH,
+            _table_with_id(b"r2", ["A", ID]),
+            record_id_column=ID,
+            schema_handling="merge",
+        )
+    db.flush()
+    table = db.get_all_records(PATH, record_id_column=ID)
+    assert table is not None
+    assert table.select([ID, "a"]).to_pylist() == [{ID: b"r1", "a": 1}]
 
 
 def _table_with_id(rid: bytes, order: list[str]) -> pa.Table:
@@ -828,12 +852,12 @@ def test_two_logical_types_over_one_storage_type_are_not_reordered(
         with pytest.raises(ValueError, match="Schema mismatch"):
             second.add_records(PATH, permuted, record_id_column="rid")
     else:
-        # Pre-existing on main and equal here (ITL-1371's family): Delta takes the
-        # rows by name and the stored table can no longer be read as one type.
-        second.add_records(PATH, permuted, record_id_column="rid", flush=True)
-        with pytest.raises(OrcapodDatabaseReadError):
-            inner.get_all_records(PATH, record_id_column="rid")
-        return
+        # Delta refuses another logical type where one is stored, before anything is
+        # queued: deltalake 1.5 and later refuses the commit (ITL-1403). Before, Delta
+        # took the rows and the table could no longer be read as one type
+        # (ITL-1371's family).
+        with pytest.raises(InputValidationError, match="logical type"):
+            second.add_records(PATH, permuted, record_id_column="rid", flush=True)
     inner.flush()
     stored_rows = inner.get_all_records(PATH, record_id_column="rid")
     assert stored_rows is not None
