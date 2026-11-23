@@ -8,8 +8,9 @@ path, on a fresh database object, gives each value under the name it was written
 never swapped, never dropped.
 
 An append that would CHANGE a recorded column's record (a field added to a recorded
-struct) is refused before anything is buffered: deltalake 1.5 and later refuses a commit
-that changes a column's field metadata, and the record is field metadata (ITL-1403). A
+struct) is refused by Delta at the commit: deltalake 1.5 and later refuses a commit that
+changes a column's field metadata, and the record is field metadata. The flush raises it
+once and the batch leaves the queue (ITL-1403: the flush is the point of truth). A
 struct with no record still gains fields, and a new column is still added.
 
 A ``null``-typed part with nothing stored at its path (a new struct field, the items of a
@@ -157,9 +158,12 @@ def test_an_evolved_struct_keeps_every_value_under_its_name(
 
 @pytest.mark.parametrize("flush", [True, False], ids=["flushed", "queued"])
 @pytest.mark.parametrize("case", sorted(RECORD_CHANGES))
-def test_an_append_changing_a_recorded_type_is_refused_before_buffering(
+def test_an_append_changing_a_recorded_type_is_refused_once_at_flush(
     tmp_path: pathlib.Path, case: str, flush: bool
 ) -> None:
+    """Accepted when added; Delta refuses the changed record at the commit; the flush
+    raises once, the batch leaves the queue, and a second flush is a no-op (ITL-1403:
+    the flush is the point of truth)."""
     first, first_values, appended, appended_values = RECORD_CHANGES[case]
     db = DeltaTableDatabase(tmp_path)
     db.add_records(
@@ -168,17 +172,16 @@ def test_an_append_changing_a_recorded_type_is_refused_before_buffering(
         record_id_column="id",
         flush=True,
     )
-    with pytest.raises(
-        InputValidationError,
-        match=r"column 'x': the append would change the column's recorded Arrow type",
-    ):
+    with pytest.raises(InputValidationError, match="Delta refused the commit"):
         db.add_records(
             PATH,
             _rows([b"2"], k=([7], pa.int64()), x=(appended_values, appended)),
             record_id_column="id",
             flush=flush,
         )
-    db.flush()  # nothing was queued
+        db.flush()
+    assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+    db.flush()  # a no-op
     back = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="id")
     assert back is not None
     assert back.column("id").to_pylist() == [b"1"]

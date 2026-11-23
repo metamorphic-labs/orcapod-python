@@ -205,6 +205,29 @@ the names of your functions, not their code.
 `loaded.run(load_only=True)` to fill the nodes from the database (bind in-memory sources
 first). To compute, run the script that defines the pipeline.
 
+### `InputValidationError: Delta refused the commit to table ...`
+
+**Symptom.** A flush, or a job's commit (`OrcapodDatabaseWriteError` with this error as
+its cause), fails with `Delta refused the commit to table '...': <Delta's reason>. The N
+rows queued for it were not written and are no longer queued`. `UnstorableColumnError`
+saying that Delta reports a name as equal to another's under its case folding is the same
+kind of failure.
+
+**Cause.** A `DeltaTableDatabase` refuses only what it can tell for certain when rows are
+added (names that differ only in case, a stored table deltalake cannot read, another logical type over a stored logical column). Everything
+else is decided by deltalake when it commits. The refusals that would happen again at
+every flush are raised once: a changed field metadata, which deltalake 1.5 and later
+refuses (a struct with a recorded type gaining a field, a list's items becoming
+nullable), a type DataFusion cannot insert or cast into the stored one, or a null in a
+non-nullable column. The rows are dropped from the queue so that the next flush is not
+refused the same way; other tables of the same flush still commit. A failure that may
+pass, such as a storage error, keeps its rows queued, and the next flush tries them
+again.
+
+**Fix.** Read Delta's reason, correct the rows (or their declared types) and add them
+again. In a job, running it again computes the same rows and fails the same way until
+then. [Data types per database](reference/database-types.md) lists what each database stores.
+
 ## Problems that give no error
 
 ### I edited my function and the results did not change

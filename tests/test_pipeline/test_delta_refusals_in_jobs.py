@@ -4,8 +4,9 @@ Pins the behaviour disclosed in the review of PR 504, so that a change to it is 
 
 - finding 6: an operator whose result TYPE depends on its data (list items nullable only
   when a value exceeds 10) in an operator node that logs (``CacheMode.LOG``): the run
-  whose result type differs from the stored one fails at the store, instead of
-  silently changing the table's recorded type. Such an operator is a bug of the
+  whose result type differs from the stored one fails at the store, where Delta
+  refuses the commit (the flush raises it once), instead of silently changing the
+  table's recorded type. Such an operator is a bug of the
   operator; ITL-1410 is to refuse it at the operator.
 - a function with output keys ``a`` and ``A`` (legal before) stops at its first write:
   Delta column names are case-insensitive.
@@ -27,7 +28,11 @@ from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.sources import ArrowTableSource
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.databases import DeltaTableDatabase
-from orcapod.errors import OrcapodDatabaseWriteError, UnstorableColumnError
+from orcapod.errors import (
+    InputValidationError,
+    OrcapodDatabaseWriteError,
+    UnstorableColumnError,
+)
 from orcapod.types import CacheMode
 
 
@@ -89,9 +94,13 @@ def test_an_operator_whose_result_type_follows_its_data_fails_at_the_store(
     run([1, 2], [1, 2])  # items non-nullable: stored
     with pytest.raises(OrcapodDatabaseWriteError) as info:
         run([3, 4], [11, 12])  # items nullable: the recorded type would change
-    assert "recorded Arrow type" in str(
-        info.value.__cause__
-    ) or "recorded Arrow type" in str(info.value)
+    # The flush is the point of truth (ITL-1403): Delta refuses the commit, and the
+    # flush raises it once, as the write error's cause; nothing stays queued.
+    cause = info.value.__cause__
+    assert isinstance(cause, InputValidationError), repr(cause)
+    assert "Delta refused the commit" in str(cause)
+    with pytest.raises(OrcapodDatabaseWriteError):
+        run([3, 4], [11, 12])  # the same rows fail the same way again, never queued
 
 
 @function_pod(output_keys=["a", "A"])

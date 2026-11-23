@@ -79,15 +79,23 @@ another order): every value keeps its field's name, and an omitted field reads a
 in the appended rows. An append is refused, naming the column and the field, when it
 would add a non-nullable struct field (the stored rows have no value for it) or add a
 struct field inside a map (Delta cannot). A nested field the append makes nullable reads
-as nullable afterwards, as Delta stores it. A column whose Arrow type Delta keeps
-through a recorded type (the "(recorded type)" cells below, every list and map
-included) cannot gain a field, nor have a nested nullability change: the record is the
-column's field metadata, which Delta (deltalake 1.5 and later) does not let a commit
-change, so such an append is refused, naming the column, before anything is queued. A
-struct column without a record still gains fields, an append may still add a new column,
-and an untyped `null` column takes the stored type. Another logical type over a stored
-logical column (another extension name, or the same name with other extension metadata)
-is refused the same way.
+as nullable afterwards, as Delta stores it.
+
+On Delta, the commit is the point of truth. When rows are added, only what is certain is
+refused, before anything is queued: two names differing only in case, a stored table
+deltalake cannot read, another logical type (another
+extension name or other extension metadata) over a stored logical column, and a struct
+evolution that would put two names differing only in case into one struct. What
+deltalake refuses at the commit for the rows themselves (a changed field metadata, a type
+it cannot insert or cast, a null in a non-nullable column) is raised by the flush, once,
+naming the table, Delta's reason and the rows not written; those rows leave the queue,
+and the other tables of the flush still commit. Any other failure keeps its rows queued.
+So a column whose Arrow type Delta keeps through a recorded type (the "(recorded type)"
+cells below, every list and map included) cannot gain a field when schema evolution is
+on, nor have a nested nullability change: the record is the column's field metadata,
+which deltalake 1.5 and later does not let a commit change. A struct column without a
+record still gains fields, an append may still add a new column, and an untyped `null`
+column takes the stored type.
 
 An append matches columns by name, exactly as Arrow matches them (`a` and `A` are two
 columns), never by position. Delta alone refuses two columns, or two fields of one

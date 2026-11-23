@@ -52,6 +52,19 @@ def _stored_ids(root: Path) -> list[bytes]:
     return sorted(cast(list[bytes], table.column("rid").to_pylist()))
 
 
+def _refused_once_at_flush(db: DeltaTableDatabase) -> InputValidationError:
+    """The flush is the point of truth (ITL-1403): the rows were accepted when added;
+    Delta refuses the commit, and the flush raises once, naming the table, Delta's
+    reason and the rows not written; nothing stays queued; a second flush is a no-op."""
+    assert db._pending_batches  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(InputValidationError, match="Delta refused the commit") as info:
+        db.flush()
+    assert "were not written and are no longer queued" in str(info.value)
+    assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+    db.flush()  # a no-op
+    return info.value
+
+
 def _struct(name: str, value: int) -> Any:
     return pa.array([{name: value}])
 
@@ -115,14 +128,16 @@ RECORD_CHANGES: dict[str, tuple[Any, Any]] = {
 
 
 @pytest.mark.parametrize("case", sorted(RECORD_CHANGES))
-def test_a_recorded_column_whose_record_would_change(tmp_path: Path, case: str) -> None:
-    """Review of PR 504, findings 2 and 6: what the commit would send is compared."""
+def test_a_recorded_column_whose_record_changes_is_refused_once_at_flush(
+    tmp_path: Path, case: str
+) -> None:
+    """Review of PR 504, findings 2 and 6: Delta refuses the changed record; the flush
+    raises once and the batch leaves the queue."""
     stored, appended = RECORD_CHANGES[case]
     db = DeltaTableDatabase(tmp_path)
     _add(db, _rows(b"1", x=stored), flush=True)
-    with pytest.raises(InputValidationError, match="recorded Arrow type"):
-        _add(db, _rows(b"2", x=appended))
-    db.flush()  # nothing was queued
+    _add(db, _rows(b"2", x=appended))  # accepted when added
+    _refused_once_at_flush(db)
     assert _stored_ids(tmp_path) == [b"1"]
 
 
@@ -285,7 +300,8 @@ def test_names_folded_alike_only_by_delta_are_refused_once(
 
 def test_a_storage_typed_column_carrying_another_extension_name(tmp_path: Path) -> None:
     """A logical identity given as ``ARROW:extension:*`` field metadata on a storage
-    type is compared as an extension type's is: another name is refused when added."""
+    type (CodeRabbit on PR 504): Delta refuses another name at the commit; the flush
+    raises once and the batch leaves the queue."""
 
     def rows(rid: bytes, name: str) -> pa.Table:
         field = pa.field(
@@ -300,9 +316,8 @@ def test_a_storage_typed_column_carrying_another_extension_name(tmp_path: Path) 
 
     db = DeltaTableDatabase(tmp_path)
     _add(db, rows(b"1", "itl1403.one"), flush=True)
-    with pytest.raises(InputValidationError, match="'itl1403.two'"):
-        _add(db, rows(b"2", "itl1403.two"))
-    assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+    _add(db, rows(b"2", "itl1403.two"))  # accepted when added
+    assert "ARROW:extension:name" in str(_refused_once_at_flush(db))
     assert _stored_ids(tmp_path) == [b"1"]
 
 
@@ -369,7 +384,7 @@ def test_a_record_that_decodes_to_the_stored_type_is_not_a_change(
     "evolution", [False, True], ids=["evolution off", "evolution on"]
 )
 @pytest.mark.parametrize("route", sorted(ROUTES))
-def test_a_real_record_change_is_refused_only_where_the_commit_sends_it(
+def test_a_real_record_change_is_refused_at_flush_only_where_delta_refuses_it(
     tmp_path: Path, route: str, evolution: bool
 ) -> None:
     """N2: list items widening to nullable (non-null values). A MERGE that evolves the
@@ -387,21 +402,14 @@ def test_a_real_record_change_is_refused_only_where_the_commit_sends_it(
         }
     )
 
-    def add() -> None:
-        db.add_records(
-            PATH,
-            rows,
-            record_id_column="rid",
-            skip_duplicates=len(ids) == 1,
-            flush=True,
-        )
-
+    db.add_records(
+        PATH, rows, record_id_column="rid", skip_duplicates=len(ids) == 1
+    )  # accepted when added, on every route
     if evolution:
-        with pytest.raises(InputValidationError, match="recorded Arrow type"):
-            add()
+        _refused_once_at_flush(db)
         assert _stored_ids(tmp_path) == [b"1"]
     else:
-        add()
+        db.flush()
         assert _stored_ids(tmp_path) == [b"1", b"2"]
     assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
 
@@ -452,22 +460,16 @@ def test_a_null_column_is_checked_like_any_column(
         null_field, pa.nulls(len(ids))
     )
 
-    def add() -> None:
-        db.add_records(
-            PATH,
-            rows,
-            record_id_column="rid",
-            skip_duplicates=len(ids) == 1,
-            flush=True,
-        )
-
-    sends = evolution or len(ids) == 1
-    if variant == "another name" and sends:
-        with pytest.raises(InputValidationError, match="itl1403.not.a.path"):
-            add()
+    db.add_records(
+        PATH, rows, record_id_column="rid", skip_duplicates=len(ids) == 1
+    )  # accepted when added: the flush is the point of truth
+    # Delta sends another type's identifier, and refuses it, on an append (every id
+    # new) and on a MERGE that evolves the schema.
+    if variant == "another name" and (evolution or len(ids) == 1):
+        _refused_once_at_flush(db)
         assert _stored_ids(tmp_path) == [b"1"]
     else:
-        add()
+        db.flush()
         back = DeltaTableDatabase(tmp_path).get_all_records(
             PATH, record_id_column="rid"
         )
@@ -516,3 +518,91 @@ def test_the_backstop_names_the_column_whole(tmp_path: Path, suffix: str) -> Non
         )
     assert info.value.column in (first, second)
     assert "int64" in str(info.value)
+
+
+# ── Third review of PR 504: the flush is the point of truth ────────────────────────
+
+
+@pytest.mark.parametrize(
+    "evolution", [False, True], ids=["evolution off", "evolution on"]
+)
+def test_a_null_with_a_foreign_identifier_after_a_queued_bare_null_is_stored(
+    tmp_path: Path, evolution: bool
+) -> None:
+    """Third review: the batch the flush commits is what counts. A bare null queued,
+    then a null carrying a foreign identifier: the concatenated batch keeps the first
+    field's metadata, so Delta stores all rows; nothing is refused when added."""
+    field, column, _ = _path_column()
+    db = DeltaTableDatabase(tmp_path, allow_schema_evolution=evolution)
+    _add(db, _rows(b"1").append_column(field, column), flush=True)
+    _add(db, _rows(b"2").append_column(pa.field("x", pa.null()), pa.nulls(1)))
+    foreign = pa.field(
+        "x",
+        pa.null(),
+        metadata={
+            "ARROW:extension:name": "review.different",
+            "ARROW:extension:metadata": b"",
+        },
+    )
+    _add(db, _rows(b"3").append_column(foreign, pa.nulls(1)))
+    db.flush()
+    back = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="rid")
+    assert back is not None
+    assert back.schema.field("x").type == field.type
+    assert back.sort_by("rid").column("x").to_pylist() == ["/a", None, None]
+
+
+def test_the_backstop_names_the_nested_field_beside_a_column_of_the_same_name(
+    tmp_path: Path,
+) -> None:
+    """Third review: Delta's own schema check locates the collision, so the field named
+    is the nested one, with its type, not a top-level column of the same name."""
+    upper, lower = RUST_ONLY_FOLDS[0]
+    db = DeltaTableDatabase(tmp_path)
+    for rid, name in ((b"1", upper), (b"2", lower)):
+        table = pa.table(
+            {
+                "rid": pa.array([rid], pa.large_binary()),
+                lower: [1],
+                "s": pa.array([{name: "value"}], pa.struct([(name, pa.string())])),
+            }
+        )
+        db.add_records(PATH, table, record_id_column="rid", schema_handling="merge")
+    with pytest.raises(UnstorableColumnError) as info:
+        db.flush()
+    assert info.value.column == f"s.{lower}"
+    assert "string" in str(info.value)
+    assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize(
+    "change", ["another writer deletes a stored row", "schema evolution turned on"]
+)
+def test_what_changes_between_add_and_flush_is_decided_at_the_flush(
+    tmp_path: Path, change: str
+) -> None:
+    """Third review: the commit route can change after the rows are added. Nulls
+    carrying another logical name, with a stored id among them and schema evolution off,
+    are a MERGE that keeps the stored schema; when another writer deletes the stored row,
+    or schema evolution is turned on, the commit sends the foreign identifier and Delta
+    refuses it. The flush raises once; nothing stays queued."""
+    field, column, _ = _path_column()
+    db = DeltaTableDatabase(tmp_path, allow_schema_evolution=False)
+    _add(db, _rows(b"1").append_column(field, column), flush=True)
+    foreign = pa.field(
+        "x",
+        pa.null(),
+        metadata={
+            "ARROW:extension:name": "review.different",
+            "ARROW:extension:metadata": b"",
+        },
+    )
+    rows = pa.table({"rid": pa.array([b"1", b"2"], pa.large_binary())}).append_column(
+        foreign, pa.nulls(2)
+    )
+    db.add_records(PATH, rows, record_id_column="rid")  # accepted when added
+    if change == "another writer deletes a stored row":
+        deltalake.DeltaTable(str(tmp_path / "t")).delete("__record_id = X'31'")
+    else:
+        db.allow_schema_evolution = True
+    _refused_once_at_flush(db)
