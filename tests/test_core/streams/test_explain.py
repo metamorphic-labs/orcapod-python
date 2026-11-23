@@ -22,6 +22,7 @@ from orcapod.core.nodes.source_node import SourceNode
 from orcapod.core.operators import (
     Batch,
     Filter,
+    GroupBy,
     Index,
     Join,
     MergeJoin,
@@ -139,7 +140,7 @@ class TestSectionFiveCases:
             return 2 * (t or 0.0)
 
         filtered = _units().filter(col("t") >= 1.0, label="late")
-        stream = double.pod(filtered.select_data_columns(["t"])).group_by("session")
+        stream = GroupBy("session")(double.pod(filtered.select_data_columns(["t"])))
         text = stream.explain().text()
         assert calls == []  # no user code ran
         assert text.splitlines()[1:] == [
