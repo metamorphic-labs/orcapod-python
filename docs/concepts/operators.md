@@ -999,7 +999,7 @@ The provisional operators are listed in one place:
 from orcapod.operators import PROVISIONAL_OPERATORS
 
 print(sorted(PROVISIONAL_OPERATORS))
-# ['AddTags', 'Batch', 'GroupBy', 'Index', 'MapColumns', 'MapTags', 'MergeJoin', 'Pick', 'PolarsFilter', 'Rejoin', 'TagBy']
+# ['AddTags', 'Batch', 'Filter', 'GroupBy', 'Index', 'MapColumns', 'MapTags', 'MergeJoin', 'Pick', 'PolarsFilter', 'Rejoin', 'TagBy']
 ```
 
 They are the operators whose identity choice is not yet obvious and solid (developer,
@@ -1014,6 +1014,7 @@ November 19, 2026). Each name maps to the issue that decides its identity or out
 | `Pick`, `Index` | the policy for a miss, which changes the output (ITL-439) |
 | `PolarsFilter` | whether the order of its predicates belongs to its identity (ITL-1247) |
 | `TagBy`, `AddTags` | days old, their identities just changed: the review of the tag operators (ITL-1290) |
+| `Filter` | new: a row filter over a condition, provisional until its first use has shown what the canonical form of a condition must hold (ITL-1374) |
 | `Rejoin` | new: puts the branches of one stream back together by matching system tags (ITL-1336); its matching rule changed in this release (ITL-1355) |
 
 Every other operator is frozen with data context v1: `Join`, `SemiJoin`, `MapData`, the
