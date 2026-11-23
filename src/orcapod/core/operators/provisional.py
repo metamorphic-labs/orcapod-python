@@ -59,6 +59,9 @@ PROVISIONAL_OPERATORS: Mapping[str, str] = MappingProxyType(
         # New (developer, November 21, 2026): puts the branches of one stream back
         # together by matching every system-tag column (ITL-1336).
         "Rejoin": "ITL-1336",
+        # New (developer, November 22, 2026): a general row filter over a Condition;
+        # shipped provisional for the workshop, frozen after it (ITL-1374).
+        "Filter": "ITL-1374",
     }
 )
 """The provisional operators: class name to the issue that decides its identity."""
