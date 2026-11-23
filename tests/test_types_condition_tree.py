@@ -1078,3 +1078,85 @@ class TestMembershipZeroAndScale:
         values = list(range(10_000))
         assert col("x").is_in(values) == col("x").is_in(list(reversed(values)))
         assert col("x").is_in(values) != col("x").is_in([*values[:-1], 10_000])
+
+
+# --- Review findings as classes (developer, 2026-11-22: every finding gets a test) ------
+
+_LONDON = ZoneInfo("Europe/London")
+# The repeated hour of three fall-back days: (zone, date, hour), its 30th minute after the
+# first occurrence's start.
+_OVERLAPS = [
+    (_NEW_YORK, dt.date(2025, 11, 2), 1),
+    (_NEW_YORK, dt.date(2026, 11, 1), 1),
+    (_LONDON, dt.date(2026, 10, 25), 1),
+]
+
+
+@pytest.mark.parametrize(
+    "zone, day, hour", _OVERLAPS, ids=["NY 2025", "NY 2026", "London 2026"]
+)
+class TestBetweenAcrossEveryOverlap:
+    """Codex review of PR 497, finding 4, as a class: ``between`` compares instants in
+    every daylight-saving overlap, never wall times within one tzinfo."""
+
+    def test_a_reversed_range_is_refused(self, zone, day, hour):
+        second_start = dt.datetime.combine(day, dt.time(hour, 0), tzinfo=zone).replace(
+            fold=1
+        )
+        first_half = dt.datetime.combine(day, dt.time(hour, 30), tzinfo=zone)
+        assert second_start.astimezone(dt.timezone.utc) > first_half.astimezone(
+            dt.timezone.utc
+        )
+        with pytest.raises(ValueError, match="low end above"):
+            col("at").between(second_start, first_half)
+
+    def test_an_ordered_range_across_the_overlap_is_taken(self, zone, day, hour):
+        first_half = dt.datetime.combine(day, dt.time(hour, 30), tzinfo=zone)
+        second_start = first_half.replace(minute=0, fold=1)
+        condition = col("at").between(first_half, second_start)
+        assert condition == (col("at") >= first_half.astimezone(dt.timezone.utc)) & (
+            col("at") <= second_start.astimezone(dt.timezone.utc)
+        )
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        (lambda: col("t") > 1.0, lambda: col("t") < 2.0),
+        (lambda: Condition.of(s="a"), lambda: col("u").is_in([3])),
+        (lambda: col("r").is_null(), lambda: (col("a") == 1) | (col("b") == 2)),
+    ],
+    ids=["comparisons", "equality and membership", "null test and or"],
+)
+def test_python_and_between_conditions_keeps_the_second(first, second):
+    """CodeRabbit on PR 493 (the docstring of ``and``): a documented limit, pinned. A
+    condition that requires something is true, so ``a and b`` is ``b``; a change to
+    ``Condition.__bool__`` must update the documentation."""
+    a, b = first(), second()
+    assert (a and b) is b
+    with pytest.raises(TypeError, match="&"):
+        _ = col("t") and col("u")
+
+
+@pytest.mark.parametrize("operator", ["==", "!=", "<", "<=", ">", ">="])
+@pytest.mark.parametrize(
+    "value", [1, {"date": "2026-11-25"}, {"float": "nan"}], ids=["int", "date", "nan"]
+)
+def test_a_saved_comparison_holds_one_operand(operator, value):
+    """CodeRabbit on PR 493 (both operands silently resolved to one), as a class: every
+    comparison operator and several saved value forms."""
+    saved = {
+        ":condition": {
+            "all": [
+                {
+                    "column": "x",
+                    "fields": [],
+                    "op": operator,
+                    "value": value,
+                    "other": {"column": "y", "fields": []},
+                }
+            ]
+        }
+    }
+    with pytest.raises(ValueError, match="one operand"):
+        Condition.from_config(saved)
