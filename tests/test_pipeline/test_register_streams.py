@@ -211,6 +211,15 @@ def through(d3: str) -> str:
     return d3.upper()
 
 
+# The fall-through form has a function of its own: two nodes of one function share one
+# result table, and which of them computes a row follows the run order of independent
+# nodes, which is not specified (ITL-1404); the property is about registering, not that.
+@op.function_pod(output_keys="m")
+def through_lower(d3: str) -> str:
+    """``d3`` lower-cased."""
+    return d3.lower()
+
+
 def _forms(sources: dict[str, Any], cache_db: Any) -> dict[str, Any]:
     """The end streams of every function pod form, labelled and unlabelled."""
     main, p, q = sources["main"], sources["p"], sources["q"]
@@ -232,7 +241,7 @@ def _forms(sources: dict[str, Any], cache_db: Any) -> dict[str, Any]:
         )(main, label="cached"),
         # A fall-through pod over a source whose tags are data-tags.
         "fell": FallThroughPod(
-            through.pod,  # pyright: ignore[reportArgumentType]  # the decorator's pod is a FunctionPod
+            through_lower.pod,  # pyright: ignore[reportArgumentType]  # the decorator's pod is a FunctionPod
             ["t1"],
         )(
             sources["main_data_tags"].select_data_columns(["t1", "d3"]),

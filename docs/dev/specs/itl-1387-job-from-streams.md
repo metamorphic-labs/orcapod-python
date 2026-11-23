@@ -635,9 +635,12 @@ alone). In risk:
   function over inputs with equal data hashes share one result table: the first to run
   computes (`__computed` true), the other reads. Which runs first follows the run order of
   independent nodes, which is not specified: for one hand-written job alone it varies between
-  processes with the hash seed (measured: 10 seeds, two outcomes). The property test leaves
-  `__computed` out with that reason, as it leaves out `__pod_ts` and `__data_id` (a uuid7).
-- **The saved edge list follows recording order.** `job.save()` writes the hash graph's edges
+  processes with the hash seed (measured: 10 seeds, two outcomes). On the async path on CI's
+  parallel runner the shared result table's rows also differed between two runs. The property
+  test leaves `__computed` out with that reason, as it leaves out `__pod_ts` and `__data_id`
+  (a uuid7), and gives each function-pod form its own function, so no two of its nodes share
+  a result table. Filed as ITL-1404.
+- **The saved edge list follows recording order** (ITL-1404). `job.save()` writes the hash graph's edges
   in the order they were recorded; a load reads them as a set. A registered job's file equals
   the hand-written one's with the edges compared as a set; everything else in the `pipeline`
   and `bindings` sections is equal as written.
