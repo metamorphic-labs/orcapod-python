@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import warnings
-from typing import TYPE_CHECKING, Any, ClassVar
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
@@ -11,7 +12,7 @@ from orcapod.core.streams.base import (
     typed_arrow_schemas,
     typed_zero_row_table,
 )
-from orcapod.errors import SourceVersionWarning
+from orcapod.errors import SourceNameWarning, SourceVersionWarning
 from orcapod.core.streams.view import StreamView
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.types import ColumnConfig, Condition, ContentHash, Schema
@@ -74,6 +75,9 @@ def table_is_rows(source: object) -> bool:
     """
     kind = type(source)
     return vars(kind).get("TABLE_IS_ROWS") is True and reads_as_its_class(source, kind)
+
+
+_SourceT = TypeVar("_SourceT", bound="RootSource")
 
 
 class RootSource(StreamBase):
@@ -186,6 +190,9 @@ class RootSource(StreamBase):
             _ = require_source_name(source_id)
             warn_if_name_looks_like_an_id(source_id)
         self._source_name: str | None = source_id
+        # Whether the name was given, not built as a default; saved, so a reload
+        # never guesses it (ITL-1425). A subclass that sets a default leaves it.
+        self._source_name_given: bool = source_id is not None
 
     # -------------------------------------------------------------------------
     # Source identity
@@ -256,7 +263,41 @@ class RootSource(StreamBase):
 
         The kind is the config's ``source_type``; ``saved_source_name`` reads it back.
         """
-        return {"source_name": self.source_name, "source_version": self.SOURCE_VERSION}
+        return {
+            "source_name": self.source_name,
+            "source_name_given": self._source_name_given,
+            "source_version": self.SOURCE_VERSION,
+        }
+
+    @classmethod
+    def _from_saved_name(
+        cls, config: dict[str, Any], build: Callable[[str | None], _SourceT]
+    ) -> _SourceT:
+        """Rebuild a source from a saved config, with the name it was saved with.
+
+        The config says whether the name was given or a default
+        (``source_name_given``; missing means given: the saved name is used exactly).
+        A given name is passed as the name, and the source computes no default (its
+        location is not read for one). A saved default is passed back as the name
+        too, so the id is the saved one exactly (a Delta table saved with a relative
+        path keeps its relative default), but it is not checked like a name the user
+        gave (``SourceNameWarning``), and it is saved again as a default.
+
+        Args:
+            config: A saved source config (``to_config``).
+            build: Builds the source with the given name (``source_id``).
+
+        Returns:
+            The rebuilt source.
+        """
+        name = cls.saved_source_name(config)
+        if name is None or config.get("source_name_given", True):
+            return build(name)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=SourceNameWarning)
+            source = build(name)
+        source._source_name_given = False  # pyright: ignore[reportPrivateUsage]  # the saved state
+        return source
 
     @classmethod
     def require_saved_name_fields(cls, config: dict[str, Any]) -> None:

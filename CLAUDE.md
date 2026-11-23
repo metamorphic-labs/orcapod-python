@@ -1425,13 +1425,14 @@ data. The rules:
   `source_ids.build_source_id` and parsed only by `source_ids.parse_source_id` (split at the
   first `:`; the kind part never holds `:`, the name may). Bump a kind's version when a row
   read before a change could read differently after it (other values, Arrow types or record
-  id). A saved config holds `source_name` and `source_version` apart (the kind is
+  id). A saved config holds `source_name`, `source_name_given` (given or default:
+  read back, never guessed, by `RootSource._from_saved_name`) and `source_version` apart (the kind is
   `source_type`); loaded where the class declares another version, the source has the
   installed version's id (`SourceVersionWarning`), never a rewritten one. A slot (a
   `job.nodes` and `bind` key) is named by the source's name, not its full id, and two
   different sources with one name are refused in a job (`SourceSlotNameCollisionError`,
   `pipeline/base._refuse_sources_sharing_a_slot_name`). A `CachedSource` presents its
-  wrapped source's id and refuses, before any read or write, a cache table whose rows name
+  wrapped source's id and refuses, before reading the source's rows or writing, a cache table whose rows name
   another id (`CachedSourceIdMismatchError`; never a silent move to another path); a
   `SourceProxy` the saved id (rebuilt from the saved name fields, or the `full_source_id`
   identity field). A legacy config (`source_id`, no `source_name`) is refused, also nested,

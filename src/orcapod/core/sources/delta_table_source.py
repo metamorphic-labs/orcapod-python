@@ -11,10 +11,7 @@ from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource, saved_tag_only_columns
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
-from orcapod.core.sources.source_ids import (
-    location_source_name,
-    saved_given_name,
-)
+from orcapod.core.sources.source_ids import location_source_name
 from orcapod.core.sources.reload import same_rows
 from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
@@ -188,15 +185,14 @@ class DeltaTableSource(RootSource):
         cls, config: dict[str, Any], db_registry=None
     ) -> "DeltaTableSource":
         """Reconstruct a DeltaTableSource from a config dict."""
-        return cls(
-            delta_table_path=config["delta_table_path"],
-            tag_columns=config.get("tag_columns", ()),
-            tag_only_columns=saved_tag_only_columns(config),
-            system_tag_columns=config.get("system_tag_columns", ()),
-            record_id_columns=config.get("record_id_columns"),
-            # A saved default name is given again as no name (ITL-1425).
-            source_id=saved_given_name(
-                cls.saved_source_name(config),
-                location_source_name(os.fspath(config["delta_table_path"])),
+        return cls._from_saved_name(
+            config,
+            lambda name: cls(
+                delta_table_path=config["delta_table_path"],
+                tag_columns=config.get("tag_columns", ()),
+                tag_only_columns=saved_tag_only_columns(config),
+                system_tag_columns=config.get("system_tag_columns", ()),
+                record_id_columns=config.get("record_id_columns"),
+                source_id=name,
             ),
         )

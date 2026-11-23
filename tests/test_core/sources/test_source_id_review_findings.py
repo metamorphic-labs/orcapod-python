@@ -44,6 +44,7 @@ from orcapod.sources import (
     CachedSource,
     CSVSource,
     DataFrameSource,
+    DeltaTableSource,
     SQLiteTableSource,
 )
 from orcapod.types import Schema
@@ -403,3 +404,196 @@ class TestFinding6WarningForAGivenNameOnly:
         with pytest.warns(SourceNameWarning):
             source = _csv(Path(kind_looking_file), source_id="csv_v1:input.csv")
         assert source.source_id == "csv_v1:csv_v1:input.csv"
+
+
+# ---------------------------------------------------------------------------
+# Second review of PR 525 (head 0af907a3)
+# ---------------------------------------------------------------------------
+
+
+def _write_sqlite(path: Path) -> None:
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE records (subject TEXT NOT NULL, session INTEGER NOT NULL, "
+            "weight REAL, count INTEGER, PRIMARY KEY (subject, session))"
+        )
+        connection.executemany(
+            "INSERT INTO records VALUES (:subject, :session, :weight, :count)", ROWS
+        )
+
+
+def _write_delta(path: Path) -> None:
+    from deltalake import write_deltalake
+
+    write_deltalake(str(path), pa.Table.from_pylist(ROWS, schema=SCHEMA))
+
+
+def _reader(kind: str, location: str, **kwargs):
+    if kind == "csv":
+        return _csv(Path(location), **kwargs)
+    if kind == "delta":
+        return DeltaTableSource(
+            location,
+            tag_columns=KEY,
+            record_id_columns=KEY,
+            tag_only_columns=True,
+            **kwargs,
+        )
+    return SQLiteTableSource(
+        location, "records", tag_columns=KEY, tag_only_columns=True, **kwargs
+    )
+
+
+def _write(kind: str, path: Path) -> None:
+    if kind == "csv":
+        _write_csv(path, ROWS)
+    elif kind == "delta":
+        _write_delta(path)
+    else:
+        _write_sqlite(path)
+
+
+def _rebuild(source):
+    return type(source).from_config(source.to_config())
+
+
+READERS = ["csv", "delta", "sqlite"]
+
+
+class TestSecondReview1ExplicitNameOverAnUnusableLocation:
+    """A given name never needs a default from the location (``::`` cannot be one)."""
+
+    @pytest.mark.parametrize("kind", READERS)
+    def test_a_named_source_at_a_location_with_the_separator_round_trips(
+        self, tmp_path, kind
+    ):
+        location = tmp_path / f"bad::{kind}"
+        _write(kind, location)
+        source = _reader(kind, str(location), source_id="units")
+        rebuilt = _rebuild(source)
+        assert (
+            rebuilt.source_id
+            == source.source_id
+            == f"{type(source).SOURCE_KIND}_v1:units"
+        )
+        assert rebuilt.content_hash() == source.content_hash()
+        assert rebuilt.as_table().num_rows == len(ROWS)
+
+    @pytest.mark.parametrize("kind", READERS)
+    def test_without_a_name_the_location_is_refused(self, tmp_path, kind):
+        location = tmp_path / f"bad::{kind}"
+        _write(kind, location)
+        with pytest.raises(ValueError, match="::"):
+            _reader(kind, str(location))
+
+    def test_a_saved_job_loads_the_named_source(self, tmp_path):
+        location = _write_csv(tmp_path / "bad::location.csv", ROWS)
+        job = PipelineJob(name="sep", database=DeltaTableDatabase(tmp_path / "db"))
+        with job:
+            ratio.pod(_csv(location, source_id="units"), label="ratio")
+        job.run()
+        saved = tmp_path / "job.json"
+        job.save(saved)
+        loaded = PipelineJob.load(saved, database=DeltaTableDatabase(tmp_path / "db"))
+        source = loaded.sources["units"]
+        assert isinstance(source, CSVSource)
+        assert source.source_id == "csv_v1:units"
+
+
+class TestSecondReview2GivenOrDefaultIsSaved:
+    """Whether the name was given is saved and read back, never guessed."""
+
+    @pytest.mark.parametrize(
+        "kind, file_name",
+        [
+            ("csv", "csv_v1:input.csv"),
+            ("delta", "delta_table_v1:input"),
+            ("sqlite", "csv_v1:default.db"),
+        ],
+    )
+    def test_a_kind_looking_default_is_quiet_on_construction_and_reload(
+        self, tmp_path, monkeypatch, kind, file_name
+    ):
+        monkeypatch.chdir(tmp_path)
+        _write(kind, tmp_path / file_name)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", SourceNameWarning)
+            source = _reader(kind, file_name)  # a relative location
+            config = source.to_config()
+            rebuilt = type(source).from_config(config)
+            again = type(source).from_config(rebuilt.to_config())
+        assert config["source_name_given"] is False
+        assert rebuilt.source_id == again.source_id == source.source_id
+        assert again.to_config()["source_name_given"] is False
+
+    @pytest.mark.parametrize("kind", READERS)
+    def test_a_given_name_equal_to_the_default_stays_given(
+        self, tmp_path, monkeypatch, kind
+    ):
+        monkeypatch.chdir(tmp_path)
+        file_name = {"csv": "csv_v1:input.csv", "delta": "delta_table_v1:input"}.get(
+            kind, "csv_v1:default.db"
+        )
+        _write(kind, tmp_path / file_name)
+        default = _reader(kind, file_name).source_name
+        with pytest.warns(SourceNameWarning):
+            source = _reader(kind, file_name, source_id=default)
+        config = source.to_config()
+        assert config["source_name_given"] is True
+        with pytest.warns(SourceNameWarning):
+            rebuilt = type(source).from_config(config)
+        assert rebuilt.source_id == source.source_id
+        assert rebuilt.to_config()["source_name_given"] is True
+
+
+class TestSecondReview3Claims:
+    def test_one_name_with_two_schemas_names_both_full_ids(self):
+        from orcapod.errors import InconsistentSourceError
+        from orcapod.sources import DictSource
+
+        arrow = ArrowTableSource(
+            pa.Table.from_pylist(ROWS, schema=SCHEMA),
+            tag_columns=KEY,
+            record_id_columns=KEY,
+            tag_only_columns=True,
+            source_id="units",
+        )
+        other = DictSource(
+            [{"subject": "s1", "session": 1, "weight": 1.5, "label": "a"}],
+            tag_columns=KEY,
+            record_id_columns=KEY,
+            tag_only_columns=True,
+            source_id="units",
+        )
+
+        @function_pod(output_keys="tagged")
+        def tagged(weight: float | None) -> float | None:
+            return weight
+
+        job = PipelineJob(name="schemas", database=InMemoryArrowDatabase())
+        with pytest.raises(InconsistentSourceError) as caught:
+            with job:
+                tagged.pod(arrow, label="first")
+                tagged.pod(other, label="second")
+        assert "'arrow_table_v1:units'" in str(caught.value)
+        assert "'dict_v1:units'" in str(caught.value)
+
+    def test_a_cache_of_another_id_reads_no_row_of_the_source(
+        self, tmp_path, csv_path, monkeypatch
+    ):
+        cached = CachedSource(
+            _csv(csv_path, source_id="subjects"),
+            cache_database=DeltaTableDatabase(tmp_path / "cache"),
+        )
+        cached.as_table()
+        config = cached.to_config()
+        monkeypatch.setattr(CSVSource, "SOURCE_VERSION", 2)
+        with pytest.warns(SourceVersionWarning):
+            reloaded = CachedSource.from_config(config)
+
+        def no_read(*args, **kwargs):
+            raise AssertionError("the wrapped source's rows were read")
+
+        monkeypatch.setattr(reloaded.cached_source, "as_table", no_read)
+        with pytest.raises(CachedSourceIdMismatchError):
+            reloaded.as_table()

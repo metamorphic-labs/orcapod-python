@@ -1090,24 +1090,27 @@ class SpiralDBTableSource(RootSource):
                 SpiralDB table id than the one saved (the table was dropped and
                 created again, or another table took the name).
         """
-        source = cls(
-            project_id=config["project_id"],
-            table_name=config["table_name"],
-            dataset=config.get("dataset", "default"),
-            tag_columns=config.get("tag_columns"),
-            tag_only_columns=saved_tag_only_columns(config),
-            system_tag_columns=config.get("system_tag_columns", ()),
-            where=Condition.from_config(config.get("where") or {}),
-            limit=config.get("limit"),
-            asof=config.get("asof"),
-            max_rows=config.get("max_rows", DEFAULT_MAX_ROWS),
-            record_id_columns=config.get("record_id_columns"),
-            batch_rows=config.get("batch_rows", DEFAULT_BATCH_ROWS),
-            tags_as_data=config.get("tags_as_data"),
-            source_id=cls.saved_source_name(config),
-            label=config.get("label"),
-            data_context=config.get("data_context"),
-            overrides=config.get("overrides"),
+        source = cls._from_saved_name(
+            config,
+            lambda name: cls(
+                project_id=config["project_id"],
+                table_name=config["table_name"],
+                dataset=config.get("dataset", "default"),
+                tag_columns=config.get("tag_columns"),
+                tag_only_columns=saved_tag_only_columns(config),
+                system_tag_columns=config.get("system_tag_columns", ()),
+                where=Condition.from_config(config.get("where") or {}),
+                limit=config.get("limit"),
+                asof=config.get("asof"),
+                max_rows=config.get("max_rows", DEFAULT_MAX_ROWS),
+                record_id_columns=config.get("record_id_columns"),
+                batch_rows=config.get("batch_rows", DEFAULT_BATCH_ROWS),
+                tags_as_data=config.get("tags_as_data"),
+                source_id=name,
+                label=config.get("label"),
+                data_context=config.get("data_context"),
+                overrides=config.get("overrides"),
+            ),
         )
         saved_id = config.get("table_id")
         if saved_id is not None and saved_id != source.table_id:

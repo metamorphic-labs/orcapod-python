@@ -12,10 +12,7 @@ from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource, saved_tag_only_columns
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
-from orcapod.core.sources.source_ids import (
-    location_source_name,
-    saved_given_name,
-)
+from orcapod.core.sources.source_ids import location_source_name
 from orcapod.core.sources.reload import keep_nullable_columns, same_rows
 from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
@@ -502,17 +499,15 @@ class CSVSource(RootSource):
         Raises:
             ValueError: If a ``"schema"`` entry is present but malformed.
         """
-        return cls(
-            file_path=config["file_path"],
-            tag_columns=config.get("tag_columns", ()),
-            tag_only_columns=saved_tag_only_columns(config),
-            system_tag_columns=config.get("system_tag_columns", ()),
-            record_id_columns=config.get("record_id_columns"),
-            # A saved default name is given again as no name, so it is not taken for
-            # one the user gave (ITL-1425).
-            source_id=saved_given_name(
-                cls.saved_source_name(config),
-                location_source_name(str(config["file_path"])),
+        return cls._from_saved_name(
+            config,
+            lambda name: cls(
+                file_path=config["file_path"],
+                tag_columns=config.get("tag_columns", ()),
+                tag_only_columns=saved_tag_only_columns(config),
+                system_tag_columns=config.get("system_tag_columns", ()),
+                record_id_columns=config.get("record_id_columns"),
+                source_id=name,
+                schema=cls.saved_schema(config),
             ),
-            schema=cls.saved_schema(config),
         )

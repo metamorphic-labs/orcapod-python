@@ -145,6 +145,7 @@ def test_the_mark_enters_no_config_and_no_identity() -> None:
         "record_id_columns",
         "polling_config",
         "source_name",
+        "source_name_given",
         "source_version",
         "impl_config",
     }

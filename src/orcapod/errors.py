@@ -723,8 +723,8 @@ class CachedSourceIdMismatchError(ValueError):
     A cache keeps the rows of one source, with that source's id in every source-info
     token and source-id system tag. A table whose stored rows name another id (most
     often the same source read by another version of its kind, after a saved job is
-    loaded where the class declares a newer ``SOURCE_VERSION``) is refused before
-    anything is read or written: the cache must be rebuilt for the new id (a new
+    loaded where the class declares a newer ``SOURCE_VERSION``) is refused before any
+    row of the wrapped source is read and before anything is written: the cache must be rebuilt for the new id (a new
     ``cache_path``, or a new cache database), or the reader's version pinned.
     """
 

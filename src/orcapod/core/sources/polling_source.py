@@ -733,12 +733,15 @@ class PollingSource(RootSource, Generic[T]):
             impl = impl_class.from_config(impl_config)
 
         polling_config = PollingConfig(**config.get("polling_config", {}))
-        return cls(
-            impl=impl,
-            tag_columns=config["tag_columns"],
-            polling_config=polling_config,
-            source_id=cls.saved_source_name(config),
-            record_id_columns=config.get("record_id_columns"),
+        return cls._from_saved_name(
+            config,
+            lambda name: cls(
+                impl=impl,
+                tag_columns=config["tag_columns"],
+                polling_config=polling_config,
+                source_id=name,
+                record_id_columns=config.get("record_id_columns"),
+            ),
         )
 
     # -------------------------------------------------------------------------

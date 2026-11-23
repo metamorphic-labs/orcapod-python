@@ -533,11 +533,21 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
             if schemas_differ:
                 from orcapod.errors import InconsistentSourceError
 
+                from orcapod.core.sources.base import RootSource
+
+                ids = sorted(
+                    {
+                        s.source_id
+                        for s in (self._source_streams[h] for h in hashes)
+                        if isinstance(s, RootSource)
+                    }
+                )
+                named = f" ({', '.join(repr(i) for i in ids)})" if ids else ""
                 raise InconsistentSourceError(
                     f"Pipeline '{'.'.join(self._name)}' has {len(hashes)} source "
-                    f"nodes all named {node_name!r} but with different schemas. "
-                    f"Assign distinct source_id values to the conflicting sources "
-                    f"so each slot has a unique, stable identity."
+                    f"nodes all named {node_name!r}{named} but with different "
+                    f"schemas. Assign distinct source_id values to the conflicting "
+                    f"sources so each slot has a unique, stable identity."
                 )
             _refuse_sources_sharing_a_slot_name(
                 node_name, [self._source_streams[h] for h in hashes]

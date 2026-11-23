@@ -384,8 +384,10 @@ class CachedSource(RootSource):
         ``SourceProxy``).
         """
         seen = self._source_modified_time()
-        live_with_hash = self._live_records()
+        # Before the wrapped source's rows are read: a cache of another source id is
+        # refused without reading or writing any row (ITL-1425).
         self._require_rows_of_this_source()
+        live_with_hash = self._live_records()
         # Store in DB with hash as record ID (skip_duplicates deduplicates).
         # The data context column is appended after the record hashes are computed:
         # it names the generation of hashing that produced them and is not hashed.
@@ -456,6 +458,7 @@ class CachedSource(RootSource):
         seen = self._source_modified_time()
         if seen == self._source_seen:
             return False
+        self._require_rows_of_this_source()
         live = self._live_records().column(self.HASH_COLUMN_NAME).to_pylist()
         # The next read presents the cache's rows and the live rows together (the
         # cache keeps every row any source sharing it wrote).
@@ -520,9 +523,13 @@ class CachedSource(RootSource):
         return records
 
     def _require_rows_of_this_source(self) -> None:
-        """Refuse a cache table holding rows of another source id, before a write.
+        """Refuse a cache table holding rows of another source id (ITL-1425).
 
-        Read once per source object; a table not yet written holds no other id.
+        Called before the wrapped source's rows are read, so a refused cache reads no
+        row of the source and writes nothing (the wrapped source's own
+        ``check_for_new_data`` may still have run). The cache table is read once per
+        source object, until it is found to hold this source's rows; a table not yet
+        written holds no other id.
 
         Raises:
             CachedSourceIdMismatchError: If a stored row names another source id.
@@ -563,7 +570,7 @@ class CachedSource(RootSource):
             raise CachedSourceIdMismatchError(
                 f"CachedSource at {'/'.join(self.cache_path)!r} reads "
                 f"{self.source_id!r}, but its cache holds rows of "
-                f"{', '.join(repr(i) for i in others)}; nothing was read or written. "
+                f"{', '.join(repr(i) for i in others)}; no row of the source was read and nothing was written. "
                 "The cache must be rebuilt for the new id (another cache_path or "
                 "cache database), or the reader's version pinned to the one that "
                 "wrote it."

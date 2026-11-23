@@ -237,14 +237,17 @@ class SQLiteTableSource(DBTableSource):
             ``:memory:`` sources cannot be reconstructed — the new in-memory
             database will be empty and ``ValueError`` will be raised.
         """
-        return cls(
-            db_path=config["db_path"],
-            table_name=config["table_name"],
-            tag_columns=config.get("tag_columns"),
-            tag_only_columns=saved_tag_only_columns(config),
-            system_tag_columns=config.get("system_tag_columns", ()),
-            record_id_columns=config.get("record_id_columns"),
-            source_id=cls.saved_source_name(config),
-            label=config.get("label"),
-            data_context=config.get("data_context"),
+        return cls._from_saved_name(
+            config,
+            lambda name: cls(
+                db_path=config["db_path"],
+                table_name=config["table_name"],
+                tag_columns=config.get("tag_columns"),
+                tag_only_columns=saved_tag_only_columns(config),
+                system_tag_columns=config.get("system_tag_columns", ()),
+                record_id_columns=config.get("record_id_columns"),
+                source_id=name,
+                label=config.get("label"),
+                data_context=config.get("data_context"),
+            ),
         )

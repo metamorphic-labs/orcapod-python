@@ -210,17 +210,6 @@ def location_source_name(location: str) -> str:
         ) from exc
 
 
-def saved_given_name(saved_name: str | None, default_name: str) -> str | None:
-    """The name to give a source rebuilt from a saved config: ``None`` for its default.
-
-    A config saves a source's name whether it was given or is the default built from
-    where the data lives; given again as no name, a saved default is rebuilt as the
-    default, which is not checked like a name the user gave
-    (``warn_if_name_looks_like_an_id``). The id is the same either way.
-    """
-    return None if saved_name == default_name else saved_name
-
-
 def joined_location(separator: str, *parts: str) -> str:
     """Join the parts of a location with ``separator``, refusing a part that holds it.
 
