@@ -101,3 +101,72 @@ print(
     "A differently named job over the same store shares nothing: the job name is the"
     " top of every stored path."
 )
+
+print("\n== Row level, from the stores (round two)")
+from orcapod.utils.arrow_utils import fold_system_tag_values  # noqa: E402
+
+from ._store import read_job, rows, system_tag_columns  # noqa: E402
+
+SA, SB = read_job(a, store), read_job(b, store)
+ra, rb = SA["rates"], SB["rates_b"]
+print(
+    f"  rates PIPELINE store: A and B use the same table: {ra.pipeline_path == rb.pipeline_path};"
+    f" entries under the shared node content hash: {ra.own(ra.pipeline).num_rows}"
+    f" (B wrote no new entry: same input system tags and input hashes)"
+)
+pa_, pb_ = SA["session_means"], SB["imec0_means"]
+print(
+    f"  session_means vs imec0_means PIPELINE tables: same table: {pa_.pipeline_path == pb_.pipeline_path}"
+)
+
+
+def members(S, group_input, gb_label, subject, session):
+    """The group's members, by key tags, checked by refolding their system tags."""
+    t = S[group_input].memory
+    ms = sorted(
+        (r for r in rows(t) if (r["subject_id"], r["session"]) == (subject, session)),
+        key=lambda r: (r["probe"], r["unit"]),
+    )
+    (g,) = [
+        r
+        for r in rows(S[gb_label].memory)
+        if (r["subject_id"], r["session"]) == (subject, session)
+    ]
+    gcols, mcols = system_tag_columns(S[gb_label].memory), system_tag_columns(t)
+    assert all(
+        g[gc] == fold_system_tag_values([m[mc] for m in ms], label="group_v1")
+        for gc, mc in zip(gcols, mcols)
+    )
+    rid = [
+        c
+        for c in mcols
+        if c.startswith("_tag_record_id")
+        and ms[0][c.replace("record_id", "source_id", 1)] == "units"
+    ][0]
+    return {m[rid] for m in ms}
+
+
+filt = [k for k in b.nodes if k.startswith("Filter")][0]
+gb_b = [k for k in b.nodes if k.startswith("GroupBy")][0]
+ma = members(SA, "rates", "GroupBy", "mouse_01", "s1")
+mb = members(SB, filt, gb_b, "mouse_01", "s1")
+print(f"  group mouse_01 s1: A's members (units record ids) {sorted(ma)}")
+print(f"                     B's members                    {sorted(mb)}")
+dropped = ma - mb
+
+
+def units_ids(t):
+    """The units record ids of a table (record ids are per source: sessions has row_0 too)."""
+    out = set()
+    for r in rows(t):
+        for c in system_tag_columns(t):
+            if c.startswith("_tag_source_id") and r[c] == "units":
+                out.add(r[c.replace("_tag_source_id", "_tag_record_id", 1)])
+    return out
+
+
+in_rates_b = units_ids(rb.memory) & dropped
+in_filter = units_ids(SB[filt].memory) & dropped
+print(
+    f"  {sorted(dropped)}: in B's rates (shared entries): {sorted(in_rates_b) == sorted(dropped)}; in B's {filt}: {sorted(in_filter)} -> the row-level divergence is at {filt}"
+)

@@ -2,35 +2,44 @@
 
 Run from docs/dev/specs/itl-1421-provenance: uv run python -m scripts.07_function_changed
 
-Proves:
-- a body edit WITHOUT a version bump keeps the function's uri, so a run over the same
-  inputs reuses the stored results of the old body (nothing recomputed); the stored
-  ``__pf_var_function_content_hash`` is the only trace that the body differs, and it can
-  be compared with the current function's;
-- with a major version bump (``v1.0``) the new results land beside the old ones (another
-  uri); the two versions' records pair up per input by ``__input_data_hash`` (and the
-  tags), so a per-input comparison is a read of two stored tables.
-Public API only (``get_all_records``); one database shared by the two jobs.
+Uses the two stores of a function node for what each is for:
+- RESULT store (which function, which computation): every result row records the
+  function's name, version, module, signature hash and CONTENT hash (its body), the git
+  revision, the executor and Python version, and when it ran (``__pod_ts``). A body edit
+  WITHOUT a version bump keeps the uri, so the old results are reused; the result rows'
+  ``__pf_var_function_content_hash`` differs from the current function's, which flags
+  every result of the old body.
+- PIPELINE store (why, from what): a major version bump (``v1.0``) gives a new uri, so new
+  pipeline and result tables. Each input row keeps its base entry id
+  (``__pipeline_base_entry_id`` = hash of the input's SYSTEM TAGS and input data hash; no
+  function in it), so the two versions' entries pair EXACTLY per input row by that id.
+  Round one paired by tags + ``__input_data_hash``; the entry id is the same key, read
+  from the store instead of rebuilt, and it also carries the system tags (two rows with
+  equal tags but different source records stay apart).
+Direct reads of the stored tables; one database shared by the jobs.
 """
 
 from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-
-from ._common import workshop_job
+from typing import Any
 
 from orcapod import PipelineJob, function_pod
 from orcapod.databases import DeltaTableDatabase
 from orcapod.sources import CSVSource
 
+from ._common import workshop_job
+from ._store import KEY, hash_text, read_job, rows, short_hash
+
 root = Path(tempfile.mkdtemp())
 store = DeltaTableDatabase(root / "store")
 job1, data_dir = workshop_job(root, database=store, name="v0")
 job1.run()
+S1 = read_job(job1, store)
 
 
-def rates_job(name: str, version: str, body):
+def rates_job(name: str, version: str, body: Any) -> tuple[PipelineJob, Any]:
     pod = function_pod(
         output_keys="rate_hz", function_name="firing_rate", version=version
     )(body)
@@ -53,72 +62,77 @@ def rates_job(name: str, version: str, body):
             sessions.select_data_columns(["duration_s"]),
             label="rates",
         )
-    return job
+    return job, pod
 
 
 def per_minute(n_spikes: int, duration_s: float) -> float:
     return 60 * n_spikes / duration_s  # the edit: spikes per minute
 
 
+def body_hash(pod: Any) -> str | None:
+    return hash_text(
+        pod.pod.data_function.get_function_variation_data()["function_content_hash"]
+    )
+
+
 print("== Body edited, version unchanged (v0.0)")
-same = rates_job("v0", "v0.0", per_minute)  # same job name: same pipeline tables
+same, pod = rates_job("v0", "v0.0", per_minute)  # same job name: same tables
 same.run()
-recs = same.nodes["rates"].get_all_records(columns={"meta": True})
+print("  run summary:", same.last_run)
+S2 = read_job(same, store)
+res = rows(S2["rates"].result)
+current = body_hash(pod)
+stale = [r for r in res if hash_text(r["__pf_var_function_content_hash"]) != current]
 print(
-    "  results computed by this run:",
-    sum(
-        1
-        for r in recs.to_pylist()
-        if r["__pod_ts"]
-        > max(
-            x["__pod_ts"]
-            for x in job1.nodes["rates"]
-            .get_all_records(columns={"meta": True})
-            .to_pylist()
-        )
-    ),
+    f"  RESULT store: {len(res)} results; function_content_hash differs from the current body's ({short_hash(current, 8)}): {len(stale)}"
+)
+print(
+    f"  e.g. {short_hash(stale[0]['__pf_var_function_content_hash'], 8)} {stale[0]['__pf_var_function_version']} ran {stale[0]['__pod_ts']:%H:%M:%S} (git {stale[0]['__pf_var_git_hash'][:12]})"
 )
 print(
     "  a rate shown:",
     same.nodes["rates"].as_table().column("rate_hz")[0].as_py(),
-    "(n/duration, the OLD body's value)",
-)
-stored = {r["__pf_var_function_content_hash"] for r in recs.to_pylist()}
-print(
-    "  stored function content hashes:",
-    len(stored),
-    "-> compare with the current function's to flag results of another body",
+    "(n/duration: the OLD body's value)",
 )
 
 print("\n== Body edited, major version bumped (v1.0)")
-new = rates_job("v1", "v1.0", per_minute)
+new, _ = rates_job("v0", "v1.0", per_minute)  # same job name, new uri: new tables
 new.run()
-old_recs = {
-    (r["subject_id"], r["session"], r["probe"], r["unit"], r["__input_data_hash"]): r
-    for r in job1.nodes["rates"].get_all_records(columns={"meta": True}).to_pylist()
+S3 = read_job(new, store)
+old_p = {
+    r["__pipeline_base_entry_id"]: r
+    for r in rows(S1["rates"].own(S1["rates"].pipeline))
 }
-new_recs = new.nodes["rates"].get_all_records(columns={"meta": True}).to_pylist()
-pairs = [
-    (
-        old_recs.get(
-            (
-                r["subject_id"],
-                r["session"],
-                r["probe"],
-                r["unit"],
-                r["__input_data_hash"],
-            )
-        ),
-        r,
-    )
-    for r in new_recs
-]
-matched = [(o, n) for o, n in pairs if o is not None]
-changed = [(o, n) for o, n in matched if o["rate_hz"] != n["rate_hz"]]
-print(f"  paired per input: {len(matched)} of {len(new_recs)}; changed: {len(changed)}")
-o, n = changed[0]
+new_p = {
+    r["__pipeline_base_entry_id"]: r
+    for r in rows(S3["rates"].own(S3["rates"].pipeline))
+}
 print(
-    f"  e.g. {n['subject_id']} {n['session']} {n['probe']} unit {n['unit']}: "
-    f"{o['rate_hz']:.4f} -> {n['rate_hz']:.4f}  ({o['__pf_var_function_version']} -> "
-    f"{n['__pf_var_function_version']})"
+    f"  PIPELINE store: v0 entries {len(old_p)}, v1.0 entries {len(new_p)}, paired by base entry id: {len(old_p.keys() & new_p.keys())}"
+)
+old_r = {r[KEY]: r for r in rows(S1["rates"].result)}
+new_r = {r[KEY]: r for r in rows(S3["rates"].result)}
+changed = [
+    (old_p[k], new_p[k])
+    for k in old_p.keys() & new_p.keys()
+    if old_r[old_p[k]["__data_id"]]["rate_hz"]
+    != new_r[new_p[k]["__data_id"]]["rate_hz"]
+]
+print(f"  RESULT store: per paired entry, the two results differ: {len(changed)}")
+o, n = sorted(
+    changed,
+    key=lambda p: (p[0]["subject_id"], p[0]["session"], p[0]["probe"], p[0]["unit"]),
+)[0]
+ro, rn = old_r[o["__data_id"]], new_r[n["__data_id"]]
+print(
+    f"  e.g. {o['subject_id']} {o['session']} {o['probe']} unit {o['unit']}: {ro['rate_hz']:.4f} ({ro['__pf_var_function_version']}, body {short_hash(ro['__pf_var_function_content_hash'], 8)})"
+    f" -> {rn['rate_hz']:.4f} ({rn['__pf_var_function_version']}, body {short_hash(rn['__pf_var_function_content_hash'], 8)})"
+)
+paths = [
+    p
+    for p in store.list_table_paths()
+    if p[-1] in ("pdb_v1", "rdb_v1") and "firing_rate" in p
+]
+print(
+    f"  firing_rate tables in the store: {sorted((p[4 if p[1] == '_result' else 3], p[-1]) for p in paths)}"
 )

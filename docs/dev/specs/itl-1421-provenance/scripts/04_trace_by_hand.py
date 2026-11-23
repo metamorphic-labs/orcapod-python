@@ -1,174 +1,245 @@
-"""Scenario 1 by hand: from ONE output cell back to the exact source records and columns.
+"""Scenario 1 by hand: from ONE output cell back to the exact source cells, using every
+stored table: the PIPELINE store (why and from what), the RESULT store (which function,
+which computation) and the SOURCE INFO (the ultimate sources).
 
 Run from docs/dev/specs/itl-1421-provenance: uv run python -m scripts.04_trace_by_hand
 
 Pipeline (the tutorial's, Part 8): units, sessions (CSV) -> select -> join -> firing_rate
 [rates] -> group_by(subject_id, session) -> select -> mean_rate [session_means].
 
-Public API only: ``as_table(columns=...)``, ``get_all_records(columns=...)``,
-``node.node_uri``, ``SourceJobNode.bound_source.source_id``. Nothing is computed by the
-trace; it reads what the run stored. The same trace is then repeated on the job LOADED from
-its saved file (``run(load_only=True)``), which shows it needs no live objects.
+The procedure, per step (the step names are printed):
+  P  pipeline store: the function node's pipeline record whose SYSTEM TAGS are the row's
+     (its key is hash(system tags + input data hash)); it names the input entry that
+     triggered the lookup, the result it was served (``__data_id``) and whether this
+     entry computed it (``__computed``).
+  R  result store: the result row ``__record_id = __data_id``: the function (name,
+     version, content hash, module, git), how it ran (executor, Python), when (``__pod_ts``)
+     and the value; ``__input_data_hash`` must equal the pipeline record's.
+  U  upstream entry: the row of the node's input with the same system-tag values (a
+     row-wise operator keeps them); its ``_content_hash`` must equal ``__input_data_hash``.
+  G  GroupBy: the members are the input rows with the group's KEY TAGS; refolding their
+     system tags in member order must give the group's folded system tags (exact
+     membership, and member i is list position i).
+  S  source info: the pipeline record's input tokens ``<source>::<record>::<column>``
+     name the ultimate source cells; the record-id system tags name the same rows.
+Nothing is computed by the trace. It is repeated on the job LOADED from its file.
 """
 
 from __future__ import annotations
 
+import contextlib
+import io
 import tempfile
 from pathlib import Path
 from typing import Any
 
-from ._common import workshop_job
-
 from orcapod import PipelineJob
 from orcapod.databases import DeltaTableDatabase
+from orcapod.utils.arrow_utils import fold_system_tag_values
+
+from ._common import workshop_job
+from ._store import (
+    KEY,
+    StoredJob,
+    hash_text,
+    parse_token,
+    read_job,
+    rows,
+    short_hash,
+    system_tag_columns,
+)
 
 
-def parse_token(token: str) -> tuple[str, str, str]:
-    """Split ``<source id>::<record id>::<column>`` at its first and last ``::``."""
-    head, _, column = token.rpartition("::")
-    source, _, record = head.partition("::")
-    return source, record, column
+def sys_values(row: dict[str, Any], cols: list[str]) -> tuple[Any, ...]:
+    return tuple(row[c] for c in cols)
 
 
-def function_nodes_by_uri(job: Any) -> dict[str, list[Any]]:
-    """A function node's token names its function as ``":".join(node.node_uri)``."""
-    out: dict[str, list[Any]] = {}
-    for label in sorted(job.nodes):
-        node = job.nodes[label]
-        if type(node).__name__ == "FunctionJobNode":
-            out.setdefault(":".join(node.node_uri), []).append(node)
-    return out
+def pipeline_record(S: StoredJob, label: str, row: dict[str, Any]) -> dict[str, Any]:
+    """P: the node's own pipeline record whose system tags are the row's."""
+    n = S[label]
+    cols = system_tag_columns(n.pipeline)
+    hits = [
+        r
+        for r in rows(n.own(n.pipeline))
+        if sys_values(r, cols) == sys_values(row, cols)
+    ]
+    assert len(hits) == 1, hits
+    return hits[0]
 
 
-def source_nodes_by_id(job: Any) -> dict[str, Any]:
-    out: dict[str, Any] = {}
-    for label in sorted(job.nodes):
-        node = job.nodes[label]
-        if type(node).__name__ == "SourceJobNode" and node.bound_source is not None:
-            out[node.bound_source.source_id] = node
-    return out
+def result_row(S: StoredJob, label: str, rec: dict[str, Any]) -> dict[str, Any]:
+    """R: the result row the pipeline record was served."""
+    (res,) = [r for r in rows(S[label].result) if r[KEY] == rec["__data_id"]]
+    assert res["__input_data_hash"] == rec["__input_data_hash"]
+    return res
 
 
-def trace(job, token: str, depth: int = 0, *, fn=None, src=None, stats=None) -> None:
-    """Print the provenance tree of one source-info token, recursively."""
-    fn = fn if fn is not None else function_nodes_by_uri(job)
-    src = src if src is not None else source_nodes_by_id(job)
-    pad = "  " * depth
-    source, record, column = parse_token(token)
-    if source in fn:
-        # A function output: the record id is the result row's ``__data_id`` (hex).
-        hits = []
-        for node in fn[source]:
-            records = node.get_all_records(columns={"source": True, "meta": True})
-            if records is None:
-                continue
-            ids = [b.hex() for b in records.column("__data_id").to_pylist()]
-            hits += [
-                (node, records.slice(i, 1)) for i, x in enumerate(ids) if x == record
-            ]
-        value = hits[0][1].column(column)[0].as_py() if hits else None
-        print(
-            f"{pad}{column} = {value!r}  <- result {record[:12]}… of "
-            f"{source.split(':')[0]} ({len(hits)} pipeline record(s) point at it)"
-        )
-        if stats is not None:
-            stats["shared"] += len(hits) > 1
-        node, row = hits[0]  # several: identical inputs; all lead to equal values
-        for name in sorted(
-            c
-            for c in row.column_names
-            if c.startswith("_source_") and c != f"_source_{column}"
-        ):
-            tokens = row.column(name)[0].as_py()
-            for t in tokens if isinstance(tokens, list) else [tokens]:
-                trace(job, t, depth + 1, fn=fn, src=src, stats=stats)
-        return
-    # A source cell: find the row by its record-id system tag.
-    node = src[source]
-    table = node.as_table(columns={"system_tags": True})
-    rid = [c for c in table.column_names if c.startswith("_tag_record_id")][0]
-    i = table.column(rid).to_pylist().index(record)
-    tags = {k: table.column(k)[i].as_py() for k in node.keys()[0]}
-    print(
-        f"{pad}{column} = {table.column(column)[i].as_py()!r}  <- source "
-        f"{source!r} record {record} {tags}"
+def upstream_row(S: StoredJob, label: str, rec: dict[str, Any]) -> dict[str, Any]:
+    """U: the input row with the record's system tags; its content hash is checked."""
+    t = S[label].memory
+    cols = system_tag_columns(t)
+    (row,) = [r for r in rows(t) if sys_values(r, cols) == sys_values(rec, cols)]
+    assert row["_content_hash"] == hash_text(rec["__input_data_hash"]), label
+    return row
+
+
+def group_members(
+    S: StoredJob,
+    group: dict[str, Any],
+    keys: list[str],
+    member_input: str,
+    order: list[str],
+) -> list[dict[str, Any]]:
+    """G: the input rows with the group's key tags, in member order, checked by refold."""
+    t = S[member_input].memory
+    members = sorted(
+        (r for r in rows(t) if all(r[k] == group[k] for k in keys)),
+        key=lambda r: tuple(r[c] for c in order),
     )
-    if stats is not None:
-        stats["sources"].add((source, record, column))
+    gcols, mcols = system_tag_columns(S["GroupBy"].memory), system_tag_columns(t)
+    for gc, mc in zip(gcols, mcols):
+        assert group[gc] == fold_system_tag_values(
+            [m[mc] for m in members], label="group_v1"
+        ), gc
+    return members
 
 
-def cell_token(job, label: str, column: str, **tags) -> str:
-    table = job.nodes[label].as_table(columns={"source": True})
-    for row in table.to_pylist():
-        if all(row[k] == v for k, v in tags.items()):
-            print(f"{label}{tags}: {column} = {row[column]!r}")
-            return row[f"_source_{column}"]
-    raise LookupError(tags)
+def source_cell(
+    S: StoredJob, token: str, rec: dict[str, Any]
+) -> tuple[str, str, str, Any]:
+    """S: resolve a source token; the record-id system tag of that source agrees."""
+    source, record, column = parse_token(token)
+    cols = system_tag_columns(S["Join"].memory)
+    named = {
+        rec[c]
+        for c in cols
+        if c.startswith("_tag_record_id")
+        and rec[c.replace("record_id", "source_id", 1)] == source
+    }
+    assert named == {record}, (named, record)
+    t = S[source].memory  # the source job node, labelled by its source
+    rid = [c for c in system_tag_columns(t) if c.startswith("_tag_record_id")][0]
+    (row,) = [r for r in rows(t) if r[rid] == record]
+    return source, record, column, row[column]
+
+
+def fn_desc(res: dict[str, Any]) -> str:
+    return (
+        f"{res['__pf_var_function_name']} {res['__pf_var_function_version']} "
+        f"body {short_hash(res['__pf_var_function_content_hash'], 8)} "
+        f"ran {res['__pod_ts']:%H:%M:%S.%f} on {res['__pf_exec_executor_type']}"
+    )
+
+
+def trace(S: StoredJob, subject: str, session: str) -> set[tuple[str, str, str, Any]]:
+    cells: set[tuple[str, str, str, Any]] = set()
+    (out,) = [
+        r
+        for r in rows(S["session_means"].memory)
+        if (r["subject_id"], r["session"]) == (subject, session)
+    ]
+    print(f"session_means {subject} {session}: mean_rate_hz = {out['mean_rate_hz']!r}")
+    p = pipeline_record(S, "session_means", out)
+    print(
+        f" P session_means entry {short_hash(p[KEY])} (by its 4 folded system tags) -> result {short_hash(p['__data_id'])}, computed by this entry: {p['__computed']}"
+    )
+    r = result_row(S, "session_means", p)
+    print(f" R result: {fn_desc(r)}; value {r['mean_rate_hz']!r}")
+    u = upstream_row(S, "SelectDataColumns_2", p)
+    g = upstream_row(S, "GroupBy", p)  # the select kept the system tags and the content
+    print(
+        f" U input entry: the SelectDataColumns_2 / GroupBy row with those system tags; content hash = __input_data_hash: True ({len(u['rate_hz'])} rates)"
+    )
+    members = group_members(S, g, ["subject_id", "session"], "rates", ["probe", "unit"])
+    print(
+        f" G {len(members)} members = 'rates' rows with subject_id={subject!r}, session={session!r}; refold of their system tags = the group's: True"
+    )
+    for i, m in enumerate(members):
+        pm = pipeline_record(S, "rates", m)
+        rm = result_row(S, "rates", pm)
+        assert (
+            g["_source_rate_hz"][i] == rm["_source_rate_hz"]
+            and g["rate_hz"][i] == rm["rate_hz"]
+        )
+        sharers = [
+            x
+            for x in rows(S["rates"].own(S["rates"].pipeline))
+            if x["__data_id"] == pm["__data_id"]
+        ]
+        print(
+            f"   [{i}] {m['probe']} unit {m['unit']}: P rates entry {short_hash(pm[KEY])} -> R result {short_hash(pm['__data_id'])} rate_hz={rm['rate_hz']:.4f} (computed by this entry: {pm['__computed']}; result served to {len(sharers)} entr{'y' if len(sharers) == 1 else 'ies'})"
+        )
+        for col in ("_source_n_spikes", "_source_duration_s"):
+            cell = source_cell(S, pm[col], pm)
+            cells.add(cell)
+            print(f"       S {col[8:]} = {cell[3]!r} <- {cell[0]} {cell[1]}")
+    return cells
+
+
+def token_only(S: StoredJob, subject: str, session: str) -> list[str]:
+    """Round one's method: follow output tokens to the FIRST pipeline record holding them."""
+    p = pipeline_record(
+        S,
+        "session_means",
+        next(
+            r
+            for r in rows(S["session_means"].memory)
+            if (r["subject_id"], r["session"]) == (subject, session)
+        ),
+    )
+    reached = []
+    for tok in p["_source_rate_hz"]:
+        rec = parse_token(tok)[1]
+        hits = [
+            x
+            for x in rows(S["rates"].own(S["rates"].pipeline))
+            if x["__data_id"].hex() == rec
+        ]
+        reached.append(parse_token(hits[0]["_source_n_spikes"])[1])
+    return reached
 
 
 root = Path(tempfile.mkdtemp())
-job, _ = workshop_job(root)
+db = DeltaTableDatabase(root / "store")
+job, _ = workshop_job(root, database=db)
 job.run()
-token = cell_token(
-    job, "session_means", "mean_rate_hz", subject_id="mouse_03", session="s2"
-)
-stats: dict[str, Any] = {"shared": 0, "sources": set()}
-trace(job, token, stats=stats)
+S = read_job(job, db)
+
+print("== 1. mouse_03 s2 (the demo cell)")
+cells = trace(S, "mouse_03", "s2")
+spikes = [v for (src, _, col, v) in cells if col == "n_spikes"]
+(duration,) = {v for (src, _, col, v) in cells if col == "duration_s"}
 print(
-    f"\nreached {len(stats['sources'])} distinct source cells; "
-    f"{stats['shared']} result(s) were shared by several pipeline records"
+    f"reached {len(cells)} source cells; recomputed from them: {sum(s / duration for s in spikes) / len(spikes)!r}"
 )
 
-print("\n== Same trace on the job loaded from its file (load_only run, same store)")
+print("\n== 2. mouse_02 s1: the group with a SHARED memoized result")
+cells2 = trace(S, "mouse_02", "s1")
+units_rows = sorted(
+    {rec for (src, rec, col, _) in cells2 if src == "units"}, key=lambda x: int(x[4:])
+)
+print(
+    f"reached units rows (exact, via pipeline records): {units_rows} ({len(units_rows)} distinct)"
+)
+old = token_only(S, "mouse_02", "s1")
+print(
+    f"round one's token-only path reaches:            {sorted(set(old), key=lambda x: (
+            int(x[4:])
+        ))} ({len(set(old))} distinct; {old.count('row_16')}x row_16)"
+)
+
+print("\n== 3. The same trace on the job LOADED from its file (load_only run)")
 job.save(root / "job.json")
-loaded = PipelineJob.load(
-    root / "job.json", database=DeltaTableDatabase(root / "store")
-)
+db2 = DeltaTableDatabase(root / "store")
+loaded = PipelineJob.load(root / "job.json", database=db2)
 loaded.run(load_only=True)
-stats2: dict[str, Any] = {"shared": 0, "sources": set()}
-trace(
-    loaded,
-    cell_token(
-        loaded, "session_means", "mean_rate_hz", subject_id="mouse_03", session="s2"
-    ),
-    stats=stats2,
-)
-print("same source cells reached:", stats2["sources"] == stats["sources"])
-
-print("\n== Check: recomputing the cell from the source cells the trace reached")
-u = job.nodes["units"].as_table(columns={"system_tags": True})
-s = job.nodes["sessions"].as_table(columns={"system_tags": True})
-
-
-def value(t, src, rec, col):
-    rid = [c for c in t.column_names if c.startswith("_tag_record_id")][0]
-    return t.column(col)[t.column(rid).to_pylist().index(rec)].as_py()
-
-
-spikes = sorted(r for (src, r, c) in stats["sources"] if c == "n_spikes")
-(dur_rec,) = {r for (src, r, c) in stats["sources"] if c == "duration_s"}
-duration = value(s, "sessions", dur_rec, "duration_s")
-rates = [value(u, "units", r, "n_spikes") / duration for r in spikes]
-print("mean of n_spikes/duration over the traced records:", sum(rates) / len(rates))
-
-print("\n== Where the chain is ambiguous: one stored result, several pipeline records")
-records = job.nodes["rates"].get_all_records(columns={"source": True, "meta": True})
-ids = [b.hex() for b in records.column("__data_id").to_pylist()]
-shared = sorted({x for x in ids if ids.count(x) > 1})
-for x in shared:
-    rows = [r for r, i in zip(records.to_pylist(), ids) if i == x]
-    print(f"result {x[:12]}… (rate_hz = {rows[0]['rate_hz']}) is pointed at by:")
-    for r in rows:
-        print(
-            f"   {r['subject_id']} {r['session']} {r['probe']} unit {r['unit']}: "
-            f"{r['_source_n_spikes']}, {r['_source_duration_s']}"
-        )
+L = read_job(loaded, db2)
+with contextlib.redirect_stdout(io.StringIO()):
+    same1 = trace(L, "mouse_03", "s2") == cells
+    same2 = trace(L, "mouse_02", "s1") == cells2
 print(
-    "A token names the RESULT (memoized by input data hash), not the input row: two"
-    " input rows with equal values share one result, here inside ONE group, so the"
-    " group key does not tell them apart. The grouped row lists the token twice, once"
-    " per member, in GroupBy's member order (non-key tags in name order, then record"
-    " id): position i of the list is the i-th member of the group in that order. A tool"
-    " resolves it by that rule, or reports every candidate; the hand trace above takes"
-    " the first."
+    "loaded job reaches the same source cells: mouse_03 s2",
+    same1,
+    "; mouse_02 s1",
+    same2,
 )

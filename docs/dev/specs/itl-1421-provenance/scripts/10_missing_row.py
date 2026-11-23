@@ -116,3 +116,27 @@ def why_missing(record):
 why_missing("row_1")  # mouse_01 s1 imec0 unit 1: kept
 why_missing("row_4")  # mouse_01 s1 imec1 unit 0: removed by the filter
 why_missing("row_48")  # mouse_04 s1 imec0 unit 0: removed by the join
+
+print("\n== The function node's PIPELINE store (round two)")
+# The pipeline store has one entry per input row the function node ever received, keyed
+# by the row's system tags: a record id with no entry never reached the function; one
+# with an entry reached it (then the result store holds what it was served).
+node = job.nodes["rates"]
+records = node.get_all_records(all_info=True)
+pipe = [] if records is None else records.to_pylist()
+for rec in ("row_1", "row_4", "row_48"):
+    hits = [
+        r
+        for r in pipe
+        for k, v in r.items()
+        if k.startswith("_tag_source_id")
+        and v == "units"
+        and r[k.replace("_tag_source_id", "_tag_record_id", 1)] == rec
+    ]
+    print(f"  units {rec}: pipeline entries naming it: {len(hits)}")
+print(
+    "  An entry-less record never reached the function: the cause is upstream (above)."
+    " This answer comes from the store alone, so it also holds in a later process"
+    " (a loaded job) without re-running the operators; WHICH step dropped it still needs"
+    " the operators' rows (held, cached with LOG, or re-derived by a load-only run)."
+)
