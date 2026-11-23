@@ -2005,26 +2005,25 @@ class DeltaTableDatabase:
         # A column Delta cannot hold is refused before anything is buffered (ITL-1334).
         self.require_storable(records.schema)
         self._refuse_untyped_null_columns(record_path, records.schema)
-        # A logical type identifier known to differ from the held one (ITL-1371),
-        # found from the Delta log before anything decodes a stored type; raised
-        # once the duplicate scan shows the append writes something.
+        # A logical type identifier known to differ from the held one is refused
+        # first (ITL-1371), whatever skip_duplicates: found from the Delta log, before
+        # anything decodes a stored type (the duplicate scan below does), so no read
+        # failure can come before it. A whole-input condition, outside the row error
+        # policy.
         identity = self._identity_refusal(record_path, records)
+        if identity is not None:
+            raise InputValidationError(identity)
 
         # Step 2: Deduplicate within input table (keep last occurrence)
         deduplicated_table = self._deduplicate_within_table(records)
 
         # Step 3: Handle conflicts based on skip_duplicates setting
         if skip_duplicates:
-            try:
-                filtered_table = self._filter_existing_records(
-                    record_path, deduplicated_table
-                )
-            except OrcapodDatabaseReadError as error:
-                # A read failure fails the run whatever the error policy: it is
-                # raised as it is, naming the identifiers it kept from refusing.
-                if identity is not None:
-                    error.add_note(f"Also refused: {identity}")
-                raise
+            # A read failure here propagates as it is: it fails the run whatever
+            # the error policy.
+            filtered_table = self._filter_existing_records(
+                record_path, deduplicated_table
+            )
             if filtered_table.num_rows == 0:
                 logger.debug("All records were duplicates, nothing to insert")
                 return None
@@ -2032,8 +2031,6 @@ class DeltaTableDatabase:
             # Check for conflicts - insert never allows duplicates when skip_duplicates=False
             # self._check_all_conflicts(record_path, deduplicated_table)
             filtered_table = deduplicated_table
-        if identity is not None:
-            raise InputValidationError(identity)
 
         # Columns match by name within a pending batch: rows with the pending
         # batch's columns in another order, each field equal, are put in its order

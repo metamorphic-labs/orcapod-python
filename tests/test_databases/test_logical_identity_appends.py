@@ -1175,10 +1175,10 @@ def test_a_dictionary_over_a_plain_held_column_is_refused_outside_delta(
         )
 
 
-def test_in_memory_duplicate_only_append_is_not_refused() -> None:
-    """With ``skip_duplicates``, an append whose every row is already stored writes
-    nothing and is not refused for another identifier, as in Delta; one with a new
-    row is."""
+def test_in_memory_duplicate_only_append_of_another_identifier_is_refused() -> None:
+    """One rule in every database: a known different identifier is refused whatever
+    ``skip_duplicates``, duplicate-only or not (on main, a duplicate-only append was a
+    silent no-op; nothing was or is written)."""
     db = InMemoryArrowDatabase()
     db.add_records(
         PATH,
@@ -1186,19 +1186,14 @@ def test_in_memory_duplicate_only_append_is_not_refused() -> None:
         record_id_column="id",
         flush=True,
     )
-    db.add_records(
-        PATH,
-        _container_rows("list_view", b"n", [b"1"]),
-        record_id_column="id",
-        skip_duplicates=True,
-    )
-    with pytest.raises(InputValidationError, match="itl1371.a;6e"):
-        db.add_records(
-            PATH,
-            _container_rows("list_view", b"n", [b"1", b"22"]),
-            record_id_column="id",
-            skip_duplicates=True,
-        )
+    for ids in ([b"1"], [b"1", b"22"]):
+        with pytest.raises(InputValidationError, match="itl1371.a;6e"):
+            db.add_records(
+                PATH,
+                _container_rows("list_view", b"n", ids),
+                record_id_column="id",
+                skip_duplicates=True,
+            )
     db.flush()
     stored = db.get_all_records(PATH, record_id_column="id")
     assert stored is not None
@@ -1370,12 +1365,16 @@ def test_delta_identity_is_refused_before_an_undecodable_stored_type(
     tmp_path: Path, skip_duplicates: bool
 ) -> None:
     """A stored struct child annotated with an identifier the registered type cannot
-    read: the identity rule reads the Delta log only and comes before every path that
-    decodes the stored types (the duplicate scan, the held columns), so another
-    identifier is refused naming both. With ``skip_duplicates`` the duplicate scan
-    must read the stored ids, which decodes: that read failure is raised as it is (a
-    read failure fails the run whatever the error policy), with the identity refusal
-    noted on it."""
+    read. The order is the same with either duplicate setting: the identity rule
+    reads the Delta log only and runs first, so another identifier is refused with
+    the same ``InputValidationError`` naming both, before anything is decoded. Only
+    when it passes does the duplicate scan run, and a read failure there propagates
+    as it is (a read failure fails the run whatever the error policy): the same
+    identifier with ``skip_duplicates`` raises ``OrcapodDatabaseReadError``. Without
+    it nothing reads the stored ids or decodes the recorded types before the rows
+    are queued but the field-metadata check (ITL-1334), which decodes the stored
+    struct's recorded type: the registered reader's own ``ValueError`` is raised, as
+    on main (that decode is not wrapped as a read failure; pre-existing)."""
 
     class Current(pa.ExtensionType):
         def __init__(self) -> None:
@@ -1402,21 +1401,25 @@ def test_delta_identity_is_refused_before_an_undecodable_stored_type(
     )
     pa.register_extension_type(cast(Any, Current()))
     try:
-        expected = OrcapodDatabaseReadError if skip_duplicates else InputValidationError
-        with pytest.raises(expected) as refused:
+        with pytest.raises(InputValidationError) as refused:
             DeltaTableDatabase(tmp_path / "delta").add_records(
                 PATH,
                 rows([b"22", b"333"], b"itl1371.other", b"new"),
                 record_id_column="id",
                 skip_duplicates=skip_duplicates,
             )
-        message = (
-            "\n".join([str(refused.value), *refused.value.__notes__])
-            if (skip_duplicates)
-            else str(refused.value)
-        )
+        message = str(refused.value)
         assert "x.v is of logical type 'itl1371.other;6e6577'" in message
         assert "the stored column's 'itl1371.current;6f6c64'" in message
+
+        same = rows([b"22", b"333"], b"itl1371.current", b"old")
+        db = DeltaTableDatabase(tmp_path / "delta")
+        if skip_duplicates:
+            with pytest.raises(OrcapodDatabaseReadError):
+                db.add_records(PATH, same, record_id_column="id", skip_duplicates=True)
+        else:
+            with pytest.raises(ValueError, match="cannot read this metadata"):
+                db.add_records(PATH, same, record_id_column="id")
     finally:
         pa.unregister_extension_type("itl1371.current")
 
@@ -1594,3 +1597,28 @@ def test_delta_merge_source_keeps_the_held_identifier_bytes(tmp_path: Path) -> N
     assert metadata_bytes(stored.metadata)[META] == b"m"
     stored_rows = db.get_all_records(PATH, record_id_column="id")
     assert stored_rows is not None and stored_rows.num_rows == 2
+
+
+@pytest.mark.parametrize("state", ["pending", "committed"])
+@pytest.mark.parametrize("kind", KINDS)
+def test_duplicate_only_append_of_the_same_identifier_is_a_no_op(
+    tmp_path: Path, kind: str, state: str
+) -> None:
+    """With ``skip_duplicates``, an append whose every row is already held, with the
+    same identifier, writes nothing and raises nothing, as on main, in every
+    database."""
+    with _store(kind, tmp_path) as store:
+        store.db.add_records(
+            PATH,
+            _rows(HELD, "annotated", "top", [b"1", b"22"]),
+            record_id_column="id",
+            flush=state == "committed",
+        )
+        store.db.add_records(
+            PATH,
+            _rows(HELD, "annotated", "top", [b"1", b"22"]),
+            record_id_column="id",
+            skip_duplicates=True,
+        )
+        stored = store.stored().sort_by("id")
+        assert stored.column("id").to_pylist() == [b"1", b"22"]
