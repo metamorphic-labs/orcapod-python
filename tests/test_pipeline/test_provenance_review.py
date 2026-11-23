@@ -596,7 +596,7 @@ def test_a_collapsed_edge_over_merged_paths_is_highlighted() -> None:
 
 
 def _batch_trace_seconds(n: int) -> float:
-    """Seconds to trace one batch of ``n`` function outputs (best of two)."""
+    """Seconds to trace one batch of ``n`` function outputs (best of three)."""
     import time
 
     rows = [(f"k{i}", "1", i, 1) for i in range(n)]
@@ -608,7 +608,7 @@ def _batch_trace_seconds(n: int) -> float:
     (row,) = job.nodes["Batch"].as_table().to_pylist()
     best = float("inf")
     cells = 0
-    for _ in range(2):
+    for _ in range(3):
         start = time.perf_counter()
         trace = job.nodes["Batch"].trace({"g": row["g"]}, "s")
         best = min(best, time.perf_counter() - start)
@@ -620,7 +620,7 @@ def _batch_trace_seconds(n: int) -> float:
 def test_tracing_many_members_scales_linearly() -> None:
     """CodeRabbit thread on PR 530: each member's lookups (input rows, stored entries,
     source records) are indexed once per call, not scanned again per member."""
-    small, large = _batch_trace_seconds(200), _batch_trace_seconds(800)
+    small, large = _batch_trace_seconds(400), _batch_trace_seconds(1600)
     # Linear work grows about 4x; scanning per member grows about 16x.
     assert large / small < 8
 
@@ -909,3 +909,117 @@ def test_an_empty_run_rejects_a_column_that_is_not_data() -> None:
             job.nodes["sums"].trace({"k": "a", "g": "1"}, column)
     with pytest.raises(ValueError, match="holds no row"):
         job.nodes["sums"].trace({"k": "a", "g": "1"}, "s")
+
+
+# ---------------------------------------------------------------------------
+# Sixth review (head dbb1f6fe): one path model
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("group_first", [True, False])
+def test_a_folded_list_passing_through_merge_join_keeps_its_members(
+    group_first: bool,
+) -> None:
+    """GroupBy builds x = [1, 4]; MergeJoin passes x through from that argument (the
+    other input has only z and w); Index("x", 1) is member 1 of the group, whatever
+    the argument order."""
+    source = DictSource(
+        [{"k": "a", "i": 0, "x": 1, "y": 0}, {"k": "a", "i": 1, "x": 4, "y": 0}],
+        tag_columns=["k", "i"],
+        tag_only_columns=True,
+        source_id="s",
+    )
+    extra = DictSource(
+        [{"k": "a", "z": 5, "w": 6}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="extra",
+    )
+    job = PipelineJob(name=f"gm{group_first}", database=InMemoryArrowDatabase())
+    with job:
+        grouped = GroupBy(["k"])(SelectDataColumns(["x"])(source))
+        merged = (
+            MergeJoin()(grouped, extra) if group_first else MergeJoin()(extra, grouped)
+        )
+        Index("x", 1)(merged)
+    job.run()
+    trace = job.nodes["Index"].trace({"k": "a"}, "x")
+    assert trace.root.value == 4
+    assert [(c.source_id, c.record_id, c.value) for c in trace.source_cells()] == [
+        ("s", "row_1", 4)
+    ]
+
+
+def test_an_inner_list_of_nested_folds_traces_its_members() -> None:
+    """Grouped twice, x = [[1, 4], [7, 10]]; Index("x", 1) selects the inner list
+    [7, 10], whose members are rows 2 and 3."""
+    source = DictSource(
+        [
+            {"a": "p", "b": "u", "c": 0, "x": 1},
+            {"a": "p", "b": "u", "c": 1, "x": 4},
+            {"a": "p", "b": "v", "c": 0, "x": 7},
+            {"a": "p", "b": "v", "c": 1, "x": 10},
+        ],
+        tag_columns=["a", "b", "c"],
+        tag_only_columns=True,
+        source_id="s",
+    )
+    job = PipelineJob(name="nested", database=InMemoryArrowDatabase())
+    with job:
+        inner = GroupBy(["a", "b"])(source)
+        Index("x", 1)(GroupBy(["a"])(inner))
+    job.run()
+    node = job.nodes["Index"]
+    trace = node.trace({"a": "p"}, "x")
+    assert trace.root.value == [7, 10]
+    assert [(c.record_id, c.value) for c in trace.source_cells()] == [
+        ("row_2", 7),
+        ("row_3", 10),
+    ]
+
+
+@function_pod(output_keys="_total")
+def underscored(x: int, y: int) -> int:
+    return x + y
+
+
+def test_an_underscore_data_column_of_an_empty_run_is_a_data_column() -> None:
+    source = table_source(rows_kgxy(("a", "1", 1, 2)), TWO_BY_TWO, ["k", "g"], "src")
+    job = PipelineJob(name="under", database=InMemoryArrowDatabase())
+    with job:
+        underscored.pod(Filter({"x": 999})(source), label="sums")
+    job.run()
+    with pytest.raises(ValueError, match="holds no row"):
+        job.nodes["sums"].trace({"k": "a", "g": "1"}, "_total")
+    with pytest.raises(ValueError, match="not a data column"):
+        job.nodes["sums"].trace({"k": "a", "g": "1"}, "k")
+
+
+@pytest.mark.parametrize("fold", ["batch", "group"])
+def test_pick_after_index_after_a_fold_traces_one_member(fold: str) -> None:
+    """A map column, folded, then Index("x", -1) and Pick("x", "a"): the path is a
+    member position, then a key inside the source cell (an Arrow map reads as a list of
+    key/value entries)."""
+    from orcapod.operators import Pick
+
+    rows = [
+        {"k": "x", "i": 0, "x": {"a": 1}, "y": 0},
+        {"k": "x", "i": 1, "x": {"a": 4}, "y": 0},
+    ]
+    schema = {"k": str, "i": int, "x": dict[str, int], "y": int}
+    source = DictSource(
+        rows,
+        data_schema=schema,
+        tag_columns=["k", "i"],
+        tag_only_columns=True,
+        source_id="input",
+    )
+    folding = Batch(batch_size=2) if fold == "batch" else GroupBy(["k"])
+    job = PipelineJob(name=f"pick{fold}", database=InMemoryArrowDatabase())
+    with job:
+        Pick("x", "a")(Index("x", -1)(SelectDataColumns(["x"])(folding(source))))
+    job.run()
+    (row,) = job.nodes["Pick"].as_table().to_pylist()
+    trace = job.nodes["Pick"].trace({"k": row["k"]}, "x")
+    assert trace.root.value == 4
+    assert [(c.record_id, c.value) for c in trace.source_cells()] == [("row_1", 4)]

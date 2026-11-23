@@ -71,7 +71,6 @@ _RECORDED_AT_COL = "__recorded_at"
 _COLUMNS = {"system_tags": True, "source": True, "content_hash": _ROW_HASH}
 
 Row = dict[str, Any]
-Link = tuple["_Cell", "int | None"]
 
 
 # ---------------------------------------------------------------------------
@@ -555,27 +554,105 @@ def _datetime(value: Any) -> datetime | None:
     return value if isinstance(value, datetime) else None
 
 
+PathStep = int | str
+"""One level of a path into a cell's value: a list position, or a mapping key."""
+
+
+def _at(value: Any, path: tuple[PathStep, ...]) -> Any:
+    """The part of ``value`` at ``path`` (list positions and mapping keys, in order).
+
+    Raises:
+        ProvenanceInconsistencyError: If the path does not lead into the value.
+    """
+    for step in path:
+        if isinstance(step, int) and isinstance(value, list):
+            items = cast(list[Any], value)
+            if not -len(items) <= step < len(items):
+                raise ProvenanceInconsistencyError(
+                    f"position {step} is outside a list of {len(items)}"
+                )
+            value = items[step]
+        elif isinstance(step, str) and isinstance(value, dict):
+            mapping = cast(dict[Any, Any], value)
+            if step not in mapping:
+                raise ProvenanceInconsistencyError(f"key {step!r} is not in the value")
+            value = mapping[step]
+        elif isinstance(step, str) and isinstance(value, list):
+            # An Arrow map reads as a list of entries, ``{"key": k, "value": v}`` or
+            # ``(k, v)``.
+            found = [
+                entry
+                for entry in cast(list[Any], value)
+                if (isinstance(entry, dict) and entry.get("key") == step)
+                or (isinstance(entry, tuple) and len(entry) == 2 and entry[0] == step)
+            ]
+            if len(found) != 1:
+                raise ProvenanceInconsistencyError(
+                    f"key {step!r} is in {len(found)} entries of the value"
+                )
+            entry = found[0]
+            value = entry["value"] if isinstance(entry, dict) else entry[1]
+        else:
+            raise ProvenanceInconsistencyError(
+                f"the path step {step!r} does not lead into a {type(value).__name__}"
+            )
+    return value
+
+
 @dataclass(frozen=True)
 class _Cell:
-    """A cell being traced: the row, the column, and optionally one element of it."""
+    """A cell being traced: a row, a column, and a path into the column's value.
+
+    The path's outer levels are the lists that operators built (a fold's members, a
+    ``MergeJoin``'s arguments); the levels below them are positions or keys inside the
+    source's own value (``Index``, ``Pick``). Walking upstream, each operator consumes
+    the level it built and passes the rest on unchanged.
+    """
 
     row: Row
     column: str
-    element: int | None = None
+    path: tuple[PathStep, ...] = ()
+
+    @property
+    def whole(self) -> Any:
+        """The column's whole value in the row."""
+        return self.row.get(self.column)
+
+    @property
+    def whole_token(self) -> Any:
+        """The column's whole source-info token in the row."""
+        return self.row.get(constants.SOURCE_PREFIX + self.column)
 
     @property
     def value(self) -> Any:
-        value = self.row.get(self.column)
-        if self.element is None:
-            return value
-        return cast(list[Any], value)[self.element]
+        """The traced part of the value."""
+        return _at(self.whole, self.path)
 
     @property
     def token(self) -> Any:
-        token = self.row.get(constants.SOURCE_PREFIX + self.column)
-        if self.element is None or not isinstance(token, list):
-            return token
-        return cast(list[Any], token)[self.element]
+        """The token of the traced part: the token lists are followed as far as the
+        path's list positions go (below them, a value inside one source cell)."""
+        token = self.whole_token
+        for step in self.path:
+            if isinstance(step, int) and isinstance(token, list):
+                token = cast(list[Any], token)[step]
+            else:
+                break
+        return token
+
+
+def _list_depth(cell: _Cell) -> int:
+    """How many of a path's leading positions the column's token lists follow (the
+    levels operators built); the rest of the path is inside one source cell."""
+    token = cell.whole_token
+    depth = 0
+    for step in cell.path:
+        if isinstance(step, int) and isinstance(token, list):
+            token = cast(list[Any], token)[step]
+            depth += 1
+        else:
+            break
+    return depth
 
 
 def _entries_for(node: Any, row: Row, column: str, reader: _Reader) -> list[Row]:
@@ -674,6 +751,7 @@ class _Tracer:
         *,
         held: bool,
         member: int | None,
+        within: tuple[PathStep, ...] = (),
         input_hash: str | None = None,
     ) -> TraceStep:
         """A source cell named by a token, checked against a held snapshot if any.
@@ -681,10 +759,11 @@ class _Tracer:
         Args:
             source_node: The job's source node.
             token: The cell's source-info token.
-            value: The value the run held for the cell (``held``), or ``None``.
+            value: The value the run held for the traced part (``held``), or ``None``.
             held: Whether ``value`` is a value the run held; if not, the value is read
                 from the snapshot, and the step is ``unavailable`` without one.
             member: The cell's position in a folded or merged list, or ``None``.
+            within: The path inside the source cell's own value (``Index``, ``Pick``).
             input_hash: For a function that read the source directly, the input data
                 hash its stored entry holds: the snapshot row must have that hash.
         """
@@ -713,13 +792,13 @@ class _Tracer:
                     "stored entry was computed from (its content hash differs)"
                 )
             if source_column in rows[0]:
+                stored = _at(rows[0][source_column], within)
                 if not held:
-                    value = rows[0][source_column]
-                elif not same_value(rows[0][source_column], value):
+                    value = stored
+                elif not same_value(stored, value):
                     raise ProvenanceInconsistencyError(
                         f"source {source_id!r} record {record_id!r} holds "
-                        f"{source_column}={rows[0][source_column]!r}; the run held "
-                        f"{value!r}"
+                        f"{source_column}={stored!r}; the run held {value!r}"
                     )
         elif not held:
             status = "unavailable"
@@ -737,46 +816,34 @@ class _Tracer:
             source=cell,
         )
 
-    def source_leaves(self, node: Any, index: int, cell: _Cell) -> list[TraceStep]:
-        """The leaves of a cell for its input ``index``, a source node: the cell's
-        tokens that name that source, each checked against the row's system tags."""
+    def to_source(
+        self,
+        node: Any,
+        index: int,
+        row: Row,
+        token: Any,
+        value: Any,
+        within: tuple[PathStep, ...],
+        member: int | None,
+    ) -> list[TraceStep]:
+        """The source cell that input ``index`` (a source node) gave a row of ``node``.
+
+        ``token`` is the source cell's token. The input must be the one whose system
+        tags, at its own position, name that token's record, and it must have the
+        token's column; ``within`` is the path inside the source cell's value.
+        """
         upstream = node.upstreams[index]
-        mine = _positional_pairs(cell.row, node, index, upstream)
-        slot = _merge_slot(node, index)
-        source_columns = set(_keys(upstream)[1])
-        token, value = cell.token, cell.value
-        pairs: list[tuple[str, Any, int | None]] = []
-        if isinstance(token, list):
-            tokens = cast(list[Any], token)
-            values = (
-                cast(list[Any], value)
-                if isinstance(value, list)
-                else [None] * len(tokens)
-            )
-            pairs = [
-                (t, v, k)
-                for k, (t, v) in enumerate(zip(tokens, values))
-                if isinstance(t, str)
-            ]
-        elif isinstance(token, str):
-            # A selected element keeps its list position (carried by the cell, never
-            # re-derived from the token's shape).
-            pairs = [(token, value, cell.element)]
-        out: list[TraceStep] = []
-        for t, v, k in pairs:
-            sid, record_id, source_column = _parse_token(t)
-            if (sid, record_id) not in mine:
-                continue
-            if slot is not None and k is not None and k != slot:
-                continue  # element k of a merged list is argument k's
-            if source_column not in source_columns and not any(
-                source_column.startswith(c + "[") or source_column.startswith(c + ".")
-                for c in source_columns
-            ):
-                continue  # the input does not have the token's column
-            self.edges.add((upstream.label, node.label))
-            out.append(self.leaf(upstream, t, v, held=True, member=k))
-        return out
+        if not isinstance(token, str):
+            return []
+        sid, record_id, source_column = _parse_token(token)
+        if (sid, record_id) not in _positional_pairs(row, node, index, upstream):
+            return []
+        if source_column not in set(_keys(upstream)[1]):
+            return []
+        self.edges.add((upstream.label, node.label))
+        return [
+            self.leaf(upstream, token, value, held=True, member=member, within=within)
+        ]
 
     def step(self, node: Any, cell: _Cell, member: int | None = None) -> TraceStep:
         kind = _kind(node)
@@ -785,7 +852,10 @@ class _Tracer:
             token = cell.token
             if not isinstance(token, str):
                 return self.unread(node, cell.column, member, "unavailable")
-            return self.leaf(node, token, cell.value, held=True, member=member)
+            within = cell.path[_list_depth(cell) :]
+            return self.leaf(
+                node, token, cell.value, held=True, member=member, within=within
+            )
         if kind == "function":
             return self.function_step(node, cell, member, tags)
         producer = getattr(node, "producer", None)
@@ -794,23 +864,9 @@ class _Tracer:
             return self.fold_step(node, cell, member, tags, operator)
         inputs: list[TraceStep] = []
         for index, upstream in enumerate(node.upstreams):
-            if _kind(upstream) == "source":
-                inputs.extend(self.source_leaves(node, index, cell))
-                continue
-            up_rows = self.reader.held(upstream)
-            if up_rows is None:
-                inputs.append(self.unread(upstream, cell.column, None, "not_computed"))
-                continue
-            matched = _input_rows(cell.row, node, index, up_rows, self.reader.lookups)
-            if not matched:
-                continue
-            for up_cell, link_member in self.links(
-                node, upstream, cell, matched, _merge_slot(node, index)
-            ):
-                self.edges.add((upstream.label, node.label))
-                inputs.append(self.step(upstream, up_cell, link_member))
-        if not inputs and cell.token is not None:
-            # No input claims the cell's token: its origin is not known here.
+            inputs.extend(self.input_steps(node, index, upstream, cell))
+        if not inputs and cell.whole_token is not None:
+            # No input claims the cell: its origin is not known here.
             inputs.append(self.unread(node, cell.column, None, "unavailable"))
         return TraceStep(
             node.label,
@@ -823,120 +879,160 @@ class _Tracer:
             inputs=tuple(inputs),
         )
 
-    def links(
+    def input_steps(
+        self, node: Any, index: int, upstream: Any, cell: _Cell
+    ) -> list[TraceStep]:
+        """The steps at input ``index`` of a row-wise operator that ``cell`` came from.
+
+        Each operator consumes only the path level it built:
+
+        - ``Index`` and ``Pick`` select inside their column: the input cell is that
+          column, with the position or key put in front of the path;
+        - a ``MergeJoin`` column of both inputs is ``[first, second]``: its outer level
+          is the argument, so input ``i`` gives element ``i`` only;
+        - any other column passes unchanged (the input's column whose whole token is the
+          cell's), and so does the path.
+
+        Every input cell is checked: it holds the value the cell holds.
+        """
+        from orcapod.core.operators.index import Index
+        from orcapod.core.operators.pick import Pick
+
+        producer = getattr(node, "producer", None)
+        column = cell.column
+        if isinstance(producer, (Index, Pick)) and column == (
+            producer.out or producer.column
+        ):
+            selected = producer.i if isinstance(producer, Index) else producer.key
+            return self.from_input(
+                node, index, upstream, cell, producer.column, selected
+            )
+        slot = _merge_slot(node, index)
+        if slot is not None and self.merged(node, column):
+            if cell.path and cell.path[0] != slot:
+                return []  # this element is the other argument's
+            whole = cell.whole_token
+            if not isinstance(whole, list) or len(cast(list[Any], whole)) <= slot:
+                return []
+            piece = _Cell(cell.row, column, (slot, *cell.path[1:]))
+            return self.passed_on(node, index, upstream, piece, slot, drop_front=True)
+        return self.passed_on(node, index, upstream, cell, None, drop_front=False)
+
+    def merged(self, node: Any, column: str) -> bool:
+        """Whether ``column`` is a column of both inputs of a ``MergeJoin`` (merged
+        into ``[first, second]``)."""
+        return all(column in _keys(u)[1] for u in node.upstreams)
+
+    def from_input(
         self,
         node: Any,
+        index: int,
         upstream: Any,
         cell: _Cell,
-        matched: list[Row],
-        slot: int | None = None,
-    ) -> list[Link]:
-        """The input cells one row-wise output cell came from, each checked by value.
-
-        The token is matched exactly first; then as one element of a list token (an
-        ``Index`` after a fold); then a list token's elements as the input's tokens
-        (``MergeJoin``); only then as an access path (``Pick``).
-        """
-        token, value = cell.token, cell.value
-        if token is None:
+        input_column: str,
+        selected: PathStep,
+    ) -> list[TraceStep]:
+        """``Index`` or ``Pick``: the cell is part of the input's ``input_column``."""
+        if input_column not in _keys(upstream)[1]:
             return []
-        if slot is not None and cell.element is not None and cell.element != slot:
-            return []  # a selected element of a merged list is its own argument's
+        if _kind(upstream) == "source":
+            # The output token is the source cell's token with the selection appended
+            # (``x[0]``, ``x['a']``): the source cell is the token without it.
+            suffix = f"[{selected!r}]" if isinstance(selected, str) else f"[{selected}]"
+            token = cell.token
+            if not isinstance(token, str) or not token.endswith(suffix):
+                return []
+            within = (selected, *cell.path[_list_depth(cell) :])
+            return self.to_source(
+                node, index, cell.row, token[: -len(suffix)], cell.value, within, None
+            )
+        up_rows = self.reader.held(upstream)
+        if up_rows is None:
+            return [self.unread(upstream, cell.column, None, "not_computed")]
+        matched = _input_rows(cell.row, node, index, up_rows, self.reader.lookups)
+        good: list[_Cell] = []
+        for r in matched:
+            whole = r.get(input_column)
+            step_at = selected
+            if isinstance(selected, int) and isinstance(whole, list):
+                size = len(cast(list[Any], whole))
+                step_at = selected + size if selected < 0 else selected
+            up = _Cell(r, input_column, (step_at, *cell.path))
+            try:
+                if same_value(up.value, cell.value):
+                    good.append(up)
+            except ProvenanceInconsistencyError:
+                continue
+        if not good:
+            return []
+        chosen = _one(
+            [c.row for c in good],
+            node,
+            f"the input of {cell.column!r} in {upstream.label!r}",
+        )
+        up_cell = next(c for c in good if c.row is chosen)
+        self.edges.add((upstream.label, node.label))
+        return [self.step(upstream, up_cell)]
+
+    def passed_on(
+        self,
+        node: Any,
+        index: int,
+        upstream: Any,
+        cell: _Cell,
+        slot: int | None,
+        *,
+        drop_front: bool,
+    ) -> list[TraceStep]:
+        """A column passed on from input ``index``: the input's column whose whole token
+        is the cell's (one element of a merged list, ``slot``, when ``drop_front``)."""
+        whole = cell.whole_token
+        if drop_front:
+            whole = cast(list[Any], whole)[cast(int, slot)]
+        path = cell.path[1:] if drop_front else cell.path
+        if whole is None:
+            return []
+        if _kind(upstream) == "source":
+            token = whole
+            depth = 0
+            while (
+                depth < len(path)
+                and isinstance(path[depth], int)
+                and isinstance(token, list)
+            ):
+                token = cast(list[Any], token)[cast(int, path[depth])]
+                depth += 1
+            return self.to_source(
+                node, index, cell.row, token, cell.value, path[depth:], slot
+            )
+        up_rows = self.reader.held(upstream)
+        if up_rows is None:
+            return [self.unread(upstream, cell.column, None, "not_computed")]
+        matched = _input_rows(cell.row, node, index, up_rows, self.reader.lookups)
         prefix = constants.SOURCE_PREFIX
-        data_columns = list(_keys(upstream)[1])
-
-        def resolve(make: Callable[[Row, str], Link | None], what: str) -> list[Link]:
-            found: list[Link] = []
-            for column in data_columns:
-                good = [(r, link) for r in matched if (link := make(r, column))]
-                if not good:
+        found: list[TraceStep] = []
+        for up_column in _keys(upstream)[1]:
+            good: list[_Cell] = []
+            for r in matched:
+                if r.get(prefix + up_column) != whole:
                     continue
-                row = _one(
-                    [r for r, _ in good],
-                    node,
-                    f"{what} of {cell.column!r} in {upstream.label!r}",
-                )
-                found.append(next(link for r, link in good if r is row))
-            return found
-
-        def exact(r: Row, column: str) -> Link | None:
-            if r.get(prefix + column) != token:
-                return None
-            up = _Cell(r, column)
-            return (up, None) if same_value(up.value, value) else None
-
-        if cell.element is not None:
-            # A selected element passes on with its position: the input cell is the
-            # list whose whole token is the output's, at the same position.
-            whole = cell.row.get(prefix + cell.column)
-
-            def carried(r: Row, column: str) -> Link | None:
-                if r.get(prefix + column) != whole:
-                    return None
-                up = _Cell(r, column, cell.element)
-                return (up, None) if same_value(up.value, value) else None
-
-            found = resolve(carried, "the input list")
-            if found:
-                return found
-        found = resolve(exact, "the input cell")
-        if found:
-            return found
-        if isinstance(token, str):
-
-            def element(r: Row, column: str) -> Link | None:
-                tokens = r.get(prefix + column)
-                if not isinstance(tokens, list):
-                    return None
-                items = cast(list[Any], tokens)
-                at = [k for k, t in enumerate(items) if t == token]
-                if len(at) > 1:
-                    chosen = getattr(node.producer, "i", None)
-                    if not isinstance(chosen, int):
-                        raise ProvenanceInconsistencyError(
-                            f"node {node.label!r}: the token of {cell.column!r} is "
-                            f"several elements of {column!r}; the link is ambiguous"
-                        )
-                    k = chosen % len(items)
-                    at = [k] if k in at else []
-                if len(at) != 1:
-                    return None
-                up = _Cell(r, column, at[0])
-                return (up, None) if same_value(up.value, value) else None
-
-            found = resolve(element, "the list element")
-            if found:
-                return found
-
-            def path(r: Row, column: str) -> Link | None:
-                up_token = r.get(prefix + column)
-                if not isinstance(up_token, str):
-                    return None
-                if token.startswith(up_token + "[") or token.startswith(up_token + "."):
-                    return (_Cell(r, column), None)
-                return None
-
-            return resolve(path, "the accessed value")
-        if isinstance(token, list):
-            values = cast(list[Any], value) if isinstance(value, list) else []
-            pieces: list[Link] = []
-            for k, piece_token in enumerate(cast(list[Any], token)):
-                if slot is not None and k != slot:
-                    continue  # element k of a merged list is argument k's
-
-                def piece(
-                    r: Row, column: str, piece_token: Any = piece_token, k: int = k
-                ) -> Link | None:
-                    if r.get(prefix + column) != piece_token:
-                        return None
-                    up = _Cell(r, column)
-                    if k < len(values) and not same_value(up.value, values[k]):
-                        return None
-                    return (up, k)
-
-                pieces.extend(resolve(piece, f"element {k}"))
-            return pieces
-        return []
+                up = _Cell(r, up_column, path)
+                try:
+                    if same_value(up.value, cell.value):
+                        good.append(up)
+                except ProvenanceInconsistencyError:
+                    continue
+            if not good:
+                continue
+            chosen = _one(
+                [c.row for c in good],
+                node,
+                f"the input of {cell.column!r} in {upstream.label!r}",
+            )
+            up_cell = next(c for c in good if c.row is chosen)
+            self.edges.add((upstream.label, node.label))
+            found.append(self.step(upstream, up_cell, slot))
+        return found
 
     def function_step(
         self,
@@ -1054,6 +1150,12 @@ class _Tracer:
         tags: tuple[tuple[str, Any], ...],
         operator: str | None,
     ) -> TraceStep:
+        """A ``GroupBy`` or ``Batch`` row: its lists' outer level is the members.
+
+        A path's first position is a member (only that member is traced, with the rest
+        of the path); without a path every member is traced. Each member must hold the
+        list's element and token at its position.
+        """
         row, column = cell.row, cell.column
         upstream = node.upstreams[0]
         assignment = self.reader.fold(node)
@@ -1079,7 +1181,18 @@ class _Tracer:
         folding = _folding(node)
         if not isinstance(values, list) and column in getattr(folding, "by", ()):
             return self.key_step(node, cell, member, tags, operator, members)
-        wanted = range(len(members)) if cell.element is None else [cell.element]
+        if cell.path:
+            first = cell.path[0]
+            if not isinstance(first, int):
+                raise ProvenanceInconsistencyError(
+                    f"node {node.label!r}: {column!r} is a list of members; "
+                    f"{first!r} is not a position"
+                )
+            wanted = [first + len(members) if first < 0 else first]
+            rest = cell.path[1:]
+        else:
+            wanted = list(range(len(members)))
+            rest = ()
         inputs: list[TraceStep] = []
         for i in wanted:
             m = members[i]
@@ -1097,7 +1210,7 @@ class _Tracer:
                     f"{cast(list[Any], tokens)[i]!r}, its input row {member_token!r}"
                 )
             self.edges.add((upstream.label, node.label))
-            inputs.append(self.step(upstream, _Cell(m, column), member=i))
+            inputs.append(self.step(upstream, _Cell(m, column, rest), member=i))
         return TraceStep(
             node.label,
             "operator",
@@ -1143,7 +1256,7 @@ class _Tracer:
         inputs: list[TraceStep] = []
         for i, m in enumerate(members):
             self.edges.add((upstream.label, node.label))
-            inputs.append(self.step(upstream, _Cell(m, column), member=i))
+            inputs.append(self.step(upstream, _Cell(m, column, cell.path), member=i))
         return TraceStep(
             node.label,
             "operator",
@@ -1217,7 +1330,8 @@ def trace(node: Any, row: Mapping[str, Any], column: str) -> Trace:
         table = tracer.reader.table(node)
         # A completed function run with no rows holds no row to read its columns
         # from: its data columns are the held table's columns that are not its
-        # input's tags (a function passes its input's tags) nor system columns.
+        # input's tags (a function passes its input's tags) nor system columns (a
+        # data column may start with "_": only the reserved prefixes are system).
         tags = set(_keys(node.upstreams[0])[0]) if _kind(node) == "function" else set()
         held_column = (
             not rows
@@ -1225,7 +1339,15 @@ def trace(node: Any, row: Mapping[str, Any], column: str) -> Trace:
             and table is not None
             and column in table.column_names
             and column not in tags
-            and not column.startswith("_")
+            and not column.startswith(
+                (
+                    constants.SYSTEM_TAG_PREFIX,
+                    constants.SOURCE_PREFIX,
+                    constants.META_PREFIX,
+                    constants.CONTEXT_KEY,
+                    _ROW_HASH,
+                )
+            )
         )
         if not held_column:
             raise ValueError(f"{column!r} is not a data column of node {node.label!r}")
