@@ -130,6 +130,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         import json as _json
         from orcapod.pipeline.serialization import (
             FALL_THROUGH_TAGS_KEY,
+            OPERATOR_INPUTS_KEY,
             PIPELINE_FORMAT_VERSION,
             serialize_arrow_schemas,
             serialize_output_schema,
@@ -168,6 +169,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                         raise
                     retained[key] = stored
         nodes: dict[str, Any] = {}
+        key_of = {id(node): key for key, node in self._persistent_node_map.items()}
         for content_hash_str, node in self._persistent_node_map.items():
             try:
                 type_converter = node.data_context.type_converter
@@ -262,6 +264,20 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                     descriptor[FALL_THROUGH_TAGS_KEY] = list(node.declared_data_tags())
 
                 case OperatorNode():
+                    # The inputs in argument order (ITL-1417): an ordered operator
+                    # (MergeJoin, SemiJoin) is rebuilt from this list, never from the
+                    # edge list, whose order follows the order steps were recorded in.
+                    inputs = [
+                        key_of[id(upstream)]
+                        for upstream in node.upstreams
+                        if id(upstream) in key_of
+                    ]
+                    if not inputs and OPERATOR_INPUTS_KEY in node._descriptor:
+                        # A loaded read-only node holds no inputs: its saved list is
+                        # written back as it is, so saving again keeps the entry.
+                        inputs = list(node._descriptor[OPERATOR_INPUTS_KEY])
+                    if inputs:
+                        descriptor[OPERATOR_INPUTS_KEY] = inputs
                     if node._operator is not None:
                         descriptor["operator_config"] = node._operator.to_config()
                     elif "operator_config" in node._descriptor:
@@ -308,8 +324,10 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         import json as _json
         from orcapod.pipeline.serialization import (
             FALL_THROUGH_TAGS_KEY,
+            OPERATOR_INPUTS_KEY,
             PIPELINE_FORMAT_VERSION,
             require_current_format,
+            require_known_argument_order,
             require_nullability_records,
             arrow_schema_from_texts,
             deserialize_schema,
@@ -484,7 +502,14 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 reconstructed[node_hash] = node
 
             elif node_type == "operator":
-                up_hashes = upstream_map.get(node_hash, [])
+                # The inputs in argument order (ITL-1417); a file saved before the
+                # list was written gives only the edges, in recording order.
+                saved_inputs = descriptor.get(OPERATOR_INPUTS_KEY)
+                up_hashes = (
+                    list(saved_inputs)
+                    if saved_inputs is not None
+                    else upstream_map.get(node_hash, [])
+                )
                 upstream_nodes = tuple(
                     reconstructed[h] for h in up_hashes if h in reconstructed
                 )
@@ -542,6 +567,10 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                             exc,
                         )
                         operator = None
+                if saved_inputs is None and operator is not None:
+                    require_known_argument_order(
+                        operator, up_hashes, descriptor.get("label")
+                    )
                 node = OperatorNode.from_descriptor(
                     descriptor,
                     operator=operator,

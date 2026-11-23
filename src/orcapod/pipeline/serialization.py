@@ -40,10 +40,51 @@ logger = logging.getLogger(__name__)
 #          whole fields. Every source config that takes the option writes
 #          ``tag_only_columns`` and every function node writes ``fall_through_tags``;
 #          a load refuses a file without them (ITL-1159, ITL-1019).
+#          Each operator node lists its inputs in argument order under ``inputs``
+#          (ITL-1417, added within 0.4.0: a file without it still loads, except an
+#          ordered operator over two inputs, which is refused).
 # A file of an earlier format (0.1.0 to 0.3.0) is refused at load, never read in its
 # old grammar: load and save had not been used in production (developer, 2026-11-21).
 # Taking such files to the current format is the migration tool's work (ITL-1048).
 PIPELINE_FORMAT_VERSION = "0.4.0"
+
+#: The key of an operator node's inputs in a saved file, their keys in argument order
+#: (ITL-1417). Written for every operator node within format 0.4.0: a file saved
+#: before it has none, and its edges list the inputs in the order the steps were
+#: recorded, not in argument order.
+OPERATOR_INPUTS_KEY = "inputs"
+
+
+def require_known_argument_order(
+    operator: Any, input_keys: list[str], label: str | None
+) -> None:
+    """Refuse to rebuild an ordered operator whose argument order a file does not give.
+
+    A file saved before ``OPERATOR_INPUTS_KEY`` was written lists an operator's
+    inputs only through its edges, in the order the steps were recorded (ITL-1417).
+    For a commutative operator (``Join``) the order does not matter; for an ordered
+    one (``MergeJoin``, ``SemiJoin``) over two different inputs it cannot be known, so
+    the file is refused rather than read with a guessed order.
+
+    Args:
+        operator: The rebuilt operator.
+        input_keys: The keys of its inputs, in edge order.
+        label: The node's label, for the message.
+
+    Raises:
+        ValueError: If the operator takes its inputs in order and the file does not
+            say which comes first.
+    """
+    if len(set(input_keys)) < 2:
+        return
+    if not isinstance(operator.argument_symmetry(tuple(input_keys)), tuple):
+        return
+    raise ValueError(
+        f"The saved job's node {label!r} ({type(operator).__name__}) takes its inputs "
+        "in order, and the file does not say which comes first: it was saved before "
+        "Orcapod wrote each operator's inputs in argument order (ITL-1417), so loading "
+        "it could swap them. Build the job from its code and save it again."
+    )
 
 
 def require_current_format(version: str, current: str) -> None:
