@@ -262,7 +262,9 @@ def condition_mask(table: pa.Table, condition: Condition) -> pa.ChunkedArray:
 
 def filter_table(table: pa.Table, condition: Condition) -> pa.Table:
     """Return the rows of ``table`` whose checked condition holds, every value as it is."""
-    return table.filter(condition_mask(table, condition), null_selection_behavior="drop")
+    return table.filter(
+        condition_mask(table, condition), null_selection_behavior="drop"
+    )
 
 
 __all__: Sequence[str] = ("check_filter_condition", "condition_mask", "filter_table")

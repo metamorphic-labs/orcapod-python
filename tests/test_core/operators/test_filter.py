@@ -213,10 +213,9 @@ class TestPassThrough:
         expected = full.filter(pa.array([False, True, True, False, True, False]))
         # ``t`` holds a NaN, which ``equals`` never matches: compared by its bits.
         assert kept.drop_columns(["t"]).equals(expected.drop_columns(["t"]))
-        assert (
-            kept.column("t").combine_chunks().view(pa.int64())
-            == expected.column("t").combine_chunks().view(pa.int64())
-        )
+        assert kept.column("t").combine_chunks().view(pa.int64()) == expected.column(
+            "t"
+        ).combine_chunks().view(pa.int64())
 
     def test_values_bit_for_bit(self):
         signalling = bytes.fromhex("0100807f")
