@@ -2340,8 +2340,11 @@ class DeltaTableDatabase:
         if pending is None:
             return
         queued = pending.schema.names
+        # A set for membership, the list for the order the clash is reported in
+        # (review of PR 511).
+        queued_names = set(queued)
         clash = _differ_only_in_case(
-            [*queued, *(n for n in schema.names if n not in queued)]
+            [*queued, *(n for n in schema.names if n not in queued_names)]
         )
         if clash is not None:
             raise InputValidationError(
@@ -2351,7 +2354,7 @@ class DeltaTableDatabase:
         # A struct queued and a struct added, merged as the flush would merge them,
         # must not hold two field names differing only in case, at any depth.
         for field in schema:
-            if field.name not in queued:
+            if field.name not in queued_names:
                 continue
             try:
                 merged = merged_type(

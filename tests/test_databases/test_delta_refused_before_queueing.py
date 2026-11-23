@@ -802,3 +802,20 @@ def test_new_columns_are_checked_against_every_stored_name(
     else:
         _add(db, rows, flush=True)
         assert _stored_ids(tmp_path) == [b"1", b"2"]
+
+
+@pytest.mark.parametrize(
+    "added", [["a", "B", "d"], ["d", "B", "a"]], ids=["one order", "another order"]
+)
+def test_a_column_differing_in_case_from_a_queued_one_is_named(
+    tmp_path: Path, added: list[str]
+) -> None:
+    """Review of PR 511 (pending names held as a set for membership): rows queued with
+    ``a`` and ``b``; rows added with a queued name, a new name and ``B``, in two
+    orders. ``B`` is refused, named with the queued ``b``, and nothing of the add is
+    queued."""
+    db = DeltaTableDatabase(tmp_path)
+    _add(db, _rows(b"1", a=pa.array([1]), b=pa.array([2])))
+    with pytest.raises(InputValidationError, match="'b' and 'B' differ only in case"):
+        _add(db, _rows(b"2", **{n: pa.array([3]) for n in added}))
+    assert db._pending_batches["t"].num_rows == 1  # pyright: ignore[reportPrivateUsage]

@@ -472,6 +472,13 @@ class TestFileSkipping:
             db.add_records(PATH, rows(range(lo, lo + 5)), flush=True)
 
         table = deltalake.DeltaTable(str(tmp_path / "t"))
+        # There are files to prune: three active files, with disjoint ``v`` ranges,
+        # one of them holding 101 (review of PR 511).
+        ranges = sorted(
+            (add["min.v"], add["max.v"])
+            for add in pa.table(table.get_add_actions(flatten=True)).to_pylist()
+        )
+        assert ranges == [(0, 4), (100, 104), (200, 204)]
         plan = pa.table(
             deltalake.QueryBuilder()
             .register("t", table)
