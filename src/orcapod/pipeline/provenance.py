@@ -759,7 +759,9 @@ class _Tracer:
                 if isinstance(t, str)
             ]
         elif isinstance(token, str):
-            pairs = [(token, value, None)]
+            # A selected element keeps its list position (carried by the cell, never
+            # re-derived from the token's shape).
+            pairs = [(token, value, cell.element)]
         out: list[TraceStep] = []
         for t, v, k in pairs:
             sid, record_id, source_column = _parse_token(t)
@@ -838,6 +840,8 @@ class _Tracer:
         token, value = cell.token, cell.value
         if token is None:
             return []
+        if slot is not None and cell.element is not None and cell.element != slot:
+            return []  # a selected element of a merged list is its own argument's
         prefix = constants.SOURCE_PREFIX
         data_columns = list(_keys(upstream)[1])
 
@@ -861,6 +865,20 @@ class _Tracer:
             up = _Cell(r, column)
             return (up, None) if same_value(up.value, value) else None
 
+        if cell.element is not None:
+            # A selected element passes on with its position: the input cell is the
+            # list whose whole token is the output's, at the same position.
+            whole = cell.row.get(prefix + cell.column)
+
+            def carried(r: Row, column: str) -> Link | None:
+                if r.get(prefix + column) != whole:
+                    return None
+                up = _Cell(r, column, cell.element)
+                return (up, None) if same_value(up.value, value) else None
+
+            found = resolve(carried, "the input list")
+            if found:
+                return found
         found = resolve(exact, "the input cell")
         if found:
             return found
@@ -1197,9 +1215,18 @@ def trace(node: Any, row: Mapping[str, Any], column: str) -> Trace:
         return Trace(root=tracer.unread(node, column, None, status))
     if column not in _keys(node)[1]:
         table = tracer.reader.table(node)
+        # A completed function run with no rows holds no row to read its columns
+        # from: its data columns are the held table's columns that are not its
+        # input's tags (a function passes its input's tags) nor system columns.
+        tags = set(_keys(node.upstreams[0])[0]) if _kind(node) == "function" else set()
         held_column = (
-            not rows and table is not None and column in table.column_names
-        )  # a completed run with no rows: the held table's schema has the column
+            not rows
+            and _kind(node) == "function"
+            and table is not None
+            and column in table.column_names
+            and column not in tags
+            and not column.startswith("_")
+        )
         if not held_column:
             raise ValueError(f"{column!r} is not a data column of node {node.label!r}")
     root = tracer.step(node, _Cell(_select_row(node, rows, row), column))

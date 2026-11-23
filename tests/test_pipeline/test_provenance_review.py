@@ -853,3 +853,59 @@ def test_a_completed_run_with_no_rows_has_its_columns() -> None:
         job.nodes["sums"].trace({"k": "a", "g": "1"}, "s")
     with pytest.raises(ValueError, match="not a data column"):
         job.nodes["sums"].trace({"k": "a", "g": "1"}, "nowhere")
+
+
+# ---------------------------------------------------------------------------
+# Fifth review (head f97048f6)
+# ---------------------------------------------------------------------------
+
+
+def _two_caches_of_one_record(name: str, left_first: bool, select: bool) -> PipelineJob:
+    def cached(source_id: str, x: int, extra: bool) -> CachedSource:
+        row: dict[str, Any] = {"k": "a", "i": 0, "x": x, "y": 0}
+        if extra:
+            row["z"] = 1
+        inner = DictSource(
+            [row], tag_columns=["k", "i"], tag_only_columns=True, source_id="s"
+        )
+        return CachedSource(
+            inner, cache_database=InMemoryArrowDatabase(), source_id=source_id
+        )
+
+    left, right = cached("left", 1, False), cached("right", 100, True)
+    job = PipelineJob(name=name, database=InMemoryArrowDatabase())
+    with job:
+        merged = MergeJoin()(left, right) if left_first else MergeJoin()(right, left)
+        if select:
+            merged = SelectDataColumns(["x"])(merged)
+        Index("x", 0)(merged)
+    job.run()
+    return job
+
+
+@pytest.mark.parametrize("select", [False, True])
+@pytest.mark.parametrize("left_first", [True, False])
+def test_a_selected_merged_element_traces_to_its_own_argument(
+    left_first: bool, select: bool
+) -> None:
+    """Index after MergeJoin of two caches keeping one source and record id: the
+    selected element keeps its position, through a select in between too."""
+    job = _two_caches_of_one_record(f"ix{left_first}{select}", left_first, select)
+    node = job.nodes["Index"]
+    trace = node.trace({"k": "a", "i": 0}, "x")
+    expected = ("left", 1) if left_first else ("right", 100)
+    assert trace.root.value == expected[1]
+    assert [(c.node, c.value) for c in trace.source_cells()] == [expected]
+
+
+def test_an_empty_run_rejects_a_column_that_is_not_data() -> None:
+    source = table_source(rows_kgxy(("a", "1", 1, 2)), TWO_BY_TWO, ["k", "g"], "src")
+    job = PipelineJob(name="emptytag", database=InMemoryArrowDatabase())
+    with job:
+        add.pod(Filter({"x": 999})(source), label="sums")
+    job.run()
+    for column in ("k", "g"):
+        with pytest.raises(ValueError, match="not a data column"):
+            job.nodes["sums"].trace({"k": "a", "g": "1"}, column)
+    with pytest.raises(ValueError, match="holds no row"):
+        job.nodes["sums"].trace({"k": "a", "g": "1"}, "s")
