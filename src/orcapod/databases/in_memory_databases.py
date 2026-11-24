@@ -380,6 +380,13 @@ class InMemoryArrowDatabase:
         for record_key in list(self._pending_batches):
             self._flush_by_key(record_key)
 
+    def refresh_table(self, record_path: tuple[str, ...]) -> None:
+        """Nothing to refresh: every view reads the one shared store (ITL-1408).
+
+        All views of an in-memory database share its tables, and two separate
+        in-memory databases never share data, so no handle can hold an older version.
+        """
+
     def flush_result_batch(
         self, record_path: tuple[str, ...], *, publish_records: bool
     ) -> None:

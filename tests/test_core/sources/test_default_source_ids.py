@@ -1,10 +1,11 @@
-"""Default source ids built from a hash: ``<source kind>:<algorithm label>:<hex>`` (ITL-957).
+"""Default ids from a hash: ``<kind>_v<N>:<algorithm label>:<hex>`` (ITL-957, ITL-1425).
 
 Developer decision of November 11, 2026: a source id is the source's name and must make
-the source easy to identify. A default id built from a hash carries the source kind (the
-class's config type key) and the hash's own label. The one string is used unchanged as
-the ``source_id`` system tag value and inside the ``_source_<col>`` values. A source id
-given by the user is never changed.
+the source easy to identify. Every source id starts with its kind part,
+``<SOURCE_KIND>_v<SOURCE_VERSION>`` (November 23, 2026, ITL-1425); a default name built
+from a hash carries the hash's own label. The one string is used unchanged as the
+``source_id`` system tag value and inside the ``_source_<col>`` values. A name given by
+the user is never changed: the kind part is put in front of it.
 """
 
 from __future__ import annotations
@@ -116,7 +117,7 @@ class TestInMemoryDefaultSourceId:
         source = make()
         parts = source.source_id.split(":")
         assert len(parts) == 3, source.source_id
-        assert parts[0] == kind
+        assert parts[0] == f"{kind}_v1"
         assert parts[1] == _arrow_label(source)
         assert len(parts[2]) >= 64
         int(parts[2], 16)  # raises unless the last part is hex
@@ -127,7 +128,7 @@ class TestInMemoryDefaultSourceId:
         source = make()
         assert cls.SOURCE_KIND == kind
         assert source.to_config()["source_type"] == cls.SOURCE_KIND
-        assert source.source_id.startswith(f"{cls.SOURCE_KIND}:")
+        assert source.source_id.startswith(f"{cls.SOURCE_KIND}_v{cls.SOURCE_VERSION}:")
 
     def test_same_string_in_system_tag_and_source_info(
         self, cls, kind, make, data_column
@@ -150,16 +151,16 @@ class TestInMemoryDefaultSourceId:
         assert make().source_id == make().source_id
 
     @pytest.mark.parametrize("given", ["my_source", "a:b:c", "0123abcd", "arrow_table"])
-    def test_given_source_id_is_never_changed(
-        self, cls, kind, make, data_column, given
-    ):
+    def test_given_name_is_never_changed(self, cls, kind, make, data_column, given):
         source = make(source_id=given)
-        assert source.source_id == given
-        assert _source_id_values(source) == {given}
+        full = f"{kind}_v1:{given}"
+        assert source.source_name == given
+        assert source.source_id == full
+        assert _source_id_values(source) == {full}
         table = source.as_table(all_info=True)
         info = table.column(f"{constants.SOURCE_PREFIX}{data_column}").to_pylist()
         sep = constants.BLOCK_SEPARATOR
-        assert info == [f"{given}{sep}row_{i}{sep}{data_column}" for i in range(3)]
+        assert info == [f"{full}{sep}row_{i}{sep}{data_column}" for i in range(3)]
 
     def test_default_is_full_length_whatever_path_n_char(
         self, cls, kind, make, data_column
@@ -174,7 +175,7 @@ class TestArrowTableDefaultIsTheLabelledTableHash:
     def test_default_is_kind_plus_the_table_hash_string(self):
         source = _arrow_table_source()
         table_hash = source.data_context.arrow_hasher.hash_table(_arrow_table())
-        assert source.source_id == f"arrow_table:{table_hash.to_string()}"
+        assert source.source_id == f"arrow_table_v1:{table_hash.to_string()}"
 
 
 class TestKindsTellSourcesApart:
@@ -227,13 +228,16 @@ class TestAsSourceDefaultSourceId:
     def test_as_source_id_is_derived_plus_the_labelled_content_hash(self, make_node):
         node = make_node()
         assert (
-            node.as_source().source_id == f"derived:{node.content_hash().to_string()}"
+            node.as_source().source_id
+            == f"derived_v1:{node.content_hash().to_string()}"
         )
 
     def test_kind_is_defined_once_on_the_class(self, make_node):
         node = make_node()
         assert DerivedSource.SOURCE_KIND == "derived"
-        assert node.as_source().source_id.startswith(f"{DerivedSource.SOURCE_KIND}:")
+        assert node.as_source().source_id.startswith(
+            f"{DerivedSource.SOURCE_KIND}_v{DerivedSource.SOURCE_VERSION}:"
+        )
 
     def test_as_source_id_has_three_parts_and_no_node_path(self, make_node):
         node = make_node()
@@ -253,5 +257,7 @@ class TestAsSourceDefaultSourceId:
         node.run()
         assert node.as_source().source_id == before
 
-    def test_given_source_id_is_never_changed(self, make_node):
-        assert DerivedSource(make_node(), source_id="my:name").source_id == "my:name"
+    def test_given_name_is_never_changed(self, make_node):
+        source = DerivedSource(make_node(), source_id="my:name")
+        assert source.source_name == "my:name"
+        assert source.source_id == "derived_v1:my:name"

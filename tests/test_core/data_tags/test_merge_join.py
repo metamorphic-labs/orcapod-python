@@ -100,9 +100,14 @@ def test_its_source_info_is_one_join_token_of_both_tokens() -> None:
     source_x = f"{constants.SOURCE_PREFIX}x"
     for k, row in rows.items():
         assert JOIN_TOKEN.match(row[source_x])
-        assert row[source_x] == join_fold([f"A::row_{k - 1}::x", f"B::row_{k - 1}::x"])
+        assert row[source_x] == join_fold(
+            [f"dict_v1:A::row_{k - 1}::x", f"dict_v1:B::row_{k - 1}::x"]
+        )
     # A merged list keeps one token per member, in argument order, as its values.
-    assert rows[2][f"{constants.SOURCE_PREFIX}v"] == ["A::row_1::v", "B::row_1::v"]
+    assert rows[2][f"{constants.SOURCE_PREFIX}v"] == [
+        "dict_v1:A::row_1::v",
+        "dict_v1:B::row_1::v",
+    ]
 
 
 def test_the_token_is_the_one_join_gives() -> None:
@@ -148,7 +153,7 @@ def test_a_tag_data_tag_in_one_input_keeps_its_own_token(other: Any) -> None:
         rows = _by_k(merged)
         for k, row in rows.items():
             assert row["x"] == 10 * k
-            assert row[f"{constants.SOURCE_PREFIX}x"] == f"A::row_{k - 1}::x"
+            assert row[f"{constants.SOURCE_PREFIX}x"] == f"dict_v1:A::row_{k - 1}::x"
 
 
 # ── case 4: a data-tag against data-only ────────────────────────────────────

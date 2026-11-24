@@ -25,8 +25,8 @@ class ListSource(RootSource):
     (default) or the dict returned by ``tag_function(element, index)``.
 
     Its identity is that of every root source (``RootSource.identity_structure``:
-    class name, output schema, ``source_id``, key columns; developer, November 21,
-    2026, ITL-1272). The elements and the tags the tag function gave enter it only
+    ``source_id``, output schema, key columns, no class name; developer, November 21,
+    2026, ITL-1272; ITL-1425). The elements and the tags the tag function gave enter it only
     through the default source id, the hash of the built table, when no
     ``source_id`` is given, and through the output schema (their types); with a
     ``source_id``, the source is an address: other elements of the same types leave its
@@ -37,8 +37,10 @@ class ListSource(RootSource):
     def _default_tag(element: Any, idx: int) -> dict[str, Any]:
         return {"element_index": idx}
 
-    # The config type key; also the kind prefix of the default source id.
+    # The config type key; also the kind in the kind part of the source id.
     SOURCE_KIND: ClassVar[str] = "list"
+    # The version of this kind's implementation, in the kind part (ITL-1425).
+    SOURCE_VERSION: ClassVar[int] = 1
     TABLE_IS_ROWS: ClassVar[bool] = True
 
     def __init__(
@@ -65,8 +67,9 @@ class ListSource(RootSource):
                 the first row (or there is no row).
             data_schema: The Python schema of the rows, when it must not be
                 inferred from the values.
-            source_id: The source's name; by default ``list:<label>:<hex>`` of the
-                built table's hash.
+            source_id: The source's name; its id is ``list_v1:<name>``
+                (ITL-1425). By default the name is ``<label>:<hex>`` of the built
+                table's hash, so the id is ``list_v1:arrow_v1:<hex>``.
             record_id_columns: The key columns that name a row, in key order;
                 ``None`` or ``()`` for the position.
             hash_in_key_order: Hash the table for the default source id with its
@@ -122,23 +125,23 @@ class ListSource(RootSource):
         result = builder.build(
             arrow_table,
             tag_columns=tag_columns,
-            source_id=self._source_id,
-            source_kind=self.SOURCE_KIND,
+            source_name=self._source_name,
+            kind_part=self.kind_part(),
             record_id_columns=self._key_columns,
             hash_in_key_order=hash_in_key_order,
         )
 
         self._stream = result.stream
-        if self._source_id is None:
-            self._source_id = result.source_id
-        warn_source_tensor_conversions(self._source_id, rows)
+        if self._source_name is None:
+            self._source_name = result.source_name
+        warn_source_tensor_conversions(self.source_id, rows)
 
     def to_config(self, db_registry=None) -> dict[str, Any]:
         """Serialize metadata-only config (data is not serializable)."""
         return {
             "source_type": self.SOURCE_KIND,
             "name": self.name,
-            "source_id": self.source_id,
+            **self._source_id_config(),
             **self._identity_config(),
         }
 

@@ -18,6 +18,8 @@ from typing import Any
 
 import pyarrow as pa
 
+from orcapod.core.sources.source_ids import parse_source_id
+
 BLOCK_SEPARATOR = "::"
 
 
@@ -48,12 +50,14 @@ class Origin:
     """One row of one source, as the test wrote it.
 
     Attributes:
-        source_id: The source's id.
+        source_id: The source's id, kind part included (``arrow_table_v1:A``): what
+            the system tags and tokens hold (ITL-1425).
         token: The row's provenance token within the source.
         record_id: The row's record id: its row identifier, the same as ``token``.
         values: Every column of the row (tags and data), as Python values.
         data_table: The row's data columns as a one-row Arrow table with the source's
             types: what the source's ``Data`` hashes.
+        name: The name the test gave the source (``A``), its id without the kind part.
     """
 
     source_id: str
@@ -61,6 +65,11 @@ class Origin:
     record_id: str
     values: Mapping[str, Any]
     data_table: pa.Table = field(compare=False, repr=False)
+    name: str = ""
+
+    def of(self, source: str) -> bool:
+        """Whether this row is of ``source``, given by its full id or by its name."""
+        return source in (self.source_id, self.name)
 
 
 @dataclass(frozen=True)
@@ -106,7 +115,8 @@ class Oracle:
         """Register the rows of a source from the table the test gave it.
 
         Args:
-            source_id: The id the test gave the source.
+            source_id: The source's id, kind part included (``source.source_id``).
+                The rows are also found by its name (the part after the kind part).
             table: The table the test gave the source, in its row order.
             tag_columns: The source's tag columns.
             schema_hash: The schema hash that names the source's system tag columns
@@ -117,6 +127,7 @@ class Oracle:
                 from its own rows (SpiralDB: its primary key).
         """
         self.schema_hashes[source_id] = schema_hash
+        name = parse_source_id(source_id).name
         key_columns = (
             (record_id_columns,)
             if isinstance(record_id_columns, str)
@@ -136,6 +147,7 @@ class Oracle:
                 record_id=token,
                 values=values,
                 data_table=table.slice(index, 1).select(data_columns),
+                name=name,
             )
             self.origins.append(origin)
             self.by_record_id[(source_id, origin.record_id)] = origin
@@ -199,8 +211,7 @@ class Oracle:
             return [
                 o
                 for o in self.origins
-                if o.source_id == derivation.source_id
-                and derivation.compute(o) == value
+                if o.of(derivation.source_id) and derivation.compute(o) == value
             ]
         name = self.base_name(column)
         return [o for o in self.origins if name in o.values and o.values[name] == value]
@@ -216,5 +227,5 @@ class Oracle:
         """Whether a row of ``origin``'s source gives the output column ``column``."""
         derivation = self._derivation(column)
         if derivation is not None:
-            return derivation.source_id == origin.source_id
+            return origin.of(derivation.source_id)
         return self.base_name(column) in origin.values

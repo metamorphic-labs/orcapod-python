@@ -34,6 +34,41 @@ logger = logging.getLogger(__name__)
 NodeT = TypeVar("NodeT", bound=Hashable)
 
 
+def _refuse_sources_sharing_a_slot_name(
+    slot_name: str, streams: list[cp.StreamProtocol]
+) -> None:
+    """Refuse two different sources that would take one slot name (ITL-1425).
+
+    A slot is named by its source's name, without the kind part, so two different
+    sources whose names are equal (a SQLite table ``data.db:main.records`` and a CSV
+    file at that path; Arrow and data frame sources over one table with default ids)
+    would share one ``job.sources`` and ``bind`` key, and one would replace the other.
+    Only sources are refused here: a slot of another stream is named by its label and
+    content hash.
+
+    Raises:
+        SourceSlotNameCollisionError: Naming every full source id and the remedy.
+    """
+    from orcapod.core.sources.base import RootSource
+
+    sources = [s for s in streams if isinstance(s, RootSource)]
+    if len(sources) < 2:
+        return
+    from orcapod.errors import SourceSlotNameCollisionError
+
+    ids = sorted({s.source_id for s in sources})
+    described = (
+        ", ".join(repr(i) for i in ids)
+        if len(ids) > 1
+        else f"{ids[0]!r} ({len(sources)} sources with other key columns or rows)"
+    )
+    raise SourceSlotNameCollisionError(
+        f"{len(sources)} different sources would take the slot name {slot_name!r}: "
+        f"{described}. A slot is named by the source's name without its kind part; "
+        "give each source its own name with source_id=... when it is built."
+    )
+
+
 @dataclass(frozen=True)
 class InvocationGraph:
     """Interchange value object between Pipeline and PipelineJob.
@@ -484,14 +519,12 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         # 2a. Validate source-node name uniqueness.
         # Source node names are identity-forming (used as bind() keys and
         # included in content_hash()).  Two distinct source nodes with the
-        # same name indicate a source_id collision.  If their schemas also
-        # differ the caller has assigned the same source_id to conceptually
-        # different sources — raise an error.  If the schemas happen to match
-        # the nodes are functionally identical (same name + same schema would
-        # normally produce the same content_hash and be deduplicated at
-        # recording time, so this branch is only reached in unusual edge cases
-        # such as non-RootSource concrete streams with colliding label:hash
-        # names), and we leave them as-is.
+        # same name are refused: with different schemas by InconsistentSourceError,
+        # and when two or more are sources (RootSource), whatever their schemas, by
+        # SourceSlotNameCollisionError (ITL-1425: a slot is named by the source's
+        # name without its kind part, so another kind, version, key or id would
+        # otherwise share the slot). Only streams that are not sources, with equal
+        # schemas and colliding label:hash names, are left as they are.
         name_to_hashes: dict[str, list[str]] = {}
         for h, node in node_map.items():
             name_to_hashes.setdefault(node._name, []).append(h)
@@ -508,12 +541,25 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
             if schemas_differ:
                 from orcapod.errors import InconsistentSourceError
 
+                from orcapod.core.sources.base import RootSource
+
+                ids = sorted(
+                    {
+                        s.source_id
+                        for s in (self._source_streams[h] for h in hashes)
+                        if isinstance(s, RootSource)
+                    }
+                )
+                named = f" ({', '.join(repr(i) for i in ids)})" if ids else ""
                 raise InconsistentSourceError(
                     f"Pipeline '{'.'.join(self._name)}' has {len(hashes)} source "
-                    f"nodes all named {node_name!r} but with different schemas. "
-                    f"Assign distinct source_id values to the conflicting sources "
-                    f"so each slot has a unique, stable identity."
+                    f"nodes all named {node_name!r}{named} but with different "
+                    f"schemas. Assign distinct source_id values to the conflicting "
+                    f"sources so each slot has a unique, stable identity."
                 )
+            _refuse_sources_sharing_a_slot_name(
+                node_name, [self._source_streams[h] for h in hashes]
+            )
 
         # 3. Topological pass — create function / operator nodes.
         for key in _nx.topological_sort(self._hash_graph):

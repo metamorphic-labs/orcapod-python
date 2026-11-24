@@ -2316,14 +2316,16 @@ def test_delta_recorded_type_decides_a_child_the_log_keeps_plain(
     assert sorted(cast(list[bytes], stored.column("id").to_pylist())) == [b"1", b"22"]
 
 
-def test_delta_stale_handle_after_delete_and_recreate_reuses_its_ids(
+def test_delta_handle_after_delete_and_recreate_reads_the_new_tables_ids(
     tmp_path: Path,
 ) -> None:
-    """Pins a pre-existing limit, as on main (round 5, finding 2; ITL-1413): a held
-    handle whose table was deleted and recreated at the same path, at the same Delta
-    version, takes the new table's identifier on a reload but its duplicate scan
-    reuses the old version's cached ids, so a same-identifier append of an old id is
-    taken for a duplicate (nothing written) and one of a new id is written again."""
+    """Round 5, finding 2 (ITL-1413): a held handle whose table was deleted and
+    recreated at the same path, at the same Delta version, no longer reuses the old
+    table's cached ids, so an old id the new table lacks is stored once, and an id of
+    the new table is not stored twice. Here the add of another identifier reopens the
+    table, and a reopen drops the snapshot with the handle (review of PR 504, round
+    eight); ITL-1377 also keys every snapshot by the Delta table's own id and commits
+    every append to an existing table as a MERGE."""
     import shutil
 
     import deltalake
@@ -2359,7 +2361,7 @@ def test_delta_stale_handle_after_delete_and_recreate_reuses_its_ids(
     stored = DeltaTableDatabase(root).get_all_records(PATH, record_id_column="id")
     assert stored is not None
     assert sorted(cast(list[bytes], stored.column("id").to_pylist())) == [
-        b"c",
+        b"a",
         b"c",
         b"d",
     ]

@@ -267,8 +267,10 @@ def test_stream_passed_for_its_tags_restricts_the_rows() -> None:
 _JOINED_PIPELINE_HASH = (
     "b197f5c813da84cca90d40506df6fe76e83d3749f2f83d76741ac4991eb903cd"
 )
+# The content hash moved once more for ITL-1425: the sources' ids gained their kind part
+# and the class name left the source identity (the pipeline hash did not move).
 _JOINED_CONTENT_HASH = (
-    "8d97c02b38f270d24ff5b55995e41a4e688c6557076264fdbfc51d3b28deb37e"
+    "d7626a640c05c053d13d1e09a4d57a967d8ab7f4e9b424b4dfa85439242b6379"
 )
 
 

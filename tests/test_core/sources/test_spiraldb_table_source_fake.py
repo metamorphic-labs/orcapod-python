@@ -292,7 +292,7 @@ class TestSourceId:
     ):
         """The default source id is the project, dataset, table and table id."""
         source = SpiralDBTableSource("edi-sample-a", "subject", tag_only_columns=True)
-        expected = f"spiraldb_table:edi-sample-a.default.subject@{source.table_id}"
+        expected = f"spiraldb_table_v1:edi-sample-a.default.subject@{source.table_id}"
         assert source.source_id == expected
         assert self._identity(source)[2] == f"{expected}::{self._M1}::sex"
 
@@ -326,10 +326,12 @@ class TestSourceId:
             Schema({"subject_id": str | None}),
             Schema({"sex": str | None}),
         )
+        # The content hash and the token moved once for ITL-1425 (the source id gained
+        # its kind part, and the class name left the identity).
         assert self._identity(source) == (
-            "semantic_v1:8159a5e1e45fb8bc11b3d3b9a4593d38d424373d40fb2dff82b763bbfb56c19d",
+            "semantic_v1:8dafaa1538973ddfbe1af8dd18c5a848f0346fcce4bd9499fefa9980c08815bb",
             self._M1,
-            f"subject::{self._M1}::sex",
+            f"spiraldb_table_v1:subject::{self._M1}::sex",
         )
         assert source.pipeline_hash().to_string() == (
             "semantic_v1:1c8a42718a1ee6baf6fa39c26c653922ff82824b946752a2bfbeff020a785c54"
@@ -350,10 +352,12 @@ class TestSourceId:
         source = SpiralDBTableSource(
             "edi-sample-a", "subject", source_id="subject", tag_only_columns=True
         )
+        # The content hash and the token moved once for ITL-1425 (the source id gained
+        # its kind part, and the class name left the identity).
         assert self._identity(source) == (
-            "semantic_v1:6a5a8b911d12be63c9cb9173e5444ef8df0ccd0c84da310440151c66f515b8ed",
+            "semantic_v1:440e9c9a18409906778e076478922aefd79e7581591f20b0240dfe0d280cbdec",
             self._M1,
-            f"subject::{self._M1}::sex",
+            f"spiraldb_table_v1:subject::{self._M1}::sex",
         )
         assert source.pipeline_hash().to_string() == (
             "semantic_v1:8a1694053997388337fecf33b28b7324bc9256185b151ee900b4ff15c6254d6e"

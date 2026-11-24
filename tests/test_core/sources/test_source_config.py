@@ -23,7 +23,8 @@ class TestCSVSourceConfig:
         assert config["source_type"] == "csv"
         assert config["file_path"] == str(csv_file)
         assert config["tag_columns"] == ["a"]
-        assert config["source_id"] == "test_csv"
+        assert config["source_name"] == "test_csv"
+        assert config["source_version"] == 1
 
     def test_round_trip(self, tmp_path):
         csv_file = tmp_path / "test.csv"
@@ -50,13 +51,14 @@ class TestDictSourceConfig:
         config = source.to_config()
         assert config["source_type"] == "dict"
         assert config["tag_columns"] == ["a"]
-        assert config["source_id"] == "test_dict"
+        assert config["source_name"] == "test_dict"
 
     def test_from_config_raises(self):
         config = {
             "source_type": "dict",
             "tag_columns": ["a"],
-            "source_id": "test_dict",
+            "source_name": "test_dict",
+            "source_version": 1,
         }
         with pytest.raises(NotImplementedError):
             DictSource.from_config(config)

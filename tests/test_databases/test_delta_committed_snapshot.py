@@ -160,15 +160,15 @@ def _operations(path: Path) -> list[str]:
     return [str(entry["operation"]) for entry in reversed(history)]
 
 
-def test_commits_with_new_ids_append(tmp_path: Path) -> None:
-    """Batches whose ids are all new are appended (no MERGE) and stored unchanged."""
+def test_commits_with_new_ids_are_merged_and_stored_unchanged(tmp_path: Path) -> None:
+    """Batches whose ids are all new are MERGEd too (ITL-1377) and stored unchanged."""
     db = DeltaTableDatabase(tmp_path)
     for start in range(0, 9, 3):
         ids = [f"id{i}" for i in range(start, start + 3)]
         db.add_records(PATH, _rows(ids, list(range(start, start + 3))))
         _ = db.get_records_with_column_value(PATH, {"g": b"g"})  # lookups as a job does
         db.flush()
-    assert _operations(tmp_path / "table") == ["WRITE", "WRITE", "WRITE"]
+    assert _operations(tmp_path / "table") == ["WRITE", "MERGE", "MERGE"]
     assert _values(DeltaTableDatabase(tmp_path).get_all_records(PATH)) == list(range(9))
 
 

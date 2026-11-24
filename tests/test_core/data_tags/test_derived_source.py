@@ -290,7 +290,7 @@ def test_the_binding_enters_the_identity_through_the_origin_and_the_schema() -> 
     )
     assert with_data_tags.pipeline_hash() != plain.pipeline_hash()
     # The default source id keeps its construction: derived:<label>:<hex> of the origin.
-    assert with_data_tags.source_id.startswith("derived:")
+    assert with_data_tags.source_id.startswith("derived_v1:")
     assert with_data_tags.source_id != plain.source_id
 
 

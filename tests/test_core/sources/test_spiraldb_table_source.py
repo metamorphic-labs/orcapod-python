@@ -267,7 +267,7 @@ class TestConnector:
         )
 
     def test_every_connector_is_closed(self):
-        """Every connector is closed: build, full read, unfinished read, error."""
+        """Close the shared connector at context exit or failed construction."""
         _make_table()
         opened: list[SpiralDBConnector] = []
 
@@ -277,17 +277,22 @@ class TestConnector:
             return opened[-1]
 
         with patch(_CONNECTOR, side_effect=connect):
-            src = SpiralDBTableSource(_PROJECT_ID, _TABLE_NAME, tag_only_columns=True)
-            src.as_table()
-            # iter_data is a generator function, so the read can be closed.
-            unfinished = cast("Generator[Any, None, None]", src.iter_data())
-            next(unfinished)  # a read that is not finished
-            unfinished.close()
+            with SpiralDBTableSource(
+                _PROJECT_ID, _TABLE_NAME, tag_only_columns=True
+            ) as src:
+                src.as_table()
+                unfinished = cast("Generator[Any, None, None]", src.iter_data())
+                next(unfinished)
+                unfinished.close()
+                assert src.as_table().num_rows == 3
+            src.close()
+            with pytest.raises(RuntimeError, match="SpiralDBTableSource is closed"):
+                src.as_table()
             with pytest.raises(ValueError):
                 SpiralDBTableSource(_PROJECT_ID, "no_such_table", tag_only_columns=True)
-        assert len(opened) == 4
+        assert len(opened) == 2
         # About the connector's own closed flag: nothing public reports it.
-        assert [c._closed for c in opened] == [True] * 4  # pyright: ignore[reportPrivateUsage]
+        assert [c._closed for c in opened] == [True] * 2  # pyright: ignore[reportPrivateUsage]
 
 
 # ===========================================================================
@@ -410,7 +415,8 @@ class TestConfigSerialization:
         assert cfg["table_id"] == src.table_id
         assert cfg["tag_columns"] == ["session_id"]
         assert cfg["overrides"] == overrides
-        assert cfg["source_id"] == src.source_id
+        assert cfg["source_name"] == src.source_name
+        assert cfg["source_version"] == src.SOURCE_VERSION
         for field in ("content_hash", "pipeline_hash", "tag_schema", "data_schema"):
             assert field in cfg
 
