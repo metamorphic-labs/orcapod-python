@@ -671,9 +671,8 @@ class FakeTable:
                 children = [
                     stored_type.field(index) for index in range(stored_type.num_fields)
                 ]
-                sf = sf.with_type(
-                    pa.struct(sorted(children, key=lambda field: field.name))
-                )
+                children.sort(key=lambda field: field.name)
+                sf = sf.with_type(pa.struct(children))
             if isinstance(f.type, pa.ExtensionType):
                 col = pa.chunked_array(
                     [cast("pa.ExtensionArray[Any]", c).storage for c in col.chunks]
