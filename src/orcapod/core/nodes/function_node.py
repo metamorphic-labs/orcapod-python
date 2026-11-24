@@ -3483,7 +3483,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         """Return a DerivedSource backed by the DB records of this node.
 
         Without ``tags_as_data`` and ``source_id``, its ``source_id`` is the
-        ``DerivedSource`` default, ``derived:<algorithm label>:<hex>`` of this
+        ``DerivedSource`` default, ``derived_v1:<algorithm label>:<hex>`` of this
         node's content hash.
 
         Args:
@@ -3506,7 +3506,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         from orcapod.core.sources.derived_source import DerivedSource
 
         # Without a source_id the plain form takes the DerivedSource default
-        # (``derived:<algorithm label>:<hex>`` of this node's content hash); the
+        # (``derived_v1:<algorithm label>:<hex>`` of this node's content hash); the
         # ``tags_as_data`` form refuses to be built without one (ITL-1313).
         return DerivedSource(
             origin=self,

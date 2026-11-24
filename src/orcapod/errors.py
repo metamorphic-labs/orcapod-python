@@ -695,6 +695,54 @@ class SourceCheckFailedWarning(UserWarning):
     """
 
 
+class SourceNameWarning(UserWarning):
+    """A given source name starts like the id of a source kind (ITL-1425).
+
+    Every source id is ``<kind>_v<N>:<name>``, and Orcapod always adds the kind part of
+    the source that reads the data. A given ``source_id`` is the name: one that starts
+    with ``<registered kind>_v<N>:`` (``delta_table_v1:units``) is accepted as it is,
+    nested after the reader's own kind part (``csv_v1:delta_table_v1:units``), and this
+    warning says so. Give the name alone.
+    """
+
+
+class SourceVersionWarning(UserWarning):
+    """A saved source was written by another version of its kind (ITL-1425).
+
+    A saved job records each source's kind, implementation version and name. Loaded
+    where the source class declares another version, the source is rebuilt as the
+    installed version, so its source id names that version (``delta_table_v2:units``
+    for a source saved as ``delta_table_v1:units``): a different source id, a different
+    source. The saved id is not rewritten.
+    """
+
+
+class CachedSourceIdMismatchError(ValueError):
+    """A ``CachedSource``'s table holds rows of another source id (ITL-1425).
+
+    A cache keeps the rows of one source, with that source's id in every source-info
+    token and source-id system tag. A table whose stored rows name another id (most
+    often the same source read by another version of its kind, after a saved job is
+    loaded where the class declares a newer ``SOURCE_VERSION``) is refused when the
+    cache is first read or checked, before the wrapped source is checked or its rows
+    are read: once a cache is found to hold another id, no row of the wrapped source
+    is read or returned and nothing is written. Building the wrapped source (loading
+    a saved cache config) may read it before that. The cache must be rebuilt for the
+    new id (a new ``cache_path``, or a new cache database), or the reader's version
+    pinned.
+    """
+
+
+class SourceSlotNameCollisionError(ValueError):
+    """Two different sources would take one slot name in a job (ITL-1425).
+
+    A job slot is named by its source's name, without the kind part, so two
+    different sources (another kind, another version or another id) whose names are
+    equal would share one slot and one would replace the other. The job refuses
+    them; give one of them its own name (``source_id=`` when it is built).
+    """
+
+
 class RestrictedAggregationWarning(UserWarning):
     """A restricted source feeds an aggregating step of a job run (ITL-1218).
 

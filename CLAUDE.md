@@ -636,9 +636,9 @@ algorithm produced it.**
 - A hash inside a name (path component, column name, `uri`, slot name, run URI) is the bare
   hex digest: `to_hex()`. A name later fed into a hash (the function `uri` in a pod's
   identity, system-tag column names in an entry-id table) is still a name.
-- Source ids: a source id is the source's name. A default built from a hash is
-  `<kind>:<label>:<hex>` (`derived:semantic_v1:<hex>`, via `to_string()`, never a label
-  literal; built by `hash_source_id`). A value folded by an operation is
+- Source ids: every source id is `<kind>_v<N>:<name>` (ITL-1425). A default name built from
+  a hash is `<label>:<hex>` (`derived_v1:semantic_v1:<hex>`, via `to_string()`, never a
+  label literal; built by `hash_source_name`). A value folded by an operation is
   `<operation label>:<hex>` (`batch_v1:` / `group_v1:`, for the folded source id and record id
   alike).
 - Record ids (developer, November 16, 2026, ITL-1154): the record-id system tag holds the row
@@ -918,8 +918,9 @@ operator. That form is a new root: fresh provenance through `SourceStreamBuilder
 "simply make them throw an error if source id is not provided"): it has no default, and
 `DerivedSource(..., tags_as_data=...)` and `node.as_source(tags_as_data=...)` raise
 `ValueError` without one, before the origin is read; a saved config without one is refused
-too. The given string is used as-is in system-tag values and source-info tokens, and with the
-sorted mapping it is the source's identity (the origin enters only through the schema). The
+too. The given string is its name (`derived_v1:<name>` in system-tag values and source-info
+tokens, ITL-1425), and with the sorted mapping the source id is the source's identity (the
+origin enters only through the schema). The
 config type key stays `derived`. `DerivedSource` without `tags_as_data` (a job node's stored records)
 keeps its old identity; do not change it (ITL-956).
 
@@ -931,13 +932,14 @@ Every pipeline element has two parallel hashes:
    identity. For a source it is a stable *address*, not a digest of its rows (developer,
    November 11, 2026: "sources content hash is meant to be a stable address and is not
    necessarily going to reflect the very data content"). A root source hashes
-   `(class name, Arrow schema identity, source_id, key columns)`; given a `source_id`, changed, added or
+   `(source_id, Arrow schema identity, key columns)`, no class name (ITL-1425: the source id's
+   kind part names the kind and implementation version); given a `source_id`, changed, added or
    reordered rows leave it unchanged. The key columns are the resolved `record_id_columns` in key
    order (`()` for the position; a database or SpiralDB table's primary key by default): two
    sources that differ only in how they name their rows are two sources, with one pipeline
    hash and one source id (developer, November 16, 2026, ITL-1154). Row content enters only where a source puts it into its own
    identity: the default `source_id` of the in-memory sources
-   (`<source kind>:<algorithm label>:<hex>` of the table hash, used when none is given; the rows
+   (`<kind>_v<N>:<algorithm label>:<hex>` of the table hash, used when none is given; the rows
    in the order given, or sorted by the key columns with `hash_in_key_order=True`, ITL-1272). A
    `ListSource` has no rule of its own (developer, November 21, 2026, ITL-1272): its elements
    and tag function enter only through that default and its output schema (their types), and
@@ -1410,25 +1412,51 @@ data. The rules:
   raw `ArrowTableStream` is refused (developer, November 14, 2026; wrap the table as a
   source). Never pass a bound stream's own system tags through.
 - A source id is the source's name (developer, November 11, 2026; ITL-957; every source,
-  November 15, 2026, ITL-1154). A `source_id` the user gives is used exactly as given, by
-  every source. Every default names its kind first: the class's `SOURCE_KIND`, which is also
-  its config type key (`arrow_table`, `dict`, `list`, `data_frame`, `derived`, `csv`,
-  `delta_table`, `sqlite_table`, `postgresql_table`, `db_table`, `spiraldb_table`,
-  `polling_source`, `cached`). A `DerivedSource` with `tags_as_data` has no default: it
-  requires a `source_id` (ITL-1313). A default built from a hash is `<kind>:<algorithm label>:<hex>`, built
-  only by `core/sources/source_ids.hash_source_id` (an in-memory source hashes its table as
+  November 15, 2026, ITL-1154), and every source id is `<kind>_v<N>:<name>` (developer,
+  November 23, 2026, ITL-1425). The kind part names the kind and implementation version that
+  read the data: the class's `SOURCE_KIND`, which is also its config type key (`arrow_table`,
+  `dict`, `list`, `data_frame`, `derived`, `csv`, `delta_table`, `sqlite_table`,
+  `postgresql_table`, `db_table`, `spiraldb_table`, `polling_source`, `cached`), and its
+  `SOURCE_VERSION`, declared beside it on every class (all start at 1). Orcapod always adds
+  the kind part, to a given name as to a default: a `source_id` the user gives is the
+  **name**, used exactly as given (`units` read by Delta v1 is `delta_table_v1:units`). A
+  given name that starts like an id of a registered kind (`delta_table_v1:units`) is accepted
+  as the name, nested, with `SourceNameWarning`; never refused. The id is built only by
+  `source_ids.build_source_id` and parsed only by `source_ids.parse_source_id` (split at the
+  first `:`; the kind part never holds `:`, the name may). Bump a kind's version when a row
+  read before a change could read differently after it (other values, Arrow types or record
+  id). A saved config holds `source_name`, `source_name_given` (given or default:
+  read back, never guessed, by `RootSource._from_saved_name`) and `source_version` apart (the kind is
+  `source_type`); loaded where the class declares another version, the source has the
+  installed version's id (`SourceVersionWarning`), never a rewritten one. A slot (a
+  `job.nodes` and `bind` key) is named by the source's name, not its full id, and two
+  different sources with one name are refused in a job (`SourceSlotNameCollisionError`,
+  `pipeline/base._refuse_sources_sharing_a_slot_name`). A `CachedSource` presents its
+  wrapped source's id and refuses, when the cache is first read or checked and before the
+  wrapped source is checked or read, a cache table whose rows name
+  another id (`CachedSourceIdMismatchError`; once found, no wrapped row is read or returned
+  and nothing written; building the wrapped source on load may read it; never a silent
+  move to another path); a
+  `SourceProxy` the saved id (rebuilt from the saved name fields, or the `full_source_id`
+  identity field). A legacy config (`source_id`, no `source_name`) is refused, also nested,
+  by `PipelineJob.load`. The name-shaped-like-an-id warning is for a given name only, not a
+  default location. Tokens,
+  system tags and `source_id` show the full id; a record id never holds the source id. A
+  `DerivedSource` with `tags_as_data` has no default: it requires a `source_id` (ITL-1313).
+  A default name built from a hash is `<algorithm label>:<hex>`, built
+  only by `core/sources/source_ids.hash_source_name` (an in-memory source hashes its table as
   given; `hash_in_key_order=True`, refused without key columns or with a `source_id`, hashes
   it sorted by the key columns in key order, `arrow_utils.key_row_order`, an Arrow sort after
   the keys are validated, rows presented as given; developer, November 21, 2026, ITL-1272);
   one built from where the data lives is
-  `<kind>:<location>`, built only by `location_source_id`: `csv:<path as passed>`,
-  `delta_table:<path or URI as passed>`, `sqlite_table:<db path as passed>:main.<table>`,
-  `postgresql_table:<host>:<port>/<database>.<schema>.<table>` (the server the connection
+  the location, built only by `location_source_name`: `csv_v1:<path as passed>`,
+  `delta_table_v1:<path or URI as passed>`, `sqlite_table_v1:<db path as passed>:main.<table>`,
+  `postgresql_table_v1:<host>:<port>/<database>.<schema>.<table>` (the server the connection
   reached, as libpq reports it: a host name lower-cased, an IPv6 address bracketed and
   exploded, a socket directory as given, the port always a number; parameters naming several
   servers, or a host beside a `hostaddr` that is not that address, give no default;
   developer, November 18, 2026, ITL-1267),
-  `spiraldb_table:<project>.<dataset>.<table>@<table id>` (developer, November 16, 2026); a
+  `spiraldb_table_v1:<project>.<dataset>.<table>@<table id>` (developer, November 16, 2026); a
   location whose parts hold their separator has no default (`source_ids.joined_location`). A
   `DBTableSource` used directly (a generic connector, no database address) has no default:
   it requires a `source_id` (developer, November 16, 2026). `::`
@@ -1443,11 +1471,12 @@ data. The rules:
   a null key, a repeated key and an unordered collection of key columns (a set) are refused
   when the source is built, and a `PollingSource` refuses a key an earlier batch already
   holds. Never format one by hand, and
-  never write a label as a literal; a new root source declares `SOURCE_KIND` and builds its
-  default with one of the two. `PollingSource` hashes `impl.identity()`, never its `repr`.
+  never write a label as a literal; a new root source declares `SOURCE_KIND` and
+  `SOURCE_VERSION` and builds its default name with one of the two. `PollingSource` hashes
+  `impl.identity()`, never its `repr`, and its identity holds its source id (ITL-1425).
   `node.as_source()` gives no id of its own; it takes the `DerivedSource` default. The
-  origin's source id is never written into a default id. `SourceStreamBuilder.build` has no
-  bare-hash default: it needs a `source_id` or a `source_kind`.
+  origin's source id is never written into a default id. `SourceStreamBuilder.build` needs
+  the kind part (`kind_part`) and takes the name (`source_name`) or makes the hash default.
 - `ArrowTableStream` requires at least one data column; raises `ValueError` otherwise.
 - A job node shows its current run; `node.as_source()` shows everything stored for it
   (developer, November 13, 2026, ITL-1095). After a run, a `FunctionJobNode` returns exactly

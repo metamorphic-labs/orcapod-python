@@ -133,9 +133,7 @@ def assert_records_aligned(
     # Every row of the node's input stored once: a record missing, or one valid record
     # stored twice in place of another, passes every per-record check below.
     stored: Counter[object] = Counter(records.column(record_id_column).to_pylist())
-    wanted: Counter[object] = Counter(
-        o.record_id for o in oracle.origins if o.source_id == "A"
-    )
+    wanted: Counter[object] = Counter(o.record_id for o in oracle.origins if o.of("A"))
     assert stored == wanted, (
         f"stored record ids are not the input rows once each: "
         f"{sum((wanted - stored).values())} missing, "
@@ -156,7 +154,7 @@ def assert_records_aligned(
         for tag in tag_keys:
             if row[tag] != origin.values[tag]:
                 fail(tag, f"{row[tag]!r}, its row has {origin.values[tag]!r}")
-        if row["_source_x"] != f"A::{origin.token}::x":
+        if row["_source_x"] != f"{origin.source_id}::{origin.token}::x":
             fail(
                 "_source_x", f"{row['_source_x']!r} does not name row {origin.token!r}"
             )

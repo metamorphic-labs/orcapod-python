@@ -187,13 +187,15 @@ def _expected(first: str, second: str) -> list[tuple[Any, ...]]:
     for left_row, right_row in MATCHES:
         index = {"a": left_row, "b": right_row}
         i, j = index[first], index[second]
+        # A source id is ``<kind part>:<name>`` (ITL-1425).
+        one, two = f"arrow_table_v1:{first}", f"arrow_table_v1:{second}"
         rows.append(
             (
                 [data[first][0][i], data[second][0][j]],
                 [data[first][1][i], data[second][1][j]],
-                [f"{first}::row_{i}::x", f"{second}::row_{j}::x"],
-                [f"{first}::row_{i}::y", f"{second}::row_{j}::y"],
-                {"0": (first, f"row_{i}"), "1": (second, f"row_{j}")},
+                [f"{one}::row_{i}::x", f"{two}::row_{j}::x"],
+                [f"{one}::row_{i}::y", f"{two}::row_{j}::y"],
+                {"0": (one, f"row_{i}"), "1": (two, f"row_{j}")},
                 f"a{left_row}",
                 f"b{right_row}",
             )

@@ -817,7 +817,7 @@ class TestIdentity:
         """A source id the user gave is kept."""
         restricted = _source(source_id="events").where(subject_id="m2")
 
-        assert restricted.source_id == "events"
+        assert restricted.source_id == "spiraldb_table_v1:events"
 
     def test_rows_are_the_matching_rows_unchanged(self, project):
         """Every column of a matching row, system tags and source info included, is equal."""
@@ -1026,7 +1026,9 @@ class TestRunsAndSavedJobs:
         assert summary.conditions == {"events": Condition.of(subject_id="m1")}
         assert summary.limits == {"events": 3}
         assert summary.restricted_source_ids == {"events": source.source_id}
-        assert "events (events): where subject_id='m1', limit 3" in repr(summary)
+        assert "events (spiraldb_table_v1:events): where subject_id='m1', limit 3" in (
+            repr(summary)
+        )
         assert "subject_id=&#x27;m1&#x27;" in summary._repr_html_()
 
     @pytest.mark.parametrize("form", list(_FORMS_OF_ONE_RESTRICTION))
@@ -1041,7 +1043,7 @@ class TestRunsAndSavedJobs:
         assert summary.conditions == {
             "events": Condition.of(subject_id="m1", flag=True)
         }
-        assert summary.restricted_source_ids == {"events": "events"}
+        assert summary.restricted_source_ids == {"events": "spiraldb_table_v1:events"}
         rows = job.nodes["double"].as_table().column("timestamp").to_pylist()
         assert rows == [3]
 
@@ -1070,7 +1072,7 @@ class TestRunsAndSavedJobs:
         summary = job.run()
 
         assert summary.conditions == {"events": Condition.of(subject_id="m1")}
-        assert summary.restricted_source_ids == {"events": "events"}
+        assert summary.restricted_source_ids == {"events": "spiraldb_table_v1:events"}
 
     def test_two_unbound_sources_of_one_label_are_both_reported(self, project):
         """Sources read without a slot are keyed by label, numbered when they meet."""
@@ -1281,8 +1283,8 @@ class TestRunsAndSavedJobs:
 
         assert summary.conditions == {}
         assert summary.limits == {"events": 2}
-        assert summary.restricted_source_ids == {"events": "events"}
-        assert "events (events): limit 2" in repr(summary)
+        assert summary.restricted_source_ids == {"events": "spiraldb_table_v1:events"}
+        assert "events (spiraldb_table_v1:events): limit 2" in repr(summary)
 
     def test_one_table_with_two_limits_in_one_job_is_refused(self, project, tmp_path):
         """The same condition with different limits reads different rows: refused."""
@@ -1313,7 +1315,9 @@ class TestRunsAndSavedJobs:
 
         assert node.last_run is not None
         assert node.last_run.conditions == {"events": Condition.of(subject_id="m2")}
-        assert node.last_run.restricted_source_ids == {"events": "events"}
+        assert node.last_run.restricted_source_ids == {
+            "events": "spiraldb_table_v1:events"
+        }
 
     def test_bound_restricted_source_runs_only_matching_rows(self, project, tmp_path):
         """Binding a restricted source runs its rows; nothing stored is removed."""
@@ -2036,7 +2040,11 @@ class TestRestrictionThroughWrappers:
         proxy = self._bound_proxy("several conditions")
         found = restrictions_in_force([proxy.select_data_columns(["amplitude"])])
         assert list(found.values()) == [
-            ("events", Condition.of(subject_id="m1", flag=True), None)
+            (
+                "spiraldb_table_v1:events",
+                Condition.of(subject_id="m1", flag=True),
+                None,
+            )
         ]
 
     @pytest.mark.parametrize("order", ["proxy first", "source first"])

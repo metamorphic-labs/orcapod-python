@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, ClassVar
+import warnings
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
@@ -10,10 +12,17 @@ from orcapod.core.streams.base import (
     typed_arrow_schemas,
     typed_zero_row_table,
 )
-from orcapod.system_constants import constants
+from orcapod.errors import SourceNameWarning, SourceVersionWarning
 from orcapod.core.streams.view import StreamView
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.types import ColumnConfig, Condition, ContentHash, Schema
+from orcapod.core.sources.source_ids import (
+    build_source_id,
+    kind_part,
+    register_kind,
+    require_source_name,
+    warn_if_name_looks_like_an_id,
+)
 from orcapod.core.sources.provisional import warn_provisional_source
 from orcapod.utils.provisional import note_provisional_use, provisional_class_name
 from orcapod.utils.schema_utils import arrow_schema_identity
@@ -68,6 +77,9 @@ def table_is_rows(source: object) -> bool:
     return vars(kind).get("TABLE_IS_ROWS") is True and reads_as_its_class(source, kind)
 
 
+_SourceT = TypeVar("_SourceT", bound="RootSource")
+
+
 class RootSource(StreamBase):
     """Abstract base class for all root sources in Orcapod.
 
@@ -87,19 +99,44 @@ class RootSource(StreamBase):
       identity Merkle chain.
 
     Source identity:
-        Every source has a ``source_id`` — a canonical name that determines the
-        source's content identity and is used in the ``SourceRegistry`` so that
-        provenance tokens embedded in downstream data can be resolved back to the
-        originating source object.
+        Every source has a ``source_id``, ``<kind>_v<N>:<name>`` (ITL-1425): the kind
+        part names the source's kind (``SOURCE_KIND``) and the version of its
+        implementation (``SOURCE_VERSION``), and the name is the given ``source_id``
+        or the source's default. The source id is in every system tag and source-info
+        token of the source's rows, enters its content hash, and is used in the
+        ``SourceRegistry`` so that provenance tokens can be resolved back to the
+        source object.
 
-        Concrete subclasses must ensure ``_source_id`` is set by the end of
-        ``__init__``.  File-backed sources (DeltaTableSource, CSVSource) default
+        Concrete subclasses must ensure ``_source_name`` is set by the end of
+        ``__init__``. File-backed sources (DeltaTableSource, CSVSource) default
         to the file path; ``ArrowTableSource`` defaults to the table's data hash.
+        Every concrete class declares its own ``SOURCE_KIND`` and ``SOURCE_VERSION``.
 
     Concrete subclasses must set ``self._stream`` in their ``__init__`` to get
     the default stream delegation behavior. They may also override
     ``identity_structure()``.
     """
+
+    SOURCE_KIND: ClassVar[str]
+    """The source's kind: its config type key and the first part of its source id."""
+
+    SOURCE_VERSION: ClassVar[int]
+    """The version of the kind's implementation, in the source id's kind part (ITL-1425).
+
+    Bump it when a row read before a change could read differently after it (other
+    values, other Arrow types, another record id): a new version is a new source id.
+    """
+
+    @classmethod
+    def kind_part(cls) -> str:
+        """The kind part of this class's source ids: ``<SOURCE_KIND>_v<SOURCE_VERSION>``."""
+        return kind_part(cls.SOURCE_KIND, cls.SOURCE_VERSION)
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        kind = cls.__dict__.get("SOURCE_KIND")
+        if kind is not None:
+            register_kind(kind)
 
     # Whether the source takes ``tag_only_columns`` and saves it in its config
     # (ITL-1019): from format 0.3.0 on such a config always holds it.
@@ -148,23 +185,14 @@ class RootSource(StreamBase):
             data_context=data_context,
             config=config,
         )
-        if source_id == "":
-            raise ValueError(
-                "source_id is empty: a source id is the source's name, and an empty "
-                "one would make every source-info token start with "
-                f"{constants.BLOCK_SEPARATOR!r}; give the source a name, or leave "
-                "source_id unset for the default"
-            )
-        if source_id is not None and (
-            constants.BLOCK_SEPARATOR in source_id or source_id.endswith(":")
-        ):
-            raise ValueError(
-                f"source_id {source_id!r} contains {constants.BLOCK_SEPARATOR!r} or ends "
-                "with ':', which would blur the separator of the parts of a source-info "
-                "token (<source id>::<record id>::<column>); give the source another "
-                "name"
-            )
-        self._source_id = source_id
+        # A given source_id is the source's name: its kind part is added in front.
+        if source_id is not None:
+            _ = require_source_name(source_id)
+            warn_if_name_looks_like_an_id(source_id)
+        self._source_name: str | None = source_id
+        # Whether the name was given, not built as a default; saved, so a reload
+        # never guesses it (ITL-1425). A subclass that sets a default leaves it.
+        self._source_name_given: bool = source_id is not None
 
     # -------------------------------------------------------------------------
     # Source identity
@@ -211,13 +239,121 @@ class RootSource(StreamBase):
 
     @property
     def source_id(self) -> str:
-        """Canonical name for this source used in the registry and provenance
-        strings. If not set, raises ``ValueError``.
+        """The source id, ``<kind>_v<N>:<name>``: in the registry, system tags and tokens.
+
+        Raises:
+            ValueError: If the source has no name yet.
         """
         self._note_provisional_identity_use()
-        if self._source_id is None:
-            raise ValueError("source_id is not set")
-        return self._source_id
+        return build_source_id(self.SOURCE_KIND, self.SOURCE_VERSION, self.source_name)
+
+    @property
+    def source_name(self) -> str:
+        """The source's name: the given ``source_id``, or the default (ITL-1425).
+
+        Raises:
+            ValueError: If the source has no name yet.
+        """
+        if self._source_name is None:
+            raise ValueError("the source has no name yet")
+        return self._source_name
+
+    def _source_id_config(self) -> dict[str, Any]:
+        """The saved form of the source id: name and version apart (ITL-1425).
+
+        The kind is the config's ``source_type``; ``saved_source_name`` reads it back.
+        """
+        return {
+            "source_name": self.source_name,
+            "source_name_given": self._source_name_given,
+            "source_version": self.SOURCE_VERSION,
+        }
+
+    @classmethod
+    def _from_saved_name(
+        cls, config: dict[str, Any], build: Callable[[str | None], _SourceT]
+    ) -> _SourceT:
+        """Rebuild a source from a saved config, with the name it was saved with.
+
+        The config says whether the name was given or a default
+        (``source_name_given``; missing means given: the saved name is used exactly).
+        A given name is passed as the name, and the source computes no default (its
+        location is not read for one). A saved default is passed back as the name
+        too, so the id is the saved one exactly (a Delta table saved with a relative
+        path keeps its relative default), but it is not checked like a name the user
+        gave (``SourceNameWarning``), and it is saved again as a default.
+
+        Args:
+            config: A saved source config (``to_config``).
+            build: Builds the source with the given name (``source_id``).
+
+        Returns:
+            The rebuilt source.
+        """
+        name = cls.saved_source_name(config)
+        if name is None or config.get("source_name_given", True):
+            return build(name)
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=SourceNameWarning)
+            source = build(name)
+        source._source_name_given = False  # pyright: ignore[reportPrivateUsage]  # the saved state
+        return source
+
+    @classmethod
+    def require_saved_name_fields(cls, config: dict[str, Any]) -> None:
+        """Refuse a saved config written before source ids named their kind (ITL-1425).
+
+        Such a config holds a ``source_id`` and no ``source_name``. It is not read as
+        anything else: ``from_config`` refuses it, and ``PipelineJob.load`` refuses a
+        file holding one anywhere (``check_saved_source_config``), instead of loading
+        the job with that source missing.
+
+        Args:
+            config: A saved source config (``to_config``).
+
+        Raises:
+            ValueError: If the config holds a ``source_id`` but no ``source_name``.
+        """
+        if "source_id" in config and "source_name" not in config:
+            raise ValueError(
+                f"the saved {cls.SOURCE_KIND} source config holds a source_id but no "
+                "source_name: it was saved before every source id named its kind and "
+                "implementation version (ITL-1425); build the source again and save "
+                "the job again"
+            )
+
+    @classmethod
+    def saved_source_name(cls, config: dict[str, Any]) -> str | None:
+        """Return the name a saved source config holds, warning on a version change.
+
+        A source saved by another version of its kind is rebuilt as the installed
+        version, so its source id names that version: a different source id. The saved
+        id is not rewritten; ``SourceVersionWarning`` names both versions.
+
+        Args:
+            config: A saved source config (``to_config``).
+
+        Returns:
+            The saved name, or ``None`` when the source was saved with its default.
+
+        Raises:
+            ValueError: If the config holds a ``source_id`` but no ``source_name``: it
+                was saved before source ids named their kind (ITL-1425) and is not read
+                as anything else.
+        """
+        cls.require_saved_name_fields(config)
+        saved_version = config.get("source_version")
+        if saved_version is not None and saved_version != cls.SOURCE_VERSION:
+            warnings.warn(
+                f"a {cls.SOURCE_KIND} source saved by version {saved_version} of its "
+                f"implementation is loaded as version {cls.SOURCE_VERSION}: its source "
+                f"id now names version {cls.SOURCE_VERSION}, so it is a different "
+                "source, and results stored for the saved source are not this "
+                "source's",
+                SourceVersionWarning,
+                stacklevel=2,
+            )
+        return config.get("source_name")
 
     # -------------------------------------------------------------------------
     # Restriction (ITL-1218)
@@ -277,18 +413,20 @@ class RootSource(StreamBase):
         return arrow_schema_identity(*self.arrow_schemas, self.data_context)
 
     def identity_structure(self) -> Any:
-        """Identity from the class name, Arrow schema, ``source_id`` and key columns.
+        """Identity from the ``source_id``, the Arrow schema and the key columns.
 
-        The key columns are the resolved ``record_id_columns`` (``()`` for the
-        position): two sources that differ only in how they name their rows are two
-        sources, so their records never share a cache (developer, November 16, 2026,
-        ITL-1154). The pipeline hash stays schema-only.
+        The source id's kind part names the kind and implementation version that read
+        the data; the class name is not part of the identity (ITL-1425), so the kind
+        enters a datum's identity in exactly one place. The key columns are the
+        resolved ``record_id_columns`` (``()`` for the position): two sources that
+        differ only in how they name their rows are two sources, so their records
+        never share a cache (developer, November 16, 2026, ITL-1154). The pipeline
+        hash stays schema-only.
         """
         self._note_provisional_identity_use()  # a direct read is a use (ITL-1331)
         return (
-            self.__class__.__name__,
-            self._schema_identity(),
             self.source_id,
+            self._schema_identity(),
             self._key_columns,
         )
 
@@ -311,6 +449,11 @@ class RootSource(StreamBase):
         tag_schema, data_schema = self.output_schema()
         type_converter = self.data_context.type_converter
         return {
+            # The full id, for a proxy when the name is not saved (a default derived
+            # name, recomputed from an origin a load may not rebuild). Not
+            # ``source_id``: a config with that key and no ``source_name`` is one saved
+            # before ITL-1425, and is refused.
+            "full_source_id": self.source_id,
             "content_hash": self.content_hash().to_string(),
             "pipeline_hash": self.pipeline_hash().to_string(),
             "tag_schema": serialize_schema(tag_schema, type_converter),
@@ -435,9 +578,10 @@ class RootSource(StreamBase):
         """The name a preview header shows: the label when one was given, else the
         source id (a source id is the source's name), e.g. a table's name. The label
         itself is not changed."""
-        if self.has_assigned_label or self._source_id is None:
+        if self.has_assigned_label or self._source_name is None:
             return self.label
-        return self._source_id
+        # The header names the class already; the name is the part that is the user's.
+        return self.source_name
 
     def head(
         self,

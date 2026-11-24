@@ -401,14 +401,14 @@ class TestIdentity:
 
         assert source.table_id == table_id
         assert source.source_id == (
-            f"spiraldb_table:{_PROJECT}.default.event@{table_id}"
+            f"spiraldb_table_v1:{_PROJECT}.default.event@{table_id}"
         )
 
     def test_a_given_source_id_is_used_as_it_is(self, project):
         """A ``source_id`` given by the user is used unchanged."""
         assert SpiralDBTableSource(
             _PROJECT, "event", source_id="mine", tag_only_columns=True
-        ).source_id == ("mine")
+        ).source_id == ("spiraldb_table_v1:mine")
 
     def test_a_recreated_table_is_a_different_source(self, project):
         """A recreated table is a new source; only its pipeline hash is unchanged."""

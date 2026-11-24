@@ -410,10 +410,10 @@ class TestDerivedSourceId:
     def test_source_id_has_no_pipeline_path(self):
         node = _make_node(n=3)
         src = node.as_source()
-        # The default is derived:<label>:<hex>; the node path is not part of it
-        # (ITL-957).
+        # The default is derived_v1:<label>:<hex>; the node path is not part of it
+        # (ITL-957, ITL-1425).
         assert "/" not in src.source_id
-        assert src.source_id == f"derived:{node.content_hash().to_string()}"
+        assert src.source_id == f"derived_v1:{node.content_hash().to_string()}"
 
     def test_source_id_contains_full_content_hash(self):
         node = _make_node(n=3)
@@ -441,7 +441,7 @@ class TestDerivedSourceId:
             origin=node,
             source_id="custom_id",
         )
-        assert src.source_id == "custom_id"
+        assert src.source_id == "derived_v1:custom_id"
 
 
 def test_derived_source_empty_cache_preserves_nullability():

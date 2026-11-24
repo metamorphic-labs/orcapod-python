@@ -34,21 +34,24 @@ ROWS = [
 # Pinned from a run of this input at c78ba80a, before ITL-1070 was merged, and
 # re-pinned when the token became the ``group_v1`` fold of the members' tokens in
 # member order (ITL-1154 refresh): the folded token of the data-tag key must not
-# move. ``m2`` has one member, so its digest is the one pinned before.
+# move. ``m2`` has one member, so its digest is the one pinned before. Re-pinned once
+# for ITL-1425: the members' tokens gained the source id's kind part
+# (``dict_v1:sessions::row_1::subject``); the values are the ``group_v1`` folds of those
+# tokens, recomputed by hand with ``arrow_utils.fold_system_tag_values``.
 SUBJECT_TOKENS = {
-    "m1": "group_v1:dc09a0e68d7b52eac555beced397606aea786ac869a0af46465a376874bb07c7",
-    "m2": "group_v1:ec856d114f3bb89b2f626c9b1bc2a195e133da8c9b828d54f99a77dfa4332b40",
+    "m1": "group_v1:cfdae8a92eba2cb7ae1c99b4f7aa50bbf6a6f9a06cd76f71911f75efd4b2d8fb",
+    "m2": "group_v1:2904fada59a2acbe8bf1d21134faeefbb7401129d3e66e24d7ad75e7b7f3de5a",
 }
 # Members ordered by ``session``: row_1 (session 1) before row_0 (session 2).
 SESSION = {"m1": [1, 2], "m2": [1]}
 SESSION_TOKENS = {
-    "m1": ["sessions::row_1::session", "sessions::row_0::session"],
-    "m2": ["sessions::row_2::session"],
+    "m1": ["dict_v1:sessions::row_1::session", "dict_v1:sessions::row_0::session"],
+    "m2": ["dict_v1:sessions::row_2::session"],
 }
 V = {"m1": [0.5, 0.7], "m2": [0.9]}
 V_TOKENS = {
-    "m1": ["sessions::row_1::v", "sessions::row_0::v"],
-    "m2": ["sessions::row_2::v"],
+    "m1": ["dict_v1:sessions::row_1::v", "dict_v1:sessions::row_0::v"],
+    "m2": ["dict_v1:sessions::row_2::v"],
 }
 
 
@@ -212,9 +215,9 @@ def _check_time_order(rows: Sequence[tuple[TagProtocol, DataProtocol]]) -> None:
     assert by_trial[1]["timestamp"] == [10, 20, 30]
     assert by_trial[1]["value"] == ["a", "b", "c"]
     assert by_trial[1].source_info()["timestamp"] == [
-        "series::row_1::timestamp",
-        "series::row_3::timestamp",
-        "series::row_0::timestamp",
+        "dict_v1:series::row_1::timestamp",
+        "dict_v1:series::row_3::timestamp",
+        "dict_v1:series::row_0::timestamp",
     ]
     assert by_trial[2]["timestamp"] == [5]
     assert by_trial[2]["value"] == ["x"]
