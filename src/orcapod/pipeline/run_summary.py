@@ -27,6 +27,10 @@ if TYPE_CHECKING:
     from orcapod.types import Condition, SchemaLike
 
 _NOOP_LOGGER = NoOpLogger()
+_ASYNC_ATTRIBUTION_NOTE = (
+    "Computed and from-store counts reflect this run. Equal inputs may arrive in a "
+    "different order or be computed concurrently."
+)
 
 
 @dataclass(frozen=True)
@@ -71,6 +75,10 @@ class RunSummary:
     for a node with failed rows, the first error and how to see its full traceback. The job
     also keeps it as ``job.last_run``.
 
+    Counts attribute work to the nodes that actually did it. In an async run, whichever
+    equal inputs arrive before a result is available may compute it. Later inputs can
+    reuse it, so the attribution and counts can vary with scheduling.
+
     Attributes:
         job_name: The job's name.
         nodes: Per function node, in run order, keyed by label.
@@ -108,6 +116,7 @@ class RunSummary:
         unchecked_sources: Sequence[str] = (),
         ran_nothing: bool = False,
         restricted_sources: Mapping[str, RestrictedSource] | None = None,
+        asynchronous: bool = False,
     ) -> None:
         """Build the summary.
 
@@ -122,6 +131,7 @@ class RunSummary:
                 for none) and the limit of each restricted source of the run
                 (``restrictions.restrictions_in_force``). Displayed by slot name
                 or direct source label.
+            asynchronous: Whether the async orchestrator executed the run.
         """
         self.job_name: str = job_name
         self.nodes: Mapping[str, NodeRunSummary] = {node.label: node for node in nodes}
@@ -129,6 +139,11 @@ class RunSummary:
         self.target: str | None = target
         self.unchecked_sources: tuple[str, ...] = tuple(unchecked_sources)
         self.ran_nothing: bool = ran_nothing
+        self._attribution_note: str = (
+            _ASYNC_ATTRIBUTION_NOTE
+            if asynchronous and not load_only and not ran_nothing and nodes
+            else ""
+        )
         # One mapping split three ways, so the keys cannot disagree.
         restricted = dict(sorted((restricted_sources or {}).items()))
         self.conditions: Mapping[str, Condition] = {
@@ -256,6 +271,8 @@ class RunSummary:
         restricted = self._restrictions_line()
         if restricted is not None:
             lines.append(f"  {restricted}")
+        if self._attribution_note:
+            lines.append(f"  {self._attribution_note}")
         for node in self.nodes.values():
             lines.append(
                 f"  {node.label}: {_rows(node.rows)}: {_counts(node, self.load_only)}"
@@ -300,8 +317,14 @@ class RunSummary:
                 f"<td{failed_style}>{node.failed}</td><td>{error}</td>"
                 "</tr>"
             )
+        attribution = (
+            f"<p>{html.escape(self._attribution_note)}</p>"
+            if self._attribution_note
+            else ""
+        )
         return (
             f"<p>{html.escape(self._headline())}</p>{self._source_lines_html()}"
+            f"{attribution}"
             f"<table><thead><tr>{header}</tr></thead>"
             f"<tbody>{''.join(body)}</tbody></table>"
         )

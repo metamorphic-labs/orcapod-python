@@ -102,7 +102,8 @@ Every stream carries hidden columns that record where its rows and values came f
 are left out by default. Ask for them with the `columns` argument of `as_table`.
 
 **Source-info columns.** For each data column there is a companion column named
-`_source_<column>`. On a source it holds the source's name, the row number and the column:
+`_source_<column>`. On the `units` source it holds the source id, the row's record id
+(its position, counted from zero) and the column:
 
 ```python
 table = job.nodes["units"].as_table(columns={"source": True})
@@ -136,8 +137,20 @@ Two system-tag columns, because two sources feed `rates`; every row depends on o
 `sessions` and one row of `units`. The column names end in a long hash that identifies the
 source's position in the pipeline, which is why the sample selects them by prefix.
 
-The companion `_tag_record_id::...` columns identify the individual source row, as text:
-`row_5` for the sixth row, or the values of the source's key columns when it has some.
+The companion `_tag_record_id::...` columns identify the individual source row within its
+source, as text. By default a record id is the row's position, counted from zero:
+
+```python
+units_table = job.nodes["units"].as_table(columns={"system_tags": True})
+record_id_column = next(
+    name for name in units_table.column_names if name.startswith("_tag_record_id::")
+)
+print(units_table.column(record_id_column)[5].as_py())
+# row_5
+```
+
+For a source with key columns (`record_id_columns`), the record id is instead a JSON object
+of the key columns and their values, in the order you declared them.
 
 !!! note "After `group_by`"
     A grouped row comes from many source rows. Its system tags are folded into a single
@@ -481,8 +494,11 @@ result of the node, including those of earlier runs over other inputs, like
 !!! warning "Not yet: a stored joined result as the source of a new job"
     The stage above runs in memory, so its own results are not stored. Recording it in a new
     `PipelineJob` does not work yet for `session_means`, or for any node downstream of a
-    join: its rows still carry the provenance of both joined sources, and a job refuses such
-    a source with `SourceSpecMismatchError` when it is bound. Support is planned (ITL-1127).
+    `Join` or `MergeJoin` of two sources. An input of a job must declare exactly one
+    source-id and one record-id system tag. The source `session_means` has the schema
+    of its node, which declares a pair for each joined source, so a job refuses it with
+    `SourceSpecMismatchError` when it is bound. (Its rows hold only the stored tag and data
+    columns: no system tags, and null source-info tokens.) Support is planned (ITL-1127).
     Until then, to store a later stage, add it to the first job.
 
 ## What to remember

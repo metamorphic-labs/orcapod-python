@@ -773,8 +773,9 @@ forms: its identity may change in a later release.
 and presents them as a new source. You get one by calling `as_source()` on the node, for
 example `job.nodes["bmi"].as_source()`. This is useful for chaining pipeline stages: run a
 job, then use one of its outputs as the input of a new pipeline. The `as_source()` of a node
-downstream of a join cannot yet be bound as a source of a new `PipelineJob`: its rows carry
-the system tags of every joined source, and binding refuses it with `SourceSpecMismatchError`
+downstream of a `Join` or `MergeJoin` of two sources cannot yet be bound as a source of a new
+`PipelineJob`: its schema is the node's, which declares a pair of system tags for each joined
+source, and binding accepts exactly one pair, so it is refused with `SourceSpecMismatchError`
 (support is planned, ITL-1127).
 
 **Using a tag value as an input to a computation.** Tags identify a row and data is what a
