@@ -773,9 +773,9 @@ forms: its identity may change in a later release.
 and presents them as a new source. You get one by calling `as_source()` on the node, for
 example `job.nodes["bmi"].as_source()`. This is useful for chaining pipeline stages: run a
 job, then use `as_source()` to start the next pipeline from a stored output. Passing a node
-directly brings its steps with it. See [Streams built before the job](pipeline-job.md#streams-built-before-the-job).
-The `as_source()` of a node
-downstream of a `Join` or `MergeJoin` of two sources cannot yet be bound as a source of a new
+directly brings its steps with it; see
+[Streams built before the job](pipeline-job.md#streams-built-before-the-job).
+The `as_source()` of a node downstream of a `Join` or `MergeJoin` of two sources cannot yet be bound as a source of a new
 `PipelineJob`: its schema is the node's, which declares a pair of system tags for each joined
 source, and binding accepts exactly one pair, so it is refused with `SourceSpecMismatchError`
 (support is planned, ITL-1127).
