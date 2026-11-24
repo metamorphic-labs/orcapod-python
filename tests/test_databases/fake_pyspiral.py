@@ -13,7 +13,7 @@ Only the calls the connector makes are implemented:
   (each call is recorded in ``scan_log``; batches are read on demand)
 * ``Project.list_tables()`` (``TableResource`` with ``.dataset`` / ``.table``),
   ``Project.table(id)``, ``Project.create_table(id, key_schema=..., exist_ok=...)``,
-  ``Project.drop_table(id)``
+  ``Project.drop_table(id)``, ``Spiral.core.drop_table(table_id=...)``
 * ``Table.key_schema``, ``Table.table_id``, ``Table.last_modified_at()``, ``Table[name] == v``,
   ``Table.core.get_snapshot()``, ``Table.schema().to_arrow()``, ``Table.select()``, ``Table.write(t)``,
   ``Table.get_metadata()``, ``Table.set_metadata(kv)``, ``Table.drop_metadata(keys)``
@@ -44,11 +44,18 @@ connector's docstrings, pyspiral's own documentation) or is an assumption to con
 * ``reject_struct_nulls`` (documented by pyspiral ``Table.write``): a null struct value is
   refused unless written with ``push_down_nulls=True``, which turns it into a struct of null
   fields (observed live, ITL-936; top-level struct columns only in the fake).
+* Creating a table name is atomic across processes and threads; with ``exist_ok=False`` a taken
+  name is a plain ``Exception`` starting ``409 Conflict`` (observed live, ITL-1446: 25 rounds
+  of 5 processes, one winner each).
+* A table is dropped by its id; an unknown or already dropped id is a plain ``Exception``
+  starting ``404 Not Found``, also when a newer table has the name (observed live, ITL-1446: 10
+  takeover rounds). Dropping by name looks the id up first (pyspiral 0.16.33's source).
 * Rows come back sorted by key and writes upsert by key (SpiralDB is a key-sorted store).
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -266,6 +273,13 @@ class _Store:
         """Return the file holding ``identifier``'s part named by ``suffix``."""
         return self.root / project_id / f"{identifier}{suffix}"
 
+    @contextmanager
+    def locked(self) -> Iterator[None]:
+        """Make the body one step of the service, for every process and thread."""
+        with open(self.root / ".lock", "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            yield
+
     def exists(self, project_id: str, identifier: str) -> bool:
         """Return whether table ``identifier`` exists in ``project_id``."""
         return self._path(project_id, identifier, ".keys.json").exists()
@@ -277,16 +291,25 @@ class _Store:
             return []
         return sorted(p.name[: -len(".keys.json")] for p in pdir.glob("*.keys.json"))
 
-    def create(self, project_id: str, identifier: str, key_schema: pa.Schema) -> None:
-        """Create table ``identifier`` with ``key_schema`` and empty metadata."""
+    def create(self, project_id: str, identifier: str, key_schema: pa.Schema) -> bool:
+        """Create table ``identifier`` with ``key_schema`` and empty metadata, atomically.
+
+        Returns:
+            Whether the name was free. If not, nothing is changed.
+        """
+        with self.locked():
+            if self.exists(project_id, identifier):
+                return False
+            self._create(project_id, identifier, key_schema)
+            return True
+
+    def _create(self, project_id: str, identifier: str, key_schema: pa.Schema) -> None:
+        """Write the files of the new table ``identifier``."""
         (self.root / project_id).mkdir(parents=True, exist_ok=True)
         sink = pa.BufferOutputStream()
         pa.ipc.new_stream(sink, key_schema).close()
         self._path(project_id, identifier, ".keys.arrow").write_bytes(
             sink.getvalue().to_pybytes()
-        )
-        self._path(project_id, identifier, ".keys.json").write_text(
-            json.dumps(key_schema.names)
         )
         self._path(project_id, identifier, ".kv.json").write_text("{}")
         # SpiralDB gives every table its own id; a recreated table gets a new one.
@@ -294,6 +317,26 @@ class _Store:
             f"table_{uuid.uuid4().hex[:12]}"
         )
         self._path(project_id, identifier, ".version.txt").write_text("0")
+        # Last: the table exists once this file does.
+        self._path(project_id, identifier, ".keys.json").write_text(
+            json.dumps(key_schema.names)
+        )
+
+    def drop_id(self, table_id: str) -> None:
+        """Remove the table with the id ``table_id``, whatever its name.
+
+        Raises:
+            Exception: If no table has that id (a 404, as pyspiral raises it).
+        """
+        with self.locked():
+            for project in self.root.iterdir():
+                for identifier in (
+                    self.identifiers(project.name) if project.is_dir() else ()
+                ):
+                    if self.table_id(project.name, identifier) == table_id:
+                        self.drop(project.name, identifier)
+                        return
+        raise Exception(f"404 Not Found: Resource `{table_id}` not found")
 
     def drop(self, project_id: str, identifier: str) -> None:
         """Remove every file of table ``identifier``."""
@@ -325,8 +368,10 @@ class _Store:
     def write(self, project_id: str, identifier: str, table: pa.Table) -> None:
         """Replace table ``identifier``'s rows with ``table`` and move its version on."""
         p = self._path(project_id, identifier, ".data.arrow")
-        with pa.ipc.new_file(str(p), table.schema) as w:
+        part = p.with_name(f"{p.name}.{uuid.uuid4().hex}")
+        with pa.ipc.new_file(str(part), table.schema) as w:
             w.write_table(table)
+        os.replace(part, p)  # a reader sees the old rows or the new ones
         self._path(project_id, identifier, ".version.txt").write_text(
             str(self.version(project_id, identifier) + 1)
         )
@@ -493,6 +538,7 @@ class FakeTable:
         self._store = store
         self._project_id = project_id
         self._identifier = identifier
+        self._table_id = store.table_id(project_id, identifier)
 
     @property
     def key_schema(self) -> pa.Schema:
@@ -502,7 +548,7 @@ class FakeTable:
     @property
     def table_id(self) -> str:
         """The table's own id: kept on rename, new when the table is recreated."""
-        return self._store.table_id(self._project_id, self._identifier)
+        return self._table_id
 
     @property
     def core(self) -> Any:
@@ -649,6 +695,12 @@ class FakeTable:
         # ITL-1367). Struct children are sorted live too; the fake keeps them as
         # written (struct field order: ITL-1368).
         incoming = incoming.select([*keys.names, *values])
+        with self._store.locked():
+            self._commit(incoming)
+
+    def _commit(self, incoming: pa.Table) -> None:
+        """Upsert ``incoming`` by key: one atomic step (observed live, ITL-1446)."""
+        keys = self.key_schema
         existing = self._store.read(self._project_id, self._identifier)
         if existing is not None:
             if existing.schema.names != incoming.schema.names:
@@ -745,6 +797,11 @@ class FakeProject:
         self, dataset: str | None = None, table: str | None = None
     ) -> list[TableResource]:
         """Apply the SDK's project API filters, which omit empty values."""
+        with self._store.locked():
+            return self._listed(dataset, table)
+
+    def _listed(self, dataset: str | None, table: str | None) -> list[TableResource]:
+        """Return the tables the filters leave."""
         out = []
         for ident in self._store.identifiers(self._project_id):
             found_dataset, _, found_table = ident.partition(".")
@@ -800,8 +857,8 @@ class FakeProject:
             The new table, or with ``exist_ok`` the existing one.
 
         Raises:
-            ValueError: If the name or key schema is invalid, or the table exists
-                and ``exist_ok`` is false.
+            ValueError: If the name or key schema is invalid.
+            Exception: If the table exists and ``exist_ok`` is false (a 409).
         """
         parts = identifier.split(".")
         if len(parts) == 1:
@@ -825,10 +882,6 @@ class FakeProject:
                 raise ValueError(
                     f"Key schema cannot contain Null type field: {field.name}"
                 )
-        if self._store.exists(self._project_id, identifier):
-            if not exist_ok:
-                raise ValueError(f"Table already exists: {identifier}")
-            return self.table(identifier)
         b = self._store.behaviour
         # SpiralDB reports key columns nullable however they were declared (ITL-936).
         schema = pa.schema(
@@ -841,12 +894,16 @@ class FakeProject:
                 for f in schema
             ]
         )
-        self._store.create(self._project_id, identifier, schema)
+        created = self._store.create(self._project_id, identifier, schema)
+        if not created and not exist_ok:
+            raise Exception(
+                f"409 Conflict: Table {self._project_id}.{identifier} already exists."
+            )
         return self.table(identifier)
 
     def drop_table(self, identifier: str) -> None:
-        """Drop the table ``"<dataset>.<table>"`` if it exists."""
-        self._store.drop(self._project_id, identifier)
+        """Look the table ``"<dataset>.<table>"`` up and drop its id."""
+        self._store.drop_id(self.table(identifier).table_id)
 
 
 class FakeSpiral:
@@ -899,9 +956,15 @@ class FakeSpiral:
 
     @property
     def core(self) -> Any:
-        """The client's low-level handle; only ``manifest_stats`` is modelled."""
+        """The client's low-level handle; ``manifest_stats`` and ``drop_table`` only."""
 
-        return types.SimpleNamespace(manifest_stats=self.manifest_stats)
+        return types.SimpleNamespace(
+            manifest_stats=self.manifest_stats, drop_table=self.drop_table
+        )
+
+    def drop_table(self, table_id: str) -> None:
+        """Drop the table with exactly this id; a 404 if there is none."""
+        self._store.drop_id(table_id)
 
     def manifest_stats(self, snapshot: FakeTable) -> Any:
         """Return stats whose ``key_space_stats.total_rows`` counts rows."""
