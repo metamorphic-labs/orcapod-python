@@ -133,14 +133,14 @@ reads from:
 print(job.diagram())
 # Job 'workshop': 9 nodes
 #   sessions (source · CSVSource · bound)
-#   SelectDataColumns_1 (operator · current) <- sessions
+#   SelectDataColumns_2 (operator · current) <- sessions
 #   units (source · CSVSource · bound)
-#   SelectDataColumns_3 (operator · current) <- units
-#   Join (operator · current) <- SelectDataColumns_1, SelectDataColumns_3
+#   SelectDataColumns_1 (operator · current) <- units
+#   Join (operator · current) <- SelectDataColumns_2, SelectDataColumns_1
 #   rates (function pod · firing_rate · current) <- Join
 #   GroupBy (operator · current) <- rates
-#   SelectDataColumns_2 (operator · current) <- GroupBy
-#   session_means (function pod · mean_rate · current) <- SelectDataColumns_2
+#   SelectDataColumns_3 (operator · current) <- GroupBy
+#   session_means (function pod · mean_rate · current) <- SelectDataColumns_3
 ```
 
 The `Join` is there because `firing_rate` was given two streams: the pod joins them for you.
@@ -234,8 +234,6 @@ print(len(calls))
 ```
 
 This is a different, empty database, so everything was computed once more: 71 further calls.
-(You will see many `WARN deltalake_core::writer::stats` lines while it writes. They are
-harmless; see [Part 0](00-setup.md#messages-you-can-ignore).)
 
 Now do what a new Python session would do: make a new database object for the same directory,
 build the job, run it.

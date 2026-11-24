@@ -83,8 +83,8 @@ def test_the_call_lets_data_tags_fall_through() -> None:
     assert table.column_names.count("t") == 1
     # The column keeps its source info: it is the input row's own.
     assert sorted(str(t) for t in table.column("_source_t").to_pylist()) == [
-        "spikes::row_0::t",
-        "spikes::row_1::t",
+        "dict_v1:spikes::row_0::t",
+        "dict_v1:spikes::row_1::t",
     ]
     for tag, data in out.iter_data():
         assert tag["t"] == data["t"]

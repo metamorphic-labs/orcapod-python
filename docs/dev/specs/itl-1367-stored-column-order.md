@@ -1,14 +1,8 @@
 # ITL-1367 step 2 (proposal): a canonical column order for a new stored table
 
-Status: **approved and implemented.** The developer approved the proposal on 2026-11-22:
-"I agree that this is indeed the simplest and ultimately the most consistent", all three
-decisions as recommended below (the canonical order in the database's shared step, readers
-presenting their own layout through one helper, no layout version change). Step 1
-(ITL-1367) is implemented: an append whose columns are the held table's columns in another
-order is put in the held order by every database. Step 2 is implemented by ITL-1370
-(`canonical_column_order`, `arrow_utils.in_presented_order`); the readers' layouts are
-listed in `CLAUDE.md`, "Stored column order". Where this document says "proposal" below,
-read "decision".
+Status: ITL-1367 is merged and ITL-1370 implements canonical writes and reader
+layouts. The exact stored order is awaiting developer approval in PR #496.
+The reader layouts are listed in `CLAUDE.md` under “Stored column order”.
 
 The developer's decision (2026-11-22): "We should always try to save to match the existing
 database order if already present, but if not yet, then use canonicalized order for new

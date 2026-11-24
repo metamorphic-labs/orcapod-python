@@ -53,17 +53,12 @@ from __future__ import annotations
 
 import base64
 from collections.abc import Collection, Mapping
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
+
+import numpy as np
+import pyarrow as pa
 
 from orcapod.utils import arrow_utils
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import numpy as np
-    import pyarrow as pa
-else:
-    np = LazyModule("numpy")
-    pa = LazyModule("pyarrow")
 
 # Field metadata key holding a column's original Arrow type.
 ARROW_TYPE_KEY = b"orcapod:arrow_type"

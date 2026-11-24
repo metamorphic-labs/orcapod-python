@@ -9,6 +9,11 @@ throughout the OrcaPod framework, including:
       a raw digest, with convenience conversions to hex, int, UUID, and base64.
     - ``Condition`` -- the row conditions of a restriction, defined in
       ``orcapod.types.condition``.
+    - ``Explanation``, ``SourceReading``, ``Step`` -- what ``stream.explain()`` returns,
+      defined in ``orcapod.types.explanation``.
+    - ``Trace``, ``TraceStep``, ``FunctionRun``, ``SourceCell``, ``Absence``,
+      ``Highlight`` -- what ``node.trace()`` and ``node.why_missing()`` return, and a
+      diagram highlight, defined in ``orcapod.types.provenance``.
 """
 
 from __future__ import annotations
@@ -23,19 +28,29 @@ from enum import Enum
 from types import UnionType
 from typing import TYPE_CHECKING, Any, Generic, Self, TypeAlias, TypeVar
 
+import pyarrow as pa
 from typing_extensions import override
 
 # Re-exported: ``Condition`` is defined in its own module (ITL-1218).
+from orcapod.types.condition import ColumnRef as ColumnRef
 from orcapod.types.condition import Condition as Condition
+from orcapod.types.condition import col as col
+
+# Re-exported: what ``stream.explain()`` returns (ITL-1402).
+from orcapod.types.explanation import Explanation as Explanation
+from orcapod.types.explanation import SourceReading as SourceReading
+from orcapod.types.explanation import Step as Step
+
+# Re-exported: what ``node.trace()`` and ``node.why_missing()`` return (ITL-1432).
+from orcapod.types.provenance import Absence as Absence
+from orcapod.types.provenance import FunctionRun as FunctionRun
+from orcapod.types.provenance import Highlight as Highlight
+from orcapod.types.provenance import SourceCell as SourceCell
+from orcapod.types.provenance import Trace as Trace
+from orcapod.types.provenance import TraceStep as TraceStep
 
 if TYPE_CHECKING:
-    import pyarrow as pa
-
     from orcapod.protocols.core_protocols import DataFunctionExecutorProtocol
-else:
-    from orcapod.utils.lazy_module import LazyModule
-
-    pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
 

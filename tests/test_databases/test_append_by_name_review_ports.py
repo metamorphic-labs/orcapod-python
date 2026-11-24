@@ -24,6 +24,7 @@ from orcapod.databases import (
     InMemoryArrowDatabase,
     SQLiteConnector,
 )
+from orcapod.errors import InputValidationError
 from tests.test_databases.type_matrix import open_database
 
 PATH = ("t",)
@@ -71,8 +72,8 @@ def test_a_permuted_append_of_another_logical_type_is_refused_at_every_depth(
     tmp_path: Path, database: str, nesting: str
 ) -> None:
     """Held rows in metres, an append in seconds with the columns permuted: refused
-    as on main (in-memory: ``ArrowInvalid``; Delta: ``Schema mismatch``), never read
-    back as metres (PR 491 Codex round 3, finding 1)."""
+    by the logical identity guard in either backend (ITL-1371, PR 491 Codex round
+    3, finding 1)."""
     db = (
         InMemoryArrowDatabase()
         if database == "in-memory"
@@ -82,10 +83,7 @@ def test_a_permuted_append_of_another_logical_type_is_refused_at_every_depth(
         PATH, _unit_rows(1, "m", nesting, ("rid", "a", "b")), record_id_column="rid"
     )
     permuted = _unit_rows(2, "s", nesting, ("b", "rid", "a"))
-    error: type[BaseException] = (
-        pa.ArrowInvalid if database == "in-memory" else ValueError
-    )
-    with pytest.raises(error):
+    with pytest.raises(InputValidationError, match="logical type.*test.ports.unit"):
         db.add_records(PATH, permuted, record_id_column="rid")
 
 
@@ -130,9 +128,9 @@ def test_a_permuted_append_of_an_unhandled_type_is_refused_as_on_main(
     kind: str, flushed: bool
 ) -> None:
     """A column whose type tree holds a type the append comparison does not handle is
-    never reordered: a permuted append (here of another unit, or an equal
-    ``string_view`` struct) is refused as main refuses it, never read under the held
-    type (PR 491 Codex round 4, finding 1; CodeRabbit utils.py:254)."""
+    never reordered, even with the same logical identifiers. A permuted append
+    is refused by the usual schema check (PR 491 Codex round 4, finding 1;
+    CodeRabbit utils.py:254)."""
 
     def rows(n: int, unit: str, order: tuple[str, ...]) -> pa.Table:
         columns = {
@@ -147,7 +145,7 @@ def test_a_permuted_append_of_an_unhandled_type_is_refused_as_on_main(
         PATH, rows(1, "m", ("rid", "a", "b")), record_id_column="rid", flush=flushed
     )
     with pytest.raises(pa.ArrowInvalid):
-        db.add_records(PATH, rows(2, "s", ("b", "rid", "a")), record_id_column="rid")
+        db.add_records(PATH, rows(2, "m", ("b", "rid", "a")), record_id_column="rid")
         db.flush()
 
 
@@ -182,13 +180,9 @@ def test_a_batch_after_a_raced_flush_is_stored_by_name(
     relying on ``schema_handling``: every row stored is stored under its names (PR 491
     Codex round 3, finding 2, the requeue form).
 
-    On a canonical table the raced batch commits by append (ITL-1377's decision;
-    main's MERGE failed and requeued it), so nothing is pending for the last batch:
-    an ``int32`` batch is then refused against the stored ``int64`` column, exactly as
-    main refuses it whenever nothing is pending (``coerce`` casts to the pending
-    batch only). Every other case stores every row, as main does."""
-    from orcapod.errors import InputValidationError
-
+    The raced MERGE retries and commits (ITL-1377). With no pending batch, coerce
+    refuses an ``int32`` for the stored ``int64`` column. The null cases store every
+    row as on main."""
     db = DeltaTableDatabase(tmp_path)
     kwargs: dict[str, Any] = {
         "record_id_column": "rid",
@@ -204,11 +198,9 @@ def test_a_batch_after_a_raced_flush_is_stored_by_name(
         DeltaTableDatabase(tmp_path).add_records(PATH, _abc(4), flush=True, **kwargs)
         return taken
 
-    with patch.object(db, "_snapshot_for_commit", side_effect=interleave):
-        try:
-            db.flush()
-        except RuntimeError:
-            pass  # main: the MERGE conflicts and the batch is requeued
+    with patch.object(db, "_snapshot_for_commit", side_effect=interleave) as attempts:
+        db.flush()
+    assert attempts.call_count == 2
     expected = {1: (10, 100), 2: (20, 200), 4: (40, 400)}
     third = _abc(3, ("b", "rid", "a"), a)
     if a.type == pa.int32():
@@ -424,23 +416,15 @@ def _marked_rows(n: int, marker: bytes, order: tuple[str, ...]) -> pa.Table:
     [("b", "rid", "a"), ("rid", "a", "b")],
     ids=["another order", "same order"],
 )
-def test_other_metadata_inside_an_extensions_storage_is_not_compared_on_append(
+def test_changed_metadata_inside_an_extensions_storage_follows_backend_rules(
     tmp_path: Path, database: str, flushed: bool, order: tuple[str, ...]
 ) -> None:
-    """Pinned, not endorsed: an append whose extension column's storage struct child
-    carries other field metadata (``incoming`` against the held ``held``) is accepted
-    in either column order, and a fresh read reports the held metadata. Storage field
-    metadata was never compared on append (on 321284ae the same-order append is
-    accepted too; its another-order refusals were the column-order refusal ITL-1367
-    removed), so the two orders now behave alike. Whether to refuse it is ITL-1415,
-    to be decided with ITL-1371; this pin makes that decision visible (PR 496
-    CodeRabbit, utils.py:303).
+    """Pin the storage field metadata rule from PR 496's CodeRabbit review.
 
-    Delta, flushed, another order: on main a new table keeps its first write's order
-    and delta-rs takes the incoming metadata when the append arrives in another
-    order; here a new table is canonical and the append is committed in its order,
-    so the held metadata stays, as for an append in the same order. A table written
-    before ITL-1370 commits as on main."""
+    Arrow retains the held metadata when combining rows. Delta MERGE separately
+    refuses conflicting storage field metadata when the table already exists.
+    Both outcomes apply in either column order.
+    """
 
     def fresh() -> Any:
         if database == "in-memory":
@@ -456,11 +440,16 @@ def test_other_metadata_inside_an_extensions_storage_is_not_compared_on_append(
         flush=flushed,
     )
     db.add_records(PATH, _marked_rows(2, b"incoming", order), record_id_column="rid")
-    db.flush()
+    delta_merge = database == "Delta" and flushed
+    if delta_merge:
+        with pytest.raises(InputValidationError, match="Cannot merge metadata"):
+            db.flush()
+    else:
+        db.flush()
 
     stored = fresh().get_all_records(PATH, record_id_column="rid")
     assert stored is not None
-    assert sorted(stored.column("b").to_pylist()) == [1, 2]
+    assert sorted(stored.column("b").to_pylist()) == ([1] if delta_merge else [1, 2])
     column_type = stored.schema.field("a").type
     assert isinstance(column_type, _MarkedStorage)
     assert column_type.storage_type.field(0).metadata == {b"marker": b"held"}

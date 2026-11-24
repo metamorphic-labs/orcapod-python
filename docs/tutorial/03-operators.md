@@ -9,7 +9,7 @@ functions.
 You will:
 
 - combine tables with `join`
-- keep a subset of rows with `polars_filter` and `semi_join`
+- keep a subset of rows with `filter` and `semi_join`
 - rename columns with `map_data`
 - see what to do when two tables have a column of the same name
 
@@ -35,7 +35,7 @@ units = CSVSource(
 ```
 
 Most operators are available as methods on a stream, and that is the form used here. All of
-them exist as classes in `orcapod.operators` (`Join`, `PolarsFilter`, ...); see
+them exist as classes in `orcapod.operators` (`Join`, `Filter`, ...); see
 [Operators](../concepts/operators.md). `MergeJoin`, at the end of this page, is used as a
 class.
 
@@ -87,46 +87,95 @@ print(everything.as_table().num_rows)
 
 ## Filter: keep some rows
 
-`polars_filter` keeps the rows that pass a test. The simplest form is equality on one or more
+`filter` keeps the rows that satisfy a condition. The simplest form is equality on one or more
 columns, written as keyword arguments:
 
 ```python
-knockouts = subjects.polars_filter(genotype="knockout")
+knockouts = subjects.filter(genotype="knockout")
 print(knockouts.as_pandas_df())
 #   subject_id sex  age_weeks  genotype
 # 0   mouse_03   F         11  knockout
 # 1   mouse_04   M         13  knockout
 ```
 
-A filter may test tag columns and data columns alike. Join first, and you can filter on
-columns from either table:
+A filter tests tag columns and data columns alike. Join first, and you can filter on
+columns from either table. Several keywords must all hold:
 
 ```python
-knockout_units = units.join(subjects).polars_filter(genotype="knockout", probe="imec1")
+knockout_units = units.join(subjects).filter(genotype="knockout", probe="imec1")
 print(knockout_units.as_table().num_rows)
 # 16
 ```
 
-For anything other than equality, pass a [Polars](https://docs.pola.rs/) expression:
+For anything other than equality, name the column with `col` and compare it:
 
 ```python
-import polars as pl
+from orcapod import col
 
-busy = units.polars_filter(pl.col("n_spikes") > 1200)
-print(busy.as_pandas_df())
+busy = units.filter(col("n_spikes") > 1200)
+print(busy.as_pandas_df().sort_values(unit_tags, ignore_index=True))
 #   subject_id session  probe  unit region  depth_um  n_spikes
 # 0   mouse_01      s2  imec0     2     V1       920      1221
 # 1   mouse_01      s2  imec1     2    CA1       120      1205
 # 2   mouse_02      s2  imec1     3    CA1      2360      1233
 ```
 
-The expression becomes part of the filtered stream's identity, so an expression filter can
-be used anywhere an equality filter can: in a join, before a function pod, or inside a
-`PipelineJob` (Part 5).
+`col` offers the comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`), `is_in` for a set of
+values, `between` for a range (both ends included), and `is_null` / `is_not_null`. Give
+`filter` several conditions and keywords at once, and every one must hold; combine them with
+`|` (or) and `~` (not):
+
+```python
+shallow_s1 = units.filter(
+    col("probe").is_in(["imec0", "imec1"]),
+    col("depth_um").between(100, 500),
+    session="s1",
+)
+print(shallow_s1.as_table().num_rows)
+# 4
+v1_or_busy = units.filter((col("region") == "V1") | (col("n_spikes") > 1200))
+print(v1_or_busy.as_table().num_rows)
+# 34
+```
+
+The order of the conditions, of the keywords and of the `is_in` values never matters. Write
+`&` and `|` between two conditions and `~` before one (`~(col("probe") == "imec0")`), never
+`and`, `or` and `not`, and put each comparison in parentheses, as in Polars.
+
+A value must have its column's type: `n_spikes` holds integers, so `col("n_spikes") > 1200.0`
+is refused (`InputValidationError`), and `col("n_spikes") > 1200` is the way to write it.
+Orcapod converts no value.
+
+The filter is a step of the pipeline: its conditions are part of the filtered stream's
+identity, so a filtered stream can be used anywhere any other stream can: in a join, before
+a function pod, or inside a `PipelineJob` (Part 5).
 
 ```python
 print(busy.join(subjects).as_table().num_rows)
 # 3
+```
+
+`filter` reads every row of its input and then keeps the matching ones. `explain()` (new in
+this release) shows what each source applies itself and what is applied after reading; it
+computes nothing:
+
+```python
+print(busy.explain())
+# DynamicPodStream[Filter] reads:
+#   source 'csv_v1:units' (CSVSource)
+#     applied by the source: nothing (the whole table is read)
+#     applied after reading: n_spikes > 1200 (Filter)
+```
+
+When `filter` cannot say what you need (arithmetic between columns, a string function), use
+`polars_filter` with a [Polars](https://docs.pola.rs/) expression:
+
+```python
+import polars as pl
+
+fast = units.join(sessions).polars_filter(pl.col("n_spikes") / pl.col("duration_s") > 8)
+print(fast.as_table().num_rows)
+# 13
 ```
 
 Orcapod has to be able to hash the expression, and it knows the common building blocks:
@@ -134,8 +183,8 @@ comparisons, arithmetic, `&`, `|`, `~`, `is_in`, `is_between`, `is_null` and a f
 tests. An expression that calls your own Python code (`map_elements`, `map_batches`) is
 refused as soon as Orcapod needs to hash it (in a join, a pod or a job), with an error that
 names the expression and lists what can be hashed; compute such a test in a function pod
-instead. The
-full list is in [PolarsFilter](../concepts/operators.md#polarsfilter).
+instead. The full list is in [PolarsFilter](../concepts/operators.md#polarsfilter); `filter`
+itself is described in [Filter](../concepts/operators.md#filter).
 
 One more filter, `drop_nulls`, keeps the rows that have a value in the columns you name. The
 workshop data has no missing values, so it is not needed here; see
@@ -192,7 +241,7 @@ A `join` followed by an equality filter selects the same 32 rows, but also carri
 columns of `subjects` along:
 
 ```python
-print(units.join(subjects).polars_filter(genotype="knockout").keys()[1])
+print(units.join(subjects).filter(genotype="knockout").keys()[1])
 # ('region', 'depth_um', 'n_spikes', 'sex', 'age_weeks', 'genotype')
 ```
 
@@ -237,12 +286,12 @@ cannot keep both under one name. To see this, split the units by probe. Each hal
 
 ```python
 imec0 = (
-    units.polars_filter(probe="imec0")
+    units.filter(probe="imec0")
     .drop_tag_columns(["probe"])
     .select_data_columns(["n_spikes"])
 )
 imec1 = (
-    units.polars_filter(probe="imec1")
+    units.filter(probe="imec1")
     .drop_tag_columns(["probe"])
     .select_data_columns(["n_spikes"])
 )
@@ -303,8 +352,9 @@ with a different content hash.
 - Operators rearrange streams; they never compute new values.
 - `join` matches on shared tags, keeps only matching rows, and needs distinct data column
   names.
-- `polars_filter` keeps rows by equality (`column=value`) or by a Polars expression; both
-  work anywhere in a pipeline.
+- `filter` keeps rows by equality (`column=value`) or by conditions built with `col`
+  (comparisons, `is_in`, `between`, null tests, `&`, `|`, `~`); it is a step of the pipeline.
+  `polars_filter` takes a Polars expression for anything else.
 - `semi_join` filters one stream by the shared tags of another and adds no columns.
 - `map_data` and `map_tags` rename columns and keep the rest unless you pass
   `drop_unmapped=True`.
@@ -320,7 +370,7 @@ with exactly two data columns: `n_spikes` and `age_weeks`. How many rows does it
     ```python
     answer = (
         units.join(subjects)
-        .polars_filter(genotype="knockout", probe="imec1")
+        .filter(genotype="knockout", probe="imec1")
         .select_data_columns(["n_spikes", "age_weeks"])
     )
     print(answer.as_pandas_df().sort_values(unit_tags, ignore_index=True).head(4))

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime
 import decimal
+import json
 from pathlib import Path
 from typing import Any, cast
 
@@ -26,6 +27,7 @@ from orcapod.databases.delta_statistics import (
     statistics_columns,
     statistics_configuration,
 )
+from orcapod.errors import InputValidationError, UnstorableColumnError
 
 STATS_WARNING = "deltalake_core::writer::stats"
 PATH = ("t",)
@@ -366,7 +368,16 @@ class TestEveryColumnKind:
         assert stats_warnings(capfd) == []
 
         assert set(statistics_columns(_delta_schema(tmp_path / "t"))) == LISTED
-        assert all(stats == LISTED for stats in columns_with_statistics(tmp_path / "t"))
+        # Read the file statistics from the transaction log. The flattened
+        # Delta action view omits some minima after nested columns in this schema.
+        adds = [
+            action["add"]
+            for log in (tmp_path / "t" / "_delta_log").glob("*.json")
+            for line in log.read_text().splitlines()
+            if "add" in (action := json.loads(line))
+        ]
+        assert adds
+        assert all(set(json.loads(add["stats"])["minValues"]) == LISTED for add in adds)
         assert len(stored_ids(db)) == 9
         # The stored values come back as written.
         fresh = DeltaTableDatabase(tmp_path).get_all_records(
@@ -379,23 +390,52 @@ class TestEveryColumnKind:
             == _every_kind(range(0, 1)).select(compared).to_pylist()
         )
 
-    def test_backtick_name_is_left_out_and_written(
-        self, tmp_path: Path, capfd: pytest.CaptureFixture[str]
+    def test_backtick_name_is_refused_before_anything_is_queued(
+        self, tmp_path: Path
     ) -> None:
-        """Create and append work; delta-rs cannot MERGE such a table either way."""
+        """delta-rs cannot MERGE such a table, and every later commit is one (ITL-1375)."""
         db = DeltaTableDatabase(tmp_path)
-
-        def table(ids: range) -> pa.Table:
-            return rows(ids).append_column("x`y", pa.array(list(ids), pa.int64()))
-
-        capfd.readouterr()
-        db.add_records(PATH, table(range(0, 3)), flush=True)
-        db.add_records(PATH, table(range(3, 6)), flush=True)
-        assert stats_warnings(capfd) == []
-        assert configuration(tmp_path / "t") == {
-            STATS_COLUMNS_PROPERTY: "`__data_context`,`v`"
-        }
+        with pytest.raises(UnstorableColumnError) as info:
+            # No flush: the refusal is when the rows are added (review of PR 511).
+            db.add_records(
+                PATH,
+                rows(range(0, 3)).append_column("x`y", pa.array([0, 1, 2], pa.int64())),
+            )
+        assert info.value.column == "x`y"
+        assert "backtick" in info.value.reason
+        assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+        db.flush()
+        assert not (tmp_path / "t" / "_delta_log").exists()
+        # A backtick inside a nested field's name is merged as any other.
+        nested = pa.array([{"x`y": i} for i in range(3)])
+        db.add_records(PATH, rows(range(0, 3)).append_column("s", nested), flush=True)
+        db.add_records(
+            PATH,
+            rows(range(3, 6)).append_column("s", pa.array([{"x`y": 3}] * 3)),
+            flush=True,
+        )
         assert len(stored_ids(db)) == 6
+
+    def test_a_stored_table_with_a_backtick_name_takes_no_append(
+        self, tmp_path: Path
+    ) -> None:
+        """A table written with such a column before ITL-1375 is refused, rows unchanged."""
+        deltalake.write_deltalake(
+            str(tmp_path / "t"),
+            rows(range(0, 3)).append_column("x`y", pa.array([0, 1, 2], pa.int64())),
+        )
+        db = DeltaTableDatabase(tmp_path)
+        # Rows holding the column are refused as new ones are (above); rows without
+        # it are refused by the stored table.
+        with pytest.raises(UnstorableColumnError):
+            db.add_records(
+                PATH,
+                rows(range(3, 6)).append_column("x`y", pa.array([3, 4, 5], pa.int64())),
+            )
+        with pytest.raises(InputValidationError, match="backtick") as info:
+            db.add_records(PATH, rows(range(3, 6)), flush=True)
+        assert "'x`y'" in str(info.value)
+        assert len(stored_ids(db)) == 3
 
     def test_names_of_nested_parts_are_left_out_and_written(
         self, tmp_path: Path, capfd: pytest.CaptureFixture[str]
@@ -445,6 +485,13 @@ class TestFileSkipping:
             db.add_records(PATH, rows(range(lo, lo + 5)), flush=True)
 
         table = deltalake.DeltaTable(str(tmp_path / "t"))
+        # There are files to prune: three active files, with disjoint ``v`` ranges,
+        # one of them holding 101 (review of PR 511).
+        ranges = sorted(
+            (add["min.v"], add["max.v"])
+            for add in pa.table(table.get_add_actions(flatten=True)).to_pylist()
+        )
+        assert ranges == [(0, 4), (100, 104), (200, 204)]
         plan = pa.table(
             deltalake.QueryBuilder()
             .register("t", table)
@@ -452,14 +499,18 @@ class TestFileSkipping:
             .read_all()
         )
         text = "\n".join(str(row) for row in plan.to_pylist())
-        assert "files_pruned=2, files_scanned=1" in text, text
+        # The scan is given only the file whose statistics can hold the value: the
+        # other two are pruned before it (deltalake 1.6 lists the files it scans).
+        assert text.count(".parquet") == 1, text
+        assert "file_groups={1 group:" in text, text
 
 
 class TestTablesCreatedElsewhere:
     def test_existing_table_without_the_property_is_unaltered(
         self, tmp_path: Path, capfd: pytest.CaptureFixture[str]
     ) -> None:
-        """A table created before ITL-1187 keeps no property and keeps warning."""
+        """A table created before ITL-1187 keeps no property: delta-rs keeps statistics
+        for every column it can, and none for a binary one."""
         deltalake.write_deltalake(str(tmp_path / "t"), rows(range(0, 10)))
         db = DeltaTableDatabase(tmp_path)
         capfd.readouterr()
@@ -467,9 +518,14 @@ class TestTablesCreatedElsewhere:
         db.add_records(PATH, rows(range(10, 20)), flush=True)
         db.add_records(PATH, rows(range(15, 30)), skip_duplicates=False, flush=True)
 
-        # The capture works: this table has no property, so delta-rs warns.
-        assert stats_warnings(capfd) != []
+        # deltalake 1.6 no longer logs the binary-column warning (1.0.2 did); what
+        # the property was about stays: no min/max is kept for a binary column.
         assert configuration(tmp_path / "t") == {}
+        # Every data file, those the two MERGEs added included, has a minimum for
+        # ``v`` and none for the binary ``h`` (review of PR 511).
+        per_file = columns_with_statistics(tmp_path / "t")
+        assert len(per_file) >= 3
+        assert all("v" in stats and "h" not in stats for stats in per_file)
         assert stored_ids(db) == sorted(f"id{i}".encode() for i in range(30))
 
     def test_plain_deltalake_appends_to_a_table_with_the_property(

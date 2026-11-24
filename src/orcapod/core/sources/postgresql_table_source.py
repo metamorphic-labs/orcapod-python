@@ -84,7 +84,7 @@ def postgresql_table_address(
 ) -> str:
     """Return ``<host>:<port>/<database>.<schema>.<table>``, a PostgreSQL table's address.
 
-    The location of the default source id (``postgresql_table:<address>``, ITL-1267):
+    The default name of the source (its id is ``postgresql_table_v1:<address>``; ITL-1267, ITL-1425):
     the server the connection reached, then the table's three-part name. The host is
     written by ``_server_name``; the port is always the number. The address names one
     table only: the parts of the three-part name hold neither ``.`` nor ``/``, so the
@@ -153,8 +153,9 @@ class PostgreSQLTableSource(DBTableSource):
         system_tag_columns: Additional system-level tag columns.
         record_id_columns: The key columns that identify a row; ``None``: the
             primary key (a table without one is refused); ``()``: the position.
-        source_id: Canonical source name. Defaults to
-            ``postgresql_table:<host>:<port>/<database>.<schema>.<table>``
+        source_id: The source's name; its id is ``postgresql_table_v1:<name>``
+            (ITL-1425). The name defaults to
+            ``<host>:<port>/<database>.<schema>.<table>``
             (``postgresql_table_address``); connection parameters that name
             several servers, or a host beside a ``hostaddr``, give no default.
         label: Human-readable label for this source node.
@@ -171,7 +172,10 @@ class PostgreSQLTableSource(DBTableSource):
     """
 
     SOURCE_KIND: ClassVar[str] = "postgresql_table"
-    """Config type key and default source-id kind of this source (one vocabulary)."""
+    """Config type key and the kind in the source id's kind part (one vocabulary)."""
+    SOURCE_VERSION: ClassVar[int] = 1
+    """The version of this kind's implementation, in the kind part (ITL-1425)."""
+    TABLE_IS_ROWS: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -289,14 +293,17 @@ class PostgreSQLTableSource(DBTableSource):
         Returns:
             A new ``PostgreSQLTableSource`` instance.
         """
-        return cls(
-            dsn=config["dsn"],
-            table_name=config["table_name"],
-            tag_columns=config.get("tag_columns"),
-            tag_only_columns=saved_tag_only_columns(config),
-            system_tag_columns=config.get("system_tag_columns", ()),
-            record_id_columns=config.get("record_id_columns"),
-            source_id=config.get("source_id"),
-            label=config.get("label"),
-            data_context=config.get("data_context"),
+        return cls._from_saved_name(
+            config,
+            lambda name: cls(
+                dsn=config["dsn"],
+                table_name=config["table_name"],
+                tag_columns=config.get("tag_columns"),
+                tag_only_columns=saved_tag_only_columns(config),
+                system_tag_columns=config.get("system_tag_columns", ()),
+                record_id_columns=config.get("record_id_columns"),
+                source_id=name,
+                label=config.get("label"),
+                data_context=config.get("data_context"),
+            ),
         )

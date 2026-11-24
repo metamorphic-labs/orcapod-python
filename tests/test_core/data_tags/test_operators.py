@@ -153,7 +153,7 @@ def test_join_plain_with_data_tag_gives_a_data_tag(plain_side: str) -> None:
     assert table.column_names.count("x") == 1
     # The data column comes from the data-tag side, with its source info.
     side = "B" if plain_side == "a" else "A"
-    assert table.column("_source_x").to_pylist() == [f"{side}::row_0::x"]
+    assert table.column("_source_x").to_pylist() == [f"dict_v1:{side}::row_0::x"]
 
 
 def test_join_data_tag_with_data_tag_merges_one_data_column() -> None:
@@ -167,7 +167,7 @@ def test_join_data_tag_with_data_tag_merges_one_data_column() -> None:
     # Both inputs' provenance is kept, folded into one merged token: the merged value
     # is scalar, so is its source info (developer decision, November 13, 2026, ITL-1017).
     (token,) = table.column("_source_x").to_pylist()
-    members = sorted(["A::row_0::x", "B::row_0::x"])
+    members = sorted(["dict_v1:A::row_0::x", "dict_v1:B::row_0::x"])
     assert token == arrow_utils.fold_system_tag_values(members, label=JOIN_FOLD_LABEL)
 
 
@@ -319,8 +319,8 @@ def test_removing_a_data_tag_keeps_its_data(drop) -> None:
     ((tag, data),) = list(result.iter_data())
     assert tag.as_dict() == {"k": 1}
     assert data.as_dict() == {"x": 1, "y": 2}
-    assert data.source_info()["x"] == "S::row_0::x"
-    assert data.source_info()["x"] == "S::row_0::x"
+    assert data.source_info()["x"] == "dict_v1:S::row_0::x"
+    assert data.source_info()["x"] == "dict_v1:S::row_0::x"
 
 
 # ── SelectColumns / DropColumns: one physical column (ITL-1022) ────────────
@@ -374,7 +374,7 @@ def test_selected_data_tag_keeps_its_values_and_source_info() -> None:
     assert _rows(result) == [{"x": 10, "y": 2}, {"x": 20, "y": 3}]
     assert result.as_table(columns={"source": True}).column(
         "_source_x"
-    ).to_pylist() == ["C::row_0::x", "C::row_1::x"]
+    ).to_pylist() == ["dict_v1:C::row_0::x", "dict_v1:C::row_1::x"]
 
 
 @pytest.mark.parametrize(
@@ -547,7 +547,10 @@ def test_map_tags_renames_a_data_tag_in_both_roles() -> None:
     assert stream_data_tags(renamed) == ("z",)
     table = renamed.as_table(columns={"source": True})
     assert "x" not in table.column_names and table.column_names.count("z") == 1
-    assert table.column("_source_z").to_pylist() == ["A::row_0::x", "A::row_1::x"]
+    assert table.column("_source_z").to_pylist() == [
+        "dict_v1:A::row_0::x",
+        "dict_v1:A::row_1::x",
+    ]
     # The prediction agrees with the result (checked against static_process).
     op_ = MapTags({"x": "z"})
     assert op_.output_schema(_a()) == op_.static_process(_a()).output_schema()
@@ -574,7 +577,7 @@ def test_map_data_is_a_data_only_move() -> None:
         assert tag["x"] == data["z"]
     assert renamed.as_table(columns={"source": True}).column(
         "_source_z"
-    ).to_pylist() == ["A::row_0::x", "A::row_1::x"]
+    ).to_pylist() == ["dict_v1:A::row_0::x", "dict_v1:A::row_1::x"]
 
 
 def test_map_data_chained_rename_does_not_reach_the_data_tag_copy() -> None:

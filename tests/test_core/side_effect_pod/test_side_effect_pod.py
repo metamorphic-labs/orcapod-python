@@ -320,7 +320,7 @@ class TestSideEffectJobNodeSync:
             calls.append(True)
 
         node, stream, db = self._make_node_with_db(fn)
-        results = node.execute(stream)
+        results = list(node.execute(stream).iter_data())
         assert len(results) == 3
         assert len(calls) == 3
 
@@ -356,14 +356,14 @@ class TestSideEffectJobNodeSync:
 
         node1 = SideEffectJobNode(side_effect_pod=pod, input_stream=stream)
         node1.attach_databases(pipeline_database=db)
-        results1 = node1.execute(stream)
+        results1 = list(node1.execute(stream).iter_data())
         assert len(results1) == 2
         assert len(calls) == 2
 
         # Second run with same DB
         node2 = SideEffectJobNode(side_effect_pod=pod, input_stream=stream)
         node2.attach_databases(pipeline_database=db)
-        results2 = node2.execute(stream)
+        results2 = list(node2.execute(stream).iter_data())
         assert len(results2) == 2  # rows still emitted (pass-through)
         assert len(calls) == 2  # fn NOT called again — completion check triggered
 
@@ -441,7 +441,7 @@ class TestSideEffectJobNodeSync:
         # Run 1: fn raises → nothing written to DB.
         node1 = SideEffectJobNode(side_effect_pod=pod, input_stream=stream)
         node1.attach_databases(pipeline_database=db)
-        results1 = node1.execute(stream)
+        results1 = list(node1.execute(stream).iter_data())
         assert len(results1) == 1  # row still emitted (drop_on_failure=False)
         assert call_count == 1  # fn was invoked
 
@@ -451,7 +451,7 @@ class TestSideEffectJobNodeSync:
         # Run 2: no record found → fn is called again, still fails.
         node2 = SideEffectJobNode(side_effect_pod=pod, input_stream=stream)
         node2.attach_databases(pipeline_database=db)
-        results2 = node2.execute(stream)
+        results2 = list(node2.execute(stream).iter_data())
         assert len(results2) == 1
         assert call_count == 2  # retried — fn called a second time
 
@@ -490,7 +490,7 @@ class TestSideEffectJobNodeSync:
         # Run 1: fn raises → no DB record.
         node1 = SideEffectJobNode(side_effect_pod=pod, input_stream=stream)
         node1.attach_databases(pipeline_database=db)
-        results1 = node1.execute(stream)
+        results1 = list(node1.execute(stream).iter_data())
         assert len(results1) == 1  # emitted despite failure
         assert call_count == 1
 
@@ -500,7 +500,7 @@ class TestSideEffectJobNodeSync:
         # Run 2: no record → fn retried → succeeds → record written.
         node2 = SideEffectJobNode(side_effect_pod=pod, input_stream=stream)
         node2.attach_databases(pipeline_database=db)
-        results2 = node2.execute(stream)
+        results2 = list(node2.execute(stream).iter_data())
         assert len(results2) == 1
         assert call_count == 2  # fn called exactly once more
 
@@ -512,7 +512,7 @@ class TestSideEffectJobNodeSync:
         # Run 3: record found → fn NOT called → row re-emitted from cache.
         node3 = SideEffectJobNode(side_effect_pod=pod, input_stream=stream)
         node3.attach_databases(pipeline_database=db)
-        results3 = node3.execute(stream)
+        results3 = list(node3.execute(stream).iter_data())
         assert len(results3) == 1
         assert call_count == 2  # still 2 — fn was skipped entirely
 

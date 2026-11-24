@@ -7,6 +7,7 @@ keeps the answers. This part shows where to find them.
 You will:
 
 - walk backwards from a result to the sources it came from
+- trace one value to the source cells it was made from, and find why a row is missing
 - reveal the provenance columns that every stream carries
 - read the record Orcapod keeps of each function call
 - start a second pipeline from the stored results of the first
@@ -72,13 +73,13 @@ def print_lineage(node, depth=0):
 
 print_lineage(job.nodes["session_means"])
 # session_means
-#   SelectDataColumns_2
+#   SelectDataColumns_3
 #     GroupBy
 #       rates
 #         Join
-#           SelectDataColumns_3
-#             units
 #           SelectDataColumns_1
+#             units
+#           SelectDataColumns_2
 #             sessions
 ```
 
@@ -108,11 +109,12 @@ table = job.nodes["units"].as_table(columns={"source": True})
 print(table.column_names)
 # ['subject_id', 'session', 'probe', 'unit', 'region', 'depth_um', 'n_spikes', '_source_region', '_source_depth_um', '_source_n_spikes']
 print(table.column("_source_n_spikes").to_pylist()[5])
-# units::row_5::n_spikes
+# csv_v1:units::row_5::n_spikes
 ```
 
-Row 5 of the source you named `units`, column `n_spikes`. This is what the `source_id` you
-have been passing since Part 1 is for.
+Row 5 of the source you named `units`, column `n_spikes`, read by the CSV source
+(`csv_v1`: the kind of source and the version of its reader come first in every source id).
+This is what the `source_id` you have been passing since Part 1 is for.
 
 **System tags.** Each source also adds two hidden tag columns to every row: one with the
 source's name, one with an identifier of the row. They travel with the row through every
@@ -127,16 +129,15 @@ source_columns = [c for c in table.columns if c.startswith("_tag_source_id")]
 print(len(source_columns))
 # 2
 print(table.select(source_columns).unique().rows())
-# [('sessions', 'units')]
+# [('csv_v1:sessions', 'csv_v1:units')]
 ```
 
 Two system-tag columns, because two sources feed `rates`; every row depends on one row of
 `sessions` and one row of `units`. The column names end in a long hash that identifies the
 source's position in the pipeline, which is why the sample selects them by prefix.
 
-The companion `_tag_record_id::...` columns identify the individual source row. They hold
-compact binary identifiers that Orcapod uses internally to tell rows apart; they are not
-meant to be read by eye.
+The companion `_tag_record_id::...` columns identify the individual source row, as text:
+`row_5` for the sixth row, or the values of the source's key columns when it has some.
 
 !!! note "After `group_by`"
     A grouped row comes from many source rows. Its system tags are folded into a single
@@ -157,7 +158,7 @@ call. `get_all_records` returns them; ask for the `meta` columns to see the deta
 records = pl.from_arrow(job.nodes["rates"].get_all_records(columns={"meta": True}))
 meta = [c for c in records.columns if c.startswith("__")]
 print(meta)
-# ['__computed', '__data_context', '__data_id', '__input_data_hash', '__input_data_hash_right', '__is_ephemeral', '__output_data_hash', '__pf_exec_executor_info', '__pf_exec_executor_type', '__pf_exec_extra_info', '__pf_exec_python_version', '__pf_var_function_content_hash', '__pf_var_function_module', '__pf_var_function_name', '__pf_var_function_signature_hash', '__pf_var_function_version', '__pf_var_git_hash', '__pod_ts']
+# ['__computed', '__data_context', '__data_id', '__input_data_hash', '__input_data_hash_right', '__is_ephemeral', '__output_data_hash', '__pf_exec_executor_info', '__pf_exec_executor_type', '__pf_exec_extra_info', '__pf_exec_python_version', '__pf_var_function_content_hash', '__pf_var_function_module', '__pf_var_function_name', '__pf_var_function_signature_hash', '__pf_var_function_version', '__pf_var_git_hash', '__pipeline_run_id', '__pod_ts', '__recorded_at']
 ```
 
 The ones you are most likely to want:
@@ -169,6 +170,8 @@ The ones you are most likely to want:
 | `__pf_exec_python_version` | The Python version it ran under |
 | `__pf_var_git_hash` | The git commit of the code, when run inside a git repository |
 | `__computed` | `True` if this row was computed, `False` if it reused the result of an identical input |
+| `__pipeline_run_id` | The job run that recorded the pipeline entry |
+| `__recorded_at` | When the pipeline entry was recorded, in UTC |
 | `__input_data_hash` | The hash of the input values: the key the result is stored under (Part 6) |
 
 ```python
@@ -196,6 +199,239 @@ They answer different questions.
 
 After the "two more units" run of Part 6, a job over the original file, once run, has 64
 rows in `as_table()`, while `get_all_records()` has 66.
+
+## Tracing one value to its sources
+
+The columns above hold every link from a result back to its sources. `trace` follows them
+for you, for one cell: give the node, the tags of the row and the column.
+
+```python
+means = job.nodes["session_means"]
+trace = means.trace({"subject_id": "mouse_03", "session": "s2"}, "mean_rate_hz")
+print(trace)
+# trace of mean_rate_hz at node session_means, for subject_id='mouse_03', session='s2': 1 row matches
+# session_means (subject_id='mouse_03', session='s2'): mean_rate_hz = 5.059375
+#   mean_rate v0.0 (body function_content_v1:...), computed here, computed ... on local, run ..., recorded ...
+#   GroupBy (subject_id='mouse_03', session='s2'): rate_hz = [4.791666666666667, 5.058333333333334, 7.366666666666666, 4.683333333333334, 5.0, 3.3333333333333335, 6.916666666666667, 3.325]  (via SelectDataColumns)
+#     [0] rates (subject_id='mouse_03', session='s2', probe='imec0', unit=0): rate_hz = 4.791666666666667
+#       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local, run ..., recorded ...
+#       csv_v1:sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
+#       csv_v1:units row_40 n_spikes = 575  (via Join, SelectDataColumns)
+#     [1] rates (subject_id='mouse_03', session='s2', probe='imec0', unit=1): rate_hz = 5.058333333333334
+#       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local, run ..., recorded ...
+#       csv_v1:sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
+#       csv_v1:units row_41 n_spikes = 607  (via Join, SelectDataColumns)
+#     [2] rates (subject_id='mouse_03', session='s2', probe='imec0', unit=2): rate_hz = 7.366666666666666
+#       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local, run ..., recorded ...
+#       csv_v1:sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
+#       csv_v1:units row_42 n_spikes = 884  (via Join, SelectDataColumns)
+#     [3] rates (subject_id='mouse_03', session='s2', probe='imec0', unit=3): rate_hz = 4.683333333333334
+#       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local, run ..., recorded ...
+#       csv_v1:sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
+#       csv_v1:units row_43 n_spikes = 562  (via Join, SelectDataColumns)
+#     [4] rates (subject_id='mouse_03', session='s2', probe='imec1', unit=0): rate_hz = 5.0
+#       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local, run ..., recorded ...
+#       csv_v1:sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
+#       csv_v1:units row_44 n_spikes = 600  (via Join, SelectDataColumns)
+#     [5] rates (subject_id='mouse_03', session='s2', probe='imec1', unit=1): rate_hz = 3.3333333333333335
+#       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local, run ..., recorded ...
+#       csv_v1:sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
+#       csv_v1:units row_45 n_spikes = 400  (via Join, SelectDataColumns)
+#     [6] rates (subject_id='mouse_03', session='s2', probe='imec1', unit=2): rate_hz = 6.916666666666667
+#       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local, run ..., recorded ...
+#       csv_v1:sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
+#       csv_v1:units row_46 n_spikes = 830  (via Join, SelectDataColumns)
+#     [7] rates (subject_id='mouse_03', session='s2', probe='imec1', unit=3): rate_hz = 3.325
+#       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local, run ..., recorded ...
+#       csv_v1:sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
+#       csv_v1:units row_47 n_spikes = 399  (via Join, SelectDataColumns)
+```
+
+The first line repeats the question: the column traced, the node it was asked at and the
+row selector, and how many held rows match it. Read the rest from the top. The mean of
+`mouse_03`, session `s2`, was computed by `mean_rate`
+(its version, the hash of its body, when and where it ran, and the job run that
+recorded the entry, with when). Its input was the grouped row
+of eight rates. Each rate was computed by `firing_rate` from one row of `units.csv` and the
+one row of `sessions.csv` for that session; the operators it passed through are listed
+after `via`.
+
+Each step is found from what the job holds and stores, not guessed:
+
+- A function's row is matched to its stored record (Part 8, "How was it computed?") by
+  its system tags, the hidden tags that name the source rows it came from.
+- The members of a group are the rows before the grouping with the group's
+  `subject_id` and `session`, in `probe`, `unit` order (Part 4). Orcapod checks them
+  against the group's folded system tags and raises an error if they do not agree.
+- The last step reads the source-info columns: `csv_v1:units row_40` is row 40 of the
+  source named `units` (its id names the kind of reader, a CSV file read by version 1,
+  then its name).
+
+Nothing is computed: the trace only reads.
+
+`source_cells()` lists the source cells alone, each once:
+
+```python
+for cell in trace.source_cells():
+    print(cell.text())
+# csv_v1:sessions row_5 duration_s = 120.0
+# csv_v1:units row_40 n_spikes = 575
+# csv_v1:units row_41 n_spikes = 607
+# csv_v1:units row_42 n_spikes = 884
+# csv_v1:units row_43 n_spikes = 562
+# csv_v1:units row_44 n_spikes = 600
+# csv_v1:units row_45 n_spikes = 400
+# csv_v1:units row_46 n_spikes = 830
+# csv_v1:units row_47 n_spikes = 399
+```
+
+**Computed here, or reused.** In session `s1` of `mouse_02`, two units have the same spike
+count, so `firing_rate` received equal inputs twice and ran once (the "63 of 64" above).
+The trace still tells the two units apart, and says which of them computed the result and
+which reused it:
+
+```python
+shared = means.trace({"subject_id": "mouse_02", "session": "s1"}, "mean_rate_hz")
+for step in shared.root.walk():
+    if step.node == "rates":
+        tags = dict(step.tags)
+        print(tags["probe"], tags["unit"], step.function.computed_here)
+# imec0 0 True
+# imec0 1 True
+# imec0 2 True
+# imec0 3 True
+# imec1 0 True
+# imec1 1 True
+# imec1 2 False
+# imec1 3 True
+```
+
+`imec1` unit 2 reused the result that `imec0` unit 0 computed: one stored result, two
+rows, both traced to their own row of `units.csv`.
+
+**Several rows at once.** The selector need not pick one row: every held row whose columns
+equal the values given is traced, and `{}` traces every row. Each matching row has its own
+tree, in `trace.roots`, in tag order; `source_cells()` and the highlight cover them all:
+
+```python
+both = means.trace({"subject_id": "mouse_02"}, "mean_rate_hz")
+print(both.header())
+# trace of mean_rate_hz at node session_means, for subject_id='mouse_02': 2 rows match
+print([dict(root.tags) for root in both.roots])
+# [{'subject_id': 'mouse_02', 'session': 's1'}, {'subject_id': 'mouse_02', 'session': 's2'}]
+print(len(both.source_cells()))
+# 18
+```
+
+A selector that matches no held row gives a trace that says so (`no held row matches`,
+status `no_match`); one that names a column the node does not have is an error.
+
+**On the diagram.** `trace.highlight()` marks the trace's path on the job's diagram. The
+listing shows the provenance question only, with no run status. It marks the nodes on the
+path with `*`, the node the trace was asked at with `>` and `[traced from here]`, and each
+function node on the path with how its rows on the path got their results: `[computed]`,
+`[reused]` (a result stored for equal inputs), or `[computed + reused]` (some rows each):
+
+```python
+print(job.diagram(highlight=trace.highlight()))
+# Job 'workshop': 9 nodes
+#   highlight (*): trace of mean_rate_hz at node session_means, for subject_id='mouse_03', session='s2': 1 row matches
+#  * sessions (source · CSVSource)
+#  * SelectDataColumns_2 (operator) <- sessions
+#  * units (source · CSVSource)
+#  * SelectDataColumns_1 (operator) <- units
+#  * Join (operator) <- SelectDataColumns_2, SelectDataColumns_1
+#  * rates (function pod · firing_rate) [computed] <- Join
+#  * GroupBy (operator) <- rates
+#  * SelectDataColumns_3 (operator) <- GroupBy
+# >* session_means (function pod · mean_rate) [computed] [traced from here] <- SelectDataColumns_3
+```
+
+A mean is made through every step of the job, so its path covers the whole diagram. The
+trace of one firing rate covers only part of it: the two sources, their column selections,
+the join and `rates`. Take the unit that reused a stored result:
+
+```python
+rate = job.nodes["rates"].trace(
+    {"subject_id": "mouse_02", "session": "s1", "probe": "imec1", "unit": 2}, "rate_hz"
+)
+print(job.diagram(highlight=rate.highlight()))
+# Job 'workshop': 9 nodes
+#   highlight (*): trace of rate_hz at node rates, for subject_id='mouse_02', session='s1', probe='imec1', unit=2: 1 row matches
+#  * sessions (source · CSVSource)
+#  * SelectDataColumns_2 (operator) <- sessions
+#  * units (source · CSVSource)
+#  * SelectDataColumns_1 (operator) <- units
+#  * Join (operator) <- SelectDataColumns_2, SelectDataColumns_1
+# >* rates (function pod · firing_rate) [reused] [traced from here] <- Join
+#    GroupBy (operator) <- rates
+#    SelectDataColumns_3 (operator) <- GroupBy
+#    session_means (function pod · mean_rate) <- SelectDataColumns_3
+```
+
+In a notebook the same call draws the picture. The caption is the question; the path is
+outlined in the text colour and the rest is dimmed (no status of a node is shown in that
+colour: red is kept for failed). The node it was asked at has a second outline and the
+bold line "traced from here"; the mark is the bold line "reused":
+
+![The diagram of the workshop job, captioned "highlighted: trace of rate_hz at node rates, for subject_id='mouse_02', session='s1', probe='imec1', unit=2: 1 row matches": the sources sessions and units, their column selections, the Join and the function pod rates outlined in a dark line; rates has a second outline and the bold lines "reused" and "traced from here"; GroupBy, its selection and the function pod session_means dimmed](provenance-diagram-trace.svg)
+
+**Why is a row missing?** A second job keeps only the `imec0` probe and leaves out the
+sessions of `mouse_04`. Row 4 of `units.csv` is an `imec1` unit, and row 48 is a unit of
+`mouse_04`. Neither has a firing rate. `why_missing` says which step removed each:
+
+```python
+from orcapod.types import col
+
+imec0 = PipelineJob(name="imec0", database=database)
+with imec0:
+    units = CSVSource(
+        str(data_dir / "units.csv"),
+        tag_columns=["subject_id", "session", "probe", "unit"], tag_only_columns=True,
+        source_id="units",
+    )
+    sessions = CSVSource(
+        str(data_dir / "sessions.csv"),
+        tag_columns=["subject_id", "session"], tag_only_columns=True,
+        source_id="sessions",
+    )
+    firing_rate.pod(
+        units.filter({"probe": "imec0"}).select_data_columns(["n_spikes"]),
+        sessions.filter(col("subject_id") != "mouse_04").select_data_columns(
+            ["duration_s"]
+        ),
+        label="imec0_rates",
+    )
+imec0.run()
+print(imec0.nodes["imec0_rates"].why_missing("units", "row_4"))
+# why record row_4 of units is missing at node imec0_rates
+# units row_4 is removed by Filter[...]: probe='imec0'
+#   no successful entry of function node 'imec0_rates' is stored for it (the function raised on it, or never received it)
+#   present in: units
+print(imec0.nodes["imec0_rates"].why_missing("units", "row_48"))
+# why record row_48 of units is missing at node imec0_rates
+# units row_48 is removed by Join: rows without a match in 'sessions' are dropped
+#   no successful entry of function node 'imec0_rates' is stored for it (the function raised on it, or never received it)
+#   present in: units, ...
+#   because: no row with session='s1', subject_id='mouse_04' in ... (reads sessions)
+```
+
+The first line repeats the question. The second answers it: which step removed the row.
+The third is read from the stored records of `imec0_rates`: no run of this job stored a
+result for the row. On its own that does not prove the function never saw it (a function
+that raised on a row stores no result for it); the second line says why it did not.
+`why_missing(...).highlight()` marks the path up to the step that removed the row; the
+other nodes are dimmed, except the node asked at, marked "asked here". For `units row_4`,
+the path ends at the filter on `probe`:
+
+![The diagram of the imec0 job, captioned "highlighted: why record row_4 of units is missing at node imec0_rates: ...": the source units and the node Filter_2 outlined in a dark line; the sessions branch and the Join dimmed; the function pod imec0_rates with a second outline and the bold line "asked here"](provenance-diagram-missing-filter.svg)
+
+For `units row_48`, the row passes the filter and its column selection and ends at the
+Join, which has no session `s1` of `mouse_04` to match it with:
+
+![The diagram of the imec0 job, captioned "highlighted: why record row_48 of units is missing at node imec0_rates: ...": the source units, Filter_2, SelectDataColumns_1 and the Join outlined in a dark line; the sessions branch dimmed; the function pod imec0_rates with a second outline and the bold line "asked here"](provenance-diagram-missing-join.svg)
+
+The pictures are drawn by `job.diagram(...)` itself, from the job above.
 
 ## Starting a second pipeline from stored results
 
@@ -256,6 +492,10 @@ result of the node, including those of earlier runs over other inputs, like
   values and rows came from; `all_info=True` shows everything.
 - `get_all_records(columns={"meta": True})` shows how and when each result was computed.
 - `as_table()` is the output of this job's run; `get_all_records()` is everything stored.
+- `node.trace(row, column)` follows one value back to its source cells, and says which
+  function computed each step and whether it reused a stored result.
+- `node.why_missing(source, record_id)` says which step removed a row.
+- `job.diagram(highlight=...)` marks a trace's or a missing row's path.
 - `node.as_source()` starts a new pipeline from stored results.
 
 ## Exercises
@@ -267,9 +507,9 @@ result of the node, including those of earlier runs over other inputs, like
     print_lineage(job.nodes["rates"])
     # rates
     #   Join
-    #     SelectDataColumns_3
-    #       units
     #     SelectDataColumns_1
+    #       units
+    #     SelectDataColumns_2
     #       sessions
     ```
 
@@ -283,13 +523,13 @@ Use the source-info column of the `sessions` node.
     table = pl.from_arrow(job.nodes["sessions"].as_table(columns={"source": True}))
     row = table.filter((pl.col("subject_id") == "mouse_03") & (pl.col("session") == "s2"))
     print(row["_source_duration_s"].to_list())
-    # ['sessions::row_5::duration_s']
+    # ['csv_v1:sessions::row_5::duration_s']
     ```
 
     Row 5, counting data rows from 0: the sixth line after the header.
 
     Note the plain Polars filter on a table you have already taken out of Orcapod. Inside a
-    pipeline you would write the same test as `stream.polars_filter(...)` (Part 3).
+    pipeline you would write the same test as `stream.filter(...)` (Part 3).
 
 **3.** Using `as_source()`, compute the mean of the session means per animal (one row per
 `subject_id`). Reuse `group_by` from Part 4.

@@ -263,7 +263,7 @@ class LoadedSideEffectJobNode(SideEffectJobNode):
         observer: ExecutionObserverProtocol | None = None,
         run_id: str | None = None,
         load_only: bool = False,
-    ) -> list[tuple[TagProtocol, DataProtocol]]:
+    ) -> StreamProtocol:
         """Pass every row on in a load-only run, as every side-effect job node does.
 
         Args:
@@ -273,7 +273,8 @@ class LoadedSideEffectJobNode(SideEffectJobNode):
             load_only: Must be true: the node can only pass rows on.
 
         Returns:
-            The rows of ``input_stream``, which the node then holds as loaded only.
+            The output stream of the rows of ``input_stream``, which the node then holds
+            as loaded only.
 
         Raises:
             RuntimeError: If ``load_only`` is false; nothing is read then.

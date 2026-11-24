@@ -1,16 +1,83 @@
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
+from contextlib import AbstractContextManager
 from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
 
 from orcapod.protocols.db_connector_protocol import ColumnInfo, DBConnectorProtocol
 
 if TYPE_CHECKING:
     import pyarrow as pa
+    from orcapod.databases._pending_commits import PendingCommit
 
 
 @runtime_checkable
 class ArrowDatabaseProtocol(Protocol):
+    """Internal Arrow store interface, including ordered function commits.
+
+    A queued result provides a shared commit token. A guarded pipeline record
+    stays readable in its queue while its result is pending. Success makes it
+    eligible for publication. Failure withdraws it, even when result rows stay
+    queued for retry. Scoped views share their pending queues and commit tokens.
+    """
+
+    @property
+    def stores_records(self) -> bool:
+        """Return whether this store keeps records. Explicit discards return False."""
+        ...
+
+    def pending_result(
+        self, record_path: tuple[str, ...], record_id: bytes
+    ) -> PendingCommit | None:
+        """Return a queued result's token, or None for an already stored or explicitly discarded result."""
+        ...
+
+    def guard_record(
+        self, record_path: tuple[str, ...], record_id: bytes, dependency: PendingCommit
+    ) -> AbstractContextManager[None]:
+        """Bind a record to its result's token before enqueue can publish it."""
+        ...
+
+    def guard_table_schema(
+        self, record_path: tuple[str, ...], check: Callable[[pa.Schema], None]
+    ) -> AbstractContextManager[None]:
+        """Keep the check with queued records and apply it to the schema at commit."""
+        ...
+
+    def fail_pending_result(self, record_path: tuple[str, ...]) -> None:
+        """Withdraw records dependent on a failed result attempt."""
+        ...
+
+    def flush_result_batch(
+        self, record_path: tuple[str, ...], *, publish_records: bool
+    ) -> None:
+        """Commit this result batch and resolve its token.
+
+        Durable result stores commit even without pipeline records. In-memory stores
+        can leave results queued when the pipeline explicitly discards its records.
+        """
+        ...
+
+    def flush_batch(self, record_path: tuple[str, ...]) -> None:
+        """Flush this pipeline batch, keeping records whose results are pending queued.
+
+        Table-scoped stores commit only this table. In-memory stores may flush the
+        shared queue while honoring every record's guard.
+        """
+        ...
+
+    def refresh_table(self, record_path: tuple[str, ...]) -> None:
+        """Read the table at ``record_path`` from the store's current version next time.
+
+        A function node calls it for each of its stored tables at the start of every
+        run and at every read of what it stored, so it sees rows another handle,
+        job or process committed since (ITL-1408). A database whose handle keeps
+        what it loaded of a table (``DeltaTableDatabase``) looks at the store again;
+        one that reads the store on every read (in memory, connector-backed, no-op)
+        has nothing to refresh and does nothing.
+        """
+        ...
+
     def add_record(
         self,
         record_path: tuple[str, ...],
@@ -113,6 +180,15 @@ class ArrowDatabaseProtocol(Protocol):
 
         Returns:
             ``True`` if a table exists at the given path, ``False`` otherwise.
+        """
+        ...
+
+    def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
+        """Read the current table schema, including for an empty table.
+
+        The path is relative to this database view. If the table has only queued
+        records, use their schema. Return ``None`` if the table has neither a
+        committed schema nor a queued batch. No rows are fetched.
         """
         ...
 

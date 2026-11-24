@@ -227,6 +227,13 @@ def test_each_table_kind_is_stored_in_the_canonical_order(
     for kind in KINDS:
         names = today[f"stored {kind}"]
         assert names == [RECORD_ID, *sorted(n for n in names if n != RECORD_ID)], kind
+    pipeline = today["stored pdb_v1"]
+    after_index = pipeline.index("__pipeline_recomputation_index") + 1
+    assert pipeline[after_index : after_index + 2] == [
+        "__pipeline_run_id",
+        "__recorded_at",
+    ]
+    assert pipeline[after_index + 2].startswith("_source_")
     # Pinned where no hash enters a column name.
     assert today["stored tdb_v1"] == [
         RECORD_ID,

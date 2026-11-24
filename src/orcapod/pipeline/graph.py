@@ -89,6 +89,8 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         """
         super().__init__(name=name, tracker_manager=tracker_manager)
         self._auto_compile = auto_compile
+        # A loaded blueprint's operator input keys in argument order (ITL-1417).
+        self._loaded_input_keys: dict[str, list[str]] = {}
 
     # ------------------------------------------------------------------
     # Context manager — respects auto_compile flag
@@ -130,6 +132,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         import json as _json
         from orcapod.pipeline.serialization import (
             FALL_THROUGH_TAGS_KEY,
+            OPERATOR_INPUTS_KEY,
             PIPELINE_FORMAT_VERSION,
             serialize_arrow_schemas,
             serialize_output_schema,
@@ -168,6 +171,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                         raise
                     retained[key] = stored
         nodes: dict[str, Any] = {}
+        key_of = {id(node): key for key, node in self._persistent_node_map.items()}
         for content_hash_str, node in self._persistent_node_map.items():
             try:
                 type_converter = node.data_context.type_converter
@@ -262,6 +266,20 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                     descriptor[FALL_THROUGH_TAGS_KEY] = list(node.declared_data_tags())
 
                 case OperatorNode():
+                    # The inputs in argument order (ITL-1417): an ordered operator
+                    # (MergeJoin, SemiJoin) is rebuilt from this list, never from the
+                    # edge list, which is sorted by hash before serialization.
+                    inputs = [
+                        key_of[id(upstream)]
+                        for upstream in node.upstreams
+                        if id(upstream) in key_of
+                    ]
+                    if not inputs and OPERATOR_INPUTS_KEY in node._descriptor:
+                        # A loaded read-only node holds no inputs: its saved list is
+                        # written back as it is, so saving again keeps the entry.
+                        inputs = list(node._descriptor[OPERATOR_INPUTS_KEY])
+                    if inputs:
+                        descriptor[OPERATOR_INPUTS_KEY] = inputs
                     if node._operator is not None:
                         descriptor["operator_config"] = node._operator.to_config()
                     elif "operator_config" in node._descriptor:
@@ -308,8 +326,10 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         import json as _json
         from orcapod.pipeline.serialization import (
             FALL_THROUGH_TAGS_KEY,
+            OPERATOR_INPUTS_KEY,
             PIPELINE_FORMAT_VERSION,
             require_current_format,
+            require_positively_commutative,
             require_nullability_records,
             arrow_schema_from_texts,
             deserialize_schema,
@@ -343,13 +363,15 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         for node_hash in nodes_data:
             if node_hash not in edge_graph:
                 edge_graph.add_node(node_hash)
-        topo_order = list(nx.topological_sort(edge_graph))
+        topo_order = nx.lexicographical_topological_sort(edge_graph)
 
         upstream_map: dict[str, list[str]] = {}
         for up_hash, down_hash in edges:
             upstream_map.setdefault(down_hash, []).append(up_hash)
 
         reconstructed: dict[str, GraphNode] = {}
+        # Each operator's input keys in argument order, for the job loader (ITL-1417).
+        loaded_input_keys: dict[str, list[str]] = {}
 
         for node_hash in topo_order:
             descriptor = nodes_data.get(node_hash)
@@ -484,7 +506,14 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 reconstructed[node_hash] = node
 
             elif node_type == "operator":
-                up_hashes = upstream_map.get(node_hash, [])
+                # The inputs in argument order (ITL-1417); a file saved before the
+                # list was written gives only the edges, in recording order.
+                saved_inputs = descriptor.get(OPERATOR_INPUTS_KEY)
+                up_hashes = (
+                    list(saved_inputs)
+                    if saved_inputs is not None
+                    else upstream_map.get(node_hash, [])
+                )
                 upstream_nodes = tuple(
                     reconstructed[h] for h in up_hashes if h in reconstructed
                 )
@@ -542,6 +571,11 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                             exc,
                         )
                         operator = None
+                if saved_inputs is None:
+                    require_positively_commutative(
+                        operator, upstream_nodes, up_hashes, descriptor.get("label")
+                    )
+                loaded_input_keys[node_hash] = list(up_hashes)
                 node = OperatorNode.from_descriptor(
                     descriptor,
                     operator=operator,
@@ -571,6 +605,10 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                     descriptor, input_stream=upstream_node
                 )
 
+        # Keep old files' edge order only for the legacy input-order fallback above.
+        edges = sorted((up, down) for up, down in edges)
+        reconstructed = cls._ordered_node_map(reconstructed, edge_graph)
+
         # Build Pipeline instance
         pipeline = cls(name=name, auto_compile=False)
         pipeline._loaded_output_schemas = {
@@ -579,6 +617,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             if isinstance(descriptor.get("output_schema"), dict)
         }
         pipeline._persistent_node_map = dict(reconstructed)
+        pipeline._loaded_input_keys = loaded_input_keys
 
         nodes_by_label: dict[str, GraphNode] = {}
         for node in reconstructed.values():
@@ -594,17 +633,16 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         pipeline._nodes = nodes_by_label
 
         node_dag: OrcaDAG[GraphNode] = OrcaDAG()
+        for node in reconstructed.values():
+            node_dag.add_node(node)
         for up_hash, down_hash in edges:
             up_node = reconstructed.get(up_hash)
             down_node = reconstructed.get(down_hash)
             if up_node is not None and down_node is not None:
                 node_dag.add_edge(up_node, down_node)
-        for node in reconstructed.values():
-            if node not in node_dag:
-                node_dag.add_node(node)
         pipeline._node_graph = node_dag
 
-        pipeline._graph_edges = [(up, down) for up, down in edges]
+        pipeline._graph_edges = edges
         pipeline._hash_graph = nx.DiGraph()
         for up_hash, down_hash in edges:
             pipeline._hash_graph.add_edge(up_hash, down_hash)

@@ -23,44 +23,50 @@ class TestSourceStreamBuilder:
 
     def test_build_returns_source_stream_result(self, builder):
         table = pa.table({"id": pa.array([1, 2]), "x": pa.array([10, 20])})
-        result = builder.build(table, tag_columns=["id"], source_kind="arrow_table")
+        result = builder.build(table, tag_columns=["id"], kind_part="arrow_table_v1")
         assert isinstance(result, SourceStreamResult)
 
     def test_build_stream_has_correct_row_count(self, builder):
         table = pa.table({"id": pa.array([1, 2, 3]), "x": pa.array([10, 20, 30])})
-        result = builder.build(table, tag_columns=["id"], source_kind="arrow_table")
+        result = builder.build(table, tag_columns=["id"], kind_part="arrow_table_v1")
         assert result.stream.as_table().num_rows == 3
 
     def test_build_source_id_defaults_to_table_hash(self, builder):
         table = pa.table({"id": pa.array([1]), "x": pa.array([10])})
-        result = builder.build(table, tag_columns=["id"], source_kind="arrow_table")
+        result = builder.build(table, tag_columns=["id"], kind_part="arrow_table_v1")
         assert result.source_id is not None
         assert len(result.source_id) > 0
 
     def test_build_default_source_id_is_kind_and_labelled_table_hash(self, builder):
         table = pa.table({"id": pa.array([1]), "x": pa.array([10])})
-        result = builder.build(table, tag_columns=["id"], source_kind="arrow_table")
-        assert result.source_id == f"arrow_table:{result.table_hash.to_string()}"
+        result = builder.build(table, tag_columns=["id"], kind_part="arrow_table_v1")
+        assert result.source_id == f"arrow_table_v1:{result.table_hash.to_string()}"
+        assert result.source_name == result.table_hash.to_string()
 
-    def test_build_without_source_id_or_source_kind_raises(self, builder):
+    def test_build_without_kind_part_raises(self, builder):
         table = pa.table({"id": pa.array([1]), "x": pa.array([10])})
-        with pytest.raises(ValueError, match="source_id or a source_kind"):
+        with pytest.raises(ValueError, match="kind part"):
             builder.build(table, tag_columns=["id"])
+        with pytest.raises(ValueError, match="kind part"):
+            builder.build(table, tag_columns=["id"], source_name="my_source")
 
-    def test_build_source_id_explicit(self, builder):
+    def test_build_source_name_explicit(self, builder):
         table = pa.table({"id": pa.array([1]), "x": pa.array([10])})
-        result = builder.build(table, tag_columns=["id"], source_id="my_source")
-        assert result.source_id == "my_source"
+        result = builder.build(
+            table, tag_columns=["id"], source_name="my_source", kind_part="dict_v1"
+        )
+        assert result.source_id == "dict_v1:my_source"
+        assert result.source_name == "my_source"
 
     def test_build_schema_hash_is_string(self, builder):
         table = pa.table({"id": pa.array([1]), "x": pa.array([10])})
-        result = builder.build(table, tag_columns=["id"], source_kind="arrow_table")
+        result = builder.build(table, tag_columns=["id"], kind_part="arrow_table_v1")
         assert isinstance(result.schema_hash, str)
         assert len(result.schema_hash) > 0
 
     def test_build_tag_columns_tuple(self, builder):
         table = pa.table({"id": pa.array([1]), "x": pa.array([10])})
-        result = builder.build(table, tag_columns=["id"], source_kind="arrow_table")
+        result = builder.build(table, tag_columns=["id"], kind_part="arrow_table_v1")
         assert result.tag_columns == ("id",)
 
     def test_build_validates_missing_tag_columns(self, builder):
@@ -75,7 +81,7 @@ class TestSourceStreamBuilder:
 
     def test_build_output_schema_has_tag_and_data(self, builder):
         table = pa.table({"id": pa.array([1]), "x": pa.array([10])})
-        result = builder.build(table, tag_columns=["id"], source_kind="arrow_table")
+        result = builder.build(table, tag_columns=["id"], kind_part="arrow_table_v1")
         tag_schema, data_schema = result.stream.output_schema()
         assert "id" in tag_schema
         assert "x" in data_schema
@@ -83,7 +89,10 @@ class TestSourceStreamBuilder:
     def test_build_with_record_id_column(self, builder):
         table = pa.table({"id": pa.array([1, 2]), "x": pa.array([10, 20])})
         result = builder.build(
-            table, tag_columns=["id"], record_id_columns="id", source_kind="arrow_table"
+            table,
+            tag_columns=["id"],
+            record_id_columns="id",
+            kind_part="arrow_table_v1",
         )
         assert result.stream.as_table().num_rows == 2
 
@@ -95,7 +104,7 @@ class TestSourceStreamBuilder:
                 "__system_col": pa.array(["sys"]),
             }
         )
-        result = builder.build(table, tag_columns=["id"], source_kind="arrow_table")
+        result = builder.build(table, tag_columns=["id"], kind_part="arrow_table_v1")
         tag_schema, data_schema = result.stream.output_schema()
         assert "__system_col" not in data_schema
 
@@ -115,7 +124,7 @@ class TestSourceStreamBuilderRespectsSchema:
         """build() preserves nullable=True from incoming schema."""
         table = pa.table({"id": pa.array([1]), "val": pa.array([10], type=pa.int64())})
         # Arrow default: nullable=True
-        result = builder.build(table, tag_columns=["id"], source_kind="arrow_table")
+        result = builder.build(table, tag_columns=["id"], kind_part="arrow_table_v1")
         _, data_schema = result.stream.output_schema()
         assert data_schema["val"] == int | None
 
@@ -130,7 +139,7 @@ class TestSourceStreamBuilderRespectsSchema:
                 ]
             ),
         )
-        result = builder.build(table, tag_columns=["id"], source_kind="arrow_table")
+        result = builder.build(table, tag_columns=["id"], kind_part="arrow_table_v1")
         _, data_schema = result.stream.output_schema()
         assert data_schema["val"] is int
 
@@ -149,10 +158,10 @@ class TestSourceStreamBuilderRespectsSchema:
             ),
         )
         result_nullable = builder.build(
-            nullable_table, tag_columns=["id"], source_kind="arrow_table"
+            nullable_table, tag_columns=["id"], kind_part="arrow_table_v1"
         )
         result_non_nullable = builder.build(
-            non_nullable_table, tag_columns=["id"], source_kind="arrow_table"
+            non_nullable_table, tag_columns=["id"], kind_part="arrow_table_v1"
         )
         assert result_nullable.schema_hash != result_non_nullable.schema_hash
 
@@ -172,11 +181,13 @@ class TestArrowTableSourceUsesBuilder:
         src = ArrowTableSource(table=table, tag_columns=["id"], tag_only_columns=True)
         assert hasattr(src, "_stream")
 
-    def test_arrow_table_source_identity_uses_class_name(self):
+    def test_arrow_table_source_identity_starts_with_its_source_id(self):
+        """The source id, not the class name, names the kind (ITL-1425)."""
         table = pa.table({"id": pa.array([1]), "x": pa.array([10])})
         src = ArrowTableSource(table=table, tag_columns=["id"], tag_only_columns=True)
         identity = src.identity_structure()
-        assert identity[0] == "ArrowTableSource"
+        assert identity[0] == src.source_id
+        assert "ArrowTableSource" not in identity
 
 
 class TestKeyColumnOrder:
@@ -302,7 +313,7 @@ class TestKeyRowIdentifiers:
         assert table.column(record_id).type == pa.large_string()
         assert table.column(record_id).to_pylist() == expected
         assert table.column("_source_v").to_pylist() == [
-            f"s::{identifier}::v" for identifier in expected
+            f"arrow_table_v1:s::{identifier}::v" for identifier in expected
         ]
 
     def test_int_and_str_keys_differ(self) -> None:

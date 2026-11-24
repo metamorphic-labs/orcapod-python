@@ -203,11 +203,17 @@ rewrites it in place.
   removed rather than kept provisional, and the tool refuses a case that builds one, declared
   or not. Of the provisional sources only `DerivedSource` is declarable
   (`cases.DECLARABLE_PROVISIONAL_SOURCES`).
-- **Today:** 475 entries. The `PolarsFilter` cases (`polars_filter`, `polars_filter_expr`,
-  `polars_filter_expr_job` and the `semantic` case `polars_expr`, 86 entries) moved out of
-  the frozen files with ITL-1266; the cases of the other provisional operators (229 entries)
-  and of the library value types (128 entries, with the 12 of `GoldenWithArray`) moved with
-  ITL-1279 and ITL-1324, and those of `DerivedSource` (32 entries) with ITL-1331. Every move was values unchanged, before `v1` was frozen.
+- **Today:** 1218 entries: `pipeline` 1018, `semantic` 58, `datagram` 50, `schema` 40,
+  `torch` 32 and `arrow` 20 (the keys of `data/v1/provisional/*.json`). 475 of them moved out
+  of the frozen files, values unchanged, before `v1` was frozen: the `PolarsFilter` cases
+  (`polars_filter`, `polars_filter_expr`, `polars_filter_expr_job` and the `semantic` case
+  `polars_expr`, 86 entries) with ITL-1266; the cases of the other provisional operators (229
+  entries) and of the library value types (128 entries, with the 12 of `GoldenWithArray`)
+  with ITL-1279 and ITL-1324, and those of `DerivedSource` (32 entries) with ITL-1331. The
+  rest were added as provisional from the start, among them the `Rejoin` cases (`rejoin`,
+  `rejoin_arrangement`, `rejoin_job`, `rejoin_job_async`: 638 entries, ITL-1336 and ITL-1355)
+  and the `Filter` cases (`pipeline:filter`, `pipeline:filter_job` and
+  `semantic:filter_condition`: 93 entries, ITL-1382).
 - **What holds.** Every provisional value is computed and compared on every CI run, so a
   change nobody intended fails. An intended change needs the developer's approval of the
   exact list of entries that move, each explained (`--remove`, then `--add`), but no new

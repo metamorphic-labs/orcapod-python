@@ -24,3 +24,13 @@ The database-backed nodes a `PipelineJob` builds; these are what `job.nodes[labe
 ::: orcapod.core.nodes.OperatorJobNode
 
 ::: orcapod.core.nodes.SourceJobNode
+
+## Provenance of a job's rows
+
+Every job node above (function, operator and source) has these two methods: they trace a
+cell to its source cells, and say why a source record does not reach a node. Both are
+provisional in 0.4.0: their answers may be refined in a later release; a case they cannot
+prove is reported unavailable or refused, never guessed. The known limits are listed on
+the [provenance concept page](../concepts/provenance.md#known-limits).
+
+::: orcapod.core.nodes.provenance_methods.ProvenanceMethods

@@ -24,21 +24,14 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from enum import Enum
 from html.parser import HTMLParser
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
+import polars as pl
+import pyarrow as pa
+import pyarrow.compute as pc
 from typing_extensions import override
 
 from orcapod.system_constants import constants
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import polars as pl
-    import pyarrow as pa
-    import pyarrow.compute as pc
-else:
-    pa = LazyModule("pyarrow")
-    pc = LazyModule("pyarrow.compute")
-    pl = LazyModule("polars")
 
 
 class ViewStatus(str, Enum):

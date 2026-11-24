@@ -612,7 +612,8 @@ class TestPollingSourceSyncMode:
         )
         cfg = src.to_config()
         assert cfg["source_type"] == "polling_source"
-        assert cfg["source_id"] == "my_source"
+        assert cfg["source_name"] == "my_source"
+        assert cfg["source_version"] == 1
         assert cfg["impl_module"] == FakeDynamicSource.__module__
         assert cfg["impl_class"] == FakeDynamicSource.__qualname__
         assert cfg["tag_columns"] == ["id"]

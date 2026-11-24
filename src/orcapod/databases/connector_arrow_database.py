@@ -20,33 +20,33 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
-from collections.abc import Collection, Mapping
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Callable, Collection, Mapping
+from contextlib import AbstractContextManager
+from typing import Any, cast
 
+import pyarrow as pa
+import pyarrow.compute as pc
+
+from orcapod.databases._pending_commits import PendingCommit, PendingCommits
 from orcapod.databases.utils import (
     coerce_record_id,
     first_changed_column,
+    first_logical_identity_change,
     in_held_column_order,
 )
 from orcapod.errors import (
     InputValidationError,
+    OrcapodDatabaseError,
+    OrcapodDatabaseReadError,
     UnstorableColumnError,
     UnstorableTableNameError,
 )
+from orcapod.protocols.db_connector_protocol import ColumnInfo, DBConnectorProtocol
 from orcapod.utils.arrow_utils import (
     normalize_schema_to_large_types,
     normalize_table_to_large_types,
     normalize_to_large_types,
 )
-from orcapod.protocols.db_connector_protocol import ColumnInfo, DBConnectorProtocol
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-    import pyarrow.compute as pc
-else:
-    pa = LazyModule("pyarrow")
-    pc = LazyModule("pyarrow.compute")
 
 
 def _arrow_schema_to_column_infos(schema: pa.Schema) -> list[ColumnInfo]:
@@ -101,6 +101,8 @@ class ConnectorArrowDatabase:
             Defaults to 10, matching ``InMemoryArrowDatabase``.
     """
 
+    stores_records = True
+
     RECORD_ID_COLUMN = "__record_id"
     _ROW_INDEX_COLUMN = "__row_index"
 
@@ -139,6 +141,21 @@ class ConnectorArrowDatabase:
             if _shared_pending_skip_existing is not None
             else {}
         )
+
+        self._pending_commits = (
+            _root._pending_commits
+            if _root is not None
+            else PendingCommits(
+                self.RECORD_ID_COLUMN,
+                self._pending_batches,
+                self._pending_record_ids,
+                on_empty=self._discard_pending_duplicate_policy,
+            )
+        )
+
+    def _discard_pending_duplicate_policy(self, key: str) -> None:
+        """Forget the duplicate policy when an entire queued batch is discarded."""
+        self._pending_skip_existing.pop(key, None)
 
     # ── Path helpers ──────────────────────────────────────────────────────────
 
@@ -300,6 +317,28 @@ class ConnectorArrowDatabase:
 
     # ── Storable columns ──────────────────────────────────────────────────────
 
+    def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
+        """Read the committed or queued schema without fetching rows.
+
+        Raises:
+            OrcapodDatabaseReadError: If the connector cannot inspect the schema.
+        """
+        full_path = self._path_prefix + record_path
+        table_name = self._path_to_table_name(full_path)
+        self._require_table_name(table_name)
+        try:
+            if table_name not in self._connector.get_table_names():
+                pending = self._pending_batches.get(self._get_record_key(record_path))
+                return None if pending is None else pending.schema
+            return pa.schema(
+                pa.field(column.name, column.arrow_type, nullable=column.nullable)
+                for column in self._connector.get_column_info(table_name)
+            )
+        except OrcapodDatabaseError:
+            raise
+        except Exception as exc:
+            raise OrcapodDatabaseReadError(table_name, full_path) from exc
+
     def require_storable(self, schema: pa.Schema) -> None:
         """Refuse a table schema with a column the connector cannot store (ITL-1162).
 
@@ -442,10 +481,15 @@ class ConnectorArrowDatabase:
         # Columns match by name: rows with the held columns in another order are
         # put in the held order, so the connector always receives the stored order
         # (ITL-1367).
+        # A column of another logical type is refused first, on the raw identifier
+        # bytes, before the reorder compares types (ITL-1371).
+        # The held schemas are gathered once for both checks (one table listing).
+        held = self._held_schemas(record_path)
+        self._refuse_changed_columns(record_path, records, held, identity_only=True)
         records = in_held_column_order(
             records, self._held_column_order(record_path), self.RECORD_ID_COLUMN
         )
-        self._refuse_changed_columns(record_path, records.schema)
+        self._refuse_changed_columns(record_path, records, held)
 
         records = self._deduplicate_within_table(records)
         input_ids = set(cast(list[bytes], records[self.RECORD_ID_COLUMN].to_pylist()))
@@ -518,28 +562,21 @@ class ConnectorArrowDatabase:
         if table_name not in self._connector.get_table_names():
             return None
         return [
-            pa.field(c.name, normalize_to_large_types(c.arrow_type, keep_null=True))
+            pa.field(
+                c.name,
+                normalize_to_large_types(c.arrow_type, keep_null=True),
+                nullable=c.nullable,
+            )
             for c in self._connector.get_column_info(table_name)
         ]
 
-    def _refuse_changed_columns(
-        self, record_path: tuple[str, ...], schema: pa.Schema
-    ) -> None:
-        """Refuse rows whose columns would not read back as written (ITL-1334).
-
-        The table holds one type per column, so an appended column must have the held
-        column's field metadata and nested field attributes (``appended_field_change``),
-        held by the stored table and by a batch pending for it: otherwise one side's
-        rows would read back with the other's. A connector that keeps no field
-        metadata refuses metadata and nested types itself, so only one that keeps it
-        is checked. The stored table's schema is read once per table
-        (``_read_stored_schema``): an append the check accepts does not change it.
-
-        Raises:
-            InputValidationError: For the first such column, naming it and the path.
-        """
+    def _held_schemas(self, record_path: tuple[str, ...]) -> list[pa.Schema] | None:
+        """The schemas held for the table, the pending batch's and the stored one's,
+        for ``_refuse_changed_columns``; ``None`` when the connector keeps no field
+        metadata. The stored table's schema is read once per table
+        (``_read_stored_schema``): an append the check accepts does not change it."""
         if not self.keeps_field_metadata:
-            return
+            return None
         held: list[pa.Schema] = []
         pending = self._pending_batches.get(self._get_record_key(record_path))
         if pending is not None:
@@ -552,7 +589,38 @@ class ConnectorArrowDatabase:
                 self._stored_schemas[table_name] = stored
         if stored is not None:
             held.append(stored)
-        changed = first_changed_column(held, schema)
+        return held
+
+    def _refuse_changed_columns(
+        self,
+        record_path: tuple[str, ...],
+        records: pa.Table,
+        held: list[pa.Schema] | None,
+        *,
+        identity_only: bool = False,
+    ) -> None:
+        """Refuse rows whose columns would not read back as written (ITL-1334).
+
+        The table holds one type per column, so an appended column must have the held
+        column's field metadata and nested field attributes (``appended_field_change``),
+        held by the stored table and by a batch pending for it: otherwise one side's
+        rows would read back with the other's. A connector that keeps no field
+        metadata refuses metadata and nested types itself, so only one that keeps it
+        is checked (``held`` is ``None`` for one that keeps none).
+
+        A column of another logical type identifier is refused first
+        (``first_logical_identity_change``, ITL-1371); ``identity_only`` checks only
+        that, so it can run before the rows are reordered by name.
+
+        Raises:
+            InputValidationError: For the first such column, naming it and the path.
+        """
+        if held is None:
+            return
+        # A column of another logical type would read back as the held one (ITL-1371).
+        changed = first_logical_identity_change(held, records)
+        if changed is None and not identity_only:
+            changed = first_changed_column(held, records.schema)
         if changed is not None:
             raise InputValidationError(
                 f"Cannot append to the table at {record_path!r}: column "
@@ -617,16 +685,72 @@ class ConnectorArrowDatabase:
 
     # ── Flush ─────────────────────────────────────────────────────────────────
 
+    def pending_result(
+        self, record_path: tuple[str, ...], record_id: bytes
+    ) -> PendingCommit | None:
+        """Return a commit dependency for a buffered result, or verify it is stored."""
+        key = self._get_record_key(record_path)
+        if record_id in self._pending_record_ids.get(key, ()):
+            return self._pending_commits.attempt(key)
+        if self.get_record_by_id(record_path, record_id) is None:
+            raise ValueError("The referenced result is neither stored nor pending.")
+        return None
+
+    def fail_pending_result(self, record_path: tuple[str, ...]) -> None:
+        """Withdraw records depending on this table's current commit attempt."""
+        self._pending_commits.finish(self._get_record_key(record_path), committed=False)
+
+    def guard_record(
+        self,
+        record_path: tuple[str, ...],
+        record_id: bytes,
+        dependency: PendingCommit,
+    ) -> AbstractContextManager[None]:
+        """Prevent this record's publication until its result commits."""
+        return self._pending_commits.guard(
+            self._get_record_key(record_path), record_id, dependency
+        )
+
+    def guard_table_schema(
+        self, record_path: tuple[str, ...], check: Callable[[pa.Schema], None]
+    ) -> AbstractContextManager[None]:
+        """Check the schema at the connector's commit."""
+        return self._pending_commits.guard_schema(
+            self._get_record_key(record_path), check
+        )
+
     def flush(self) -> None:
         """Commit all pending batches to the connector via upsert."""
-        for record_key in list(self._pending_batches.keys()):
-            record_path = tuple(record_key.split("/"))
-            table_name = self._path_to_table_name(record_path)
-            self._require_table_name(table_name)
-            pending = self._pending_batches.pop(record_key)
-            self._pending_record_ids.pop(record_key, None)
-            skip_existing = self._pending_skip_existing.pop(record_key, False)
+        for record_key in list(self._pending_batches):
+            self._flush_by_key(record_key)
 
+    def refresh_table(self, record_path: tuple[str, ...]) -> None:
+        """Nothing to refresh: every read queries the connector's backend (ITL-1408)."""
+
+    def flush_result_batch(
+        self, record_path: tuple[str, ...], *, publish_records: bool
+    ) -> None:
+        """Commit a durable result table even if no pipeline records are stored."""
+        self.flush_batch(record_path)
+
+    def flush_batch(self, record_path: tuple[str, ...]) -> None:
+        """Commit one table's ready records."""
+        self._flush_by_key(self._get_record_key(record_path))
+
+    def _flush_by_key(self, record_key: str) -> None:
+        """Commit the ready records at a key shared by all views."""
+        ready = self._pending_commits.take_ready(record_key)
+        if ready is None:
+            return
+        pending, ids = ready
+        record_path = tuple(record_key.split("/"))
+        table_name = self._path_to_table_name(record_path)
+        skip_existing = self._pending_skip_existing.get(record_key, False)
+        if record_key not in self._pending_batches:
+            self._pending_skip_existing.pop(record_key, None)
+
+        try:
+            self._require_table_name(table_name)
             columns = _arrow_schema_to_column_infos(pending.schema)
 
             # Schema validation: if the table already exists, confirm the column
@@ -636,6 +760,9 @@ class ConnectorArrowDatabase:
             # Looked up now, as the check needs: nothing about the stored table is
             # trusted from an earlier call (ITL-1367).
             existing = self._stored_columns(table_name)
+            check = self._pending_commits.schema_check(record_key)
+            if check is not None:
+                check(pending.schema if existing is None else pa.schema(existing))
             if existing is not None:
                 # A connector reads text and binary back in their large variants,
                 # which are the same types (ITL-1162).
@@ -673,6 +800,13 @@ class ConnectorArrowDatabase:
                 id_column=self.RECORD_ID_COLUMN,
                 skip_existing=skip_existing,
             )
+        except BaseException:
+            self._pending_commits.finish(record_key, committed=False)
+            raise
+        else:
+            self._pending_commits.finish(record_key, committed=True)
+        finally:
+            self._pending_commits.forget(record_key, ids)
 
     # ── Read methods ──────────────────────────────────────────────────────────
 

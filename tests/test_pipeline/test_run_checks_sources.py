@@ -287,12 +287,14 @@ def test_a_failed_check_warns_once_and_the_run_goes_on(orchestrator: str) -> Non
     failed = [w for w in caught if issubclass(w.category, SourceCheckFailedWarning)]
     assert len(failed) == 1
     message = str(failed[0].message)
-    assert "'s'" in message
+    assert "'dict_v1:s'" in message
     assert "ConnectionError: server unreachable" in message
     assert "proceeds with the data the source already holds" in message
     assert CALLS == []  # the job was current: nothing ran
-    assert summary.unchecked_sources == ("s",)
-    assert "sources not checked for new data (see the warning): s" in repr(summary)
+    assert summary.unchecked_sources == ("dict_v1:s",)
+    assert "sources not checked for new data (see the warning): dict_v1:s" in repr(
+        summary
+    )
     assert "sources not checked for new data" in summary._repr_html_()
 
 
@@ -323,7 +325,7 @@ def test_a_failed_check_in_a_node_run_is_reported_in_its_summary() -> None:
         job.nodes["picked"].run()
     last_run = job.nodes["picked"].last_run
     assert last_run is not None
-    assert last_run.unchecked_sources == ("s",)
+    assert last_run.unchecked_sources == ("dict_v1:s",)
 
 
 def test_a_check_that_keeps_failing_warns_at_every_run() -> None:
@@ -347,7 +349,7 @@ def test_a_source_node_run_checks_its_bound_source() -> None:
     _ = job.nodes["s"].run()
     assert source.checks == 1
     source.error = OSError("boom")
-    with pytest.warns(SourceCheckFailedWarning, match="'s'"):
+    with pytest.warns(SourceCheckFailedWarning, match="'dict_v1:s'"):
         view = job.nodes["s"].run(load_only=True)
     assert len(view.as_table()) == 3  # the rows the source already holds
 

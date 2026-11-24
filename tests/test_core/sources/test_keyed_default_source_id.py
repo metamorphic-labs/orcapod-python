@@ -148,7 +148,7 @@ class TestHashInKeyOrder:
             for order in ROW_ORDERS
         ]
         assert len({s.source_id for s in sources}) == 1
-        assert sources[0].source_id.startswith(f"{kind}:")
+        assert sources[0].source_id.startswith(f"{kind}_v1:")
         assert len({s.content_hash() for s in sources}) == 1
         assert len({s.pipeline_hash() for s in sources}) == 1
 
@@ -293,7 +293,7 @@ class TestHashInKeyOrderIsTheKeySortedTableHash:
         )
         hasher = source.data_context.arrow_hasher
         expected = hasher.hash_table(table.sort_by([(c, "ascending") for c in key]))
-        assert source.source_id == f"arrow_table:{expected.to_string()}"
+        assert source.source_id == f"arrow_table_v1:{expected.to_string()}"
 
     def test_without_it_the_default_is_the_hash_of_the_table_as_given(self) -> None:
         table = pa.Table.from_pylist(_ordered(ROW_ORDERS[2]), schema=SCHEMA)
@@ -301,7 +301,7 @@ class TestHashInKeyOrderIsTheKeySortedTableHash:
             table, tag_columns=TAGS, tag_only_columns=True, record_id_columns=TAGS
         )
         expected = source.data_context.arrow_hasher.hash_table(table)
-        assert source.source_id == f"arrow_table:{expected.to_string()}"
+        assert source.source_id == f"arrow_table_v1:{expected.to_string()}"
 
 
 @pytest.mark.parametrize("kind", KINDS)
@@ -425,8 +425,8 @@ class TestListSourceIdentity:
             source = make("list", ROWS, record_id_columns=key, source_id="given")
             identity = source.identity_structure()
             assert identity == RootSource.identity_structure(source)
-            assert identity[0] == "ListSource"
-            assert identity[2:] == ("given", resolved)
+            assert identity[0] == "list_v1:given"
+            assert identity[2:] == (resolved,)
 
     def test_with_a_source_id_the_elements_do_not_count(self) -> None:
         hashes = {
@@ -562,15 +562,15 @@ def test_build_takes_hash_in_key_order_by_keyword_only() -> None:
     table = pa.Table.from_pylist(ROWS, schema=SCHEMA)
     positional: Any = builder.build  # the signature refuses this; call it untyped
     with pytest.raises(TypeError):
-        positional(table, TAGS, None, TAGS, (), "arrow_table", (), True)
+        positional(table, TAGS, None, TAGS, (), "arrow_table_v1", (), True)
     result = builder.build(
         table,
         TAGS,
         None,
         TAGS,
         (),
-        "arrow_table",
+        "arrow_table_v1",
         (),
         hash_in_key_order=True,
     )
-    assert result.source_id.startswith("arrow_table:")
+    assert result.source_id.startswith("arrow_table_v1:")

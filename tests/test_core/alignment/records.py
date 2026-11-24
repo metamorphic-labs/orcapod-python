@@ -15,10 +15,12 @@ its origin row:
 * every input row is stored once: the record ids are source A's, each exactly once;
 * ``__data_context`` and ``_context_key`` are the data context's key.
 
-The remaining columns are not derived from the row: ``__pod_ts`` is the time the row was
-computed; ``__computed``, ``__is_ephemeral``, ``__pf_var_*`` and ``__pf_exec_*`` describe the
-function and the run, the same in every row of one run. They are listed by name, so a new
-per-row column fails the check until a rule covers it.
+The remaining columns describe recording and execution. Each entry has its own UTC
+``__recorded_at`` timestamp. Its ``__pipeline_run_id`` names the job run that recorded it
+and is the same for every entry written by that run. These fixtures write all their
+entries in one run, then optionally read those entries back. ``__pod_ts`` is the result
+timestamp. ``__computed``, ``__is_ephemeral``, ``__pf_var_*`` and ``__pf_exec_*`` describe
+the function and its execution. A new column fails the check until a rule covers it.
 """
 
 from __future__ import annotations
@@ -28,6 +30,10 @@ from collections import Counter
 import pyarrow as pa
 
 from orcapod import PipelineJob
+from orcapod.core.nodes.function_node import (
+    PIPELINE_RECORDED_AT_COL,
+    PIPELINE_RUN_ID_COL,
+)
 from orcapod.system_constants import constants
 
 from .checker import split_token
@@ -102,6 +108,8 @@ def assert_records_aligned(
         "__input_data_hash_right",
         "__data_context",
         constants.CONTEXT_KEY,
+        PIPELINE_RUN_ID_COL,
+        PIPELINE_RECORDED_AT_COL,
         *NOT_ROW_DERIVED,
     }
     unknown = [
@@ -111,12 +119,21 @@ def assert_records_aligned(
     ]
     assert not unknown, f"no alignment rule covers the record columns {unknown!r}"
 
+    run_ids = records.column(PIPELINE_RUN_ID_COL)
+    assert run_ids.type == pa.large_string(), "recording run IDs must be large strings"
+    assert run_ids.null_count == 0 and len(run_ids.unique()) == 1, (
+        "every entry must name the same recording run"
+    )
+    recorded_at = records.column(PIPELINE_RECORDED_AT_COL)
+    assert recorded_at.type == pa.timestamp("us", tz="UTC"), (
+        "recording timestamps must be UTC microseconds"
+    )
+    assert recorded_at.null_count == 0, "every entry must have a recording timestamp"
+
     # Every row of the node's input stored once: a record missing, or one valid record
     # stored twice in place of another, passes every per-record check below.
     stored: Counter[object] = Counter(records.column(record_id_column).to_pylist())
-    wanted: Counter[object] = Counter(
-        o.record_id for o in oracle.origins if o.source_id == "A"
-    )
+    wanted: Counter[object] = Counter(o.record_id for o in oracle.origins if o.of("A"))
     assert stored == wanted, (
         f"stored record ids are not the input rows once each: "
         f"{sum((wanted - stored).values())} missing, "
@@ -137,7 +154,7 @@ def assert_records_aligned(
         for tag in tag_keys:
             if row[tag] != origin.values[tag]:
                 fail(tag, f"{row[tag]!r}, its row has {origin.values[tag]!r}")
-        if row["_source_x"] != f"A::{origin.token}::x":
+        if row["_source_x"] != f"{origin.source_id}::{origin.token}::x":
             fail(
                 "_source_x", f"{row['_source_x']!r} does not name row {origin.token!r}"
             )

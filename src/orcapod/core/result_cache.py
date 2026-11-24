@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
 from collections.abc import Sequence
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
+
+import pyarrow as pa
 
 from orcapod.core.data_function_types import DataFunctionTypeDeclaration, StoredColumn
 from orcapod.errors import OrcapodDatabaseReadError, OrcapodDatabaseWriteError
@@ -32,14 +34,9 @@ from orcapod.system_constants import (
     constants,
 )
 from orcapod.utils import arrow_utils
-from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
-    import pyarrow as pa
-
     from orcapod.protocols.core_protocols.datagrams import DatagramProtocol
-else:
-    pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
 

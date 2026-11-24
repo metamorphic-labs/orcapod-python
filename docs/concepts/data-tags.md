@@ -326,7 +326,7 @@ grouped = sessions.group_by(["subject"]).as_table(columns={"source": True})
 print(grouped.column("_source_subject").to_pylist())
 # ['group_v1:...']
 print(grouped.column("_source_v").to_pylist())
-# [['sessions::row_0::v', 'sessions::row_1::v']]
+# [['dict_v1:sessions::row_0::v', 'dict_v1:sessions::row_1::v']]
 ```
 
 The materialization warning can be turned off; it never changes a result or a hash:

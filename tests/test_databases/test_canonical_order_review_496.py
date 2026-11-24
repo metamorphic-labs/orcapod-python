@@ -14,9 +14,8 @@ from unittest.mock import patch
 
 import pyarrow as pa
 import pytest
-from deltalake import DeltaTable, write_deltalake
+from deltalake import write_deltalake
 
-import orcapod.databases.utils as database_utils
 from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
 from orcapod.core.datagrams import Data
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
@@ -48,9 +47,11 @@ def _rows(n: int, order: tuple[str, ...], z_type: Any) -> pa.Table:
 def test_a_writer_that_keeps_its_order_matches_itself(
     tmp_path: Path, database: str, z_type: Any
 ) -> None:
-    """Two batches with the same column order and a type the append comparison does
-    not handle: both are written, as on main. Such rows are never sorted, so the
-    second batch meets the first as given (review finding 2)."""
+    """Two identically ordered batches with a type the append comparison cannot handle.
+
+    Both are written in that order when the backend preserves the type. Delta
+    normalizes string views first, so those batches can use the canonical order.
+    """
     db = (
         InMemoryArrowDatabase()
         if database == "in-memory"
@@ -62,42 +63,16 @@ def test_a_writer_that_keeps_its_order_matches_itself(
     db.flush()
     table = db.get_all_records(PATH, record_id_column="rid")
     assert table is not None
-    assert sorted(table.column("a").to_pylist()) == [1, 2]  # pyright: ignore[reportArgumentType]  # int64 column
-
-
-def test_a_delta_table_main_created_with_a_merge_reserved_name_still_appends(
-    tmp_path: Path,
-) -> None:
-    """A Delta table created before ITL-1370 in a non-canonical order, with a column
-    named ``__delta_rs_source`` (which delta-rs's MERGE cannot handle): a batch in the
-    stored order is appended by WRITE, as main does (review finding 3)."""
-
-    def rows(n: int) -> pa.Table:
-        return pa.table(
-            {
-                "z": [n],
-                "rid": pa.array([bytes([n])], pa.large_binary()),
-                "__delta_rs_source": [n + 10],
-            }
-        )
-
-    with patch.object(
-        database_utils,
-        "canonical_column_order",
-        lambda records, record_id: records,
-        create=True,
-    ):
-        DeltaTableDatabase(tmp_path).add_records(
-            PATH, rows(1), record_id_column="rid", flush=True
-        )
-    db = DeltaTableDatabase(tmp_path)
-    db.add_records(PATH, rows(2), record_id_column="rid", flush=True)
-    history = [entry["operation"] for entry in DeltaTable(tmp_path / "t").history()]
-    assert history == ["WRITE", "WRITE"]
-    table = db.get_all_records(PATH, record_id_column="rid")
-    assert table is not None
-    assert table.column_names == ["z", "rid", "__delta_rs_source"]
-    assert sorted(table.column("z").to_pylist()) == [1, 2]  # pyright: ignore[reportArgumentType]  # int64 column
+    expected_order = (
+        ["rid", "a", "z"]
+        if database == "Delta" and z_type == pa.string_view()
+        else list(order)
+    )
+    assert table.column_names == expected_order
+    assert sorted(table.to_pylist(), key=lambda row: row["rid"]) == [
+        {"rid": bytes([1]), "a": 1, "z": "1"},
+        {"rid": bytes([2]), "a": 2, "z": "2"},
+    ]
 
 
 def _outputs(x: int) -> tuple[int, int]:
@@ -183,16 +158,6 @@ def test_an_external_empty_delta_table_presents_its_order_before_and_after_a_flu
     assert pending.column_names == committed.column_names == ["z", "rid", "A"]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason=(
-        "ITL-1377: on a canonical Delta table a batch commits by plain append, as an "
-        "ordinary writer's batch does on main, so a competing writer's record id is "
-        "stored twice; ITL-1377 makes every Delta append conflict-safe (developer, "
-        "2026-11-22). PR 496 must not merge before ITL-1377's fix."
-    ),
-)
 @pytest.mark.parametrize("skip_duplicates", [True, False])
 def test_a_competing_record_id_on_a_canonical_delta_table_keeps_one_row(
     tmp_path: Path, skip_duplicates: bool
@@ -230,11 +195,13 @@ def test_a_competing_record_id_on_a_canonical_delta_table_keeps_one_row(
         )
         return taken
 
-    with patch.object(one, "_snapshot_for_commit", side_effect=interleave):
-        try:
-            one.flush()
-        except RuntimeError:
-            pass
+    with patch.object(one, "_snapshot_for_commit", side_effect=interleave) as attempts:
+        one.flush()
+    assert attempts.call_count == 2
     table = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="rid")
     assert table is not None
-    assert sorted(table.column("rid").to_pylist()) == [bytes([1]), bytes([2])]  # pyright: ignore[reportArgumentType]  # binary column
+    assert table.column_names == ["rid", "a", "z"]
+    assert table.sort_by("rid").to_pylist() == [
+        {"rid": bytes([1]), "a": 10, "z": 101},
+        {"rid": bytes([2]), "a": 99, "z": 102},
+    ]

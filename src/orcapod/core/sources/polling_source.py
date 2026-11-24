@@ -18,10 +18,12 @@ from collections.abc import Collection
 from math import floor
 from typing import Any, ClassVar, Generic, TYPE_CHECKING, TypeVar, cast
 
+import polars as pl
+import pyarrow as pa
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
-from orcapod.core.sources.source_ids import hash_source_id
+from orcapod.core.sources.source_ids import hash_source_name
 from orcapod.logical_types.canonical_form import declaration_form_schema
 from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
@@ -45,7 +47,6 @@ from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Cursor, PollingConfig, Schema
 from orcapod.utils import arrow_utils, polars_data_utils
 from orcapod.utils.arrow_utils import system_tag_column_names
-from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.schema_utils import (
     _normalize_column_list,
     compute_source_schema_hash,
@@ -53,17 +54,11 @@ from orcapod.utils.schema_utils import (
 )
 
 if TYPE_CHECKING:
-    import polars as pl
-    import pyarrow as pa
     from polars._typing import FrameInitTypes
 
     from orcapod.core.streams.arrow_table_stream import ArrowTableStream
     from orcapod.protocols.core_protocols.sources import DynamicSourceProtocol
     from orcapod.types import Schema
-
-else:
-    pa = LazyModule("pyarrow")
-    pl = LazyModule("polars")
 
 T = TypeVar("T")
 
@@ -210,9 +205,10 @@ class PollingSource(RootSource, Generic[T]):
             See ``PollingConfig`` for field semantics and defaults.
             All fields are validated at construction — ``ValueError`` is
             raised for out-of-range values.
-        source_id: Optional stable string identifier for provenance tracking.
-            Defaults to ``polling_source:<label>:<hex>`` of the semantic hash of
-            ``impl.identity()``.
+        source_id: Optional name of the source; its id is
+            ``polling_source_v1:<name>`` (ITL-1425). The name defaults to
+            ``<label>:<hex>`` of the semantic hash of ``impl.identity()``, so the
+            default id is ``polling_source_v1:semantic_v1:<hex>``.
         label: Optional human-readable label shown in pipeline diagrams.
         data_context: Optional data context key or instance for type
             conversion and hashing.
@@ -275,7 +271,9 @@ class PollingSource(RootSource, Generic[T]):
     """
 
     SOURCE_KIND: ClassVar[str] = "polling_source"
-    """Config type key and default source-id kind of this source (one vocabulary)."""
+    """Config type key and the kind in the source id's kind part (one vocabulary)."""
+    SOURCE_VERSION: ClassVar[int] = 1
+    """The version of this kind's implementation, in the kind part (ITL-1425)."""
     PROVISIONAL = True
     """Provisional in data context v1 (ITL-1314, ``PROVISIONAL_SOURCES``)."""
 
@@ -317,12 +315,11 @@ class PollingSource(RootSource, Generic[T]):
         self._committed_record_ids: set[str] = set()
         self._state_lock: threading.Lock = threading.Lock()
         self._canonical_arrow_schema: pa.Schema | None = None
-        # The default source id is the kind and the semantic hash of the impl's identity:
-        # a hash, never the identity's repr, which is not stable (ITL-1154).
-        if self._source_id is None:
-            self._source_id = hash_source_id(
-                self.SOURCE_KIND,
-                self.data_context.semantic_hasher.hash_object(self._impl.identity()),
+        # The default name is the semantic hash of the impl's identity: a hash, never
+        # the identity's repr, which is not stable (ITL-1154).
+        if self._source_name is None:
+            self._source_name = hash_source_name(
+                self.data_context.semantic_hasher.hash_object(self._impl.identity())
             )
         # Split impl.schema() into tag/data schemas
         self._tag_schema: Schema | None = None
@@ -428,17 +425,21 @@ class PollingSource(RootSource, Generic[T]):
     # -------------------------------------------------------------------------
 
     def identity_structure(self) -> Any:
-        """Identity derived from the impl's own identity, tag columns and key columns.
+        """Identity from the source id, the impl's own identity, tags and key columns.
 
-        Delegates to ``impl.identity()`` so that the implementer fully
-        controls what makes two ``PollingSource`` instances distinct; the key
-        columns (``record_id_columns``) follow, as for every root source (ITL-1154).
-        The tag columns name a set: they enter in name order, so the order they are
-        declared in changes no hash (ITL-1271). The key columns keep their order: it
-        is the explicit order of the record id.
+        The source id (``polling_source_v1:<name>``) comes first, as for every root
+        source (ITL-1425): a given ``source_id`` now tells two polling sources apart.
+        ``impl.identity()`` follows, so that the implementer still controls what makes
+        two ``PollingSource`` instances distinct; then the key columns
+        (``record_id_columns``), as for every root source (ITL-1154). The tag columns
+        name a set: they enter in name order, so the order they are declared in
+        changes no hash (ITL-1271). The key columns keep their order: it is the
+        explicit order of the record id. The schema is not part of it: it may be
+        known only after a poll (ITL-1316 decides this source's identity).
         """
         self._note_provisional_identity_use()  # a direct read is a use (ITL-1331)
         return (
+            self.source_id,
             self._impl.identity(),
             tuple(sorted(self._tag_columns)),
             self._key_columns,
@@ -690,7 +691,7 @@ class PollingSource(RootSource, Generic[T]):
             "tag_columns": list(self._tag_columns),
             "record_id_columns": list(self._record_id_columns),
             "polling_config": dataclasses.asdict(self._polling_config),
-            "source_id": self._source_id,
+            **self._source_id_config(),
             "impl_config": self._impl.to_config(),
         }
 
@@ -732,12 +733,15 @@ class PollingSource(RootSource, Generic[T]):
             impl = impl_class.from_config(impl_config)
 
         polling_config = PollingConfig(**config.get("polling_config", {}))
-        return cls(
-            impl=impl,
-            tag_columns=config["tag_columns"],
-            polling_config=polling_config,
-            source_id=config.get("source_id"),
-            record_id_columns=config.get("record_id_columns"),
+        return cls._from_saved_name(
+            config,
+            lambda name: cls(
+                impl=impl,
+                tag_columns=config["tag_columns"],
+                polling_config=polling_config,
+                source_id=name,
+                record_id_columns=config.get("record_id_columns"),
+            ),
         )
 
     # -------------------------------------------------------------------------
@@ -765,7 +769,7 @@ class PollingSource(RootSource, Generic[T]):
         if cursor_snapshot is None:
             # First access — no poll needed, fetch unconditionally.
             logger.debug(
-                "PollingSource %r: first sync access — fetching", self._source_id
+                "PollingSource %r: first sync access — fetching", self.source_id
             )
             new_cursor, data = _run_sync(self._impl.fetch, cursor=None)
             new_stream = self._try_build_stream(data)
@@ -785,7 +789,7 @@ class PollingSource(RootSource, Generic[T]):
             if has_new:
                 logger.debug(
                     "PollingSource %r: sync poll found new data — fetching",
-                    self._source_id,
+                    self.source_id,
                 )
                 new_cursor, data = _run_sync(self._impl.fetch, cursor=cursor_snapshot)
                 new_stream = self._try_build_stream(data)
@@ -803,7 +807,7 @@ class PollingSource(RootSource, Generic[T]):
                         committed = True
                 return committed and self._mark_new_rows(new_stream)
             logger.debug(
-                "PollingSource %r: sync poll — cache still valid", self._source_id
+                "PollingSource %r: sync poll — cache still valid", self.source_id
             )
             return False
 
@@ -830,7 +834,7 @@ class PollingSource(RootSource, Generic[T]):
         repeated = sorted(self._committed_record_ids.intersection(record_ids))
         if repeated:
             raise RowIdentifierError(
-                f"PollingSource {self._source_id!r}: a polled batch repeats the key "
+                f"PollingSource {self.source_id!r}: a polled batch repeats the key "
                 f"{repeated[0]} of a row polled earlier ({len(repeated)} repeated "
                 "in all). A polled row is identified by its key alone, so a key is "
                 "polled once; give the update a new key or start a new source."
@@ -870,7 +874,7 @@ class PollingSource(RootSource, Generic[T]):
         if len(df.columns) == 0:
             logger.debug(
                 "PollingSource %r: fetch returned data with no columns — skipping stream build",
-                self._source_id,
+                self.source_id,
             )
             return None
         return self._build_stream_from_df(df)
@@ -910,7 +914,7 @@ class PollingSource(RootSource, Generic[T]):
                         "PollingSource %r: no schema declared via impl.schema(); "
                         "inferring nullability from first batch. Implement impl.schema() "
                         "to avoid schema drift on zero-row polls or null-free batches.",
-                        self._source_id,
+                        self.source_id,
                     )
                     self._canonical_arrow_schema = arrow_utils.infer_schema_nullable(
                         arrow_table
@@ -939,7 +943,8 @@ class PollingSource(RootSource, Generic[T]):
         result = builder.build(
             arrow_table,
             tag_columns=self._tag_columns,
-            source_id=self._source_id,
+            source_name=self._source_name,
+            kind_part=self.kind_part(),
             record_id_columns=self._record_id_columns,
         )
         return result.stream
@@ -967,7 +972,7 @@ class PollingSource(RootSource, Generic[T]):
         ]
         if undeclared:
             raise SchemaInconsistencyError(
-                f"PollingSource {self._source_id!r}: the fetched columns {undeclared} "
+                f"PollingSource {self.source_id!r}: the fetched columns {undeclared} "
                 f"are not in the declared schema {self._declared_arrow.names} (its "
                 "identity was fixed by the declared schema; declare them in "
                 "impl.schema(), or fetch only the declared columns)."
@@ -982,7 +987,7 @@ class PollingSource(RootSource, Generic[T]):
             ):
                 continue
             raise SchemaInconsistencyError(
-                f"PollingSource {self._source_id!r}: the fetched column "
+                f"PollingSource {self.source_id!r}: the fetched column "
                 f"{declared.name!r} has the Arrow type {field.type}, but the source "
                 f"declares {declared.type} (its identity was fixed by the declared "
                 "schema; a Python type means one Arrow type, so declare impl.schema() "
@@ -1006,11 +1011,11 @@ class PollingSource(RootSource, Generic[T]):
         actual_tag_schema, actual_data_schema = stream.output_schema()
         if self._tag_schema is not None:
             _assert_schema_match(
-                "tag", self._tag_schema, actual_tag_schema, self._source_id
+                "tag", self._tag_schema, actual_tag_schema, self.source_id
             )
         if self._data_schema is not None:
             _assert_schema_match(
-                "data", self._data_schema, actual_data_schema, self._source_id
+                "data", self._data_schema, actual_data_schema, self.source_id
             )
 
     def _validate_combining_schemas(
@@ -1039,14 +1044,14 @@ class PollingSource(RootSource, Generic[T]):
             added = sorted(new_cols - old_cols)
             removed = sorted(old_cols - new_cols)
             raise SchemaInconsistencyError(
-                f"PollingSource {self._source_id!r}: schema mismatch between batches — "
+                f"PollingSource {self.source_id!r}: schema mismatch between batches — "
                 f"added: {added!r}, removed: {removed!r}"
             )
 
         old_tag_schema, old_data_schema = existing.output_schema()
         new_tag_schema, new_data_schema = new_stream.output_schema()
-        _assert_schema_match("tag", old_tag_schema, new_tag_schema, self._source_id)
-        _assert_schema_match("data", old_data_schema, new_data_schema, self._source_id)
+        _assert_schema_match("tag", old_tag_schema, new_tag_schema, self.source_id)
+        _assert_schema_match("data", old_data_schema, new_data_schema, self.source_id)
 
     def _combine(
         self, existing: ArrowTableStream, new_stream: ArrowTableStream
@@ -1144,7 +1149,7 @@ class PollingSource(RootSource, Generic[T]):
 
         logger.info(
             "PollingSource %r starting (interval=%.2fs, duration=%.1fs)",
-            self._source_id,
+            self.source_id,
             cfg.interval,
             cfg.duration,
         )
@@ -1176,7 +1181,7 @@ class PollingSource(RootSource, Generic[T]):
                     if has_new:
                         logger.debug(
                             "PollingSource %r: new data detected, fetching",
-                            self._source_id,
+                            self.source_id,
                         )
                         # Fetch — no lock held across await.
                         new_cursor, data = await self._impl.fetch(
@@ -1217,13 +1222,13 @@ class PollingSource(RootSource, Generic[T]):
                                 )
                                 logger.debug(
                                     "PollingSource %r: committed %d row(s)",
-                                    self._source_id,
+                                    self.source_id,
                                     emitted_count,
                                 )
                     else:
                         logger.debug(
                             "PollingSource %r: poll returned no new data",
-                            self._source_id,
+                            self.source_id,
                         )
 
                     consecutive_errors = 0
@@ -1235,7 +1240,7 @@ class PollingSource(RootSource, Generic[T]):
                     logger.error(
                         "PollingSource %r: cursor invalidated — previous state cannot "
                         "be reconciled with already-emitted rows. Terminating source.",
-                        self._source_id,
+                        self.source_id,
                     )
                     raise
 
@@ -1249,7 +1254,7 @@ class PollingSource(RootSource, Generic[T]):
                     logger.error(
                         "PollingSource %r: poll/fetch error (consecutive=%d, "
                         "backoff=%.1fs): %s",
-                        self._source_id,
+                        self.source_id,
                         consecutive_errors,
                         backoff,
                         e,
@@ -1258,7 +1263,7 @@ class PollingSource(RootSource, Generic[T]):
                         logger.error(
                             "PollingSource %r: max consecutive errors (%d) reached. "
                             "Terminating source.",
-                            self._source_id,
+                            self.source_id,
                             cfg.max_consecutive_errors,
                         )
                         break
@@ -1273,7 +1278,7 @@ class PollingSource(RootSource, Generic[T]):
                     logger.warning(
                         "PollingSource %r: tick overrun — consumed %d interval(s) "
                         "(consecutive_misses=%d/%d)",
-                        self._source_id,
+                        self.source_id,
                         intervals_consumed,
                         consecutive_misses,
                         cfg.max_missed_intervals,
@@ -1282,7 +1287,7 @@ class PollingSource(RootSource, Generic[T]):
                         logger.error(
                             "PollingSource %r: overrun threshold exceeded. "
                             "Terminating source.",
-                            self._source_id,
+                            self.source_id,
                         )
                         break
                 else:
@@ -1294,7 +1299,7 @@ class PollingSource(RootSource, Generic[T]):
                     logger.info(
                         "PollingSource %r: duration limit (%.1fs) reached. "
                         "Terminating source.",
-                        self._source_id,
+                        self.source_id,
                         cfg.duration,
                     )
                     break
@@ -1312,10 +1317,10 @@ class PollingSource(RootSource, Generic[T]):
         except asyncio.CancelledError:
             logger.info(
                 "PollingSource %r: cancelled — shutting down cleanly.",
-                self._source_id,
+                self.source_id,
             )
 
         finally:
-            logger.debug("PollingSource %r: calling impl.close()", self._source_id)
+            logger.debug("PollingSource %r: calling impl.close()", self.source_id)
             await self._impl.close()
-            logger.info("PollingSource %r: closed.", self._source_id)
+            logger.info("PollingSource %r: closed.", self.source_id)

@@ -227,8 +227,8 @@ def test_group_by_key_has_one_merged_token() -> None:
 
 def test_a_group_of_one_member_still_has_a_merged_token() -> None:
     tokens = _by(_grouped(), "s", "s")
-    assert tokens["s2"] == group_fold(["G::row_2::s"])
-    assert tokens["s2"] != "G::row_2::s"
+    assert tokens["s2"] == group_fold(["dict_v1:G::row_2::s"])
+    assert tokens["s2"] != "dict_v1:G::row_2::s"
 
 
 def test_grouping_a_grouped_stream_folds_the_digests() -> None:
@@ -300,18 +300,20 @@ def test_the_group_token_is_the_same_in_another_process() -> None:
 def test_join_of_two_data_tag_inputs_merges_their_tokens() -> None:
     (token,) = _source_column(Join()(_a(), _b()), "x")
     assert JOIN_TOKEN.match(token)
-    assert token == join_fold(["A::row_0::x", "B::row_0::x"])
+    assert token == join_fold(["dict_v1:A::row_0::x", "dict_v1:B::row_0::x"])
 
 
 def test_join_with_a_plain_input_keeps_the_data_tag_token() -> None:
     assert _source_column(Join()(_a(tag_only_columns=True), _b()), "x") == [
-        "B::row_0::x"
+        "dict_v1:B::row_0::x"
     ]
 
 
 def test_three_way_join_folds_all_inputs_once() -> None:
     (token,) = _source_column(Join()(_a(), _b(), _c()), "x")
-    assert token == join_fold(["A::row_0::x", "B::row_0::x", "C::row_0::x"])
+    assert token == join_fold(
+        ["dict_v1:A::row_0::x", "dict_v1:B::row_0::x", "dict_v1:C::row_0::x"]
+    )
 
 
 def _tied(sid: str):
@@ -327,14 +329,16 @@ def test_join_token_does_not_depend_on_input_order() -> None:
         for order in itertools.permutations(inputs)
     }
     assert len(tokens) == 1
-    assert tokens.pop() == join_fold(["Q::row_0::x", "A::row_0::x", "P::row_0::x"])
+    assert tokens.pop() == join_fold(
+        ["dict_v1:Q::row_0::x", "dict_v1:A::row_0::x", "dict_v1:P::row_0::x"]
+    )
 
 
 def test_join_after_group_by_folds_the_group_digest() -> None:
     other = _ref([{"s": "s1", "z": 1}], ["s"], "Z")
     group_token = _by(_grouped(), "s", "s")["s1"]
     (token,) = _source_column(Join()(_grouped(), other), "s")
-    assert token == join_fold([group_token, "Z::row_0::s"])
+    assert token == join_fold([group_token, "dict_v1:Z::row_0::s"])
 
 
 # ── the helpers ─────────────────────────────────────────────────────────────

@@ -227,6 +227,10 @@ What the workflow guarantees:
 
 - Only the input skips the tests. A test job that failed or was cancelled still stops the
   build and everything after it, as do a failed validation, license check or build.
+- The test jobs do not cancel each other (`fail-fast: false`, ITL-1429): a failure on one
+  Python version leaves the others running, so one run shows every version's result. To
+  repeat a run after an intermittent failure, use **Re-run all jobs**: the build needs all
+  three to pass in one attempt.
 - A run with the tests skipped says so: the build job writes a `Tests skipped` warning
   annotation and a run summary section naming who started the run (`github.actor`).
 

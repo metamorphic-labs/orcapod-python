@@ -1,7 +1,7 @@
 """Every materialized row keeps its own source info (ITL-845).
 
 ``StaticOutputOperatorPod._materialize_to_stream`` and
-``SyncPipelineOrchestrator._materialize_as_stream`` turn collected (Tag, Data)
+``StaticOutputOperatorPod._materialize_upstream`` turn collected (Tag, Data)
 pairs back into a stream. They used to read row 0's source info and stamp it on
 every row, so rows from index 1 onward were attributed to row 0. These tests
 send rows with distinct source-info tokens through every path that materializes
@@ -42,7 +42,6 @@ from orcapod.core.operators.pick import Pick
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.sources import ArrowTableSource, DictSource
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
-from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.system_constants import constants
@@ -136,9 +135,9 @@ def _materialize(rows: Sequence[Row]) -> StreamProtocol:
 
 
 def _materialize_buffer(buf: Sequence[Row], node: Any) -> StreamProtocol:
-    """Call ``SyncPipelineOrchestrator._materialize_as_stream``, the helper under test."""
+    """Call ``StaticOutputOperatorPod._materialize_upstream``, the helper under test."""
     # Non-public on purpose: these tests are about this helper itself.
-    return SyncPipelineOrchestrator._materialize_as_stream(list(buf), node)  # pyright: ignore[reportPrivateUsage]
+    return StaticOutputOperatorPod._materialize_upstream(list(buf), node)  # pyright: ignore[reportPrivateUsage]
 
 
 def _broadcast_row_zero(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -155,8 +154,28 @@ def _broadcast_row_zero(monkeypatch: pytest.MonkeyPatch) -> None:
             [(tag, data.with_source_info(**row_zero)) for tag, data in rows]
         )
 
+    original_form = StaticOutputOperatorPod._row_built_form  # pyright: ignore[reportPrivateUsage]
+
+    def broadcasting_form(
+        table: pa.Table, keys: tuple[Sequence[str], Sequence[str]]
+    ) -> pa.Table:
+        """Stamp row 0's source info on every row of the row-built form (ITL-1347)."""
+        formed = original_form(table, keys)
+        for i, name in enumerate(formed.column_names):
+            if name.startswith(constants.SOURCE_PREFIX):
+                column = formed.column(i)
+                first = column.slice(0, 1).combine_chunks()
+                repeated = pa.concat_arrays([first] * formed.num_rows)
+                formed = formed.set_column(i, formed.schema.field(i), repeated)
+        return formed
+
     monkeypatch.setattr(
         StaticOutputOperatorPod, "_rows_to_table", staticmethod(broadcasting)
+    )
+    # An operator node keeps the row-built form of its result's table, without
+    # making the rows (ITL-1347, stage 2).
+    monkeypatch.setattr(
+        StaticOutputOperatorPod, "_row_built_form", staticmethod(broadcasting_form)
     )
 
 
@@ -604,8 +623,10 @@ class TestIdentityPinned:
         assert node.pipeline_hash().to_string() == (
             "semantic_v1:386901951044b05f46421bac006888fe02778622cbb80011d3ede392dc81a930"
         )
+        # Moved once for ITL-1425 (the source id gained its kind part and the class
+        # name left the source identity); the pipeline hash did not move.
         assert node.content_hash().to_string() == (
-            "semantic_v1:94ccd6889f0ea79a46ae247cfeb7d0b6c35209db4a735ade1eede30bd171d9db"
+            "semantic_v1:b71ffc40650c9e66af9dfd03a1372bc9394bf3cbc8bb43c55619e8de60f5afa8"
         )
         ids = _record_ids(node)
         assert ids["a"] == ROW_ZERO_RECORD_ID
@@ -637,20 +658,22 @@ class TestIdentityPinned:
 # default source id. Re-recorded again for ITL-1154 (key columns in a source's
 # identity): the node content hash, which every stored row hash covers, moved. And for
 # ITL-640 (a schema enters an identity as its Arrow schema): the node content hash moved
-# again; the source's default id did not.
+# again; the source's default id did not. Re-recorded for ITL-1425 the same way: the
+# default id became ``arrow_table_v1:<label>:<hex>`` (in every token) and the class name
+# left the source identity (the node content hash moved).
 ROW_ZERO_RECORD_ID = b"arrow_v1:" + bytes.fromhex(
-    "000002f107db7ac2b54ac740a522624a714bf9444508dbcba76b1babc480b95577d369"
+    "00000234b25240a441d52b207f72dd4e883ecc384173138d5408c795512a7b15bcb80d"
 )
 PRE_FIX_RECORD_IDS = frozenset(
     {
         ROW_ZERO_RECORD_ID,
         b"arrow_v1:"
         + bytes.fromhex(
-            "000002ec1e4e6d5c9675688e2cb78807869a149cb25b7d13bd0cee6a01a9e32aa85267"
+            "00000242f5936aa63d0e124dfcdfc02543f9cccf2ec1c6ca3f5af2061dfee7684dae2d"
         ),
         b"arrow_v1:"
         + bytes.fromhex(
-            "0000022638c9de42abaf632e8d7c52e3d6af26b499052a3315e6693ca9796aa3244eb5"
+            "000002857b8ea4384ea197784961d1e6146f388a4098aa2f2e9c44b02b21c409676fc1"
         ),
     }
 )
@@ -688,7 +711,7 @@ class TestStoreWrittenBeforeFix:
         assert _stored_source(old) == [tokens[0]] * 3
 
         new = self._node(db)
-        out = new.execute(_pin_source())
+        out = list(new.execute(_pin_source()).iter_data())
 
         # The run itself emits the corrected rows.
         assert _source_info_tokens(out) == tokens

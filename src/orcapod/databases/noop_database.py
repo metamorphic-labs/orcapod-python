@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
+from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, Any
 
-from orcapod.utils.lazy_module import LazyModule
+import pyarrow as pa
 
 if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
+    from orcapod.databases._pending_commits import PendingCommit
 
 
 class NoOpArrowDatabase:
@@ -28,6 +27,8 @@ class NoOpArrowDatabase:
     tags plain (``tag_only_columns``) or use the cache mode ``OFF`` to dry-run such a
     node.
     """
+
+    stores_records = False
 
     def __init__(
         self,
@@ -101,6 +102,37 @@ class NoOpArrowDatabase:
     def flush(self) -> None:
         pass
 
+    def fail_pending_result(self, record_path: tuple[str, ...]) -> None:
+        """There are no buffered writes to withdraw."""
+
+    def refresh_table(self, record_path: tuple[str, ...]) -> None:
+        """Nothing to refresh: the no-op store holds no table (ITL-1408)."""
+
+    def flush_result_batch(
+        self, record_path: tuple[str, ...], *, publish_records: bool
+    ) -> None:
+        """A discarded result leaves no batch to commit."""
+
+    def flush_batch(self, record_path: tuple[str, ...]) -> None:
+        """Flush the no-op store at the pipeline batch boundary."""
+        self.flush()
+
+    def pending_result(self, record_path: tuple[str, ...], record_id: bytes) -> None:
+        """Treat explicitly discarded outputs as resolved for bookkeeping."""
+        return None
+
+    def guard_record(
+        self, record_path: tuple[str, ...], record_id: bytes, dependency: PendingCommit
+    ) -> AbstractContextManager[None]:
+        """Accept the bookkeeping dependency without retaining the pipeline record."""
+        return nullcontext()
+
+    def guard_table_schema(
+        self, record_path: tuple[str, ...], check: Callable[[pa.Schema], None]
+    ) -> AbstractContextManager[None]:
+        """Discard records without committing a table."""
+        return nullcontext()
+
     def list_table_paths(self, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
         """Return no path: this no-op implementation never stores a table.
 
@@ -128,6 +160,10 @@ class NoOpArrowDatabase:
     def base_path(self) -> tuple[str, ...]:
         """The current relative root of this database view (always () for root instances)."""
         return self._path_prefix
+
+    def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
+        """Return no schema because this database stores no tables."""
+        return None
 
     def at(self, *path_components: str) -> "NoOpArrowDatabase":
         """Return a new NoOpArrowDatabase scoped to the given sub-path.

@@ -5,6 +5,8 @@ from collections.abc import Collection, Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar
 
+import pyarrow as pa
+
 from orcapod.core.data_tags import (
     stored_data_tags,
     stream_data_tags,
@@ -15,7 +17,7 @@ from typing_extensions import override
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.provisional import warn_provisional_source
 from orcapod.core.sources.reload import same_rows
-from orcapod.core.sources.source_ids import hash_source_id
+from orcapod.core.sources.source_ids import hash_source_name
 from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
     normalize_record_id_columns,
@@ -35,16 +37,11 @@ from orcapod.errors import InputValidationError
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils, schema_utils
-from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.provisional import provisional_class_name
 
 if TYPE_CHECKING:
-    import pyarrow as pa
-
     from orcapod.core.nodes.function_node import FunctionJobNode
     from orcapod.core.nodes.operator_node import OperatorJobNode
-else:
-    pa = LazyModule("pyarrow")
 
 
 def validate_tags_as_data(
@@ -127,9 +124,10 @@ class DerivedSource(RootSource):
     equals the tag when the source is read; downstream it is plain data.
 
     Being a source, this form starts provenance afresh by the rule every source
-    follows: its own system-tag columns, record IDs derived from its ``source_id``
-    and each row's position (or ``record_id_columns``), and a source-info token
-    for every data column, the copies included. It stores nothing itself; like
+    follows: its own system-tag columns, record IDs from each row's position (or
+    its ``record_id_columns`` values), which never hold the source id (ITL-1425),
+    and a source-info token (``<source id>::<record id>::<column>``) for every data
+    column, the copies included. It stores nothing itself; like
     any source it can be wrapped with ``cached(database)``.
 
     Identity (``tags_as_data`` form):
@@ -137,8 +135,9 @@ class DerivedSource(RootSource):
           2026, ITL-1313). The default this form had, a hash of the derivation,
           was of questionable stability (``record_id_columns=None`` and ``()``,
           one key policy, gave two ids).
-        - ``content_hash`` follows the rule of every root source (class name,
-          output schema and ``source_id``) plus the sorted ``tags_as_data`` items,
+        - ``content_hash`` follows the rule of every root source (``source_id``,
+          ``derived_v1:<name>``, output schema and key columns; no class name,
+          ITL-1425) plus the sorted ``tags_as_data`` items,
           since two mappings can give one schema and one explicit ``source_id``.
         - ``pipeline_hash`` is schema-only, as for every root source.
 
@@ -163,9 +162,10 @@ class DerivedSource(RootSource):
 
     Args:
         origin: The source or DB-backed job node to derive from.
-        source_id: Canonical source name. Required with ``tags_as_data``; the plain
-            form defaults it to ``derived:<algorithm label>:<hex>`` of the origin's
-            content hash.
+        source_id: The source's name; its id is ``derived_v1:<name>`` (ITL-1425).
+            Required with ``tags_as_data``; the plain form defaults the name to
+            ``<algorithm label>:<hex>`` of the origin's content hash, so its id is
+            ``derived_v1:semantic_v1:<hex>``.
         tags_as_data: Maps a tag column of the origin to the name of the data
             column that receives a copy of it.
         record_id_columns: Key columns whose values identify a row in record IDs and
@@ -192,10 +192,16 @@ class DerivedSource(RootSource):
     """
 
     # The config type key (names the class a saved config is rebuilt with) and
-    # the kind prefix of the plain form's default source id.
+    # the kind in the source id's kind part, for both forms.
     SOURCE_KIND: ClassVar[str] = "derived"
+    # The version of this kind's implementation, in the kind part (ITL-1425).
+    SOURCE_VERSION: ClassVar[int] = 1
+    TABLE_IS_ROWS: ClassVar[bool] = True
     PROVISIONAL = True
     """Provisional in data context v1, both forms (ITL-1331, ``PROVISIONAL_SOURCES``)."""
+
+    REPORTS_WHAT_IT_READS = False
+    """It reads the rows stored for its origin (``explain()``, ITL-1402)."""
 
     @staticmethod
     def _missing_source_id() -> ValueError:
@@ -209,7 +215,7 @@ class DerivedSource(RootSource):
 
     @classmethod
     def require_saved_source_id(cls, config: Mapping[str, Any]) -> None:
-        """Refuse a saved ``tags_as_data`` config without a ``source_id`` (ITL-1313).
+        """Refuse a saved ``tags_as_data`` config without a saved name (ITL-1313).
 
         Checks the config and every source config nested in it (under the keys of
         ``serialization.NESTED_SOURCE_CONFIG_KEYS``: a derived source's ``origin``, a
@@ -223,15 +229,21 @@ class DerivedSource(RootSource):
 
         Raises:
             ValueError: If the config, or a config nested in it, is a derived source
-                with ``tags_as_data`` but no ``source_id`` (absent or null).
+                with ``tags_as_data`` but no saved name (``source_name`` absent or
+                null), or one saved before ITL-1425 (a ``source_id`` without a
+                ``source_name``, refused by ``require_saved_name_fields`` with its
+                own message).
         """
         from orcapod.pipeline.serialization import NESTED_SOURCE_CONFIG_KEYS
 
         if (
             config.get("source_type") == cls.SOURCE_KIND
             and config.get("tags_as_data") is not None
-            and config.get("source_id") is None
+            and config.get("source_name") is None
         ):
+            # A config saved before ITL-1425 holds a source_id: say so, not that one
+            # is missing.
+            cls.require_saved_name_fields(dict(config))
             raise cls._missing_source_id()
         for key in NESTED_SOURCE_CONFIG_KEYS:
             nested = config.get(key)
@@ -273,12 +285,10 @@ class DerivedSource(RootSource):
 
         self._explicit_source_id = source_id
         if source_id is None:
-            # Only the plain form gets here without a source id. A source id is the
-            # source's name, used as-is in system tags and source-info values; a
-            # default built from a hash keeps a source-kind prefix and the hash's
-            # label (developer, November 11, 2026): ``derived:<algorithm
-            # label>:<hex>`` of the origin's content hash.
-            source_id = hash_source_id(self.SOURCE_KIND, origin.content_hash())
+            # Only the plain form gets here without a source id. Its default name is
+            # the origin's content hash with its label, after the kind part
+            # (ITL-1425): ``derived_v1:<algorithm label>:<hex>``.
+            source_id = hash_source_name(origin.content_hash())
         super().__init__(source_id=source_id, **kwargs)
         self._origin = origin
         self._record_id_columns = key_columns
@@ -299,8 +309,8 @@ class DerivedSource(RootSource):
         """Return what the content hash is built from.
 
         The plain form is tied to the origin node's content hash. The
-        ``tags_as_data`` form is the root source rule (class name, output schema,
-        ``source_id``, key columns) followed by the sorted mapping items: two mappings can give
+        ``tags_as_data`` form is the root source rule (``source_id``, output schema,
+        key columns) followed by the sorted mapping items: two mappings can give
         the same schema (two tag columns of one type copied to one name) while the
         copy holds different values, so with an explicit ``source_id`` the mapping
         has to tell the sources apart (ITL-1000).
@@ -344,7 +354,11 @@ class DerivedSource(RootSource):
             "record_id_columns": None
             if self._record_id_columns is None
             else list(self._record_id_columns),
-            "source_id": self._explicit_source_id,
+            # The plain form's default name is not written: it is recomputed from
+            # the origin. ``source_name_given`` says the same, as for every source.
+            "source_name": self._explicit_source_id,
+            "source_name_given": self._explicit_source_id is not None,
+            "source_version": self.SOURCE_VERSION,
         }
         # Every concrete source has to_config; the abstract RootSource does not
         # declare it, so look it up as PipelineJob.save does.
@@ -395,7 +409,7 @@ class DerivedSource(RootSource):
         origin = resolve_source_from_config(config["origin"], db_registry=db_registry)
         return cls(
             origin,
-            source_id=config.get("source_id"),
+            source_id=cls.saved_source_name(config),
             tags_as_data=config["tags_as_data"],
             record_id_columns=config.get("record_id_columns"),
         )
@@ -602,7 +616,8 @@ class DerivedSource(RootSource):
             table,
             tag_columns=self._origin.keys()[0],
             data_tags=self._data_tags(),
-            source_id=self.source_id,
+            source_name=self.source_name,
+            kind_part=self.kind_part(),
             record_id_columns=self._record_id_columns or (),
         )
         return result.stream

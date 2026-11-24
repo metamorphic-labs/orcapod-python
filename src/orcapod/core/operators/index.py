@@ -5,8 +5,11 @@ from __future__ import annotations
 import logging
 import typing
 from collections.abc import Sequence
-from typing import Any, ClassVar, TYPE_CHECKING, cast
+from typing import Any, ClassVar, cast
 
+import pyarrow as pa
+
+from orcapod.types.explanation import plain_repr
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
@@ -17,12 +20,6 @@ from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.types import ColumnConfig, ContentHash, Schema, SourceInfoValue
 from orcapod.utils import arrow_utils, schema_utils
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +52,8 @@ class Index(UnaryOperator):
     PROVISIONAL: ClassVar[bool] = True
 
     # Data-tags (ITL-1023): handled.
+    # Each output row comes from one input row (ITL-1347).
+    ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(
@@ -82,6 +81,21 @@ class Index(UnaryOperator):
         self._element_arrow_type_fallback: pa.DataType | None = None
         self._element_arrow_type_error: str = ""
         super().__init__(**kwargs)
+
+    def rows_dropped_text(
+        self,
+        position: int,
+        others: Sequence[str],
+        inputs: Sequence[StreamProtocol],
+    ) -> str | None:
+        """What the step drops, for ``explain()``: rows missing the element, unless a
+        miss raises."""
+        if self.fail_on_miss:
+            return None
+        return (
+            f"rows whose {plain_repr(self.column)} has no element "
+            f"{plain_repr(self.i)} are dropped"
+        )
 
     def identity_structure(self) -> Any:
         self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)

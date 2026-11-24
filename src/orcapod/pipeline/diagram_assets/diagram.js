@@ -328,6 +328,8 @@
     row(dl, 'tags', schema(n.tag_schema));
     row(dl, 'data', schema(n.data_schema));
     row(dl, 'inputs', inputs.join(', ') || 'none');
+    if (n.asked) row(dl, 'question', n.asked);
+    if (n.mark) row(dl, 'highlight', n.mark);
     n.facts.forEach(function (f) { row(dl, f[0], f[1]); });
     panel.appendChild(dl);
     panel.classList.add('op-dag-open');

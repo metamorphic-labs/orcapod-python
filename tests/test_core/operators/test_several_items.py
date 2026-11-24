@@ -43,6 +43,7 @@ from orcapod.core.operators import (
     DropDataColumns,
     DropNulls,
     DropTagColumns,
+    Filter,
     Join,
     MapColumns,
     MapData,
@@ -55,14 +56,14 @@ from orcapod.core.operators import (
     SemiJoin,
     TagBy,
 )
-from orcapod import PipelineJob
+from orcapod import PipelineJob, col
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import InputValidationError
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
-from orcapod.types import CacheMode
+from orcapod.types import CacheMode, Condition
 from orcapod.protocols.core_protocols import StreamProtocol
 
 from .several_items import (
@@ -133,6 +134,10 @@ UNARY_CASES = [
     UnaryCase(
         "polars_filter_predicates",
         lambda: PolarsFilter(predicates=[pl.col("d1") > 10, pl.col("t3") == 1]),
+    ),
+    UnaryCase(
+        "filter",
+        lambda: Filter(Condition.of(col("d1") > 10, col("t3").is_in([1, 2]), t1="a")),
     ),
     UnaryCase("drop_nulls_named", lambda: DropNulls(["d2", "t2"])),
     UnaryCase("drop_nulls_all", DropNulls),
@@ -310,6 +315,16 @@ ORDER_CASES = [
     OrderCase("select_columns", ("t1", "d3", "t3", "d1"), SelectColumns),
     OrderCase("drop_columns", ("t1", "d3", "d1"), DropColumns),
     OrderCase("drop_nulls", ("d2", "t2", "d1"), DropNulls),
+    OrderCase(
+        "filter_keywords",
+        (("t1", "a"), ("t2", 1), ("t3", 2)),
+        lambda items: Filter(Condition.of(**items)),
+    ),
+    OrderCase(
+        "filter_conditions",
+        (col("t1") == "a", col("d1") > 10, col("d2").is_not_null()),
+        lambda items: Filter(Condition.of(*items)),
+    ),
     OrderCase("map_tags", (("t1", "u1"), ("t2", "u2"), ("t3", "u3")), MapTags),
     # A swap: each target is another entry's source.
     OrderCase("map_tags_swap", (("t1", "t3"), ("t3", "t1")), MapTags, roles=(PLAIN,)),
@@ -494,6 +509,11 @@ ROLE_CASES = [
     RoleCase(
         "drop_nulls",
         lambda: DropNulls(["t3", "t2", "d2"]),
+        (("t1", "t2", "t3"), ("t1", "t3", "d1", "d2", "d3")),
+    ),
+    RoleCase(
+        "filter",
+        lambda: Filter(Condition.of(col("t3") == 1, col("t2") >= 2, d3="w")),
         (("t1", "t2", "t3"), ("t1", "t3", "d1", "d2", "d3")),
     ),
     RoleCase(
@@ -743,7 +763,10 @@ def test_merge_join_of_tied_values_keeps_argument_order(role: str) -> None:
             for column in MAIN.data:
                 tokens = data.source_info()[column]
                 assert isinstance(tokens, list)
-                assert [str(t).split("::")[0] for t in tokens] == [first, second]
+                assert [str(t).split("::")[0] for t in tokens] == [
+                    inputs[first].source_id,
+                    inputs[second].source_id,
+                ]
                 values = data[column]
                 assert isinstance(values, list)
                 assert values[0] == values[1]

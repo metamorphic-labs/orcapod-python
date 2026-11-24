@@ -35,11 +35,17 @@ A case owned by an open issue is ``xfail(strict=True)`` naming it
 from __future__ import annotations
 
 import asyncio
+import functools
 import inspect
 import itertools
 import json
+import operator
+import os
 import re
 import sqlite3
+import subprocess
+import sys
+import warnings
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -51,12 +57,28 @@ import pyarrow.csv as pa_csv
 import pytest
 
 import orcapod
-from orcapod import PipelineJob, function_pod, operators, sources, streams
+from orcapod import (
+    Pipeline,
+    PipelineJob,
+    col,
+    function_pod,
+    operators,
+    sources,
+    streams,
+)
 from orcapod.channels import Channel
 from orcapod.core.nodes import SourceJobNode
+from orcapod.core.nodes.function_node import (
+    PIPELINE_RECORDED_AT_COL,
+    PIPELINE_RUN_ID_COL,
+)
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
+from orcapod.errors import RestrictedAggregationWarning
+from orcapod.protocols.core_protocols import StreamProtocol
+from orcapod.system_constants import PIPELINE_DB_SCHEMA_VERSION
+from orcapod.types import Condition
 from orcapod.operators import (
     AddTags,
     Batch,
@@ -64,6 +86,7 @@ from orcapod.operators import (
     DropDataColumns,
     DropNulls,
     DropTagColumns,
+    Filter,
     GroupBy,
     Index,
     Join,
@@ -92,6 +115,7 @@ from orcapod.sources import (
     ListSource,
     PollingSource,
     SQLiteTableSource,
+    SpiralDBTableSource,
 )
 from orcapod.types import CacheMode, Cursor
 
@@ -423,6 +447,32 @@ OPERATOR_CASES: dict[str, tuple[OperatorCase, ...]] = {
             lambda items: PolarsFilter(predicates=list(items)),
             (pl.col("d1") > 10, pl.col("t3") == 1),
             argument_issue="ITL-1247",
+        ),
+    ),
+    "Filter": (
+        # Positional conditions on a tag, a data column and every role.
+        OperatorCase(
+            "filter_conditions",
+            lambda items: Filter(Condition.of(*items)),
+            (col("t1") == "a", col("d1") > 10, col("t3").is_in([1, 2])),
+        ),
+        # Keywords.
+        OperatorCase(
+            "filter_keywords",
+            lambda items: Filter(Condition.of(**dict(items))),
+            (("t1", "a"), ("t2", 1)),
+        ),
+        # The values of is_in.
+        OperatorCase(
+            "filter_is_in_values",
+            lambda items: Filter(col("d1").is_in(list(items))),
+            (20, 30, 50),
+        ),
+        # The operands of |.
+        OperatorCase(
+            "filter_or_operands",
+            lambda items: Filter(functools.reduce(operator.or_, items)),
+            (col("t2") == 2, col("d2").is_null(), col("d3") == "x"),
         ),
     ),
     "DropNulls": (
@@ -1080,7 +1130,10 @@ def _job(
         stored = database.get_all_records(path)
         if stored is None:
             continue
-        keep = [c for c in stored.column_names if c not in _VOLATILE]
+        volatile = _VOLATILE
+        if path[-1] == PIPELINE_DB_SCHEMA_VERSION:
+            volatile = volatile | {PIPELINE_RUN_ID_COL, PIPELINE_RECORDED_AT_COL}
+        keep = [c for c in stored.column_names if c not in volatile]
         out[f"stored[{'/'.join(path)}]"] = sorted(
             _masked(sorted(row.items())) for row in stored.select(keep).to_pylist()
         )
@@ -1167,3 +1220,175 @@ def test_a_saved_job_records_the_declared_order_and_loads_the_same_hashes(
         assert loaded.nodes["pod"].content_hash() == original
         hashes.append(original)
     assert hashes[0] == hashes[1]
+
+
+@function_pod(output_keys="doubled")
+def _double_reading(reading: int | None) -> int:
+    """Double one reading."""
+    return (reading or 0) * 2
+
+
+@pytest.mark.parametrize("first_source", ["a", "step_1"])
+def test_explicit_suffixes_remain_addressable_in_every_definition_order(
+    first_source: str,
+) -> None:
+    """A generated suffix never shadows a node with its own label."""
+    definitions = ((first_source, 1, "step"), ("b", 2, "step"), ("c", 3, "step_1"))
+    results: dict[str, dict[str, Any]] = {}
+    for order in itertools.permutations(definitions):
+        job = PipelineJob(name="labels", database=InMemoryArrowDatabase())
+        with job:
+            for name, value, label in order:
+                source = ListSource("reading", [value], source_id=name)
+                _ = _double_reading.pod(source, label=label)
+        summary = job.run()
+        assert set(summary.nodes) == {"step_1", "step_2", "step_3"}
+        assert job.nodes["step_1"].as_table()["doubled"].to_pylist() == [6]
+        results["".join(name for name, _, _ in order)] = {
+            "labels": list(job.nodes),
+            "rows": {
+                name: job.nodes[name].as_table()["doubled"].to_pylist()
+                for name in summary.nodes
+            },
+        }
+    assert_all_equal(results)
+
+
+@pytest.mark.parametrize("labels", [("label_z", "label_a"), (None, "label_a")])
+def test_identical_invocations_keep_the_smallest_explicit_label(
+    labels: tuple[str | None, str],
+) -> None:
+    """Invocations deduplicate whichever label was recorded first."""
+    for order in (labels, labels[::-1]):
+        source = ListSource("reading", [2], source_id="readings")
+        job = PipelineJob(name="labels", database=InMemoryArrowDatabase())
+        with job:
+            for label in order:
+                _ = _double_reading.pod(source, label=label)
+        assert list(job.nodes) == ["readings", "label_a"]
+        assert list(job.run().nodes) == ["label_a"]
+
+
+def _restricted_job_run(root: Path, names: Sequence[str]) -> None:
+    """Print the node labels, summary lines and warning for one job in a child process."""
+    from tests.test_databases import fake_pyspiral
+
+    keys = pa.schema([pa.field("subject", pa.string())])
+    with fake_pyspiral.install(root):
+        project = fake_pyspiral.FakeSpiral().project("synthetic")
+        for value, name in enumerate(sorted(names)):
+            # Distinct readings avoid competing for the same cache entry in async.
+            rows = pa.table({"subject": ["a", "b"], "reading": [value, value + 1]})
+            project.create_table(f"default.{name}", key_schema=keys).write(rows)
+
+        bindings: dict[str, StreamProtocol] = {
+            name: SpiralDBTableSource(
+                "synthetic", name, source_id=name, tag_only_columns=True
+            ).where(subject="a")
+            for name in names
+        }
+        pipeline = Pipeline(name="restricted")
+        with pipeline:
+            for name, source in bindings.items():
+                # The step labels run the opposite way to the source names.
+                _ = GroupBy(["subject"])(source, label=f"group_{name[-1]}")
+                if name == "alpha3":
+                    _ = Batch(batch_size=2)(source, label="another_alpha")
+                _ = _double_reading.pod(source, label=f"read_{name}")
+        results = {}
+        path = root / "job.json"
+        for async_run in (False, True):
+            database = InMemoryArrowDatabase()
+            job = PipelineJob.from_pipeline(pipeline, database, sources=bindings)
+            labels = list(job.nodes)
+            summary_labels: list[str] = []
+            assert labels.index("group_3") < labels.index("another_alpha")
+            for load_only in (False, True):
+                if load_only:
+                    job = PipelineJob.load(path, database=database)
+                    assert list(job.nodes) == labels
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always", RestrictedAggregationWarning)
+                    summary = (
+                        asyncio.run(job.run_async(load_only=load_only))
+                        if async_run
+                        else job.run(load_only=load_only)
+                    )
+                (warning,) = (
+                    str(item.message)
+                    for item in caught
+                    if item.category is RestrictedAggregationWarning
+                )
+                if load_only:
+                    assert list(summary.nodes) == summary_labels
+                    assert all(node.reused == 1 for node in summary.nodes.values())
+                else:
+                    summary_labels = list(summary.nodes)
+                results[f"{async_run}-{load_only}"] = {
+                    "nodes": list(job.nodes),
+                    "summary": str(summary),
+                    "warning": warning,
+                }
+                if not load_only:
+                    job.save(path)
+                    saved = json.loads(path.read_text())
+                    assert list(saved["bindings"]["sources"]) == sorted(names)
+                    # Independently vary the serialized order, as in pre-fix files.
+                    saved["pipeline"]["edges"].reverse()
+                    saved["pipeline"]["nodes"] = dict(
+                        reversed(saved["pipeline"]["nodes"].items())
+                    )
+                    path.write_text(json.dumps(saved))
+    print(json.dumps(results))
+
+
+def test_restricted_job_order_is_independent_of_hash_seed_and_definition_order(
+    tmp_path: Path,
+) -> None:
+    """Compare the full summary and warning across processes and branch orders."""
+    names = ("alpha3", "beta2", "gamma1")
+    results: dict[str, dict[str, Any]] = {}
+    for seed in ("1", "7", "42"):
+        for order in (names, names[::-1]):
+            variant = f"{seed}-{order[0]}"
+            process = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    f"from {__name__} import _restricted_job_run, Path; "
+                    "import sys; _restricted_job_run(Path(sys.argv[1]), sys.argv[2:])",
+                    str(tmp_path / variant),
+                    *order,
+                ],
+                env={**os.environ, "PYTHONHASHSEED": seed},
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            assert process.returncode == 0, process.stderr
+            results[variant] = json.loads(process.stdout)
+
+    assert_all_equal(results)
+    for result in next(iter(results.values())).values():
+        assert result["nodes"][: len(names)] == list(names)
+        restrictions = next(
+            line
+            for line in result["summary"].splitlines()
+            if line.lstrip().startswith("restricted sources:")
+        )
+        entries = restrictions.lstrip().removeprefix("restricted sources: ").split("; ")
+        slots = []
+        for entry in entries:
+            match = re.fullmatch(
+                r"(?P<slot>\w+) \(spiraldb_table_v1:(?P=slot)\): where subject='a'",
+                entry,
+            )
+            assert match is not None, entry
+            slots.append(match["slot"])
+        assert slots == list(names)
+        assert re.findall(r"'(\w+)' feeds \w+ '(\w+)'", result["warning"]) == [
+            ("alpha3", "another_alpha"),
+            ("alpha3", "group_3"),
+            ("beta2", "group_2"),
+            ("gamma1", "group_1"),
+        ]

@@ -305,8 +305,8 @@ class TestMergeJoinSourceColumns:
                         values[second][column][i],
                     ]
                     assert rows[key][source_column] == [
-                        f"{first}::row_{i}::{column}",
-                        f"{second}::row_{i}::{column}",
+                        f"arrow_table_v1:{first}::row_{i}::{column}",
+                        f"arrow_table_v1:{second}::row_{i}::{column}",
                     ]
 
 
@@ -791,11 +791,11 @@ class TestMergeJoinSystemTags:
         )
         assert [c[-2:] for c in sid_cols] == [":0", ":1"]
         for row in table_ab.to_pylist():
-            assert row[sid_cols[0]] == "zzz_source"
-            assert row[sid_cols[1]] == "aaa_source"
+            assert row[sid_cols[0]] == "arrow_table_v1:zzz_source"
+            assert row[sid_cols[1]] == "arrow_table_v1:aaa_source"
         for row in table_ba.to_pylist():
-            assert row[sid_cols[0]] == "aaa_source"
-            assert row[sid_cols[1]] == "zzz_source"
+            assert row[sid_cols[0]] == "arrow_table_v1:aaa_source"
+            assert row[sid_cols[1]] == "arrow_table_v1:zzz_source"
 
 
 class TestMergeJoinWithListExtensionColumn:

@@ -40,10 +40,81 @@ logger = logging.getLogger(__name__)
 #          whole fields. Every source config that takes the option writes
 #          ``tag_only_columns`` and every function node writes ``fall_through_tags``;
 #          a load refuses a file without them (ITL-1159, ITL-1019).
+#          Each operator node lists its inputs in argument order under ``inputs``
+#          (ITL-1417, added within 0.4.0: a file without it still loads, except an
+#          operator over two or more inputs not known to be commutative, refused).
 # A file of an earlier format (0.1.0 to 0.3.0) is refused at load, never read in its
 # old grammar: load and save had not been used in production (developer, 2026-11-21).
 # Taking such files to the current format is the migration tool's work (ITL-1048).
 PIPELINE_FORMAT_VERSION = "0.4.0"
+
+#: The key of an operator node's inputs in a saved file, their keys in argument order
+#: (ITL-1417). Written for every operator node within format 0.4.0: a file saved
+#: before it has none, and its edges list the inputs in the order the steps were
+#: recorded, not in argument order.
+OPERATOR_INPUTS_KEY = "inputs"
+
+
+def require_positively_commutative(
+    operator: Any,
+    input_streams: tuple[Any, ...],
+    input_keys: list[str],
+    label: str | None,
+) -> None:
+    """Accept an operator of a legacy file only when it is known to be commutative.
+
+    A file saved before ``OPERATOR_INPUTS_KEY`` was written lists an operator's
+    inputs only through its edges, in the order the steps were recorded (ITL-1417).
+    Its argument order cannot be known, so an operator node with two or more
+    different inputs is accepted only when it is positively known to be fully
+    commutative: the operator is available, and ``argument_symmetry``, called as its
+    contract requires (on the rebuilt input streams), returns a flat ``frozenset`` of
+    exactly those inputs. A binary operator with other than two edges (one stream
+    given twice) cannot have its inputs restored and is refused too. Anything else (the call raises, a tuple, a nested group, an
+    operator that is not available, an input not restored) is refused: when in doubt,
+    refuse.
+
+    Args:
+        operator: The rebuilt operator, or ``None`` when it is not available.
+        input_streams: The rebuilt input nodes.
+        input_keys: The keys of its inputs, in edge order.
+        label: The node's label, for the message.
+
+    Raises:
+        ValueError: If the operator is not positively known to be commutative.
+    """
+    from orcapod.core.operators.base import BinaryOperator
+
+    # A binary operator given one stream twice has one edge in a legacy file (an edge
+    # list cannot repeat an edge), so its two inputs cannot be restored (CodeRabbit on
+    # PR 513): refused like an unknown order, never rebuilt with one input.
+    one_input_of_two = isinstance(operator, BinaryOperator) and len(input_keys) != 2
+    if len(set(input_keys)) < 2 and not one_input_of_two:
+        return
+    refusal = ValueError(
+        f"The saved job's node {label!r} has several inputs, and the file does not say "
+        "in which order: it was saved before Orcapod wrote each operator's inputs in "
+        "argument order (ITL-1417), and the operator is not known to be commutative, "
+        "so loading it could swap them. Build the job from its code and save it again."
+    )
+    if one_input_of_two:
+        raise ValueError(
+            f"The saved job's node {label!r} takes two inputs, and the file does not "
+            "say in which order nor restore both: it was saved before Orcapod wrote "
+            "each operator's inputs in argument order (ITL-1417), and it holds one edge "
+            "for one stream given twice. Build the job from its code and save it again."
+        )
+    if operator is None or len(input_streams) != len(input_keys):
+        raise refusal
+    try:
+        symmetry = operator.argument_symmetry(input_streams)
+    except Exception as exc:
+        raise refusal from exc
+    if not isinstance(symmetry, frozenset):
+        raise refusal
+    members = cast("frozenset[Any]", symmetry)
+    if {id(member) for member in members} != {id(stream) for stream in input_streams}:
+        raise refusal
 
 
 def require_current_format(version: str, current: str) -> None:
@@ -216,6 +287,7 @@ def _build_operator_registry() -> dict[str, type]:
         DropDataColumns,
         DropNulls,
         DropTagColumns,
+        Filter,
         GroupBy,
         Join,
         MapColumns,
@@ -248,6 +320,7 @@ def _build_operator_registry() -> dict[str, type]:
         "MapData": MapData,
         "MapColumns": MapColumns,
         "PolarsFilter": PolarsFilter,
+        "Filter": Filter,
         "DropNulls": DropNulls,
         "TagBy": TagBy,
         "AddTags": AddTags,
@@ -516,6 +589,37 @@ def resolve_source_from_config(
         raise
 
 
+def saved_source_id(config: dict[str, Any]) -> str:
+    """Rebuild the source id a saved source config names (ITL-1425).
+
+    A config holds the kind (``source_type``), the implementation version
+    (``source_version``) and the name (``source_name``) apart; the id is rebuilt from
+    them by ``source_ids.build_source_id``, never parsed out of one string. A config
+    that does not name its source (a plain derived source, whose default name is
+    recomputed from its origin) gives the full id saved among its identity fields
+    (``full_source_id``, written by ``RootSource._identity_config``), checked by the
+    one parser; one without that either gives ``"unknown"``.
+
+    Args:
+        config: A saved source config.
+
+    Returns:
+        The source id, or ``"unknown"``.
+    """
+    from orcapod.core.sources.source_ids import build_source_id, parse_source_id
+
+    kind = config.get("source_type")
+    version = config.get("source_version")
+    name = config.get("source_name")
+    if kind is not None and version is not None and name is not None:
+        return build_source_id(kind, version, name)
+    full_id = config.get("full_source_id")
+    if isinstance(full_id, str):
+        _ = parse_source_id(full_id)
+        return full_id
+    return "unknown"
+
+
 def _source_proxy_from_config(
     config: dict[str, Any],
     node_descriptor: dict[str, Any] | None = None,
@@ -546,6 +650,19 @@ def _source_proxy_from_config(
     """
     from orcapod.core.sources.source_proxy import SourceProxy
     from orcapod.types import Schema
+
+    inner_config = config.get("inner_source")
+    if (
+        node_descriptor is None
+        and not config.get("content_hash")
+        and config.get("source_type") == "cached"
+        and isinstance(inner_config, dict)
+    ):
+        # A cache has its wrapped source's identity (id, hashes, schemas), and its own
+        # config holds none: the proxy stands in with the wrapped source's, so a cache
+        # nested in another cache that cannot be rebuilt keeps its source id and the
+        # outer cache still reads its rows (ITL-1425).
+        return _source_proxy_from_config(cast("dict[str, Any]", inner_config))
 
     if node_descriptor is not None:
         # New format: top-level node descriptor carries identity
@@ -592,7 +709,7 @@ def _source_proxy_from_config(
     )
 
     return SourceProxy(
-        source_id=config.get("source_id", "unknown"),
+        source_id=saved_source_id(config),
         content_hash_str=content_hash,
         pipeline_hash_str=pipeline_hash_val,
         tag_schema=tag_schema,
@@ -1891,7 +2008,9 @@ def check_saved_source_config(config: dict[str, Any]) -> None:
 
     Each source class that reads entries of its own from a saved config may declare
     ``check_saved_config(config)``, which raises ``ValueError`` on an entry it would
-    have to interpret (a ``CSVSource``'s ``schema``, ITL-1315). It is called here for
+    have to interpret (a ``CSVSource``'s ``schema``, ITL-1315), and every source
+    config saved before source ids named their kind (a ``source_id`` without a
+    ``source_name``, ITL-1425) is refused. It is called here for
     the config and for every source config nested in it, so ``PipelineJob.load``
     refuses such a file instead of loading it with the source unbound.
 
@@ -1907,6 +2026,10 @@ def check_saved_source_config(config: dict[str, Any]) -> None:
         if isinstance(nested, dict):
             check_saved_source_config(cast("dict[str, Any]", nested))
     cls = SOURCE_REGISTRY.get(config.get("source_type"))  # pyright: ignore[reportArgumentType]  # any saved value
+    from orcapod.core.sources.base import RootSource
+
+    if isinstance(cls, type) and issubclass(cls, RootSource):
+        cls.require_saved_name_fields(config)
     check = getattr(cls, "check_saved_config", None)
     if check is not None:
         check(config)

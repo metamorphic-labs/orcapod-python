@@ -1,6 +1,9 @@
 import logging
-from collections.abc import Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from typing import Any, ClassVar, TYPE_CHECKING, TypeAlias
+
+import polars as pl
+import pyarrow as pa
 
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators.base import UnaryOperator
@@ -8,21 +11,28 @@ from orcapod.core.streams import ArrowTableStream
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils
-from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
     import numpy as np
-    import polars as pl
     import polars._typing as pl_type
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
-    pl = LazyModule("polars")
-    pl_type = LazyModule("polars._typing")
 
 logger = logging.getLogger(__name__)
 
 polars_predicate: TypeAlias = "pl_type.IntoExprColumn| Iterable[pl_type.IntoExprColumn]| bool| list[bool]| np.ndarray[Any, Any]"
+
+
+_SAFE_SCALARS: tuple[type, ...] = (bool, int, float, str, bytes, type(None))
+"""Values whose ``repr`` is the built-in one: written as they are by ``explain()``."""
+
+
+def _safe_text(value: object, write: Callable[[object], str]) -> str:
+    """Return ``value`` written by ``write`` when its type's writer is Polars' or the
+    built-in one (exactly ``pl.Expr`` or a built-in scalar); otherwise ``<type name>``,
+    so no user-defined ``__str__`` or ``__repr__`` runs (``explain()`` runs no user code).
+    """
+    if type(value) in _SAFE_SCALARS or type(value) is pl.Expr:
+        return write(value)
+    return f"<{type(value).__name__}>"
 
 
 class PolarsFilter(UnaryOperator):
@@ -173,6 +183,32 @@ class PolarsFilter(UnaryOperator):
                     predicates.append(pl.Expr.deserialize(p, format="json"))
         constraints = inner.get("constraints")
         return cls(predicates=predicates, constraints=constraints)
+
+    def rows_dropped_text(
+        self,
+        position: int,
+        others: Sequence[str],
+        inputs: Sequence[StreamProtocol],
+    ) -> str | None:
+        """What the filter keeps, for ``explain()``: its constraints and predicates as
+        text, each sorted (display only).
+
+        No user code runs: a Polars expression is written by Polars (``pl.Expr``
+        exactly), a constraint value by ``repr`` when it is exactly a built-in scalar,
+        and anything else by its type name only. The constraints are read only when
+        they are exactly a ``dict`` with ``str`` names (a mapping of another class could
+        run its own ``items()``); otherwise they are written as their type name.
+        """
+        constraints = self.constraints
+        if type(constraints) is dict and all(type(name) is str for name in constraints):
+            parts = sorted(
+                f"{name}={_safe_text(value, repr)}"
+                for name, value in dict.items(constraints)
+            )
+        else:
+            parts = [f"<{type(constraints).__name__}>"]
+        parts += sorted(_safe_text(predicate, str) for predicate in self.predicates)
+        return ", ".join(parts) if parts else None
 
     def identity_structure(self) -> Any:
         self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)

@@ -13,6 +13,7 @@ from collections.abc import Callable, Iterable, Sequence
 import typing
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, TypeVar
 
+import pyarrow as pa
 from uuid_utils import uuid7
 
 from orcapod.config import OrcapodConfig
@@ -46,7 +47,6 @@ from orcapod.types import ContentHash, DataValue, Schema, SchemaLike
 from orcapod.utils import schema_utils
 from orcapod.utils.canonical_type_names import stabilize_type_names
 from orcapod.utils.git_utils import get_git_info_for_python_object
-from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.tensor_conversions import describe, tensor_conversions, warn_once
 
 from orcapod.protocols.observability_protocols import DataExecutionLoggerProtocol
@@ -55,11 +55,6 @@ if TYPE_CHECKING:
     from orcapod.logical_types.protocols import (
         TypeConverterProtocol as LogicalTypeConverterProtocol,
     )
-    import pyarrow as pa
-    import pyarrow.compute as pc
-else:
-    pa = LazyModule("pyarrow")
-    pc = LazyModule("pyarrow.compute")
 
 module_logger = logging.getLogger(__name__)
 
