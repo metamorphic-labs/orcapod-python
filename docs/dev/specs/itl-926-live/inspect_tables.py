@@ -39,7 +39,7 @@ def main() -> None:
 
     import spiral  # pyright: ignore[reportMissingImports]  (spiraldb extra, absent in the type-check job)
 
-    sp = spiral.Spiral()
+    sp = spiral.Spiral()  # pyright: ignore[reportAttributeAccessIssue]  # historical: measured with pyspiral, removed in ITL-1186
     project = sp.project(args.project)
     names = sorted(r.table for r in project.list_tables() if r.dataset == args.dataset)
     if args.tables:

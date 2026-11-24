@@ -46,7 +46,9 @@ redis = ["redis>=6.2.0"]
 ray = ["ray[default]>=2.60.0,<3", "ipywidgets>=8.1.7"]
 postgresql = ["psycopg[binary]>=3.1.17"]
 spiraldb = [
-    "pyspiral>=0.16.33",
+    # Exact: a pre-alpha that releases daily, and Orcapod reads two attributes that are
+    # not its public API (ITL-1186). How to move it: RELEASING.md.
+    "spiral-sdk==0.16.74",
 ]
 # Convenience extra that installs PyTorch. Orcapod's torch.Tensor support depends only on
 # torch being importable, however it was installed (ITL-871). 2.6 is the first version whose

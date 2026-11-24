@@ -165,7 +165,7 @@ class Run:
 
         self.args = args
         self.overrides = {"server.url": args.server_url} if args.server_url else None
-        self.sp = sp.Spiral(overrides=self.overrides)
+        self.sp = sp.Spiral(overrides=self.overrides)  # pyright: ignore[reportAttributeAccessIssue]  # historical: measured with pyspiral, removed in ITL-1186
         self.project = self.sp.project(args.project)
         self.prefix = f"itl926_{args.run_id}"
         self.created: list[str] = []

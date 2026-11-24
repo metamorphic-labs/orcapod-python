@@ -39,7 +39,7 @@ Optional features are installed as extras, for example `uv add "orcapod[spiraldb
 | `orcapod[ray]` | Distributed execution with `RayExecutor` (Ray 2.60 or later, which has no wheel for Intel macOS) |
 | `orcapod[redis]` | `RedisCacher`, a Redis-backed hash cache |
 | `orcapod[postgresql]` | The PostgreSQL connector, table source and file hash cache (psycopg 3.1.17 or later) |
-| `orcapod[spiraldb]` | The SpiralDB connector and table source |
+| `orcapod[spiraldb]` | The SpiralDB connector and table source, read only (spiral-sdk) |
 | `orcapod[torch]` | PyTorch, for `torch.Tensor` values (any installed `torch` works) |
 | `orcapod[all]` | All of the above |
 

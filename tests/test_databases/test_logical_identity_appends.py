@@ -28,7 +28,6 @@ from orcapod.databases import (
     InMemoryArrowDatabase,
 )
 from orcapod.databases.connector_arrow_database import ConnectorArrowDatabase
-from orcapod.databases.spiraldb_connector import SpiralDBConnector
 from orcapod.databases.utils import (
     IdentityNode,
     first_logical_identity_change,
@@ -41,7 +40,6 @@ from orcapod.logical_types.identifier import LogicalTypeIdentifier
 from orcapod.logical_types.registry import make_arrow_extension_type
 from orcapod.logical_types.registry import LogicalTypeRegistry
 from orcapod.semantic_types.universal_converter import UniversalTypeConverter
-from tests.test_databases import fake_pyspiral
 
 NAME = b"ARROW:extension:name"
 META = b"ARROW:extension:metadata"
@@ -173,10 +171,7 @@ def _store(kind: str, root: Path) -> Iterator[_Store]:
     elif kind == "Delta":
         yield _Store(lambda: DeltaTableDatabase(root / "delta"))
     else:
-        assert kind == "SpiralDB"
-        with fake_pyspiral.install(root / "spiral"):
-            fake_pyspiral.FakeSpiral().project("p")
-            yield _Store(lambda: ConnectorArrowDatabase(SpiralDBConnector("p")))
+        raise AssertionError(kind)
 
 
 def _through(db: Any, via: str) -> Any:
@@ -187,11 +182,7 @@ def _through(db: Any, via: str) -> Any:
 
 
 def _supported(kind: str, form: str, depth: str) -> bool:
-    """Whether ``kind`` stores the column at all (the type matrix): SpiralDB keeps an
-    annotated top-level column only here; it refuses extension types, and the fake
-    refuses these nested forms."""
-    if kind == "SpiralDB":
-        return form == "annotated" and depth == "top"
+    """Whether ``kind`` stores the column at all (the type matrix): both do."""
     return True
 
 
@@ -210,7 +201,7 @@ def _main_accepts(kind: str, state: str, form: str, depth: str) -> bool:
     )
 
 
-KINDS = ("in-memory", "Delta", "SpiralDB")
+KINDS = ("in-memory", "Delta")
 STATES = ("pending", "committed", "reopened")
 FORMS = ("extension", "annotated")
 DEPTHS = ("top", "struct", "list", "map value")
@@ -2128,52 +2119,6 @@ def test_an_unwritable_encoding_is_refused_before_the_rule(tmp_path: Path) -> No
         sqlite.add_records(PATH, _annotated_top(b"n", [b"22"]), record_id_column="id")
 
 
-def test_connector_compares_against_its_cached_stored_schema(tmp_path: Path) -> None:
-    """Pins the connector's behaviour, as main's (round 4, finding 3): it compares
-    against the stored schema it caches for the ITL-1334 check, so after another
-    connection replaces the table (same ids, another identifier), the original
-    handle still refuses by the replaced identifier and a new handle by the one
-    stored now."""
-    with fake_pyspiral.install(tmp_path / "spiral"):
-        fake_pyspiral.FakeSpiral().project("p")
-        held = ConnectorArrowDatabase(SpiralDBConnector("p"))
-        held.add_records(
-            PATH, _annotated_top(b"m", [b"1"]), record_id_column="id", flush=True
-        )
-        held.add_records(  # reads and caches the stored schema
-            PATH,
-            _annotated_top(b"m", [b"1"]),
-            record_id_column="id",
-            skip_duplicates=True,
-        )
-        connector = SpiralDBConnector("p")
-        fake_pyspiral.FakeSpiral().project("p").drop_table(
-            connector._table_id("t")  # pyright: ignore[reportPrivateUsage]  # the fake's id of the table
-        )
-        fresh = ConnectorArrowDatabase(connector)
-        fresh.add_records(
-            PATH, _annotated_top(b"n", [b"1"]), record_id_column="id", flush=True
-        )
-        with pytest.raises(
-            InputValidationError, match="the stored column's 'itl1371.a;6d'"
-        ):
-            held.add_records(
-                PATH,
-                _annotated_top(b"n", [b"1"]),
-                record_id_column="id",
-                skip_duplicates=True,
-            )
-        with pytest.raises(
-            InputValidationError, match="the stored column's 'itl1371.a;6e'"
-        ):
-            ConnectorArrowDatabase(SpiralDBConnector("p")).add_records(
-                PATH,
-                _annotated_top(b"m", [b"1"]),
-                record_id_column="id",
-                skip_duplicates=True,
-            )
-
-
 def test_delta_flush_refuses_after_another_writer_changed_the_identifier(
     tmp_path: Path,
 ) -> None:
@@ -2365,25 +2310,3 @@ def test_delta_handle_after_delete_and_recreate_reads_the_new_tables_ids(
         b"c",
         b"d",
     ]
-
-
-def test_connector_lists_its_tables_once_per_append(tmp_path: Path) -> None:
-    """The identity check and the ordinary check share one gathering of the held
-    schemas: an append to a table not stored yet lists the backend's tables once, as
-    on main (CodeRabbit, 6eab211e)."""
-    with fake_pyspiral.install(tmp_path / "spiral"):
-        fake_pyspiral.FakeSpiral().project("p")
-        connector = SpiralDBConnector("p")
-        calls = {"n": 0}
-        listing = connector.get_table_names
-
-        def counted() -> list[str]:
-            calls["n"] += 1
-            return listing()
-
-        connector.get_table_names = counted  # pyright: ignore[reportAttributeAccessIssue]  # counts the listings
-        db = ConnectorArrowDatabase(connector)
-        for ids in ([b"1"], [b"22"]):
-            calls["n"] = 0
-            db.add_records(PATH, _annotated_top(b"m", ids), record_id_column="id")
-            assert calls["n"] == 1
