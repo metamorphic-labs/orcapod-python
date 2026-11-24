@@ -232,6 +232,50 @@ class TestStepsThatDropRows:
             "its rows only choose rows of 'arrow_table_v1:units' and do not flow on"
         ]
 
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_steps_follow_rows_through_semi_join(self, reverse: bool) -> None:
+        left_inputs = (
+            _units("left-units").filter(col("t") >= 0.5, label="left-units-filter"),
+            _probes("left-probes").filter(session="s1", label="left-probes-filter"),
+        )
+        right_inputs = (
+            _units("right-units").filter(col("t") >= 1.0, label="right-units-filter"),
+            _probes("right-probes").filter(session="s2", label="right-probes-filter"),
+        )
+        left = Join()(*(left_inputs[::-1] if reverse else left_inputs), label="left")
+        right = Join()(
+            *(right_inputs[::-1] if reverse else right_inputs), label="right"
+        )
+        joined = SemiJoin()(left, right, label="choose")
+        steps = {
+            reading.name: [step.label for step in reading.steps]
+            for reading in joined.filter(col("t") >= 1.5, label="after")
+            .explain()
+            .sources
+        }
+        assert steps == {
+            "arrow_table_v1:left-units": [
+                "left-units-filter",
+                "left",
+                "choose",
+                "after",
+            ],
+            "arrow_table_v1:left-probes": [
+                "left-probes-filter",
+                "left",
+                "choose",
+                "after",
+            ],
+            "arrow_table_v1:right-units": ["right-units-filter", "right", "choose"],
+            "arrow_table_v1:right-probes": ["right-probes-filter", "right", "choose"],
+        }
+
+    def test_a_source_on_both_sides_still_flows_on_from_the_left(self) -> None:
+        source = _units()
+        joined = SemiJoin()(source, source, label="choose")
+        (reading,) = joined.filter(col("t") >= 1.5, label="after").explain().sources
+        assert [step.label for step in reading.steps] == ["choose", "choose", "after"]
+
     def test_merge_join(self):
         stream = MergeJoin()(_units(), _probes())
         texts = {r.name: [s.text for s in r.steps] for r in stream.explain().sources}
