@@ -330,6 +330,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 | user-class identity | a class's identity record | SHA-256 hex prefix | extension name `name@<fingerprint>` (a name) | `logical_types/user_class_identity.py:identity_string` |
 | database registry key | a database config, canonical JSON | SHA-256 hex, 8 digits | `db_<hex>` key in a saved job (a name) | `pipeline/serialization.py:DatabaseRegistry._make_key` |
 | SpiralDB nullability record | the nullability path list | SHA-256 hex | chunk key and checksum of a stored record (a name) | `databases/spiraldb_nullability.py:_encode`, `databases/spiraldb_nullability.py:read_nullability_record` |
+| SpiralDB store manifest | the manifest's JSON payload (record path and Arrow schema) | SHA-256 hex | key and checksum of the manifest in a table's metadata (a name) | `databases/spiral_store.py:_digest` |
 | synthesized struct class name | the field signature | MD5 hex, 8 digits | a Python class name (a name) | (not reached by a traced test) `semantic_types/universal_converter.py` |
 | random ids | nothing | `uuid4`, `uuid7` | run ids, datagram and record uuids, observer ids, correlation keys | (not hashes) |
 | unused code | Arrow tables | SHA-256, SHA3, BLAKE2b | no caller; removal is ITL-1156 | (not reached) `hashing/arrow_utils.py`, `hashing/arrow_serialization.py` |
