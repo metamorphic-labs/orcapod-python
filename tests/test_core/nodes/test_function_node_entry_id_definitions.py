@@ -70,8 +70,11 @@ def _outcome(compute: Any) -> Any:
 
 
 def _assert_one_definition(stream: Any) -> None:
-    """Slice-built ids and input data hashes equal the row-built ones, byte for byte
-    (or both paths raise the same error)."""
+    """Slice-built ids and input data hashes equal the row-built ones, byte for byte.
+
+    Both paths must give ids: the same error on both is not an equivalence. (Inputs that
+    raise are compared with ``_outcome`` where a test expects it.)
+    """
     node = _node()
     sliced = _outcome(
         lambda: [entry_id for _, _, entry_id in node._input_entries(stream)]  # pyright: ignore[reportPrivateUsage]  # under test
@@ -81,6 +84,8 @@ def _assert_one_definition(stream: Any) -> None:
             node.compute_base_entry_id(tag, data) for tag, data in stream.iter_data()
         ]
     )
+    assert isinstance(sliced, list) and sliced, sliced
+    assert isinstance(by_rows, list) and by_rows, by_rows
     assert sliced == by_rows
     table = stream.as_table(columns={"system_tags": True})
     takes_slices = function_node_module._reads_as_a_table_stream(  # pyright: ignore[reportPrivateUsage]  # the slice path's precondition
@@ -414,6 +419,76 @@ def test_only_the_library_row_blind_observers_get_views() -> None:
     assert not reads_no_rows(CompositeObserver(Watch(), RunCountingObserver()))
     assert not reads_no_rows(CompositeObserver(Claims(), RunCountingObserver()))
     assert not reads_no_rows(object())
+
+
+@pytest.mark.parametrize("hook", ["on_data_start", "create_data_logger"])
+@pytest.mark.parametrize("kind", ["noop", "counting", "composite"])
+def test_an_observer_with_a_hook_replaced_on_it_receives_the_rows(
+    kind: str, hook: str
+) -> None:
+    """A hook replaced on an instance of a library observer, alone or in a composite."""
+    from orcapod.core.datagrams import Data, Tag
+    from orcapod.pipeline.composite_observer import CompositeObserver
+    from orcapod.pipeline.observer import NoOpLogger, NoOpObserver
+    from orcapod.pipeline.run_summary import RunCountingObserver
+
+    seen: list[tuple[Any, Any]] = []
+
+    def replaced(*args: Any) -> Any:
+        seen.append((args[-2], args[-1]))
+        return NoOpLogger()
+
+    observer: Any = RunCountingObserver() if kind == "counting" else NoOpObserver()
+    setattr(observer, hook, replaced)
+    if kind == "composite":
+        observer = CompositeObserver(observer, RunCountingObserver())
+    assert not function_node_module._reads_no_rows(observer)  # pyright: ignore[reportPrivateUsage]  # under test
+    _ = _observed_rows(observer)
+    assert seen
+    assert all(type(t) is Tag and type(d) is Data for t, d in seen)
+
+
+def test_an_async_run_releases_an_earlier_sync_runs_stored_tables() -> None:
+    """A sync run over stored results keeps their table for its output; an async run of
+    the same node drops it, and the sync output still builds the same table."""
+    import asyncio
+
+    from orcapod.channels import Channel
+
+    source = DictSource(
+        [{"k": k, "d1": k} for k in range(3)],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="source",
+    )
+    stream: Any = _forms(source)["handed_on"]
+    database = InMemoryArrowDatabase()
+    nodes: list[Any] = [
+        FunctionJobNode(
+            _double.pod,  # pyright: ignore[reportArgumentType]  # a function pod
+            stream,
+            pipeline_database=database,
+        )
+        for _ in range(2)
+    ]
+    _ = nodes[0].execute(stream)
+    node = nodes[1]
+    built = node.execute(stream).as_table(columns={"source": True})
+    node.clear_cache()
+    output = node.execute(stream)
+    assert node._stored_hit_tables and node._stored_hit_positions
+
+    async def run() -> None:
+        source_channel: Channel[Any] = Channel(buffer_size=4)
+        sink: Channel[Any] = Channel(buffer_size=8)
+        for row in stream.iter_data():
+            await source_channel.writer.send(row)
+        await source_channel.writer.close()
+        await node.async_execute(source_channel.reader, sink.writer)
+
+    asyncio.run(run())
+    assert not node._stored_hit_tables and not node._stored_hit_positions
+    assert output.as_table(columns={"source": True}).equals(built)
 
 
 def test_an_observer_claiming_to_read_no_rows_receives_the_rows() -> None:

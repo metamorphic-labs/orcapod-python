@@ -39,6 +39,16 @@ def tripled(d1: int) -> int:
     return 3 * d1
 
 
+@function_pod(output_keys=["total", "text"])
+def combined(d3: str, d1: int, d2: float | None) -> tuple[float, str]:
+    return (d1 + (d2 or 0.0), f"{d3}-{d1}-{d2}")
+
+
+@function_pod(output_keys=["text", "total"])
+def combined_reversed(d1: int, d2: float | None, d3: str) -> tuple[str, float]:
+    return (f"{d3}-{d1}-{d2}", d1 + (d2 or 0.0))
+
+
 @pytest.fixture
 def compared(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     """Check every function node output against the rebuild of its rows."""
@@ -77,6 +87,46 @@ def test_the_output_is_the_rebuild_of_its_rows(
         _job(make_source(MAIN, arrangement), pod, database).run()
         _job(make_source(MAIN, arrangement), pod, database).run()
     assert len(compared) == 3
+
+
+@pytest.mark.parametrize(
+    "pod", [combined, combined_reversed], ids=["total_text", "text_total"]
+)
+@pytest.mark.parametrize("arrangement", arrangements(MAIN), ids=lambda a: a.id)
+def test_several_input_and_output_columns(
+    arrangement: Any, pod: Any, compared: list[int]
+) -> None:
+    """Three data columns in and two out, computed, mixed and all stored: the sync
+    output is the rebuild of its rows, and the async run gives the same rows as a set."""
+    from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
+
+    def job(database: Any, rows: list[int] | None = None) -> PipelineJob:
+        made = PipelineJob(name="several", database=database)
+        with made:
+            pod.pod(make_source(MAIN, arrangement, rows=rows), label="fn")
+        return made
+
+    def rows_of(made: PipelineJob) -> list[str]:
+        return sorted(
+            repr((tag.as_dict(columns={"system_tags": True}), data.as_dict()))
+            for tag, data in made.nodes["fn"].iter_data()
+        )
+
+    database = InMemoryArrowDatabase()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", ProvisionalHashWarning)
+        job(database, [0, 1, 2]).run()
+        mixed, stored = job(database), job(database)
+        mixed.run()
+        stored.run()
+        assert len(compared) == 3
+        assert len(rows_of(mixed)) == 6
+        assert rows_of(stored) == rows_of(mixed)
+        other = InMemoryArrowDatabase()
+        for over in (other, other, database):  # cold, its own store, the sync store
+            async_job = job(over)
+            async_job.run(orchestrator=AsyncPipelineOrchestrator())
+            assert rows_of(async_job) == rows_of(mixed)
 
 
 def _keyed(keys: list[int]) -> Any:

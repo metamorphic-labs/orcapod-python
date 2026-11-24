@@ -827,8 +827,10 @@ holding no null; stage 2's source and operator routes use the same helper), no m
 (`__`) column, and no column a datagram would retype (`_slices_are_rows`; a stored table
 is checked the same way). A row's data hash is computed once, when its entry id is
 prepared, and a datagram built later for the row keeps it
-(`Datagram._keep_content_hash`): nothing hashes a value again. Anything else takes
-`main`'s row path. The entry id has one definition on both paths: the preimage's last
+(`Datagram._keep_content_hash`): the full input datagram is not hashed again for its entry
+id or pipeline record. A projection of it (`function_input(...)`, the result cache's input
+when data-tags fall through) is another datagram with its own content hash, as on `main`.
+Anything else takes `main`'s row path. The entry id has one definition on both paths: the preimage's last
 column is `_with_input_data_hash`, and the input data hash is `data_table_content_hash`, a
 data datagram's content hash.
 

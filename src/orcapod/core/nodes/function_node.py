@@ -545,8 +545,9 @@ def _reads_no_rows(observer: object) -> bool:
     """Whether ``observer`` is one of the library observers that read no input row.
 
     A closed set of exact library classes (``NoOpObserver``, ``RunCountingObserver``),
-    and a ``CompositeObserver`` all of whose observers are in it: never a subclass, and
-    never anything an observer states about itself. Only these receive row views
+    and a ``CompositeObserver`` all of whose observers are in it: never a subclass, never
+    an instance with a hook replaced on it (``reads_as_its_class``), and never anything
+    an observer states about itself. Only these receive row views
     (``_TagView``, ``_DataView``); every other observer receives the rows themselves,
     as on ``main`` (ITL-1361).
 
@@ -561,10 +562,12 @@ def _reads_no_rows(observer: object) -> bool:
     from orcapod.pipeline.observer import NoOpObserver
     from orcapod.pipeline.run_summary import RunCountingObserver
 
-    kind = type(observer)
-    if kind in (NoOpObserver, RunCountingObserver):
+    if any(
+        reads_as_its_class(observer, kind)
+        for kind in (NoOpObserver, RunCountingObserver)
+    ):
         return True
-    if kind is CompositeObserver:
+    if reads_as_its_class(observer, CompositeObserver):
         composite = cast(CompositeObserver, observer)
         return all(_reads_no_rows(member) for member in composite.observers)
     return False
@@ -2298,7 +2301,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
 
         A run keeps only the tables of the results it loads; a result held from an
         earlier run has no place recorded, and its output row is built from its
-        datagram, as before (ITL-1361).
+        datagram, as before (ITL-1361). An async run keeps none, so it only drops an
+        earlier sync run's; an output of that run not built yet builds its rows.
         """
         self._stored_hit_tables = []
         self._stored_hit_positions = {}
@@ -3621,15 +3625,12 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         # One digest per row, computed here, where main hashed each row's data.
         # One-row tables read batch by batch (``_one_row_tables``): a row's cost does
         # not grow with the number of chunks, as ``Table.slice(i, 1)``'s does.
-        row_tables = list(_one_row_tables(tag_side, data_side))
-        data_hashes = [
-            data_table_content_hash(data_row, rows_context)
-            for _, data_row in row_tables
-        ]
-        ids = [
-            self._base_entry_id_of_slices(tag_row, data_hash)
-            for (tag_row, _), data_hash in zip(row_tables, data_hashes, strict=True)
-        ]
+        data_hashes: list[ContentHash] = []
+        ids: list[bytes] = []
+        for tag_row, data_row in _one_row_tables(tag_side, data_side):
+            data_hash = data_table_content_hash(data_row, rows_context)
+            data_hashes.append(data_hash)
+            ids.append(self._base_entry_id_of_slices(tag_row, data_hash))
         # The rows themselves are made only when one is read (``_RowView``); each
         # row's data keeps the digest computed above.
         lazy = _LazyRows(
@@ -5027,6 +5028,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         """
         from orcapod.pipeline.serialization import LoadStatus
 
+        self._forget_stored_hit_tables()
         if load_only:
             await self._async_execute_load_only(input_channel, output, observer)
             return

@@ -198,6 +198,9 @@ def cases() -> dict[str, tuple[Any, Any]]:
 
 def main() -> None:
     store, mode, report = Path(sys.argv[1]), sys.argv[2], Path(sys.argv[3])
+    if mode not in ("write", "load"):
+        # Checked before any store is opened: anything else would compute and write.
+        raise SystemExit(f"mode must be 'write' or 'load', not {mode!r}")
     results: dict[str, Any] = {}
     for index, (label, (pod, stream)) in enumerate(sorted(cases().items())):
         database = DeltaTableDatabase(store / f"case_{index:03d}")
@@ -227,7 +230,12 @@ def main() -> None:
                 "ids": ids,
                 "cached": observer.cached,
                 "calls": len(CALLS),
-                "rows": len(list(node.iter_data())),
+                # Which result each input received, in order: the write and load
+                # reports of one case must hold the same.
+                "received": [
+                    [repr(tag.as_dict()), repr(data.as_dict())]
+                    for tag, data in node.iter_data()
+                ],
             }
         except Exception as error:  # noqa: BLE001  # the outcome is compared across versions
             results[label] = {"error": f"{type(error).__name__}: {error}"}
