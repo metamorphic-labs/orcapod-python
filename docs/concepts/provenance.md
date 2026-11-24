@@ -86,7 +86,10 @@ three records the job keeps.
   of the input with the same system tags.
 - **A function node's stored records.** For each input row a function node received, its
   pipeline record names that row (by its tags and system tags), the result it was served,
-  and whether this row computed the result or reused one. The stored result says which
+  and whether this row computed the result or reused one. The entry's `__computed`
+  field records what happened when that entry was written. When equal inputs arrive
+  concurrently in an async run, their arrival and cache lookup timing can change
+  which entries record a computation. The stored result says which
   function ran: its name, version and body hash, the executor, the Python version and the
   time. The trace shows these as a `FunctionRun`, and checks that the input row's content
   hash is the one the record stored.
