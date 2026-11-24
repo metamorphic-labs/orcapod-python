@@ -65,7 +65,7 @@ def labelled_source(stream: Any) -> LabelledSource | None:
     label = _stored_text(stream, "_label")
     if not label or issubclass(type(stream), SourceProxy):
         return None
-    source = stream
+    source: Any = stream
     while type(source) is CachedSource:
         source = _stored(source).get("_source")
     # A cache accepts any source-like object; only a root source holds a name to show.

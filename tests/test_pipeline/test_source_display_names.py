@@ -21,7 +21,7 @@ from orcapod.core.sources.display_names import (
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import RestrictedAggregationWarning
 from orcapod.sources import DictSource, SpiralDBTableSource
-from tests.test_databases import fake_pyspiral
+from tests.test_databases import fake_spiral_sdk
 
 
 @function_pod(output_keys="z")
@@ -225,35 +225,34 @@ _KEYS = pa.schema([pa.field("g", pa.int64(), False), pa.field("k", pa.int64(), F
 @pytest.fixture
 def spiral(tmp_path: Path) -> Iterator[None]:
     """Tables ``d1.units``, ``d2.units`` of ``p1`` and ``d1.units`` of ``p2``."""
-    with fake_pyspiral.install(tmp_path / "spiral"):
+    with fake_spiral_sdk.install(tmp_path / "spiral"):
         for project, dataset, a, b in (
             ("p1", "d1", "x", "x2"),
             ("p1", "d2", "y", "y2"),
             ("p2", "d1", "y", "y2"),
         ):
-            table = (
-                fake_pyspiral.FakeSpiral()
-                .project(project)
-                .create_table(f"{dataset}.units", key_schema=_KEYS)
+            table = fake_spiral_sdk.ExternalProject(project).create_table(
+                f"{dataset}.units", key_schema=_KEYS
+            )
+            schema = pa.schema(
+                [*_KEYS, pa.field(a, pa.int64()), pa.field(b, pa.int64())]
             )
             table.write(
                 pa.table(
-                    {"g": [0, 1], "k": [0, 1], a: [1, 2], b: [3, 4]},
-                    schema=pa.schema(
-                        [*_KEYS, pa.field(a, pa.int64()), pa.field(b, pa.int64())]
-                    ),
+                    {"g": [0, 1], "k": [0, 1], a: [1, 2], b: [3, 4]}, schema=schema
                 )
             )
+            table.record(schema)
         yield
 
 
-def _spiral(project: str, dataset: str, **kwargs: Any) -> SpiralDBTableSource:
+def _spiral(project: str, dataset: str, tag_only: Any = True) -> SpiralDBTableSource:
     return SpiralDBTableSource(
         project_id=project,
         dataset=dataset,
         table_name="units",
         label="units",
-        **{"tag_only_columns": True, **kwargs},
+        tag_only_columns=tag_only,
     )
 
 
@@ -284,10 +283,7 @@ def test_one_table_of_two_datasets_or_projects(
 def test_the_restricted_aggregation_warning_names_the_label(
     spiral: None, use_async: bool, by: list[str], tag_only: Any
 ) -> None:
-    sources = [
-        _spiral("p1", dataset, tag_only_columns=tag_only).where(g=0)
-        for dataset in ("d1", "d2")
-    ]
+    sources = [_spiral("p1", dataset, tag_only).where(g=0) for dataset in ("d1", "d2")]
     job = PipelineJob(name="j", database=InMemoryArrowDatabase())
     with job:
         for source, label in zip(sources, ("one", "two"), strict=True):
