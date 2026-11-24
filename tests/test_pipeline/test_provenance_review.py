@@ -40,6 +40,7 @@ from orcapod.operators import (
     SemiJoin,
 )
 from orcapod.sources import ArrowTableSource, CachedSource, DictSource
+from orcapod.system_constants import constants
 
 pytestmark = pytest.mark.filterwarnings("ignore::Warning")
 
@@ -1276,10 +1277,13 @@ def key_length(k: str) -> int:
 
 
 @pytest.mark.parametrize("mode", ["sync", "async"])
-def test_stored_history_of_tied_bindings_with_one_id_is_unknown(mode: str) -> None:
-    """Two bindings with one pipeline hash and one source id s at a Join: a stored
-    entry naming s::row_0 cannot tell which binding it came through, so the stored
-    answer for the binding whose row_0 the Join removed is unknown, not reached."""
+def test_stored_history_of_tied_bindings_reads_the_asked_source(mode: str) -> None:
+    """Two bindings with one pipeline hash at a Join, of two source ids (s and t;
+    since ITL-1425 two bindings in one job cannot share one full id, so an entry
+    naming one pair cannot have come through either tied slot). Asked about s's
+    row_0, which the Join removed (t's row_0 is the one stored), the stored answer
+    is that no entry of s names it, and whether it reached the function is unknown:
+    the tie never lets t's entries answer for s."""
     a = DictSource(
         [{"k": "unmatched", "i": 0}, {"k": "shared", "i": 1}],
         tag_columns=["k", "i"],
@@ -2789,19 +2793,32 @@ def test_a_label_that_is_one_of_its_slots_ids_is_refused(
 
 @pytest.mark.parametrize("valid_first", [True, False])
 @pytest.mark.parametrize("mode", ["sync", "async"])
-@pytest.mark.parametrize("kind", ["MapTags", "MapData", "MapColumns"])
+@pytest.mark.parametrize(
+    ("kind", "layout"),
+    [
+        ("MapTags", "plain"),
+        ("MapData", "plain"),
+        ("MapColumns", "plain"),
+        # g a data-tag, tags laid out g, k. MapColumns refuses data-tags (ITL-1022).
+        ("MapTags", "data_tag"),
+        ("MapData", "data_tag"),
+    ],
+)
 def test_an_ignored_rename_beside_a_valid_one(
-    kind: str, mode: str, valid_first: bool
+    kind: str, layout: str, mode: str, valid_first: bool
 ) -> None:
     """A strict=False mapping holding an entry that applies to nothing and a valid
-    rename, in both orders, on two tags and three data columns: the valid rename
-    traces to its original column, every other column to itself."""
+    rename, in both orders, on two tags and three data columns, with plain tags (k, g)
+    and with g a data-tag (g, k): the valid rename traces to its original column (a
+    renamed data-tag's data column to the source's g cell), every other column to
+    itself."""
     from orcapod import operators
 
+    data_tag = layout == "data_tag"
     source = DictSource(
         [{"k": "a", "g": "1", "x": 1, "y": 2, "z": 3}],
-        tag_columns=["k", "g"],
-        tag_only_columns=True,
+        tag_columns=["g", "k"] if data_tag else ["k", "g"],
+        tag_only_columns=["k"] if data_tag else True,
         source_id="s",
     )
     valid = {"MapTags": ("g", "gg"), "MapData": ("x", "xx"), "MapColumns": ("y", "yy")}
@@ -2809,19 +2826,23 @@ def test_an_ignored_rename_beside_a_valid_one(
     entries = [valid[kind], ignored] if valid_first else [ignored, valid[kind]]
     mapper = getattr(operators, kind)(dict(entries), strict=False)
     job = PipelineJob(
-        name=f"mix{kind}{mode}{valid_first}", database=InMemoryArrowDatabase()
+        name=f"mix{kind}{layout}{mode}{valid_first}", database=InMemoryArrowDatabase()
     )
     with job:
         mapper(source)
     run(job, mode)
     node = job.nodes[kind]
-    tags = {"k": "a", ("gg" if kind == "MapTags" else "g"): "1"}
-    data = {"x": 1, "y": 2, "z": 3}
+    g_name = "gg" if kind == "MapTags" else "g"
+    tags = {"k": "a", g_name: "1"}
+    data: dict[str, Any] = {"x": 1, "y": 2, "z": 3}
     old, new = valid[kind]
     if kind != "MapTags":
         data[new] = data.pop(old)
+    if data_tag:
+        assert g_name in node.keys()[1]
+        data[g_name] = "1"
     for column, value in data.items():
-        original = old if column == new else column
+        original = old if column == new else "g" if column == g_name else column
         cells = node.trace(tags, column).source_cells()
         assert [(c.column, c.value) for c in cells] == [(original, value)]
 
@@ -2839,16 +2860,16 @@ def echo_x(x: int) -> int:
 
 @pytest.mark.parametrize("order", [(0, 1, 0), (0, 0, 1), (1, 0, 0)])
 @pytest.mark.parametrize("mode", ["sync", "async"])
-def test_repeated_identical_inputs_before_a_batch_are_refused(
+def test_repeated_identical_inputs_before_a_batch_never_trace_wrongly(
     mode: str, order: tuple[int, ...]
 ) -> None:
     """A hand-built stream holding one row twice (identical system tags, one base
-    entry id; no Orcapod source gives this, record ids are unique). The node holds
-    one result per entry id, so the held rows may not match what Batch received:
-    each batch's trace is then refused, never a wrong cell (when in doubt, refuse).
-    How the rows are grouped follows arrival order on the async path (ITL-1437), so
-    the test asserts, for every batch, a refusal or members that each trace to their
-    own record and value; with A, B, A on the sync path, both batches are refused."""
+    entry id; no Orcapod source gives this, record ids are unique). On the sync path
+    the node holds its rows in the order it emitted them, so every batch traces to
+    its members' own records and values. On the async path the two equal inputs can
+    be computed separately (ITL-1433) and the node holds one result per entry id:
+    a batch it cannot match is refused, never traced to a wrong cell. The grouping
+    follows arrival order on the async path (ITL-1437) and is never assumed."""
     from orcapod.operators import Batch
 
     s = DictSource(
@@ -2893,29 +2914,64 @@ def test_repeated_identical_inputs_before_a_batch_are_refused(
             assert [(c.source_id, c.record_id) for c in cells] == [
                 (s.source_id, f"row_{k}")
             ]
-    if mode == "sync" and order == (0, 1, 0):
-        assert refused == len(batches) == 2
+    if mode == "sync":
+        # Rows are held in the order emitted: each batch is traced, none refused.
+        assert refused == 0
+
+
+def _store_calls(
+    monkeypatch: pytest.MonkeyPatch, database_class: type
+) -> list[tuple[str, int, tuple[str, ...]]]:
+    """Record every ``refresh_table`` and ``get_all_records`` call on instances of
+    ``database_class``.
+
+    Args:
+        monkeypatch: The test's monkeypatch fixture.
+        database_class: The database class whose calls are recorded.
+
+    Returns:
+        The calls, in order, as ``(method name, id of the database, table path)``;
+        the list grows as calls are made.
+    """
+    calls: list[tuple[str, int, tuple[str, ...]]] = []
+    for name in ("refresh_table", "get_all_records"):
+        real = getattr(database_class, name)
+
+        def recorded(
+            self: Any, path: Any, *args: Any, _r: Any = real, _n: str = name, **kw: Any
+        ) -> Any:
+            calls.append((_n, id(self), tuple(path)))
+            return _r(self, path, *args, **kw)
+
+        monkeypatch.setattr(database_class, name, recorded)
+    return calls
+
+
+def _refreshed_before_read(calls: list[tuple[str, int, tuple[str, ...]]]) -> bool:
+    """Whether every table read was refreshed (same database, same path) before it."""
+    return all(
+        ("refresh_table", db, path) in calls[:i]
+        for i, (name, db, path) in enumerate(calls)
+        if name == "get_all_records"
+    )
 
 
 def test_why_missing_reads_the_stores_current_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The stored-record read refreshes the node's stored tables first (another
-    handle may have committed entries since)."""
-    from orcapod.core.nodes.function_node import FunctionJobNode as FunctionNode
-
+    """The stored-record read refreshes each table it reads first (another handle may
+    have committed entries since). Probe: the database's own ``refresh_table`` and
+    ``get_all_records`` calls, by database and path."""
     job = _trials_job(InMemoryArrowDatabase())
     job.run()
-    calls: list[str] = []
-    real = FunctionNode._refresh_stored_tables
-
-    def counted(self: Any) -> None:
-        calls.append(self.label)
-        real(self)
-
-    monkeypatch.setattr(FunctionNode, "_refresh_stored_tables", counted)
+    calls = _store_calls(monkeypatch, InMemoryArrowDatabase)
     job.nodes["scores"].why_missing("trials", "row_0")
-    assert "scores" in calls
+    reads = [c for c in calls if c[0] == "get_all_records"]
+    assert reads and _refreshed_before_read(calls)
+    calls.clear()
+    job.nodes["scores"].trace({"animal": "a1", "trial": 1}, "score")
+    assert any(c[2][-1] == "rdb_v1" for c in calls if c[0] == "get_all_records")
+    assert _refreshed_before_read(calls)
 
 
 @pytest.mark.parametrize("mode", ["sync", "async"])
@@ -3178,21 +3234,36 @@ def test_batches_of_two_cached_versions_of_one_record(
 
 @pytest.mark.parametrize("keys", [("k", "g"), ("g", "k")])
 @pytest.mark.parametrize("mode", ["sync", "async"])
-def test_group_members_follow_both_keys(mode: str, keys: tuple[str, str]) -> None:
+@pytest.mark.parametrize(
+    ("tag_order", "plain"),
+    [
+        (["k", "g"], True),
+        (["g", "k"], True),
+        (["g", "k"], ["k"]),  # g, a grouping key, is a data-tag
+        (["k", "g"], ["g"]),  # k, a grouping key, is a data-tag
+    ],
+)
+def test_group_members_follow_both_keys(
+    mode: str, keys: tuple[str, str], tag_order: list[str], plain: Any
+) -> None:
     """Rows sharing k but differing on g are two groups: each group's members are
-    exactly its own source rows, for either key order, with tags laid out k, g and g, k."""
-    for tag_order in (["k", "g"], ["g", "k"]):
+    exactly its own source rows, in both data columns (x and w, with distinct values
+    and the table laid out x, w or w, x), for either key order, with tags laid out
+    k, g and g, k, and with either key a data-tag."""
+    for data_order in (["x", "w"], ["w", "x"]):
         rows = [
-            {"k": "a", "g": "1", "x": 1},
-            {"k": "a", "g": "2", "x": 2},
-            {"k": "a", "g": "1", "x": 3},
-            {"k": "b", "g": "1", "x": 4},
+            {"k": "a", "g": "1", "x": 1, "w": 10},
+            {"k": "a", "g": "2", "x": 2, "w": 20},
+            {"k": "a", "g": "1", "x": 3, "w": 30},
+            {"k": "b", "g": "1", "x": 4, "w": 40},
         ]
+        rows = [{c: r[c] for c in (*tag_order, *data_order)} for r in rows]
         source = DictSource(
-            rows, tag_columns=tag_order, tag_only_columns=True, source_id="s"
+            rows, tag_columns=tag_order, tag_only_columns=plain, source_id="s"
         )
         job = PipelineJob(
-            name=f"two{mode}{''.join(keys)}", database=InMemoryArrowDatabase()
+            name=f"two{mode}{''.join(keys)}{''.join(data_order)}",
+            database=InMemoryArrowDatabase(),
         )
         with job:
             GroupBy(list(keys))(source)
@@ -3200,29 +3271,275 @@ def test_group_members_follow_both_keys(mode: str, keys: tuple[str, str]) -> Non
         node = job.nodes["GroupBy"]
         expected = {("a", "1"): [1, 3], ("a", "2"): [2], ("b", "1"): [4]}
         for (k, g), xs in expected.items():
-            cells = node.trace({"k": k, "g": g}, "x").source_cells()
-            assert sorted((c.record_id, c.value) for c in cells) == sorted(
-                (f"row_{x - 1}", x) for x in xs
-            )
+            for column, scale in (("x", 1), ("w", 10)):
+                cells = node.trace({"k": k, "g": g}, column).source_cells()
+                assert sorted((c.record_id, c.column, c.value) for c in cells) == (
+                    sorted((f"row_{x - 1}", column, x * scale) for x in xs)
+                )
 
 
 def test_why_missing_reads_no_result_table(monkeypatch: pytest.MonkeyPatch) -> None:
     """The stored answer of why_missing needs the pipeline entries only: no result
-    table is read (a trace still reads them)."""
-    from orcapod.core.nodes.function_node import FunctionJobNode as FunctionNode
+    table is refreshed or read; a trace still refreshes and reads its results.
+
+    Probe: the database's own ``refresh_table`` and ``get_all_records`` calls, by
+    path (a result table's path ends in ``rdb_v1``, a pipeline table's in
+    ``pdb_v1``).
+    """
+    job = _trials_job(InMemoryArrowDatabase())
+    job.run()
+    calls = _store_calls(monkeypatch, InMemoryArrowDatabase)
+    answer = job.nodes["scores"].why_missing("trials", "row_0")
+    assert not answer.missing and answer.entry_recorded is True
+    assert any(c[2][-1] == "pdb_v1" for c in calls)
+    assert not [c for c in calls if c[2][-1] == "rdb_v1"]
+    calls.clear()
+    job.nodes["scores"].trace({"animal": "a1", "trial": 1}, "score")
+    result_calls = {c[0] for c in calls if c[2][-1] == "rdb_v1"}
+    assert result_calls == {"refresh_table", "get_all_records"}
+
+
+# ---------------------------------------------------------------------------
+# CodeRabbit review of acca12c9
+# ---------------------------------------------------------------------------
+
+
+def _boundary_job(mode: str) -> PipelineJob:
+    """L and R joined, the Join feeding a function F; L's row_1 is dropped."""
+    left = DictSource(
+        [{"k": "a", "x": 1}, {"k": "lonely", "x": 2}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="L",
+    )
+    right = DictSource(
+        [{"k": "a", "q": 5}], tag_columns=["k"], tag_only_columns=True, source_id="R"
+    )
+    job = PipelineJob(name=f"edges{mode}", database=InMemoryArrowDatabase())
+    with job:
+        echo_x.pod(Join()(left, right), label="F")
+    run(job, mode)
+    return job
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_a_collapsed_endpoint_stays_when_its_outgoing_edge_is_not_highlighted(
+    mode: str,
+) -> None:
+    """A highlight of L, the Join, the automatic SelectDataColumns after it and F,
+    with only the edge L -> Join: the Join ends the highlighted path (its edge on is
+    not highlighted, though the next node is), so it is not folded; with every edge
+    on the path highlighted, the path folds as before."""
+    from dataclasses import replace
+
+    job = _boundary_job(mode)
+    base = job.nodes["F"].why_missing("L", "row_1").highlight()
+    nodes = frozenset({"L", "Join", "SelectDataColumns", "F"})
+    one_edge = replace(base, nodes=nodes, edges=frozenset({("L", "Join")}))
+    text = job.diagram(collapse=True, highlight=one_edge).to_text()
+    assert " * Join (operator)" in text
+    path = frozenset(
+        {("L", "Join"), ("Join", "SelectDataColumns"), ("SelectDataColumns", "F")}
+    )
+    text = job.diagram(collapse=True, highlight=replace(base, nodes=nodes, edges=path))
+    assert "Join (operator)" not in text.to_text()
+
+
+def test_a_float_selector_subclass_never_runs_its_own_equality() -> None:
+    """A selector value of a float subclass is read as its float: its __eq__ never
+    runs, and NaN and signed zeros still compare as Orcapod matches them."""
+
+    class LoudFloat(float):
+        def __eq__(self, other: object) -> bool:  # pyright: ignore[reportImplicitOverride]
+            raise AssertionError("the selector's __eq__ ran")
+
+        __hash__ = float.__hash__
+
+    source = DictSource(
+        [{"t": 1.0, "x": 1}, {"t": 0.0, "x": 2}, {"t": float("nan"), "x": 3}],
+        tag_columns=["t"],
+        tag_only_columns=True,
+        source_id="f",
+    )
+    job = PipelineJob(name="floats", database=InMemoryArrowDatabase())
+    with job:
+        echo_x.pod(source, label="F")
+    job.run()
+    for value, x in ((1.0, 1), (-0.0, 2), (float("nan"), 3)):
+        trace = job.nodes["F"].trace({"t": LoudFloat(value)}, "y")
+        assert trace.matched == 1 and trace.root.value == x
+
+
+def test_a_selector_container_subclass_is_copied_without_its_methods() -> None:
+    """A list subclass whose __iter__ raises and a dict subclass whose items()
+    raises are copied through the base types' own methods; tuples are copied at
+    every depth, so a value changed after the trace does not change its header (a
+    trace with no match included)."""
+    from orcapod.operators import Batch
+
+    class SneakyList(list[Any]):
+        def __iter__(self) -> Any:  # pyright: ignore[reportImplicitOverride]
+            raise AssertionError("the selector's __iter__ ran")
+
+    class SneakyDict(dict[str, Any]):
+        def items(self) -> Any:  # pyright: ignore[reportImplicitOverride]
+            raise AssertionError("the selector's items() ran")
+
+    source = DictSource(
+        [{"k": "u0", "x": 1}, {"k": "u1", "x": 2}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="s",
+    )
+    job = PipelineJob(name="containers", database=InMemoryArrowDatabase())
+    with job:
+        Batch(batch_size=0)(source)
+    job.run()
+    node = job.nodes["Batch"]
+    assert node.trace({"k": SneakyList(["u0", "u1"])}, "x").matched == 1
+    assert node.trace({"k": SneakyDict(a=1)}, "x").matched == 0
+    inner = ["v"]
+    no_match = node.trace({"k": [("a", inner)]}, "x")
+    header = no_match.header()
+    inner.append("w")
+    assert no_match.header() == header
+    assert "'w'" not in header
+
+
+def test_a_fold_needs_its_system_tag_mapping_one_to_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two system-tag columns of the groups mapped to one input column (an extended
+    name and the unextended one, both naming the input's record-id column) cover
+    every column on both sides but are not one to one: refused."""
+    from orcapod.pipeline import provenance
 
     job = _trials_job(InMemoryArrowDatabase())
     job.run()
-    asked: list[bool] = []
-    real = FunctionNode._stored_provenance
+    real = provenance._Reader.held
 
-    def spied(self: Any, *, results: bool = True) -> Any:
-        asked.append(results)
-        return real(self, results=results)
+    def held(self: Any, node: Any) -> Any:
+        rows = real(self, node)
+        if rows and node.label == "GroupBy":
+            for row in rows:
+                for column in [
+                    c
+                    for c in list(row)
+                    if c.startswith(constants.SYSTEM_TAG_RECORD_ID_PREFIX)
+                    and c.count("::") == 2  # the fold's extended name only
+                ]:
+                    row[column.rsplit("::", 1)[0]] = row[column]
+        return rows
 
-    monkeypatch.setattr(FunctionNode, "_stored_provenance", spied)
-    answer = job.nodes["scores"].why_missing("trials", "row_0")
-    assert not answer.missing and answer.entry_recorded is True
-    assert asked and not any(asked)
-    job.nodes["scores"].trace({"animal": "a1", "trial": 1}, "score")
-    assert True in asked
+    monkeypatch.setattr(provenance._Reader, "held", held)
+    with pytest.raises(ProvenanceInconsistencyError, match="one to one"):
+        job.nodes["means"].trace({"animal": "a1"}, "mean")
+
+
+def test_a_direct_source_entry_token_must_name_its_own_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A function over a source: a stored entry whose input token names another
+    record than its own system tags (same input hash) is refused, never traced to
+    the other record."""
+    from orcapod.pipeline import provenance
+
+    job = _trials_job(InMemoryArrowDatabase())
+    job.run()
+    real = provenance._entries_for
+
+    def moved(*args: Any, **kwargs: Any) -> Any:
+        entries = real(*args, **kwargs)
+        return [
+            {
+                name: value.replace("::row_0::", "::row_9::")
+                if name.startswith(constants.SOURCE_PREFIX) and isinstance(value, str)
+                else value
+                for name, value in entry.items()
+            }
+            for entry in entries
+        ]
+
+    trace = job.nodes["scores"].trace({"animal": "a1", "trial": 1}, "score")
+    assert {c.record_id for c in trace.source_cells()} == {"row_0"}
+    monkeypatch.setattr(provenance, "_entries_for", moved)
+    with pytest.raises(ProvenanceInconsistencyError, match="not the record"):
+        job.nodes["scores"].trace({"animal": "a1", "trial": 1}, "score")
+
+
+@pytest.mark.parametrize("stored", [(1,), (2,), (0, 2), (1, 2)])
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_a_batch_after_a_partly_stored_run_traces(
+    mode: str, stored: tuple[int, ...]
+) -> None:
+    """An earlier run stored some results; the next run over three keyed rows (two
+    tag columns, two data columns) reads those and computes the rest. The function
+    node holds its rows in the order it emitted them, so every Batch it fed traces
+    to exactly its members' records and values."""
+    rows = [{"k": i, "j": f"r{i}", "x": i + 1, "v": 10 * i} for i in range(3)]
+    database = InMemoryArrowDatabase()
+
+    def build(given: list[dict[str, Any]]) -> PipelineJob:
+        source = DictSource(
+            given,
+            tag_columns=["k", "j"],
+            tag_only_columns=True,
+            record_id_columns=["k"],
+            source_id="s",
+        )
+        job = PipelineJob(name="partly", database=database)
+        with job:
+            Batch(batch_size=2)(echo_x.pod(source, label="f"))
+        return job
+
+    run(build([rows[i] for i in stored]), mode)
+    job = build(rows)
+    run(job, mode)
+    batches = job.nodes["Batch"].as_table().to_pylist()
+    assert sorted(k for b in batches for k in b["k"]) == [0, 1, 2]
+    for batch in batches:
+        trace = job.nodes["Batch"].trace({"k": batch["k"]}, "y")
+        cells = trace.source_cells()
+        assert sorted((c.record_id, c.value) for c in cells) == sorted(
+            (f'{{"k":{k}}}', k + 1) for k in batch["k"]
+        )
+
+
+@pytest.mark.parametrize("over", ["source", "operator"])
+def test_two_entries_for_one_input_and_result_are_refused(
+    monkeypatch: pytest.MonkeyPatch, over: str
+) -> None:
+    """Two stored entries for one input and one result (async execution can record
+    two copies of an identical input, one reusing the other's result) say different
+    things (entry id, computed or reused, run), and the held row does not record
+    which served it: the trace refuses rather than report the higher index. One
+    entry traces as before. Covered for a function over a source and over an
+    operator (the trials job's means reads GroupBy, scores reads the source)."""
+    from orcapod.pipeline import provenance
+
+    job = _trials_job(InMemoryArrowDatabase())
+    job.run()
+    label, selector, column = (
+        ("scores", {"animal": "a1", "trial": 1}, "score")
+        if over == "source"
+        else ("means", {"animal": "a1"}, "mean")
+    )
+    assert job.nodes[label].trace(selector, column).matched == 1
+    real = provenance._entries_for
+
+    def doubled(*args: Any, **kwargs: Any) -> Any:
+        entries = real(*args, **kwargs)
+        copies = [
+            {
+                **entry,
+                "__pipeline_entry_id": b"semantic_v1:" + bytes(32),
+                "__pipeline_recomputation_index": 1,
+                "__computed": not entry.get("__computed"),
+            }
+            for entry in entries
+        ]
+        return entries + copies
+
+    monkeypatch.setattr(provenance, "_entries_for", doubled)
+    with pytest.raises(ProvenanceInconsistencyError, match="which one served"):
+        job.nodes[label].trace(selector, column)

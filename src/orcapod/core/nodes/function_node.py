@@ -24,7 +24,7 @@ import sys
 import uuid
 from abc import abstractmethod
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import datetime, timezone
 from functools import partial
 from typing import Any, Literal, NamedTuple, cast
@@ -1430,6 +1430,9 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
     # its number of inputs; None when no run completed (ITL-1093). A class default so
     # nodes rebuilt from a saved descriptor start without a run.
     _run_entry_counts: Counter[bytes] | None = None
+    # The same base entry ids in the order the run emitted its rows (ITL-1432): the
+    # order the rows are held in, so a read gives them as downstream received them.
+    _run_entry_order: tuple[bytes, ...] = ()
     # Whether the last completed run was load-only, and how many of its inputs had no
     # stored result (ITL-1095). Class defaults for nodes rebuilt from a descriptor.
     _run_load_only: bool = False
@@ -1467,6 +1470,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         self._cached_output_table: "pa.Table | None" = None
         self._cached_content_hash_column: "pa.Array | None" = None
         self._run_entry_counts = None
+        self._run_entry_order = ()
 
         # DB persistence state (initially None; set via __init__ params or attach_databases)
         self._pipeline_database: ArrowDatabaseProtocol | None = None
@@ -1987,6 +1991,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         self._cached_output_table = None
         self._cached_content_hash_column = None
         self._run_entry_counts = None
+        self._run_entry_order = ()
         self._run_load_only = False
         self._run_not_stored = 0
         self._run_failed = 0
@@ -2001,20 +2006,18 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         cache may hold more (results of other inputs, read from the database), which stay
         cached for reuse but are not rows of this run (ITL-1093). Without a completed
         run in this process there are no rows, whatever the cache or the database holds
-        (ITL-1095). Rows come in the order the cache holds them. An input without output
-        (an inactive function) is not a row.
+        (ITL-1095). Rows come in the order the run emitted them (a stored result and a
+        computed one alike, as downstream received them; ITL-1432), one row per input:
+        a repeated input's row is repeated at each of its places. An input without
+        output (an inactive function) is not a row.
         """
-        counts = self._run_entry_counts
-        if counts is None:
+        if self._run_entry_counts is None:
             return
-        pairs: Iterable[tuple[TagProtocol, DataProtocol | None]] = (
-            pair
-            for eid, pair in self._cached_output_datas.items()
-            for _ in range(counts.get(eid, 0))
-        )
-        for tag, data in pairs:
-            if data is not None:
-                yield tag, data
+        cache = self._cached_output_datas
+        for eid in self._run_entry_order:
+            pair = cache.get(eid)
+            if pair is not None and pair[1] is not None:
+                yield pair[0], pair[1]
 
     def _set_run_rows(
         self,
@@ -2027,12 +2030,14 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         """Make the inputs of a completed run, by base entry id, the rows this node holds.
 
         Args:
-            entry_ids: The base entry ids of the run's inputs whose rows the node holds.
+            entry_ids: The base entry ids of the run's inputs whose rows the node holds,
+                in the order the run emitted them.
             load_only: Whether the run was load-only (ITL-1095).
             not_stored: How many inputs of a load-only run had no stored result.
             failed: How many rows of the run failed (error policy ``"continue"``).
         """
         self._run_entry_counts = Counter(entry_ids)
+        self._run_entry_order = tuple(entry_ids)
         self._run_load_only = load_only
         self._run_not_stored = not_stored
         self._run_failed = failed
@@ -3534,7 +3539,9 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         entries are kept (``__node_content_hash``, when the table is shared by the
         nodes of one pipeline hash), and only rows of the current data context, of
         both tables. Results are read from the persistent result database and, when
-        one is attached, the ephemeral one. Nothing is computed or written.
+        one is attached, the ephemeral one. Each table read is first refreshed to the
+        store's current version, and only the tables read (``results=False`` touches no
+        result table). Nothing is computed or written.
 
         Args:
             results: Whether to read the result tables too; ``False`` reads the pipeline
@@ -3546,8 +3553,9 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         """
         if self._pipeline_database is None or self._cached_function_pod is None:
             return None, None
-        # A read of what is stored: the store's current version (ITL-1408).
-        self._refresh_stored_tables()
+        # A read of what is stored: the store's current version (ITL-1408), of each
+        # table this read fetches and of no other (entries only: no result table).
+        self._pipeline_database.refresh_table(self._versioned_pipeline_path)
         context_key = self._stored_data_context_key
         entries = self._pipeline_database.get_all_records(
             self._versioned_pipeline_path,
@@ -3590,6 +3598,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 (self.ephemeral_result_database, self._cached_function_pod.record_path)
             )
         for database, path in places:
+            database.refresh_table(path)
             stored = database.get_all_records(
                 path, record_id_column=constants.DATA_RECORD_ID
             )

@@ -326,13 +326,15 @@ def _build_model(
         }
         if highlight is not None:
             # The node the question was asked at is always shown, and so is a
-            # highlighted node no highlighted path leaves (where a path ends, such as
+            # highlighted node no highlighted edge leaves (where a path ends, such as
             # the step that removed a record): folded, its emphasis would be lost.
+            # The edge decides, not the successor: a highlighted successor reached by
+            # an edge that is not highlighted does not carry the path on.
             folded.discard(highlight.asked)
             folded -= {
                 label
                 for label in highlight.nodes
-                if not any(s in highlight.nodes for s in succs.get(label, ()))
+                if not any((label, s) in highlight.edges for s in succs.get(label, ()))
             }
 
     shown = [

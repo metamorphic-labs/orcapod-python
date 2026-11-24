@@ -506,3 +506,40 @@ def test_reader_of_a_loaded_node_reads_its_ephemeral_results(tmp_path: Path) -> 
     assert sorted(stored.column("__data_id").to_pylist()) == sorted(
         live.column("__data_id").to_pylist()
     )
+
+
+def test_a_loaded_node_refreshes_its_ephemeral_results_before_reading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The provenance read of a loaded node refreshes every table it reads, the
+    ephemeral result table it reads without an ephemeral cached pod included (a Delta
+    handle could hold an older version). Probe: ``DeltaTableDatabase``'s own
+    ``refresh_table`` and ``get_all_records`` calls, by database and path."""
+    from orcapod.types import NodeConfig
+
+    job = build(tmp_path)
+    ephemeral = DeltaTableDatabase(tmp_path / "ephemeral")
+    job.set_ephemeral_database(ephemeral)
+    job.nodes["unit_rates"].node_config = NodeConfig(is_result_ephemeral=True)
+    job.run()
+    job.save(tmp_path / "job.json")
+    loaded = load(tmp_path)
+    loaded.set_ephemeral_database(ephemeral)
+    calls: list[tuple[str, int, tuple[str, ...]]] = []
+    for name in ("refresh_table", "get_all_records"):
+        real = getattr(DeltaTableDatabase, name)
+
+        def recorded(
+            self: Any, path: Any, *args: Any, _r: Any = real, _n: str = name, **kw: Any
+        ) -> Any:
+            calls.append((_n, id(self), tuple(path)))
+            return _r(self, path, *args, **kw)
+
+        monkeypatch.setattr(DeltaTableDatabase, name, recorded)
+    _, stored = loaded.nodes["unit_rates"]._stored_provenance()
+    assert stored is not None
+    reads = [c for c in calls if c[0] == "get_all_records"]
+    assert any(c[1] == id(ephemeral) for c in reads)
+    for i, (name, db, path) in enumerate(calls):
+        if name == "get_all_records":
+            assert ("refresh_table", db, path) in calls[:i]

@@ -92,23 +92,24 @@ def same_value(a: Any, b: Any) -> bool:
     Returns:
         Whether they are one value.
     """
+    # A subclass of a built-in type is compared as its base value (read through the
+    # base type's own slots), so no subclass hook (__eq__, __int__, ...) ever runs.
+    a, b = _plain_builtin(a), _plain_builtin(b)
     if isinstance(a, bool) or isinstance(b, bool):
         return type(a) is type(b) and a == b
     if isinstance(a, float) and isinstance(b, float):
         return (math.isnan(a) and math.isnan(b)) or a == b
-    if isinstance(a, list) and isinstance(b, list):
-        items_a, items_b = cast(list[Any], a), cast(list[Any], b)
-        return len(items_a) == len(items_b) and all(
-            same_value(x, y) for x, y in zip(items_a, items_b)
-        )
+    for kind in (list, tuple):
+        if isinstance(a, kind) and isinstance(b, kind):
+            items_a, items_b = cast(Sequence[Any], a), cast(Sequence[Any], b)
+            return len(items_a) == len(items_b) and all(
+                same_value(x, y) for x, y in zip(items_a, items_b)
+            )
     if isinstance(a, dict) and isinstance(b, dict):
         map_a, map_b = cast(dict[Any, Any], a), cast(dict[Any, Any], b)
         return map_a.keys() == map_b.keys() and all(
             same_value(map_a[k], map_b[k]) for k in map_a
         )
-    # A subclass of a built-in type is compared as its base value (read through the
-    # base type's own slots), so no subclass hook (__eq__, __int__, ...) ever runs.
-    a, b = _plain_builtin(a), _plain_builtin(b)
     numbers = isinstance(a, (int, float)) and isinstance(b, (int, float))
     if type(a) is not type(b) and not numbers:
         return False
@@ -120,11 +121,18 @@ def same_value(a: Any, b: Any) -> bool:
 
 def _plain_builtin(value: Any) -> Any:
     """``value`` as its built-in base value when it is an instance of a subclass of
-    ``int``, ``float``, ``str`` or ``bytes`` (read through the base type's slots, so
-    no subclass method runs); any other value unchanged."""
+    ``int``, ``float``, ``str``, ``bytes``, ``list``, ``tuple`` or ``dict`` (read
+    through the base type's slots, so no subclass method runs; a container's items
+    stay as they are); any other value unchanged."""
     kind = type(value)
-    if kind in (int, float, str, bytes, bool):
+    if kind in (int, float, str, bytes, bool, list, tuple, dict):
         return value
+    if isinstance(value, list):
+        return list.__getitem__(cast(list[Any], value), slice(None))
+    if isinstance(value, tuple):
+        return tuple.__getitem__(cast(tuple[Any, ...], value), slice(None))
+    if isinstance(value, dict):
+        return dict(dict.items(cast(dict[Any, Any], value)))
     if isinstance(value, int):
         return int.__int__(value)
     if isinstance(value, float):
@@ -771,6 +779,7 @@ class _Reader:
         if rows and (
             set(mapping) != set(_system_tags(rows[0]))
             or set(mapping.values()) != set(_system_tags(up_rows[0]) if up_rows else [])
+            or len(set(mapping.values())) != len(mapping)
         ):
             # Every system-tag column must take part (source id and record id alike),
             # or a group would be trusted on part of its fold.
@@ -960,14 +969,32 @@ def _entries_for(node: Any, row: Row, column: str, reader: _Reader) -> list[Row]
 
 
 def _latest(entries: list[Row], node: Any) -> Row:
-    """The entry of the latest attempt; entries for different inputs are refused."""
+    """The one stored entry behind a held row; several are refused.
+
+    The entries given have the row's system tags and name its result (and, past a
+    function's input, the input row's hash). Entries for different inputs make the
+    link ambiguous. Several entries for one input and one result (async execution
+    can record two copies of an identical input, one reusing the other's result) each
+    say something different (entry id, computed or reused, run, time recorded), and
+    the held row does not record which one served it: never guessed (the highest
+    index is not necessarily the one), refused.
+    """
     inputs = {bytes(e[constants.INPUT_DATA_HASH_COL]) for e in entries}
     if len(inputs) > 1:
         raise ProvenanceInconsistencyError(
             f"node {node.label!r}: {len(inputs)} stored entries for different inputs "
             "have the row's system tags and result; the link is ambiguous"
         )
-    return max(entries, key=lambda e: e.get("__pipeline_recomputation_index") or 0)
+    distinct: dict[Any, Row] = {
+        _hash_text(e.get("__pipeline_entry_id")) or id(e): e for e in entries
+    }
+    if len(distinct) > 1:
+        raise ProvenanceInconsistencyError(
+            f"node {node.label!r}: {len(distinct)} stored entries for one input have "
+            "the row's system tags and result; which one served the row is not "
+            "recorded"
+        )
+    return next(iter(distinct.values()))
 
 
 def _function_run(
@@ -1651,11 +1678,21 @@ class _Tracer:
             if entries:
                 entry = _latest(entries, node)
                 run = _function_run(node, entry, row, column, self.reader)
+                # The entry's own system tags name the record it was computed for;
+                # every input token it stores must name that record.
+                own = _pairs(entry, _system_tags(entry))
                 for name in sorted(
                     c for c in entry if c.startswith(constants.SOURCE_PREFIX)
                 ):
                     token = entry[name]
                     if isinstance(token, str):
+                        source_id, record_id, _ = _parse_token(token)
+                        if (source_id, record_id) not in own:
+                            raise ProvenanceInconsistencyError(
+                                f"node {node.label!r}: the stored entry's input token "
+                                f"{name} names {source_id!r} {record_id!r}, not the "
+                                f"record its system tags name"
+                            )
                         self.edges.add((upstream.label, node.label))
                         leaves.append(
                             self.leaf(
@@ -1880,13 +1917,16 @@ class _Tracer:
 
 
 def _snapshot(value: Any) -> Any:
-    """A copy of a selector value's lists and mappings (no user method is called);
-    other values as given."""
-    if isinstance(value, list):
+    """A copy of a selector value's lists, tuples and mappings, at every depth, read
+    through the base types' own methods (``_plain_builtin``: no subclass method is
+    called); other values as given."""
+    value = _plain_builtin(value)
+    if type(value) is list:
         return [_snapshot(v) for v in cast(list[Any], value)]
-    if isinstance(value, dict):
-        items = cast(dict[Any, Any], value)
-        return {k: _snapshot(v) for k, v in items.items()}
+    if type(value) is tuple:
+        return tuple(_snapshot(v) for v in cast(tuple[Any, ...], value))
+    if type(value) is dict:
+        return {k: _snapshot(v) for k, v in cast(dict[Any, Any], value).items()}
     return value
 
 
