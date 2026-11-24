@@ -152,7 +152,10 @@ then show the same results, with the times they were computed.
 id as it appears in a source-info token (`dict_v1:trials`), and a record id. The source
 argument must name exactly one source: when one source's name is another's id
 (`dict_v1:a` names the source `a`, and a source named `dict_v1:a` too), it is refused
-with `ValueError` naming both; give the node label or full id that names one. It reads the run the job holds: before a run, and on a loaded job not
+with `ValueError` naming both; give the node label or full id that names one. A node
+label or source name asks about every id the slot's rows carry, a full id about that id
+only; a slot whose label is also one of the several ids it carries is refused for that
+string too. It reads the run the job holds: before a run, and on a loaded job not
 yet run (`load_only=True`), it answers `not_computed`, even when the store holds entries.
 It answers in two steps:
 

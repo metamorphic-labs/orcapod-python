@@ -2682,3 +2682,62 @@ def test_a_full_id_asks_about_that_id_only_in_a_slot_of_several(
         # The slot's label asks about every id the slot carries.
         for rid in (1, 2):
             assert not node.why_missing("slot", f'{{"rid":{rid}}}').missing
+
+
+@pytest.mark.parametrize("overlap", [True, False])
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_a_label_that_is_one_of_its_slots_ids_is_refused(
+    tmp_path: Path, mode: str, overlap: bool
+) -> None:
+    """A slot labelled dict_v1:tenant:a carrying dict_v1:tenant:a (rid 1) and
+    dict_v1:tenant:b (rid 2): 'dict_v1:tenant:a' means the slot and one of its ids, so
+    it is refused, never one meaning picked. Control: the slot labelled 'slot', where
+    the id asks about its own records only. Live and load-only."""
+    import warnings
+
+    from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+
+    def feed(name: str, rid: int, value: int) -> DictSource:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # a name shaped like an id warns
+            return DictSource(
+                [{"rid": rid, "x": value}],
+                tag_columns=["rid"],
+                tag_only_columns=True,
+                record_id_columns=["rid"],
+                source_id=name,
+            )
+
+    a, b = feed("tenant:a", 1, 10), feed("tenant:b", 2, 20)
+    slot = a.source_id if overlap else "slot"
+    tables = [s.as_table(columns={"source": True, "system_tags": True}) for s in (a, b)]
+    mixed = ArrowTableStream(
+        pa.concat_tables(tables), tag_columns=["rid"], label="mixed"
+    )
+    store = DeltaTableDatabase(tmp_path / "db")
+    job = PipelineJob(name="overlap", database=store)
+    with job:
+        SelectDataColumns(["x"])(feed(slot, 3, 30))
+    job.save(tmp_path / "job.json")
+    loaded = PipelineJob.load(tmp_path / "job.json", database=store)
+    for load_only, current in ((False, job), (True, loaded)):
+        current.bind(sources={slot: mixed})
+        current.run(
+            orchestrator=AsyncPipelineOrchestrator()
+            if mode == "async"
+            else SyncPipelineOrchestrator(),
+            load_only=load_only,
+        )
+        node = current.nodes["SelectDataColumns"]
+        # The other id is unambiguous either way.
+        assert not node.why_missing(b.source_id, '{"rid":2}').missing
+        assert node.why_missing(b.source_id, '{"rid":1}').missing
+        if overlap:
+            for record in ('{"rid":1}', '{"rid":2}'):
+                with pytest.raises(ValueError, match="two meanings"):
+                    node.why_missing(a.source_id, record)
+        else:
+            assert not node.why_missing(a.source_id, '{"rid":1}').missing
+            crossed = node.why_missing(a.source_id, '{"rid":2}')
+            assert crossed.missing and crossed.present_in == ()
+            assert not node.why_missing("slot", '{"rid":2}').missing

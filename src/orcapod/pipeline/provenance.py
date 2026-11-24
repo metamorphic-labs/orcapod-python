@@ -2032,6 +2032,16 @@ def why_missing(node: Any, source: str, record_id: str) -> Absence:
     # can carry several: a stream of two sources' rows); a full id asks about that id
     # only, so another id's record of the same number is never taken for it.
     slot_wide = source in (chosen.label, _source_name(chosen))
+    if slot_wide and source in chosen_ids and chosen_ids != {source}:
+        # Two meanings at one node: the slot (every id it carries) and one of its ids.
+        # Refused, never one picked.
+        carried_ids = ", ".join(sorted(map(str, chosen_ids)))
+        raise ValueError(
+            f"{source!r} is both the label of source node {chosen.label!r} (every id "
+            f"its rows carry: {carried_ids}) and one of those full source ids, so it "
+            "has two meanings here; give the slot's source another name (so its "
+            "label is none of its ids), or ask by one of its other ids"
+        )
     ids = (chosen_ids or {source}) if slot_wide else {source}
     wanted: dict[int, set[tuple[Any, Any]]] = {
         id(chosen): {(sid, record_id) for sid in ids}
