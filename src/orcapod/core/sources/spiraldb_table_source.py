@@ -6,9 +6,8 @@ read holds one of SpiralDB's batches at a time whatever the table's size. The ta
 primary-key (key-schema) columns are the tag columns by default.
 
 Requires the ``spiraldb`` optional extra: ``pip install orcapod[spiraldb]``.
-Authentication is handled externally — run ``spiral login`` once; pyspiral keeps
-the credentials in its per-user application directory
-(``~/Library/Application Support/pyspiral/`` on macOS, ``~/.config/pyspiral/`` on Linux).
+Authentication is spiral-sdk's: ``SPIRAL_*`` environment variables, or the credentials
+``spiral login`` saved.
 The SDK client is reused for reads and freshness checks, including on restricted copies.
 Use a new source after changing the SDK endpoint, credentials or options. Use the source
 as a context manager or call ``close()`` after its reads and jobs have finished.
@@ -42,7 +41,9 @@ from __future__ import annotations
 import asyncio
 import copy
 import dataclasses
+import os
 from collections.abc import AsyncIterator, Collection, Generator, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from types import TracebackType
 from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING
@@ -67,6 +68,7 @@ from orcapod.databases.spiraldb_connector import (
     SpiralDBConnector,
     SpiralDBTable,
     SpiralDBTableNotFoundError,
+    require_same_process,
 )
 from orcapod.errors import InputValidationError, RowIdentifierError, SourceTooLargeError
 from orcapod.types import ColumnConfig, Condition
@@ -97,16 +99,18 @@ class _Head(NamedTuple):
         rows: The rows read; zero rows (the source's columns) when ``rows_read`` is
             false.
         rows_read: Whether rows were read at all.
-        total_rows: The rows the source reads or, as an estimate, the table's recorded
-            row count.
-        total_is_estimate: Whether ``total_rows`` is the recorded row count rather than
-            an exact count.
+        total_rows: The rows the source reads or, as an estimate, the table's row count;
+            ``None`` when it is above the bound that was counted.
+        total_is_estimate: Whether ``total_rows`` is the table's row count rather than
+            that of the rows the source reads.
+        counted_to: With no ``total_rows``, the rows the table has at least.
     """
 
     rows: "pa.Table"
     rows_read: bool
-    total_rows: int
+    total_rows: int | None
     total_is_estimate: bool
+    counted_to: int = 0
 
 
 def _schema_difference(found: "pa.Schema", expected: "pa.Schema") -> str:
@@ -194,7 +198,7 @@ class SpiralDBTableSource(RootSource):
     """A read-only Source over a table in a SpiralDB dataset, read in batches.
 
     Building the source reads the table's metadata only: that the table exists, its
-    key columns, its schema (with the table's nullability record applied) and
+    key columns, its schema (with the table's row in the dataset's schema table applied) and
     SpiralDB's own id of the table. No row is read. ``output_schema``, ``keys``,
     ``content_hash``, ``pipeline_hash`` and ``to_config`` never read a row either.
 
@@ -263,8 +267,8 @@ class SpiralDBTableSource(RootSource):
         label: Human-readable label for this source node.
         data_context: Data context governing type conversion and hashing.
         config: OrcaPod configuration.
-        overrides: Optional pyspiral client config overrides passed through to
-            ``SpiralDBConnector``, e.g. ``{"server.url": "https://api.spiraldb.dev"}``.
+        overrides: Optional: ``{"server.url": "https://api.spiraldb.dev"}``, the
+            address of the service, passed to ``SpiralDBConnector``.
         tag_only_columns: Tag columns kept as tags only, not data, exactly as in
             v0.3; ``True`` for all of them. Keyword-only. Every other tag column is
             a data-tag: also a data column of the same name (ITL-1023).
@@ -345,6 +349,7 @@ class SpiralDBTableSource(RootSource):
         self._overrides = None if overrides is None else dict(overrides)
         self._connection: SpiralDBConnector | None = None
         self._connection_lock = Lock()
+        self._pid = os.getpid()
         self._closed = False
         self._condition = Condition()
         self._limit = limit
@@ -587,6 +592,7 @@ class SpiralDBTableSource(RootSource):
         The modified time is carried over until ``_apply_restriction`` moves it.
         A SpiralDB source holds no rows it read.
         """
+        require_same_process(self._pid)  # before a lock inherited by a fork
         with self._connection_lock:
             connection = self._connection
             if connection is None:
@@ -686,6 +692,7 @@ class SpiralDBTableSource(RootSource):
 
     def _connector(self) -> SpiralDBConnector:
         """Return the connector owned by this source."""
+        require_same_process(self._pid)  # before a lock inherited by a fork
         with self._connection_lock:
             if self._closed:
                 raise RuntimeError("SpiralDBTableSource is closed")
@@ -699,6 +706,7 @@ class SpiralDBTableSource(RootSource):
 
     def close(self) -> None:
         """Release this source's reference to the SDK client after its reads finish."""
+        require_same_process(self._pid)  # before a lock inherited by a fork
         with self._connection_lock:
             self._closed = True
             if self._connection is not None:
@@ -737,12 +745,12 @@ class SpiralDBTableSource(RootSource):
 
     @property
     def row_count_estimate(self) -> int:
-        """The whole table's row count as SpiralDB's manifests record it.
+        """The whole table's row count, exact: every key is read to count it.
 
         The count is of the version this source reads (the one it was built at, or
-        the given ``asof``). No row is read. ``where`` and ``limit`` are not taken into
-        account, and the count can be above what a scan returns when rows were
-        deleted or overwritten and not yet compacted.
+        the given ``asof``), and is remembered while the source is open. ``where`` and
+        ``limit`` are not taken into account. SpiralDB offers no recorded count, so the
+        cost grows with the table.
         """
         asof = self._asof
         return self._lookup_table().row_count_estimate(asof=asof)
@@ -862,16 +870,13 @@ class SpiralDBTableSource(RootSource):
             and (limit is None or limit > max_rows)
         ):
             # Nothing but limit bounds the read, and the limit does not keep it
-            # under the cap: the table's recorded row count decides, before any
-            # row is read (so no row reaches a function of a job that would fail).
-            # The count can be above the rows a scan returns, never below.
-            recorded = table.row_count_estimate(asof=asof)
-            bound = recorded if limit is None else min(limit, recorded)
-            if bound > max_rows:
+            # under the cap: the table's row count decides, before any row is
+            # handed on (so no row reaches a function of a job that would fail).
+            # Counting stops one past the cap.
+            if table.count_rows(asof=asof, at_most=max_rows + 1) > max_rows:
+                bound = "" if limit is None else f" (limit={limit:,})"
                 raise self._too_large(
-                    f"the read may return up to {bound:,} rows: the table records "
-                    f"about {recorded:,} rows (SpiralDB's count, which can include "
-                    "deleted rows not yet compacted)"
+                    f"the table has more than {max_rows:,} rows{bound}"
                 )
         seen = 0
         # Keys must be unique across the whole read, not only within a slice.
@@ -926,22 +931,24 @@ class SpiralDBTableSource(RootSource):
     async def async_iter_data(
         self,
     ) -> AsyncIterator["tuple[TagProtocol, DataProtocol]"]:
-        """Yield the table's ``(tag, data)`` pairs, reading each batch off the event loop."""
+        """Yield the table's ``(tag, data)`` pairs, reading each batch off the event loop.
+
+        One thread owns the reader for its whole life. When the consumer stops or is
+        cancelled, that thread closes it, after a read in progress has ended.
+        """
         streams = self._batch_streams()
+        owner = ThreadPoolExecutor(max_workers=1, thread_name_prefix="spiraldb-read")
+        loop = asyncio.get_running_loop()
         try:
             while True:
-                stream = await asyncio.to_thread(next, streams, None)
+                stream = await loop.run_in_executor(owner, next, streams, None)
                 if stream is None:
                     break
                 for pair in stream.iter_data():
                     yield pair
         finally:
-            try:
-                streams.close()
-            except ValueError:
-                # Cancelled while a batch was being read in the worker thread: the
-                # scan cannot be closed from here and ends with that read.
-                pass
+            _ = owner.submit(streams.close)
+            owner.shutdown(wait=False)
 
     def as_table(
         self,
@@ -988,7 +995,8 @@ class SpiralDBTableSource(RootSource):
         At most ``n`` rows are read (fewer when the source's ``limit`` is smaller), with
         ``where`` and the pinned version applied and ``max_rows`` not, so a table of any
         size can be looked at. When these are not all the rows the source reads, the
-        size is the table's recorded row count (no scan), an estimate.
+        size is the table's row count, counted from its keys up to ``max_rows`` (at most
+        100,000) rows; above that it is unknown.
 
         Args:
             n: The most rows to read.
@@ -997,7 +1005,8 @@ class SpiralDBTableSource(RootSource):
         """
         if not self._preview_reads_rows:
             schema_only = self._stream.as_table(columns=columns, all_info=all_info)
-            return _Head(schema_only, False, self.row_count_estimate, True)
+            bound, total = self._bounded_count(PREVIEW_ROWS)
+            return _Head(schema_only, False, total, True, bound)
         limit = self._limit
         head_limit = n if limit is None else min(n, limit)
         asof = self._asof
@@ -1009,10 +1018,32 @@ class SpiralDBTableSource(RootSource):
         )
         if rows.num_rows < head_limit or head_limit == limit:
             return _Head(rows, True, rows.num_rows, False)
-        recorded = table.row_count_estimate(asof=asof)
+        bound, total = self._bounded_count(n, table)
         if limit is not None and not self._condition:
-            recorded = min(limit, recorded)
-        return _Head(rows, True, recorded, True)
+            total = limit if total is None and limit <= bound else total
+            total = None if total is None else min(limit, total)
+        return _Head(rows, True, total, True, bound)
+
+    def _bounded_count(
+        self, shown: int, table: SpiralDBTable | None = None
+    ) -> tuple[int, int | None]:
+        """Return how far the table's rows were counted for a preview, and their number,
+        or ``None`` when there are more.
+
+        A preview counts at most ``DEFAULT_MAX_ROWS`` keys: never every key of a table of
+        any size. One that shows more rows than that counts none.
+
+        Args:
+            shown: The rows the preview shows.
+            table: The handle resolved for this read; looked up when not given.
+        """
+        if shown > DEFAULT_MAX_ROWS:
+            return shown, None
+        allowed = min(self._max_rows or DEFAULT_MAX_ROWS, DEFAULT_MAX_ROWS)
+        bound = max(allowed, shown)
+        handle = self._lookup_table() if table is None else table
+        total = handle.count_rows(asof=self._asof, at_most=bound + 1)
+        return bound, (None if total > bound else total)
 
     def _head_note(self, head: "_Head", sorted_by_tags: bool = False) -> str:
         """Return the words a notebook display puts after the header: the one place.
@@ -1021,8 +1052,17 @@ class SpiralDBTableSource(RootSource):
         rows of the table in tag order, and the words say so.
         """
         shown = head.rows.num_rows
+        total = (
+            (
+                f"at least {head.counted_to:,}"
+                if head.counted_to > DEFAULT_MAX_ROWS
+                else f"more than {head.counted_to:,}"
+            )
+            if head.total_rows is None
+            else f"about {head.total_rows:,}"
+        )
         if not head.rows_read:
-            return f"rows not read; the table has about {head.total_rows:,} rows"
+            return f"rows not read; the table has {total} rows"
         if not head.total_is_estimate:
             all_rows = f"all {shown:,} row{'' if shown == 1 else 's'}"
             return f"{all_rows}, sorted by tags" if sorted_by_tags else all_rows
@@ -1033,13 +1073,10 @@ class SpiralDBTableSource(RootSource):
                 if sorted_by_tags
                 else f"first {shown:,} matching rows"
             )
-            return (
-                f"{read} (where {condition}); the table has "
-                f"about {head.total_rows:,} rows"
-            )
+            return f"{read} (where {condition}); the table has {total} rows"
         if sorted_by_tags:
-            return f"{shown:,} rows read, sorted by tags, of about {head.total_rows:,}"
-        return f"first {shown:,} rows of about {head.total_rows:,}"
+            return f"{shown:,} rows read, sorted by tags, of {total}"
+        return f"first {shown:,} rows of {total}"
 
     def head(
         self,
@@ -1053,7 +1090,8 @@ class SpiralDBTableSource(RootSource):
         At most ``n`` rows are read (fewer when the source's ``limit`` is smaller), with
         ``where`` and the pinned version applied and ``max_rows`` not, so a table of any
         size can be looked at. The total is exact when these are all the rows the
-        source reads, else the table's recorded row count (an estimate). The notebook
+        source reads, else the table's row count (an estimate of what is read), unknown
+        above the bound that is counted. The notebook
         preview is this head. See ``StreamBase.head``.
         """
         check_head_size(n)
