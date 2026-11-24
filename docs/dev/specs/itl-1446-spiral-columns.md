@@ -183,7 +183,7 @@ path, and the Arrow schema in storage form (logical types as `ARROW:extension:*`
   after the first time (the manifest of a table id does not change).
 - To probe: whether parallel `set_metadata` calls on **different** keys keep both. pyspiral says
   entries are upserted and parallel calls race "to set a value". If the server replaces the
-  whole map, the manifest goes to a table of its own (the registry of section 5.4), where a write
+  whole map, the manifest goes to a table of its own (the catalog of section 5.4), where a write
   is an upsert of one row.
 
 Limits: 1,024 entries a table, 8 KiB a pair, 255 characters a key. A key here is at most 90
@@ -369,30 +369,78 @@ stays below it either way.
 
 ### 5.3 The mapping
 
-`op-<hint>-<digest>`: `<digest>` is the 64-hex SHA-256 of the compact JSON list of the full path
-(base path included), and `<hint>` is the components that hold no 64-hex hash, joined by `_`,
-sanitised as today and cut to 56 characters. At most 124 characters, always `[a-z]`-initial, only
-`[a-zA-Z0-9_-]`. Two paths share a name only if SHA-256 collides, and the manifest's recorded path
-is compared on first use of a table, so even then (or if SpiralDB folds case) the store refuses
-rather than mixes. A bare digest in a name carries no label, per the hash label rule.
+Decided (developer, 2026-11-24): a short readable part plus a digest of the full, unsanitised
+record path, independent of any lookup; a fixed-name catalog table; nothing is ever parsed out of
+a name.
 
-A reversible escape (no digest) was considered: it cannot fit. Two 64-hex hashes are already 128
-characters.
+`op-<hint>-<digest>`:
 
-### 5.4 Finding tables by path: the registry
+- `<digest>` is the 64-hex SHA-256 of the compact JSON list of the full path as text: the
+  database's base path and the record path, each component exact. JSON quoting keeps `["a","b"]`
+  and `["a/b"]` apart.
+- `<hint>` is for people: the components without a 64-hex hash, joined by `_`, sanitised as
+  today, cut to 56 characters.
 
-`list_table_paths(prefix)` must give real paths, and a digest cannot be reversed. Reading every
-table's manifest costs a call a table. Proposed: the developer's lookup table (ITL-1100), one
-table `op-tables` with key `table_name` and value columns `path` (JSON) and `format`:
+At most 124 characters of `[a-zA-Z0-9_-]`, starting with `o`. The developer gives SpiralDB's limit
+as 255; pyspiral's own type says 128 (Read). Names fit both, and P2 settles which the server
+applies. A reversible escape instead of a digest cannot fit 128: two path hashes are already 128.
 
-- a row is upserted **before** its table is created, so no store table is missing from it;
-- a row's content is a function of its key, so two writers write the same row: the one kind of
-  upsert that really is harmless;
-- listing is one scan of the registry, joined with the project's table list (a row whose table
-  was never created or was dropped is left out).
+The digest is a new hash site of class "in a name" (bare hex, no label) and gets its row in the
+hash site inventory. No existing hash or record path moves.
 
-The prefix `op-` is the store's. A store table name that exists without a manifest and with value
-columns is refused. Cleanup: the registry names every store table of a dataset.
+**Several databases over one connector.** `.at()` views and separate `ConnectorArrowDatabase`
+objects use the full path, so `db.at("a")` writing `("b",)` and `db` writing `("a", "b")` are one
+table, as on Delta; they share one catalog. Two datasets are two stores.
+
+### 5.4 The catalog, `orcapod_catalog_v1`
+
+| Column | Type | Content |
+|---|---|---|
+| `physical_name` | text, **key** | the table's name in SpiralDB |
+| `path` | text | the exact path, the JSON text the digest is of |
+| `kind` | text | `function_pipeline`, `function_result`, `side_effect_log`, `operator_cache`, `cached_source`, or `other`; from the path's last component (its layout), never from the name |
+| `store_format` | int32 | the manifest format the table was created with |
+
+No column starts with `__` or holds `.`. The catalog is written with these fixed types, without
+the codec or a manifest, and its schema is checked when opened. A row is a function of its key:
+there is no created-at column, so two writers write the same row.
+
+- **Order.** The catalog row is committed, then the table is created, then its manifest, then
+  rows. So every store table is in the catalog, and a crash leaves at most a row with no table,
+  which a listing leaves out.
+- **Use.** A table's name is computed, so a read or write needs no lookup to find it. The catalog
+  is for `list_table_paths`, cleanup, people, and two checks: a row for the name with **another
+  path** is a digest collision and is refused; a table that exists **without a row** is not ours,
+  and is neither read nor written (an error naming it, never "no such table", which would
+  recompute over it).
+- **Deletion.** Under the lease: drop the table by id, then delete its row. A crash between
+  leaves a row with no table. A table dropped by hand reads as absent and is recreated. Offered
+  as `database.delete_table(path)`; nothing is deleted automatically.
+- **A lost catalog.** Every table's manifest also holds its path, so it can be rebuilt:
+  `rebuild_catalog()`, run by a person, reads each table's metadata once, takes those with a
+  manifest whose path gives exactly the table's name, and writes the rows. Until then the tables
+  are refused, not recomputed. When the catalog does not exist, opening the store for writing
+  looks once at the metadata of the tables there; if any has a manifest it refuses and names
+  `rebuild_catalog()`, else it creates the catalog. A catalog that lost only some rows shows as
+  "exists without a row" on use. `list_table_paths` cannot see those tables until the rebuild, so
+  stale-layout accounting may miss them: a stated limit.
+- **Schema version.** In the name. A changed catalog is `orcapod_catalog_v2`, with its own
+  migration decision; a store that holds a catalog of another version is refused. The manifest and
+  the lease (`orcapod_lease_v1`, section 6.3) are versioned apart.
+- **Cost.** One read a handle at the start of a run (about 300 bytes a table; kept until
+  `refresh_table`), none per row, one commit per **new** table (five for the prototype's job, first
+  run only), and nothing on a rerun. `list_table_paths` is this read plus one listing.
+- **Scope: dataset or project** (under discussion with the developer):
+
+| | per dataset | per project |
+|---|---|---|
+| A dataset moved, copied or dropped takes its catalog along | yes | no: rows dangle |
+| Permissions | the dataset's own | write access where the catalog lives, for every store |
+| All stores of a project listed at once | no | yes |
+| Key | `physical_name` | dataset and name |
+| Lease | one per dataset, beside it | the lease stays per dataset |
+
+The rest of this design is the same either way; per dataset is the smaller one.
 
 ## 6. Concurrent writers and failed writes
 
@@ -453,7 +501,7 @@ committed record stays (insert when not matched), so a record once read never ch
 | `create_table(exist_ok=False)` | may be an atomic test-and-set, if the service makes names unique atomically. Unknown (P11) |
 | upsert and `delete_keys` of one row, then a fresh read | **enough**, if a read started after a commit sees it |
 
-**Claim, then check.** One table `op-lease` per dataset, key `token` (UUIDv7 of one acquisition),
+**Claim, then check.** One table `orcapod_lease_v1` per dataset, key `token` (UUIDv7 of one acquisition),
 value columns: run id, job name, process id, start time, last renewal.
 
 1. Commit a row with my token. 2. Read every row, fresh. 3. If mine is the only one, I hold the
@@ -514,7 +562,7 @@ change its key.
 | the write raises, nothing committed | `ConnectorArrowDatabase` **drops** the rows from its queue (`take_ready`, never restored) | restore them (`PendingCommits.restore`) and withdraw their dependents, as Delta does; a later flush retries. A refusal of the rows themselves still drops them |
 | the commit is **ambiguous** (committed, but the reply is lost) | as above | results: a retry upserts the same UUIDs, harmless. Pipeline records: a retry is skipped by `skip_existing`. The run still reports failure |
 | the result table commits, the pipeline table fails | results without records | the next run finds them by input hash, computes nothing, writes the records |
-| a manifest or registry row without rows | - | inert |
+| a manifest or catalog row without rows | - | inert |
 | a side effect was delivered and its log row failed | the row is dropped: delivered again next run | the row stays queued; a crash still delivers again (at least once, as on Delta) |
 | interrupted between two tables' commits | - | promise 2; the job reruns |
 
@@ -530,7 +578,7 @@ store by default (give them an in-memory or Delta store) until they batch.
 | # | Question | Decides |
 |---|---|---|
 | P1 | names: each ASCII character and class of 3.1, `ox_` names, 1 to 1,024 characters, case pairs, NFC/NFD pairs; nested field names | 3.1 |
-| P2 | table name of 128 and 129 characters, case pair, `-` | 5.3 |
+| P2 | table name of 128, 129, 255 and 256 characters, case pair, `-` | 5.3 |
 | P3 | the type matrix, physical forms; float bits; `null`; null struct; struct field order | 3.2 |
 | P4 | `key_table` with `binary` and `large_binary`, unsorted, repeated, absent ids; 1 to 100,000 ids: time | 4.3 |
 | P5 | `where` equality and `in_` on binary; time against a table of 10^3 to 10^6 rows | 4.3 |
@@ -551,7 +599,7 @@ today until PR 5.
 |---|---|---|
 | 1 | Fake as strict as the client (3.4); the connector refuses what it must (`fixed_size_binary`, `duration`, `null`, table names); `database-types.md` regenerated | each rule, with the native library's text; matrix |
 | 2 | `spiral_store` codec: names, types, manifest, as pure functions with no pyspiral | property tests: names (adversarial alphabet, nested), schema round trip over the type matrix, chunk sizes, two manifests |
-| 3 | Connector: store tables use the codec; `ox_order`; registry and table names; null struct refused when added; `ConnectorArrowDatabase` asks the connector for a table's name | matrix on the fake; column and row order; foreign tables unchanged; a failed first write; two connectors with an injected failure (ITL-1190's interleaving); collisions of 5.2 |
+| 3 | Connector: store tables use the codec; `ox_order`; table names and the catalog; null struct refused when added; `ConnectorArrowDatabase` asks the connector for a table's name | matrix on the fake; column and row order; foreign tables unchanged; a failed first write; two connectors with an injected failure (ITL-1190's interleaving); collisions of 5.2; catalog: crash between each step, lost, partly lost, another version, `.at()` views, a forced digest collision |
 | 4 | Lookups (4.3): keyed and `where` reads, the run index, table handles; failed rows restored (6.4) | call counts per run asserted; equivalence with the whole-table path (`test_*_lookup_equivalence`); staleness by a second handle |
 | 5 | Job: the lease (6.3) in the database and in `job.run`, `run_async` and `node.run`; refusals removed where covered; the post-commit check; docs (names, other readers, cleanup, permissions, the lease and its two conditions) | the pipeline store suites parametrised over the fake: first run, rerun, added rows, changed version, `run()` and `run_async()`, save and load, `load_only`, `clear_cache`, separate result database, `trace`; equal to Delta: sync exactly, async as sets. Every table kind. The lease: each row of 6.3's table, on the fake, with two handles and an injected crash between any two steps |
 | 6 | Live suite (the existing `spiral-integration` job): PR 5's job, the type matrix, P7, P8, cost printed; every table dropped | live |
@@ -569,13 +617,13 @@ save an override that is not a known non-secret key (`server.url`).
 | 1 | Where the mapping lives: (a) the store, (b) rename everywhere, (c) mixed | (a) |
 | 2 | *Decided: one writer, a second refused.* To confirm: the lease's conditions C1 and C2 are acceptable, and what ships if P8 refutes C1 (named-table lease if P11 holds, else detection only) | lease; do not ship a "refusal" resting on neither |
 | 3 | Row order: store `ox_order` so reads follow the written order | yes; otherwise results differ from Delta |
-| 4 | Table names `op-<hint>-<digest>` with the registry table `op-tables` (ITL-1100's lookup table) | yes |
+| 4 | *Decided: digest names and the catalog.* Open: its scope, dataset or project (5.4) | dataset |
 | 5 | Two different manifests in one table stop the job, rather than one winning | stop |
 | 6 | Use the collision-free path mapping for SQLite and PostgreSQL too (their existing tables would no longer be found) | yes, in its own PR before 0.4.0, while nobody has such a store |
 | 7 | Null structs refused in the first version (a `T \| None` user-class output holding a null) | yes |
 | 8 | Observers not on a SpiralDB store at first | yes |
 | 9 | The 8 KiB failure of today's Arrow metadata entry on tables that are not store tables: fix now (chunks) or leave | fix in PR 2, same chunk code |
-| 10 | Stay on pyspiral 0.16.33 for this (ITL-931 and ITL-1186 later). The codec, manifest and registry do not depend on the client | yes |
+| 10 | Stay on pyspiral 0.16.33 for this (ITL-931 and ITL-1186 later). The codec, manifest and catalog do not depend on the client | yes |
 | 11 | A `CachedSource` read while another run holds the store: refuse, or serve live rows without storing | refuse |
 | 12 | A crashed job's claim is cleared by a person only, never by age | yes |
 
@@ -585,7 +633,7 @@ save an override that is not a known non-secret key (`server.url`).
   limits.
 - The prototype maps names and top-level types only, and its job has number and text columns and
   UTC timestamps; it runs no logical type. It does not implement the manifest set, `ox_order`, the
-  registry, the proposed table names or the lookups.
+  catalog, the proposed table names or the lookups.
 - The async path, save and load, `load_only` and `trace` were not run through the prototype.
 - The fake's and the matrix's behaviour for logical types nested at depth was read, not run
   through the prototype.
