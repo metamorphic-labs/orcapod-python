@@ -29,6 +29,8 @@ from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.sources import ArrowTableSource
 from orcapod.types import CacheMode
+from tests.pipeline_stores import function_store_cases
+from tests.pipeline_stores import cache_store_cases
 
 JOB_NAME = "loaded_operator_cache"
 NULLABILITY = {
@@ -137,13 +139,13 @@ def _sorted(table: pa.Table) -> pa.Table:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("store_kind", STORES)
 @pytest.mark.parametrize("nullability", list(NULLABILITY))
+@function_store_cases
 def test_every_node_keeps_its_identity_and_schema_through_save_and_load(
-    store_kind: str, nullability: str, tmp_path: pathlib.Path
+    pipeline_store: ArrowDatabaseProtocol, nullability: str, tmp_path: pathlib.Path
 ) -> None:
     """Pipeline hash, content hash, table path and output schema are the run's."""
-    store = _store(store_kind, tmp_path)
+    store = pipeline_store
     job = _run(store, nullability)
     loaded = PipelineJob.load(str(_save(job, tmp_path)), database=store)
     # In-memory sources are not saved: a source node's content hash is its bound
@@ -160,14 +162,17 @@ def test_every_node_keeps_its_identity_and_schema_through_save_and_load(
 
 
 @pytest.mark.parametrize("read", ["as_table", "iter_data", "head"])
-@pytest.mark.parametrize("store_kind", STORES)
 @pytest.mark.parametrize("nullability", list(NULLABILITY))
+@function_store_cases
 def test_loaded_replay_operator_reads_the_rows_its_run_stored(
-    store_kind: str, nullability: str, read: str, tmp_path: pathlib.Path
+    pipeline_store: ArrowDatabaseProtocol,
+    nullability: str,
+    read: str,
+    tmp_path: pathlib.Path,
 ) -> None:
     """A loaded operator node's stored view reads exactly the rows read before saving;
     the node itself is empty until it runs (ITL-1095)."""
-    store = _store(store_kind, tmp_path)
+    store = pipeline_store
     job = _run(store, nullability)
     expected = _sorted(job.nodes["joined"].as_table())
     node = _load_replaying(_save(job, tmp_path), store).nodes["joined"]
@@ -182,11 +187,12 @@ def test_loaded_replay_operator_reads_the_rows_its_run_stored(
 
 
 @pytest.mark.parametrize("nullability", list(NULLABILITY))
+@cache_store_cases
 def test_a_pipeline_loaded_and_bound_to_its_sources_reuses_the_operator_cache(
-    nullability: str, tmp_path: pathlib.Path
+    nullability: str, pipeline_store: ArrowDatabaseProtocol, tmp_path: pathlib.Path
 ) -> None:
     """``Pipeline.load`` + ``from_pipeline(sources=...)`` reads and writes the run's table."""
-    store = InMemoryArrowDatabase()
+    store = pipeline_store
     # Pipeline.load rebuilds operators but not function pods: an operator-only pipeline.
     job = _run(store, nullability, with_function=False)
     expected = _sorted(job.nodes["joined"].as_table())

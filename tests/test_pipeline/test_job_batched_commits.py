@@ -38,6 +38,7 @@ from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 from orcapod.databases.utils import as_table_committing
 from orcapod.sources import DictSource
 from orcapod.types import NodeConfig, PodConfig
+from tests.pipeline_stores import function_store_cases
 
 ORCHESTRATORS: dict[str, Callable[..., Any]] = {
     "sync": SyncPipelineOrchestrator,
@@ -465,20 +466,24 @@ def test_base_entry_id_is_computed_once_per_row(
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
 @pytest.mark.parametrize("source_id", ["s", None])
+@function_store_cases
 def test_records_read_right_after_the_run_are_complete(
-    tmp_path: Path, orchestrator: str, source_id: str | None
+    pipeline_store: Any, orchestrator: str, source_id: str | None
 ) -> None:
     """``get_all_records`` right after ``run`` returns every row (ITL-930)."""
-    job = PipelineJob(name="itl930", database=DeltaTableDatabase(tmp_path))
+    job = PipelineJob(name="itl930", database=pipeline_store)
     with job:
         source = DictSource(
-            data=[{"k": "b", "x": 2}, {"k": "c", "x": 3}],
-            tag_columns=["k"],
+            data=[
+                {"g": "a", "k": "b", "note": "first", "x": 2},
+                {"g": "a", "k": "c", "note": "second", "x": 3},
+            ],
+            tag_columns=["g", "k"],
             tag_only_columns=True,
             source_id=source_id,
         )
         double.pod(source, label="double")
-    job.run(orchestrator=ORCHESTRATORS[orchestrator]())
+    job.run(orchestrator=ORCHESTRATORS[orchestrator](), commit_every_rows=1)
     records = job.nodes["double"].get_all_records()
     assert records is not None and records.num_rows == 2
     assert job.nodes["double"].as_table().num_rows == 2

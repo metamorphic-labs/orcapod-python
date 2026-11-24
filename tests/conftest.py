@@ -16,8 +16,14 @@ serial; pass ``-n 4`` to run in parallel on a machine with cores and memory to s
 from __future__ import annotations
 
 import os
+from collections.abc import Callable, Iterator
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+if TYPE_CHECKING:
+    from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 
 
 def _running_in_ci() -> bool:
@@ -65,3 +71,26 @@ def pytest_collection_modifyitems(
     for item in items:
         if any(mark.name == "postgres" for mark in item.iter_markers()):
             item.add_marker(skip_marker)
+
+
+@pytest.fixture
+def pipeline_store_factory(
+    request: pytest.FixtureRequest, tmp_path: Path
+) -> Iterator[Callable[[str], ArrowDatabaseProtocol]]:
+    """Open named, isolated stores of the same backend for one test.
+
+    Disk-backed stores return a fresh handle for an existing name. In-memory
+    stores keep their original handle so a second open can see the same data.
+    """
+    from tests.pipeline_stores import open_stores
+
+    with open_stores(request.param, tmp_path) as factory:
+        yield factory
+
+
+@pytest.fixture
+def pipeline_store(
+    pipeline_store_factory: Callable[[str], ArrowDatabaseProtocol],
+) -> ArrowDatabaseProtocol:
+    """An empty store for tests that only need one handle."""
+    return pipeline_store_factory("store")

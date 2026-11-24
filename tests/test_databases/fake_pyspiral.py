@@ -45,6 +45,24 @@ connector's docstrings, pyspiral's own documentation) or is an assumption to con
   refused unless written with ``push_down_nulls=True``, which turns it into a struct of null
   fields (observed live, ITL-936; top-level struct columns only in the fake).
 * Rows come back sorted by key and writes upsert by key (SpiralDB is a key-sorted store).
+
+Limits of this double (pyspiral 0.16.33 client docstrings and the connector's live tests):
+
+* A project ID and client configuration are accepted without authentication, permissions,
+  service-side name/key-schema validation, or storage routing. ``root_uri`` and transaction
+  options are ignored. Deleting an absent table succeeds, while the real client first opens it.
+* Each write replaces a local Arrow file. The fake does not enforce the client's unique-key
+  requirement within one transaction, and offers no transaction, atomic visibility, or
+  server conflict semantics for concurrent writes. Metadata limits are checked, but the
+  unversioned metadata race is not simulated.
+* Scans record ``asof`` but always read current rows. The fake reads and filters the whole
+  file, so ``limit`` demonstrates the output bound but cannot establish early termination.
+  Batch arguments are ignored, including ``disable_view_types``; batch splitting is synthetic.
+* The fake preserves written struct-child order and checks/pushes down null structs only in
+  top-level struct columns. Its Arrow casts and extension unwrapping are approximations.
+  Nested coercions, key types, identifier length limits, and service-side failures need live
+  checks. The fake refuses changes to the column set that raw SpiralDB can accept.
+
 """
 
 from __future__ import annotations

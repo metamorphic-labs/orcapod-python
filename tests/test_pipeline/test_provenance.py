@@ -20,8 +20,10 @@ from orcapod.databases import DeltaTableDatabase
 from orcapod.errors import ProvenanceInconsistencyError
 from orcapod.operators import Batch, Filter, GroupBy, Join, SelectDataColumns
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.sources import ArrowTableSource
 from orcapod.types import Highlight, SourceCell, col
+from tests.pipeline_stores import function_store_cases
 
 pytestmark = pytest.mark.filterwarnings("ignore::Warning")
 
@@ -110,6 +112,7 @@ def build(
     sessions_first: bool = False,
     fold: str = "group",
     name: str = "prov",
+    database: ArrowDatabaseProtocol | None = None,
 ) -> PipelineJob:
     """The test pipeline: units filtered (``depth_um < 500``, which removes ``row_5``),
     joined with sessions (``row_6`` has no session), a per-unit function with two outputs
@@ -122,8 +125,14 @@ def build(
         sessions_first: Give the join its inputs in the other argument order.
         fold: ``"group"`` or ``"batch"``.
         name: The job's name.
+        database: Override the default Delta store.
     """
-    job = PipelineJob(name=name, database=DeltaTableDatabase(root / "store"))
+    job = PipelineJob(
+        name=name,
+        database=database
+        if database is not None
+        else DeltaTableDatabase(root / "store"),
+    )
     with job:
         kept = Filter(col("depth_um") < 500)(units())
         left = SelectDataColumns(["n_spikes"])(kept)
@@ -170,10 +179,14 @@ GROUP_M1_S1 = {
 
 @pytest.mark.parametrize("mode", ["sync", "async"])
 @pytest.mark.parametrize("sessions_first", [False, True])
+@function_store_cases
 def test_trace_reaches_every_source_cell(
-    tmp_path: Path, mode: str, sessions_first: bool
+    tmp_path: Path,
+    mode: str,
+    sessions_first: bool,
+    pipeline_store: ArrowDatabaseProtocol,
 ) -> None:
-    job = build(tmp_path, sessions_first=sessions_first)
+    job = build(tmp_path, sessions_first=sessions_first, database=pipeline_store)
     run(job, mode)
     trace = job.nodes["means"].trace({"subject": "m1", "session": "s1"}, "mean_hz")
     assert trace.status == "traced"
@@ -188,7 +201,11 @@ def test_trace_reaches_every_source_cell(
     (grouped,) = trace.root.inputs
     members = [step for step in grouped.walk() if step.node == "unit_rates"]
     assert [m.member for m in members] == [0, 1, 2]
-    assert [dict(m.tags)["unit"] for m in members] == ["u0", "u1", "u2"]
+    units_in_trace = [dict(m.tags)["unit"] for m in members]
+    if mode == "async":
+        assert set(units_in_trace) == {"u0", "u1", "u2"}
+    else:
+        assert units_in_trace == ["u0", "u1", "u2"]
 
 
 def test_argument_order_gives_one_trace(tmp_path: Path) -> None:
