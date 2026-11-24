@@ -117,6 +117,22 @@ def _table(table: pa.Table | None) -> tuple[list[str], list[str]] | None:
     return table.column_names, sorted(map(str, table.to_pylist()))
 
 
+def test_live_function_presents_declared_keys_without_a_zero_row_layout() -> None:
+    """The stored reader preserves the live node's declared tag and output order."""
+    with _job(InMemoryArrowDatabase(), [1, 2]) as (job, _):
+        node = job.nodes["fn"]
+        expected = node.get_all_records(all_info=True)
+        assert expected is not None
+        with patch.object(type(node), "_zero_row_output_table", return_value=None):
+            records = node.get_all_records(all_info=True)
+        assert records is not None
+        user_columns = ["z_tag", "a_tag", "w_out", "c_out"]
+        assert [
+            name for name in records.column_names if name in user_columns
+        ] == user_columns
+        assert records.select(user_columns).equals(expected.select(user_columns))
+
+
 # Function result rows are named by a fresh uuid7 each run (``__data_id``, the result
 # table's record id, and the source-info tokens of the outputs, which name it) and
 # carry the time they were computed (``__pod_ts``): not hashes, different in any two

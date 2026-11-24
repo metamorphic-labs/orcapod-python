@@ -766,10 +766,14 @@ def in_presented_order(table: "pa.Table", reference: "Sequence[str]") -> "pa.Tab
         reference: The reader's layout.
 
     Returns:
-        ``table``, its columns reordered (``table`` itself when already in order).
+        ``table`` with its columns reordered, or the original table if already in
+        order or if its names repeat.
     """
-    order = presented_column_order(table.column_names, reference)
-    if order == table.column_names:
+    names = table.column_names
+    if len(set(names)) != len(names):
+        return table
+    order = presented_column_order(names, reference)
+    if order == names:
         return table
     return table.select(order)
 

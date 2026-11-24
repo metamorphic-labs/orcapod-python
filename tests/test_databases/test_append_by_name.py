@@ -21,7 +21,7 @@ from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
 import pytest
@@ -1182,6 +1182,8 @@ def test_queued_rows_combine_with_a_stored_key_read_back_not_null(
 @pytest.fixture
 def postgresql_database() -> Iterator[ConnectorArrowDatabase]:
     psycopg = pytest.importorskip("psycopg")
+    from psycopg import sql
+
     from orcapod.databases import PostgreSQLConnector
 
     host = os.environ.get("PGHOST", "localhost")
@@ -1193,12 +1195,15 @@ def postgresql_database() -> Iterator[ConnectorArrowDatabase]:
         f"host={host} port={port} dbname={dbname} user={user} password={password}"
     )
     schema = f"test_{uuid.uuid4().hex[:12]}"
+    identifier = sql.Identifier(schema)
     with psycopg.connect(base_dsn, autocommit=True) as admin:
-        admin.execute(f"CREATE SCHEMA {schema}")
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(identifier))
 
     def drop() -> None:
         with psycopg.connect(base_dsn, autocommit=True) as admin:
-            admin.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+            admin.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(identifier)
+            )
 
     with _dropped_after(
         lambda: PostgreSQLConnector(f"{base_dsn} options=-csearch_path={schema}"), drop
@@ -1230,6 +1235,32 @@ class _Closing:
     def close(self) -> None:
         if self.fail:
             raise RuntimeError("close failed")
+
+
+def test_the_postgresql_fixture_quotes_schema_identifiers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Setup and cleanup quote the same identifier, even if its name has a quote."""
+    psycopg = pytest.importorskip("psycopg")
+    import orcapod.databases
+
+    admin = MagicMock()
+    admin.__enter__.return_value = admin
+    monkeypatch.setattr(psycopg, "connect", lambda *_args, **_kwargs: admin)
+    monkeypatch.setattr(uuid, "uuid4", lambda: MagicMock(hex='quoted"name'))
+    monkeypatch.setattr(
+        orcapod.databases, "PostgreSQLConnector", lambda _: _Closing(False)
+    )
+
+    fixture = getattr(postgresql_database, "__wrapped__")
+    with contextmanager(fixture)():
+        pass
+
+    statements = [call.args[0].as_string() for call in admin.execute.call_args_list]
+    assert statements == [
+        'CREATE SCHEMA "test_quoted""name"',
+        'DROP SCHEMA IF EXISTS "test_quoted""name" CASCADE',
+    ]
 
 
 @pytest.mark.parametrize("failure", ["connect", "close", "none"])

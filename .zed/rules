@@ -992,7 +992,7 @@ generation of hashing; rows of the current data context are the current entries.
   the backend preserves that type. Delta normalizes view types before queueing,
   matches merge and coerce to the queued rows by name, and uses a retrying MERGE
   for every commit to an existing table (ITL-1377). A connector database trusts nothing about a stored
-  table across calls: it aligns an append only to its own pending batch and checks rows
+  table across calls: it aligns incoming rows only with its own pending batch and checks rows
   against the table read at flush and at a read. No hash, record id, path or layout version follows a stored column order, and no
   table is rewritten. Every reader of stored rows presents them in its own layout,
   whatever order they are stored in, through one helper, arrow_utils.in_presented_order

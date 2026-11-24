@@ -10,6 +10,7 @@ from orcapod.utils.arrow_utils import (
     column_arrow_type,
     concat_tables_by_name,
     decode_dictionaries,
+    in_presented_order,
     infer_schema_nullable,
     make_schema_non_nullable,
     normalize_extension_columns,
@@ -18,6 +19,15 @@ from orcapod.utils.arrow_utils import (
     prepare_prefixed_columns,
     source_info_arrow_type,
 )
+
+
+def test_in_presented_order_keeps_a_table_with_repeated_names() -> None:
+    """Both occurrences and their positions survive an ambiguous name projection."""
+    table = pa.Table.from_arrays(
+        [pa.array([1]), pa.array([2]), pa.array([3])],
+        names=["repeated", "other", "repeated"],
+    )
+    assert in_presented_order(table, ["other", "repeated"]) is table
 
 
 # ---------------------------------------------------------------------------

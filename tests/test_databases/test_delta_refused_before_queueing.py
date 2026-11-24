@@ -303,7 +303,8 @@ def test_names_folded_alike_only_by_delta_are_refused_once(
 def test_the_backstop_reports_the_data_column_first(
     tmp_path: Path, include_data: bool
 ) -> None:
-    upper, lower = (name + "'q" for name in RUST_ONLY_FOLDS[0])
+    """Exercise the flush check even if Python learns earlier Unicode case folds."""
+    upper, lower = (name + "'q" for name in RUST_ONLY_FOLDS[-1])
     source_prefix = constants.SOURCE_PREFIX
     columns: dict[str, pa.Array[Any]] = {
         f"{source_prefix}{upper}": pa.array(["first"]),

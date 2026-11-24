@@ -1144,8 +1144,8 @@ column order, in every database: the record id, then every other column sorted b
 stores and reads every table in, whatever the order written (measured on SpiralDB
 itself), so the order written and the order read are the same in every database; rows
 queued with nothing pending for their table are put in that order. A table written
-before Orcapod used the canonical order keeps the order of its first write and takes
-appends in any order. Delta uses a conflict-safe MERGE with retry for each later commit.
+before Orcapod used the canonical order keeps the order of its first write and accepts
+new rows in any column order. Delta uses a conflict-safe MERGE with retry for each later commit.
 If the write schema contains a type the append comparison does not handle, the ordering
 helper leaves the columns in input order. Delta normalizes view types before ordering.
 Stored column order has no effect on hashes, record IDs or stored paths. What Orcapod shows of

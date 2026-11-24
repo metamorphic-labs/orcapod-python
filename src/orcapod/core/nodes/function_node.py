@@ -3936,24 +3936,20 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
     def _presented_layout(self) -> list[str]:
         """The columns of this node's rows in the order it presents them (ITL-1370).
 
-        Its zero-row table (tags, system tags, data, context, source info) when its
-        input can say it; a loaded node's saved tags and data, each data column
-        followed by nothing else. Stored rows are put in this order on read, then
-        every other column by name (``arrow_utils.in_presented_order``), so what the
-        node presents never follows the stored order.
+        Use the zero-row table when available. Otherwise use the node's declared
+        or saved tag and data keys, then the data columns' source info. Other stored
+        columns follow by name (``arrow_utils.in_presented_order``).
         """
         if self._input_stream is not None:
             zero = self._zero_row_output_table()
             if zero is not None:
                 return zero.column_names
-        if self._function_pod is None:
-            tags, data = self.keys()
-            return [
-                *tags,
-                *data,
-                *(f"{constants.SOURCE_PREFIX}{name}" for name in data),
-            ]
-        return []
+        tags, data = self.keys()
+        return [
+            *tags,
+            *data,
+            *(f"{constants.SOURCE_PREFIX}{name}" for name in data),
+        ]
 
     def _stored_tag_keys(self, fetched: _JoinedRecords) -> tuple[str, ...]:
         """Return the user tag columns of the records in *fetched*.
