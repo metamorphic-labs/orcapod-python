@@ -466,7 +466,9 @@ result database's, when one was given) and how each source was configured. `Pipe
 Python session. An `InMemoryArrowDatabase` has no location to record, so here the database
 is passed again; `PipelineJob.load(path, database=...)` is also how you point a loaded job
 at a database that has moved, and `PipelineJob.load(path, result_database=...)` at a result
-database. The file records each node's own Arrow types, so saving types
+database. A connector database (SQLite, PostgreSQL, SpiralDB) is never rebuilt from the
+file: pass it, built over your connector, or the load raises an error that names what to
+pass. The file records each node's own Arrow types, so saving types
 every node from its inputs' types, as previewing an empty job does, and costs what that
 preview costs: a pipeline whose joins keep many system-tag columns saves as slowly as it
 previews.

@@ -1123,13 +1123,16 @@ from that database, and no rows under that key is an empty result, not an error.
   is refused the same way: wrap its table as a source,
   `ArrowTableSource(stream.as_table(), tag_columns=[...])`.
 - The results are read from the database recorded in the file. Pass
-  `PipelineJob.load(path, database=...)` if the database has moved.
+  `PipelineJob.load(path, database=...)` if the database has moved. A connector database
+  (SQLite, PostgreSQL, SpiralDB) must always be passed: without it the load raises
+  `ValueError` naming the argument to pass.
 - A job given a separate result database
   ([Sharing function results between jobs](pipeline-job.md#sharing-function-results-between-jobs))
   records it in the file too, and loading rebuilds it the same way; pass
   `PipelineJob.load(path, result_database=...)` if it has moved or cannot be rebuilt from
   the file. An `InMemoryArrowDatabase` holds nothing after its process ends, so it is never
-  rebuilt (a new one would be empty), as a connector database is not. When the file names a
+  rebuilt (a new one would be empty). A connector result database must be passed at load,
+  as a connector `database` must. When the file names another
   result database that is not available and none is given, the loaded job's function nodes
   get no database (a warning says what to pass): they are never pointed at the job's own
   `_result` location, which holds none of their results. `job.bind(result_database=...)`

@@ -453,6 +453,34 @@ def resolve_database_from_config(
     return cls.from_config(config)
 
 
+def saved_connector_type(config: Any) -> str | None:
+    """The kind of connector a saved database configuration is over, or ``None``.
+
+    A connector is not rebuilt from a saved file: the user supplies it at load
+    (developer, 2026-11-22, ITL-1391). Only the kind (``"sqlite"``) is read, never the
+    connection, which may hold a credential.
+
+    Args:
+        config: A saved database configuration, or ``None``.
+
+    Returns:
+        The connector's kind (``"unknown"`` when the file does not say), or ``None``
+        for a database that is not over a connector.
+    """
+    from orcapod.databases.connector_arrow_database import CONNECTOR_DATABASE_TYPE
+
+    if not isinstance(config, dict):
+        return None
+    saved = cast("dict[str, Any]", config)
+    if saved.get("type") != CONNECTOR_DATABASE_TYPE:
+        return None
+    connector = saved.get("connector")
+    if not isinstance(connector, dict):
+        return "unknown"
+    kind = cast("dict[str, Any]", connector).get("connector_type")
+    return kind if isinstance(kind, str) else "unknown"
+
+
 def resolve_operator_from_config(config: dict[str, Any]) -> Any:
     """Reconstruct an operator instance from a config dict.
 
