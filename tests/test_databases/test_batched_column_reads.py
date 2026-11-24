@@ -220,6 +220,7 @@ def test_scalar_membership_matches_original_one_value_predicates(
     }
     actual = db.get_records_by_column(_PATH, "value", requested, "rid")
     assert actual is not None
+    assert actual.schema.field("value").type == kind
     assert set(actual["rid"].to_pylist()) == prior
 
 

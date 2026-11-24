@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import cast
 
 import pyarrow as pa
 import pytest
 
 from orcapod import function_pod
+from orcapod.channels import Channel
 from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes.function_node import (
@@ -18,7 +20,11 @@ from orcapod.core.nodes.function_node import (
 )
 from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
-from orcapod.protocols.core_protocols import FunctionPodProtocol
+from orcapod.protocols.core_protocols import (
+    DataProtocol,
+    FunctionPodProtocol,
+    TagProtocol,
+)
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.sources import DictSource
 from orcapod.system_constants import constants
@@ -131,34 +137,60 @@ class TestFetchJoinedRecords:
         assert result.table.num_rows == 0
 
     def test_targeted_reads_still_warn_about_an_unrequested_missing_result(
-        self, executed_node, caplog
+        self, caplog
     ):
-        node = executed_node
-        pipeline_database = node._pipeline_database
-        pod = node._cached_function_pod
-        first_tag, first_data = next(node._input_stream.iter_data())
-        entry_id = node.compute_base_entry_id(first_tag, first_data)
+        source = DictSource(
+            [{"id": i, "value": i + 1} for i in range(3)],
+            tag_columns=["id"],
+            tag_only_columns=True,
+        )
+        pipeline_database = InMemoryArrowDatabase()
+        results = InMemoryArrowDatabase()
+        pod = function_pod(output_keys="result")(double_value).pod
+        assert isinstance(pod, FunctionPodProtocol)
+        node = FunctionJobNode(
+            pod, source, pipeline_database=pipeline_database, result_database=results
+        )
+        rows = list(source.iter_data())
+        for row in rows:
+            node.execute_data(*row)
+        entry_ids = [node.compute_base_entry_id(tag, data) for tag, data in rows[:2]]
         entries = pipeline_database.get_all_records(node._versioned_pipeline_path)
-        result_id = next(
+        cached_pod = node._cached_function_pod
+        assert entries is not None and cached_pod is not None
+        result_ids = [
             row[constants.DATA_RECORD_ID]
             for row in entries.to_pylist()
-            if row[_PIPELINE_BASE_ENTRY_ID_COL] == entry_id
+            if row[_PIPELINE_BASE_ENTRY_ID_COL] in entry_ids
+        ]
+        kept = results.get_records_by_ids(
+            cached_pod.record_path, result_ids, record_id_column="rid"
         )
-        record = pod.result_database.get_record_by_id(pod.record_path, result_id)
-        assert record is not None
+        assert kept is not None
         partial_results = InMemoryArrowDatabase()
-        partial_results.add_record(pod.record_path, result_id, record)
+        partial_results.add_records(
+            cached_pod.record_path, kept, record_id_column="rid"
+        )
         node.attach_databases(pipeline_database, result_database=partial_results)
 
-        found = node._fetch_joined_records(base_entry_ids=[entry_id])
-        assert found is not None
-        assert found.table[_PIPELINE_BASE_ENTRY_ID_COL].to_pylist() == [entry_id]
-        assert (
-            "1 pipeline DB entries have no match in persistent result DB" in caplog.text
-        )
+        for requested in (entry_ids, list(reversed(entry_ids))):
+            caplog.clear()
+            found = node._fetch_joined_records(base_entry_ids=requested)
+            assert found is not None
+            assert found.table.num_rows == 2
+            assert set(found.table[_PIPELINE_BASE_ENTRY_ID_COL].to_pylist()) == set(
+                entry_ids
+            )
+            assert (
+                "1 pipeline DB entries have no match in persistent result DB"
+                in caplog.text
+            )
 
 
-def test_delta_stored_and_sync_order_agree_with_the_original_read_path(tmp_path):
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_delta_stored_and_sync_order_agree_with_the_original_read_path(
+    tmp_path, asynchronous: bool
+):
     source = DictSource(
         [{"id": i, "value": i + 1} for i in range(5)],
         tag_columns=["id"],
@@ -192,8 +224,27 @@ def test_delta_stored_and_sync_order_agree_with_the_original_read_path(tmp_path)
     assert actual is not None and expected is not None
     assert actual.to_pylist() == expected.to_pylist()
 
-    sync_rows = node.execute(source)
-    assert [tag.as_dict()["id"] for tag, _ in sync_rows.iter_data()] == list(range(5))
+    if asynchronous:
+
+        async def run_async():
+            inputs: Channel[tuple[TagProtocol, DataProtocol]] = Channel(buffer_size=5)
+            output: Channel[tuple[TagProtocol, DataProtocol]] = Channel(buffer_size=5)
+            for row in rows:
+                await inputs.writer.send(row)
+            await inputs.writer.close()
+            await node.async_execute(inputs.reader, output.writer)
+            return await output.reader.collect()
+
+        emitted = asyncio.run(run_async())
+        assert len(emitted) == len(rows)
+        assert {
+            (tag.as_dict()["id"], data.as_dict()["result"]) for tag, data in emitted
+        } == {(i, 2 * (i + 1)) for i in range(5)}
+    else:
+        sync_rows = node.execute(source)
+        assert [tag.as_dict()["id"] for tag, _ in sync_rows.iter_data()] == list(
+            range(5)
+        )
 
 
 def test_readback_uses_existing_reads_with_a_legacy_result_wrapper():
