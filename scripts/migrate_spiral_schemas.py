@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import base64
 import hashlib
+import importlib
 import json
 import os
 import sys
@@ -52,6 +53,11 @@ def canonical(value: Any) -> str:
 def plan_digest(plan: dict[str, Any]) -> str:
     """Return the SHA-256 (hex) of the plan's canonical bytes."""
     return hashlib.sha256(canonical(plan).encode()).hexdigest()
+
+
+def spiral_module() -> Any:
+    """Return the ``spiral`` module of this environment: pyspiral's or spiral-sdk's."""
+    return importlib.import_module("spiral")
 
 
 def require_credentials() -> None:
@@ -211,14 +217,14 @@ def dry_run(args: argparse.Namespace) -> None:
     """Write the plan and print what each dataset's schema table would hold."""
     from orcapod.databases.spiraldb_connector import SpiralDBConnector
 
-    import spiral as sp
+    sp = spiral_module()
 
     if hasattr(sp, "keyed_tables") or not hasattr(sp, "Spiral"):
         raise MigrationError(
             "this environment has spiral-sdk; the dry run needs the last Orcapod on "
             "pyspiral (see RELEASING.md)"
         )
-    client = sp.Spiral()  # pyright: ignore[reportAttributeAccessIssue]  # pyspiral, not the SDK
+    client = sp.Spiral()
     token = client.authn.token()
     print(
         "principal:", "none" if token is None else principal_of(token.expose_secret())
@@ -290,7 +296,7 @@ def require_scope(plan: dict[str, Any], args: argparse.Namespace) -> None:
 
 def sdk_client() -> Any:
     """Return a spiral-sdk client and print its principal."""
-    import spiral
+    spiral = spiral_module()
 
     if not hasattr(spiral, "Client"):
         raise MigrationError(
