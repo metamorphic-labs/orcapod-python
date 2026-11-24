@@ -15,6 +15,7 @@ import math
 import random
 import subprocess
 import sys
+import unicodedata
 import uuid
 from pathlib import Path
 from typing import Any, cast
@@ -329,6 +330,115 @@ def test_names_in_rows_at_every_depth(names: list[str], depth: int) -> None:
             arrays = [inner, pa.array([5, 6])]
             fields = [pa.field("s.t", inner.type), pa.field("__z", pa.int64())]
         _ = round_trip(keyed({f.name: a for f, a in zip(fields, arrays)}, fields))
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_a_stored_name_never_matches_a_logical_name(nested: bool) -> None:
+    """``E("a.b")`` is ``ox_a;2Eb``, which is also another column's own name."""
+    values = {"a.b": 1, "ox_a;2Eb": 2, "__record": 3, "ox___record": 4}
+    for order in (list(values), list(reversed(values))):
+        if nested:
+            ty = pa.struct([(n, pa.int64()) for n in order])
+            table = keyed({"s": pa.array([values], ty)})
+            assert round_trip(table).column("s").to_pylist() == [values]
+        else:
+            got = round_trip(keyed({n: pa.array([values[n]]) for n in order}))
+            assert {n: got.column(n)[0].as_py() for n in values} == values
+
+
+def test_the_key_is_not_a_value_column_of_the_same_name() -> None:
+    inner = pa.array([{KEY: 7}], pa.struct([(KEY, pa.int64())]))
+    table = keyed({"ox_" + KEY: pa.array([1]), "s": inner})
+    got = round_trip(table)
+    assert got.column(KEY).to_pylist() == ids(1).to_pylist()
+    assert got.column("ox_" + KEY).to_pylist() == [1]
+    encoded = store.encode_rows(table)
+    renamed = encoded.rename_columns(
+        ["ox_" + KEY if n == KEY else n for n in encoded.column_names]
+    )
+    with pytest.raises(store.StoredRowsError, match="missing"):
+        store.decode_rows(renamed, table.schema)
+
+
+@pytest.mark.parametrize("name", ["\ud800", "a\udfff", "__\ud800.b"])
+def test_a_lone_surrogate_is_refused(name: str) -> None:
+    with pytest.raises(store.UnstorableInSpiralError, match="UTF-8"):
+        store.encode_name(name)
+    for stored in (name, f"ox_{name}"):
+        with pytest.raises(store.StoredRowsError):
+            store.decode_name(stored)
+
+
+def test_a_name_that_is_not_utf8_is_refused_at_every_depth() -> None:
+    bad: Any = pa.field(cast(Any, b"a\xff"), pa.int8())
+    for field in (
+        bad,
+        pa.field("s", pa.struct([bad])),
+        pa.field("l", pa.list_(pa.struct([bad]))),
+        pa.field("i", pa.list_(bad)),
+    ):
+        with pytest.raises(store.UnstorableInSpiralError, match="UTF-8"):
+            store.logical_schema(schema_of([field, (KEY, pa.large_binary())]))
+
+
+def wrappings(inner: Any) -> list[Any]:
+    """``inner`` alone, below each kind of nesting, and as a logical type's storage."""
+    return [
+        inner,
+        pa.list_(inner),
+        pa.list_(inner, 2),
+        pa.struct([("s", pa.large_list(inner))]),
+        Labelled(inner, "test.storage", b""),
+        Labelled(pa.large_list(inner), "test.storage", b""),
+    ]
+
+
+def test_duplicate_sibling_names_are_refused_at_every_depth() -> None:
+    twice = pa.struct([("a.b", pa.int8()), ("c", pa.int8()), ("a.b", pa.int8())])
+    for ty in wrappings(twice):
+        with pytest.raises(store.UnstorableInSpiralError, match="more than once"):
+            store.logical_schema(schema_of([("x", ty), (KEY, pa.large_binary())]))
+    same_in_two_structs = pa.struct([("a", pa.struct([("a", pa.int8())]))])
+    _ = store.logical_schema(
+        schema_of([("a", same_in_two_structs), (KEY, pa.large_binary())])
+    )
+
+
+def test_names_the_service_would_merge_have_a_hook_and_no_guessed_rule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pairs = [("A", "a"), ("e\u0301", "\u00e9")]
+    schemas = [
+        schema_of([(x, pa.int8()), (y, pa.int8()), (KEY, pa.large_binary())])
+        for x, y in pairs
+    ] + [
+        schema_of([("s", ty), (KEY, pa.large_binary())])
+        for x, y in pairs
+        for ty in wrappings(pa.struct([(x, pa.int8()), (y, pa.int8())]))
+    ]
+    for schema in schemas:
+        _ = store.logical_schema(schema)
+    monkeypatch.setattr(
+        store,
+        "_service_form",
+        lambda s: unicodedata.normalize("NFC", s).casefold(),
+    )
+    for schema in schemas:
+        with pytest.raises(store.UnstorableInSpiralError, match="more than once"):
+            store.logical_schema(schema)
+
+
+@pytest.mark.parametrize("as_storage", [False, True])
+def test_a_struct_parent_must_be_valid_also_in_a_logical_types_storage(
+    as_storage: bool,
+) -> None:
+    struct = pa.struct([pa.field("a.b", pa.int8(), False)])
+    for ty, value in ((struct, None), (pa.large_list(struct), [{"a.b": 1}, None])):
+        array = pa.array([value], ty)
+        if as_storage:
+            live = Labelled(ty, "test.parent", b"")
+            array = pa.ExtensionArray.from_storage(live, array)
+        refused(keyed({"c": array}), "'c'", "null struct")
 
 
 # --------------------------------------------------------------------------- types

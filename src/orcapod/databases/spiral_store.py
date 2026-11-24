@@ -125,7 +125,14 @@ def encode_name(name: str) -> str:
     Returns:
         The stored name. It is never empty, never starts with ``__`` and holds none of
         the characters above.
+
+    Raises:
+        UnstorableInSpiralError: If the name is not UTF-8 text (a lone surrogate).
     """
+    try:
+        _ = name.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise UnstorableInSpiralError(f"the name {name!r} is not UTF-8 text") from exc
     if name and not name.startswith(("__", _MARK)) and not _NOT_PLAIN.search(name):
         return name
     return _MARK + _ESCAPED.sub(lambda m: f";{ord(m[0]):02X}", name)
@@ -146,7 +153,11 @@ def decode_name(stored: str) -> str:
     name = stored
     if stored.startswith(_MARK):
         name = _CODE.sub(lambda m: chr(int(m[1], 16)), stored[len(_MARK) :])
-    if encode_name(name) != stored:
+    try:
+        written = encode_name(name)
+    except UnstorableInSpiralError:
+        written = None
+    if written != stored:
         raise StoredRowsError(f"{stored!r} is not a name Orcapod writes")
     return name
 
@@ -210,7 +221,8 @@ def _refuse_nested_identifier(arrow_type: Any) -> None:
     if isinstance(arrow_type, pa.BaseExtensionType):
         raise UnstorableInSpiralError("a logical type nested in another type")
     for child in _children(arrow_type):
-        with _at(child.name if pa.types.is_struct(arrow_type) else "[]"):
+        name = child.name  # read also for a list's item, whose name must be text too
+        with _at(name if pa.types.is_struct(arrow_type) else "[]"):
             if EXTENSION_NAME_KEY in (child.metadata or {}):
                 raise UnstorableInSpiralError("a logical type nested in another type")
             _refuse_nested_identifier(child.type)
@@ -221,10 +233,20 @@ def _children(arrow_type: Any) -> list[pa.Field[Any]]:
     return [arrow_type.field(i) for i in range(arrow_type.num_fields)]
 
 
-def _unique(names: list[str]) -> None:
-    """Refuse a repeated name among columns or struct fields."""
-    if len(set(names)) != len(names):
-        repeated = sorted({n for n in names if names.count(n) > 1})
+def _service_form(stored: str) -> str:
+    """The form in which SpiralDB tells stored sibling names apart.
+
+    The hook for probe P1: whether the service folds case or normalises Unicode is
+    unknown, so no rule is guessed and every name is its own form.
+    """
+    return stored
+
+
+def _unique(stored: list[str]) -> None:
+    """Refuse sibling names (columns, or fields of one struct) that are one to SpiralDB."""
+    forms = [_service_form(name) for name in stored]
+    if len(set(forms)) != len(forms):
+        repeated = sorted({n for n, f in zip(stored, forms) if forms.count(f) > 1})
         raise UnstorableInSpiralError(f"names used more than once: {repeated}")
 
 
@@ -241,8 +263,18 @@ def logical_schema(schema: pa.Schema) -> pa.Schema:
 
     Raises:
         UnstorableInSpiralError: If a column cannot be stored exactly, naming it, or if
-            the table has no key column, no value column or a repeated name.
+            the table has no key column, no value column, a repeated name or a name that
+            is not UTF-8.
     """
+    try:
+        return _logical_schema(schema)
+    except UnicodeDecodeError as exc:
+        # pyarrow holds a name of any bytes, and fails where it is read as text.
+        raise UnstorableInSpiralError(f"a name is not UTF-8 text ({exc})") from exc
+
+
+def _logical_schema(schema: pa.Schema) -> pa.Schema:
+    """``logical_schema``, for names that can be read."""
     fields: list[pa.Field[Any]] = []
     for field in schema:
         with _at(field.name):
@@ -254,7 +286,7 @@ def logical_schema(schema: pa.Schema) -> pa.Schema:
             ):
                 raise UnstorableInSpiralError("the key column must be binary")
             fields.append(logical)
-    _unique(schema.names)
+    _unique([_stored_column_name(name) for name in schema.names])
     if KEY_COLUMN not in schema.names:
         raise UnstorableInSpiralError(f"no key column {KEY_COLUMN!r}")
     if len(fields) < 2:
@@ -268,7 +300,12 @@ def _is_list(arrow_type: pa.DataType) -> bool:
 
 
 def _physical_type(arrow_type: pa.DataType) -> pa.DataType:
-    """Return the type a logical type (``_logical_field``) is written as, or refuse it."""
+    """Return the type a logical type (``_logical_field``) is written as, or refuse it.
+
+    The one traversal of a type: struct fields and the items of every list kind, to any
+    depth. A logical type's storage is traversed as any other type. Struct fields get
+    encoded names; sibling names must differ. A struct is never null (``_encode``).
+    """
     t = pa.types
     logical: Any = arrow_type
     if t.is_timestamp(arrow_type):
@@ -283,7 +320,7 @@ def _physical_type(arrow_type: pa.DataType) -> pa.DataType:
         fields = _children(arrow_type)
         if not fields:
             raise UnstorableInSpiralError("a struct with no fields")
-        _unique([f.name for f in fields])
+        _unique([encode_name(f.name) for f in fields])
         physical: list[pa.Field[Any]] = []
         for field in fields:
             with _at(field.name):
