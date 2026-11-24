@@ -396,7 +396,7 @@ def test_loaded_csv_of_another_type_is_left_unbound(
     with caplog.at_level(logging.WARNING):
         job = PipelineJob.load(path)
     assert any(
-        "'csv'" in r.getMessage() and "declared int" in r.getMessage()
+        "'csv' (csv)" in r.getMessage() and "SourceSpecMismatchError" in r.getMessage()
         for r in caplog.records
     )
     assert job.unbound_sources == ["csv"]
