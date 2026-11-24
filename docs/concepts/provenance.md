@@ -191,6 +191,20 @@ print(job.diagram(highlight=trace.highlight()))
 # * per_animal (function pod · average · current) <- SelectDataColumns
 ```
 
+In a notebook the diagram is drawn as a picture. Here is the job of tutorial
+[Part 8](../tutorial/08-inspecting-and-tracing.md), first plain, then with the trace of one
+session's mean rate highlighted:
+
+![The diagram of the tutorial's workshop job: the sources sessions and units on the left, through column selections and a Join into the function pod rates, then GroupBy, a selection and the function pod session_means on the right](../tutorial/provenance-diagram-plain.svg)
+
+![The same diagram with the trace of session_means.mean_rate_hz highlighted: every node and every edge outlined in orange, because the mean was made from both sources through every step](../tutorial/provenance-diagram-trace.svg)
+
+A missing row's highlight ends at the step that removed it, and dims the rest. In the
+tutorial's second job, a unit of `mouse_04` passes the filter on `probe` and is removed by
+the Join, which has no session of `mouse_04` to match it with:
+
+![The diagram of the tutorial's imec0 job with the path of units row_48 highlighted: the source units, Filter_1, SelectDataColumns_1 and the Join outlined in orange; the sessions branch and the function pod imec0_rates dimmed](../tutorial/provenance-diagram-missing-join.svg)
+
 A `Highlight` can also be made by hand, from node labels and `(upstream, downstream)` label
 pairs. A label the job does not have is refused with `ValueError`.
 

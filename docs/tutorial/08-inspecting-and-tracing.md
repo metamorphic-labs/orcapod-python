@@ -319,6 +319,12 @@ print(job.diagram(highlight=trace.highlight()))
 # * session_means (function pod · mean_rate · current) <- SelectDataColumns_2
 ```
 
+In a notebook the same call draws the picture. Every node and stream on the path is drawn
+in the accent colour; here that is all of them, since the mean was made from both sources
+through every step:
+
+![The diagram of the workshop job with the trace of session_means.mean_rate_hz highlighted: the sources sessions and units, their column selections, the Join, the function pod rates, GroupBy, a selection and the function pod session_means, every node and every edge outlined in orange](provenance-diagram-trace.svg)
+
 **Why is a row missing?** A second job keeps only the `imec0` probe and leaves out the
 sessions of `mouse_04`. Row 4 of `units.csv` is an `imec1` unit, and row 48 is a unit of
 `mouse_04`. Neither has a firing rate. `why_missing` says which step removed each:
@@ -361,7 +367,17 @@ The first line answers the question: which step removed the row. The second is r
 the stored records of `imec0_rates`: no run of this job stored a result for the row. On
 its own that does not prove the function never saw it (a function that raised on a row
 stores no result for it); the first line says why it did not.
-`why_missing(...).highlight()` marks the path up to the step that removed the row.
+`why_missing(...).highlight()` marks the path up to the step that removed the row; the
+other nodes are dimmed. For `units row_4`, the path ends at the filter on `probe`:
+
+![The diagram of the imec0 job with the path of units row_4 highlighted: the source units and the node Filter_1 outlined in orange; the sessions branch, the Join and the function pod imec0_rates dimmed](provenance-diagram-missing-filter.svg)
+
+For `units row_48`, the row passes the filter and its column selection and ends at the
+Join, which has no session `s1` of `mouse_04` to match it with:
+
+![The diagram of the imec0 job with the path of units row_48 highlighted: the source units, Filter_1, SelectDataColumns_1 and the Join outlined in orange; the sessions branch and the function pod imec0_rates dimmed](provenance-diagram-missing-join.svg)
+
+The pictures are drawn by `job.diagram(...)` itself, from the job above.
 
 ## Starting a second pipeline from stored results
 
