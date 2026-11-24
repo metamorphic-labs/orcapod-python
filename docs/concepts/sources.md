@@ -379,7 +379,8 @@ them, and every read scans the table again:
   the rows into memory and return them all.
 
 To read part of a table, say so when you build the source. SpiralDB applies both
-restrictions before any row is transferred:
+restrictions before any row is transferred (except a condition on a `float16` column, which
+Orcapod applies to the rows it receives, and then the limit):
 
 <!-- docs-test: skip -->
 ```python

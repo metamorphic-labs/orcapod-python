@@ -70,9 +70,10 @@ def test_each_credential_in_the_environment_is_accepted(
     "given",
     [
         {"SPIRAL_TOKEN": ""},
-        {"SPIRAL_CLIENT_ID": "c"},
-        {"SPIRAL_PRIVATE_KEY": "k"},
-        {"SPIRAL_CLIENT_ID": "c", "SPIRAL_PRIVATE_KEY": ""},
+        {"SPIRAL_CLIENT_ID": "sentinel-id-1"},
+        {"SPIRAL_PRIVATE_KEY": "sentinel-key-1"},
+        {"SPIRAL_CLIENT_SECRET": "sentinel-secret-1"},
+        {"SPIRAL_CLIENT_ID": "sentinel-id-1", "SPIRAL_PRIVATE_KEY": ""},
     ],
 )
 def test_half_a_credential_is_refused(
@@ -83,7 +84,7 @@ def test_half_a_credential_is_refused(
     with pytest.raises(SpiralDBSignInError) as refused:
         require_sign_in()
     for value in given.values():
-        assert not value or f"={value}" not in str(refused.value)
+        assert not value or value not in str(refused.value)
 
 
 @pytest.mark.parametrize("platform", ["darwin", "linux"])

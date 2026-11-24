@@ -299,18 +299,78 @@ def test_verify_finds_what_changed_after_it(
         tool.verify(args)
 
 
-@pytest.mark.parametrize("part", ["source_id", "content_hash", "pipeline_hash"])
+@pytest.mark.parametrize(
+    "part", ["source_id", "content_hash", "pipeline_hash", "tag_schema", "data_schema"]
+)
 def test_verify_compares_every_identity(
-    tool: ModuleType, args: argparse.Namespace, part: str
+    tool: ModuleType,
+    args: argparse.Namespace,
+    monkeypatch: pytest.MonkeyPatch,
+    part: str,
 ) -> None:
     tool.write(args)
-    plan = tool.read_plan(args.plan)
-    table = plan["datasets"]["one"]["tables"][1]
-    table["source"][part] = "another"
-    table["first_rows"] = "another"
-    Path(args.plan).write_text(tool.canonical(plan))
-    with pytest.raises(tool.MigrationError):
+    original = tool.source_values
+
+    def changed(project: str, dataset: str, name: str) -> dict[str, Any]:
+        values = original(project, dataset, name)
+        return {**values, part: "another"} if name == "units" else values
+
+    monkeypatch.setattr(tool, "source_values", changed)
+    with pytest.raises(tool.MigrationError, match=f"units: {part}") as raised:
         tool.verify(args)
+    assert "trials" not in str(raised.value)
+    assert "first" not in str(raised.value)
+
+
+def test_verify_compares_the_first_rows(
+    tool: ModuleType, args: argparse.Namespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tool.write(args)
+    monkeypatch.setattr(tool, "first_rows_digest", lambda connector, name: "another")
+    with pytest.raises(tool.MigrationError, match="its first 20 rows"):
+        tool.verify(args)
+
+
+@pytest.mark.parametrize("when", ["before the creation", "after it", "at the note"])
+def test_a_stop_while_the_schema_table_is_created_is_resumed(
+    tool: ModuleType,
+    args: argparse.Namespace,
+    monkeypatch: pytest.MonkeyPatch,
+    when: str,
+) -> None:
+    create = fake.FakeProject.create_keyed_table
+    note = tool.write_note
+
+    def stopping(self: Any, *given: Any, **options: Any) -> Any:
+        if when == "before the creation":
+            raise RuntimeError("stopped")
+        made = create(self, *given, **options)
+        if when == "after it":
+            raise RuntimeError("stopped")
+        return made
+
+    def failing(given: Any, dataset: str, value: str) -> None:
+        if when == "at the note" and value != tool.CREATING:
+            raise OSError("disk full")
+        note(given, dataset, value)
+
+    monkeypatch.setattr(fake.FakeProject, "create_keyed_table", stopping)
+    monkeypatch.setattr(tool, "write_note", failing)
+    with pytest.raises((RuntimeError, OSError)):
+        tool.write(args)
+    monkeypatch.setattr(fake.FakeProject, "create_keyed_table", create)
+    monkeypatch.setattr(tool, "write_note", note)
+    tool.write(args)
+    tool.verify(args)
+
+
+def test_a_noted_creation_does_not_adopt_a_table_that_holds_rows(
+    tool: ModuleType, args: argparse.Namespace
+) -> None:
+    fake.migrate("p", {}, "one")
+    tool.write_note(args, "one", tool.CREATING)
+    with pytest.raises(tool.MigrationError, match="not created by this plan"):
+        tool.write(args)
 
 
 def test_a_schema_table_of_another_hand_is_refused(

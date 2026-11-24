@@ -25,6 +25,7 @@ import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.databases import ConnectorArrowDatabase, SpiralDBConnector
+from orcapod.core.sources import spiraldb_table_source as source_module
 from orcapod.databases import spiraldb_connector as connector_module
 from orcapod.errors import (
     NullInNonNullableColumnError,
@@ -113,22 +114,38 @@ def test_a_recorded_table_is_read_with_its_schema(project: Any) -> None:
 
 def test_rows_come_in_key_order_and_values_are_kept(project: Any) -> None:
     fake.migrate("p", {"units": _WRITTEN, "swapped": _WRITTEN})
-    assert _keys(SpiralDBTableSource("p", "units")) == [(1, "a"), (1, "b"), (2, "a")]
-    assert _keys(SpiralDBTableSource("p", "swapped")) == [(1, "a"), (2, "a"), (1, "b")]
+    assert _keys(SpiralDBTableSource("p", "units", tag_only_columns=True)) == [
+        (1, "a"),
+        (1, "b"),
+        (2, "a"),
+    ]
+    assert _keys(SpiralDBTableSource("p", "swapped", tag_only_columns=True)) == [
+        (1, "a"),
+        (2, "a"),
+        (1, "b"),
+    ]
     table = pa.Table.from_batches(SpiralDBConnector("p").scan_batches("units"))
     expected = {(r["k2"], r["k1"]): r for r in _rows().to_pylist()}
     assert {(r["k2"], r["k1"]): r for r in table.to_pylist()} == expected
 
 
-def test_sync_and_async_read_the_same_rows(project: Any) -> None:
-    fake.migrate("p", {"units": _WRITTEN})
-    source = SpiralDBTableSource("p", "units")
+@pytest.mark.parametrize("name", ["units", "swapped"])
+@pytest.mark.parametrize("tag_only", [True, False], ids=["plain tags", "data-tags"])
+def test_sync_and_async_read_the_same_rows(
+    project: Any, name: str, tag_only: bool
+) -> None:
+    fake.migrate("p", {"units": _WRITTEN, "swapped": _WRITTEN})
+    source = SpiralDBTableSource("p", name, tag_only_columns=tag_only)
 
     async def collect() -> list[Any]:
         return [(t.as_dict(), d.as_dict()) async for t, d in source.async_iter_data()]
 
     sync = [(t.as_dict(), d.as_dict()) for t, d in source.iter_data()]
-    assert sorted(map(repr, asyncio.run(collect()))) == sorted(map(repr, sync))
+    expected = {"units": ["a", "b", "a"], "swapped": ["a", "a", "b"]}[name]
+    assert [t["k1"] for t, _ in sync] == expected
+    # One reader hands the batches on in order, so a source's own async read is in key
+    # order too (a job's async result has no order).
+    assert repr(asyncio.run(collect())) == repr(sync)
 
 
 def test_a_null_in_a_recorded_column_is_refused(project: Any) -> None:
@@ -162,7 +179,7 @@ def test_an_unrecorded_table_warns_once_and_reads_nullable(
         )
     name = "late" if complete else "units"
     with pytest.warns(UnrecordedTableSchemaWarning, match=_unrecorded(name)) as seen:
-        source = SpiralDBTableSource("p", name)
+        source = SpiralDBTableSource("p", name, tag_only_columns=True)
         _ = source.as_table()
         _ = SpiralDBConnector("p").get_arrow_schema(name)
     assert len(seen) == 1
@@ -178,14 +195,14 @@ def test_the_warning_as_an_error_is_raised_every_time(project: Any) -> None:
         warnings.simplefilter("error", UnrecordedTableSchemaWarning)
         for _ in range(2):
             with pytest.raises(UnrecordedTableSchemaWarning):
-                SpiralDBTableSource("p", "units")
+                SpiralDBTableSource("p", "units", tag_only_columns=True)
 
 
 def test_a_recorded_table_warns_nothing(project: Any) -> None:
     fake.migrate("p", {"units": _WRITTEN})
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        SpiralDBTableSource("p", "units").as_table()
+        SpiralDBTableSource("p", "units", tag_only_columns=True).as_table()
         assert SpiralDBConnector("p").get_table_names() == ["swapped", "units"]
 
 
@@ -205,7 +222,7 @@ def test_a_column_added_later_is_refused_naming_it(project: Any) -> None:
         pa.table({"k2": pa.array([9], pa.int32()), "k1": ["z"], "new": [1]})
     )
     with pytest.raises(TableSchemaError, match="not recorded: .'new'"):
-        SpiralDBTableSource("p", "units")
+        SpiralDBTableSource("p", "units", tag_only_columns=True)
 
 
 def test_an_older_version_with_other_columns_is_refused(project: Any) -> None:
@@ -224,8 +241,11 @@ def test_an_older_version_with_the_same_columns_is_read(project: Any) -> None:
     project.table("default.units").write(
         _rows().slice(0, 1).set_column(1, "k1", pa.array(["new"]))
     )
-    assert len(_keys(SpiralDBTableSource("p", "units"))) == 4
-    assert len(_keys(SpiralDBTableSource("p", "units", asof=1))) == 3
+    assert len(_keys(SpiralDBTableSource("p", "units", tag_only_columns=True))) == 4
+    assert (
+        len(_keys(SpiralDBTableSource("p", "units", asof=1, tag_only_columns=True)))
+        == 3
+    )
 
 
 def test_a_recreated_table_is_not_read_with_the_old_row(project: Any) -> None:
@@ -252,7 +272,7 @@ def test_a_schema_table_that_cannot_be_reached_is_not_an_absent_one(
 
     monkeypatch.setattr(fake.FakeClient, "keyed_table", opened)
     with pytest.raises(fake.SpiralError, match=failure) as raised:
-        SpiralDBTableSource("p", "units")
+        SpiralDBTableSource("p", "units", tag_only_columns=True)
     assert "__orcapod_schemas__" in raised.value.__notes__[0]
 
 
@@ -373,16 +393,47 @@ def test_a_preview_counts_no_further_than_its_bound(
     """Review finding B4: also when the preview shows the schema only."""
     fake.migrate("p", {"units": _WRITTEN})
     fake.count_log.clear()
-    source = SpiralDBTableSource("p", "units", max_rows=1)
+    source = SpiralDBTableSource("p", "units", max_rows=1, tag_only_columns=True)
     monkeypatch.setattr(SpiralDBTableSource, "_preview_reads_rows", False)
     head = source.head(1)
     assert [c.limit for c in fake.count_log] == [11]
     assert head.total_rows == 3
     monkeypatch.setattr(SpiralDBTableSource, "_preview_reads_rows", True)
     fake.count_log.clear()
-    head = SpiralDBTableSource("p", "units", max_rows=1).head(2)
+    head = SpiralDBTableSource("p", "units", max_rows=1, tag_only_columns=True).head(2)
     assert [c.limit for c in fake.count_log] == [3]
     assert (head.total_rows, "more than 2" in head.header()) == (None, True)
+
+
+def test_a_preview_names_the_bound_it_counted_to(
+    project: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = pa.table({"k": list(range(30)), "v": list(range(30))})
+    project.create_table("default.many", key_schema=[("k", pa.int64())]).write(rows)
+    source = SpiralDBTableSource("p", "many", max_rows=1, tag_only_columns=True)
+    monkeypatch.setattr(SpiralDBTableSource, "_preview_reads_rows", False)
+    assert "more than 10 rows" in source.head(1).header()
+    monkeypatch.setattr(SpiralDBTableSource, "_preview_reads_rows", True)
+    assert "of more than 3" in source.head(3).header()
+    # More rows shown than a preview counts: no key is read for the total.
+    monkeypatch.setattr(source_module, "DEFAULT_MAX_ROWS", 5)
+    fake.count_log.clear()
+    assert "of at least 6" in source.head(6).header()
+    assert fake.count_log == []
+
+
+def test_one_warning_from_many_threads(project: Any) -> None:
+    barrier = threading.Barrier(8)
+
+    def build(_: int) -> None:
+        barrier.wait(10)
+        SpiralDBConnector("p").get_arrow_schema("units")
+
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        with ThreadPoolExecutor(8) as pool:
+            list(pool.map(build, range(8)))
+    assert len([w for w in seen if w.category is UnrecordedTableSchemaWarning]) == 1
 
 
 def test_a_count_is_remembered_per_version(project: Any) -> None:
@@ -415,12 +466,16 @@ def test_the_listing_reads_every_page(tmp_path: Path, count: int) -> None:
         assert names == sorted(f"t{i}" for i in range(count))
 
 
-def test_a_listing_that_does_not_advance_is_refused(project: Any) -> None:
+@pytest.mark.parametrize("given", [["a", "a"], ["a", "b", "a"], ["a", "b", "c", "b"]])
+def test_a_listing_that_does_not_advance_is_refused(
+    project: Any, given: list[str]
+) -> None:
+    tokens = iter(given)
     # A patch that ends inside the fake's own (monkeypatch would end after it).
     with patch.object(
         connector_module,
         "_http_get_json",
-        lambda url, token: {"items": [], "nextPageToken": "same"},
+        lambda url, token: {"items": [], "nextPageToken": next(tokens)},
     ):
         with pytest.raises(RuntimeError, match="does not advance"):
             SpiralDBConnector("p").get_table_names()
@@ -468,12 +523,12 @@ def test_every_write_is_refused_and_writes_nothing(project: Any) -> None:
         lambda: connector.upsert_records("units", _rows(), "k1"),
         lambda: connector.upsert_records("units", _rows(), "k1", skip_existing=True),
         lambda: connector.delete_table("units"),
+        lambda: connector.delete_table("absent"),
         lambda: connector.validate_records(_rows()),
         lambda: connector.unstorable_column_reason("v", pa.int64(), primary_key=False),
     ):
         with pytest.raises(SpiralDBWriteNotSupportedError, match="ITL-1186"):
             write()
-    connector.delete_table("absent")  # nothing to delete
     assert connector.get_table_names() == ["swapped", "units"]
     assert connector.get_row_count_estimate("units") == 3
 
@@ -522,7 +577,9 @@ def test_a_job_reads_a_source_and_stores_elsewhere(
 
     job = PipelineJob(name="j", database=DeltaTableDatabase(tmp_path / "store"))
     with job:
-        double.pod(SpiralDBTableSource("p", "units"), label="double")
+        double.pod(
+            SpiralDBTableSource("p", "units", tag_only_columns=True), label="double"
+        )
     job.run()
     node = job.nodes["double"]
     assert isinstance(node, FunctionJobNode)
@@ -537,7 +594,10 @@ def test_a_job_reads_a_source_and_stores_elsewhere(
         n.bound_source for n in loaded.nodes.values() if hasattr(n, "bound_source")
     ]
     assert isinstance(source, SpiralDBTableSource)
-    assert source.source_id == SpiralDBTableSource("p", "units").source_id
+    assert (
+        source.source_id
+        == SpiralDBTableSource("p", "units", tag_only_columns=True).source_id
+    )
 
 
 # -------------------------------------------------------------------- client and lifetime
@@ -578,7 +638,7 @@ def test_a_closed_connector_reads_nothing(project: Any) -> None:
 
 def test_an_abandoned_read_closes_its_reader(project: Any) -> None:
     fake.migrate("p", {"units": _WRITTEN})
-    source = SpiralDBTableSource("p", "units")
+    source = SpiralDBTableSource("p", "units", tag_only_columns=True)
     fake.scan_log.clear()
     rows: Any = source.iter_data()
     next(rows)
@@ -590,7 +650,7 @@ def test_a_cancelled_async_read_closes_its_reader(
     project: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     fake.migrate("p", {"units": _WRITTEN})
-    source = SpiralDBTableSource("p", "units")
+    source = SpiralDBTableSource("p", "units", tag_only_columns=True)
     started, release = threading.Event(), threading.Event()
     original = fake.FakeReader.read_next_batch
     threads: set[int] = set()
@@ -609,8 +669,13 @@ def test_a_cancelled_async_read_closes_its_reader(
     async def cancel() -> None:
         # Before the read that blocks: what it looks up runs on the same thread.
         task = asyncio.create_task(read())
-        while not started.is_set():
+        for _ in range(1000):
+            if started.is_set() or task.done():
+                break
             await asyncio.sleep(0.01)
+        if task.done():
+            await task  # an early failure is this test's failure
+        assert started.is_set()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
@@ -618,9 +683,11 @@ def test_a_cancelled_async_read_closes_its_reader(
     _ = source.row_count_estimate  # counted before, so only the read is slowed
     fake.scan_log.clear()
     monkeypatch.setattr(fake.FakeReader, "read_next_batch", slow)
-    asyncio.run(cancel())
-    assert not any(scan.closed for scan in fake.scan_log)  # still being read
-    release.set()
+    try:
+        asyncio.run(cancel())
+        assert not any(scan.closed for scan in fake.scan_log)  # still being read
+    finally:
+        release.set()
     deadline = threading.Event()
     for _ in range(200):
         if all(scan.closed for scan in fake.scan_log):
@@ -673,7 +740,7 @@ def test_a_source_in_a_forked_child_is_refused_and_never_waits(
     """Review finding B7: the process is checked before the inherited lock, which a
     thread that does not exist in the child may hold for ever."""
     fake.migrate("p", {"units": _WRITTEN})
-    source = SpiralDBTableSource("p", "units")
+    source = SpiralDBTableSource("p", "units", tag_only_columns=True)
     lock = source._connection_lock  # pyright: ignore[reportPrivateUsage]  # the inherited lock is the subject
     taken, release = threading.Event(), threading.Event()
 

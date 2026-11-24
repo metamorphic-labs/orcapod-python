@@ -39,6 +39,7 @@ PLAN_VERSION = 1
 ROW_FORMAT = "orcapod.table_schema"
 ROW_FORMAT_VERSION = 1
 FIRST_ROWS = 20
+CREATING = "creating"
 
 
 class MigrationError(Exception):
@@ -391,6 +392,17 @@ def read_note(args: argparse.Namespace) -> dict[str, str]:
     return note["created"] if note["digest"] == args.digest else {}
 
 
+def write_note(args: argparse.Namespace, dataset: str, value: str) -> None:
+    """Note what this plan's write creates in a dataset: ``CREATING``, then the table id.
+
+    The note is replaced as a whole, so it is never half written.
+    """
+    created = {**read_note(args), dataset: value}
+    new = Path(f"{note_path(args)}.new")
+    new.write_text(canonical({"digest": args.digest, "created": created}))
+    os.replace(new, note_path(args))
+
+
 def require_own_schema_table(
     client: Any, args: argparse.Namespace, dataset: str, planned: dict[str, Any]
 ) -> Any | None:
@@ -403,7 +415,17 @@ def require_own_schema_table(
             f"{dataset}: {SCHEMA_TABLE} existed at the dry run ({planned['schema_table']})"
         )
     table = _open_keyed_table(client, args.project, dataset, SCHEMA_TABLE)
-    if table is not None and read_note(args).get(dataset) != table.resource_id:
+    noted = read_note(args).get(dataset)
+    if (
+        table is not None
+        and noted == CREATING
+        and list(table.key_columns) == ["table_id"]
+        and int(table.version_id) == 0
+    ):
+        # Stopped between creating the table and noting its id: it holds nothing.
+        write_note(args, dataset, table.resource_id)
+        return table
+    if table is not None and noted != table.resource_id:
         raise MigrationError(
             f"{dataset}: {SCHEMA_TABLE} ({table.resource_id}) was not created by this "
             f"plan's write ({note_path(args)} does not name it)"
@@ -464,14 +486,12 @@ def write(args: argparse.Namespace) -> None:
             client, args, dataset, plan["datasets"][dataset]
         )
         if handle is None:
-            # Created once, exclusively, and noted before anything is in it.
+            # Created once, exclusively; the note is there before and after.
+            write_note(args, dataset, CREATING)
             handle = client.project(project).create_keyed_table(
                 dataset, SCHEMA_TABLE, st.KEY_SCHEMA, exist_ok=False
             )
-            created = {**read_note(args), dataset: handle.resource_id}
-            note_path(args).write_text(
-                canonical({"digest": args.digest, "created": created})
-            )
+            write_note(args, dataset, handle.resource_id)
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         values = {**values, "written_at": now, "written_by": by}
         handle.append(pa.Table.from_pylist([values], schema=st.ROW_SCHEMA))

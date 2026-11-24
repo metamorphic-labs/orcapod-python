@@ -112,6 +112,7 @@ class _Place:
             name,
             dataset=self.dataset,
             overrides=self.overrides,
+            tag_only_columns=True,
             **options,
         )
 
@@ -276,6 +277,9 @@ def test_limit_reads_the_first_keys(place: _Place, limit: int) -> None:
         ({"s": "x", "k": 1}, [1]),
         ({"k": 1, "s": "é"}, []),
         ({"h": 0.5, "s": "x"}, [1]),
+        ({"s": "x", "h": 0.5}, [1]),
+        ({"k": 1, "s": "x"}, [1]),
+        ({"s": "é", "k": 1}, []),
     ],
 )
 def test_where(place: _Place, where: dict[str, Any], expected: list[int]) -> None:

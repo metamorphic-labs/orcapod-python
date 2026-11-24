@@ -494,11 +494,15 @@ def _upserted(stored: pa.Table, rows: pa.Table, keys: list[str]) -> pa.Table:
 
 @dataclass(frozen=True)
 class _Column:
+    """A column named in an expression."""
+
     name: str
 
 
 @dataclass(frozen=True)
 class _Literal:
+    """A value with the exact Arrow type ``FakeKeyedTable.scan`` checks."""
+
     value: Any
     type: pa.DataType
 
@@ -548,10 +552,12 @@ class FakeReader:
     """Stands in for the reader of ``Scan.to_reader()``; a closed one gives no row."""
 
     def __init__(self, rows: pa.Table, record: ScanRecord, batch_rows: int) -> None:
+        """Hold the parts it is made of."""
         self._batches = iter(rows.to_batches(max_chunksize=batch_rows))
         self._record = record
 
     def __iter__(self) -> Iterator[pa.RecordBatch]:
+        """Yield the batches until there is none."""
         while True:
             try:
                 yield self.read_next_batch()
@@ -559,6 +565,7 @@ class FakeReader:
                 return
 
     def __next__(self) -> pa.RecordBatch:
+        """Return the next batch."""
         return self.read_next_batch()
 
     def read_next_batch(self) -> pa.RecordBatch:
@@ -578,6 +585,7 @@ class FakeScan:
     """Stands in for ``spiral.tables.Scan``: rows are read when asked for."""
 
     def __init__(self, rows: pa.Table, record: ScanRecord, batch_rows: int) -> None:
+        """Hold the parts it is made of."""
         self._rows, self._record, self._batch_rows = rows, record, batch_rows
 
     def to_reader(self) -> FakeReader:
@@ -600,6 +608,7 @@ class FakeKeyedTable:
     """Stands in for ``spiral.keyed_tables.KeyedTable``: one immutable snapshot."""
 
     def __init__(self, store: _Store, table: dict[str, Any], version: int) -> None:
+        """Hold the parts it is made of."""
         self._store, self._table, self._version = store, table, version
 
     @property
@@ -681,6 +690,7 @@ class FakeWriter:
     """Stands in for ``spiral.keyed_tables.KeyedTableWrite``."""
 
     def __init__(self, store: _Store, table: dict[str, Any]) -> None:
+        """Hold the parts it is made of."""
         self._store, self._table = store, table
         self._parts: list[pa.Table] = []
         self._keys_to_delete: list[pa.Table] = []
@@ -753,6 +763,7 @@ class FakeProject:
     """Stands in for ``spiral.projects.Project``."""
 
     def __init__(self, store: _Store, project: str) -> None:
+        """Hold the parts it is made of."""
         self._store, self._project = store, project
 
     def create_keyed_table(
@@ -790,6 +801,7 @@ class FakeClient:
     """Stands in for ``spiral.Client``; tables live under the installed root."""
 
     def __init__(self, *, api_url: str | None = None, token: str | None = None) -> None:
+        """Hold the parts it is made of."""
         self._store = _store()
         self.api_url = api_url
         self._native = types.SimpleNamespace(
@@ -870,6 +882,7 @@ class ExternalTable:
     """A table as another program writes it: no row in the schema table."""
 
     def __init__(self, store: _Store, table: dict[str, Any]) -> None:
+        """Hold the parts it is made of."""
         self._store, self._table = store, table
 
     @property
@@ -899,6 +912,7 @@ class ExternalProject:
     them), and drops."""
 
     def __init__(self, project: str) -> None:
+        """Hold the parts it is made of."""
         self._store, self._project = _store(), project
 
     def create_table(self, identifier: str, *, key_schema: Any) -> ExternalTable:

@@ -7,6 +7,7 @@ change; a new form is a new ``FORMAT_VERSION``.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from pathlib import Path
 from typing import Any, cast
@@ -193,24 +194,34 @@ def test_a_row_that_cannot_be_read_in_full_is_refused(
 # ------------------------------------------------------------- a dataset's schema table
 
 
-@pytest.fixture()
-def project(tmp_path: Path):
-    with fake.install(tmp_path / "spiral"):
-        made = fake.ExternalProject("p")
-        for name in ("units", "trials"):
-            made.create_table(f"default.{name}", key_schema=[("k", pa.string())]).write(
-                pa.table({"k": ["a", "b"], "v": [1, 2], "w": ["x", None]})
-            )
-        yield made
-
-
 _WRITTEN = pa.schema(
     [
         pa.field("k", pa.string(), False),
+        pa.field("j", pa.int32(), False),
         pa.field("v", pa.int64(), False),
         pa.field("w", pa.string()),
     ]
 )
+
+
+@pytest.fixture()
+def project(tmp_path: Path):
+    with fake.install(tmp_path / "spiral"):
+        made = fake.ExternalProject("p")
+        for name, keys in (("units", ["k", "j"]), ("trials", ["j", "k"])):
+            made.create_table(
+                f"default.{name}", key_schema=[_WRITTEN.field(key) for key in keys]
+            ).write(
+                pa.table(
+                    {
+                        "w": ["x", None],
+                        "k": ["a", "b"],
+                        "v": [1, 2],
+                        "j": pa.array([2, 1], pa.int32()),
+                    }
+                )
+            )
+        yield made
 
 
 def _edit_schema_table(**change: Any) -> None:
@@ -225,7 +236,7 @@ def _edit_schema_table(**change: Any) -> None:
 
 # Every way a person reaches a table's rows or what is known of it.
 _PATHS = {
-    "source": lambda: SpiralDBTableSource("p", "units"),
+    "source": lambda: SpiralDBTableSource("p", "units", tag_only_columns=True),
     "schema": lambda: SpiralDBConnector("p").get_arrow_schema("units"),
     "columns": lambda: SpiralDBConnector("p").get_column_info("units"),
     "batches": lambda: list(SpiralDBConnector("p").scan_batches("units")),
@@ -271,14 +282,22 @@ def test_a_schema_table_that_is_not_complete_is_refused_on_every_path(
         _PATHS[path]()
 
 
-def test_open_readers_refuse_too(project: Any) -> None:
-    """A source and its previews, built while the table was complete."""
-    fake.migrate("p", {"units": _WRITTEN})
-    source = SpiralDBTableSource("p", "units")
+async def _collect(source: SpiralDBTableSource) -> list[Any]:
+    return [pair async for pair in source.async_iter_data()]
+
+
+@pytest.mark.parametrize("name", ["units", "trials"])
+@pytest.mark.parametrize("tag_only", [True, False], ids=["plain tags", "data-tags"])
+def test_open_readers_refuse_too(project: Any, name: str, tag_only: bool) -> None:
+    """A source and its previews, built while the table was complete, sync and async."""
+    fake.migrate("p", {"units": _WRITTEN, "trials": _WRITTEN})
+    source = SpiralDBTableSource("p", name, tag_only_columns=tag_only)
+    assert len(asyncio.run(_collect(source))) == len(list(source.iter_data())) == 2
     _edit_schema_table(table_count=9)
     for read in (
         source.as_table,
         lambda: list(source.iter_data()),
+        lambda: asyncio.run(_collect(source)),
         source.head,
         lambda: source.row_count_estimate,
         source.check_for_new_data,
@@ -289,7 +308,7 @@ def test_open_readers_refuse_too(project: Any) -> None:
 
 def test_a_display_names_the_refusal_and_shows_no_row(project: Any) -> None:
     fake.migrate("p", {"units": _WRITTEN})
-    source = SpiralDBTableSource("p", "units")
+    source = SpiralDBTableSource("p", "units", tag_only_columns=True)
     _edit_schema_table(table_count=9)
     html = source._repr_html_()
     assert "could not read" in html and "completion marker" in html
@@ -306,7 +325,7 @@ def test_a_foreign_table_at_the_reserved_name_is_refused(tmp_path: Path) -> None
             f"default.{st.SCHEMA_TABLE}", key_schema=[("x", pa.string())]
         ).write(pa.table({"x": ["a"], "y": [1]}))
         with pytest.raises(TableSchemaError, match="key columns"):
-            SpiralDBTableSource("p", "units")
+            SpiralDBTableSource("p", "units", tag_only_columns=True)
 
 
 def test_the_reserved_name_is_refused_and_unlisted(project: Any) -> None:

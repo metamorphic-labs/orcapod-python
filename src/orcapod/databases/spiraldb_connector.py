@@ -196,12 +196,18 @@ def _warn_once(about: tuple[str, str], message: str) -> None:
     with _warned_lock:
         if about in _warned_unrecorded:
             return
-    warnings.warn(
-        message, UnrecordedTableSchemaWarning, stacklevel=outside_orcapod_stacklevel()
-    )
-    # Only once it was shown: a warning turned into an error is raised every time.
-    with _warned_lock:
         _warned_unrecorded.add(about)
+    try:
+        warnings.warn(
+            message,
+            UnrecordedTableSchemaWarning,
+            stacklevel=outside_orcapod_stacklevel(),
+        )
+    except BaseException:
+        # Not shown: a warning turned into an error is raised every time.
+        with _warned_lock:
+            _warned_unrecorded.discard(about)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -312,6 +318,7 @@ def _list_keyed_tables(client: Any, project_id: str, dataset: str) -> dict[str, 
     )
     names: dict[str, str] = {}
     token: str | None = None
+    seen: set[str] = set()
     while True:
         query = {"dataset": dataset}
         if token is not None:
@@ -326,8 +333,9 @@ def _list_keyed_tables(client: Any, project_id: str, dataset: str) -> dict[str, 
         following = page.get("nextPageToken")
         if following is None:
             return names
-        if not following or following == token:
+        if not following or following in seen:
             raise RuntimeError("SpiralDB's table listing does not advance")
+        seen.add(following)
         token = following
 
 
@@ -867,7 +875,9 @@ class SpiralDBConnector:
         """Scan a table, optionally restricted, and yield prepared Arrow batches.
 
         The restrictions are applied by SpiralDB, before any row reaches this
-        process. Batches arrive in key order; their sizes are SpiralDB's. Each batch has
+        process, except a condition on a column its literals do not cover (``float16``):
+        that one is applied here, to the rows the other conditions select, and ``limit``
+        after it, so rows are transferred that are not returned. Batches arrive in key order; their sizes are SpiralDB's. Each batch has
         the types, metadata and nullability ``iter_batches`` documents.
 
         Args:
@@ -947,19 +957,12 @@ class SpiralDBConnector:
         return self.lookup_table(table_name).row_count_estimate(asof=asof)
 
     def delete_table(self, table_name: str) -> None:
-        """Refuse to drop a table: spiral-sdk offers no way to drop a keyed table.
-
-        Args:
-            table_name: Plain table name (no dataset prefix). Nothing is done if the
-                table does not exist.
+        """Refuse to drop a table: Orcapod does not write SpiralDB yet.
 
         Raises:
-            SpiralDBWriteNotSupportedError: If the table exists.
+            SpiralDBWriteNotSupportedError: Always (ITL-1186).
         """
-        try:
-            self.lookup_table(table_name)
-        except SpiralDBTableNotFoundError:
-            return
+        self._require_open()
         raise SpiralDBWriteNotSupportedError(_NO_WRITES)
 
     def create_table_if_not_exists(
