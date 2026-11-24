@@ -2566,3 +2566,72 @@ def test_a_question_shows_a_date_selector_value(mode: str) -> None:
     assert _value_text(timedelta(days=1, seconds=2)) == "timedelta(1d 2s 0us)"
     assert _value_text(Decimal("1.50")) == "Decimal('1.50')"
     assert _value_text(UUID(int=1)) == "UUID('00000000-0000-0000-0000-000000000001')"
+
+
+# ---------------------------------------------------------------------------
+# Review of 583c4b25: one rule for the source argument of why_missing
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_a_source_argument_naming_two_sources_is_refused(
+    tmp_path: Path, mode: str
+) -> None:
+    """The right source is named a (id dict_v1:a); the left is NAMED dict_v1:a (id
+    dict_v1:dict_v1:a). 'dict_v1:a' is the right's id and the left's name: refused,
+    never the two bindings combined. Each unique spelling answers for its own source,
+    live and after a load-only run."""
+    import warnings
+
+    from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+
+    def orchestrator() -> Any:
+        return (
+            AsyncPipelineOrchestrator()
+            if mode == "async"
+            else SyncPipelineOrchestrator()
+        )
+
+    def sources() -> tuple[DictSource, DictSource]:
+        right = DictSource(
+            [{"k": "match", "y": 2}],
+            tag_columns=["k"],
+            tag_only_columns=True,
+            source_id="a",
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # a name shaped like an id warns
+            left = DictSource(
+                [{"k": "match", "x": 1}],
+                tag_columns=["k"],
+                tag_only_columns=True,
+                source_id="dict_v1:a",
+            )
+        return left, right
+
+    left, right = sources()
+    assert (left.source_id, right.source_id) == ("dict_v1:dict_v1:a", "dict_v1:a")
+    job = PipelineJob(name="twoa", database=DeltaTableDatabase(tmp_path / "db"))
+    with job:
+        SemiJoin()(left, right)
+    job.run(orchestrator=orchestrator())
+    job.save(tmp_path / "job.json")
+    loaded = PipelineJob.load(
+        tmp_path / "job.json", database=DeltaTableDatabase(tmp_path / "db")
+    )
+    again_left, again_right = sources()
+    loaded.bind(sources={"dict_v1:a": again_left, "a": again_right})
+    loaded.run(orchestrator=orchestrator(), load_only=True)
+    for current in (job, loaded):
+        node = current.nodes["SemiJoin"]
+        with pytest.raises(ValueError, match="names several sources") as refused:
+            node.why_missing("dict_v1:a", "row_0")
+        assert "node 'a' (id dict_v1:a)" in str(refused.value)
+        assert "node 'dict_v1:a' (id dict_v1:dict_v1:a)" in str(refused.value)
+        # The right source, by its label: its rows only choose, never flow on.
+        right_answer = node.why_missing("a", "row_0")
+        assert right_answer.missing and right_answer.present_in == ("a",)
+        # The left source, by its full id: its row reaches the output.
+        left_answer = node.why_missing("dict_v1:dict_v1:a", "row_0")
+        assert not left_answer.missing
+        assert left_answer.present_in == ("dict_v1:a", "SemiJoin")

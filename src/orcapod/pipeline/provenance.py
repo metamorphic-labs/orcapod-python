@@ -212,6 +212,18 @@ def _static_source_ids(node: Any) -> set[str]:
     return ids
 
 
+def _source_name(node: Any) -> str | None:
+    """A source node's source name (stored, read through any ``CachedSource``; no method
+    or property of the source is called), or ``None``."""
+    from orcapod.core.sources.cached_source import CachedSource
+
+    bound = getattr(node, "bound_source", None)
+    while type(bound) is CachedSource:
+        bound = vars(bound).get("_source")
+    name = vars(bound).get("_source_name") if bound is not None else None
+    return name if isinstance(name, str) else None
+
+
 def _declared_system_tags(node: Any) -> list[str]:
     """A source node's system-tag columns, from the schema it declares."""
     from orcapod.core.nodes.source_node import SourceNodeBase
@@ -1961,14 +1973,16 @@ def why_missing(node: Any, source: str, record_id: str) -> Absence:
 
     Args:
         node: A job node.
-        source: The source id, or the source node's label.
+        source: A source node's label, a source's name or its full id; it must name
+            exactly one source (several are refused, never combined).
         record_id: The record id (``row_<n>``, or the key columns as JSON).
 
     Returns:
         The answer about ``node``.
 
     Raises:
-        ValueError: If no source with that id feeds the node.
+        ValueError: If no source with that label, name or id feeds the node, or it
+            names several.
         ProvenanceInconsistencyError: If a group's members cannot be proven.
     """
     ancestry = _ancestry(node)
@@ -1991,19 +2005,32 @@ def why_missing(node: Any, source: str, record_id: str) -> Absence:
             (node.label,),
         )
     all_nodes = list(ancestry.values())
-    wanted: dict[int, set[tuple[Any, Any]]] = {}
-    sources: list[Any] = []
+    # One rule: the source nodes whose label, name or full id is ``source``. Exactly
+    # one is the answer's source; several are refused, never combined (two bindings'
+    # rows are never evidence for one another).
+    candidates: list[tuple[Any, set[Any]]] = []
     for n in all_nodes:
         if _kind(n) != "source":
             continue
-        static = _static_source_ids(n)
-        emitted = _emitted_ids(n, all_nodes, reader)
-        if source in static or source in emitted:
-            ids = {source} | (static | emitted if n.label == source else set())
-            wanted[id(n)] = {(sid, record_id) for sid in ids}
-            sources.append(n)
-    if not sources:
+        ids = (_static_source_ids(n) - {n.label}) | _emitted_ids(n, all_nodes, reader)
+        if source == n.label or source == _source_name(n) or source in ids:
+            candidates.append((n, ids))
+    if not candidates:
         raise ValueError(f"no source with id {source!r} feeds node {node.label!r}")
+    if len(candidates) > 1:
+        named = "; ".join(
+            f"node {n.label!r} (id {', '.join(sorted(map(str, ids))) or 'unknown'})"
+            for n, ids in sorted(candidates, key=lambda c: c[0].label)
+        )
+        raise ValueError(
+            f"{source!r} names several sources feeding node {node.label!r}: {named}; "
+            "give the node label or the full id of one of them"
+        )
+    chosen, chosen_ids = candidates[0]
+    sources: list[Any] = [chosen]
+    wanted: dict[int, set[tuple[Any, Any]]] = {
+        id(chosen): {(sid, record_id) for sid in (chosen_ids or {source})}
+    }
     path = _topological(
         [n for n in all_nodes if any(id(s) in _ancestry(n) for s in sources)]
     )

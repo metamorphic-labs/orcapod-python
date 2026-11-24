@@ -70,8 +70,8 @@ class ProvenanceMethods:
         own), the answer is ``unavailable``.
 
         Args:
-            source: The source id (as in source-info tokens), or the source node's
-                label (which tells apart two bindings that carry one id).
+            source: The source: its node's label, its name or its full id (as in
+                source-info tokens, ``dict_v1:trials``). It must name one source.
             record_id: The record id (``row_<n>``, or the key columns as JSON).
 
         Returns:
@@ -80,8 +80,10 @@ class ProvenanceMethods:
             ``"unavailable"`` and the source id or label is not checked.
 
         Raises:
-            ValueError: If no source with that id or label feeds this node, unless
-                this node is a source whose rows are not read.
+            ValueError: If no source with that label, name or id feeds this node
+                (unless this node is a source whose rows are not read), or if it names
+                several (one's name is another's id): give a node label or full id
+                that names one.
             ProvenanceInconsistencyError: If a group's members cannot be proven.
         """
         from orcapod.pipeline.provenance import why_missing

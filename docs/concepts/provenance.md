@@ -148,9 +148,11 @@ then show the same results, with the times they were computed.
 
 ## Why a row is missing
 
-`why_missing(source, record_id)` takes a source, by its id as it appears in a source-info
-token or by its source node's label (which tells apart two bindings that carry one id),
-and a record id. It reads the run the job holds: before a run, and on a loaded job not
+`why_missing(source, record_id)` takes a source, by its node's label, its name or its full
+id as it appears in a source-info token (`dict_v1:trials`), and a record id. The source
+argument must name exactly one source: when one source's name is another's id
+(`dict_v1:a` names the source `a`, and a source named `dict_v1:a` too), it is refused
+with `ValueError` naming both; give the node label or full id that names one. It reads the run the job holds: before a run, and on a loaded job not
 yet run (`load_only=True`), it answers `not_computed`, even when the store holds entries.
 It answers in two steps:
 
