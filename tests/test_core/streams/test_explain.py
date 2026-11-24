@@ -39,6 +39,16 @@ from orcapod.databases import InMemoryArrowDatabase
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.sources import SpiralDBTableSource
 from orcapod.types import Condition, Explanation, SourceReading, Step
+from tests.test_core.operators.several_items import (
+    DATA_FIRST_REVERSED,
+    P,
+    PLAIN,
+    Q,
+    TAGS_FIRST,
+    Arrangement,
+    Spec,
+    make_source,
+)
 from tests.test_databases import fake_pyspiral
 
 pytestmark = [
@@ -232,42 +242,45 @@ class TestStepsThatDropRows:
             "its rows only choose rows of 'arrow_table_v1:units' and do not flow on"
         ]
 
-    @pytest.mark.parametrize("reverse", [False, True])
-    def test_steps_follow_rows_through_semi_join(self, reverse: bool) -> None:
+    @pytest.mark.parametrize("reverse_inputs", [False, True])
+    @pytest.mark.parametrize("reverse_layout", [False, True])
+    def test_steps_follow_rows_through_semi_join(
+        self, reverse_inputs: bool, reverse_layout: bool
+    ) -> None:
+        def source(spec: Spec, source_id: str) -> ArrowTableSource:
+            arrangement = Arrangement(
+                spec.tags[::-1] if reverse_layout else spec.tags,
+                DATA_FIRST_REVERSED if reverse_layout else TAGS_FIRST,
+                PLAIN,
+            )
+            return make_source(spec, arrangement, source_id=source_id)
+
         left_inputs = (
-            _units("left-units").filter(col("t") >= 0.5, label="left-units-filter"),
-            _probes("left-probes").filter(session="s1", label="left-probes-filter"),
+            source(P, "left-p").filter(col("p1") >= 6, label="left-p-filter"),
+            source(Q, "left-q").filter(t2=1, label="left-q-filter"),
         )
         right_inputs = (
-            _units("right-units").filter(col("t") >= 1.0, label="right-units-filter"),
-            _probes("right-probes").filter(session="s2", label="right-probes-filter"),
+            source(P, "right-p").filter(col("p1") >= 7, label="right-p-filter"),
+            source(Q, "right-q").filter(t2=2, label="right-q-filter"),
         )
-        left = Join()(*(left_inputs[::-1] if reverse else left_inputs), label="left")
+        left = Join()(
+            *(left_inputs[::-1] if reverse_inputs else left_inputs), label="left"
+        )
         right = Join()(
-            *(right_inputs[::-1] if reverse else right_inputs), label="right"
+            *(right_inputs[::-1] if reverse_inputs else right_inputs), label="right"
         )
         joined = SemiJoin()(left, right, label="choose")
         steps = {
             reading.name: [step.label for step in reading.steps]
-            for reading in joined.filter(col("t") >= 1.5, label="after")
+            for reading in joined.filter(col("p1") >= 8, label="after")
             .explain()
             .sources
         }
         assert steps == {
-            "arrow_table_v1:left-units": [
-                "left-units-filter",
-                "left",
-                "choose",
-                "after",
-            ],
-            "arrow_table_v1:left-probes": [
-                "left-probes-filter",
-                "left",
-                "choose",
-                "after",
-            ],
-            "arrow_table_v1:right-units": ["right-units-filter", "right", "choose"],
-            "arrow_table_v1:right-probes": ["right-probes-filter", "right", "choose"],
+            "arrow_table_v1:left-p": ["left-p-filter", "left", "choose", "after"],
+            "arrow_table_v1:left-q": ["left-q-filter", "left", "choose", "after"],
+            "arrow_table_v1:right-p": ["right-p-filter", "right", "choose"],
+            "arrow_table_v1:right-q": ["right-q-filter", "right", "choose"],
         }
 
     def test_a_source_on_both_sides_still_flows_on_from_the_left(self) -> None:
