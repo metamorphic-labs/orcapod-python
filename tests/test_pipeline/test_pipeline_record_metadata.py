@@ -25,6 +25,7 @@ from orcapod.databases import (
 )
 from orcapod.errors import (
     OrcapodDatabaseError,
+    OrcapodDatabaseReadError,
     StoredTableSchemaError,
     UnstorableColumnError,
 )
@@ -116,6 +117,49 @@ class RunObserver(NoOpObserver):
     def on_run_start(self, run_id: str, pipeline_uri: str = "") -> None:
         """Keep the ID of the job run."""
         self.run_id = run_id
+
+
+@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
+@pytest.mark.parametrize("operation", ["get_table_names", "get_column_info"])
+def test_connector_schema_lookup_failure_stops_run_under_continue(
+    orchestrator: str, operation: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unavailable connector during preflight must fail the run."""
+    connector = MockDBConnector()
+    store = ConnectorArrowDatabase(connector)
+    results = InMemoryArrowDatabase()
+    initial, _ = job_and_node(store, result_database=results)
+    _ = initial.run()
+    (result_path,) = results.list_table_paths()
+    original_results = results.get_all_records(result_path)
+    assert original_results is not None
+
+    writer, node = job_and_node(store, count=3, result_database=results)
+    original_lookup = ConnectorArrowDatabase.get_table_schema
+
+    def disconnected(*args: object, **kwargs: object) -> None:
+        """Fail schema introspection for this lookup."""
+        raise ConnectionError("connector unavailable")
+
+    def lookup(view: ConnectorArrowDatabase, path: tuple[str, ...]) -> pa.Schema | None:
+        """Inject failure only at schema preflight, after cached rows can be read."""
+        with monkeypatch.context() as patch:
+            patch.setattr(connector, operation, disconnected)
+            return original_lookup(view, path)
+
+    monkeypatch.setattr(ConnectorArrowDatabase, "get_table_schema", lookup)
+    with pytest.raises(OrcapodDatabaseReadError, match="connector unavailable") as info:
+        _ = writer.run(
+            orchestrator=ORCHESTRATORS[orchestrator](error_policy="continue")
+        )
+    assert info.value.record_path == (
+        "record_metadata",
+        *node.node_identity_path,
+        PIPELINE_DB_SCHEMA_VERSION,
+    )
+    assert isinstance(info.value.__cause__, ConnectionError)
+    remaining = results.get_all_records(result_path)
+    assert remaining is not None and remaining.equals(original_results)
 
 
 @pytest.mark.parametrize("orchestrator", ORCHESTRATORS)

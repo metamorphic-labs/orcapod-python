@@ -36,6 +36,8 @@ from orcapod.databases.utils import (
 )
 from orcapod.errors import (
     InputValidationError,
+    OrcapodDatabaseError,
+    OrcapodDatabaseReadError,
     UnstorableColumnError,
     UnstorableTableNameError,
 )
@@ -316,16 +318,26 @@ class ConnectorArrowDatabase:
     # ── Storable columns ──────────────────────────────────────────────────────
 
     def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
-        """Read the committed or queued schema without fetching rows."""
-        table_name = self._path_to_table_name(self._path_prefix + record_path)
+        """Read the committed or queued schema without fetching rows.
+
+        Raises:
+            OrcapodDatabaseReadError: If the connector cannot inspect the schema.
+        """
+        full_path = self._path_prefix + record_path
+        table_name = self._path_to_table_name(full_path)
         self._require_table_name(table_name)
-        if table_name not in self._connector.get_table_names():
-            pending = self._pending_batches.get(self._get_record_key(record_path))
-            return None if pending is None else pending.schema
-        return pa.schema(
-            pa.field(column.name, column.arrow_type, nullable=column.nullable)
-            for column in self._connector.get_column_info(table_name)
-        )
+        try:
+            if table_name not in self._connector.get_table_names():
+                pending = self._pending_batches.get(self._get_record_key(record_path))
+                return None if pending is None else pending.schema
+            return pa.schema(
+                pa.field(column.name, column.arrow_type, nullable=column.nullable)
+                for column in self._connector.get_column_info(table_name)
+            )
+        except OrcapodDatabaseError:
+            raise
+        except Exception as exc:
+            raise OrcapodDatabaseReadError(table_name, full_path) from exc
 
     def require_storable(self, schema: pa.Schema) -> None:
         """Refuse a table schema with a column the connector cannot store (ITL-1162).
