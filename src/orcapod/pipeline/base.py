@@ -430,6 +430,7 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         # slot is copied.
         if (
             isinstance(stream, SourceJobNode)
+            and stream._owned_by_job  # pyright: ignore[reportPrivateUsage]  # standalone slots keep their live bindings
             and self._persistent_node_map.get(key) is not stream
         ):
             return SourceJobNode.from_stream(stream)
@@ -533,15 +534,29 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         return True
 
     def _held_streams(self) -> list[Any]:
-        """Every stream the pipeline holds: its leaves and every recorded input."""
-        return [
-            *self._source_streams.values(),
-            *(
-                stream
-                for invocation in self._invocation_lut.values()
-                for stream in invocation.input_streams
-            ),
+        """The recorded graph's leaves, including this pipeline's copies of slots."""
+        from orcapod.core.nodes.source_node import SourceJobNode
+
+        leaves = [
+            stream
+            for key, stream in self._source_streams.items()
+            if key not in self._invocation_lut
         ]
+        for key, invocation in self._invocation_lut.items():
+            for input_key, stream in zip(
+                self._input_keys.get(key, ()), invocation.input_streams
+            ):
+                if input_key in self._invocation_lut:
+                    continue
+                if (
+                    isinstance(stream, SourceJobNode)
+                    and stream._owned_by_job  # pyright: ignore[reportPrivateUsage]  # job-owned slots may have been copied
+                    and self._persistent_node_map.get(input_key) is not stream
+                ):
+                    continue  # its captured binding is already represented in leaves
+                # Equal hashes can hide distinct live leaves (including standalone slots).
+                leaves.append(stream)
+        return leaves
 
     # ------------------------------------------------------------------
     # register() (ITL-1387)

@@ -1590,6 +1590,8 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
             *bound_source* is ``None``.
     """
 
+    _owned_by_job = False
+
     def __init__(
         self,
         name: str,

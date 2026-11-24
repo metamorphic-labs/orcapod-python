@@ -913,6 +913,68 @@ def test_a_refused_block_restores_a_rebound_slot_and_its_current_results() -> No
     assert job.double.as_table().to_pylist() == original_rows
 
 
+@pytest.mark.parametrize("initial_database", [True, False])
+def test_a_refused_block_restores_node_databases(initial_database: bool) -> None:
+    """Refusing a database bind restores both scopes and all node attachments."""
+    from orcapod.pipeline.execution_context import ExecutionContext
+
+    initial = InMemoryArrowDatabase() if initial_database else None
+    results = InMemoryArrowDatabase() if initial_database else None
+    replacement, replacement_results = InMemoryArrowDatabase(), InMemoryArrowDatabase()
+    context = ExecutionContext()
+    job = PipelineJob(
+        database=initial, result_database=results, execution_context=context
+    )
+    source = _two_rows("s", 1)
+
+    def deliver(f: int, ctx: Any) -> None:
+        pass
+
+    with job:
+        mapped = MapData({"y": "renamed"})(source, label="mapped")
+        doubled = doubled_x.pod(mapped, label="double")
+        SideEffectPod(deliver)(doubled, label="sink")
+    if initial is not None:
+        job.run()
+    function, operator, side_effect = job.double, job.mapped, job.sink
+    before = (
+        function._pipeline_database,
+        function._cached_function_pod,
+        operator._pipeline_database,
+        side_effect._pipeline_database,
+        side_effect._table_path,
+    )
+    before_rows = function.as_table().to_pylist() if initial is not None else None
+    with pytest.raises(ValueError, match="refuse the block"):
+        with job:
+            job.bind(
+                database=replacement,
+                result_database=replacement_results,
+                execution_context=ExecutionContext(),
+            )
+            assert job.database is replacement
+            raise ValueError("refuse the block")
+    assert job.database is initial
+    assert job.result_database is results
+    assert job.execution_context is context
+    assert (job.double, job.mapped, job.sink) == (function, operator, side_effect)
+    after = (
+        function._pipeline_database,
+        function._cached_function_pod,
+        operator._pipeline_database,
+        side_effect._pipeline_database,
+        side_effect._table_path,
+    )
+    assert all(old is new for old, new in zip(before, after, strict=True))
+    if initial is not None:
+        assert function.as_table().to_pylist() == before_rows
+        job.run()
+        assert initial.list_table_paths(())
+        assert results is not None and results.list_table_paths(())
+    assert not replacement.list_table_paths(())
+    assert not replacement_results.list_table_paths(())
+
+
 @pytest.mark.parametrize("assigned_first", [False, True])
 def test_an_assigned_label_wins_over_none_in_either_order(assigned_first: bool) -> None:
     """Finding 7: one step registered once unlabelled and once labelled takes the

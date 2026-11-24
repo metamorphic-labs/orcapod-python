@@ -2662,6 +2662,27 @@ class TestEqualStepsOverTwoRestrictions:
         return PipelineJob(name=name, database=DeltaTableDatabase(tmp_path / name))
 
     @pytest.mark.parametrize("first, second", [("m1", "m2"), ("m2", "m1")])
+    @pytest.mark.parametrize("way", ["register", "block"])
+    def test_rebinding_the_original_job_does_not_change_absorbed_restrictions(
+        self, project, tmp_path, first: str, second: str, way: str
+    ):
+        other = self._job(tmp_path, "other")
+        other.register(self._picked(first))
+        job = self._job(tmp_path)
+        job.register(other.picked)
+        events = _source(source_id="events", tag_only_columns=True)
+        other.bind(sources={"events": events.where(subject_id=second)})
+
+        rename = MapData({"amplitude": "a2"})
+        if way == "register":
+            job.register(rename(job.picked, label="renamed"))
+        else:
+            with job:
+                rename(job.picked, label="renamed")
+        assert job.run().conditions == {"events": Condition.of(subject_id=first)}
+        assert other.run().conditions == {"events": Condition.of(subject_id=second)}
+
+    @pytest.mark.parametrize("first, second", [("m1", "m2"), ("m2", "m1")])
     @pytest.mark.parametrize(
         "way",
         ["register_one_call", "register_two_calls", "block", "reopen", "absorb"],

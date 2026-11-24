@@ -225,6 +225,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
     def _state(self) -> dict[str, Any]:
         """Capture the job's state, including bindings held by the existing slots."""
         saved = super()._state()
+        saved["_job_bindings"] = (
+            self._database,
+            self._result_database,
+            self._unresolved_result_database,
+            self._execution_context,
+        )
         saved["_slot_bindings"] = [
             (node, node._binding_state())  # pyright: ignore[reportPrivateUsage]  # a job owns its slots
             for node in self._persistent_node_map.values()
@@ -233,11 +239,40 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         return saved
 
     def _restore_state(self, saved: dict[str, Any]) -> None:
-        """Restore the existing slots in place so their identity and results survive."""
+        """Restore bindings in place so existing nodes and their results survive."""
         bindings = saved.pop("_slot_bindings")
+        attachments = saved.pop("_database_attachments", ())
+        (
+            self._database,
+            self._result_database,
+            self._unresolved_result_database,
+            self._execution_context,
+        ) = saved.pop("_job_bindings")
         super()._restore_state(saved)
         for node, binding in bindings:
             node._restore_binding(binding)
+        for node, state in attachments:
+            vars(node).clear()
+            vars(node).update(state)
+
+    def _save_database_attachments(self) -> None:
+        """Save node state before the block's first database rebind."""
+        saved = self._state_at_entry
+        if saved is None or "_database_attachments" in saved:
+            return
+        # Attaching a database also clears held results and hash caches. Copy the
+        # dictionaries that can be cleared in place, retaining the original views.
+        saved["_database_attachments"] = [
+            (
+                node,
+                {
+                    name: value.copy() if isinstance(value, dict) else value
+                    for name, value in vars(node).items()
+                },
+            )
+            for node in self._persistent_node_map.values()
+            if isinstance(node, (FunctionJobNode, OperatorJobNode, SideEffectJobNode))
+        ]
 
     def _require_recordable(self) -> None:
         """Refuse ``register`` on a loaded job, which is read-only (ITL-1387).
@@ -283,7 +318,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         compiled_by_name: dict[str, Any] = {}
         compiled_by_hash: dict[str, Any] = {}
         for h, n in self._persistent_node_map.items():
-            if isinstance(n, SourceJobNode) and n.bound_source is not None:
+            if not isinstance(n, SourceJobNode):
+                continue
+            n._owned_by_job = True  # pyright: ignore[reportPrivateUsage]  # compilation owns the new slot
+            if n.bound_source is not None:
                 compiled_by_name[n.name] = n.bound_source
                 compiled_by_hash[h] = n.bound_source
                 # Also index by schema-based hash (matches blueprint pipeline keys).
@@ -563,6 +601,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         )
         if database_changed and new_database is not None:
             self._require_storable_tables(new_database, new_result_database)
+            self._save_database_attachments()
 
         # Every source is validated before anything changes: a refused source leaves
         # the job as it was, its database included (ITL-1112).
@@ -2047,6 +2086,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 sjn = SourceJobNode._from_loaded_slot(  # pyright: ignore[reportPrivateUsage]  # the loader is the one caller
                     bp_node, bound_source=sources.get(bp_node.name)
                 )
+                sjn._owned_by_job = True  # pyright: ignore[reportPrivateUsage]  # loading owns the restored slot
                 job._persistent_node_map[node_hash] = sjn
                 if bp_node.name in sources:
                     job._sources_by_hash[node_hash] = sources[bp_node.name]
