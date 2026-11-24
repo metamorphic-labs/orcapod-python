@@ -201,11 +201,10 @@ class MappingConnector(SpiralDBConnector):
             )
             arrays = []
             for field in schema:
-                name = (
-                    field.name
-                    if field.name in rows.column_names
-                    else encode(field.name)
-                )
+                # The expected stored name, never "whichever is there": a.b is stored
+                # as ox_a;2Eb, which is also a name a user's column may have.
+                key = field.name == ConnectorArrowDatabase.RECORD_ID_COLUMN
+                name = field.name if key else encode(field.name)
                 array = rows.column(name).combine_chunks()
                 target = field.type
                 if pa.types.is_timestamp(target) and target.tz is not None:
@@ -319,6 +318,25 @@ def counted() -> Any:
     finally:
         for p in patches:
             p.stop()
+
+
+def check_lookalike() -> None:
+    """A column that looks like another's stored name keeps its own values."""
+    with tempfile.TemporaryDirectory() as root, fake_pyspiral.install(root):
+        connector = MappingConnector("p")
+        database = ConnectorArrowDatabase(connector)
+        rows = pa.table(
+            {
+                "__record_id": pa.array([b"k"], pa.large_binary()),
+                "a.b": [1],
+                "ox_a;2Eb": [2],
+            }
+        )
+        database.add_records(("t",), rows, record_id_column="__record_id", flush=True)
+        read = database.get_all_records(("t",))
+        assert read is not None
+        assert read.to_pylist() == [{"a.b": 1, "ox_a;2Eb": 2}], read.to_pylist()
+        print("codec: a.b and ox_a;2Eb side by side keep their own values")
 
 
 def check_job() -> None:
@@ -560,6 +578,7 @@ def check_wrong_result() -> None:
 
 if __name__ == "__main__":
     check_codec()
+    check_lookalike()
     check_job()
     check_order()
     check_cached_source_order()

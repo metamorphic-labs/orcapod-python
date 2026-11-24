@@ -2,6 +2,7 @@
 
 ```text
 codec: 200000 distinct names -> 200000 stored names, all decoded
+codec: a.b and ox_a;2Eb side by side keep their own values
 job: first run calls {'add': 6, 'mean': 2, 'notify': 2}, rerun calls {}; rows, schemas, system tags and content hashes equal the in-memory store's
 order (6 rows): pipeline table equal False, as_source() equal True
 order (60 rows): pipeline table equal False, as_source() equal True

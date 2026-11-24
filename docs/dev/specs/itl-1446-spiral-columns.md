@@ -1,693 +1,548 @@
 # ITL-1446: storing a pipeline in SpiralDB
 
-Status: **proposal, nothing implemented.** Section 8 lists the decisions the developer makes.
-Decided (developer, 2026-11-24): the first version runs one job at a time and **refuses** a second
-writer (section 6.3; several writers are a follow-up issue); every table kind goes to SpiralDB
-(function pipeline, function result, operator cache, cached source, side-effect log); the live
-probes may use the throwaway test project.
-Covers ITL-1176, ITL-1164, ITL-1100 (names, tables) and ITL-1190 (metadata races).
+Status: **proposal, nothing implemented.** Revised after an independent review that found the
+first draft not sound (section 11 answers each finding). Covers ITL-1176, ITL-1164, ITL-1100 and
+ITL-1190.
 
-How each statement below is known:
+Decided by the developer (2026-11-24): one job at a time, a second writer is refused; every table
+kind goes to SpiralDB (function pipeline, function result, operator cache, cached source,
+side-effect log); digest table names and one catalog per dataset, so a dataset is one
+self-contained store; a store is a **set of rows**, with no row order kept or promised.
 
-- **Measured**: run on `main` at `7a2248bf` on the disk fake (`tests/test_databases/fake_pyspiral.py`)
-  by the scripts in [`itl-1446/`](itl-1446/). The fake is a model, not the service.
-- **Read**: from the installed pyspiral 0.16.33 (its Python source, stubs, or the text of its
-  native library). Reading says what the client offers, not what the server does.
-- **Seen live**: an earlier live session, cited by issue.
-- **To probe**: not known; section 7 lists one live probe for each. No SpiralDB was used here.
+How each statement is known:
 
-## 0. Summary
+- **Live**: measured on the throwaway project by the live worker, taken as given until its
+  report; or an earlier session, cited by issue.
+- **Fake**: run by the scripts in [`itl-1446/`](itl-1446/) on the disk fake, a model of SpiralDB.
+- **Read**: from pyspiral 0.16.33 (Python source, stubs, text of the native library).
+- **To probe**: unknown; section 9.
 
-- **Recommendation: option (a).** A SpiralDB store maps column names, types and table names when
-  it writes and restores them when it reads. Nothing above the database changes: no hash, record
-  path, layout version or golden value moves.
-- A prototype of (a) runs a job (join, filter, function, group by, second function, side effect)
-  on the fake with rows, schemas, system tags and content hashes equal to the in-memory store's,
-  and an unchanged rerun calls nothing (Measured, [`prototype.py`](itl-1446/prototype.py)).
-- Column names are the small part. Reading the code and running the prototype found five things
-  the issue does not list. F3 is accepted; the others must be in the first version:
+## 1. Summary
 
-| # | Finding | How known | Section |
-|---|---|---|---|
-| F1 | **Table names are too long.** pyspiral types a table name as at most 128 characters of `[a-zA-Z0-9_-]`. A function pipeline table's name is 181 characters today. `unstorable_table_name_reason` says SpiralDB holds every name | Read, Measured | 5 |
-| F2 | **Table names collide, and a collision serves wrong results.** `function_name="my-fn"` and `"my_fn"` share one result table; the second function is given the first one's values | Measured | 5 |
-| F3 | **Row order is not kept.** SpiralDB returns rows in key order, and the key is a hash, so `Batch(2)` over a `CachedSource` gives other batches than on Delta. *Accepted (developer): a store is a set of rows* | Measured | 3.6 |
-| F4 | **Result record ids are not content derived.** A function result's id is a random UUIDv7; a pipeline record's id leaves out the result it names. "Same id, same content" holds only for operator caches and cached sources, and not bit for bit | Read | 6 |
-| F5 | **The fake accepts what the client refuses**: `fixed_size_binary` and `duration` (pyspiral's own `Schema.from_arrow` raises) and probably a `null` column (the native library has an error for it). The connector says it stores all three | Measured (client, offline) and Read | 3.4 |
+A SpiralDB store maps column names and types, and table names, when it writes, and restores them
+when it reads (option (a) of section 2). No hash, record path, layout or golden value moves. One
+run holds a lease on the dataset; a catalog says which tables are the store's.
 
-## 1. Every stored column
+| # | What the first version must solve | Known |
+|---|---|---|
+| F1 | Table names reach 182 characters and **collide**: `my-fn` and `my_fn` share a result table, and the second is served the first one's results | Fake |
+| F2 | `__` columns, dotted names, time zones and logical types are refused: 57 of 153 stored columns ([list](itl-1446/stored-columns.md)) | Fake |
+| F3 | Two writers of one key: the last commit wins, silently. No data-commit conflict exists | Live |
+| F4 | A first write that fails leaves a key-only table that refuses every later run | Live |
+| F5 | Lookups cost a whole-table scan for each new row, and 4 listings for each row | Fake |
+| F6 | Result record ids are random; a pipeline record's id does not cover the result it names, so an overwrite is not harmless | Read |
+| F7 | Row order is not kept. **Accepted** (section 3.5) | Fake |
+
+**Honest size: about four L of work, not a few days** (section 10), with a narrow first version.
+
+## 2. Stored columns, and the options
 
 [`stored-columns.md`](itl-1446/stored-columns.md) is generated by
-[`stored_columns.py`](itl-1446/stored_columns.py): a job writes every table kind, each
-`add_records` call is recorded, and each column is given to
-`SpiralDBConnector.unstorable_column_reason` and written alone through the fake. It has names,
-Arrow types, nullability, the reason for each refusal, and what the fake does. 153 columns, 57
-refused.
+[`stored_columns.py`](itl-1446/stored_columns.py): every column of every table kind, with type,
+nullability, the refusal and what the fake does.
 
-| Table kind | Columns refused today | Reason |
-|---|---|---|
-| Function pipeline (`pdb_v1`) | the 11 bookkeeping columns: `__data_id`, `__node_content_hash`, `__input_data_hash`, `__output_data_hash`, `__data_context`, `__computed`, `__is_ephemeral`, `__pipeline_base_entry_id`, `__pipeline_recomputation_index`, `__pipeline_run_id`, `__recorded_at` | `__` prefix; `__recorded_at` also has a time zone |
-| Function result (`rdb_v1`) | 13: `__input_data_hash`, six `__pf_var_*`, four `__pf_exec_*`, `__pod_ts`, `__data_context` | `__` prefix; `__pod_ts` also has a time zone |
-| ... its outputs | `datetime`, `Path`, a user class, `list[UUID]` | time zone; logical (extension) type |
-| Side-effect log (`tdb_v1`) | `executed_at`, `__data_context` | time zone; `__` prefix |
-| Operator cache (`odb_v1`) | `__node_content_hash`, `__data_context`, and user columns by type | `__` prefix |
-| Cached source (`sdb_v1`) | `__data_context`, and user columns by type | `__` prefix |
-| Observer tables (opt-in) | none | but `_log_id` / `_status_id` are `fixed_size_binary[16]`, which the client refuses (F5) |
-
-A second point the list shows: the reason given is the first one found. `__recorded_at` and
-`__pod_ts` fail twice, so fixing names alone does not make them storable.
-
-## 2. Options
+| Table kind | Refused today |
+|---|---|
+| Function pipeline (`pdb_v1`) | 11 bookkeeping columns (`__`); `__recorded_at` also for its zone |
+| Function result (`rdb_v1`) | 13 (`__`); `__pod_ts` also for its zone; outputs that are `datetime` or logical types |
+| Side-effect log (`tdb_v1`) | `executed_at` (zone), `__data_context` |
+| Operator cache (`odb_v1`) | `__node_content_hash`, `__data_context`; user columns by type |
+| Cached source (`sdb_v1`) | `__data_context`; user columns by type |
 
 | | (a) map in the store | (b) rename the stored columns everywhere | (c) mixed |
 |---|---|---|---|
-| What changes | a SpiralDB store encodes on write and decodes on read | `SYSTEM_COLUMN_PREFIX` becomes a prefix SpiralDB accepts, for every store | (b) for Orcapod's own columns, (a) for user columns |
-| Hashes, paths, golden | **none** | `__input_data_hash` and `__pipeline_recomputation_index` are column names in hashed preimages (`_build_record_id_preimage`), and `__node_content_hash` is in the operator cache's hashed row: every pipeline entry id, base entry id, side-effect id and operator record id moves | as (b) |
-| Layouts | none | all five layout versions and the Python function type's revision | as (b) |
-| Time zones, logical types, dotted names, table names | handled by the same mechanism | **not handled**; (a) is needed anyway | (a) is needed anyway |
-| Existing stores | untouched | Delta stores of 0.4.0rc1 are no longer read | as (b) |
-| What other SpiralDB readers see | `ox___data_context` for `__data_context` | a plain name | a plain name |
+| Hashes, golden | none move | every pipeline entry, base entry, side-effect and operator record id moves: `__input_data_hash`, `__pipeline_recomputation_index` and `__node_content_hash` are names inside hashed tables | as (b) |
+| Layouts | none | all five, and the Python function revision | as (b) |
+| Zones, logical types, dotted names, table names | handled | not handled: (a) is needed anyway | (a) is needed anyway |
+| Another SpiralDB reader sees | `ox___data_context` | a plain name | a plain name |
 
-(b) and (c) pay the cost of moving hashes and still need (a). **Recommended: (a).**
+**(a).** It applies only to a connector opened as a store (`store mode`, section 10), only to
+tables in its catalog. A connector used otherwise, and `SpiralDBTableSource` over a user's table,
+read and write as today.
 
-Where (a) lives: in `SpiralDBConnector`, for a table it creates through
-`create_table_if_not_exists`, which is where `ConnectorArrowDatabase` learns a table is new. A
-table is an *Orcapod store table* when its key-value metadata holds a manifest (3.3); every other
-table is read and written exactly as today, without decoding.
-
-## 3. Columns: the exact encoding
+## 3. Columns
 
 ### 3.1 Names
 
-`E(c)`, the stored name of a value column `c`:
+`E(c)`, the stored name of a value column, or of a struct field among its siblings:
 
-1. `c` is **plain** when it is not empty, does not start with `__` or `ox_`, and holds none of
-   `.`, `$`, `*` and the ASCII control characters (0-31, 127). A plain name is stored as it is.
-2. Any other name is stored as `ox_` followed by `c` with each of `.`, `$`, `*`, `;` and each
-   control character written as `;` and two upper-case hex digits.
+1. `c` is **plain**, and stored as it is, when it is not empty, does not start with `__` or `ox_`,
+   and holds none of `.` `$` `*` and the ASCII controls.
+2. Otherwise it is `ox_` + `c`, with each of `.` `$` `*` `;` and each control written `;` + two
+   upper-case hex digits.
 
-| Orcapod name | Stored name |
+| Orcapod name | Stored |
 |---|---|
-| `x`, `_source_x`, `_tag_source_id::<hex>`, `a;b`, `é`, `a b` | unchanged |
+| `x`, `_source_x`, `_tag_source_id::<hex>`, `a;b`, `a;2Eb`, `é` | unchanged |
 | `__data_context` | `ox___data_context` |
 | `a.b` | `ox_a;2Eb` |
-| `a;2Eb` | `a;2Eb` (plain) |
-| `ox_a;2Eb` (a user's column that looks encoded) | `ox_ox_a;3B2Eb` |
-| `ox_` | `ox_ox_` |
+| `ox_a;2Eb` | `ox_ox_a;3B2Eb` |
 | the empty name | `ox_` |
 
-`D(s)`: if `s` does not start with `ox_`, `s`; otherwise drop `ox_` and replace each `;HH`.
+**Injective.** A plain name never starts with `ox_`; an encoded one does. In an encoded name every
+`;` starts an escape of two digits, because a literal `;` is escaped there. Checked on 200,000
+adversarial names (Fake). The key column `__record_id` is stored as it is; no `E(c)` starts with `__`.
 
-**Injective, proof.** A plain name does not start with `ox_`, so it never equals an encoded one,
-and plain names map to themselves. Among encoded names, the escape replaces single characters by
-codes that start with `;`, and a literal `;` is itself escaped, so reading left to right every `;`
-starts a code of exactly two digits and every other character is literal: `D(E(c)) = c`. So `E` is
-injective. **Accepted by SpiralDB's known rules**: no `.` remains, and no stored value column
-starts with `__` or `$`. The prototype checks round trip, injectivity and these rules on 200,000
-adversarial names; the implementation keeps that as a property test.
+**Reading never decodes a name.** `E` is invertible only on its image (`ox_order` would decode to
+`order`, which is not stored so). The manifest lists each column's logical and stored name, at
+every depth; a read looks for exactly the **expected stored name**, and refuses a missing, extra
+or repeated one. The earlier prototype looked for the logical name first, and so gave column
+`ox_a;2Eb` the values of `a.b`; it is fixed, with a check.
 
-Why these characters: `:` `::` space, `-`, `;`, `"`, `/`, upper case, non-ASCII letters and JSON
-text were accepted live (ITL-1164). `%` was never tried, so the escape is `;`, not `%`. `$` is
-"reserved for key columns" (Read: native library text). `*` selects all columns in
-pyspiral's expressions (`Expr.__getitem__`).
+Refused before anything is written, naming the column:
 
-- **Key column.** `__record_id` is stored as it is: SpiralDB accepts `__` on a key column.
-  `E` never yields a name that starts with `__`, so a value column cannot collide with it.
-- **Unicode.** Characters are kept as code points, with no normalisation. To probe: whether
-  SpiralDB normalises (`é` as one or two code points) or folds case. If it does, two names that
-  it merges are refused before writing; the rule is written from the probe, not guessed.
-- **Length.** An encoded name adds 3 characters and 2 per escaped one. No client limit was found
-  (Read); to probe. The longest names Orcapod writes are a join's system tags:
-  `_tag_record_id::<64 hex>::<64 hex>:0` is 148 characters after one join (section 1's list), and
-  each nested join adds 68.
-- **Nested names.** SpiralDB stores a struct column as a column group, and its name rules are
-  stated for "column group columns", so a struct field named `a.b` or `__x` may be refused or
-  split. The same `E` is applied to struct field names at every depth.
+- a name or path component that is not valid UTF-8 (a lone surrogate);
+- two siblings of one name, at the top level or among a struct's fields;
+- a name over the service's limit, in characters or bytes, once probed.
 
-### 3.2 What is kept, per Arrow type
+Matching uses path components, never joined text. List item and map key/value names are Arrow's
+own and are not encoded.
 
-The store writes a *physical* column and restores the *logical* one from the manifest. All
-physical fields are declared nullable (SpiralDB stores a null in a non-null struct field as the
-type's zero, seen live, ITL-936); the logical flags are checked before a write and after a read,
-as the nullability record does today.
+**Case and Unicode folding: a rule that waits for P1, not a guess.** Upper case was kept live
+(`B, C, a`, ITL-1367); whether two names that differ only in case or in normal form can be
+siblings is unknown. If the service keeps them apart, nothing is added. If it folds or
+normalises: names that it would change (even alone) are escaped, by adding exactly those
+characters to the escaped set, so stored names are stable under the service and stay distinct.
+Until P1 runs, the store refuses non-ASCII names and names with two siblings equal under
+`casefold`. In either case the first commit of a table is **read back** and its column names must be
+exactly the expected ones; otherwise the write fails and the table stays `intended` (5.3).
 
-| Logical type | Physical | Restored by | First version |
-|---|---|---|---|
-| timestamp with a zone, top level or nested | the same integers, `timestamp[unit]` without a zone | a zero-copy view under the recorded type. Exact for every zone and unit the physical type keeps: Arrow stores UTC instants | yes |
-| logical (extension) type, top level | its storage type, mapped by this table | the recorded extension name and metadata; a live type when it is registered, else field metadata | yes |
-| logical type in a list (`list[UUID]`) | a native container is itself one top-level extension type over its storage | as above | yes |
-| logical type nested in a plain list or struct | Orcapod refuses it at definition (`require_storable_in_struct_field`); one that reaches the store is refused | - | refuse |
-| logical data-tag | as a top-level column; the data-tag marker is field metadata, and the manifest keeps field metadata at every depth | manifest | yes |
-| `large_string` / `large_binary` / lists | native | large normalisation, as today | yes |
-| `fixed_size_binary[n]` | `large_binary` | recorded width; another width is refused on read (as Delta) | yes (F5) |
-| `duration` | `int64` | view | yes (F5) |
-| `null` column | `int8`, all null | recorded type | yes (F5) |
-| struct | struct with encoded field names. SpiralDB returns the fields sorted by name (seen live, ITL-1367) | fields matched by name, in recorded order | yes |
-| **null struct** | refused today (`UnsupportedValueError`), at flush, after the function ran | later: a hidden presence field | refuse, but when rows are added (`validate_records`), before anything is buffered |
-| map with fields `key` / `value` | native | recorded key order flag, nullability and metadata | keep if the live matrix keeps it, else refuse |
-| renamed map | IPC renames the fields, so the record cannot hold them | - | refuse, as today |
-| `interval`, union, list view, dictionary, run-end encoded | - | - | refuse (the client refuses an interval; streams refuse the others) |
-| `decimal256`, `float16`, `date64`, `time` | native (the client accepts them, offline) | recorded type | by live matrix; a lossy one is refused |
-| float bits (`-0.0`, NaN payloads) | native | - | by live matrix; a lossy one is recorded as an integer or refused |
+### 3.2 Types
 
-"Kept" must be shown twice: on the fake by the type matrix, and live by the same matrix. A row
-is kept in the first version only when **both** keep it.
+All physical fields are nullable (a null in a non-null struct field is stored as zero, seen live,
+ITL-936). Logical nullability is checked on write and read, a child's under its parent's validity;
+the key has its own rule: never null.
 
-### 3.3 The manifest, against today's two records
+| Logical type | Physical | First version |
+|---|---|---|
+| timestamp with a zone, at any depth | the same integers without the zone (zero-copy view) | kept |
+| logical type at the top level, a native container (`list[UUID]`, `set[int]`) included | its storage | kept; live when registered, else as field metadata |
+| logical type inside a plain list or struct | - | refused (Orcapod refuses it at definition too) |
+| text, binary, `large_list`, integer, bool, float32/64, date32, naive timestamp | native | kept once P3 shows it, float bits included |
+| struct | encoded field names; SpiralDB sorts fields by name (live, ITL-1367); restored by name in the recorded order | kept |
+| a **null struct** | - | refused when the batch is added, before it is buffered |
+| `fixed_size_list`, map, `decimal`, `float16`, `date64`, `time` | native | kept only if both the fake and P3 keep it; until then refused |
+| `fixed_size_binary`, `duration` | - | refused: pyspiral's own `Schema.from_arrow` raises (Read, offline) |
+| `null` | - | refused; only inferred from a native error text, so P3 confirms it |
+| renamed map, map field metadata, `interval` | - | refused |
 
-| | nullability record (ITL-936) | Arrow metadata (ITL-471) | manifest (proposed) |
-|---|---|---|---|
-| Holds | non-null paths | field and schema metadata | the whole logical schema: names, order, types, nullability, metadata; the record path; the encoding version |
-| Size | chunked, under 8 KiB each | **one entry: over 8 KiB the write raises** (Measured: 200 columns with a 40-byte metadata value) | chunked |
-| Written | first write | before **every** write | once |
-| After a failed first write | removed (races, ITL-1190) | previous value put back (races) | stays |
-| Two writers | last header wins | last entry wins | a set: both stay, and a difference is found |
+A data-tag's marker is field metadata, which the manifest keeps at every depth.
 
-Format: header key `__orcapod_store__/<digest>` with `{"format", "version", "chunks", "sha256"}`,
-and chunk keys `__orcapod_store__/<digest>/<i>`. The payload is JSON: encoding version, record
-path, and the Arrow schema in storage form (logical types as `ARROW:extension:*` field metadata,
-`canonical_form.storage_form_schema`) as base64 IPC. Chunks go first, then the header.
+**What "refused before anything is written" means.** A refusal by type or name happens when the
+database is attached, or before the first row of the table. A refusal by **value** (a null struct,
+a null in a non-null field) happens when that batch is added: batches committed earlier in the run
+stay, as results that a rerun reuses. ITL-1446's wording is wider; this narrower promise is
+decision 3.
 
-- **No write ever replaces or removes a manifest** (a grow-only set of digests), so two writers
-  cannot lose one another's. Manifests are compared as decoded schemas, field by field at every
-  depth (Arrow's own type equality ignores nested names), so bytes that differ only by pyarrow
-  version agree.
-- **Two different manifests in one table** are refused, on read and write, naming both. Data is
-  never decoded by the wrong one. The pipeline determines a node's columns, so this should not
-  happen; if it does it is a bug or another Orcapod version, and stopping is right.
-- **A manifest without rows** (a first write that failed) is inert: the table reads as having
-  those columns and zero rows. The next writer of the same schema just writes.
-- A writer compares its rows' schema with the manifest before buffering; the check costs nothing
-  after the first time (the manifest of a table id does not change).
-- To probe: whether parallel `set_metadata` calls on **different** keys keep both. pyspiral says
-  entries are upserted and parallel calls race "to set a value". If the server replaces the
-  whole map, the manifest goes to a table of its own (the catalog of section 5.4), where a write
-  is an upsert of one row.
+### 3.3 The manifest
 
-Limits: 1,024 entries a table, 8 KiB a pair, 255 characters a key. A key here is at most 90
-characters. A 1 MiB schema fits in about 130 entries.
+One manifest per table, written once at creation under the lease, never changed: format version,
+record path, kind, and the logical schema (names with stored names, order, types, nullability,
+metadata at every depth, in storage form). Chunks `__orcapod_store__/<digest>/<i>` first, then the
+header `__orcapod_store__/<digest>`.
 
-### 3.4 The fake must be made as strict as the client first
+- A read checks the full digest, the chunk count and order, the schema, and that the recorded path
+  is the one asked for. Chunks without a header are no manifest; two headers are refused.
+- It replaces, for store tables, the nullability record and the Arrow metadata entry. The latter
+  is one entry of at most 8 KiB, above which a write raises today (Fake: 200 columns).
+- Schemas are compared field by field at every depth, unknown logical types by name and metadata.
+- **A manifest without value columns** (a crash before the first rows) reads as zero rows of the
+  recorded schema. The key-only table is never scanned, which the service refuses (live, ITL-926).
 
-F5 means that today's "kept" in the SpiralDB column of `docs/reference/database-types.md` is not
-evidence for `fixed_size_binary`, `duration` and `null`. The fake's other gaps that matter here:
-struct fields keep their order (live: sorted), every table name is accepted (client: 128
-characters, `[a-zA-Z_][a-zA-Z0-9_-]*`), `$` is accepted, duplicate keys in one write are
-accepted (native text: "Duplicate keys found in input batch"), and a write of key columns only is
-accepted (native text: "Write array contains only key columns"). The first PR makes the fake
-refuse these, so the suite fails where the service would.
+### 3.4 Other programs, pushdown
 
-### 3.5 Tables of another program, other readers, pushdown
+Another SpiralDB reader sees stored names, UTC instants without a zone, storage types. A
+`SpiralDBTableSource` over a store table reads the manifest and shows Orcapod's names; it refuses
+a format it does not know. Writes by another program into a store table cannot be prevented; a
+read checks every batch against the manifest. Predicates use stored names and only text, binary,
+boolean and integer columns; everything else is filtered by Arrow, with the same null behaviour.
 
-- **A table another program wrote** has no manifest: names, types and nullability are read as
-  today, so a user's column called `ox_a` stays `ox_a`. `SpiralDBTableSource` is unaffected. The
-  store refuses to write into a table without a manifest that has value columns.
-- **Another SpiralDB reader of a store table** (CLI, Polars, DuckDB, spiral-sdk) sees `ox___pod_ts`
-  as a timestamp without a zone (UTC instants), a logical type as its storage, a `File` or user
-  class as its struct with sorted fields. Plain user columns, tags and
-  `_source_*` are readable under their own names. Documented, with the encoding version.
-- **A `SpiralDBTableSource` over a store table** must not silently show encoded names: it reads
-  the manifest, so it shows Orcapod's names, and refuses a manifest version it does not know.
-- **Writes by another program into a store table** cannot be prevented. A read checks every
-  batch against the manifest: a missing or retyped column, or a null in a non-null one, raises
-  naming it; an extra column not in the manifest raises too.
-- **Pushdown.** A predicate on an Orcapod column is built on `E(name)`, its literal converted as
-  the column is (a zone-aware instant to its UTC timestamp; a logical column is not pushed down).
-  Encoding removes `.` from names, which `table["a.b"]` would split. Store lookups use only
-  binary, text and boolean columns, so nothing else is needed at first.
+### 3.5 Order
 
-### 3.6 Order
-
-**Column order.** SpiralDB stores value columns sorted by name. A read puts them in the
-manifest's order, so a table reads back in the order of its first write, as on Delta.
-
-**Row order: none is kept, and none is promised** (decided, developer, 2026-11-24). A database is a
-**set of rows** unless one says otherwise. There is no order column and nothing hidden; stores are
-compared as sets of rows. A read of an unchanged table gives SpiralDB's key order, which is a hash
-order and says nothing about when a row was written.
-
-Within a run nothing depends on it: a node's rows are in the run's own order, stored rows
-included (ITL-1441), which the run takes from its inputs. So a job gives equal rows in the same
-order on SpiralDB and Delta, unless one of its **inputs** is read from a store. There, what can
-differ from Delta (Measured on the fake and on Delta):
+Columns come back in the manifest's order. **Rows: no order is kept, promised or hidden.** A
+node's rows within a run are in the run's own order (ITL-1441). Where a job's *input* is read from
+a store, an order-sensitive step can differ from Delta (Fake, and local Delta):
 
 | Where | SpiralDB (prototype) | Delta |
 |---|---|---|
 | `CachedSource` over k = 0..5 | 4, 5, 1, 2, 3, 0 | 0, 1, 2, 3, 4, 5 |
 | `Batch(2)` over it: y | [4, 5], [1, 2], [3, 0] | [0, 1], [2, 3], [4, 5] |
-| `as_source(tags_as_data=...)` over a logged `Join`: **positional** record ids of k = 0..3 | 3, 0, 2, 1; after 4 rows are added 5, 1, 4, 2 | 0, 1, 2, 3; after 4 rows are added 4, 5, 6, 7 |
-| the same with `record_id_columns=["k"]` | `{"k":0}` ... in every case | the same |
+| positional record ids of `as_source(tags_as_data=...)` over a logged `Join`, k = 0..3 | 3, 0, 2, 1; after 4 rows more 5, 1, 4, 2 | 0, 1, 2, 3; after 4 rows more 4, 5, 6, 7 |
+| the same with `record_id_columns=["k"]` | stable | stable |
 
-All accepted. The consequences, to be documented:
+Accepted, and documented: `Batch` (or a `GroupBy` with full ties) over a `CachedSource`, a
+`REPLAY` operator or an `as_source()` may group differently and so change values and ids
+downstream; adding rows can regroup earlier ones; positional ids over a stored node move. Delta
+does not keep append order either. Conformance tests use order-independent jobs and one explicit
+order-sensitive example.
 
-- **An order-sensitive step over rows read from a store** (`Batch`; a `GroupBy` whose members tie
-  on every tag and record id) may group differently, so its values, folded record ids and what is
-  recomputed downstream differ. This covers a `CachedSource`, a `REPLAY` operator, and any
-  `as_source()`.
-- **Adding rows** puts them anywhere in key order, so such a step's earlier groups change. On
-  Delta too: the third row shows that Delta's order is not append order either.
-- **Positional record ids over a stored node** move when rows are added, and everything
-  downstream is computed again. Give `record_id_columns`.
-- `head()`, previews and `as_table()` of stored rows show key order; `sort_by_tags` for a stable
-  one.
-- Two results of one input with an equal `__pod_ts` (to the microsecond): which one a lookup
-  takes is unspecified, as it is today.
+## 4. The lease
 
-Compare-as-sets is for what is read **from a store**. A run's own rows are still compared exactly
-for sync and as sets for async.
+### 4.1 What the service gives
 
-### 3.7 Does anything move?
+| Primitive | Live result |
+|---|---|
+| `create_table(exist_ok=False)` | an **atomic test-and-set**: 25 rounds of 5 processes, exactly one winner, the others a 409; 0.12 s |
+| dropping by table **id** | a late clearer gets a 404 and cannot drop a newer table of that name; takeover 10 of 10 rounds one winner |
+| owner text in the key column's name | fits, so the owner is part of the atomic create |
+| claim row, then check | works, but about 6 s, and two starts at once are both refused in 45 of 48 |
+| data commits | no conflict; last commit of a key wins. A drop fences an open transaction on that table (404); a rename does not |
 
-No. Hashes, `record_path` tuples, system-tag column names, layout versions, data function type
-revisions and golden values are computed above the database, from Orcapod names and types. The
-manifest's SHA-256 and the table name's SHA-256 (section 5) are in names; both get a row in the
-hash site inventory ("in a name"). The store's own format is versioned by the manifest's
-`version`, independent of `pdb_v1` and the others. The implementing PRs run `--check` on golden.
+### 4.2 Design: one table per dataset, `orcapod_lease_v1`
 
-## 4. Lookups
+- **Take**: `create_table("orcapod_lease_v1", exist_ok=False)` with one key column named
+  `own-<token>-<utc start>-<pid>-<job, 40 characters of [a-z0-9_]>`. The token is a new UUIDv7 for
+  each attempt, never reused, not even after a retry, a fork or a restart. The returned **table
+  id** is the lease.
+- **409**: someone holds it. The refusal names the owner text and the table id. No retry loop:
+  one attempt, refuse at once.
+- **Lost reply** (timeout, or the client's own retry got a 409): look the name up. My token in
+  the key column name: I own it, with that id. Anything else, or nothing, or an error: refuse. A
+  create that lands after that is a left-behind lease, never a second holder.
+- **Before every commit**: look the name up; the id must be mine. Otherwise stop the run.
+- **Release**: drop **by id**. 404 is success. An unclear reply: look up, drop the id again if it
+  is still there; a repeated or late drop of that id cannot touch a newer lease. If it cannot be
+  settled, the run raises (or adds a note to its own error) with the id to clear.
+- **Reuse of the name** after a drop was measured with takeover; P11 repeats it across clients.
 
-### 4.1 What a run costs today
+[`lease_model.py`](itl-1446/lease_model.py) visits every interleaving of 2 to 4 writers with
+crashes, lost replies, late creates and repeated drops: never two holders. Two holders are reached
+in the two variants that break a rule: a live holder's table is cleared, or drops go by name.
 
-SpiralDB calls of the six-step job of `prototype.py` with today's lookups (Measured on the fake;
-each is at least one round trip on the service):
+### 4.3 What is guaranteed, and the window that is not
 
-| Rows | Run | list tables | look up table | metadata reads | writes | whole-table scans |
+Two Orcapod runs never both hold one dataset, **if**:
+
+- L1. the service keeps creation of a name atomic, and a dropped id gone. Measured, not
+  documented: violations can be found by tests, not excluded. Ask SpiralDB to state it.
+- L2. nobody drops or renames the lease table of a live writer.
+- L3. every writer takes the lease: this version of Orcapod, in store mode. A program calling
+  pyspiral, or an older Orcapod, is not stopped.
+
+There is **no fencing** of data writes: if L2 is broken, the old holder notices at its next commit
+check, but a commit already past that check lands. That check is detection, not a guarantee, and
+so is the read-back after a commit (section 6.5).
+
+### 4.4 A crashed holder
+
+The lease stays. **No age, process id or host makes it expire**: a crash cannot be told from a
+pause. A person runs `store.clear_lease(table_id)` with the id from the refusal, after making sure
+the process is gone *and* that no request of it is in flight (the message says to wait for the
+client's request timeout, P10). It drops exactly that id. Nothing renews or recreates a lease, so a
+cleared writer never brings it back.
+
+### 4.5 Scope: a write session
+
+A **session** is one run's leases and the state decided under them. The order of a run:
+
+1. Collect every SpiralDB dataset the run may write: the pipeline and result databases, a pod's
+   `result_database` and `pod_cache_database`, cached operators', `CachedSource`s', observers'.
+2. Take their leases, sorted by (endpoint, project, dataset), **before sources are checked and
+   before the plan**. If one is refused, release those taken and raise; report a failed release.
+3. Drop everything remembered from before: indexes, table handles, "does not exist" answers, the
+   catalog, and once-per-object flags (`_pipeline_preflight_checked`, `_stale_tables_checked`).
+   Then check the catalog (5.2).
+4. Check sources, plan, compute, deliver, commit: every read that decides work is under the lease.
+5. Drain: wait for every task, thread and commit of this run, cancelled ones included (a
+   cancelled `to_thread` commit still runs). Then the final flush, then release.
+
+| Case | Rule |
+|---|---|
+| `job.run()`, `run_async()`, `node.run()` | a session. An unchanged rerun takes it too (about 0.3 s), because whether there is work is decided under it |
+| `load_only=True`, `load`, `as_source()`, `head`, `get_*`, `trace`, reads of a held run | no session, **never refused**. They read the pipeline table first and results after, so a record's result is there (results commit first) |
+| reading a `CachedSource` outside a run, a standalone tracked side effect | a session of its own, taken before the cache or log is read, or anything delivered. Refused while another run holds the dataset (decision 4); `cached.get_all_records()` is a pure read |
+| `add_records` / `flush` by hand | only inside `with store.writing():`. Outside it, refused **before buffering**. At the end of a session the queue is empty: committed, or dropped with an error that counts the rows |
+| whose writes are the session's | a context variable, set by the run and copied by Orcapod into its own tasks and threads. A user's thread, or another run on the same object, has none, so its write is refused |
+| a user function | runs **without** the variable, so it cannot write with the run's authority. A nested job on the same dataset is refused |
+| a task that outlives the run | its session is closed: refused |
+| a fork | the session records the process id; a write from another is refused. Ray workers do not write |
+| two datasets | both leases. A run sharing either dataset is refused, even if it would write other tables |
+| one dataset, two connectors in one run | one lease: the 409's owner text holds this run's own token |
+| the same service under two addresses | the second create sees the same name. Recognised by the token within a run, refused between runs |
+| the process is killed, or draining fails | the lease stays (4.4) |
+
+## 5. Tables
+
+### 5.1 Names
+
+`op-<hint>-<digest>`, the digest being the 64-hex SHA-256 of the path's compact JSON list (UTF-8,
+non-ASCII as itself; a component that is not UTF-8 is refused earlier; `/` and NUL stay refused).
+The hint: drop the components that match `([a-z]+:)?[0-9a-f]{64}`, replace every run of characters
+outside `[A-Za-z0-9_]` by `_`, join by `_`, cut to 56. At most 124 characters; the limit is 255 on
+the table part (Live). Because the hint is part of the name, its rule and the JSON form are frozen
+as **store format 1** with test vectors: another rule would look for another name and find nothing.
+
+The full path includes `base_path`, so `.at()` views agree on a table. The digest is a hash "in a
+name" (bare hex), with a row in the hash site inventory. SQLite and PostgreSQL share the old
+mapping and its collisions: the code goes in `ConnectorArrowDatabase`, switched on for SpiralDB
+only; the others later (their tables would be rebuilt; nobody has any. PostgreSQL's 63 bytes hold
+a hint of 27 and 32 hex digits; its long column names stay ITL-1166).
+
+### 5.2 The catalog, `orcapod_catalog_v1`
+
+Key `physical_name`; columns `path` (JSON text), `kind`, `store_format`, `state` (`intended`,
+`ready`), `table_id`. Written only under the lease. `kind` comes from the path's last component;
+nothing is parsed from a name.
+
+**It fails closed.** A store's dataset holds only store tables, the catalog and the lease. At the
+start of every session, and in `list_table_paths`, one listing is compared with the catalog:
+
+| Found | Meaning | Action |
+|---|---|---|
+| nothing at all | a new store | create the catalog (exclusive) |
+| tables, no catalog | lost catalog, or a foreign dataset | refuse: `rebuild_catalog()`, or another dataset |
+| a table without a row | a lost row, or a foreign table | refuse, naming it |
+| a `ready` row without its table, or with another table id | dropped or replaced by hand | refuse: never read as absent. `forget_table(path)` says it is meant |
+| an `intended` row | an interrupted creation | finish it (5.3); a reader sees no rows |
+| a row for the name with another path | a digest collision | refuse |
+| another catalog version, or an unexpected schema | another Orcapod | refuse |
+
+So a stale-layout check never runs on a partial listing: the review showed that a missing row of
+an old side-effect log lets a delivery through. For result lookups too, a missing row is an error
+in the writer **and** the reader path, never a miss. An access or network failure is an error,
+never "absent".
+
+`rebuild_catalog()` takes the lease, reads every table's manifest, refuses if one is invalid,
+repeated, or does not give its own name, writes the rows to a new table, and only then
+makes it the catalog; a half-built one is never read. A table whose creation never reached its manifest has no known
+path: it is listed for the person to drop.
+
+### 5.3 Creating a table
+
+Under the lease. The live failure (F4) is a key-only table left by a failed first write.
+
+| Step | A crash after it leaves | Recovery by the next session |
+|---|---|---|
+| 1. the name is not listed; row `intended`, read back | a row, no table | go on from 2 |
+| 2. `create_table(exist_ok=False)` | an empty key-only table | no value columns and no committed write: **drop it by id, create it again** |
+| 3. manifest chunks, then header | the same, with a manifest | the same (a manifest of an empty table pins nothing) |
+| 4. first rows, one atomic commit; names read back | a whole table | manifest valid and value columns present: go on to 5 |
+| 5. row `ready` with the table id | done | - |
+
+- Step 2's 409 means the table appeared after step 1's listing. It is never adopted: refuse.
+- The drop in recovery is safe only because the row is `intended` (so nobody may have results in
+  it), the lease is held, and the table has no value columns. A table with value columns and no
+  valid manifest is refused, never dropped.
+- A lost reply at any step is settled by reading back before going on.
+
+Deleting (`delete_table(path)`, by a person, in a session): row to `intended`, drop by id, delete
+row. Nothing is deleted automatically. Deleting a result table whose pipeline records remain makes
+those records recompute, as on Delta; the method says so and asks for `force`.
+
+## 6. Reading and writing
+
+### 6.1 What a run costs today (Fake, prototype's six-step job)
+
+| Rows | Run | list tables | look up | metadata reads | writes | whole-table scans |
 |---|---|---|---|---|---|---|
 | 2 | first | 35 | 15 | 5 | 5 | 3 |
 | 50 | first | 227 | 15 | 5 | 5 | 3 |
-| 50 | unchanged rerun | 10 | 14 | 7 | 0 | 7 |
+| 50 | unchanged | 10 | 14 | 7 | 0 | 7 |
 | 50 | 10 rows added | 48 | 89 | 48 | 5 | 34 |
 
-Three separate problems:
+Offered by the client (Read): `where=` with comparisons, `in_`, null tests; `to_record_batches(
+key_table=)` (sorted, unique keys); `asof`; `last_modified_at`; projection. Not offered:
+conditional writes, rows since a version, a transaction over two tables.
 
-1. **`list_tables` per row** (4 per row on a first run): `ConnectorArrowDatabase` lists the whole
-   project to ask whether one table exists. At about 1 s a call (seen live, ITL-926: 1.2 s for
-   27 tables) 50 rows spend minutes.
-2. **A whole-table scan per new row and table.** `ResultCache.lookup` (by `__input_data_hash`)
-   and `add_pipeline_record` (by `__pipeline_base_entry_id`) are called once per row, through
-   `get_records_with_column_value`. N new rows read the table N times: quadratic. The issue's
-   "record-id lookup pushdown" covers neither, since both look up by another column; only the
-   side-effect log looks up by record id.
-3. **Whole tables per node per run** (`_fetch_joined_records` reads the pipeline table and the
-   result table, payload included, whatever the inputs).
+### 6.2 One generation
 
-### 4.2 What pyspiral 0.16.33 offers (Read)
+A session pins, for each table, `(table id, manifest digest, version V)`. The index scan **and**
+the payload reads use `asof=V`. A manifest never changes for an id. Under the lease only this
+session changes a table, so V moves only by its own commits: the index is extended by the rows
+**actually inserted** (not skipped, not ambiguous) and V is read again. A reader without a lease
+pins V once for its read. The version must be exact and never reused for an id: P14. If it is not,
+a session reads the latest (safe under the lease) and readers check the version before and after.
 
-| Facility | Use |
+### 6.3 Lookups
+
+- **Index**, read once per session and table: record id, the columns callers filter by, data
+  context, and `__pod_ts` for results. A lookup with a constraint on another column loads that
+  column into the index at the same V.
+- **Misses cost no call.** A hit needs its full row.
+- **Hits are read in batches.** A node hands over all its inputs' keys before its loop (sync: it
+  already lists them; async: what the channel holds without waiting, at most 1,000). One
+  `key_table` read serves up to 10,000 ids: 10,000 warm hits are 1 to 10 scans, not 10,000.
+  `ResultCache` gets `prefetch(inputs)`; a single `lookup` uses what was prefetched.
+- **Side-effect checks**: the log's record ids are one index; a check is a set lookup. The lease
+  makes it authoritative for the session.
+- **Equal `__pod_ts`**: the greater record id (UUIDv7 bytes) wins, on every database. Today the
+  first row returned wins, which depends on the backend. Decision 5, as it changes Delta's tie.
+- **Budget**: 512 MiB of index and prefetched rows per session, counted in Arrow bytes. Over it, a
+  table falls back to `where=<column>.in_(batch)` for each prefetch batch, never per row. The
+  earlier 250 bytes a row was not measured; PR 7 measures peak memory.
+
+### 6.4 The other whole-table reads
+
+| Read | First version |
 |---|---|
-| `scan(proj, where=expr)`; `==`, `!=`, `<` ..., `&`, `\|`, `~`, `is_null`; `expr.in_([...])` (a list literal: `list.contains`) | lookup by any column |
-| `scan(proj).to_record_batches(key_table=keys)` | **take by key**: a table whose columns are exactly the key schema |
-| `scan(..., asof=version)`, `last_modified_at()` | pin a read; one call says whether a table changed |
-| `scan(table.select("a", "b"))` | read some columns only |
-| `scan(..., key_ranges=[KeyRange])` | ranges; excludes `key_table` |
-| `scan_keys` | keys only. The client says it reads keys of the referenced column groups; seen live, a scan of key columns alone was refused (ITL-926) |
-| `Spiral.sample`, `enrich` | not needed |
+| `_fetch_joined_records` (pipeline, then results) | batched: a run asks for its base entry ids, then their result ids, through a new protocol method `get_records_by_column(path, column, values)`, implemented by every database |
+| `as_source()`, `get_all_records()`, `trace` | whole, pipeline rows first; that is the request. Result payloads by id |
+| `stored_data_contexts`, the data-context check | projection of one column |
+| `CachedSource` ids and source-id check | projection of two columns, under the session |
+| `CachedSource` rows, `REPLAY` operators | whole: they return every row. **Not bounded** |
+| `skip_existing` | the index |
+| `_stored_record_count` (at save) | projection with `where` |
 
-There is no conditional write, no read of "rows changed since a version", and no transaction over
-two tables. Docs say an unsorted or repeated `key_table` is supported but slower; the native text
-says "must be sorted by key". So keys are always sorted by bytes and made unique.
+**Cost at 10,000 rows**, from the calls (not measured): each table that gets 10,000 new rows takes
+100 commits at `commit_every_rows=100`, each with a lease look-up and a version read: about 300
+calls a table, 1,500 for five. The job suggests a larger `commit_every_rows` on SpiralDB. An
+unchanged rerun: the listing and catalog, one index scan a table, and the batched reads. P9 and PR
+7 measure calls, bytes, memory and time for: unchanged (same object, rebuilt job), many hits, new
+rows, two result databases, and much old history. The issue's "acceptable cost" is judged on those.
 
-### 4.3 Design, for SpiralDB only
+### 6.5 Writes
 
-The protocol methods stay as they are. Three optional connector methods, which the database uses
-when the connector has them (as `get_arrow_schema` today); SQLite and PostgreSQL keep their path:
+- **Insert only.** A row whose id is stored is never overwritten, whatever `skip_duplicates` says,
+  as Delta's merge does. Under the lease and the index this holds without a window. Equal ids can
+  hold other float bits (`-0.0`, NaN); the first stored stays, bit for bit.
+- **Results before records**, across databases too (`PendingCommits`, ITL-1412), unchanged.
+- **A failed commit** keeps its rows queued for a retry in the session, with their guards, schema
+  checks and skip policy (today `ConnectorArrowDatabase` drops them). An **ambiguous** one is settled by
+  reading the ids back before a retry; results keep their UUIDs.
+- **After a crash** the next session reads what is stored before it treats anything as a miss.
+- **Read-back** of pipeline records and side-effect rows after a commit finds an overwrite by a
+  program outside the lease, and warns. Detection only; other tables have none.
+- Run progress is partial: committed batches of a failed run stay. Side effects are at least once:
+  a crash between delivery and its log row delivers again.
 
-- `read_by_keys(table, ids)`: `key_table` of `{"__record_id": large_binary}` (cast to the key
-  type the table states: `binary` or `large_binary`), sorted and unique, 10,000 ids a batch (about
-  0.6 MB of 60-byte ids; the size is a constant set by a live measurement). Serves
-  `get_record_by_id`, `get_records_by_ids` and `skip_existing` (which today scans the table and
-  converts it to Python).
-- `read_where(table, pairs)`: equality on encoded names. Serves `get_records_with_column_value`.
-  Binary, text, boolean and integer columns only; anything else is filtered by Arrow on the
-  client, as today.
-- `read_columns(table, names)`.
+Why an overwrite of a pipeline record is not harmless (F6): the new record names another result,
+run and time, while downstream rows were computed from the first, so `trace` breaks and history
+changes. The recomputation index is read, then written, with the same exposure.
 
-That makes each lookup small, but still one round trip a row. At 0.7 to 1.7 s a scan (seen live)
-1,000 new rows would take an hour. So lookups are answered from a **per-table index held for one
-run**, as `DeltaTableDatabase` does with its `KeyIndex`:
+## 7. Hashes, parity, credentials
 
-- On the first lookup in a table, read only the lookup columns of all rows with a pinned `asof`
-  (`__record_id`, `__input_data_hash`, `__data_context`, `__pod_ts` for results;
-  `__record_id`, `__pipeline_base_entry_id`, `__pipeline_recomputation_index`,
-  `__node_content_hash`, `__data_context` for the pipeline). A miss needs no call. Hits read their
-  full rows by `read_by_keys`.
-- Columns indexed are those a caller has filtered by, so the database needs no knowledge of
-  table kinds.
-- Own commits extend the index. Pending rows are consulted as today.
-- About 250 bytes a row: 1 M rows is about 250 MB and one scan. `read_where` per lookup is the
-  fallback above a limit (proposed: 2 M rows by `row_count_estimate`).
+- Nothing above the database changes: hashes, record paths, system-tag names, layouts, revisions
+  and golden values stay; golden `--check` runs in every PR.
+- **Parity with Delta** is: equal values, tags, system tags, content hashes, pipeline entry ids
+  and schemas; sync rows of a run exactly, async and stores as sets. Generated values (result
+  UUIDs, run ids, timestamps) cannot be equal: they are compared through a one-to-one mapping, and
+  every reference must resolve. Delta accepts some inputs SpiralDB v1 refuses (schema evolution,
+  null structs, the refused types).
+- **Saved files**: `overrides` is saved only for `server.url`, and only as scheme, host, port and
+  path. User information, a query or a fragment is refused, in nested and separate databases too.
+- **Permissions are per project** (documentation: "A grant gives one role on one Project to a
+  principal"; pyspiral's grant call agrees). Datasets do not separate writers. Whether a dataset
+  must be created first, and which role the store needs, is P13.
 
-Batch-loading the rows a run needs (problem 3) is a change in `_fetch_joined_records`: ask by the
-run's base entry ids, then result ids, instead of `get_all_records`. It is a separate PR after the
-store works, since it touches every store's path.
+## 8. Failure table
 
-**Staleness.** `refresh_table` is already called for each table of a function node at the start of
-a run and at every read of what is stored (ITL-1408). On SpiralDB it becomes one
-`last_modified_at` call: unchanged keeps the index, changed drops it. Within a run the handle
-does not see another writer's rows, which costs at most a repeated computation, as on Delta; the
-keyed check before a write (section 6) reads the latest version.
+| Failure | Result |
+|---|---|
+| a second run starts | refused before it reads, computes, delivers or writes |
+| the holder crashes | its lease blocks until a person clears it |
+| the lease is cleared while alive | detected at the next commit; a commit past the check lands |
+| a first write fails or is killed | recovered by the next session (5.3) |
+| a commit fails | retried in the session; else the run fails, earlier batches stay |
+| catalog lost or partial | refused until rebuilt; no recomputation, no delivery |
+| a table dropped by hand | refused until `forget_table` |
+| network or access failure | an error, never "absent" |
 
-**Table existence and handles.** `lookup_table` once per table and handle (the exact-name
-listing), kept until `refresh_table`; "does not exist" is asked again at refresh and before
-create. Expected calls per run: about 2 per table for an unchanged rerun, plus 2 to 4 per commit,
-and none per row. The tests assert these counts on the fake.
+## 9. Probes still needed
 
-## 5. Table names
+| # | Question |
+|---|---|
+| P1 | names: case and normal-form pairs, alone and as siblings, at depth; each ASCII class; length in characters and bytes |
+| P3 | the type matrix in physical form, float bits, `null`, struct order |
+| P4, P5 | `key_table` and `where in_`: key type, absent and repeated ids, `asof`; 1 to 100,000 ids |
+| P6 | metadata entries: 1 to 130 chunks; read by another client at once |
+| P8 | a read after a commit, from a second client (results before records) |
+| P9 | time of every call; the runs listed in 6.4 |
+| P10 | a write killed midway; duplicate keys in one write; the client's request timeout and retries |
+| P11 | the lease across clients: name reuse, lost replies, a paused process, two endpoint addresses |
+| P13 | dataset creation; what `viewer` and `editor` may do |
+| P14 | `last_modified_at` and `asof`: exact, monotonic, never reused; two commits in one microsecond; after recreation |
 
-### 5.1 Today
+## 10. Pull requests
 
-Each path component has every character other than `[a-zA-Z0-9_]` replaced by `_`, joined by
-`__`; `t_` in front of a digit.
+A **store mode** switch (`SpiralDBConnector(..., store=True)`) stays private and refuses to open
+until PR 8. Leaving jobs refused is not enough, because `ConnectorArrowDatabase` can be written to
+directly. **No PR before 8 lets anything write a store table outside tests on the fake and the
+throwaway project.**
 
-### 5.2 Collisions: disproved safe, by example
-
-| Path A | Path B | One name today |
-|---|---|---|
-| `job/_result/my-fn/<hash>/v0/...` | `job/_result/my_fn/<hash>/v0/...` | `job___result__my_fn__<hash>__v0__...` |
-| `job/_result/café/<hash>/...` | `job/_result/cafè/<hash>/...` | `job___result__caf___<hash>__...` |
-| `run-1/add/pdb_v1` | `run_1/add/pdb_v1` (two job names) | `run_1__add__pdb_v1` |
-| `a/b__c` | `a__b/c` | `a__b__c` |
-| `a_/b` | `a/_b` | `a___b` |
-| `1x` | `t_1x` | `t_1x` |
-
-The first is reachable with the public `function_name` argument, and the two functions need only
-the same outputs and major version. Through the prototype, `my_fn` (3x) was given `my-fn`'s (2x)
-stored `[0.0, 2.0]` for inputs `[0.0, 1.0]`: a result lookup matches the input hash and the data
-context, not the function. On `main` no function table reaches a connector database, so nobody
-has been given such a result; the same mapping serves SQLite and PostgreSQL, where it is latent
-(decision 6).
-
-**Length** (Measured): 181 and 182 characters for the function pipeline tables of a job named
-`proto` with functions `add` and `mean`, 123 and 124 for their result tables. Limit: 128 (Read,
-`spiral/api/types.py`: `TableName`). Whether the server enforces 128 is to probe; the design
-stays below it either way.
-
-### 5.3 The mapping
-
-Decided (developer, 2026-11-24): a short readable part plus a digest of the full, unsanitised
-record path, independent of any lookup; a fixed-name catalog table; nothing is ever parsed out of
-a name.
-
-`op-<hint>-<digest>`:
-
-- `<digest>` is the 64-hex SHA-256 of the compact JSON list of the full path as text: the
-  database's base path and the record path, each component exact. JSON quoting keeps `["a","b"]`
-  and `["a/b"]` apart.
-- `<hint>` is for people: the components without a 64-hex hash, joined by `_`, sanitised as
-  today, cut to 56 characters.
-
-At most 124 characters of `[a-zA-Z0-9_-]`, starting with `o`. The developer gives SpiralDB's limit
-as 255; pyspiral's own type says 128 (Read). Names fit both, and P2 settles which the server
-applies. A reversible escape instead of a digest cannot fit 128: two path hashes are already 128.
-
-The digest is a new hash site of class "in a name" (bare hex, no label) and gets its row in the
-hash site inventory. No existing hash or record path moves.
-
-**Several databases over one connector.** `.at()` views and separate `ConnectorArrowDatabase`
-objects use the full path, so `db.at("a")` writing `("b",)` and `db` writing `("a", "b")` are one
-table, as on Delta; they share one catalog. Two datasets are two stores.
-
-### 5.4 The catalog, `orcapod_catalog_v1`
-
-| Column | Type | Content |
-|---|---|---|
-| `physical_name` | text, **key** | the table's name in SpiralDB |
-| `path` | text | the exact path, the JSON text the digest is of |
-| `kind` | text | `function_pipeline`, `function_result`, `side_effect_log`, `operator_cache`, `cached_source`, or `other`; from the path's last component (its layout), never from the name |
-| `store_format` | int32 | the manifest format the table was created with |
-
-No column starts with `__` or holds `.`. The catalog is written with these fixed types, without
-the codec or a manifest, and its schema is checked when opened. A row is a function of its key:
-there is no created-at column, so two writers write the same row.
-
-- **Order.** The catalog row is committed, then the table is created, then its manifest, then
-  rows. So every store table is in the catalog, and a crash leaves at most a row with no table,
-  which a listing leaves out.
-- **Use.** A table's name is computed, so a read or write needs no lookup to find it. The catalog
-  is for `list_table_paths`, cleanup, people, and two checks: a row for the name with **another
-  path** is a digest collision and is refused; a table that exists **without a row** is not ours,
-  and is neither read nor written (an error naming it, never "no such table", which would
-  recompute over it).
-- **Deletion.** Under the lease: drop the table by id, then delete its row. A crash between
-  leaves a row with no table. A table dropped by hand reads as absent and is recreated. Offered
-  as `database.delete_table(path)`; nothing is deleted automatically.
-- **A lost catalog.** Every table's manifest also holds its path, so it can be rebuilt:
-  `rebuild_catalog()`, run by a person, reads each table's metadata once, takes those with a
-  manifest whose path gives exactly the table's name, and writes the rows. Until then the tables
-  are refused, not recomputed. When the catalog does not exist, opening the store for writing
-  looks once at the metadata of the tables there; if any has a manifest it refuses and names
-  `rebuild_catalog()`, else it creates the catalog. A catalog that lost only some rows shows as
-  "exists without a row" on use. `list_table_paths` cannot see those tables until the rebuild, so
-  stale-layout accounting may miss them: a stated limit.
-- **Schema version.** In the name. A changed catalog is `orcapod_catalog_v2`, with its own
-  migration decision; a store that holds a catalog of another version is refused. The manifest and
-  the lease (`orcapod_lease_v1`, section 6.3) are versioned apart.
-- **Cost.** One read a handle at the start of a run (about 300 bytes a table; kept until
-  `refresh_table`), none per row, one commit per **new** table (five for the prototype's job, first
-  run only), and nothing on a rerun. `list_table_paths` is this read plus one listing.
-- **Scope: one catalog per dataset** (decided, developer, 2026-11-24). A dataset is one
-  self-contained Orcapod store: its tables, its catalog and its lease. The database sees nothing
-  of other datasets, and a path names a table within its dataset only.
-
-### 5.5 What a dataset is, and who may write
-
-| Question | Answer | Source |
-|---|---|---|
-| Must a dataset be created first? | **Unknown.** The client has no call that creates one: `create_table("dataset.table")` takes the name, and tables are listed, filtered and moved by it, so it looks implicit. The public documentation does not mention datasets | pyspiral 0.16.33 source; documentation; P13 |
-| Dataset name | at most 128 characters, `[a-zA-Z_][a-zA-Z0-9_-]+`, so at least two | pyspiral `api/types.py` |
-| Level of permissions | **the project**: "A grant gives one role on one Project to a principal." Roles `viewer`, `editor`, `admin`. Dataset or table grants: not in the documentation, and the client's grant call is on the project only | docs.spiraldb.com, Platform > Access; pyspiral `Projects.grant_role` |
-| Roles the store needs | a reader `viewer`, a writer `editor` (create, write, drop): **unknown in detail**. The live test job runs as `editor` | `test_spiraldb_connector_integration.py`; P13 |
-
-So separate datasets do **not** separate permissions: anyone who may write one store of a project
-may write all of them, its lease and catalog included. Different writers need different projects.
-
-The current documentation describes the newer platform (catalog, branches, commits, `spiral-sdk`),
-not pyspiral's `dataset.table` model, so it may not apply to this client unchanged. It states
-conflict checks that pyspiral does not expose: a commit compares names and versions and fails
-with a conflict, and one commit may change several tables of a project. With that client
-(ITL-931) the lease could be a conditional publish, and results and records one commit. It states
-no read-after-commit guarantee, so C1 is not documented.
-
-### 5.6 Every connector, or SpiralDB only
-
-`_path_to_table_name` is shared by all three connectors, so the collisions of 5.2 exist on SQLite
-and PostgreSQL too, and PostgreSQL refuses names over 63 bytes (ITL-1162, CA3): a join's operator
-cache, 2 hashes in its path, cannot have a name there.
-
-| | SpiralDB connector only | `ConnectorArrowDatabase`, every connector |
-|---|---|---|
-| Fixes collisions | SpiralDB | all three |
-| PostgreSQL table names | no | yes: 63 bytes hold `op-<hint of 27>-<first 32 hex digits>`. 128 bits, and the catalog refuses a collision |
-| PostgreSQL operator caches | no | **not by this alone**: its column names are over 63 bytes too (a join's system tags, 148), which is ITL-1166 |
-| Needs | a name hook on one connector | the hook, a length limit per connector (SpiralDB 128, PostgreSQL 63 bytes, SQLite none known), a catalog per dataset / schema / file, all in the database layer |
-| Catalog write | the order of 5.4 | the same, or one transaction with `CREATE TABLE` on SQL connectors |
-| Tests | SpiralDB fake | also SQLite, PostgreSQL (its CI job), every existing name and listing test of the three |
-| Existing tables | none: no store table could be written | SQLite and PostgreSQL tables of `ConnectorArrowDatabase` would no longer be found: they have no catalog row. Nobody has any (greenfield, before 0.4.0), so no migration: rebuild. Tables read by a SQL **source** are not affected |
-
-**Recommended:** the code goes in `ConnectorArrowDatabase`, switched on per connector, and the
-first version switches on SpiralDB only. The path digest, the catalog's columns and the crash
-order are connector-neutral as designed, so switching on SQLite and PostgreSQL is a later PR that
-renames no SpiralDB table. That PR should land before 0.4.0, while nobody has such a store. The
-first version does not wait for it.
-
-## 6. Concurrent writers and failed writes
-
-SpiralDB upserts by key. The client retries a transaction "after conflicts" (3 times by default)
-and reports "failed to commit transaction due to conflict" (Read). What counts as a conflict is
-to probe; nothing read suggests that two upserts of one key do. Assume: both commit, the later
-commit wins, and no error is raised.
-
-### 6.1 Is "same id, same content" true?
-
-| Table | Record id | What a second write of the same id changes | Harmless? |
+| PR | Content | Size | Mergeable alone? |
 |---|---|---|---|
-| Function result | **random UUIDv7** of the output datagram | cannot happen between writers. Two writers computing one input store **two** rows; a lookup takes the newest `__pod_ts` | yes for storage; both values stay, and a nondeterministic function can then serve either |
-| Function pipeline | hash of system tags, input hash, recomputation index | `__data_id`, `__computed`, `__output_data_hash`, `__is_ephemeral`, `__pipeline_run_id`, `__recorded_at` | **no** (below) |
-| ... its recomputation index | read, then write | two writers both take index `n`; one recomputation disappears from the history | **no** |
-| Side-effect log | hash of the same preimage | `pipeline_run_id`, `executed_at` | the log is, the **delivery is not**: both delivered before either logged |
-| Operator cache | hash of the row and node content hash | float bits (below) | yes, up to float bits |
-| Cached source | hash of the row with system tags | float bits | yes, up to float bits |
+| 1 | Fake as strict as the service (names, 255 characters, key-only writes, duplicate keys, struct order, 409s, ids, drops by id); refusals the client confirms; types page regenerated | M | **yes** (a behaviour change of the direct connector, in the changelog) |
+| 2 | Codec and manifest as pure functions, with property tests | M | **yes**, unused |
+| 3 | `ConnectorArrowDatabase`: failed rows kept, insert only; the `__pod_ts` tie-breaker on every database | S | **yes** |
+| 4 | `get_records_by_column` on every database; `_fetch_joined_records` and side-effect checks batched | M | **yes**, helps Delta too; the differential suite must show no change |
+| 5 | Lease and sessions | L | inert: merges after 1, used by nothing |
+| 6 | Catalog, names, creation and recovery, store reads and writes | L | inert: needs 2, 3, 5; behind the switch |
+| 7 | Index, pinned generations, prefetch, budget; cost measured | L | inert: needs 4, 6 |
+| 8 | Job integration, `CachedSource`, saved config, docs, **switch on** | L | no: needs all, ITL-1391, ITL-1381, and the gate |
+| 9 | The store as an ongoing live job in CI | S | after 8 |
 
-Every row of a table has the same `__node_content_hash` for one id only where that hash enters
-the id: it does for the operator cache. For the pipeline table it is redundant with the path and
-system tags by design, so the two writers' values agree unless two nodes share both.
+**Gate for PR 8**, evidence in its PR: P1, P3, P4, P8, P10, P11, P14 answered; live lease races and
+first-write kills; the full conformance suite on the fake (first run, rerun, added rows, changed
+version, sync, async, save and load, `load_only`, `clear_cache`, separate result database,
+`trace`, every table kind, every row of 4.5, 5.2 and 5.3 with a crash between steps) **and** the
+same job live; measured costs. Live evidence comes before the switch, not after it.
 
-*Float bits*: the Arrow hash reads `-0.0` as `0.0` and every NaN alike (ITL-1179), so one id can
-hold two bit patterns. The stored value is one of them; the same holds on Delta.
+Decision 9 of the first draft (the 8 KiB limit for non-store tables) is integration work and gets
+its own issue, not PR 2.
 
-**What an overwritten pipeline record breaks.** Writer A records entry `e` naming result `r_A`,
-and its downstream nodes compute from `r_A`. Writer B overwrites `e`, naming `r_B`. Both results
-stay, so nothing dangles, but: `trace` of A's downstream rows reaches result `r_A` with no
-pipeline entry naming it; the entry's run id and time are B's, so A's run appears to have computed
-nothing; and a reader that read `e` before and after sees history change. On Delta the first
-committed record stays (insert when not matched), so a record once read never changes.
+**The first working version excludes**: several writers; null structs; `fixed_size_binary`,
+`duration`, `null`, and every type P3 does not prove; non-ASCII names if P1 is not answered;
+observers (one commit an event); bounded `CachedSource` and `REPLAY` reads; automatic clearing of
+leases; stores shared with other tables in a dataset; SQLite and PostgreSQL names; schema
+evolution; `spiral-sdk`; any promise of order.
 
-### 6.2 What the design promises
-
-1. **A record id is stored once**, always: it is the table's key. *(holds under any race)*
-2. **A pipeline record never names a result that was not stored.** The result table commits first
-   and `PendingCommit` withholds the records (ITL-1412). Each SpiralDB write is one atomic
-   transaction. *(holds under any race; needs a live test that a read after a commit sees it,
-   from another client)*
-3. **A failed write leaves no half-written table**: chunks, then header, then rows, and no
-   rollback. *(holds under any race)*
-4. **An existing record is not overwritten by a later run.** `skip_existing` is decided by
-   `read_by_keys` at the latest version just before the write. *(holds while one writer holds the
-   store, 6.3)*
-5. **A second writer is refused before it computes, delivers or writes anything.** *(holds under
-   the two conditions of 6.3; not unconditional)*
-
-### 6.3 The lease: one writer, the second refused
-
-**What SpiralDB offers** (Read; behaviour to probe):
-
-| Primitive | Use for a lease |
-|---|---|
-| conditional write, compare-and-set on rows or metadata | does not exist |
-| `last_modified_at`, `asof`, the write-ahead log | shows afterwards that someone wrote: detection only, it stops nothing. (A transaction has a snapshot; nothing read says a commit fails because a key was written since) |
-| table metadata | races are documented, so it is not used for the lease |
-| `create_table(exist_ok=False)` | may be an atomic test-and-set, if the service makes names unique atomically. Unknown (P11) |
-| upsert and `delete_keys` of one row, then a fresh read | **enough**, if a read started after a commit sees it |
-
-**Claim, then check.** One table `orcapod_lease_v1` per dataset, key `token` (UUIDv7 of one acquisition),
-value columns: run id, job name, process id, start time, last renewal.
-
-1. Commit a row with my token. 2. Read every row, fresh. 3. If mine is the only one, I hold the
-store. 4. Otherwise delete my row and refuse, naming the other claim (job, run id, start,
-renewal). 5. The holder deletes its own row in a `finally`.
-
-*Why two cannot hold.* Suppose A and B both hold, with neither's claim removed. A read after its
-claim was committed and did not see B, so B's commit came after A's read, and so after A's commit.
-B read after its own commit, so B's read sees A, and B does not hold: a contradiction.
-[`lease_model.py`](itl-1446/lease_model.py) visits every interleaving of 2, 3 and 4 writers with
-crashes at any step: no two holders. It finds two holders in exactly the two variants below.
-
-**The guarantee is therefore conditional:**
-
-- **C1: a read started after a commit returned sees that commit, from any client.** P8 tests it.
-  A test can refute it, not prove it, so it needs SpiralDB's own statement too. With stale reads
-  the model reaches two holders. If C1 fails but P11 holds, the lease is the creation of one
-  named table instead; if both fail, what is left is detection (below), and must be called that.
-- **C2: nobody clears the claim of a live writer.** SpiralDB has no fencing: a writer that was
-  cleared and is still alive can commit. It looks its claim up before every commit and stops when
-  it is gone, but **a window remains** between that check and the commit, and commits already in
-  flight land. That check is detection, not a guarantee.
-
-It covers Orcapod versions that take the lease. Another program, or an SDK call by hand, is not
-stopped.
-
-| Case | Behaviour |
-|---|---|
-| Two starts at the same instant | at most one holds. **Both may be refused** (each sees the other); an acquisition therefore retries up to 3 times with a random wait of 1 to 5 s before refusing. The model shows the both-refused case |
-| The claim's commit fails or its reply is lost | nothing has run. The writer tries to delete its token and raises. A claim that lands later is a stale one: others are refused, two never hold |
-| A crashed job | its claim stays, and the next run is refused. A crash cannot be told from a pause, a lost network or a suspended laptop from outside, so **no claim ever expires by time**. The holder renews its row's time (about once a minute, at a commit or from a background thread); the refusal shows how old the renewal is, as information |
-| Clearing a stale claim | by a person: `database.clear_lease(token)`, with the token from the error. It deletes exactly that row, so clearing twice or late never removes a newer claim. The message says what to check: that the named process no longer runs. Never automatic, not even when the process id looks dead on this machine (containers share hostnames and reuse ids) |
-| Separate pipeline and result databases | a run takes the lease of **every** dataset it may write: both databases, a pod's own `result_database` and `pod_cache_database`, a cached operator's, a `CachedSource`'s, an observer's. The refusal is per dataset. Two datasets: the run holds both leases, taken in sorted order; if one is refused the other is released, and another job that shares **either** dataset is refused. A job sharing only the result dataset is refused too, although it would write other tables. Two jobs in disjoint datasets run together |
-| One dataset, two connectors or database objects | in one run (its pipeline and result databases, or `at()` views): one lease, recognised by server, project and dataset, not by object. In two runs: the second is refused, also in one process. A connector opened under another server address for the same service is not recognised as the same: it is then refused by its own run's claim, which is safe |
-| Several jobs in one process | a claim belongs to a run, not to a process: one after the other works; a second run while the first one runs (threads, `run_async`, a function that runs a job) is refused if it shares a dataset |
-| One database object used by two threads | the second run's acquisition is refused. A bare `add_records` by another thread through the same object during a run uses that run's lease: one object has one queue |
-| A forked child | refused: the lease records the process id and a write checks it. Ray workers do not write |
-| `job.run()`, `run_async()` | after planning, before anything is computed or delivered, and only if a node is to run. (A source check that stores rows, a `CachedSource`'s, takes the lease for its own flush.) An unchanged rerun with nothing to run writes nothing and takes none |
-| `node.run()` | the same acquisition, for the nodes its plan runs |
-| Writes outside a run (`add_records` and `flush` by hand, a standalone side effect with a store) | the database itself enforces it: a flush without a lease takes one for that flush. So no write path can forget it |
-| **Readers** | never refused, and take nothing: `get_*`, `as_source()`, `head`, `trace`, `load`, `load_only=True`, reads of a held run, `SpiralDBTableSource` over a store table. A reader during a run sees committed batches: results first, then records (promise 2) |
-| Reading a `CachedSource` | it fetches live rows and **stores** them, so it is a writer. While another run holds the store it is refused, naming the holder (decision 11). `get_all_records()` on it, which reads the cache only, is a reader |
-
-**Cost**: one commit and one read to take it, one look-up per commit, one commit to release. About
-3 to 5 s a run at the times seen live (P9 measures). Permissions: none beyond writing.
-
-**Detection besides the lease** (also the fallback if C1 and P11 both fail, and then documented as
-best effort only): after a commit, the written ids are read back by key and compared with the rows
-written. No hidden column is needed: what a second writer changes in a pipeline record
-(`__data_id`, `__pipeline_run_id`, `__recorded_at`) and in a side-effect row (`pipeline_run_id`,
-`executed_at`) is stored data. A difference raises a warning naming the table and the count.
-A later overwrite is missed. **For the other tables there is no detection and none is needed**: a
-result's id is a random UUID, and a cache row written twice is the same row up to float bits.
-
-Follow-up (several writers), not designed here: the key (`__record_id`, writer), which keeps every
-writer's row, or a conditional write in `spiral-sdk` (ITL-931). A store made now is rebuilt to
-change its key.
-
-### 6.4 Failed writes
-
-| Failure | Today | Design |
-|---|---|---|
-| the write raises, nothing committed | `ConnectorArrowDatabase` **drops** the rows from its queue (`take_ready`, never restored) | restore them (`PendingCommits.restore`) and withdraw their dependents, as Delta does; a later flush retries. A refusal of the rows themselves still drops them |
-| the commit is **ambiguous** (committed, but the reply is lost) | as above | results: a retry upserts the same UUIDs, harmless. Pipeline records: a retry is skipped by `skip_existing`. The run still reports failure |
-| the result table commits, the pipeline table fails | results without records | the next run finds them by input hash, computes nothing, writes the records |
-| a manifest or catalog row without rows | - | inert |
-| a side effect was delivered and its log row failed | the row is dropped: delivered again next run | the row stays queued; a crash still delivers again (at least once, as on Delta) |
-| interrupted between two tables' commits | - | promise 2; the job reruns |
-
-Write-size limits and the time of one commit are to probe. `commit_every_rows=100` gives one
-commit per table per 100 rows. Orcapod flushes per table, so several node tables are several
-transactions; there is no transaction over tables.
-
-Observers write with `flush=True`, one SpiralDB transaction per event. They stay off a SpiralDB
-store by default (give them an in-memory or Delta store) until they batch.
-
-## 7. Live probes (throwaway tables, agent workload; before PR 3)
-
-| # | Question | Decides |
-|---|---|---|
-| P1 | names: each ASCII character and class of 3.1, `ox_` names, 1 to 1,024 characters, case pairs, NFC/NFD pairs; nested field names | 3.1 |
-| P2 | table name of 128, 129, 255 and 256 characters, case pair, `-` | 5.3 |
-| P3 | the type matrix, physical forms; float bits; `null`; null struct; struct field order | 3.2 |
-| P4 | `key_table` with `binary` and `large_binary`, unsorted, repeated, absent ids; 1 to 100,000 ids: time | 4.3 |
-| P5 | `where` equality and `in_` on binary; time against a table of 10^3 to 10^6 rows | 4.3 |
-| P6 | parallel `set_metadata` of different keys, 50 pairs | 3.3 |
-| P7 | two clients write one key at once, 50 pairs: errors, winner; the same with a first write of new columns | 6 |
-| P8 | (C1, 1,000 times, two clients in two processes) read after commit from a second client, both at once and after `create_table(exist_ok=True)` raced by two | 6.2 |
-| P9 | time of list, look up, metadata, commit (1, 100, 10,000 rows), and of a rerun | 4 |
-| P11 | `create_table(exist_ok=False)` of one name by two clients, 50 times: exactly one succeeds? the name's reuse after `drop_table` | 6.3 |
-| P12 | the lease itself: two processes claim at once, 50 times; a process killed while holding; `delete_keys` of one token | 6.3 |
-| P13 | `create_table` in a dataset that does not exist; what `viewer` and `editor` may do to tables, rows and metadata | 5.5 |
-| P10 | duplicate key in one write; a write killed midway | 6.4 |
-
-## 8. First working version, in order
-
-The **smallest working version is PRs 1 to 5**. Each is reviewable alone; a job is refused as
-today until PR 5.
-
-| PR | Content | Tests |
-|---|---|---|
-| 1 | Fake as strict as the client (3.4); the connector refuses what it must (`fixed_size_binary`, `duration`, `null`, table names); `database-types.md` regenerated | each rule, with the native library's text; matrix |
-| 2 | `spiral_store` codec: names, types, manifest, as pure functions with no pyspiral | property tests: names (adversarial alphabet, nested), schema round trip over the type matrix, chunk sizes, two manifests |
-| 3 | Connector: store tables use the codec; table names and the catalog; null struct refused when added; `ConnectorArrowDatabase` asks the connector for a table's name | matrix on the fake; column order; rows as a set; foreign tables unchanged; a failed first write; two connectors with an injected failure (ITL-1190's interleaving); collisions of 5.2; catalog: crash between each step, lost, partly lost, another version, `.at()` views, a forced digest collision |
-| 4 | Lookups (4.3): keyed and `where` reads, the run index, table handles; failed rows restored (6.4) | call counts per run asserted; equivalence with the whole-table path (`test_*_lookup_equivalence`); staleness by a second handle |
-| 5 | Job: the lease (6.3) in the database and in `job.run`, `run_async` and `node.run`; refusals removed where covered; the post-commit comparison (pipeline records and side-effect rows); docs (names, other readers, cleanup, permissions, the lease and its two conditions) | the pipeline store suites parametrised over the fake: first run, rerun, added rows, changed version, `run()` and `run_async()`, save and load, `load_only`, `clear_cache`, separate result database, `trace`; a run's rows equal Delta's: sync exactly, async as sets; stores compared as sets of rows; `Batch` over a stored source asserted only for what 3.6 promises. Every table kind. The lease: each row of 6.3's table, on the fake, with two handles and an injected crash between any two steps |
-| 6 | Live suite (the existing `spiral-integration` job): PR 5's job, the type matrix, P7, P8, cost printed; every table dropped | live |
-| later | batched `_fetch_joined_records`; null structs; observers; maps if P3 refuses; several writers | |
-
-ITL-1391 (load a saved connector database) and ITL-1381 (read before flush) are needed for save
-and load in PR 5; both are in progress. A saved config has no credential today (`to_config`:
-project, dataset, `overrides`); `overrides` is free-form client configuration, so PR 5 refuses to
-save an override that is not a known non-secret key (`server.url`).
+**Estimate.** Four L (a few days each, with review rounds), three M, two S; PRs 1 to 4 can go in
+parallel, 5 to 8 mostly cannot. A demonstration on the fake is days away; a store fit for real
+results is weeks, and the live probes may add to it.
 
 ### Decisions for the developer
 
 | # | Decision | Recommended |
 |---|---|---|
-| 1 | Where the mapping lives: (a) the store, (b) rename everywhere, (c) mixed | (a) |
-| 2 | *Decided: one writer, a second refused.* To confirm: the lease's conditions C1 and C2 are acceptable, and what ships if P8 refutes C1 (named-table lease if P11 holds, else detection only) | lease; do not ship a "refusal" resting on neither |
-| 3 | *Decided: no row order is kept or promised; a store is a set of rows (3.6).* | - |
-| 4 | *Decided: digest names, and one catalog per dataset.* To note: permissions are per project (5.5) | - |
-| 5 | Two different manifests in one table stop the job, rather than one winning | stop |
-| 6 | Digest names and the catalog for SQLite and PostgreSQL too (5.6): existing tables there are rebuilt, nobody has any | yes, a later PR before 0.4.0; the first version does not wait |
-| 7 | Null structs refused in the first version (a `T \| None` user-class output holding a null) | yes |
-| 8 | Observers not on a SpiralDB store at first | yes |
-| 9 | The 8 KiB failure of today's Arrow metadata entry on tables that are not store tables: fix now (chunks) or leave | fix in PR 2, same chunk code |
-| 10 | Stay on pyspiral 0.16.33 for this (ITL-931 and ITL-1186 later). The codec, manifest and catalog do not depend on the client | yes |
-| 11 | A `CachedSource` read while another run holds the store: refuse, or serve live rows without storing | refuse |
-| 12 | A crashed job's claim is cleared by a person only, never by age | yes |
+| 1 | Accept the lease's conditions L1 to L3 and the stated window (4.3) | yes, with SpiralDB asked to confirm L1 |
+| 2 | A crashed run's lease is cleared by a person only | yes |
+| 3 | Value refusals (null struct) come per batch; earlier batches of the run stay | yes |
+| 4 | Reading a `CachedSource` outside a run is a write, so it is refused while another run holds the dataset | yes |
+| 5 | Equal `__pod_ts`: the greater record id wins, on every database | yes |
+| 6 | A store's dataset holds nothing else; an unknown table refuses the store | yes |
+| 7 | An unchanged rerun takes the lease too | yes |
+| 8 | Hand writes only inside `with store.writing():` | yes |
+| 9 | Order of work: correctness gate before the switch, even if the working version is later than hoped | yes |
 
-## 9. Not verified here
+## 11. Answers to the review
 
-- Everything marked "to probe". The fake cannot answer timing, conflicts, visibility or server
-  limits.
-- The prototype maps names and top-level types only, and its job has number and text columns and
-  UTC timestamps; it runs no logical type. It does not implement the manifest set, the
-  catalog, the proposed table names or the lookups.
-- The async path, save and load, `load_only` and `trace` were not run through the prototype.
-- The fake's and the matrix's behaviour for logical types nested at depth was read, not run
-  through the prototype.
+| Finding | Answer |
+|---|---|
+| `E` invertible only on its image; the prototype swaps `a.b` and `ox_a;2Eb` | taken: 3.1, reads by expected names; prototype fixed and checked |
+| non-UTF-8 names, duplicate siblings, nested traversal, path components | taken: 3.1 |
+| folding can break a single name | taken: 3.1, refuse until P1, then escape; read back the first commit |
+| manifest integrity, incomplete chunks, schema pinned by an empty table, typed empty reads | taken: 3.3, 5.3. The grow-only set is dropped: under the lease there is one manifest |
+| the row lease: token reuse, missing own row, ghost claims, both refused | taken by replacing it with the named table (4.2); the old model's wrong grant on an empty read is gone with it |
+| canonical lease table, aliases, never-reused tokens | taken: 4.2, 4.5 |
+| hold until all writes drained; run-scoped owner; threads, forks, flushes by hand | taken: 4.5. The shared-object exception is removed |
+| decisions before the lease (source checks, cached indexes) | taken: 4.5, order of a run |
+| clear only when quiescent; pid and age only diagnostic; renewals | taken: 4.4; there are no renewals |
+| ambiguous delete | taken: 4.2 |
+| destructive operations and references across datasets | partly: deletion needs a session on its own dataset and `force`. Refusing to delete a still-referenced result would need a scan of every store that may refer to it, which cannot be known; left to the person |
+| catalog race, adoption of a foreign empty table, competing first schemas | taken: 5.2, 5.3; the lease covers the catalog from its first write |
+| hint rule must be fixed by format | taken: 5.1 |
+| `/` and NUL in components | already refused; kept |
+| lost or partial catalog must fail closed, stale layouts and results, readers too | taken: 5.2 |
+| losing a physical result table | taken, stricter: refused until `forget_table`, not recomputed |
+| generation of index, payload, manifest; version semantics; refresh; own commits | taken: 6.2, P14 |
+| a false miss is not only repeated work | taken: decisions are made under the lease at the pinned version |
+| 10,000 hits are 10,000 scans; side-effect probes; new constraints | taken: 6.3 |
+| tie on `__pod_ts` | taken: 6.3, for every database |
+| byte budget; 250 bytes unmeasured | taken: 6.3 |
+| remaining whole-table reads | taken: 6.4; `CachedSource` and `REPLAY` rows stay unbounded, stated |
+| "none per row", "about 2 per table" unsubstantiated | taken: withdrawn; 6.4 has call estimates and says they are not measured |
+| `ox_order`, clocks, high-water mark | no longer applies: no order is kept |
+| generated ids differ; what the prototype did not compare | taken: 7 |
+| Delta inserts only, the connector overwrites | taken: insert only, 6.5 |
+| parent validity, key nullability, fixed-size lists, value-dependent refusal at row 101 | taken: 3.2; fixed-size lists refused until P3 |
+| `server.url` can hold secrets | taken: 7 |
+| `null`: refused or inferred? | taken: refused in v1, marked as inferred until P3 |
+| PR 3 enables writing before the lease; live evidence after the switch | taken: 10 |
+
+## 12. Not verified here
+
+- Everything in section 9. The live facts of 4.1 are the live worker's and await its report.
+- The prototype maps names and top-level types for a job of numbers, text and UTC timestamps. It
+  implements no lease, catalog, manifest format, index or batched read, and did not run async,
+  save and load, `load_only` or `trace`.
+- Costs in 6.4 and sizes in 10 are estimates.

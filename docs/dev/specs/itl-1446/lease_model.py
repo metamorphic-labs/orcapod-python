@@ -1,73 +1,106 @@
-"""ITL-1446: exhaustive check of the claim-then-check lease (section 6.3).
+"""ITL-1446: exhaustive check of the named-table lease (section 4 of the design).
 
-Every interleaving of N writers. A writer: add its claim, read all claims, hold if its own
-is the only one, else withdraw; a holder writes twice and releases. A writer may crash after
-any step (its claim stays). Two variants show what the rule rests on: ``stale reads`` (the
-check may miss the newest claim) and ``cleared while alive`` (a person deletes the claim of
-a live holder).
+One table name; creating it succeeds for one caller only (atomic, measured live). A writer:
+creates; on a lost reply looks the name up and owns the table only when its own token is in
+it; writes; drops **its own table id**. Every interleaving, with a crash after any step.
+
+Variants, each adding one thing:
+
+* ``late``: a create whose reply was lost may land after the writer looked (a ghost lease).
+* ``late_drop``: a drop may be sent again after it already succeeded.
+* ``clear``: a person drops the current table's id while its holder is alive (forbidden).
+* ``by_name``: drops go by name instead of by id (the rule the design rests on, removed).
 
 Run: ``uv run python docs/dev/specs/itl-1446/lease_model.py``
 """
 
 from __future__ import annotations
 
-State = tuple[tuple[str, ...], frozenset[int], frozenset[int]]
+from typing import NamedTuple
+
 HOLDING = ("hold", "wrote")
 
 
-def steps(state: State, stale: bool, clear: bool) -> list[State]:
-    """Every state one step away: writers' phases, claims stored, claims visible."""
-    phases, claims, seen = state
+class State(NamedTuple):
+    """Writers' phases, the table's (owner, id) or ``None``, next id, own ids, in flight."""
+
+    phases: tuple[str, ...]
+    table: tuple[int, int] | None
+    next_id: int
+    ids: tuple[int, ...]
+    flying: frozenset[int]
+
+
+def steps(
+    s: State, *, late: bool, late_drop: bool, clear: bool, by_name: bool
+) -> list[State]:
+    """Every state one step away."""
     out: list[State] = []
-    for i, phase in enumerate(phases):
+    for i, phase in enumerate(s.phases):
 
-        def to(
-            new: str, c: frozenset[int] = claims, s: frozenset[int] = seen, i: int = i
-        ) -> State:
-            return ((*phases[:i], new, *phases[i + 1 :]), c, s)
+        def to(new: str, i: int = i) -> tuple[str, ...]:
+            return (*s.phases[:i], new, *s.phases[i + 1 :])
 
+        own = (*s.ids[:i], s.next_id, *s.ids[i + 1 :])
         if phase == "start":
-            # stored at once; visible at once unless reads may be stale
-            out.append(to("claimed", claims | {i}, seen if stale else seen | {i}))
-        elif phase == "claimed":
-            out.append(to("hold" if not (seen - {i}) else "withdraw"))
-        elif phase == "withdraw":
-            out.append(to("refused", claims - {i}, seen - {i}))
+            if s.table is None:
+                made = s._replace(table=(i, s.next_id), next_id=s.next_id + 1)
+                out.append(made._replace(phases=to("hold"), ids=own))
+                out.append(made._replace(phases=to("unsure")))  # reply lost
+            else:
+                out.append(s._replace(phases=to("refused")))
+                out.append(s._replace(phases=to("unsure")))  # refusal lost
+            if late:
+                out.append(s._replace(phases=to("unsure"), flying=s.flying | {i}))
+        elif phase == "unsure":
+            if s.table is not None and s.table[0] == i:
+                ids = (*s.ids[:i], s.table[1], *s.ids[i + 1 :])
+                out.append(s._replace(phases=to("hold"), ids=ids))
+            else:
+                out.append(s._replace(phases=to("refused")))
         elif phase == "hold":
-            out.append(to("wrote"))
-        elif phase == "wrote":
-            out.append(to("done", claims - {i}, seen - {i}))
+            out.append(s._replace(phases=to("wrote")))
+        elif phase == "wrote" or (late_drop and phase == "done"):
+            mine = s.table is not None and (by_name or s.table[1] == s.ids[i])
+            out.append(s._replace(phases=to("done"), table=None if mine else s.table))
         if phase not in ("start", "refused", "done", "crashed"):
-            out.append(to("crashed"))
-        if clear and i in claims:
-            out.append((phases, claims - {i}, seen - {i}))
-    if stale and claims - seen:
-        out.append((phases, claims, claims))
+            out.append(s._replace(phases=to("crashed")))
+        if i in s.flying:
+            landed = s._replace(flying=s.flying - {i})
+            if s.table is None:
+                landed = landed._replace(table=(i, s.next_id), next_id=s.next_id + 1)
+            out.append(landed)
+    if clear and s.table is not None:
+        out.append(s._replace(table=None))
     return out
 
 
-def explore(writers: int, *, stale: bool = False, clear: bool = False) -> None:
-    """Visit every reachable state and report whether two writers ever hold at once."""
-    start: State = (("start",) * writers, frozenset(), frozenset())
-    visited, queue, broken, all_refused = {start}, [start], False, False
+def explore(writers: int, **variant: bool) -> None:
+    """Visit every reachable state; report two holders at once, and a stuck lease."""
+    options = {"late": False, "late_drop": False, "clear": False, "by_name": False}
+    options.update(variant)
+    start = State(("start",) * writers, None, 0, (-1,) * writers, frozenset())
+    visited, queue, two, stuck = {start}, [start], False, False
     while queue:
-        state = queue.pop()
-        holders = sum(p in HOLDING for p in state[0])
-        broken = broken or holders > 1
-        all_refused = all_refused or set(state[0]) == {"refused"}
-        for new in steps(state, stale, clear):
+        s = queue.pop()
+        two = two or sum(p in HOLDING for p in s.phases) > 1
+        ended = all(p in ("refused", "done", "crashed") for p in s.phases)
+        stuck = stuck or (ended and not s.flying and s.table is not None)
+        for new in steps(s, **options):
             if new not in visited:
                 visited.add(new)
                 queue.append(new)
     print(
-        f"{writers} writers, stale reads {stale}, cleared while alive {clear}: "
-        + f"{len(visited)} states, two holders possible: {broken}, "
-        + f"all refused possible: {all_refused}"
+        f"{writers} writers, {', '.join(variant) or 'base'}: {len(visited)} states, "
+        + f"two holders possible: {two}, a lease left behind possible: {stuck}"
     )
 
 
 if __name__ == "__main__":
     for count in (2, 3, 4):
         explore(count)
-    explore(2, stale=True)
+    explore(3, late=True)
+    explore(3, late_drop=True)
+    explore(3, late=True, late_drop=True)
     explore(2, clear=True)
+    explore(3, late_drop=True, by_name=True)
