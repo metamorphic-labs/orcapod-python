@@ -636,10 +636,16 @@ class FakeKeyedTable:
                     "scan filter is unsupported: Comparison requires equal dtypes, got "
                     f"{rows.schema.field(name).type} and {wanted.type}"
                 )
-            values = rows.column(name).to_pylist()
+            # Temporal values as their counts: a date64 may be off midnight.
+            stored: Any = rows.column(name)
+            given: Any = pa.array([wanted.value], wanted.type)
+            if pa.types.is_temporal(wanted.type):
+                width = pa.int32() if pa.types.is_date32(wanted.type) else pa.int64()
+                stored, given = stored.cast(width), given.cast(width)
+            values, (value,) = stored.to_pylist(), given.to_pylist()
             rows = rows.filter(
                 pa.array(
-                    [v is not None and _bits(v) == _bits(wanted.value) for v in values],
+                    [v is not None and _bits(v) == _bits(value) for v in values],
                     pa.bool_(),
                 )
             )
