@@ -58,8 +58,8 @@ def _arrow_schema_to_column_infos(schema: pa.Schema) -> list[ColumnInfo]:
 
 
 def _alike(parts: list[pa.Table]) -> list[pa.Table]:
-    """Stored and queued rows under one schema when they differ only in a column's
-    nullability: a store may read a column back ``NOT NULL`` (PostgreSQL's primary
+    """Rows of one table (stored and queued, or queued by two calls) under one schema
+    when they differ only in a column's nullability: a store may read a column back ``NOT NULL`` (PostgreSQL's primary
     key) that the queued rows declare nullable. Each such field is nullable when
     either side's is, and the arrays are re-wrapped under it, never cast. Any other
     difference is left for ``pa.concat_tables`` to refuse, as before."""
@@ -523,8 +523,10 @@ class ConnectorArrowDatabase:
         if existing_pending is None:
             self._pending_batches[record_key] = records
         else:
+            # Two queued batches may declare a column's nullability differently, as
+            # stored and queued rows may (ITL-1381).
             self._pending_batches[record_key] = pa.concat_tables(
-                [existing_pending, records]
+                _alike([existing_pending, records])
             )
         self._pending_record_ids[record_key].update(
             cast(list[bytes], records[self.RECORD_ID_COLUMN].to_pylist())

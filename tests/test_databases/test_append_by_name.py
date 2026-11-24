@@ -18,7 +18,7 @@ import os
 import sqlite3
 import uuid
 from collections.abc import Iterator
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -1049,6 +1049,83 @@ def test_queued_rows_combine_with_a_stored_key_read_back_not_null(
     _check(
         db.get_all_records(PATH, record_id_column=ID), [ID, "a", "c", "b"], [1, 2, 3, 4]
     )
+
+
+def _declared(order: list[str], ns: list[int], *, not_null: bool) -> pa.Table:
+    """Rows ``ns`` with the id and ``a`` declared ``NOT NULL``, or nullable."""
+    table = _rows(order, ns)
+    schema = pa.schema(
+        f.with_nullable(not (not_null and f.name in (ID, "a"))) for f in table.schema
+    )
+    return pa.Table.from_arrays(table.columns, schema=schema)
+
+
+def _check_lookups(db: Any, ns: list[int]) -> None:
+    """The rows ``ns`` by one id, by several ids and by column values."""
+    several = db.get_records_by_ids(
+        PATH, [_row(n)[ID] for n in reversed(ns)], record_id_column=ID
+    )
+    assert sorted(several[ID].to_pylist()) == [_row(n)[ID] for n in ns]
+    for n in ns:
+        one = db.get_record_by_id(PATH, _row(n)[ID], record_id_column=ID)
+        valued = db.get_records_with_column_value(
+            PATH, {"a": n, "c": 100 + n}, record_id_column=ID
+        )
+        assert one.to_pylist() == valued.to_pylist() == [_row(n)]
+
+
+@contextmanager
+def _connector_database(kind: str, tmp_path: Path) -> Iterator[Any]:
+    if kind == "SQLite, key read NOT NULL":
+        yield ConnectorArrowDatabase(_KeyNotNullSQLite(str(tmp_path / "store.db")))
+    else:
+        with open_database(kind, tmp_path) as db:
+            yield db
+
+
+CONNECTOR_DATABASES = ("SQLite", "SQLite, key read NOT NULL", "SpiralDB")
+
+
+@pytest.mark.parametrize("kind", CONNECTOR_DATABASES)
+@pytest.mark.parametrize("order", [["id", "a", "c", "b"], ["b", "c", "id", "a"]])
+@pytest.mark.parametrize("stored", [True, False])
+@pytest.mark.parametrize("queued", [True, False])
+def test_lookups_before_a_flush_combine_rows_of_differing_nullability(
+    tmp_path: Path, kind: str, order: list[str], stored: bool, queued: bool
+) -> None:
+    """Stored and queued rows that declare the key and a data column ``NOT NULL`` or
+    nullable read together, whole and by id and by value (ITL-1381)."""
+    with _connector_database(kind, tmp_path) as db:
+        _add(db, _declared([ID, "a", "c", "b"], [1, 2], not_null=stored), flush=True)
+        _add(db, _declared(order, [3, 4], not_null=queued))
+        rows = db.get_all_records(PATH, record_id_column=ID)
+        _check(rows, _given_order(kind, [ID, "a", "c", "b"]), [1, 2, 3, 4])
+        _check_lookups(db, [1, 2, 3, 4])
+
+
+@pytest.mark.parametrize("kind", CONNECTOR_DATABASES)
+@pytest.mark.parametrize("order", [["id", "a", "c", "b"], ["b", "c", "id", "a"]])
+@pytest.mark.parametrize("not_null", [(True, False, True), (False, True, False)])
+def test_queued_batches_of_differing_nullability_are_one_batch(
+    tmp_path: Path, kind: str, order: list[str], not_null: tuple[bool, ...]
+) -> None:
+    """Batches queued by several calls that declare the key and a data column
+    ``NOT NULL`` and nullable are one nullable batch, before and after the flush
+    (ITL-1381): the second call raised ``ArrowInvalid``."""
+    with _connector_database(kind, tmp_path) as db:
+        first = [ID, "a", "c", "b"]
+        for n, flag in enumerate(not_null, start=1):
+            _add(db, _declared(order if n > 1 else first, [n], not_null=flag))
+        _check(db.get_all_records(PATH, record_id_column=ID), first, [1, 2, 3])
+        _check_lookups(db, [1, 2, 3])
+        assert db.get_all_records(PATH, record_id_column=ID).schema.field("a").nullable
+        db.flush()
+        _check(
+            db.get_all_records(PATH, record_id_column=ID),
+            _given_order(kind, first),
+            [1, 2, 3],
+        )
+        _check_lookups(db, [1, 2, 3])
 
 
 # ── PostgreSQL (a live server: the PostgreSQL CI job) ──────────────────────────
