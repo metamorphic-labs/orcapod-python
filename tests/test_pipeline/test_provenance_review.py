@@ -2635,3 +2635,50 @@ def test_a_source_argument_naming_two_sources_is_refused(
         left_answer = node.why_missing("dict_v1:dict_v1:a", "row_0")
         assert not left_answer.missing
         assert left_answer.present_in == ("dict_v1:a", "SemiJoin")
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_a_full_id_asks_about_that_id_only_in_a_slot_of_several(
+    tmp_path: Path, mode: str
+) -> None:
+    """One slot bound to a stream of two sources' rows (tenant:a holds rid 1, tenant:b
+    rid 2): a full id asks about that id's record only, so each id's crossed record is
+    missing; the slot's label asks about every id it carries. Live and load-only."""
+    from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+
+    def feed(name: str, rid: int, value: int) -> DictSource:
+        return DictSource(
+            [{"rid": rid, "x": value}],
+            tag_columns=["rid"],
+            tag_only_columns=True,
+            record_id_columns=["rid"],
+            source_id=name,
+        )
+
+    a, b = feed("tenant:a", 1, 10), feed("tenant:b", 2, 20)
+    tables = [s.as_table(columns={"source": True, "system_tags": True}) for s in (a, b)]
+    mixed = ArrowTableStream(
+        pa.concat_tables(tables), tag_columns=["rid"], label="mixed"
+    )
+    store = DeltaTableDatabase(tmp_path / "db")
+    job = PipelineJob(name="mixed", database=store)
+    with job:
+        SelectDataColumns(["x"])(feed("slot", 3, 30))
+    job.save(tmp_path / "job.json")
+    loaded = PipelineJob.load(tmp_path / "job.json", database=store)
+    for load_only, current in ((False, job), (True, loaded)):
+        current.bind(sources={"slot": mixed})
+        current.run(
+            orchestrator=AsyncPipelineOrchestrator()
+            if mode == "async"
+            else SyncPipelineOrchestrator(),
+            load_only=load_only,
+        )
+        node = current.nodes["SelectDataColumns"]
+        for source, own, other in ((a, 1, 2), (b, 2, 1)):
+            assert not node.why_missing(source.source_id, f'{{"rid":{own}}}').missing
+            crossed = node.why_missing(source.source_id, f'{{"rid":{other}}}')
+            assert crossed.missing and crossed.present_in == ()
+        # The slot's label asks about every id the slot carries.
+        for rid in (1, 2):
+            assert not node.why_missing("slot", f'{{"rid":{rid}}}').missing

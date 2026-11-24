@@ -2028,8 +2028,13 @@ def why_missing(node: Any, source: str, record_id: str) -> Absence:
         )
     chosen, chosen_ids = candidates[0]
     sources: list[Any] = [chosen]
+    # A node label or source name asks about every id the slot's rows carry (a slot
+    # can carry several: a stream of two sources' rows); a full id asks about that id
+    # only, so another id's record of the same number is never taken for it.
+    slot_wide = source in (chosen.label, _source_name(chosen))
+    ids = (chosen_ids or {source}) if slot_wide else {source}
     wanted: dict[int, set[tuple[Any, Any]]] = {
-        id(chosen): {(sid, record_id) for sid in (chosen_ids or {source})}
+        id(chosen): {(sid, record_id) for sid in ids}
     }
     path = _topological(
         [n for n in all_nodes if any(id(s) in _ancestry(n) for s in sources)]
