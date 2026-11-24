@@ -45,6 +45,23 @@ class PendingCommits:
         self._on_empty = on_empty
         self._attempts: dict[str, PendingCommit] = {}
         self._guards: dict[str, dict[bytes, PendingCommit]] = {}
+        self._schema_checks: dict[str, Callable[[pa.Schema], None]] = {}
+
+    @contextmanager
+    def guard_schema(
+        self, key: str, check: Callable[[pa.Schema], None]
+    ) -> Iterator[None]:
+        """Keep a schema check with the batch through buffering and retries."""
+        self._schema_checks.setdefault(key, check)
+        try:
+            yield
+        finally:
+            if key not in self._batches:
+                self._schema_checks.pop(key, None)
+
+    def schema_check(self, key: str) -> Callable[[pa.Schema], None] | None:
+        """Get the check for a batch being committed."""
+        return self._schema_checks.get(key)
 
     def attempt(self, key: str) -> PendingCommit:
         """Get the attempt shared by all rows currently pending for a table."""
@@ -89,6 +106,7 @@ class PendingCommits:
         else:
             self._batches.pop(key)
             self._ids.pop(key)
+            self._schema_checks.pop(key, None)
             if self._on_empty is not None:
                 self._on_empty(key)
 
@@ -119,6 +137,8 @@ class PendingCommits:
 
     def forget(self, key: str, ids: set[bytes]) -> None:
         """Forget dependencies for records that are leaving the queue."""
+        if key not in self._batches:
+            self._schema_checks.pop(key, None)
         guards = self._guards.get(key)
         if guards is not None:
             for record_id in ids:
