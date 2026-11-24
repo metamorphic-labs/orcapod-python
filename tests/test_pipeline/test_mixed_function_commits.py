@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import asyncio
 import json
 from collections import defaultdict
@@ -453,6 +455,10 @@ class DatabaseWithoutCommitGuards:
 class ProtocolDatabase(DatabaseWithoutCommitGuards):
     """Forward the complete protocol without exposing unrelated backend methods."""
 
+    def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
+        """Read the wrapped store's current schema."""
+        return self._inner.get_table_schema(record_path)
+
     @property
     def stores_records(self) -> bool:
         return self._inner.stores_records
@@ -466,6 +472,11 @@ class ProtocolDatabase(DatabaseWithoutCommitGuards):
         self, record_path: tuple[str, ...], record_id: bytes, dependency: PendingCommit
     ) -> AbstractContextManager[None]:
         return self._inner.guard_record(record_path, record_id, dependency)
+
+    def guard_table_schema(
+        self, record_path: tuple[str, ...], check: Callable[[pa.Schema], None]
+    ) -> AbstractContextManager[None]:
+        return self._inner.guard_table_schema(record_path, check)
 
     def fail_pending_result(self, record_path: tuple[str, ...]) -> None:
         self._inner.fail_pending_result(record_path)

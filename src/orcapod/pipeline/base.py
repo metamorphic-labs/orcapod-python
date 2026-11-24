@@ -350,12 +350,20 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         # every source the pipeline's streams read now (nothing is remembered: a
         # slot rebound since the last invocation changes what they read).
         require_one_restriction([*self._held_streams(), *inputs])
-        self._invocation_lut[key] = invocation
+        self._remember_invocation(key, invocation)
         self._hash_graph.add_node(key)
         for upstream, upstream_hash in upstreams:
             self._hash_graph.add_edge(upstream_hash, key)
             if upstream_hash not in self._source_streams:
                 self._source_streams[upstream_hash] = upstream
+
+    def _remember_invocation(self, key: str, invocation: PodInvocation) -> None:
+        """Keep the smallest explicit label when identical invocations share a node."""
+        previous = self._invocation_lut.get(key)
+        if previous is not None and previous.label is not None:
+            if invocation.label is None or previous.label < invocation.label:
+                return
+        self._invocation_lut[key] = invocation
 
     def _held_streams(self) -> list[Any]:
         """Every stream the pipeline holds: its leaves and every recorded input."""
@@ -504,19 +512,17 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
 
         source_node_cls = self.source_node_class
 
-        # 1. Source hashes: inputs that have no registered invocation.
-        source_hashes = set(self._source_streams.keys()) - set(
-            self._invocation_lut.keys()
+        # 1. Resolve source nodes in hash order, then insert them by their slot
+        # labels. The original stream hash breaks ties between identical labels.
+        sources = [
+            (h, source_node_cls.from_stream(self._source_streams[h]))
+            for h in sorted(self._source_streams.keys() - self._invocation_lut.keys())
+        ]
+        node_map: dict[str, Any] = dict(
+            sorted(sources, key=lambda item: (item[1].label, item[0]))
         )
 
-        # 2. Create source nodes keyed by the original stream hash.
-        node_map: dict[str, Any] = {
-            h: source_node_cls.from_stream(self._source_streams[h])
-            for h in source_hashes
-            if h in self._source_streams
-        }
-
-        # 2a. Validate source-node name uniqueness.
+        # 2. Validate source-node name uniqueness.
         # Source node names are identity-forming (used as bind() keys and
         # included in content_hash()).  Two distinct source nodes with the
         # same name are refused: with different schemas by InconsistentSourceError,
@@ -561,8 +567,8 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                 node_name, [self._source_streams[h] for h in hashes]
             )
 
-        # 3. Topological pass — create function / operator nodes.
-        for key in _nx.topological_sort(self._hash_graph):
+        # 3. Topological pass with independent invocations ordered by hash.
+        for key in _nx.lexicographical_topological_sort(self._hash_graph):
             if key in node_map:
                 continue  # already added as a source node in step 2
             if key not in self._invocation_lut:
@@ -590,34 +596,44 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                     label=inv.label,
                 )
 
-        self._persistent_node_map = node_map
-
-        # 4. Label disambiguation (preserves existing Pipeline.compile() behavior).
+        # 4. Reserve every original label before generating any suffixes.
         name_candidates: dict[str, list] = {}
         for node in node_map.values():
             name_candidates.setdefault(node.label, []).append(node)
 
-        self._nodes.clear()
+        reserved_names = set(name_candidates)
         for label, nodes in name_candidates.items():
             if len(nodes) > 1:
+                explicitly_named = [node for node in nodes if node._label is not None]
+                if len(explicitly_named) == 1:
+                    # A computed label can coincide with an otherwise unique explicit one.
+                    nodes = [node for node in nodes if node is not explicitly_named[0]]
                 sorted_nodes = sorted(nodes, key=lambda n: n.content_hash().to_string())
-                for i, node in enumerate(sorted_nodes, start=1):
+                i = 1
+                for node in sorted_nodes:
                     key = f"{label}_{i}"
-                    self._nodes[key] = node
+                    while key in reserved_names:
+                        i += 1
+                        key = f"{label}_{i}"
+                    reserved_names.add(key)
                     node._label = key
-            else:
-                self._nodes[label] = nodes[0]
+                    i += 1
+
+        node_map = self._ordered_node_map(node_map, self._hash_graph)
+        self._persistent_node_map = node_map
+        self._nodes.clear()
+        self._nodes.update((node.label, node) for node in node_map.values())
 
         # 5. Build node_graph (OrcaDAG with node objects as vertices).
+        graph_edges = sorted(self._hash_graph.edges())
         node_dag: OrcaDAG[NodeT] = OrcaDAG()
-        for up_hash, down_hash in self._hash_graph.edges():
+        for node in node_map.values():
+            node_dag.add_node(node)
+        for up_hash, down_hash in graph_edges:
             up_node = node_map.get(up_hash)
             down_node = node_map.get(down_hash)
             if up_node is not None and down_node is not None:
                 node_dag.add_edge(up_node, down_node)
-        for node in node_map.values():
-            if node not in node_dag:
-                node_dag.add_node(node)
         self._node_graph = node_dag
 
         # 6. Enrich hash_graph node attributes (used by serialization).
@@ -643,9 +659,31 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         self._upstreams = {
             h: n for h, n in node_map.items() if isinstance(n, source_node_cls)
         }
-        self._graph_edges = list(self._hash_graph.edges())
+        self._graph_edges = graph_edges
 
         self._compiled = True
+
+    @staticmethod
+    def _ordered_node_map(
+        nodes: dict[str, Any], graph: nx.DiGraph[str]
+    ) -> dict[str, Any]:
+        """Order compiled or restored nodes with slots first and dependencies intact."""
+        from orcapod.core.nodes.source_node import SourceNodeBase
+
+        def order_key(key: str) -> tuple[int, str, str, str]:
+            node = nodes.get(key)
+            if isinstance(node, SourceNodeBase):
+                return (0, node.name, node.label, key)
+            if node is None:  # An unrestored node may still be in the saved graph.
+                return (1, key, "", key)
+            # Live and saved nodes share the schema-only pipeline hash.
+            return (1, node.pipeline_hash().to_string(), node.label, key)
+
+        return {
+            key: nodes[key]
+            for key in nx.lexicographical_topological_sort(graph, key=order_key)
+            if key in nodes
+        }
 
     # ------------------------------------------------------------------
     # InvocationGraph transitions
@@ -734,7 +772,7 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                 )
 
         # Sort topologically using _hash_graph (node_hash keys match _hash_graph).
-        topo_keys = list(_nx.topological_sort(self._hash_graph))
+        topo_keys = _nx.lexicographical_topological_sort(self._hash_graph)
         ordered = [inv_by_node_hash[k] for k in topo_keys if k in inv_by_node_hash]
 
         return InvocationGraph(
@@ -762,17 +800,13 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
             A compiled instance of ``cls``.
         """
         instance = cls(name=name)
-        instance._invocation_lut = {
-            inv.content_hash().to_string(): inv for inv in graph.invocations
-        }
         instance._source_streams = dict(graph.source_streams)
         for inv in graph.invocations:
-            instance._hash_graph.add_node(inv.content_hash().to_string())
+            key = inv.content_hash().to_string()
+            instance._remember_invocation(key, inv)
+            instance._hash_graph.add_node(key)
             for upstream in inv.input_streams:
-                instance._hash_graph.add_edge(
-                    upstream.content_hash().to_string(),
-                    inv.content_hash().to_string(),
-                )
+                instance._hash_graph.add_edge(upstream.content_hash().to_string(), key)
         # Also add source hashes as isolated nodes (no incoming edges)
         for h in graph.source_streams:
             if h not in instance._hash_graph:

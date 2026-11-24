@@ -76,6 +76,10 @@ class ExtensionAwareDatabase:
 
     # ── Read methods ──────────────────────────────────────────────────────────
 
+    def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
+        """Read the current stored schema from the wrapped database."""
+        return self._db.get_table_schema(record_path)
+
     def get_record_by_id(
         self,
         record_path: tuple[str, ...],
@@ -230,6 +234,12 @@ class ExtensionAwareDatabase:
     ) -> AbstractContextManager[None]:
         """Guard a queued record in the wrapped database."""
         return self._db.guard_record(record_path, record_id, dependency)
+
+    def guard_table_schema(
+        self, record_path: tuple[str, ...], check: Callable[[pa.Schema], None]
+    ) -> AbstractContextManager[None]:
+        """Delegate the schema check to the database that commits the batch."""
+        return self._db.guard_table_schema(record_path, check)
 
     @property
     def stores_records(self) -> bool:

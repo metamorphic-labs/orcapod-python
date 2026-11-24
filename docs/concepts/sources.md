@@ -579,7 +579,8 @@ print(Condition.of(day=day, started=started, recorded=recorded))
 - **Recorded.** `RunSummary.conditions` maps the slot of each source read under a condition
   to its `Condition`, `RunSummary.limits` the slot of each source read with a `limit=` to the
   limit, and `RunSummary.restricted_source_ids` every such slot to its source id; the
-  summary shows them (`spikes (spikes): where unit_id=106, limit 3`). A saved job records them in
+  summary shows them in alphabetical order by slot name or direct source label
+  (`spikes (spikes): where unit_id=106, limit 3`). A saved job records them in
   the source's config, and a loaded job reads with them. A slot's new restriction need
   not match its previous one: a restricted source fits the slot of the unrestricted one, and
   `bind` does not compare the two. But a bind after which two slots would read one source
@@ -603,7 +604,8 @@ print(Condition.of(day=day, started=started, recorded=recorded))
 - **Under an aggregation.** A `GroupBy`, `Batch` or `MergeJoin` below a restricted source
   builds its groups from the rows the restriction lets through. That is allowed (each
   aggregated row lists its members), and a job run issues one
-  `RestrictedAggregationWarning` naming the source and the step.
+  `RestrictedAggregationWarning` listing each source and step in alphabetical order by slot
+  name or direct source label, then by step label.
 - **Stored rows stay.** A run over a restricted source deletes nothing: a job node shows the
   rows of its current run, and `node.as_source()` shows everything stored for it.
 

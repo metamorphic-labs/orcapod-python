@@ -25,6 +25,8 @@ import uuid
 from abc import abstractmethod
 from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from datetime import datetime, timezone
+from functools import partial
 from typing import Any, Literal, NamedTuple, cast
 
 import polars as pl
@@ -74,6 +76,7 @@ from orcapod.errors import (
     OrcapodDatabaseError,
     TypeIdentityError,
     OrcapodDatabaseWriteError,
+    StoredTableSchemaError,
     UnstorableColumnError,
 )
 from orcapod.contexts.stored import (
@@ -135,6 +138,14 @@ _PIPELINE_BASE_ENTRY_ID_COL = "__pipeline_base_entry_id"
 # 0 for the first computation, N+1 for each miss-triggered recompute.
 _PIPELINE_RECOMPUTATION_INDEX_COL = "__pipeline_recomputation_index"
 
+PIPELINE_RUN_ID_COL = "__pipeline_run_id"
+PIPELINE_RECORDED_AT_COL = "__recorded_at"
+
+_PIPELINE_RECORDING_FIELDS = (
+    pa.field(PIPELINE_RUN_ID_COL, pa.large_string()),
+    pa.field(PIPELINE_RECORDED_AT_COL, pa.timestamp("us", tz="UTC"), nullable=False),
+)
+
 
 def _pipeline_meta_schema() -> pa.Schema:
     """The bookkeeping columns of a function node's pipeline record (``pdb_v1``).
@@ -154,6 +165,7 @@ def _pipeline_meta_schema() -> pa.Schema:
             pa.field(constants.IS_EPHEMERAL_COL, pa.bool_()),
             pa.field(_PIPELINE_BASE_ENTRY_ID_COL, pa.large_binary()),
             pa.field(_PIPELINE_RECOMPUTATION_INDEX_COL, pa.int32()),
+            *_PIPELINE_RECORDING_FIELDS,
         ]
     )
 
@@ -1410,6 +1422,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
     _stale_tables_checked: bool = False
     # Set once the rows of the current tables were counted by data context.
     _current_tables_checked: bool = False
+    # Preflight the first miss before invoking user code. Each commit checks again.
+    _pipeline_preflight_checked: bool = False
     # Set once a database that cannot list its tables was reported.
     _unlisted_store_reported: bool = False
     # Base entry ids of the inputs of the last completed run in this process, each with
@@ -1531,7 +1545,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         )
 
     def _begin_run(self) -> None:
-        """Start a run: see the stored results as they are now, then check for stale ones.
+        """Reset schema preflight and refresh the stored tables for this run.
 
         The stored tables are read from the store's current version
         (``_refresh_stored_tables``), so the run reuses every result committed before
@@ -1550,6 +1564,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             SideEffectLogDataContextError: If this node delivers side effects and
                 completions it cannot match exist; nothing has been delivered then.
         """
+        self._pipeline_preflight_checked = False
         self._refresh_stored_tables()
         if self._delivers_side_effects:
             self._stale_tables_checked = False
@@ -1734,6 +1749,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         # Another database has its own tables of other generations to account for.
         self._stale_tables_checked = False
         self._current_tables_checked = False
+        self._pipeline_preflight_checked = False
         self._unlisted_store_reported = False
         self._skipped_rows_reported = False
         # ... and its own rows to compare with the job file's expected count.
@@ -2448,6 +2464,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         database = self._require_pipeline_database()
         path = self._versioned_pipeline_path
         pod = self._ephemeral_cached_pod if is_ephemeral else self._cached_function_pod
+        dependency = None
         if self._commit_every_rows is not None and isinstance(pod, CachedFunctionPod):
             result_database = pod.result_database
             try:
@@ -2461,11 +2478,14 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                     flush=True,
                     table_flush=True,
                 ) from exc
-            if dependency is not None:
-                with database.guard_record(path, record_id, dependency):
-                    database.add_record(path, record_id, record, skip_duplicates=True)
-                return
-        database.add_record(path, record_id, record, skip_duplicates=True)
+        check = partial(self._check_pipeline_write_schema, database, path)
+        result_guard = (
+            contextlib.nullcontext()
+            if dependency is None
+            else database.guard_record(path, record_id, dependency)
+        )
+        with database.guard_table_schema(path, check), result_guard:
+            database.add_record(path, record_id, record, skip_duplicates=True)
 
     def _row_processed(self) -> None:
         """Count a processed row; commit once a batch is full (only inside a job run)."""
@@ -2832,15 +2852,12 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         When ``node_config.is_result_ephemeral=True``:
         - Uses ``_ephemeral_cached_pod`` for both compute and storage.
         - Raises ``RuntimeError`` if no ephemeral database has been set.
-        - Calls ``add_pipeline_record`` which computes the next recomputation
-          index (``max_index + 1``) and writes with ``skip_duplicates=True``
-          so concurrent coroutines are safely serialised.
 
         When ``node_config.is_result_ephemeral=False`` (default):
         - Uses ``_cached_function_pod`` (persistent DB) or raw function pod.
-        - Calls ``add_pipeline_record`` which computes the next recomputation
-          index (``max_index + 1``) and writes with ``skip_duplicates=True``
-          so concurrent coroutines are safely serialised.
+
+        When a pipeline database is attached, a result produced here is recorded
+        at the next recomputation index, using ``skip_duplicates=True``.
 
         Returns:
             A ``(tag, output_data)`` 2-tuple.
@@ -2860,6 +2877,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         if isinstance(data, EmptyData):
             return self._empty_data_cache_hit(tag, data, base_entry_id)
 
+        self._preflight_pipeline_write_schema()
         ephemeral_result = bool(self._node_config.is_result_ephemeral)
 
         if ephemeral_result:
@@ -2890,6 +2908,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                         computed=result_computed,
                         is_ephemeral=True,
                         output_data_hash=output_data.content_hash(),
+                        run_id=run_id,
                     )
         elif self._cached_function_pod is not None:
             tag_out, output_data = self._cached_function_pod.process_data(
@@ -2911,6 +2930,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                     data_record_id=output_data.datagram_uuid,
                     computed=result_computed,
                     output_data_hash=output_data.content_hash(),
+                    run_id=run_id,
                 )
         else:
             tag_out, output_data = self._function_pod.process_data(
@@ -2998,6 +3018,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         if isinstance(data, EmptyData):
             return self._empty_data_cache_hit(tag, data, base_entry_id)
 
+        self._preflight_pipeline_write_schema()
         ephemeral_result = bool(self._node_config.is_result_ephemeral)
 
         if ephemeral_result:
@@ -3153,15 +3174,18 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         computed: bool,
         is_ephemeral: bool = False,
         output_data_hash: ContentHash | None = None,
+        *,
+        run_id: str | None = None,
     ) -> None:
-        """Add a pipeline record to the database for a processed data.
+        """Add a pipeline record for a row that produced output.
 
         Computes the next recomputation index by querying existing rows in the
         pipeline DB that share the same ``base_entry_id``, then writes at
-        ``max_index + 1``. The write uses ``skip_duplicates=True`` so that
-        concurrent asyncio coroutines competing for the same versioned entry ID
-        are safely serialised: the first writer lands, subsequent writers whose
-        compute happened to produce the same hash are silently no-oped.
+        ``max_index + 1``. The database skips duplicate versioned entry IDs.
+        Sync execution ordinarily reuses the first recorded result for an
+        identical input in the same run. Async execution can schedule both
+        copies of an identical input without system tags before either entry is
+        available, and can write separate entries with successive indices.
 
         The pipeline record stores:
 
@@ -3173,6 +3197,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         - Whether the result is stored in the ephemeral database
         - Input data context key
         - Whether the result was freshly computed or cached
+        - The run ID and the UTC recording time
         - Output data content hash (``OUTPUT_DATA_HASH_COL``) — used by downstream
           ``EmptyData`` flow-through to look up the downstream result cache.
 
@@ -3187,6 +3212,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 ``input_data``. When provided, stored as ``OUTPUT_DATA_HASH_COL``
                 so that downstream ``EmptyData`` flow-through can locate its cached
                 result keyed by the same hash (= the downstream's ``INPUT_DATA_HASH_COL``).
+            run_id: ID of the run recording the entry, if any.
         """
         self._add_pipeline_record(
             tag,
@@ -3196,6 +3222,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             computed=computed,
             is_ephemeral=is_ephemeral,
             output_data_hash=output_data_hash,
+            run_id=run_id,
         )
 
     def _add_pipeline_record(
@@ -3207,6 +3234,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         computed: bool,
         is_ephemeral: bool = False,
         output_data_hash: ContentHash | None = None,
+        *,
+        run_id: str | None = None,
     ) -> None:
         """``add_pipeline_record`` with the row's base entry id already computed.
 
@@ -3218,6 +3247,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             computed: Whether the result was freshly computed.
             is_ephemeral: Whether the result is stored in the ephemeral database.
             output_data_hash: Content hash of the output, if any.
+            run_id: ID of the run recording the entry, if any.
         """
         pipeline_database = self._require_pipeline_database()
         # The row key combines the input's hash with this node's hasher: an input
@@ -3226,6 +3256,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             input_data.data_context_key, self._stored_data_context_key
         )
         self._account_for_stale_tables()
+        self._preflight_pipeline_write_schema()
 
         # Determine the next recomputation index by querying all existing rows
         # for this base_entry_id. No await is used here, so within a single-threaded
@@ -3274,6 +3305,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 constants.IS_EPHEMERAL_COL: [is_ephemeral],
                 _PIPELINE_BASE_ENTRY_ID_COL: [base_entry_id],
                 _PIPELINE_RECOMPUTATION_INDEX_COL: [new_index],
+                PIPELINE_RUN_ID_COL: [run_id],
+                PIPELINE_RECORDED_AT_COL: [datetime.now(timezone.utc)],
             },
             schema=_pipeline_meta_schema(),
         )
@@ -3303,6 +3336,55 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 node_label=self.label,
                 tag=tag.as_dict(),
             ) from exc
+
+    def _preflight_pipeline_write_schema(self) -> None:
+        """Refuse an incompatible table before the first computation in this run."""
+        database = self._pipeline_database
+        if database is None or self._pipeline_preflight_checked:
+            return
+        path = self._versioned_pipeline_path
+        existing = database.get_table_schema(path)
+        if existing is not None:
+            self._check_pipeline_write_schema(database, path, existing)
+        self._pipeline_preflight_checked = True
+
+    def _check_pipeline_write_schema(
+        self,
+        database: ArrowDatabaseProtocol,
+        path: tuple[str, ...],
+        schema: pa.Schema,
+    ) -> None:
+        """Report missing or incompatible recording columns and name their table."""
+        issues: list[str] = []
+        for expected in _PIPELINE_RECORDING_FIELDS:
+            index = schema.get_field_index(expected.name)
+            if index < 0:
+                issues.append(f"missing {expected.name}")
+                continue
+            actual = schema.field(index)
+            actual_type = arrow_utils.normalize_to_large_types(
+                actual.type, keep_null=True
+            )
+            if actual_type != expected.type:
+                issues.append(
+                    f"{expected.name} has type {actual_type}, expected {expected.type}"
+                )
+            if actual.nullable != expected.nullable:
+                actual_nullability = "nullable" if actual.nullable else "non-nullable"
+                expected_nullability = (
+                    "nullable" if expected.nullable else "non-nullable"
+                )
+                issues.append(
+                    f"{expected.name} is {actual_nullability}, expected {expected_nullability}"
+                )
+        if issues:
+            raise StoredTableSchemaError(
+                f"Cannot append a pipeline record to the "
+                f"{describe_database_table(database, path)}: "
+                f"{', '.join(issues)}. Rebuild the pipeline table "
+                "with the current version of Orcapod.",
+                node_label=self.label,
+            )
 
     # ------------------------------------------------------------------
     # Records and sources
@@ -4487,6 +4569,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                                 run_entry_ids.append(base_entry_id)
                                 await output.send((cached_tag, cached_data))
                             else:
+                                self._preflight_pipeline_write_schema()
                                 correlation_key = uuid.uuid4().bytes
                                 input_store[correlation_key] = (
                                     tag,
@@ -4528,6 +4611,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                                 computed=result_computed,
                                 is_ephemeral=is_ephemeral,
                                 output_data_hash=output_data.content_hash(),
+                                run_id=run_id,
                             )
                         except OrcapodDatabaseError as exc:
                             # This runs outside the pod's per-row handler: name the

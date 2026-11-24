@@ -485,7 +485,8 @@ def warn_restricted_aggregation(dag: OrcaDAG[StreamProtocol]) -> None:
 
     Called by ``job.run()`` and ``run_async()`` before the run (ITL-1218). The
     warning names each source slot and aggregating step, at the user's line that
-    started the run, at every run.
+    started the run, at every run. Pairs are ordered by slot name (or direct
+    source label), then by step label.
 
     Args:
         dag: The job's graph of the run.
@@ -496,22 +497,25 @@ def warn_restricted_aggregation(dag: OrcaDAG[StreamProtocol]) -> None:
     from orcapod.errors import RestrictedAggregationWarning
     from orcapod.utils.warning_utils import outside_orcapod_stacklevel, warn_at_frame
 
-    pairs: list[str] = []
-    for node in dag.topological_sort():
+    position = {node: index for index, node in enumerate(dag.nodes())}
+    pairs: list[tuple[str, str, str]] = []
+    for node in position:
         step = node.producer
         if not isinstance(step, (GroupBy, Batch, MergeJoin)):
             continue
-        restricted = sorted(restrictions_in_force(dag.ancestors(node)))
+        ancestors = sorted(dag.ancestors(node), key=position.__getitem__)
         pairs.extend(
-            f"{slot!r} feeds {type(step).__name__} {node.label!r}"
-            for slot in restricted
+            (slot, node.label, type(step).__name__)
+            for slot in restrictions_in_force(ancestors)
         )
     if not pairs:
         return
     caller = sys._getframe(outside_orcapod_stacklevel() - 1)  # pyright: ignore[reportPrivateUsage]  # as the warnings module does
     warn_at_frame(
         "A restricted source feeds an aggregating step: "
-        + "; ".join(pairs)
+        + "; ".join(
+            f"{slot!r} feeds {kind} {label!r}" for slot, label, kind in sorted(pairs)
+        )
         + ". Its groups are built from the rows the restriction lets through only "
         "(each aggregated row lists its members).",
         RestrictedAggregationWarning,

@@ -268,7 +268,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 case OperatorNode():
                     # The inputs in argument order (ITL-1417): an ordered operator
                     # (MergeJoin, SemiJoin) is rebuilt from this list, never from the
-                    # edge list, whose order follows the order steps were recorded in.
+                    # edge list, which is sorted by hash before serialization.
                     inputs = [
                         key_of[id(upstream)]
                         for upstream in node.upstreams
@@ -363,7 +363,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         for node_hash in nodes_data:
             if node_hash not in edge_graph:
                 edge_graph.add_node(node_hash)
-        topo_order = list(nx.topological_sort(edge_graph))
+        topo_order = nx.lexicographical_topological_sort(edge_graph)
 
         upstream_map: dict[str, list[str]] = {}
         for up_hash, down_hash in edges:
@@ -605,6 +605,10 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                     descriptor, input_stream=upstream_node
                 )
 
+        # Keep old files' edge order only for the legacy input-order fallback above.
+        edges = sorted((up, down) for up, down in edges)
+        reconstructed = cls._ordered_node_map(reconstructed, edge_graph)
+
         # Build Pipeline instance
         pipeline = cls(name=name, auto_compile=False)
         pipeline._loaded_output_schemas = {
@@ -629,17 +633,16 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         pipeline._nodes = nodes_by_label
 
         node_dag: OrcaDAG[GraphNode] = OrcaDAG()
+        for node in reconstructed.values():
+            node_dag.add_node(node)
         for up_hash, down_hash in edges:
             up_node = reconstructed.get(up_hash)
             down_node = reconstructed.get(down_hash)
             if up_node is not None and down_node is not None:
                 node_dag.add_edge(up_node, down_node)
-        for node in reconstructed.values():
-            if node not in node_dag:
-                node_dag.add_node(node)
         pipeline._node_graph = node_dag
 
-        pipeline._graph_edges = [(up, down) for up, down in edges]
+        pipeline._graph_edges = edges
         pipeline._hash_graph = nx.DiGraph()
         for up_hash, down_hash in edges:
             pipeline._hash_graph.add_edge(up_hash, down_hash)
