@@ -697,8 +697,9 @@ every depth and metadata. The name is reserved, and listings leave it out.
   so, once per table and process.
 - **A record that is not complete** is refused: the last row written says for which project
   and dataset, how many tables, and a digest of their rows. When it is missing or does not
-  fit, every read of the dataset raises `TableSchemaError`, and so does a schema table that
-  cannot be read.
+  fit, every read that opens a table of the dataset raises `TableSchemaError`, and so does a
+  schema table that cannot be read. A connector's table handle that has already read one
+  version keeps the schema it read it with.
 - **Joins are type strict.** A key column that is `T` in a recorded table and `T | None` in one
   that is not is an error, not a conversion.
 
