@@ -589,13 +589,17 @@ def _declares_non_null(field: "pa.Field[Any]") -> bool:
 
 def _child_fields(data_type: "pa.DataType") -> "list[tuple[str, pa.Field[Any]]]":
     """The nested fields whose values can be null, with their path text. A map's keys
-    are never null."""
+    are never null, but the fields nested in them can be."""
     if isinstance(data_type, pa.BaseExtensionType):
         data_type = data_type.storage_type
     if pa.types.is_struct(data_type):
         return [(f".{f.name}", f) for f in data_type]
     if pa.types.is_map(data_type):
-        return [("{}", data_type.item_field)]
+        # The key itself is never null, whatever its flag says; only below it.
+        return [
+            ("{key}", data_type.key_field.with_nullable(True)),
+            ("{}", data_type.item_field),
+        ]
     if (
         pa.types.is_list(data_type)
         or pa.types.is_large_list(data_type)
@@ -618,10 +622,14 @@ def _declared_null_below(
     for index, (segment, child) in enumerate(_child_fields(field.type)):
         if segment == "[]":
             below = [a.flatten() for a in arrays]
-        elif segment == "{}":
-            # ``MapArray.items`` ignores a slice; the list over its offsets does not.
+        elif segment in ("{key}", "{}"):
+            # ``MapArray.keys`` and ``items`` ignore a slice; the list over its
+            # offsets does not.
             below = [
-                pa.ListArray.from_arrays(a.offsets, a.items).flatten() for a in arrays
+                pa.ListArray.from_arrays(
+                    a.offsets, a.keys if segment == "{key}" else a.items
+                ).flatten()
+                for a in arrays
             ]
         else:
             below = [a.field(index) for a in arrays]

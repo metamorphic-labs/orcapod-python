@@ -1344,6 +1344,19 @@ def test_the_declared_null_rule_reads_only_the_values_of_the_rows() -> None:
         None,
         "c{}",
     )
+    # A key is never null, but a field nested in it can be (CodeRabbit on PR 539).
+    for declared in (True, False):
+        child = pa.field("x", pa.int64(), nullable=not declared)
+        keys = pa.StructArray.from_arrays([pa.array([1, None])], fields=[child])
+        keyed = arrow.MapArray.from_arrays(
+            pa.array([0, 1, 2], pa.int32()),
+            keys,
+            pa.array([1, 2]),
+            type=arrow.map_(pa.field("key", keys.type, nullable=False), pa.int64()),
+        )
+        found = "c{key}.x" if declared else None
+        assert path(keyed) == path(keyed.slice(1)) == found
+        assert path(keyed.slice(0, 1)) is None
 
 
 # ── PostgreSQL (a live server: the PostgreSQL CI job) ──────────────────────────
