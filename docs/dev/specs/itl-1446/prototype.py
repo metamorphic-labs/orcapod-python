@@ -503,7 +503,7 @@ def today(path: tuple[str, ...]) -> str:
 
 
 def proposed(path: tuple[str, ...]) -> str:
-    """The proposed name (section 5.3 of the design)."""
+    """A digest name, to show that colliding paths get different ones (illustrative)."""
     import json
     import re
 
