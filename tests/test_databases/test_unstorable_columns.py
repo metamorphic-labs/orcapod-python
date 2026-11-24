@@ -622,19 +622,15 @@ class TestWriteChecksOrder:
 
         assert exc_info.value.column == "u"
 
-    def test_untyped_null_column_is_refused_before_buffering(self, spiral_database):
-        """A null value needs a concrete column type."""
-        with pytest.raises(UnstorableColumnError, match="concrete Arrow type"):
-            spiral_database.add_record(("t",), b"1", pa.table({"v": pa.nulls(1)}))
-        spiral_database.flush()
-        assert spiral_database.list_table_paths() == []
+    def test_null_column_is_not_a_large_string_column(self, spiral_database):
+        """The schema comparison keeps ``null``: a later ``large_string`` is a change."""
+        null_table = pa.table({"v": pa.array([None], type=pa.null())})
+        text_table = pa.table({"v": pa.array(["a"], type=pa.large_string())})
+        spiral_database.add_record(("t",), b"1", null_table, flush=True)
 
-        typed = pa.table({"v": pa.array([None], type=pa.large_string())})
-        spiral_database.add_record(("t",), b"1", typed, flush=True)
-        stored = spiral_database.get_all_records(("t",))
-        assert stored is not None
-        assert stored.schema.field("v").type == pa.large_string()
-        assert stored["v"].to_pylist() == [None]
+        spiral_database.add_record(("t",), b"2", text_table)
+        with pytest.raises(ValueError, match="Schema mismatch"):
+            spiral_database.flush()
 
     def test_buffered_text_reads_with_committed_text(self, tmp_path: pathlib.Path):
         """Buffered ``string`` rows read together with committed ``large_string`` rows."""

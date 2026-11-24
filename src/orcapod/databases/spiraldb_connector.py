@@ -61,9 +61,8 @@ else:
 logger = logging.getLogger(__name__)
 
 _ARROW_METADATA_KEY = "__arrow_metadata__"
-# pyspiral 0.16.33, spiral.api.types.TableName.
-_TABLE_NAME_MAX_LENGTH = 128
-_TABLE_NAME_PATTERN = re.compile(r"[a-zA-Z_][a-zA-Z0-9_-]*")
+# ITL-1446 service probe: 255 characters accepted, 256 refused.
+_TABLE_NAME_MAX_LENGTH = 255
 
 
 def _serialize_field_meta_tree(field: pa.Field) -> dict | None:
@@ -384,13 +383,6 @@ def _about_table(table: str) -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
-def _unsupported_physical_type_reason(arrow_type: pa.DataType) -> str | None:
-    """Explain a physical Arrow type refused before it reaches the writer."""
-    if pa.types.is_null(arrow_type):
-        return "the SpiralDB connector requires a concrete Arrow type for a column of nulls"
-    return _fixed_binary_or_duration_reason(arrow_type)
-
-
 def _fixed_binary_or_duration_reason(arrow_type: pa.DataType) -> str | None:
     """Find a fixed-size binary or duration type refused by pyspiral's schema converter."""
     # Both fail in pyspiral 0.16.33's Schema.from_arrow, including inside containers.
@@ -608,11 +600,13 @@ class SpiralDBConnector:
             )
         return f"{self._dataset}.{table_name}"
 
-    def _require_supported_physical_type(
-        self, column: str, arrow_type: pa.DataType
-    ) -> None:
-        """Reject a physical type the connector cannot write."""
-        reason = _unsupported_physical_type_reason(arrow_type)
+    def _require_supported_column(self, column: str, arrow_type: pa.DataType) -> None:
+        """Reject a column the connector cannot write without loss."""
+        reason = (
+            "SpiralDB truncates a column name at NUL"
+            if "\0" in column
+            else _fixed_binary_or_duration_reason(arrow_type)
+        )
         if reason is not None:
             raise UnstorableColumnError(
                 database_kind=type(self).__name__,
@@ -995,7 +989,7 @@ class SpiralDBConnector:
             )
         pk_arrow_type = next(c.arrow_type for c in columns if c.name == pk_column)
         for column in columns:
-            self._require_supported_physical_type(column.name, column.arrow_type)
+            self._require_supported_column(column.name, column.arrow_type)
         self._project.create_table(
             identifier,
             key_schema=[(pk_column, pk_arrow_type)],
@@ -1085,7 +1079,7 @@ class SpiralDBConnector:
                 f"table key schema {pk_cols}."
             )
         for field in records.schema:
-            self._require_supported_physical_type(field.name, field.type)
+            self._require_supported_column(field.name, field.type)
 
         # Nullability (ITL-936). SpiralDB keeps no non-null flag except on list items, and
         # stores a null written to a non-null struct field as the type's zero, so every
@@ -1216,8 +1210,7 @@ class SpiralDBConnector:
         is refused (ITL-1334; keeping it is a follow-up). A map whose key or item
         field has another name than ``key`` / ``value`` reads back with those names,
         and is refused too. The pyspiral schema converter refuses fixed-size
-        binary and duration, including inside containers. The connector also
-        requires a concrete type for an entirely untyped null column.
+        binary and duration, including inside containers.
 
         Args:
             name: The column's name.
@@ -1227,6 +1220,8 @@ class SpiralDBConnector:
         Returns:
             A short reason, or ``None`` when SpiralDB stores the column.
         """
+        if "\0" in name:
+            return "SpiralDB truncates a column name at NUL"
         if "." in name:
             return "SpiralDB reserves '.' in column names as its column-group separator"
         if name.startswith("__") and not primary_key:
@@ -1246,7 +1241,7 @@ class SpiralDBConnector:
                 "SpiralDB drops Arrow field metadata, so a logical (extension) type "
                 "reads back as its storage type"
             )
-        physical_reason = _unsupported_physical_type_reason(arrow_type)
+        physical_reason = _fixed_binary_or_duration_reason(arrow_type)
         if physical_reason is not None:
             return physical_reason
         if arrow_utils.holds_renamed_map(arrow_type):
@@ -1261,7 +1256,7 @@ class SpiralDBConnector:
         return None
 
     def unstorable_table_name_reason(self, table_name: str) -> str | None:
-        """Say why the name fails pyspiral's ``TableName`` constraints.
+        """Say why SpiralDB cannot use this plain table name.
 
         Args:
             table_name: The table name.
@@ -1274,11 +1269,8 @@ class SpiralDBConnector:
                 f"SpiralDB allows at most {_TABLE_NAME_MAX_LENGTH} characters in a "
                 f"table name, and this name has {len(table_name)}"
             )
-        if _TABLE_NAME_PATTERN.fullmatch(table_name) is None:
-            return (
-                "SpiralDB table names must start with an ASCII letter or '_' and "
-                "contain only ASCII letters, digits, '_' or '-'"
-            )
+        if not table_name or "." in table_name:
+            return "SpiralDB requires a non-empty plain table name without dots"
         return None
 
     def validate_records(self, records: pa.Table) -> None:

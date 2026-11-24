@@ -51,12 +51,12 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import types
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -243,8 +243,13 @@ def _push_down_struct_nulls(col: pa.ChunkedArray[Any]) -> pa.ChunkedArray[Any]:
 
 
 def _has_struct_nulls(arr: pa.ChunkedArray[Any]) -> bool:
-    """Return whether ``arr`` is a struct column with a null struct value."""
-    return pa.types.is_struct(arr.type) and arr.null_count > 0
+    """Detect a null struct in a struct column or one of its struct fields."""
+    if not pa.types.is_struct(arr.type):
+        return False
+    # ITL-1446 observed the refusal for a struct inside another struct too.
+    return arr.null_count > 0 or any(
+        _has_struct_nulls(field) for field in arr.flatten()
+    )
 
 
 class _Store:
@@ -262,20 +267,22 @@ class _Store:
         )
 
     def _path(self, project_id: str, identifier: str, suffix: str) -> Path:
-        # identifiers contain a dot (``dataset.table``), so never use ``with_suffix``
         """Return the file holding ``identifier``'s part named by ``suffix``."""
-        return self.root / project_id / f"{identifier}{suffix}"
+        # A 255-character table name plus its dataset and suffix can exceed the
+        # filesystem's component length, so use a fixed-width filename.
+        digest = sha256(identifier.encode()).hexdigest()
+        return self.root / project_id / f"{digest}{suffix}"
 
     def exists(self, project_id: str, identifier: str) -> bool:
         """Return whether table ``identifier`` exists in ``project_id``."""
-        return self._path(project_id, identifier, ".keys.json").exists()
+        return self._path(project_id, identifier, ".identifier").exists()
 
     def identifiers(self, project_id: str) -> list[str]:
         """Return every table identifier of ``project_id``, sorted."""
         pdir = self.root / project_id
         if not pdir.exists():
             return []
-        return sorted(p.name[: -len(".keys.json")] for p in pdir.glob("*.keys.json"))
+        return sorted(p.read_text(encoding="utf-8") for p in pdir.glob("*.identifier"))
 
     def create(self, project_id: str, identifier: str, key_schema: pa.Schema) -> None:
         """Create table ``identifier`` with ``key_schema`` and empty metadata."""
@@ -285,8 +292,8 @@ class _Store:
         self._path(project_id, identifier, ".keys.arrow").write_bytes(
             sink.getvalue().to_pybytes()
         )
-        self._path(project_id, identifier, ".keys.json").write_text(
-            json.dumps(key_schema.names)
+        self._path(project_id, identifier, ".identifier").write_text(
+            identifier, encoding="utf-8"
         )
         self._path(project_id, identifier, ".kv.json").write_text("{}")
         # SpiralDB gives every table its own id; a recreated table gets a new one.
@@ -298,7 +305,7 @@ class _Store:
     def drop(self, project_id: str, identifier: str) -> None:
         """Remove every file of table ``identifier``."""
         for suffix in (
-            ".keys.json",
+            ".identifier",
             ".keys.arrow",
             ".kv.json",
             ".data.arrow",
@@ -445,7 +452,7 @@ class FakeScan:
         self._where = where
         self._limit = limit
 
-    def _rows(self) -> pa.Table:
+    def _rows(self, key_table: pa.Table | None) -> pa.Table:
         """Return the rows matching ``where``, cut to ``limit``, in key order."""
         rows = self._table._read_all()
         for name, value in self._where.equalities if self._where else []:
@@ -454,15 +461,30 @@ class FakeScan:
                     rows.column(name), pa.scalar(value, rows.schema.field(name).type)
                 )
             )
+        if key_table is not None:
+            # Scan.to_table(key_table=...) takes keys in request order. The ITL-1446
+            # service probe observed a null row in the slot of an absent key.
+            names = self._table.key_schema.names
+            by_key = {
+                key: index for index, key in enumerate(zip(*rows.select(names).columns))
+            }
+            keys = [
+                key_table.column(name).cast(rows.schema.field(name).type)
+                for name in names
+            ]
+            indices = pa.array([by_key.get(key) for key in zip(*keys)], type=pa.int64())
+            rows = rows.take(indices)
         return rows if self._limit is None else rows.slice(0, self._limit)
 
-    def to_table(self) -> pa.Table:
-        """Return the scanned rows, in key order."""
-        return self._rows()
+    def to_table(self, *, key_table: pa.Table | None = None) -> pa.Table:
+        """Return scanned rows in key order or in the requested key order."""
+        return self._rows(key_table)
 
-    def to_record_batches(self, **kwargs: Any) -> pa.RecordBatchReader:
-        """Return the rows in key order, ``scan_batch_rows`` per batch, read on demand."""
-        rows = self._rows()
+    def to_record_batches(
+        self, *, key_table: pa.Table | None = None, **kwargs: Any
+    ) -> pa.RecordBatchReader:
+        """Return up to ``scan_batch_rows`` rows per batch, read on demand."""
+        rows = self._rows(key_table)
 
         def batches() -> Iterator[pa.RecordBatch]:
             # SpiralDB yields more than one batch for larger tables; split to exercise that.
@@ -581,6 +603,9 @@ class FakeTable:
         """
         b = self._store.behaviour
         keys = self.key_schema
+        if table.num_rows == 0:
+            # The ITL-1446 service probe hit a native panic on an empty write.
+            raise ValueError("SpiralDB cannot write a zero-row table")
         missing = [k for k in keys.names if k not in table.column_names]
         if missing:
             raise ValueError(f"write is missing key columns {missing}")
@@ -597,6 +622,9 @@ class FakeTable:
                 if len(batch_keys) != batch.num_rows:
                     raise ValueError("Duplicate keys found in input batch")
         for name in table.column_names:
+            if "\0" in name:
+                # The ITL-1446 service probe observed truncation at the first NUL.
+                raise ValueError(f"SpiralDB truncates column name {name!r} at NUL")
             # SpiralDB's own refusals, with its messages as observed live (ITL-1164).
             if "." in name:
                 raise ValueError(f"Column '{name}' contains a reserved dot-separator")
@@ -612,6 +640,9 @@ class FakeTable:
                 )
         for field in table.schema:
             _check_arrow_type(field.type)
+            if pa.types.is_struct(field.type) and not field.type.num_fields:
+                # A write of an empty struct was refused by the ITL-1446 service probe.
+                raise ValueError("SpiralDB cannot write an empty struct")
         if b.reject_struct_nulls and not push_down_nulls:
             for name in table.column_names:
                 if _has_struct_nulls(table.column(name)):
@@ -634,6 +665,11 @@ class FakeTable:
                     )
                 col = _zero_struct_field_nulls(col, f.type)
             sf = _stored_field(f, b, nullable=b.server_nullability or None)
+            if pa.types.is_struct(sf.type) and f.name in values:
+                # ITL-1446 observed sorted fields on a top-level struct column.
+                sf = sf.with_type(
+                    pa.struct(sorted(sf.type, key=lambda field: field.name))
+                )
             if isinstance(f.type, pa.ExtensionType):
                 col = pa.chunked_array(
                     [cast("pa.ExtensionArray[Any]", c).storage for c in col.chunks]
@@ -646,8 +682,7 @@ class FakeTable:
         # SpiralDB matches a write's columns by name and stores them in its own
         # order, whatever the order written: the key columns in key-schema order,
         # then the value columns sorted by name, by code point (observed live,
-        # ITL-1367). Struct children are sorted live too; the fake keeps them as
-        # written (struct field order: ITL-1368).
+        # ITL-1367).
         incoming = incoming.select([*keys.names, *values])
         existing = self._store.read(self._project_id, self._identifier)
         if existing is not None:
@@ -806,13 +841,9 @@ class FakeProject:
         parts = identifier.split(".")
         if len(parts) == 1:
             identifier = f"default.{identifier}"
-        # The pyspiral 0.16.33 spiral.api.types.TableName annotation on create_table.
+        # ITL-1446 service probe: 255 characters accepted, 256 refused.
         name = parts[-1]
-        if (
-            len(parts) > 2
-            or len(name) > 128
-            or re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_-]*", name) is None
-        ):
+        if len(parts) > 2 or not name or len(name) > 255:
             raise ValueError(f"Invalid table name: {identifier!r}")
         if isinstance(key_schema, pa.Schema):
             schema = key_schema

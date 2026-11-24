@@ -34,7 +34,7 @@ from tests.test_databases import fake_pyspiral
 from tests.test_databases.type_matrix import map_of_fields
 
 
-@pytest.mark.parametrize("name", ["", "1table", "a.b", "a b", "é", "a\n", "a" * 129])
+@pytest.mark.parametrize("name", ["", "a.b", "a" * 256])
 def test_invalid_table_name(tmp_path, name):
     with fake_pyspiral.install(tmp_path):
         connector = SpiralDBConnector("p")
@@ -44,18 +44,20 @@ def test_invalid_table_name(tmp_path, name):
         assert connector.get_table_names() == []
 
 
-@pytest.mark.parametrize("name", ["_", "_T-9", "T" * 128])
+@pytest.mark.parametrize("name", ["_T-9", "T" * 129, "T" * 255])
 def test_valid_table_name(tmp_path, name):
     with fake_pyspiral.install(tmp_path):
         project = fake_pyspiral.FakeSpiral().project("p")
         connector = SpiralDBConnector("p")
         assert connector.unstorable_table_name_reason(name) is None
-        project.create_table(f"default.{name}", key_schema=[("id", pa.int64())])
+        table = project.create_table(f"default.{name}", key_schema=[("id", pa.int64())])
+        table.write(pa.table({"id": [1], "value": ["v"]}))
         assert connector.get_table_names() == [name]
+        assert table.schema().to_arrow().names == ["id", "value"]
 
 
-@pytest.mark.parametrize("name", ["", "1table", "a b", "é", "a\n", "a" * 129])
-def test_fake_refuses_table_names_outside_client_type(tmp_path, name):
+@pytest.mark.parametrize("name", ["", "a.b", "a" * 256])
+def test_fake_refuses_invalid_table_names(tmp_path, name):
     with fake_pyspiral.install(tmp_path):
         project = fake_pyspiral.FakeSpiral().project("p")
         with pytest.raises(ValueError, match="table name"):
@@ -92,6 +94,8 @@ def test_fake_refuses_types_rejected_by_schema_from_arrow(tmp_path, arrow_type, 
         ({"id": [1], "part": [2]}, "Write array contains only key columns"),
         ({"id": [1, 1], "part": [2, 2], "v": [3, 4]}, "Duplicate keys found"),
         ({"id": [1], "part": [2], "$value": [3]}, "reserved for key columns"),
+        ({"id": [1], "part": [2], "v\0suffix": [3]}, "at NUL"),
+        ({"id": [], "part": [], "v": []}, "zero-row"),
     ],
 )
 def test_fake_refuses_invalid_write_batch(tmp_path, rows, message):
@@ -126,7 +130,6 @@ def test_fake_refuses_null_key_type(tmp_path):
     [
         (pa.binary(16), "fixed_size_binary"),
         (pa.duration("us"), "duration"),
-        (pa.null(), "null"),
     ],
 )
 def test_connector_refuses_unstorable_arrow_columns(tmp_path, arrow_type, reason):
@@ -139,6 +142,73 @@ def test_connector_refuses_unstorable_arrow_columns(tmp_path, arrow_type, reason
             connector.upsert_records("t", rows, id_column="id")
         assert exc_info.value.column == "v"
         assert table.get_metadata() == {}
+        assert table.schema().to_arrow().names == ["id"]
+
+
+def test_connector_refuses_a_column_name_truncated_at_nul(tmp_path):
+    with fake_pyspiral.install(tmp_path):
+        project = fake_pyspiral.FakeSpiral().project("p")
+        table = project.create_table("t", key_schema=[("id", pa.int64())])
+        connector = SpiralDBConnector("p")
+        name = "before\0after"
+        assert connector.unstorable_column_reason(name, pa.int64(), primary_key=False)
+        with pytest.raises(UnstorableColumnError, match="at NUL"):
+            connector.upsert_records("t", pa.table({"id": [1], name: [2]}), "id")
+        assert table.get_metadata() == {}
+
+
+def test_key_table_returns_a_null_row_for_a_missing_key(tmp_path):
+    with fake_pyspiral.install(tmp_path):
+        client = fake_pyspiral.FakeSpiral()
+        table = client.project("p").create_table("t", key_schema=[("id", pa.binary())])
+        table.write(pa.table({"id": [b"a", b"b"], "v": [1, 2]}))
+        keys = pa.table({"id": pa.array([b"b", b"x", b"a"], type=pa.large_binary())})
+        scan = client.scan(table.select())
+        expected = [{"id": b"b", "v": 2}, {"id": None, "v": None}, {"id": b"a", "v": 1}]
+        assert scan.to_table(key_table=keys).to_pylist() == expected
+        assert scan.to_record_batches(key_table=keys).read_all().to_pylist() == expected
+
+
+def test_struct_fields_read_back_sorted_with_values_matched_by_name(tmp_path):
+    with fake_pyspiral.install(tmp_path):
+        client = fake_pyspiral.FakeSpiral()
+        table = client.project("p").create_table("t", key_schema=[("id", pa.int64())])
+        for key, order in enumerate((("z", "a"), ("a", "z"))):
+            struct_type = pa.struct([(name, pa.int64()) for name in order])
+            struct = pa.array([{"a": 1, "z": 2}], type=struct_type)
+            table.write(pa.table({"id": [key], "v": struct}))
+        rows = client.scan(table.select()).to_table()
+        assert rows.schema.field("v").type == pa.struct(
+            [("a", pa.int64()), ("z", pa.int64())]
+        )
+        assert rows.to_pylist() == [
+            {"id": 0, "v": {"a": 1, "z": 2}},
+            {"id": 1, "v": {"a": 1, "z": 2}},
+        ]
+
+
+@pytest.mark.parametrize(
+    ("column", "message"),
+    [
+        (pa.array([{}], type=pa.struct([])), "empty struct"),
+        (
+            pa.array(
+                [{"inner": None}],
+                type=pa.struct([("inner", pa.struct([("v", pa.int64())]))]),
+            ),
+            "struct-level nulls",
+        ),
+    ],
+)
+def test_fake_refuses_unsupported_struct_values(tmp_path, column, message):
+    with fake_pyspiral.install(tmp_path):
+        table = (
+            fake_pyspiral.FakeSpiral()
+            .project("p")
+            .create_table("t", key_schema=[("id", pa.int64())])
+        )
+        with pytest.raises(ValueError, match=message):
+            table.write(pa.table({"id": [0], "v": column}))
         assert table.schema().to_arrow().names == ["id"]
 
 

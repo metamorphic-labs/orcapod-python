@@ -181,7 +181,7 @@ fields is not covered: a struct whose fields are in another order is another typ
 
 | Type | in-memory | Delta | SQLite | PostgreSQL | SpiralDB |
 |---|---|---|---|---|---|
-| `null` | kept | refused | refused | refused | refused |
+| `null` | kept | refused | refused | refused | kept |
 
 ## Temporal
 
