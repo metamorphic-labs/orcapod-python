@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from contextlib import AbstractContextManager
 from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
 
@@ -36,6 +36,12 @@ class ArrowDatabaseProtocol(Protocol):
         self, record_path: tuple[str, ...], record_id: bytes, dependency: PendingCommit
     ) -> AbstractContextManager[None]:
         """Bind a record to its result's token before enqueue can publish it."""
+        ...
+
+    def guard_table_schema(
+        self, record_path: tuple[str, ...], check: Callable[[pa.Schema], None]
+    ) -> AbstractContextManager[None]:
+        """Keep the check with queued records and apply it to the schema at commit."""
         ...
 
     def fail_pending_result(self, record_path: tuple[str, ...]) -> None:
@@ -174,6 +180,15 @@ class ArrowDatabaseProtocol(Protocol):
 
         Returns:
             ``True`` if a table exists at the given path, ``False`` otherwise.
+        """
+        ...
+
+    def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
+        """Read the current table schema, including for an empty table.
+
+        The path is relative to this database view. If the table has only queued
+        records, use their schema. Return ``None`` if the table has neither a
+        committed schema nor a queued batch. No rows are fetched.
         """
         ...
 

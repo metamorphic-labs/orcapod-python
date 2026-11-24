@@ -57,6 +57,7 @@ from orcapod.databases.utils import (
 )
 from orcapod.errors import (
     InputValidationError,
+    StoredTableSchemaError,
     OrcapodDatabaseReadError,
     TableListingNotSupportedError,
     TypeIdentityError,
@@ -1632,17 +1633,22 @@ def _database_error_to_raise(errors: list[Exception]) -> Exception | None:
     A ``OrcapodDatabaseReadError`` is preferred, because it is the error that fails a run
     whatever the orchestrator's ``error_policy``; failing that, an
     ``InputValidationError`` from a refused append, then an ``UnstorableColumnError``
-    from a batch Delta refused for its column names (ITL-1403).
+    from a batch Delta refused for its column names (ITL-1403), then a
+    ``StoredTableSchemaError`` from a schema guard.
 
     Args:
         errors: The error of every batch that failed, in flush order.
 
     Returns:
-        The first ``OrcapodDatabaseReadError``, else the first ``InputValidationError``,
-        else the first ``UnstorableColumnError``, or ``None`` when no batch failed with
-        a database error.
+        The first error of the highest-priority type listed above, or
+        ``None`` when no batch failed with one of those types.
     """
-    for kind in (OrcapodDatabaseReadError, InputValidationError, UnstorableColumnError):
+    for kind in (
+        OrcapodDatabaseReadError,
+        InputValidationError,
+        UnstorableColumnError,
+        StoredTableSchemaError,
+    ):
         chosen = next((e for e in errors if isinstance(e, kind)), None)
         if chosen is not None:
             return chosen
@@ -2089,6 +2095,22 @@ class DeltaTableDatabase:
         # Checks again even when the table was found absent before (ITL-1173).
         self._absent_tables.discard(self._get_record_key(record_path))
         return self._get_delta_table(record_path) is not None
+
+    def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
+        """Read the latest Delta schema from the log or the table's first batch."""
+        from deltalake.exceptions import TableNotFoundError
+
+        try:
+            table = deltalake.DeltaTable(
+                self._get_table_uri(record_path),
+                storage_options=self._storage_options or None,
+            )
+            return pa.schema(_held_columns(table).values())
+        except TableNotFoundError:
+            pending = self._pending_batches.get(self._get_record_key(record_path))
+            return None if pending is None else pending.schema
+        except Exception as exc:
+            raise self._read_failed(record_path) from exc
 
     def _ensure_record_id_column(
         self, arrow_data: pa.Table, record_id: str | bytes
@@ -3429,6 +3451,8 @@ class DeltaTableDatabase:
           (``_append_refusal``). The batch is dropped from the queue, since every later
           flush would refuse it too; the error says how many rows were not written.
           Correct the rows and add them again (ITL-1334).
+        - Refused by a schema guard (``StoredTableSchemaError``): the stored table
+          must be rebuilt before appending. The refused batch leaves the queue.
         - Refused by Delta for the rows themselves (ITL-1403): a ``SchemaMismatchError``,
           a ``DeltaError`` whose message starts with one of
           ``PERMANENT_DELTA_ERROR_PREFIXES`` (raised as ``InputValidationError``), or two
@@ -3450,6 +3474,8 @@ class DeltaTableDatabase:
             UnstorableColumnError: If neither of the above, but Delta refused a batch
                 for two names equal under its case folding (dropped from the queue:
                 every later flush would refuse it too; ITL-1403).
+            StoredTableSchemaError: If a schema guard refused an append and no batch
+                failed with any error above. Other failed batches are added as notes.
             RuntimeError: If batches failed with other errors only, naming the
                 failed batches, with the first failure as its ``__cause__``.
         """
@@ -3512,6 +3538,14 @@ class DeltaTableDatabase:
     ) -> None:
         """Commit a durable result table even if no pipeline records are stored."""
         self.flush_batch(record_path)
+
+    def guard_table_schema(
+        self, record_path: tuple[str, ...], check: Callable[[pa.Schema], None]
+    ) -> AbstractContextManager[None]:
+        """Check the schema in the snapshot opened at commit."""
+        return self._pending_commits.guard_schema(
+            self._get_record_key(record_path), check
+        )
 
     def flush_batch(self, record_path: tuple[str, ...]) -> None:
         """
@@ -3617,7 +3651,7 @@ class DeltaTableDatabase:
                     _sleep_before_retry(attempt)
                     attempt += 1
 
-        except InputValidationError as e:
+        except (InputValidationError, StoredTableSchemaError) as e:
             # The stored table refuses these rows (``_append_refusal``,
             # ``_conformed_to_stored``): they would be refused by every later flush
             # too, so they leave the queue, as rows refused when added never enter
@@ -3630,14 +3664,19 @@ class DeltaTableDatabase:
             # The discard notice is part of the message, so it survives wherever the
             # error is reported: the log, and the note ``flush`` puts on another
             # batch's error when that one is raised instead.
-            refused = InputValidationError(
-                f"{e} The {pending_batch.num_rows} rows queued for table "
-                f"{record_key!r} were not written and are no longer queued: correct "
-                "them and add them again."
+            discarded = (
+                f"The {pending_batch.num_rows} rows queued for table "
+                f"{record_key!r} were not written and are no longer queued."
             )
             self._pending_commits.forget(record_key, pending_ids)
             self._pending_commits.finish(record_key, committed=False)
-            logger.error(f"Refused batch for {record_key}: {refused}")
+            logger.error("Refused batch for %s: %s %s", record_key, e, discarded)
+            if isinstance(e, StoredTableSchemaError):
+                e.add_note(discarded)
+                raise
+            refused = InputValidationError(
+                f"{e} {discarded.removesuffix('.')}: correct them and add them again."
+            )
             raise refused from e
         except BaseException as e:
             permanent = isinstance(e, Exception) and _permanent_commit_failure(e)
@@ -3686,8 +3725,12 @@ class DeltaTableDatabase:
                 logger.error(f"Refused batch for {record_key}: {refused}")
                 raise refused from e
             logger.error(f"Error flushing batch for {record_key}: {e}")
-            self._pending_commits.finish(record_key, committed=False)
-            self._pending_commits.restore(record_key, pending_batch, pending_ids)
+            # Requeue the ready rows before withdrawing dependents. Withdrawing
+            # the last blocked row would otherwise discard the table's schema check.
+            try:
+                self._pending_commits.restore(record_key, pending_batch, pending_ids)
+            finally:
+                self._pending_commits.finish(record_key, committed=False)
             raise
 
         # The rows are committed: nothing below may put them back in the queue.
@@ -3743,6 +3786,7 @@ class DeltaTableDatabase:
             OrcapodDatabaseReadError: If the table exists but cannot be loaded, or
                 its stored ids cannot be read.
             InputValidationError: If the stored table refuses the rows.
+            StoredTableSchemaError: If the table does not satisfy the queued schema guard.
         """
         from deltalake.exceptions import CommitFailedError, TableNotFoundError
 
@@ -3761,6 +3805,14 @@ class DeltaTableDatabase:
             raise OrcapodDatabaseReadError(
                 table_uri, abs_path_components
             ) from load_error
+
+        check = self._pending_commits.schema_check(record_key)
+        if check is not None:
+            check(
+                original_table.schema
+                if delta_table is None
+                else pa.schema(_held_columns(delta_table).values())
+            )
 
         if delta_table is None:
             # Tells this create's table from one another writer creates again at the

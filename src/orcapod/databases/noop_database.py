@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, Any
 
@@ -127,6 +127,12 @@ class NoOpArrowDatabase:
         """Accept the bookkeeping dependency without retaining the pipeline record."""
         return nullcontext()
 
+    def guard_table_schema(
+        self, record_path: tuple[str, ...], check: Callable[[pa.Schema], None]
+    ) -> AbstractContextManager[None]:
+        """Discard records without committing a table."""
+        return nullcontext()
+
     def list_table_paths(self, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
         """Return no path: this no-op implementation never stores a table.
 
@@ -154,6 +160,10 @@ class NoOpArrowDatabase:
     def base_path(self) -> tuple[str, ...]:
         """The current relative root of this database view (always () for root instances)."""
         return self._path_prefix
+
+    def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
+        """Return no schema because this database stores no tables."""
+        return None
 
     def at(self, *path_components: str) -> "NoOpArrowDatabase":
         """Return a new NoOpArrowDatabase scoped to the given sub-path.

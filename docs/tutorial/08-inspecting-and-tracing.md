@@ -158,7 +158,7 @@ call. `get_all_records` returns them; ask for the `meta` columns to see the deta
 records = pl.from_arrow(job.nodes["rates"].get_all_records(columns={"meta": True}))
 meta = [c for c in records.columns if c.startswith("__")]
 print(meta)
-# ['__data_id', '__input_data_hash', '__output_data_hash', '__data_context', '__computed', '__is_ephemeral', '__input_data_hash_right', '__pf_var_function_name', '__pf_var_function_version', '__pf_var_function_module', '__pf_var_function_signature_hash', '__pf_var_function_content_hash', '__pf_var_git_hash', '__pf_exec_executor_type', '__pf_exec_executor_info', '__pf_exec_python_version', '__pf_exec_extra_info', '__pod_ts']
+# ['__data_id', '__input_data_hash', '__output_data_hash', '__data_context', '__computed', '__is_ephemeral', '__pipeline_run_id', '__recorded_at', '__input_data_hash_right', '__pf_var_function_name', '__pf_var_function_version', '__pf_var_function_module', '__pf_var_function_signature_hash', '__pf_var_function_content_hash', '__pf_var_git_hash', '__pf_exec_executor_type', '__pf_exec_executor_info', '__pf_exec_python_version', '__pf_exec_extra_info', '__pod_ts']
 ```
 
 The ones you are most likely to want:
@@ -170,6 +170,8 @@ The ones you are most likely to want:
 | `__pf_exec_python_version` | The Python version it ran under |
 | `__pf_var_git_hash` | The git commit of the code, when run inside a git repository |
 | `__computed` | `True` if this row was computed, `False` if it reused the result of an identical input |
+| `__pipeline_run_id` | The job run that recorded the pipeline entry |
+| `__recorded_at` | When the pipeline entry was recorded, in UTC |
 | `__input_data_hash` | The hash of the input values: the key the result is stored under (Part 6) |
 
 ```python
