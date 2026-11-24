@@ -2052,7 +2052,8 @@ def null_key_length(k: str | None) -> int:
 
 def test_a_null_join_key_matches_nothing_in_the_explanation() -> None:
     """Both inputs hold k = null: the Join drops the row (a null key matches nothing),
-    so the other input is named as lacking the key, never passed over as a match."""
+    and the reason says so: the null key, never the other input passed over as a
+    match (nor said to lack a row it holds)."""
     schema = pa.schema(
         [pa.field("k", pa.large_string(), nullable=True), pa.field("x", pa.int64())]
     )
@@ -2078,8 +2079,9 @@ def test_a_null_join_key_matches_nothing_in_the_explanation() -> None:
     assert job.nodes["Join"].as_table().num_rows == 0
     answer = job.nodes["Join"].why_missing("a", "row_0")
     assert answer.missing
-    assert answer.because.startswith("no row with k=")
-    assert answer.because.endswith(" in 'b' (reads b)")
+    assert (
+        answer.because == "its key k is null, and a null key matches nothing in a join"
+    )
 
 
 @pytest.mark.parametrize("same_input", [True, False])
@@ -2441,3 +2443,142 @@ def test_a_highlight_shows_no_status() -> None:
         assert word not in shown.to_text()
         assert word not in shown_text
     assert "<circle" not in shown.to_svg()  # no status dot
+
+
+# ---------------------------------------------------------------------------
+# Review of 37cc4100: operator equality in the reason, collapse, NaN order, dates
+# ---------------------------------------------------------------------------
+
+
+def _null_key_peer(name: str) -> ArrowTableSource:
+    """A source of one row whose tag k is null."""
+    table = pa.Table.from_pylist(
+        [{"k": None, "x": 1, "y": 2}],
+        schema=pa.schema(
+            [
+                pa.field("k", pa.large_string()),
+                pa.field("x", pa.int64()),
+                pa.field("y", pa.int64()),
+            ]
+        ),
+    )
+    return ArrowTableSource(
+        table, tag_columns=["k"], tag_only_columns=True, source_id=name
+    )
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_the_reason_follows_each_operators_equality(mode: str) -> None:
+    """Join: a null key matches nothing (the peer is not said to lack a row). Rejoin
+    matches the nulls (its rows differ by origin), so no input is said to lack k."""
+    from orcapod.operators import Rejoin
+
+    for operator in (Join, Rejoin):
+        left, right = _null_key_peer("left"), _null_key_peer("right")
+        job = PipelineJob(
+            name=f"null{operator.__name__}{mode}", database=InMemoryArrowDatabase()
+        )
+        with job:
+            operator()(SelectDataColumns(["x"])(left), SelectDataColumns(["y"])(right))
+        run(job, mode)
+        node = job.nodes[operator.__name__]
+        answer = node.why_missing("left", "row_0")
+        assert answer.missing
+        assert "no row with" not in answer.because
+        if operator is Join:
+            assert answer.because == (
+                "its key k is null, and a null key matches nothing in a join"
+            )
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_a_collapsed_diagram_keeps_the_asked_node(mode: str) -> None:
+    from orcapod.operators import MapData
+
+    source = DictSource(
+        [{"k": "one", "i": 1, "x": 7}],
+        tag_columns=["k", "i"],
+        tag_only_columns=True,
+        source_id="a",
+    )
+    job = PipelineJob(name=f"collapse{mode}", database=InMemoryArrowDatabase())
+    with job:
+        MapData({"x": "y"})(SelectDataColumns(["x"])(source))
+    run(job, mode)
+    target = job.nodes["SelectDataColumns"]
+    # Without a highlight, collapse folds the selection.
+    assert "SelectDataColumns" not in job.diagram(collapse=True).to_text()
+    for selector in ({"k": "one"}, {"k": "absent"}):
+        diagram = job.diagram(
+            collapse=True, highlight=target.trace(selector, "x").highlight()
+        )
+        assert "SelectDataColumns (operator) [traced from here]" in diagram.to_text()
+        assert diagram.to_svg().count('class="op-dag-asked"') == 1
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_roots_follow_a_total_order_with_nan(mode: str) -> None:
+    orders = []
+    for held in (
+        (float("nan"), 2.0, 1.0),
+        (2.0, float("nan"), 1.0),
+        (1.0, 2.0, float("nan")),
+    ):
+        source = DictSource(
+            [{"key": v, "value": 0} for v in held],
+            tag_columns=["key"],
+            tag_only_columns=True,
+            source_id="numbers",
+        )
+        job = PipelineJob(name=f"nan{mode}", database=InMemoryArrowDatabase())
+        with job:
+            SelectDataColumns(["value"])(source)
+        run(job, mode)
+        keys = [
+            dict(r.tags)["key"]
+            for r in job.nodes["SelectDataColumns"].trace({}, "value").roots
+        ]
+        orders.append([("nan" if k != k else k) for k in keys])
+    assert orders == [[1.0, 2.0, "nan"]] * 3
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_a_question_shows_a_date_selector_value(mode: str) -> None:
+    from datetime import date
+
+    from orcapod.types.provenance import _value_text
+
+    source = DictSource(
+        [
+            {"when": date(2026, 1, 1), "value": 1},
+            {"when": date(2026, 1, 2), "value": 2},
+        ],
+        tag_columns=["when"],
+        tag_only_columns=True,
+        source_id="dates",
+    )
+    job = PipelineJob(name=f"dates{mode}", database=InMemoryArrowDatabase())
+    with job:
+        SelectDataColumns(["value"])(source)
+    run(job, mode)
+    node = job.nodes["SelectDataColumns"]
+    headers = [
+        node.trace({"when": d}, "value").header()
+        for d in (date(2026, 1, 1), date(2026, 1, 2))
+    ]
+    assert headers == [
+        "trace of value at node SelectDataColumns, for when=date('2026-01-01'): 1 row matches",
+        "trace of value at node SelectDataColumns, for when=date('2026-01-02'): 1 row matches",
+    ]
+    # Other supported types read by type and exact text, never as one shared <type>.
+    from datetime import datetime, time, timedelta, timezone
+    from decimal import Decimal
+    from uuid import UUID
+
+    assert _value_text(datetime(2026, 1, 1, 12, tzinfo=timezone.utc)) == (
+        "datetime('2026-01-01T12:00:00+00:00')"
+    )
+    assert _value_text(time(9, 30)) == "time('09:30:00')"
+    assert _value_text(timedelta(days=1, seconds=2)) == "timedelta(1d 2s 0us)"
+    assert _value_text(Decimal("1.50")) == "Decimal('1.50')"
+    assert _value_text(UUID(int=1)) == "UUID('00000000-0000-0000-0000-000000000001')"

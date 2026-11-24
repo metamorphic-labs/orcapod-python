@@ -1762,8 +1762,16 @@ def _select_rows(
     found = [r for r in rows if all(same_value(r[k], v) for k, v in row.items())]
     tags = list(_keys(node)[0])
 
+    def place(value: Any) -> tuple[int, Any]:
+        # A total order, as GroupBy's: values, then NaN, then null.
+        if value is None:
+            return (2, 0)
+        if isinstance(value, float) and value != value:
+            return (1, 0)
+        return (0, value)
+
     def typed(r: Row) -> tuple[Any, ...]:
-        return tuple((r.get(t) is None, r.get(t)) for t in tags)
+        return tuple(place(r.get(t)) for t in tags)
 
     def text(r: Row) -> tuple[str, ...]:
         return tuple(repr(r.get(k)) for k in (*tags, *sorted(r)))
@@ -2278,7 +2286,12 @@ def _missing_key_text(
     """
     proving: list[str] = []
     unread: list[str] = []
+    null_keys: dict[str, None] = {}
     holding_tags = set(_keys(holding)[0])
+    # Each operator's own equality: Rejoin matches a null with a null in a shared
+    # column (outside the system tags); Join, MergeJoin and SemiJoin match a null key
+    # with nothing, so a null key is the reason, not a peer lacking a row.
+    nulls_match = type(getattr(node, "producer", None)).__name__ == "Rejoin"
     for i in _input_order(node):
         if i == position:
             continue
@@ -2287,22 +2300,23 @@ def _missing_key_text(
         if not shared:
             continue
         key = {t: carried_row[t] for t in shared}
+        if not nulls_match and any(v is None for v in key.values()):
+            null_keys.update((t, None) for t, v in key.items() if v is None)
+            continue
         rows = reader.held(other)
         if rows is None:
             unread.append(other.label)
             continue
         if not any(
-            # The join's rule: a null key matches nothing, even another null.
-            all(
-                v is not None and o.get(t) is not None and same_value(o[t], v)
-                for t, v in key.items()
-            )
-            for o in rows
+            all(t in o and same_value(o[t], v) for t, v in key.items()) for o in rows
         ):
             proving.append(
                 f"no row with {_key_text(key)} in {other.label!r} "
                 f"(reads {', '.join(_source_labels(other))})"
             )
+    if null_keys:
+        names = ", ".join(sorted(null_keys))
+        return f"its key {names} is null, and a null key matches nothing in a join"
     if proving:
         return "; ".join(proving)
     if unread:

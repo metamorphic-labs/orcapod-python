@@ -37,7 +37,34 @@ def _value_text(value: Any) -> str:
         return plain_repr(value)
     if value is None:
         return "None"
-    return f"<{type(value).__name__}>"
+    return _typed_text(value)
+
+
+def _typed_text(value: Any) -> str:
+    """A value of another supported type, by its type and its exact text, so two
+    different values never read the same: ``date('2026-01-01')``, ``datetime(...)``
+    in ISO form, ``Decimal('1.50')``, ``UUID(...)``, ``Path(...)``, a dataclass by its
+    fields; anything else as ``<type name>``."""
+    import dataclasses
+    import datetime as dt
+    import decimal
+    import pathlib
+    import uuid
+
+    name = type(value).__name__
+    if isinstance(value, (dt.datetime, dt.date, dt.time)):
+        return f"{name}({value.isoformat()!r})"
+    if isinstance(value, dt.timedelta):
+        return f"{name}({value.days}d {value.seconds}s {value.microseconds}us)"
+    if isinstance(value, (decimal.Decimal, uuid.UUID, pathlib.PurePath)):
+        return f"{name}({str(value)!r})"
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        fields = ", ".join(
+            f"{f.name}={_value_text(getattr(value, f.name))}"
+            for f in dataclasses.fields(value)
+        )
+        return f"{name}({fields})"
+    return f"<{name}>"
 
 
 def _value_key(value: Any) -> Any:

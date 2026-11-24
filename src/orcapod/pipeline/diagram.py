@@ -324,6 +324,9 @@ def _build_model(
             for label, node in by_label.items()
             if _collapsible(node) and len(succs[label]) == 1
         }
+        if highlight is not None:
+            # The node the question was asked at is always shown.
+            folded.discard(highlight.asked)
 
     shown = [
         label for label in _topological_labels(preds, succs) if label not in folded
