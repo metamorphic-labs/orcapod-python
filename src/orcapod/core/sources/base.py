@@ -121,6 +121,10 @@ class RootSource(StreamBase):
     """The source's kind: its config type key and the first part of its source id."""
 
     SOURCE_VERSION: ClassVar[int]
+
+    # The attributes holding what tells two sources of one label apart in a display,
+    # nearest first (``core/sources/display_names.py``); ``""`` for a kind without them.
+    DISPLAY_PARTS: ClassVar[tuple[str, str]] = ("", "")
     """The version of the kind's implementation, in the source id's kind part (ITL-1425).
 
     Bump it when a row read before a change could read differently after it (other

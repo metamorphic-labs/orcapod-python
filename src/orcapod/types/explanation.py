@@ -68,6 +68,8 @@ class SourceReading:
         condition: The condition the source applies itself (``where``), empty for none.
         limit: The source's row limit, ``None`` for none.
         steps: The steps above the source that drop rows of it, nearest the source first.
+        shown: The name the text shows for a source with an assigned label (the text then
+            gives ``name`` once, after the kind); ``""`` when it shows ``name``.
     """
 
     name: str
@@ -77,6 +79,7 @@ class SourceReading:
     condition: Condition
     limit: int | None
     steps: tuple[Step, ...]
+    shown: str = ""
 
     def lines(self) -> list[str]:
         """Return the reading as text lines (``Explanation.text``)."""
@@ -99,7 +102,9 @@ class SourceReading:
         else:
             applied = "nothing (the whole table is read)"
         return [
-            f"source {self.name!r} ({self.kind})",
+            f"source {self.shown!r} ({self.kind}, {self.name})"
+            if self.shown
+            else f"source {self.name!r} ({self.kind})",
             f"  applied by the source: {applied}",
             f"  applied after reading: {after}",
         ]

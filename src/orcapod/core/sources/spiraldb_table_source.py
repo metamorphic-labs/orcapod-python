@@ -286,6 +286,7 @@ class SpiralDBTableSource(RootSource):
     SOURCE_KIND: ClassVar[str] = "spiraldb_table"
     """Config type key and the kind in the source id's kind part (one vocabulary)."""
     SOURCE_VERSION: ClassVar[int] = 1
+    DISPLAY_PARTS: ClassVar[tuple[str, str]] = ("_dataset", "_project_id")
     """The version of this kind's implementation, in the kind part (ITL-1425)."""
     TABLE_IS_ROWS: ClassVar[bool] = True
     TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True

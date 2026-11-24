@@ -310,7 +310,7 @@
     var n = model.nodes[i], inputs = [];
     selected = n.label;
     model.edges.forEach(function (e) {
-      if (e.target === i) inputs.push(model.nodes[e.source].label);
+      if (e.target === i) inputs.push(model.nodes[e.source].text || model.nodes[e.source].label);
     });
     svg.querySelectorAll('.op-dag-node').forEach(function (g) {
       g.classList.toggle('op-dag-selected', +g.getAttribute('data-index') === i);
@@ -322,7 +322,7 @@
     panel.textContent = '';
     var head = document.createElement('div');
     head.style.fontWeight = '600';
-    head.textContent = n.label + ' \u2014 ' + [n.kind_text, n.detail, n.status].filter(Boolean).join(' \u00b7 ');
+    head.textContent = (n.text || n.label) + ' \u2014 ' + [n.kind_text, n.detail, n.status].filter(Boolean).join(' \u00b7 ');
     panel.appendChild(head);
     var dl = document.createElement('dl');
     row(dl, 'tags', schema(n.tag_schema));

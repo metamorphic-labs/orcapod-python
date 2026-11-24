@@ -14,7 +14,7 @@ whatever order the sources, the inputs or an argument's items were given in.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import TYPE_CHECKING
 
 from orcapod.types.condition import Condition
@@ -129,7 +129,40 @@ _Reach = dict[
 ]
 
 
-def _reach(stream: StreamProtocol, memo: dict[int, _Reach]) -> _Reach:
+def _shown_names(stream: StreamProtocol) -> dict[str, str]:
+    """Return the text each labelled source ``stream`` reads is shown by, by source id.
+
+    A source read under two labels (or with and without one) is shown by its id.
+    """
+    from orcapod.core.sources.display_names import (
+        LabelledSource,
+        display_names,
+        labelled_source,
+    )
+
+    found: dict[str, set[LabelledSource | None]] = {}
+    seen: set[int] = set()
+    pending = [stream]
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        _, beneath = _beneath(current)
+        if isinstance(beneath, SourceReading):
+            found.setdefault(beneath.name, set()).add(labelled_source(current))
+        else:
+            pending.extend(beneath)
+    one = {name: next(iter(found[name])) for name in found if len(found[name]) == 1}
+    return display_names(
+        {name: source for name, source in one.items() if source is not None},
+        set(found),
+    )
+
+
+def _reach(
+    stream: StreamProtocol, memo: dict[int, _Reach], shown: Mapping[str, str]
+) -> _Reach:
     """Return the sources ``stream`` reads and the steps above each, once per node.
 
     Each node is expanded once (``memo``), so a graph whose nodes share inputs costs one
@@ -148,11 +181,11 @@ def _reach(stream: StreamProtocol, memo: dict[int, _Reach]) -> _Reach:
         memo[id(stream)] = result
         return result
     inputs = found
-    reaches = [_reach(upstream, memo) for upstream in inputs]
+    reaches = [_reach(upstream, memo, shown) for upstream in inputs]
     producer = stream.producer if kind == "inputs" else None
     result = {}
     for position, reach in enumerate(reaches):
-        step = _step_of(stream, producer, position, inputs, reaches)
+        step = _step_of(stream, producer, position, inputs, reaches, shown)
         chooses_only = isinstance(producer, SemiJoin) and position == 1
         for key, (reading, distance, steps) in reach.items():
             here = None if distance is None else distance + 1
@@ -180,6 +213,7 @@ def _step_of(
     position: int,
     inputs: Sequence[StreamProtocol],
     reaches: Sequence[_Reach],
+    shown: Mapping[str, str],
 ) -> Step | None:
     """Return the step ``stream``'s operator takes on its input at ``position``; the
     other inputs are named by the sources they read (sorted, joined)."""
@@ -188,7 +222,10 @@ def _step_of(
     if not isinstance(producer, StaticOutputOperatorPod):
         return None
     others = sorted(
-        ", ".join(sorted({reading.name for reading, _, _ in reach.values()}))
+        ", ".join(
+            shown.get(name, name)
+            for name in sorted({reading.name for reading, _, _ in reach.values()})
+        )
         for i, reach in enumerate(reaches)
         if i != position
     )
@@ -207,7 +244,8 @@ def explain(stream: StreamProtocol) -> Explanation:
     Returns:
         The explanation; nothing is computed, read, polled or written.
     """
-    reach = _reach(stream, {})
+    shown = _shown_names(stream)
+    reach = _reach(stream, {}, shown)
     sources = []
     for key in sorted(reach, key=_sort_key):
         reading, _, steps = reach[key]
@@ -225,6 +263,7 @@ def explain(stream: StreamProtocol) -> Explanation:
                 condition=reading.condition,
                 limit=reading.limit,
                 steps=tuple(step for _, step in ordered),
+                shown=shown.get(reading.name, ""),
             )
         )
     return Explanation(stream=stream_name(stream), sources=tuple(sources))
