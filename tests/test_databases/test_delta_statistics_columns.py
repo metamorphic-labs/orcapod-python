@@ -442,6 +442,13 @@ class TestFileSkipping:
             db.add_records(PATH, rows(range(lo, lo + 5)), flush=True)
 
         table = deltalake.DeltaTable(str(tmp_path / "t"))
+        # There are files to prune: three active files, with disjoint ``v`` ranges,
+        # one of them holding 101 (review of PR 511).
+        ranges = sorted(
+            (add["min.v"], add["max.v"])
+            for add in pa.table(table.get_add_actions(flatten=True)).to_pylist()
+        )
+        assert ranges == [(0, 4), (100, 104), (200, 204)]
         plan = pa.table(
             deltalake.QueryBuilder()
             .register("t", table)
@@ -449,14 +456,18 @@ class TestFileSkipping:
             .read_all()
         )
         text = "\n".join(str(row) for row in plan.to_pylist())
-        assert "files_pruned=2, files_scanned=1" in text, text
+        # The scan is given only the file whose statistics can hold the value: the
+        # other two are pruned before it (deltalake 1.6 lists the files it scans).
+        assert text.count(".parquet") == 1, text
+        assert "file_groups={1 group:" in text, text
 
 
 class TestTablesCreatedElsewhere:
     def test_existing_table_without_the_property_is_unaltered(
         self, tmp_path: Path, capfd: pytest.CaptureFixture[str]
     ) -> None:
-        """A table created before ITL-1187 keeps no property and keeps warning."""
+        """A table created before ITL-1187 keeps no property: delta-rs keeps statistics
+        for every column it can, and none for a binary one."""
         deltalake.write_deltalake(str(tmp_path / "t"), rows(range(0, 10)))
         db = DeltaTableDatabase(tmp_path)
         capfd.readouterr()
@@ -464,9 +475,14 @@ class TestTablesCreatedElsewhere:
         db.add_records(PATH, rows(range(10, 20)), flush=True)
         db.add_records(PATH, rows(range(15, 30)), skip_duplicates=False, flush=True)
 
-        # The capture works: this table has no property, so delta-rs warns.
-        assert stats_warnings(capfd) != []
+        # deltalake 1.6 no longer logs the binary-column warning (1.0.2 did); what
+        # the property was about stays: no min/max is kept for a binary column.
         assert configuration(tmp_path / "t") == {}
+        added = pa.table(
+            deltalake.DeltaTable(str(tmp_path / "t")).get_add_actions(flatten=True)
+        )
+        assert "min.v" in added.column_names
+        assert not any(n.startswith("min.h") for n in added.column_names)
         assert stored_ids(db) == sorted(f"id{i}".encode() for i in range(30))
 
     def test_plain_deltalake_appends_to_a_table_with_the_property(

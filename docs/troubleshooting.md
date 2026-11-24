@@ -206,6 +206,33 @@ the names of your functions, not their code.
 `loaded.run(load_only=True)` to fill the nodes from the database (bind in-memory sources
 first). To compute, run the script that defines the pipeline.
 
+### `InputValidationError: Delta refused the commit to table ...`
+
+**Symptom.** A flush, or a job's commit (`OrcapodDatabaseWriteError` with this error as
+its cause), fails with `Delta refused the commit to table '...': <Delta's reason>. The N
+rows queued for it were not written and are no longer queued`. `UnstorableColumnError`
+saying that Delta reports a name as equal to another's under its case folding is the same
+kind of failure.
+
+**Cause.** A `DeltaTableDatabase` refuses only what it can tell for certain when rows are
+added (names that differ only in case, a stored table deltalake cannot read because two of
+its names differ only in case, another logical type over a stored logical column).
+Everything else is decided by deltalake when it commits. Four kinds of refusal, which
+deltalake makes for the rows themselves, are raised once: a changed field metadata,
+which deltalake 1.5 and later refuses (a struct with a recorded type gaining a field, a
+list's items becoming nullable); two names equal under Delta's case folding; a type
+DataFusion cannot insert or cast into the stored one; and a row Delta finds invalid (a
+null in a non-nullable column, a failed CHECK constraint). The rows are dropped from the
+queue so that the next flush is not refused for them again; other tables of the same flush
+still commit. A CHECK constraint whose verdict changes by chance might have accepted them
+later; Orcapod writes no CHECK constraint. Any other failure keeps its rows queued, and the next flush tries them
+again, as before: a storage error, a constraint whose evaluation itself fails, a stored
+table unreadable for another reason.
+
+**Fix.** Read Delta's reason, correct the rows (or their declared types) and add them
+again. In a job, running it again computes the same rows and is refused again until
+then, except by a CHECK constraint whose verdict changes by chance. [Data types per database](reference/database-types.md) lists what each database stores.
+
 ## Problems that give no error
 
 ### I edited my function and the results did not change
@@ -302,25 +329,6 @@ a path to nothing.
 
 **Fix.** Delete output files and the database together, or bump the function's major
 version to regenerate them.
-
-## Messages you can ignore
-
-- `WARN deltalake_core::writer::stats] Skipping column ... because it's a binary field.`
-  whenever a `DeltaTableDatabase` writes to a table that an earlier version of Orcapod
-  created: one line per binary column (record ids and hashes) per commit. The deltalake
-  library keeps no minimum and maximum statistics for binary columns and says so on every
-  write; nothing is wrong with the table. A table that `DeltaTableDatabase` creates now names
-  the columns it keeps statistics for (the `delta.dataSkippingStatsColumns` table property),
-  and writes to it log nothing. Orcapod never changes the property of an existing table. To
-  hide only this line for an older table, set `RUST_LOG` in the environment before Python
-  starts, keeping deltalake's other warnings:
-
-  ```
-  RUST_LOG="warn,deltalake_core::writer::stats=error" python my_pipeline.py
-  ```
-
-  deltalake reads `RUST_LOG` once, when it is first imported, so setting it later in the
-  same process (for example with `os.environ`) has no effect.
 
 ## A script finishes its work but the process never exits
 

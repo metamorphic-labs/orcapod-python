@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 from collections import defaultdict
 from collections.abc import Callable, Collection, Mapping
@@ -66,6 +67,10 @@ if TYPE_CHECKING:
     import pyarrow.dataset as pa_ds
     import pyarrow.fs as pa_fs
     from upath import UPath
+
+    from orcapod.logical_types.protocols import (
+        TypeConverterProtocol as LogicalTypeConverterProtocol,
+    )
 else:
     deltalake = LazyModule("deltalake")
     pa_ds = LazyModule("pyarrow.dataset")
@@ -446,34 +451,340 @@ def _with_merged_records(
         ``written`` with the merged records.
     """
     stored = _stored_arrow_schema(delta_table)
-    stored_records = {
-        f.name: recorded_type(f.metadata) for f in delta_table.schema().fields
-    }
+    stored_metadata = {f.name: dict(f.metadata) for f in delta_table.schema().fields}
     for index, field in enumerate(written.schema):
         position = stored.get_field_index(field.name)
         own = original.schema.field(field.name).type
-        if position < 0 or isinstance(own, pa.ExtensionType):
+        if position < 0:
             continue
-        stored_record = stored_records.get(field.name)
-        incoming_record = recorded_type(field.metadata)
-        if stored_record is None and incoming_record is None:
+        held = stored_metadata[field.name]
+        if pa.types.is_null(own):
+            # A null column claiming a logical identity the stored column reads is
+            # written under the stored identifier: it holds no value to read
+            # otherwise, and Delta refuses another identifier string (ITL-1403).
+            if _null_reads_as_stored(held, field.metadata):
+                identifier = {
+                    key.encode(): str(held[key]).encode()
+                    for key in _EXTENSION_TEXT_KEYS
+                    if key in held
+                }
+                written = written.set_column(
+                    index,
+                    field.with_metadata({**dict(field.metadata or {}), **identifier}),
+                    written.column(index),
+                )
             continue
-        base = (
-            stored_record
-            if stored_record is not None
-            else arrow_utils.normalize_to_large_types(stored.field(position).type)
-        )
-        incoming = (
-            incoming_record
-            if incoming_record is not None
-            else arrow_utils.normalize_to_large_types(own)
-        )
-        written = written.set_column(
-            index,
-            with_recorded_type(field, merged_type(base, incoming)),
-            written.column(index),
-        )
+        if isinstance(own, pa.ExtensionType):
+            continue
+        stored_record = recorded_type(held)
+        merged = _merged_record(stored.field(position).type, stored_record, own, field)
+        if merged is None:
+            continue
+        recorded = with_recorded_type(field, merged)
+        if stored_record is not None and stored_record.equals(
+            merged, check_metadata=True
+        ):
+            # The same record: sent as stored, byte for byte. Delta compares the
+            # metadata strings, and a record that decodes to the same type may be
+            # serialized otherwise (ITL-1403).
+            recorded = recorded.with_metadata(
+                {
+                    **dict(recorded.metadata or {}),
+                    ARROW_TYPE_KEY: str(held[ARROW_TYPE_KEY.decode()]).encode(),
+                }
+            )
+        written = written.set_column(index, recorded, written.column(index))
     return written
+
+
+# The field metadata keys that hold a logical column's identifier, as Delta keeps them.
+_EXTENSION_TEXT_KEYS = ("ARROW:extension:name", "ARROW:extension:metadata")
+
+
+def _null_reads_as_stored(held: Mapping[str, Any], metadata: Any) -> bool:
+    """Whether a null column's identifier is one the stored logical column reads.
+
+    Args:
+        held: The stored column's field metadata, as Delta keeps it.
+        metadata: The null column's field metadata (bytes keys), or ``None``.
+
+    Returns:
+        ``True`` when the null column names the stored extension, with the stored
+        extension metadata or one the registered logical type reads
+        (``readable_extension_metadata``).
+    """
+    incoming = {
+        (k.decode() if isinstance(k, bytes) else str(k)): v
+        for k, v in (metadata or {}).items()
+    }
+    name = incoming.get("ARROW:extension:name")
+    stored_name = held.get("ARROW:extension:name")
+    if name is None or stored_name is None:
+        return False
+    if (name.decode() if isinstance(name, bytes) else str(name)) != stored_name:
+        return False
+    raw = incoming.get("ARROW:extension:metadata", b"")
+    raw = raw if isinstance(raw, bytes) else str(raw).encode()
+    if raw == str(held.get("ARROW:extension:metadata", "")).encode():
+        return True
+    from orcapod.contexts import get_default_context
+
+    # The context's converter implements the logical-type lookup of
+    # ``logical_types.protocols.TypeConverterProtocol``.
+    converter = cast(
+        "LogicalTypeConverterProtocol",
+        cast(object, get_default_context().type_converter),
+    )
+    logical_type = converter.get_logical_type_by_arrow_extension_name(stored_name)
+    return (
+        logical_type is not None and raw in logical_type.readable_extension_metadata()
+    )
+
+
+def _merged_record(
+    stored_type: pa.DataType,
+    stored_record: pa.DataType | None,
+    own: pa.DataType,
+    written: "pa.Field[Any]",
+) -> pa.DataType | None:
+    """The record a column has after an append, or ``None`` when it has none.
+
+    A column recorded on either side (stored or incoming) is recorded as the merge of
+    its stored type (its record, else its stored type) and the incoming rows' type
+    (``merged_type``).
+
+    Args:
+        stored_type: The column's type as Delta stores it.
+        stored_record: The column's stored record, or ``None``.
+        own: The incoming rows' own type for the column.
+        written: The incoming column as it is written (``to_delta_layout``).
+
+    Returns:
+        The merged record, or ``None`` when neither side is recorded.
+    """
+    incoming_record = recorded_type(written.metadata)
+    if stored_record is None and incoming_record is None:
+        return None
+    base = (
+        stored_record
+        if stored_record is not None
+        else arrow_utils.normalize_to_large_types(stored_type)
+    )
+    incoming = (
+        incoming_record
+        if incoming_record is not None
+        else arrow_utils.normalize_to_large_types(own)
+    )
+    return merged_type(base, incoming)
+
+
+# Why Delta refuses names that differ only in case (ITL-1403).
+_CASE_INSENSITIVE = (
+    "Delta column names are case-insensitive, so a Delta table cannot hold both"
+)
+
+
+def _differ_only_in_case(names: list[str]) -> tuple[str, str] | None:
+    """The first two of ``names`` that differ only in case, or ``None``."""
+    position = _case_clash_position(names)
+    if position is None:
+        return None
+    second = names[position]
+    first = next(n for n in names if n.lower() == second.lower() and n != second)
+    return first, second
+
+
+def _case_clash_position(names: list[str]) -> int | None:
+    """The position in ``names`` of the first name that differs only in case from an
+    earlier one, or ``None``. A position, since the name itself may be repeated."""
+    seen: dict[str, str] = {}
+    for position, name in enumerate(names):
+        other = seen.setdefault(name.lower(), name)
+        if other != name:
+            return position
+    return None
+
+
+def _nested_names_differing_in_case(arrow_type: pa.DataType) -> tuple[str, str] | None:
+    """Two field names of one struct inside ``arrow_type`` that differ only in case."""
+    if isinstance(arrow_type, pa.ExtensionType):
+        return _nested_names_differing_in_case(arrow_type.storage_type)
+    if pa.types.is_struct(arrow_type):
+        found = _differ_only_in_case(
+            [arrow_type.field(i).name for i in range(arrow_type.num_fields)]
+        )
+        if found is not None:
+            return found
+    for i in range(arrow_type.num_fields):
+        found = _nested_names_differing_in_case(arrow_type.field(i).type)
+        if found is not None:
+            return found
+    return None
+
+
+def _case_reason(first: str, second: str, nested: bool = False) -> str:
+    where = "struct fields" if nested else "columns"
+    return f"{where} {first!r} and {second!r} differ only in case: {_CASE_INSENSITIVE}"
+
+
+# delta-rs reports two names equal under its case folding (Rust ``to_lowercase``).
+# Delta's duplicate-name refusal, as deltalake 1.6.6 words it: at the START of the
+# message of deltalake's own error (a bare ``Exception`` or a ``DeltaError``), after
+# its ``External error:`` / ``Kernel error:`` / ``Generic DeltaTable error:`` wrappers.
+# Never matched inside other text: a table's path may contain the same words
+# (review of PR 504, round four).
+_DUPLICATE_NAME = re.compile(
+    r"^(?:(?:External|Kernel|Generic DeltaTable) error: )*"
+    r"Schema error: Duplicate field name \(case-insensitive\): '(.*)'",
+    re.DOTALL,  # a name may hold a newline
+)
+
+
+def _is_delta_error(error: BaseException) -> bool:
+    """Whether ``error`` is one deltalake raised: a ``DeltaError``, or the bare
+    ``Exception`` its schema conversion raises."""
+    from deltalake.exceptions import DeltaError
+
+    return type(error) is Exception or isinstance(error, DeltaError)
+
+
+def _duplicate_name_in(error: BaseException) -> str | None:
+    """The name delta-rs reports as a case-insensitive duplicate in ``error``'s chain."""
+    for seen in _error_chain(error):
+        if not _is_delta_error(seen):
+            continue
+        match = _DUPLICATE_NAME.match(str(seen))
+        if match is not None:
+            return match.group(1)
+    return None
+
+
+def _write_refused_for_duplicate_name(error: BaseException) -> str | None:
+    """The duplicate name for which Delta refused the write itself, else ``None``.
+
+    Only an error deltalake raised for the write counts, never one that merely carries
+    a duplicate-name cause: a ``CommitFailedError`` (another writer committed first)
+    and a table that could not be loaded (``OrcapodDatabaseReadError``, raised before
+    the write) keep their rows queued for a later flush (review of PR 504, round
+    seven).
+    """
+    from deltalake.exceptions import CommitFailedError
+
+    if not _is_delta_error(error) or isinstance(error, CommitFailedError):
+        return None
+    return _duplicate_name_in(error)
+
+
+def _error_chain(error: BaseException) -> list[BaseException]:
+    """``error`` and its explicit causes (``raise ... from``), each once.
+
+    Never the implicit ``__context__``: that is whatever the caller was handling when
+    the commit failed, which says nothing about the commit (review of PR 504, round
+    five). Each error is taken once, so a chain that loops back ends.
+    """
+    chain: list[BaseException] = []
+    seen: BaseException | None = error
+    while seen is not None and all(seen is not e for e in chain):
+        chain.append(seen)
+        seen = seen.__cause__
+    return chain
+
+
+# The forms of a plain ``DeltaError`` that are permanent: DataFusion cannot insert the
+# rows into the stored schema, cannot cast them to it, or the rows break a constraint of
+# the stored table (a null in a non-nullable column). Every later flush would fail the
+# same way.
+# ``DeltaError`` is also how deltalake reports a storage failure, which may pass, so
+# only these message forms are taken as permanent (deltalake 1.6.6; ITL-1403).
+PERMANENT_DELTA_ERROR_PREFIXES = (
+    "Generic DeltaTable error: type_coercion",
+    "Generic DeltaTable error: External error: Invalid data found",
+    "Generic DeltaTable error: This feature is not implemented: Unsupported CAST",
+)
+
+
+def _permanent_commit_failure(error: BaseException) -> bool:
+    """Whether a failed commit would fail the same way at every later flush.
+
+    Permanent: ``SchemaMismatchError`` (Delta refuses the rows' schema or field
+    metadata), the duplicate-name error (two names equal under Delta's case folding,
+    a bare ``Exception``), and a ``DeltaError`` whose message starts with one of
+    ``PERMANENT_DELTA_ERROR_PREFIXES``. Not permanent: ``CommitFailedError`` (another
+    writer committed first) and everything else, which keeps its rows queued.
+    """
+    from deltalake.exceptions import (
+        CommitFailedError,
+        DeltaError,
+        SchemaMismatchError,
+    )
+
+    if isinstance(error, CommitFailedError):
+        return False
+    if isinstance(error, SchemaMismatchError):
+        return True
+    if type(error) is Exception and _DUPLICATE_NAME.match(str(error)):
+        return True
+    if isinstance(error, DeltaError):
+        return str(error).startswith(PERMANENT_DELTA_ERROR_PREFIXES)
+    return False
+
+
+def _reported_field(error: BaseException, schema: pa.Schema) -> tuple[str, Any]:
+    """The field of ``schema`` delta-rs names as a duplicate in ``error``'s chain.
+
+    Delta's own schema check locates it: each struct of the schema (the top level
+    included) is checked on its direct children alone, each child standing in as an
+    ``int64``, so a collision deeper down is not seen there. The struct Delta refuses
+    holds the pair, and the field is named by its path (``outer.right.ᲊ``) with its
+    type. Names come from the schema, the longest one Delta's message quotes, so a
+    name holding a quote is named whole. ``(the reported text, null)`` when no struct
+    is refused.
+    """
+    messages = [str(seen) for seen in _error_chain(error)]
+
+    def quoted(field: "pa.Field[Any]") -> bool:
+        return any(f"(case-insensitive): '{field.name}'" in m for m in messages)
+
+    for prefix, children in _structs_of(schema):
+        probe = pa.schema([pa.field(c.name, pa.int64()) for c in children])
+        try:
+            deltalake.Schema.from_arrow(probe)
+        except Exception as refused:  # noqa: BLE001  # only a duplicate name is looked at
+            if _duplicate_name_in(refused) is None:
+                continue
+            named = [c for c in children if quoted(c)]
+            if named:
+                field = max(named, key=lambda c: len(c.name))
+                return prefix + field.name, field.type
+    # No struct of the batch is refused on its own: the pair is a batch column and a
+    # stored column. Name the batch's column, with its type.
+    top = [field for field in schema if quoted(field)]
+    if top:
+        field = max(top, key=lambda f: len(f.name))
+        return field.name, field.type
+    return _duplicate_name_in(error) or "", pa.null()
+
+
+def _structs_of(schema: pa.Schema) -> list[tuple[str, list["pa.Field[Any]"]]]:
+    """``(path prefix, direct children)`` of the top level and of every struct inside,
+    through lists, maps and logical types."""
+    found: list[tuple[str, list[pa.Field[Any]]]] = [("", list(schema))]
+
+    def visit(prefix: str, arrow_type: pa.DataType) -> None:
+        if isinstance(arrow_type, pa.ExtensionType):
+            arrow_type = arrow_type.storage_type
+        if pa.types.is_struct(arrow_type):
+            children = [arrow_type.field(i) for i in range(arrow_type.num_fields)]
+            found.append((prefix, children))
+            for child in children:
+                visit(f"{prefix}{child.name}.", child.type)
+            return
+        for i in range(arrow_type.num_fields):
+            visit(prefix, arrow_type.field(i).type)
+
+    for field in schema:
+        visit(f"{field.name}.", field.type)
+    return found
 
 
 _EXTENSION_KEYS = (b"ARROW:extension:name", b"ARROW:extension:metadata")
@@ -774,8 +1085,47 @@ def _stored_identities(
     ]
 
 
-def _append_refusal(
+def _exact_refusal(
     delta_table: deltalake.DeltaTable, rows: pa.Table
+) -> tuple[str, str] | None:
+    """What Orcapod can tell for certain about an append to ``delta_table`` (ITL-1403).
+
+    The commit itself is the point of truth: what deltalake refuses for any other
+    reason is refused at the flush, once (``_permanent_commit_failure``). Refused
+    here, for certain: a struct evolution that would put two field names differing
+    only in case into one struct, which Delta refuses whatever the commit route.
+    (Another logical type identifier is ITL-1371's rule, ``identity_refusal``.)
+
+    Args:
+        delta_table: The loaded stored table.
+        rows: The rows to append, with their own types.
+
+    Returns:
+        ``(column, reason)``, or ``None``.
+    """
+    stored = _stored_arrow_schema(delta_table)
+    for field in rows.schema:
+        position = stored.get_field_index(field.name)
+        if position < 0:
+            continue
+        if isinstance(field.type, pa.ExtensionType):
+            # A logical column's identifier is ITL-1371's rule (``identity_refusal``).
+            continue
+        try:
+            evolved = merged_type(
+                arrow_utils.normalize_to_large_types(stored.field(position).type),
+                arrow_utils.normalize_to_large_types(field.type),
+            )
+        except Exception:  # noqa: BLE001  # a type change: the type check reports it
+            continue
+        nested = _nested_names_differing_in_case(evolved)
+        if nested is not None:
+            return field.name, _case_reason(*nested, nested=True)
+    return None
+
+
+def _append_refusal(
+    delta_table: deltalake.DeltaTable, rows: pa.Table, schema_evolution: bool
 ) -> tuple[str, str] | None:
     """The first column of ``rows`` the stored table cannot take, and why (ITL-1334).
 
@@ -795,6 +1145,9 @@ def _append_refusal(
     Args:
         delta_table: The loaded stored table.
         rows: The rows to append, with their own types.
+        schema_evolution: Whether the database's MERGE evolves the stored schema:
+            only then does a new column name enter it, so only then is a name
+            differing only in case from a stored one refused.
 
     Returns:
         ``(column, reason)``, or ``None`` when the rows can be appended.
@@ -803,11 +1156,28 @@ def _append_refusal(
     if identity is not None:
         return identity
     held = _held_columns(delta_table)
+    # Folded once per check, not once per new column (review of PR 504, round eight).
+    held_clash = _differ_only_in_case(list(held))
+    held_folded: dict[str, str] = {}
+    for name in held:
+        held_folded.setdefault(name.lower(), name)
     for field in rows.schema:
         if field.name in held:
             change = _column_change(held[field.name], field)
             if change is not None:
                 return field.name, change
+        elif schema_evolution:
+            # A new name enters the stored schema only when the MERGE evolves it;
+            # without evolution Delta leaves an unknown column out, as main did
+            # (review of PR 504, round four).
+            if held_clash is not None:
+                return field.name, _case_reason(*held_clash)
+            stored_name = held_folded.get(field.name.lower())
+            if stored_name is not None:
+                return field.name, _case_reason(stored_name, field.name)
+    exact = _exact_refusal(delta_table, rows)
+    if exact is not None:
+        return exact
     violation = _non_null_violation(held, rows)
     if violation is not None:
         name, omitted = violation
@@ -978,6 +1348,9 @@ def delta_unstorable_reason(field: "pa.Field[Any]") -> str | None:
         Delta's reason (``Invalid data type for Delta Lake: Decimal256(40, 2)``), or
         ``None`` when Delta holds the column.
     """
+    nested = _nested_names_differing_in_case(field.type)
+    if nested is not None:
+        return _case_reason(*nested, nested=True)
     if arrow_utils.holds_renamed_map(field.type):
         # The recorded type goes through Arrow IPC, which renames them (ITL-1334).
         return "a map's key and item fields read back as 'key' and 'value'"
@@ -1163,16 +1536,18 @@ def _database_error_to_raise(errors: list[Exception]) -> Exception | None:
 
     A ``OrcapodDatabaseReadError`` is preferred, because it is the error that fails a run
     whatever the orchestrator's ``error_policy``; failing that, an
-    ``InputValidationError`` from a refused append.
+    ``InputValidationError`` from a refused append, then an ``UnstorableColumnError``
+    from a batch Delta refused for its column names (ITL-1403).
 
     Args:
         errors: The error of every batch that failed, in flush order.
 
     Returns:
-        The first ``OrcapodDatabaseReadError``, else the first ``InputValidationError``, or
-        ``None`` when no batch failed with a database error.
+        The first ``OrcapodDatabaseReadError``, else the first ``InputValidationError``,
+        else the first ``UnstorableColumnError``, or ``None`` when no batch failed with
+        a database error.
     """
-    for kind in (OrcapodDatabaseReadError, InputValidationError):
+    for kind in (OrcapodDatabaseReadError, InputValidationError, UnstorableColumnError):
         chosen = next((e for e in errors if isinstance(e, kind)), None)
         if chosen is not None:
             return chosen
@@ -1789,10 +2164,25 @@ class DeltaTableDatabase:
         Args:
             schema: The Arrow schema of a table this database is to hold.
 
+        Two columns whose names differ only in case are refused too: Delta column
+        names are case-insensitive (ITL-1403).
+
         Raises:
             UnstorableColumnError: For the first column Delta cannot hold, naming the
                 column, its Arrow type and Delta's reason.
         """
+        position = _case_clash_position(schema.names)
+        if position is not None:
+            # By position: the name may be repeated (``x``, ``X``, ``X``), and a
+            # lookup by a repeated name raises (review of PR 504, round eight).
+            clash = _differ_only_in_case(schema.names)
+            assert clash is not None
+            raise UnstorableColumnError(
+                database_kind=type(self).__name__,
+                column=clash[1],
+                arrow_type=schema.field(position).type,
+                reason=_case_reason(*clash),
+            )
         for field in schema:
             reason = delta_unstorable_reason(field)
             if reason is not None:
@@ -1801,6 +2191,55 @@ class DeltaTableDatabase:
                     column=field.name,
                     arrow_type=field.type,
                     reason=reason,
+                )
+
+    def _refuse_case_clash_with_pending(
+        self, record_path: tuple[str, ...], schema: pa.Schema
+    ) -> None:
+        """Refuse a column whose name differs only in case from a queued one (ITL-1403).
+
+        Checked before the schema handling, which would otherwise report the queued
+        and the new columns as a mismatch. A stored table's columns are checked by
+        ``_append_refusal``.
+
+        Raises:
+            InputValidationError: Naming both columns.
+        """
+        pending = self._pending_batches.get(self._get_record_key(record_path))
+        if pending is None:
+            return
+        queued = pending.schema.names
+        # A set for membership, the list for the order the clash is reported in
+        # (review of PR 511).
+        queued_names = set(queued)
+        clash = _differ_only_in_case(
+            [*queued, *(n for n in schema.names if n not in queued_names)]
+        )
+        if clash is not None:
+            raise InputValidationError(
+                f"Cannot add rows to {self._get_table_uri(record_path)!r}: column "
+                f"{clash[1]!r}: {_case_reason(*clash)}. Nothing was queued."
+            )
+        # A struct queued and a struct added, merged as the flush would merge them,
+        # must not hold two field names differing only in case, at any depth.
+        for field in schema:
+            if field.name not in queued_names:
+                continue
+            try:
+                merged = merged_type(
+                    arrow_utils.normalize_to_large_types(
+                        pending.schema.field(field.name).type
+                    ),
+                    arrow_utils.normalize_to_large_types(field.type),
+                )
+            except Exception:  # noqa: BLE001  # a type change: the schema check reports it
+                continue
+            nested = _nested_names_differing_in_case(merged)
+            if nested is not None:
+                raise InputValidationError(
+                    f"Cannot add rows to {self._get_table_uri(record_path)!r}: column "
+                    f"{field.name!r}: {_case_reason(*nested, nested=True)}, once "
+                    "merged with the rows queued. Nothing was queued."
                 )
 
     def _refuse_unmergeable_append(
@@ -1853,12 +2292,25 @@ class DeltaTableDatabase:
                     f"{'omit it' if omitted else 'hold a null'}",
                 )
         if refusal is None:
-            try:
-                delta_table = self._get_delta_table(record_path)
-            except OrcapodDatabaseReadError:
-                delta_table = None
+            delta_table = self._stored_table_for_check(record_path)
             if delta_table is not None:
-                refusal = _append_refusal(delta_table, records)
+                refusal = _append_refusal(
+                    delta_table, records, self.allow_schema_evolution
+                )
+            if refusal is not None:
+                # The handle may be cached from a version another writer has since
+                # replaced: the rows are refused only if the version stored now
+                # refuses them too (review of PR 504, round seven). An accepted add
+                # keeps the cached handle, so it costs no reload.
+                self._forget_loaded_table(record_path)
+                delta_table = self._stored_table_for_check(record_path)
+                refusal = (
+                    None
+                    if delta_table is None
+                    else _append_refusal(
+                        delta_table, records, self.allow_schema_evolution
+                    )
+                )
         if refusal is not None:
             column, reason = refusal
             raise InputValidationError(
@@ -1866,6 +2318,47 @@ class DeltaTableDatabase:
                 f"{self._get_table_uri(record_path)!r}: column {column!r}: {reason}. "
                 "The stored rows are unchanged and nothing was written."
             )
+
+    def _forget_loaded_table(self, record_path: tuple[str, ...]) -> None:
+        """Drop the table handle and the snapshot of it cached for ``record_path``.
+
+        Both go together: the next load may find a table another writer created
+        again at the same version, and a snapshot is kept by version only, so a
+        snapshot left behind would serve the old table's rows for the new one
+        (review of PR 504, round eight).
+        """
+        record_key = self._get_record_key(record_path)
+        self._delta_table_cache.pop(record_key, None)
+        self._snapshots.pop(record_key, None)
+
+    def _stored_table_for_check(
+        self, record_path: tuple[str, ...]
+    ) -> deltalake.DeltaTable | None:
+        """The stored table rows added to ``record_path`` are checked against.
+
+        ``None`` when no table is stored, or when it cannot be loaded for a reason the
+        flush reports (``OrcapodDatabaseReadError``).
+
+        Raises:
+            InputValidationError: If the stored table holds two names differing only in
+                case, written before deltalake 1.5.1, which no longer reads it: every
+                flush would fail the same way, so nothing is queued (ITL-1403).
+        """
+        try:
+            return self._get_delta_table(record_path)
+        except OrcapodDatabaseReadError as unreadable:
+            duplicate = _duplicate_name_in(unreadable)
+            if duplicate is not None:
+                raise InputValidationError(
+                    f"Cannot append to the stored table "
+                    f"{self._get_table_uri(record_path)!r}: it holds columns whose "
+                    f"names differ only in case (one is {duplicate!r}), which "
+                    "deltalake 1.5.1 and later cannot read: "
+                    f"{_CASE_INSENSITIVE} of them. Nothing was queued. Rebuild the "
+                    "table with distinct names, using a deltalake version before "
+                    "1.5.1 to read it."
+                ) from unreadable
+            return None
 
     def _refuse_declared_nulls(
         self, record_path: tuple[str, ...], rows: pa.Table
@@ -1961,7 +2454,7 @@ class DeltaTableDatabase:
         if identity_refusal(_stored_identities(delta_table), rows) is None:
             return None
         # Decide the refusal on the version stored now.
-        self._delta_table_cache.pop(self._get_record_key(record_path), None)
+        self._forget_loaded_table(record_path)
         try:
             delta_table = self._get_delta_table(record_path)
         except OrcapodDatabaseReadError:
@@ -2152,6 +2645,10 @@ class DeltaTableDatabase:
             # Check for conflicts - insert never allows duplicates when skip_duplicates=False
             # self._check_all_conflicts(record_path, deduplicated_table)
             filtered_table = deduplicated_table
+
+        # Against the rows queued, on the rows that remain once duplicates are
+        # skipped: an all-duplicate add queues nothing and is not refused (ITL-1403).
+        self._refuse_case_clash_with_pending(record_path, filtered_table.schema)
 
         # Columns match by name within a pending batch: rows with the pending
         # batch's columns in another order, each field equal, are put in its order
@@ -2776,16 +3273,27 @@ class DeltaTableDatabase:
           (``_append_refusal``). The batch is dropped from the queue, since every later
           flush would refuse it too; the error says how many rows were not written.
           Correct the rows and add them again (ITL-1334).
-        - Any other failure (a table that cannot be loaded, a failed write): the batch
-          stays queued, so a later flush tries it again.
+        - Refused by Delta for the rows themselves (ITL-1403): a ``SchemaMismatchError``,
+          a ``DeltaError`` whose message starts with one of
+          ``PERMANENT_DELTA_ERROR_PREFIXES`` (raised as ``InputValidationError``), or two
+          names equal under Delta's case folding (raised as ``UnstorableColumnError``).
+          Every later flush would be refused the same way, so the batch is dropped from
+          the queue and nothing of it is written: correct the rows and add them again.
+        - Any other failure (a table that cannot be loaded, another writer committing
+          first, a storage error): the batch stays queued, so a later flush tries it
+          again.
 
         Raises:
             OrcapodDatabaseReadError: If a batch's existing table could not be loaded. It is
                 raised as itself; every other batch that failed in this flush is
                 added to it as a note.
             InputValidationError: If no batch failed with ``OrcapodDatabaseReadError`` but a
-                batch was refused by its stored table (dropped from the queue, above).
-                Other failed batches are added to it as notes.
+                batch was refused by its stored table or by Delta for its rows
+                (dropped from the queue, above). Other failed batches are added to it
+                as notes.
+            UnstorableColumnError: If neither of the above, but Delta refused a batch
+                for two names equal under its case folding (dropped from the queue:
+                every later flush would refuse it too; ITL-1403).
             RuntimeError: If batches failed with other errors only, naming the
                 failed batches, with the first failure as its ``__cause__``.
         """
@@ -2970,7 +3478,9 @@ class DeltaTableDatabase:
             else:
                 # The add-time check, against the version just loaded: another
                 # writer may have committed since the rows were buffered (ITL-1334).
-                refusal = _append_refusal(delta_table, original_table)
+                refusal = _append_refusal(
+                    delta_table, original_table, self.allow_schema_evolution
+                )
                 if refusal is not None:
                     column, reason = refusal
                     raise InputValidationError(
@@ -3044,8 +3554,53 @@ class DeltaTableDatabase:
             self._pending_commits.finish(record_key, committed=False)
             logger.error(f"Refused batch for {record_key}: {refused}")
             raise refused from e
-        except BaseException as exc:
-            logger.error(f"Error flushing batch for {record_key}: {exc}")
+        except BaseException as e:
+            permanent = isinstance(e, Exception) and _permanent_commit_failure(e)
+            reported = _write_refused_for_duplicate_name(e)
+            if permanent and reported is None:
+                # Refused by Delta for the rows themselves: every later flush would be
+                # refused the same way, so the batch leaves the queue, and nothing of
+                # it was written (ITL-1403). The flush is the point of truth. Records
+                # waiting on this commit (pipeline records of these results) are
+                # withdrawn with it (ITL-1412).
+                self._delta_table_cache.pop(record_key, None)
+                self._snapshots.pop(record_key, None)
+                refused = InputValidationError(
+                    f"Delta refused the commit to table {record_key!r}: "
+                    f"{str(e).rstrip('.')}. The "
+                    f"{pending_batch.num_rows} rows queued for it were not written "
+                    "and are no longer queued: correct them and add them again."
+                )
+                self._pending_commits.forget(record_key, pending_ids)
+                self._pending_commits.finish(record_key, committed=False)
+                logger.error(f"Refused batch for {record_key}: {refused}")
+                raise refused from e
+            if reported is not None:
+                # The batch's own name, not the message's: a name may hold a quote.
+                duplicate, arrow_type = _reported_field(e, pending_batch.schema)
+                # delta-rs folds case with Rust's ``to_lowercase``, which agrees with
+                # Python's ``str.lower`` (the check when rows are added) except for a
+                # few code points of newer Unicode versions. Every later flush would
+                # fail the same way, so the batch leaves the queue and nothing of it
+                # was written (ITL-1403); records waiting on it are withdrawn.
+                self._delta_table_cache.pop(record_key, None)
+                self._snapshots.pop(record_key, None)
+                refused = UnstorableColumnError(
+                    database_kind=type(self).__name__,
+                    column=duplicate,
+                    arrow_type=arrow_type,
+                    reason=(
+                        "Delta reports its name as equal to another column's or "
+                        f"struct field's under its case folding: {_CASE_INSENSITIVE}. "
+                        f"The {pending_batch.num_rows} rows queued for table "
+                        f"{record_key!r} were not written and are no longer queued"
+                    ),
+                )
+                self._pending_commits.forget(record_key, pending_ids)
+                self._pending_commits.finish(record_key, committed=False)
+                logger.error(f"Refused batch for {record_key}: {refused}")
+                raise refused from e
+            logger.error(f"Error flushing batch for {record_key}: {e}")
             self._pending_commits.finish(record_key, committed=False)
             self._pending_commits.restore(record_key, pending_batch, pending_ids)
             raise
