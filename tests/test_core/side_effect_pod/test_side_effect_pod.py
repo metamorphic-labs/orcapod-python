@@ -414,7 +414,7 @@ class TestSideEffectJobNodeSync:
     def test_failure_does_not_write_log_so_next_run_retries(self):
         """Delivery failure writes nothing to the log; the next run retries the row.
 
-        With ``track_completion=True``, the completion check uses ``get_record_by_id``.
+        With ``track_completion=True``, the completion check looks up the recorded keys.
         A failed delivery never writes a success record, so the record_id is absent
         from the DB and the next run sees no prior completion — it calls fn again.
         """

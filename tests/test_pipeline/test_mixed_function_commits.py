@@ -423,6 +423,9 @@ class DatabaseWithoutCommitGuards:
     def get_records_by_ids(self, *args: Any, **kwargs: Any) -> pa.Table | None:
         return self._inner.get_records_by_ids(*args, **kwargs)
 
+    def get_records_by_column(self, *args: Any, **kwargs: Any) -> pa.Table | None:
+        return self._inner.get_records_by_column(*args, **kwargs)
+
     def get_records_with_column_value(
         self, *args: Any, **kwargs: Any
     ) -> pa.Table | None:

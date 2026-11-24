@@ -13,6 +13,7 @@ import dataclasses
 import datetime
 import logging
 from collections.abc import Callable, Collection, Iterator, Sequence
+from itertools import islice
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import pyarrow as pa
@@ -57,6 +58,7 @@ from orcapod.invocation import (
     InvocationContext,
     InvocationHashConfig,
 )
+from orcapod.protocols.database_protocols import STORED_RECORD_ID_COLUMN
 from orcapod.system_constants import (
     TRACKING_DB_SCHEMA_VERSION,
     constants,
@@ -74,6 +76,7 @@ if TYPE_CHECKING:
         TrackerManagerProtocol,
     )
     from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+    from orcapod.protocols.hashing_protocols import ArrowHasherProtocol
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
     from orcapod.contexts import DataContext
     from orcapod.types import ContentHash, Schema
@@ -401,6 +404,21 @@ def _side_effect_arguments(
     return {k: v for k, v in values.items() if k not in data_tags or k in keywords}
 
 
+def _side_effect_record_hash(
+    tag: TagProtocol,
+    data: DataProtocol,
+    arrow_hasher: ArrowHasherProtocol,
+    data_context_key: str,
+) -> ContentHash:
+    """Hash the invocation log key using the input and fixed recomputation index."""
+    require_same_data_context(data.data_context_key, data_context_key)
+    preimage = _build_record_id_preimage(tag, data).append_column(
+        _SIDE_EFFECT_RECOMPUTATION_INDEX_COL,
+        pa.array([0], type=pa.int32()),
+    )
+    return arrow_hasher.hash_table(preimage)
+
+
 def _execute_side_effect_row(
     *,
     fn: Callable,
@@ -410,11 +428,13 @@ def _execute_side_effect_row(
     pipeline_hash_ch: ContentHash,
     pod_name: str,
     run_id: str | None,
-    arrow_hasher: Any,
+    arrow_hasher: ArrowHasherProtocol,
     data_context_key: str,
     ctx_arg_name: str = "ctx",
     pipeline_database: ArrowDatabaseProtocol | None = None,
     table_path: tuple[str, ...] | None = None,
+    record_id_hash: ContentHash | None = None,
+    completed: set[bytes] | None = None,
 ) -> tuple[TagProtocol, DataProtocol] | None:
     """Execute delivery for one (tag, data) row.
 
@@ -444,23 +464,21 @@ def _execute_side_effect_row(
         data_context_key: Key of the pod's data context, stored on the log row.
         pipeline_database: Attached DB (or ``None`` for standalone mode).
         table_path: Path tuple for the invocation log table.
+        record_id_hash: The invocation key computed while preparing a batch.
+        completed: Stored and newly logged completions for this batch, if tracked.
 
     Returns:
         ``(tag, data)`` to emit downstream, or ``None`` to drop the row.
     """
-    require_same_data_context(data.data_context_key, data_context_key)
-
-    # 1. Build the preimage — delegates to the shared helper used by FunctionJobNode.
-    #    Appends the recomputation index (fixed at 0; side effects never recompute).
-    preimage = _build_record_id_preimage(tag, data).append_column(
-        _SIDE_EFFECT_RECOMPUTATION_INDEX_COL,
-        pa.array([0], type=pa.int32()),
-    )
-    record_id_hash: ContentHash = arrow_hasher.hash_table(preimage)
-    record_id: bytes = record_id_hash.to_prefixed_digest()
-
-    # 2. Completion check — look up by deterministic record_id.
-    if (
+    if record_id_hash is None:
+        record_id_hash = _side_effect_record_hash(
+            tag, data, arrow_hasher, data_context_key
+        )
+    record_id = record_id_hash.to_prefixed_digest()
+    if completed is not None:
+        if record_id in completed:
+            return (tag, data)
+    elif (
         pod_config.track_completion
         and pipeline_database is not None
         and table_path is not None
@@ -468,11 +486,10 @@ def _execute_side_effect_row(
         try:
             prior = pipeline_database.get_record_by_id(table_path, record_id)
         except OrcapodDatabaseError as exc:
-            # A failed lookup fails the run like a failed write: name pod and row.
             exc.add_context(node_label=pod_name, tag=tag.as_dict())
             raise
         if prior is not None:
-            return (tag, data)  # already completed — re-emit without re-delivery
+            return (tag, data)
 
     # 3. Build InvocationContext (invocation_hash derived lazily via format_id()).
     ctx = InvocationContext(
@@ -502,6 +519,8 @@ def _execute_side_effect_row(
                 run_id=run_id,
                 data_context_key=data_context_key,
             )
+            if completed is not None:
+                completed.add(record_id)
         return (tag, data)
     except OrcapodDatabaseError as exc:
         # A failed database read or write fails the run, even under on_error="log".
@@ -546,8 +565,8 @@ def _write_invocation_row(
     """Write one success row to the side-effect invocation log table.
 
     Only called on successful delivery. Uses a deterministic ``record_id``
-    (the prefixed digest of the unified preimage hash) so that
-    ``get_record_by_id`` can look up prior completions without a column scan.
+    (the prefixed digest of the unified preimage hash) for looking up prior
+    completions by record id.
 
     Args:
         pipeline_database: The attached pipeline database.
@@ -1291,24 +1310,114 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         """Deliver every row of ``input_stream``; return the rows passed on."""
         self._refuse_log_of_another_data_context()
         results: list[tuple[TagProtocol, DataProtocol]] = []
-        for tag, data in input_stream.iter_data():
-            result = _execute_side_effect_row(
-                fn=self._pod._fn,
-                tag=tag,
-                data=data,
-                pod_config=self._pod.pod_config,
-                pipeline_hash_ch=self.pipeline_hash(),
-                pod_name=self._pod.label,
-                run_id=run_id,
-                arrow_hasher=self._pod.data_context.arrow_hasher,
-                data_context_key=self._pod.data_context_key,
-                ctx_arg_name=self._pod.ctx_arg_name,
-                pipeline_database=self._pipeline_database,
-                table_path=self._table_path,
-            )
-            if result is not None:
-                results.append(result)
-        return results
+        database = self._pipeline_database
+        track_completion = (
+            self._pod.pod_config.track_completion
+            and database is not None
+            and database.stores_records
+        )
+        inputs = input_stream.iter_data()
+        batch_size = 1_000 if track_completion else 1
+        while True:
+            batch: list[tuple[TagProtocol, DataProtocol]] = []
+            input_error: Exception | None = None
+            try:
+                batch.extend(islice(inputs, batch_size))
+            except Exception as exc:
+                # The original row loop delivers the valid prefix before the
+                # next input fails. Do the same for a partially filled batch.
+                input_error = exc
+            if batch:
+                completed: set[bytes] | None = set() if track_completion else None
+                for tag, data, record_hash in self._prepare_deliveries(
+                    batch, completed
+                ):
+                    result = self._deliver_row(
+                        tag, data, record_hash, completed, run_id
+                    )
+                    if result is not None:
+                        results.append(result)
+            if input_error is not None:
+                raise input_error
+            if not batch:
+                return results
+
+    def _prepare_deliveries(
+        self,
+        batch: list[tuple[TagProtocol, DataProtocol]],
+        completed: set[bytes] | None,
+    ) -> Iterator[tuple[TagProtocol, DataProtocol, ContentHash | None]]:
+        """Read the pending and stored completions of this batch in one lookup."""
+        database = self._pipeline_database
+        path = self._table_path
+        if completed is None or database is None or path is None:
+            yield from ((tag, data, None) for tag, data in batch)
+            return
+
+        entries: list[tuple[TagProtocol, DataProtocol, ContentHash]] = []
+        pending: set[bytes] = set()
+        preparation_error: Exception | None = None
+        for tag, data in batch:
+            try:
+                record_hash = _side_effect_record_hash(
+                    tag,
+                    data,
+                    self._pod.data_context.arrow_hasher,
+                    self._pod.data_context_key,
+                )
+            except Exception as exc:
+                # A bad row fails at its original position, after the valid prefix.
+                preparation_error = exc
+                break
+            entries.append((tag, data, record_hash))
+            pending.add(record_hash.to_prefixed_digest())
+
+        if pending:
+            try:
+                prior = database.get_records_by_column(
+                    path,
+                    STORED_RECORD_ID_COLUMN,
+                    pending,
+                    record_id_column=STORED_RECORD_ID_COLUMN,
+                )
+            except OrcapodDatabaseError as exc:
+                exc.add_context(node_label=self._pod.label, tag=batch[0][0].as_dict())
+                raise
+            if prior is not None:
+                completed.update(
+                    record_id
+                    for record_id in prior[STORED_RECORD_ID_COLUMN].to_pylist()
+                    if isinstance(record_id, bytes)
+                )
+        yield from entries
+        if preparation_error is not None:
+            raise preparation_error
+
+    def _deliver_row(
+        self,
+        tag: TagProtocol,
+        data: DataProtocol,
+        record_hash: ContentHash | None,
+        completed: set[bytes] | None,
+        run_id: str | None,
+    ) -> tuple[TagProtocol, DataProtocol] | None:
+        """Deliver one input unless the run found or logged its completion."""
+        return _execute_side_effect_row(
+            fn=self._pod._fn,
+            tag=tag,
+            data=data,
+            pod_config=self._pod.pod_config,
+            pipeline_hash_ch=self.pipeline_hash(),
+            pod_name=self._pod.label,
+            run_id=run_id,
+            arrow_hasher=self._pod.data_context.arrow_hasher,
+            data_context_key=self._pod.data_context_key,
+            ctx_arg_name=self._pod.ctx_arg_name,
+            pipeline_database=self._pipeline_database,
+            table_path=self._table_path,
+            record_id_hash=record_hash,
+            completed=completed,
+        )
 
     def _hold(
         self, rows: list[tuple[TagProtocol, DataProtocol]], *, load_only: bool = False

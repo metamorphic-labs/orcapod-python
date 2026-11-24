@@ -27,12 +27,14 @@ from typing import Any, cast
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from orcapod.protocols.database_protocols import STORED_RECORD_ID_COLUMN
 from orcapod.databases._pending_commits import PendingCommit, PendingCommits
 from orcapod.databases.utils import (
     coerce_record_id,
     first_changed_column,
     first_logical_identity_change,
     in_held_column_order,
+    records_matching_values,
 )
 from orcapod.errors import (
     InputValidationError,
@@ -103,7 +105,7 @@ class ConnectorArrowDatabase:
 
     stores_records = True
 
-    RECORD_ID_COLUMN = "__record_id"
+    RECORD_ID_COLUMN = STORED_RECORD_ID_COLUMN
     _ROW_INDEX_COLUMN = "__row_index"
 
     def __init__(
@@ -840,6 +842,15 @@ class ConnectorArrowDatabase:
         record_path: tuple[str, ...],
         record_id_column: str | None = None,
     ) -> pa.Table | None:
+        table = self._combined_table(record_path)
+        return (
+            None
+            if table is None
+            else self._handle_record_id_column(table, record_id_column)
+        )
+
+    def _combined_table(self, record_path: tuple[str, ...]) -> pa.Table | None:
+        """Read committed rows once and combine them with this view's pending rows."""
         record_key = self._get_record_key(record_path)
         parts: list[pa.Table] = []
 
@@ -861,8 +872,7 @@ class ConnectorArrowDatabase:
 
         if not parts:
             return None
-        table = parts[0] if len(parts) == 1 else pa.concat_tables(_alike(parts))
-        return self._handle_record_id_column(table, record_id_column)
+        return parts[0] if len(parts) == 1 else pa.concat_tables(_alike(parts))
 
     def get_records_by_ids(
         self,
@@ -887,6 +897,21 @@ class ConnectorArrowDatabase:
         if filtered.num_rows == 0:
             return None
         return self._handle_record_id_column(filtered, record_id_column)
+
+    def get_records_by_column(
+        self,
+        record_path: tuple[str, ...],
+        column: str,
+        values: Collection[Any] | pa.Array[Any],
+        record_id_column: str | None = None,
+    ) -> pa.Table | None:
+        if len(values) == 0:
+            return None
+        table = self._combined_table(record_path)
+        if table is None:
+            return None
+        matches = records_matching_values(table, column, values)
+        return self._handle_record_id_column(matches, record_id_column)
 
     def get_records_with_column_value(
         self,

@@ -85,6 +85,15 @@ class NoOpArrowDatabase:
     ) -> "pa.Table | None":
         return None
 
+    def get_records_by_column(
+        self,
+        record_path: tuple[str, ...],
+        column: str,
+        values: Collection[Any] | pa.Array[Any],
+        record_id_column: str | None = None,
+    ) -> pa.Table | None:
+        return None
+
     def get_records_with_column_value(
         self,
         record_path: tuple[str, ...],

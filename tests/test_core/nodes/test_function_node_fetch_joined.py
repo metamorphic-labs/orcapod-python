@@ -15,6 +15,7 @@ from orcapod.core.nodes.function_node import (
 )
 from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import InMemoryArrowDatabase
+from orcapod.system_constants import constants
 
 
 def double_value(value: int) -> int:
@@ -122,3 +123,30 @@ class TestFetchJoinedRecords:
         result = executed_node._fetch_joined_records(base_entry_ids=[])
         assert result is not None
         assert result.table.num_rows == 0
+
+    def test_targeted_reads_still_warn_about_an_unrequested_missing_result(
+        self, executed_node, caplog
+    ):
+        node = executed_node
+        pipeline_database = node._pipeline_database
+        pod = node._cached_function_pod
+        first_tag, first_data = next(node._input_stream.iter_data())
+        entry_id = node.compute_base_entry_id(first_tag, first_data)
+        entries = pipeline_database.get_all_records(node._versioned_pipeline_path)
+        result_id = next(
+            row[constants.DATA_RECORD_ID]
+            for row in entries.to_pylist()
+            if row[_PIPELINE_BASE_ENTRY_ID_COL] == entry_id
+        )
+        record = pod.result_database.get_record_by_id(pod.record_path, result_id)
+        assert record is not None
+        partial_results = InMemoryArrowDatabase()
+        partial_results.add_record(pod.record_path, result_id, record)
+        node.attach_databases(pipeline_database, result_database=partial_results)
+
+        found = node._fetch_joined_records(base_entry_ids=[entry_id])
+        assert found is not None
+        assert found.table[_PIPELINE_BASE_ENTRY_ID_COL].to_pylist() == [entry_id]
+        assert (
+            "1 pipeline DB entries have no match in persistent result DB" in caplog.text
+        )

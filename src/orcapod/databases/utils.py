@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import pyarrow as pa
+import pyarrow.compute as pc
 
+from orcapod.protocols.database_protocols import STORED_RECORD_ID_COLUMN
 from orcapod.utils import arrow_utils
 
 if TYPE_CHECKING:
@@ -35,6 +37,25 @@ def coerce_record_id(record_id: str | bytes) -> bytes:
     if isinstance(record_id, str):
         return record_id.encode()
     return record_id
+
+
+def records_matching_values(
+    table: pa.Table, column: str, values: Collection[Any] | pa.Array[Any]
+) -> pa.Table:
+    """Select matching rows in Arrow while preserving their original columns."""
+    keys = table[column]
+    if column == STORED_RECORD_ID_COLUMN and not (
+        isinstance(values, pa.Array) and pa.types.is_large_binary(values.type)
+    ):
+        values = [
+            coerce_record_id(value.as_py() if isinstance(value, pa.Scalar) else value)
+            for value in values
+        ]
+    if pa.types.is_null(keys.type):
+        return table.slice(0, 0)
+    value_set = pa.array(values, type=keys.type)
+    matches = pc.is_in(keys, value_set, skip_nulls=True)
+    return table if pc.all(matches).as_py() else table.filter(matches)
 
 
 def as_table_committing(database: object) -> TableCommittingDatabaseProtocol | None:

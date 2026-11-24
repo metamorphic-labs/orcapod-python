@@ -11,6 +11,9 @@ if TYPE_CHECKING:
     from orcapod.databases._pending_commits import PendingCommit
 
 
+STORED_RECORD_ID_COLUMN = "__record_id"
+
+
 @runtime_checkable
 class ArrowDatabaseProtocol(Protocol):
     """Internal Arrow store interface, including ordered function commits.
@@ -119,6 +122,25 @@ class ArrowDatabaseProtocol(Protocol):
         record_id_column: str | None = None,
         flush: bool = False,
     ) -> pa.Table | None: ...
+
+    def get_records_by_column(
+        self,
+        record_path: tuple[str, ...],
+        column: str,
+        values: Collection[Any] | pa.Array[Any],
+        record_id_column: str | None = None,
+    ) -> pa.Table | None:
+        """Read rows whose stored column contains a requested value.
+
+        Includes pending rows according to the database's normal read rules.
+        Repeated values never repeat rows, and nulls never match. Returns None
+        for an empty request or a table with no visible rows. A miss in a table
+        with visible rows retains the table's schema in a zero-row result.
+        Callers must not rely on row order.
+        Pass ``STORED_RECORD_ID_COLUMN`` to query the database's own record ID
+        (bytes or UTF-8 text). ``record_id_column`` controls its output name.
+        """
+        ...
 
     def get_records_with_column_value(
         self,

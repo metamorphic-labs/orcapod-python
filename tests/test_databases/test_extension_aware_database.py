@@ -148,6 +148,11 @@ def test_get_records_by_ids_applies_extension_types():
     assert result is not None
     assert result.schema.field("col").type == ext_type
 
+    matching = db.get_records_by_column(("p",), "col", ["a", "missing"])
+    assert matching is not None
+    assert matching.schema.field("col").type == ext_type
+    assert matching["col"].to_pylist() == ["a"]
+
 
 def test_get_all_records_returns_none_when_no_records():
     """Returns None when the underlying database has no records for the path."""
