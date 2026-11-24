@@ -287,6 +287,15 @@ def test_open_readers_refuse_too(project: Any) -> None:
             read()
 
 
+def test_a_display_names_the_refusal_and_shows_no_row(project: Any) -> None:
+    fake.migrate("p", {"units": _WRITTEN})
+    source = SpiralDBTableSource("p", "units")
+    _edit_schema_table(table_count=9)
+    html = source._repr_html_()
+    assert "could not read" in html and "completion marker" in html
+    assert "<td>" not in html
+
+
 def test_a_foreign_table_at_the_reserved_name_is_refused(tmp_path: Path) -> None:
     with fake.install(tmp_path / "spiral"):
         made = fake.ExternalProject("p")

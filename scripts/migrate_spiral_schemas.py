@@ -357,7 +357,7 @@ def require_unchanged(
         if int(handle.version_id) != table["row"]["captured_version"]:
             raise MigrationError(
                 f"{where} was written since the dry run (version {handle.version_id}, "
-                f"planned {table['version']})"
+                f"planned {row.captured_version})"
             )
         if list(handle.key_columns) != list(row.key_columns):
             raise MigrationError(
