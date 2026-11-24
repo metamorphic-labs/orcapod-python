@@ -422,18 +422,88 @@ def test_a_preview_names_the_bound_it_counted_to(
     assert fake.count_log == []
 
 
-def test_one_warning_from_many_threads(project: Any) -> None:
+def test_warnings_from_many_threads_stop_once_shown(project: Any) -> None:
+    """Racing readers may each show it; once shown, nobody shows it again."""
     barrier = threading.Barrier(8)
 
     def build(_: int) -> None:
         barrier.wait(10)
         SpiralDBConnector("p").get_arrow_schema("units")
 
+    def shown(seen: list[warnings.WarningMessage]) -> int:
+        return len([w for w in seen if w.category is UnrecordedTableSchemaWarning])
+
     with warnings.catch_warnings(record=True) as seen:
         warnings.simplefilter("always")
         with ThreadPoolExecutor(8) as pool:
             list(pool.map(build, range(8)))
-    assert len([w for w in seen if w.category is UnrecordedTableSchemaWarning]) == 1
+        before = shown(seen)
+        assert 1 <= before <= 8
+        with ThreadPoolExecutor(8) as pool:
+            list(pool.map(build, range(8)))
+        assert shown(seen) == before
+
+
+def test_every_concurrent_reader_raises_with_the_warning_as_an_error(
+    project: Any,
+) -> None:
+    barrier = threading.Barrier(8)
+
+    def build(_: int) -> str:
+        barrier.wait(10)
+        try:
+            SpiralDBConnector("p").get_arrow_schema("units")
+        except UnrecordedTableSchemaWarning:
+            return "raised"
+        return "passed"
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnrecordedTableSchemaWarning)
+        with ThreadPoolExecutor(8) as pool:
+            assert list(pool.map(build, range(8))) == ["raised"] * 8
+
+
+@pytest.mark.parametrize("table", ["units", "swapped"])
+def test_a_warning_hook_may_wait_for_a_reader_in_another_thread(
+    project: Any, monkeypatch: pytest.MonkeyPatch, table: str
+) -> None:
+    """CodeRabbit on PR 550: no lock is held while warning."""
+    finished: list[bool] = []
+    readers: list[threading.Thread] = []
+
+    def hook(*given: Any, **options: Any) -> None:
+        if readers:
+            return
+        reader = threading.Thread(
+            target=lambda: SpiralDBConnector("p").get_arrow_schema(table), daemon=True
+        )
+        readers.append(reader)
+        reader.start()
+        reader.join(5)
+        finished.append(not reader.is_alive())
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("always", UnrecordedTableSchemaWarning)
+        monkeypatch.setattr(warnings, "showwarning", hook)
+        SpiralDBConnector("p").get_arrow_schema("units")
+    assert finished == [True]
+
+
+def test_a_warning_hook_may_read_the_table_itself(
+    project: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[int] = []
+
+    def hook(*given: Any, **options: Any) -> None:
+        calls.append(1)
+        SpiralDBConnector("p").get_arrow_schema("units")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("always", UnrecordedTableSchemaWarning)
+        monkeypatch.setattr(warnings, "showwarning", hook)
+        SpiralDBConnector("p").get_arrow_schema("units")
+        SpiralDBConnector("p").get_arrow_schema("units")
+    assert calls == [1]
 
 
 def test_a_second_reader_does_not_pass_while_the_first_warning_raises(

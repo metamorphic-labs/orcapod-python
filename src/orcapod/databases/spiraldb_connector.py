@@ -27,7 +27,7 @@ import warnings
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from copy import copy
-from threading import RLock
+from threading import local
 from typing import TYPE_CHECKING, Any, cast
 
 import pyarrow as pa
@@ -75,7 +75,7 @@ _NO_WRITES = (
 )
 # Tables a warning was issued for in this process (``UnrecordedTableSchemaWarning``).
 _warned_unrecorded: set[tuple[str, str]] = set()
-_warned_lock = RLock()  # a warning hook may read a table itself
+_warning_here = local()  # ``keys``: what this thread is warning about right now
 
 
 # ---------------------------------------------------------------------------
@@ -187,23 +187,33 @@ def _warn_unrecorded(table: str, table_id: str) -> None:
 
 
 def _warn_once(about: tuple[str, str], message: str) -> None:
-    """Issue an ``UnrecordedTableSchemaWarning`` once per ``about`` and process.
+    """Issue an ``UnrecordedTableSchemaWarning``, usually once per ``about`` and process.
+
+    Once it has been shown it is not shown again. Threads reading one table at the same
+    time may each show it: no lock is held while warning, since a warning hook may wait
+    for another thread that reads an unrecorded table. A warning turned into an error is
+    not recorded as shown, so every reader raises it. A hook that reads the table itself
+    is not warned again about it.
 
     Args:
         about: What the warning is about.
         message: The warning.
     """
-    # Held over the check, the warning and the record: while one thread's warning is
-    # turned into an error, another does not pass as if it had been shown.
-    with _warned_lock:
-        if about in _warned_unrecorded:
-            return
+    warning_now: set[tuple[str, str]] | None = getattr(_warning_here, "keys", None)
+    if warning_now is None:
+        warning_now = _warning_here.keys = set()
+    if about in _warned_unrecorded or about in warning_now:
+        return
+    warning_now.add(about)
+    try:
         warnings.warn(
             message,
             UnrecordedTableSchemaWarning,
             stacklevel=outside_orcapod_stacklevel(),
         )
-        _warned_unrecorded.add(about)
+    finally:
+        warning_now.discard(about)
+    _warned_unrecorded.add(about)
 
 
 # ---------------------------------------------------------------------------
