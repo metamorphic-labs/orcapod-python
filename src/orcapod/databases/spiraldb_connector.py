@@ -44,6 +44,8 @@ from orcapod.errors import (
     NullabilityRecordError,
     NullabilityRecordMismatchError,
     NullInNonNullableColumnError,
+    UnstorableColumnError,
+    UnstorableTableNameError,
     UnsupportedValueError,
 )
 from orcapod.types import ColumnInfo
@@ -59,6 +61,9 @@ else:
 logger = logging.getLogger(__name__)
 
 _ARROW_METADATA_KEY = "__arrow_metadata__"
+# pyspiral 0.16.33, spiral.api.types.TableName.
+_TABLE_NAME_MAX_LENGTH = 128
+_TABLE_NAME_PATTERN = re.compile(r"[a-zA-Z_][a-zA-Z0-9_-]*")
 
 
 def _serialize_field_meta_tree(field: pa.Field) -> dict | None:
@@ -379,6 +384,27 @@ def _about_table(table: str) -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
+def _unsupported_physical_type_reason(arrow_type: pa.DataType) -> str | None:
+    """Explain a physical Arrow type refused before it reaches the writer."""
+    if pa.types.is_null(arrow_type):
+        return "the SpiralDB connector requires a concrete Arrow type for a column of nulls"
+    return _fixed_binary_or_duration_reason(arrow_type)
+
+
+def _fixed_binary_or_duration_reason(arrow_type: pa.DataType) -> str | None:
+    """Find a fixed-size binary or duration type refused by pyspiral's schema converter."""
+    # Both fail in pyspiral 0.16.33's Schema.from_arrow, including inside containers.
+    if pa.types.is_fixed_size_binary(arrow_type) or pa.types.is_duration(arrow_type):
+        return f"pyspiral does not support the Arrow type {arrow_type}"
+    if pa.types.is_dictionary(arrow_type):
+        return _fixed_binary_or_duration_reason(arrow_type.value_type)
+    for index in range(arrow_type.num_fields):
+        reason = _fixed_binary_or_duration_reason(arrow_type.field(index).type)
+        if reason is not None:
+            return reason
+    return None
+
+
 def _holds_zone_aware_timestamp(arrow_type: pa.DataType) -> bool:
     """Whether ``arrow_type`` is or nests a timestamp with a time zone (ITL-1162).
 
@@ -575,7 +601,25 @@ class SpiralDBConnector:
 
     def _table_id(self, table_name: str) -> str:
         """Return the dataset-qualified table identifier for a plain table name."""
+        reason = self.unstorable_table_name_reason(table_name)
+        if reason is not None:
+            raise UnstorableTableNameError(
+                database_kind=type(self).__name__, table_name=table_name, reason=reason
+            )
         return f"{self._dataset}.{table_name}"
+
+    def _require_supported_physical_type(
+        self, column: str, arrow_type: pa.DataType
+    ) -> None:
+        """Reject a physical type the connector cannot write."""
+        reason = _unsupported_physical_type_reason(arrow_type)
+        if reason is not None:
+            raise UnstorableColumnError(
+                database_kind=type(self).__name__,
+                column=column,
+                arrow_type=arrow_type,
+                reason=reason,
+            )
 
     def _qualified(self, table_name: str) -> str:
         """Return ``"<project>/<dataset>/<table>"``, the table as errors name it."""
@@ -605,7 +649,6 @@ class SpiralDBConnector:
             The table: its id and key columns, and its schema and version when asked.
         """
         self._require_open()
-        identifier = self._table_id(table_name)
         if (
             not self._dataset
             or not table_name
@@ -614,8 +657,9 @@ class SpiralDBConnector:
         ):
             # The SDK omits empty filters and treats dots as identifier separators.
             raise SpiralDBTableNotFoundError(
-                f"Table not found: {self._project_id}.{identifier}"
+                f"Table not found: {self._project_id}.{self._dataset}.{table_name}"
             )
+        identifier = self._table_id(table_name)
         try:
             table = self._project.table(identifier)
         except ValueError as exc:
@@ -912,8 +956,9 @@ class SpiralDBConnector:
                 if the table does not exist.
         """
         self._require_open()
+        identifier = self._table_id(table_name)
         if table_name in self.get_table_names():
-            self._project.drop_table(self._table_id(table_name))
+            self._project.drop_table(identifier)
 
     def create_table_if_not_exists(
         self,
@@ -924,9 +969,9 @@ class SpiralDBConnector:
         """Create a SpiralDB table with a single-column key schema, idempotently.
 
         Only the primary-key column's type is registered with Spiral at creation
-        time (via ``key_schema``). Non-PK columns in ``columns`` are ignored —
-        Spiral infers value column schemas from the first write. A second call
-        with the same table name is a no-op (``exist_ok=True``).
+        time (via ``key_schema``). The connector checks the other columns for
+        unsupported physical types. Spiral infers their schemas from the first
+        write. A second call with the same table name is a no-op (``exist_ok=True``).
 
         Only single-column primary keys are supported via this method. Tables
         with composite primary keys must be created outside this connector but
@@ -934,8 +979,7 @@ class SpiralDBConnector:
 
         Args:
             table_name: Plain table name (no dataset prefix).
-            columns: Full column list; must include ``pk_column``. Non-PK entries
-                are accepted but not used at creation time.
+            columns: Full column list; must include ``pk_column``.
             pk_column: Name of the single primary-key column.
 
         Raises:
@@ -943,14 +987,17 @@ class SpiralDBConnector:
                 when ``columns`` is empty).
         """
         self._require_open()
+        identifier = self._table_id(table_name)
         col_names = [c.name for c in columns]
         if pk_column not in col_names:
             raise ValueError(
                 f"pk_column {pk_column!r} not found in columns: {col_names}"
             )
         pk_arrow_type = next(c.arrow_type for c in columns if c.name == pk_column)
+        for column in columns:
+            self._require_supported_physical_type(column.name, column.arrow_type)
         self._project.create_table(
-            self._table_id(table_name),
+            identifier,
             key_schema=[(pk_column, pk_arrow_type)],
             exist_ok=True,
         )
@@ -1004,12 +1051,6 @@ class SpiralDBConnector:
         ``write_nullability_record`` after checking the data holds no null in the
         non-nullable columns.
 
-        Limitation: "no value columns yet" stands for "no rows yet", which saves a scan
-        on every first write. A table whose columns are all key columns, holding rows
-        and no record, is recorded by the next write; if that write adds value columns
-        declared non-nullable, the earlier rows hold nulls there and every read raises
-        ``NullInNonNullableColumnError`` (a null is never hidden).
-
         Raises:
             ValueError: If ``id_column`` is not in the table key schema (including
                 empty key schema), or if any key-schema column is absent from
@@ -1043,6 +1084,8 @@ class SpiralDBConnector:
                 f"records is missing key column(s) {missing} required by the "
                 f"table key schema {pk_cols}."
             )
+        for field in records.schema:
+            self._require_supported_physical_type(field.name, field.type)
 
         # Nullability (ITL-936). SpiralDB keeps no non-null flag except on list items, and
         # stores a null written to a non-null struct field as the type's zero, so every
@@ -1066,8 +1109,7 @@ class SpiralDBConnector:
                     [render_path(p) for p in sorted(paths - recorded)],
                     table=qualified,
                 )
-        # A table with no value columns yet holds no rows Orcapod did not record (but see
-        # the limitation in the docstring: a table whose columns are all keys may).
+        # A table with no value columns yet holds no rows: pyspiral refuses key-only writes.
         record_first = recorded is None and set(tbl.schema().to_arrow().names) <= set(
             pk_cols
         )
@@ -1173,7 +1215,9 @@ class SpiralDBConnector:
         class, ``set[int]``, a NumPy array) would read back as its storage type and
         is refused (ITL-1334; keeping it is a follow-up). A map whose key or item
         field has another name than ``key`` / ``value`` reads back with those names,
-        and is refused too.
+        and is refused too. The pyspiral schema converter refuses fixed-size
+        binary and duration, including inside containers. The connector also
+        requires a concrete type for an entirely untyped null column.
 
         Args:
             name: The column's name.
@@ -1202,6 +1246,9 @@ class SpiralDBConnector:
                 "SpiralDB drops Arrow field metadata, so a logical (extension) type "
                 "reads back as its storage type"
             )
+        physical_reason = _unsupported_physical_type_reason(arrow_type)
+        if physical_reason is not None:
+            return physical_reason
         if arrow_utils.holds_renamed_map(arrow_type):
             return (
                 "SpiralDB gives a map's key and item fields back as 'key' and 'value'"
@@ -1214,16 +1261,24 @@ class SpiralDBConnector:
         return None
 
     def unstorable_table_name_reason(self, table_name: str) -> str | None:
-        """Say why SpiralDB cannot hold a table of this name: it holds every name.
-
-        The database's table names are letters, digits and ``_``.
+        """Say why the name fails pyspiral's ``TableName`` constraints.
 
         Args:
             table_name: The table name.
 
         Returns:
-            Always ``None``.
+            A short reason, or ``None`` when the name is valid.
         """
+        if len(table_name) > _TABLE_NAME_MAX_LENGTH:
+            return (
+                f"SpiralDB allows at most {_TABLE_NAME_MAX_LENGTH} characters in a "
+                f"table name, and this name has {len(table_name)}"
+            )
+        if _TABLE_NAME_PATTERN.fullmatch(table_name) is None:
+            return (
+                "SpiralDB table names must start with an ASCII letter or '_' and "
+                "contain only ASCII letters, digits, '_' or '-'"
+            )
         return None
 
     def validate_records(self, records: pa.Table) -> None:

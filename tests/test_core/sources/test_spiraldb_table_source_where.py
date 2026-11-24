@@ -539,7 +539,6 @@ def _typed_rows() -> pa.Table:
         {
             "d64": pa.array([one, two, one], pa.date64()),
             "bin": pa.array([b"a", b"b", b"a"], pa.binary()),
-            "fbin": pa.array([b"aa", b"bb", b"aa"], pa.binary(2)),
             "i8": pa.array([-1, 2, -1], pa.int8()),
             "u8": pa.array([255, 2, 255], pa.uint8()),
             "i32": pa.array([1, 2, 1], pa.int32()),
@@ -549,7 +548,6 @@ def _typed_rows() -> pa.Table:
             "t32": pa.array([dt.time(1), dt.time(2), dt.time(1)], pa.time32("s")),
             "t64": pa.array([dt.time(1), dt.time(2), dt.time(1)], pa.time64("us")),
             "dec": pa.array([Decimal("1.50")] * 3, pa.decimal128(5, 2)),
-            "dur": pa.array([dt.timedelta(1)] * 3, pa.duration("us")),
         }
     )
     return pa.table(columns)
@@ -640,7 +638,6 @@ class TestColumnTypes:
         [
             ("d64", dt.date(2026, 1, 1), [0, 2]),
             ("bin", b"a", [0, 2]),
-            ("fbin", b"aa", [0, 2]),
             ("i8", -1, [0, 2]),
             ("u8", 255, [0, 2]),
             ("i32", 2, [1]),
@@ -656,23 +653,31 @@ class TestColumnTypes:
     @pytest.mark.parametrize(
         "column, value, match",
         [
-            ("fbin", b"a", "cannot hold"),
             ("i8", 128, "cannot hold"),
             ("u8", -1, "cannot hold"),
             ("u32", 2**32, "cannot hold"),
             ("t32", 1, "does not support"),
             ("t64", 1, "does not support"),
             ("dec", 1.5, "does not support"),
-            ("dur", 1, "does not support"),
         ],
     )
     def test_a_value_the_column_cannot_take_is_refused(
         self, typed, column, value, match
     ):
-        """Time of day, decimal and duration columns take no condition: a condition
+        """Time of day and decimal columns take no condition: a condition
         holds only a bool, int, float, str, bytes, datetime or date."""
         with pytest.raises(TypeError, match=match):
             typed.where({column: value})
+
+    def test_predicate_types_that_pyspiral_cannot_write(self):
+        """The predicate checker can be tested without writing an unsupported schema."""
+        fixed_binary = pa.schema([pa.field("fbin", pa.binary(2))])
+        assert _checked_conditions({"fbin": b"aa"}, fixed_binary) == {"fbin": b"aa"}
+        with pytest.raises(TypeError, match="cannot hold"):
+            _checked_conditions({"fbin": b"a"}, fixed_binary)
+        duration = pa.schema([pa.field("dur", pa.duration("us"))])
+        with pytest.raises(TypeError, match="does not support"):
+            _checked_conditions({"dur": 1}, duration)
 
     @pytest.mark.parametrize(
         "value", [dt.time(1), Decimal("1.50"), dt.timedelta(1)], ids=repr

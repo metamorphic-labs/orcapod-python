@@ -24,12 +24,123 @@ from orcapod.errors import (
     NullabilityRecordError,
     NullabilityRecordMismatchError,
     NullInNonNullableColumnError,
+    UnstorableColumnError,
+    UnstorableTableNameError,
     UnsupportedValueError,
 )
 from orcapod.utils import arrow_utils
 from orcapod.sources import ArrowTableSource, SpiralDBTableSource
 from tests.test_databases import fake_pyspiral
 from tests.test_databases.type_matrix import map_of_fields
+
+
+@pytest.mark.parametrize("name", ["", "1table", "a.b", "a b", "é", "a\n", "a" * 129])
+def test_invalid_table_name(tmp_path, name):
+    with fake_pyspiral.install(tmp_path):
+        connector = SpiralDBConnector("p")
+        assert connector.unstorable_table_name_reason(name)
+        with pytest.raises(UnstorableTableNameError, match="table name"):
+            connector.create_table_if_not_exists(name, [], "id")
+        assert connector.get_table_names() == []
+
+
+@pytest.mark.parametrize("name", ["_", "_T-9", "T" * 128])
+def test_valid_table_name(tmp_path, name):
+    with fake_pyspiral.install(tmp_path):
+        project = fake_pyspiral.FakeSpiral().project("p")
+        connector = SpiralDBConnector("p")
+        assert connector.unstorable_table_name_reason(name) is None
+        project.create_table(f"default.{name}", key_schema=[("id", pa.int64())])
+        assert connector.get_table_names() == [name]
+
+
+@pytest.mark.parametrize("name", ["", "1table", "a b", "é", "a\n", "a" * 129])
+def test_fake_refuses_table_names_outside_client_type(tmp_path, name):
+    with fake_pyspiral.install(tmp_path):
+        project = fake_pyspiral.FakeSpiral().project("p")
+        with pytest.raises(ValueError, match="table name"):
+            project.create_table(f"default.{name}", key_schema=[("id", pa.int64())])
+        assert project.list_tables() == []
+
+
+@pytest.mark.parametrize(
+    ("arrow_type", "reason"),
+    [
+        (pa.binary(16), "fixed_size_binary"),
+        (pa.duration("us"), "duration"),
+        (pa.list_(pa.struct([("value", pa.binary(4))])), "fixed_size_binary"),
+        (pa.map_(pa.int64(), pa.duration("ns")), "duration"),
+        (pa.month_day_nano_interval(), "month_day_nano_interval"),
+        (pa.sparse_union([pa.field("value", pa.int64())]), "sparse_union"),
+    ],
+)
+def test_fake_refuses_types_rejected_by_schema_from_arrow(tmp_path, arrow_type, reason):
+    with fake_pyspiral.install(tmp_path):
+        project = fake_pyspiral.FakeSpiral().project("p")
+        with pytest.raises(ValueError, match=reason):
+            project.create_table("default.bad", key_schema=[("id", arrow_type)])
+        table = project.create_table("default.t", key_schema=[("id", pa.int64())])
+        rows = pa.table({"id": [0], "v": pa.nulls(1, type=arrow_type)})
+        with pytest.raises(ValueError, match=reason):
+            table.write(rows)
+        assert table.schema().to_arrow().names == ["id"]
+
+
+@pytest.mark.parametrize(
+    ("rows", "message"),
+    [
+        ({"id": [1], "part": [2]}, "Write array contains only key columns"),
+        ({"id": [1, 1], "part": [2, 2], "v": [3, 4]}, "Duplicate keys found"),
+        ({"id": [1], "part": [2], "$value": [3]}, "reserved for key columns"),
+    ],
+)
+def test_fake_refuses_invalid_write_batch(tmp_path, rows, message):
+    with fake_pyspiral.install(tmp_path):
+        project = fake_pyspiral.FakeSpiral().project("p")
+        table = project.create_table(
+            "default.t", key_schema=[("id", pa.int64()), ("part", pa.int64())]
+        )
+        with pytest.raises(ValueError, match=message):
+            table.write(pa.table(rows))
+        # A repeated component is valid, and a later write may upsert a complete key.
+        table.write(pa.table({"id": [1, 1], "part": [2, 3], "a$b": [3, 4]}))
+        table.write(pa.table({"id": [1], "part": [2], "a$b": [5]}))
+        assert table.schema().to_arrow().names == ["id", "part", "a$b"]
+        assert list(SpiralDBConnector("p").scan_batches("t"))[0].to_pylist() == [
+            {"id": 1, "part": 2, "a$b": 5},
+            {"id": 1, "part": 3, "a$b": 4},
+        ]
+
+
+def test_fake_refuses_null_key_type(tmp_path):
+    with fake_pyspiral.install(tmp_path):
+        project = fake_pyspiral.FakeSpiral().project("p")
+        with pytest.raises(
+            ValueError, match="Key schema cannot contain Null type field"
+        ):
+            project.create_table("t", key_schema=[("id", pa.null())])
+
+
+@pytest.mark.parametrize(
+    ("arrow_type", "reason"),
+    [
+        (pa.binary(16), "fixed_size_binary"),
+        (pa.duration("us"), "duration"),
+        (pa.null(), "null"),
+    ],
+)
+def test_connector_refuses_unstorable_arrow_columns(tmp_path, arrow_type, reason):
+    with fake_pyspiral.install(tmp_path):
+        project = fake_pyspiral.FakeSpiral().project("p")
+        table = project.create_table("default.t", key_schema=[("id", pa.int64())])
+        connector = SpiralDBConnector("p")
+        rows = pa.table({"id": [0], "v": pa.nulls(1, type=arrow_type)})
+        with pytest.raises(UnstorableColumnError, match=reason) as exc_info:
+            connector.upsert_records("t", rows, id_column="id")
+        assert exc_info.value.column == "v"
+        assert table.get_metadata() == {}
+        assert table.schema().to_arrow().names == ["id"]
+
 
 _NESTED = pa.schema(
     [
