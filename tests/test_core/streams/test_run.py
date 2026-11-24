@@ -197,7 +197,7 @@ def _bound_source_proxy() -> Any:
     """A ``SourceProxy`` for ``_source()``, bound to a live ``_source()``."""
     live = _source()
     proxy = SourceProxy(
-        source_id="readings",
+        source_id="arrow_table_v1:readings",
         expected_class_name="ArrowTableSource",
         tag_schema=Schema({"id": int}),
         data_schema=Schema({"x": int}),

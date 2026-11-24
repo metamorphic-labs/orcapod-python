@@ -85,8 +85,9 @@ class SQLiteTableSource(DBTableSource):
         system_tag_columns: Additional system-level tag columns.
         record_id_columns: The key columns that identify a row; ``None``: the
             primary key (a table without one is refused); ``()``: the position.
-        source_id: Canonical source name. Defaults to
-            ``sqlite_table:<db path as passed>:main.<table>``.
+        source_id: The source's name; its id is ``sqlite_table_v1:<name>``
+            (ITL-1425). The name defaults to ``<db path as passed>:main.<table>``,
+            so the default id is ``sqlite_table_v1:<db path as passed>:main.<table>``.
         label: Human-readable label for this source node.
         data_context: Data context governing type conversion and hashing.
         config: OrcaPod configuration.
@@ -100,7 +101,9 @@ class SQLiteTableSource(DBTableSource):
     """
 
     SOURCE_KIND: ClassVar[str] = "sqlite_table"
-    """Config type key and default source-id kind of this source (one vocabulary)."""
+    """Config type key and the kind in the source id's kind part (one vocabulary)."""
+    SOURCE_VERSION: ClassVar[int] = 1
+    """The version of this kind's implementation, in the kind part (ITL-1425)."""
     TABLE_IS_ROWS: ClassVar[bool] = True
 
     def __init__(
@@ -235,14 +238,17 @@ class SQLiteTableSource(DBTableSource):
             ``:memory:`` sources cannot be reconstructed — the new in-memory
             database will be empty and ``ValueError`` will be raised.
         """
-        return cls(
-            db_path=config["db_path"],
-            table_name=config["table_name"],
-            tag_columns=config.get("tag_columns"),
-            tag_only_columns=saved_tag_only_columns(config),
-            system_tag_columns=config.get("system_tag_columns", ()),
-            record_id_columns=config.get("record_id_columns"),
-            source_id=config.get("source_id"),
-            label=config.get("label"),
-            data_context=config.get("data_context"),
+        return cls._from_saved_name(
+            config,
+            lambda name: cls(
+                db_path=config["db_path"],
+                table_name=config["table_name"],
+                tag_columns=config.get("tag_columns"),
+                tag_only_columns=saved_tag_only_columns(config),
+                system_tag_columns=config.get("system_tag_columns", ()),
+                record_id_columns=config.get("record_id_columns"),
+                source_id=name,
+                label=config.get("label"),
+                data_context=config.get("data_context"),
+            ),
         )

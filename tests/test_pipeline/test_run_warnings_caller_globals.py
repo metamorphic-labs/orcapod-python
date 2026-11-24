@@ -295,10 +295,16 @@ def _restricted_messages(namespace: dict[str, Any]) -> list[tuple[str, ...]]:
 
 
 def _unchecked_messages(namespace: dict[str, Any]) -> list[tuple[str, ...]]:
-    assert sorted(namespace["summary"].unchecked_sources) == ["left", "right"]
+    assert sorted(namespace["summary"].unchecked_sources) == [
+        "dict_v1:left",
+        "dict_v1:right",
+    ]
     return [
-        ("Source 'left' could not be checked", "ConnectionError: server unreachable"),
-        ("Source 'right' could not be checked", "OSError: disk gone"),
+        (
+            "Source 'dict_v1:left' could not be checked",
+            "ConnectionError: server unreachable",
+        ),
+        ("Source 'dict_v1:right' could not be checked", "OSError: disk gone"),
     ]
 
 
@@ -385,19 +391,19 @@ NODE_RUNS: dict[str, tuple[Callable[[], PipelineJob], str, type[Warning], str]] 
         _unchecked_job,
         "doubled",
         SourceCheckFailedWarning,
-        "Source 'left' could not be checked",
+        "Source 'dict_v1:left' could not be checked",
     ),
     "operator_node_over_an_unchecked_source": (
         _unchecked_job,
         "present",
         SourceCheckFailedWarning,
-        "Source 'right' could not be checked",
+        "Source 'dict_v1:right' could not be checked",
     ),
     "source_node_of_an_unchecked_source": (
         _unchecked_job,
         "right",
         SourceCheckFailedWarning,
-        "Source 'right' could not be checked",
+        "Source 'dict_v1:right' could not be checked",
     ),
 }
 

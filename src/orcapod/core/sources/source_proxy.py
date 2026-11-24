@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
+from orcapod.core.sources.source_ids import parse_source_id
 from orcapod.core.streams.view import (
     ViewStatus,
     StreamView,
@@ -69,7 +70,9 @@ class SourceProxy(RootSource):
         source_config: dict[str, Any] | None = None,
         label: str | None = None,
     ) -> None:
-        super().__init__(source_id=source_id, label=label)
+        super().__init__(label=label)
+        # The saved source id, kind part included, presented as it was (ITL-1425).
+        self._saved_source_id = source_id
         self._content_hash_str = content_hash_str
         self._pipeline_hash_str = pipeline_hash_str
         self._tag_schema = tag_schema
@@ -193,6 +196,21 @@ class SourceProxy(RootSource):
 
     def identity_structure(self) -> Any:
         return ContentHash.from_string(self._content_hash_str)
+
+    @property
+    def source_id(self) -> str:
+        """The saved source id, kind part included, as the original source had it."""
+        return self._saved_source_id
+
+    @property
+    def source_name(self) -> str:
+        """The name part of the saved source id, read by the one parser.
+
+        Raises:
+            ValueError: If the saved id is not a source id (a config that names no
+                source gives ``"unknown"``).
+        """
+        return parse_source_id(self._saved_source_id).name
 
     def pipeline_identity_structure(self) -> Any:
         return ContentHash.from_string(self._pipeline_hash_str)

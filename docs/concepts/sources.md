@@ -37,9 +37,9 @@ hashing) and produces the final immutable stream.
 `PostgreSQLTableSource`, `SpiralDBTableSource`) and `PollingSource` for data that arrives over
 time (provisional in this release, see [Provisional sources](#provisional-sources)); see the
 [API reference](../api/sources.md). Their default `source_id` names the table
-where it lives (`sqlite_table:<db path>:main.<table>`,
-`postgresql_table:<host>:<port>/<database>.<schema>.<table>`, with the server the connection
-reached; the
+where it lives (`sqlite_table_v1:<db path>:main.<table>`,
+`postgresql_table_v1:<host>:<port>/<database>.<schema>.<table>`, with the server the
+connection reached; the
 [hashing reference](../reference/hashing.md#default-source-ids-and-row-identifiers) has
 every form). A PostgreSQL DSN that names several servers (`host=a,b`), or gives a host
 beside a different `hostaddr` (`host=db.example.org hostaddr=192.0.2.1`; with
@@ -48,6 +48,40 @@ beside a different `hostaddr` (`host=db.example.org hostaddr=192.0.2.1`; with
 `source_id`. `DBTableSource`, the base they share, can also be used directly
 over any connector; a connector gives no address of its database, so it then has no default
 and needs a `source_id`.
+
+### Source ids name the kind that reads the data
+
+Every source id is `<kind>_v<N>:<name>`. The **kind part**, `<kind>_v<N>`, names the kind
+of source that read the data (`csv`, `delta_table`, `sqlite_table`, `arrow_table`, ...; the
+same word as the source's config type) and the version of that kind's implementation.
+Orcapod always adds it. The **name** is the `source_id` you give, kept exactly, or the
+source's default: where the data lives (a file path, a table) or a hash of an in-memory
+table.
+
+```python
+import pyarrow as pa
+from orcapod.sources import ArrowTableSource
+
+units_table = pa.table({"unit": ["u1", "u2"], "rate": [3.5, 7.25]})
+units = ArrowTableSource(
+    units_table, tag_columns=["unit"], tag_only_columns=True, source_id="units"
+)
+print(units.source_name)
+# units
+print(units.source_id)
+# arrow_table_v1:units
+```
+
+The source id, kind part included, is what the source's system tags and source-info tokens
+hold (`arrow_table_v1:units::row_0::rate`), and it is part of the source's identity, so the
+same rows read by another kind, or by another version of one kind, are another source. The
+record id names a row within its source and never holds the source id. A job names an input
+slot by the source's name (`job.bind(sources={"units": ...})`).
+
+A kind's version moves when a row read before a change of its implementation could read
+differently after it (other values, other Arrow types, another record id). Saved jobs keep
+each source's name and version apart; a job loaded where a kind's version moved rebuilds the
+source with the new version's id and warns (`SourceVersionWarning`).
 
 Two construction rules apply to every source and are the most common first errors:
 
@@ -312,9 +346,9 @@ Things to know about Spiral tables:
   timestamps without one) and Orcapod logical types such as `Path` (they come back as their
   storage type).
 - **Source identity.** A Spiral source is identified by where its table is, never by its
-  rows. The default `source_id` is `spiraldb_table:<project id>.<dataset>.<table>@<Spiral
+  rows. The default `source_id` is `spiraldb_table_v1:<project id>.<dataset>.<table>@<Spiral
   table id>`, for example
-  `spiraldb_table:edi-tutorial-v1-841226.default.session@table_Jo7J0lpkLcOM`. The table id is
+  `spiraldb_table_v1:edi-tutorial-v1-841226.default.session@table_Jo7J0lpkLcOM`. The table id is
   SpiralDB's own, so tables with the same name in different projects stay apart, and a table
   that is dropped and created again under the same name is a different source: nothing
   recorded for the old table is reused. A renamed table also gets a new `source_id`.
@@ -828,7 +862,7 @@ before. Things to know:
 print(with_start.upstreams)
 # ()
 print(with_start.source_id)
-# experiments_with_start
+# derived_v1:experiments_with_start
 ```
 
 Only a source can do this. An operator rearranges rows and columns, and every data value it
@@ -852,7 +886,7 @@ print(sorted(PROVISIONAL_SOURCES))
 
 | Source | What is still open |
 |---|---|
-| `PollingSource` | its default source id hashes the implementation's own identity, and its content hash leaves out the source id and the declared schema (ITL-1316) |
+| `PollingSource` | its default source id hashes the implementation's own identity, and its content hash leaves out the declared schema (ITL-1316); it holds the source id (ITL-1425) |
 | `DerivedSource`, both forms | the plain form (`node.as_source()`) hashes only its origin's content hash and accepts a `source_id` its identity does not use; the `tags_as_data` form changed just before this release (ITL-1317) |
 
 So everything built on a `DerivedSource`, whether it came from `node.as_source()` or from
@@ -965,8 +999,8 @@ is reused rather than recomputed.
 Every source accepts `record_id_columns`, one or several key columns whose values name the
 row instead (`{"unit":"u1","time":1700000000}`), so the record ID follows the row. Both
 system tags must be stable: when you omit `source_id` an in-memory source is named after a
-hash of its table, as `<source kind>:<algorithm label>:<hex>` (for example
-`dict:arrow_v1:000002fe…`), which changes when any row changes or is reordered. Whenever row
+hash of its table, as `<kind part>:<algorithm label>:<hex>` (for example
+`dict_v1:arrow_v1:000002fe…`), which changes when any row changes or is reordered. Whenever row
 order or content can vary between runs, pass an explicit, stable `source_id` **and** name
 key columns that are unique per row; this avoids both the duplicate entries and the repeated
 deliveries.
@@ -1036,7 +1070,7 @@ table = source.as_table(columns={"source": True})
 print(table.column_names)
 # ['subject_id', 'age', 'weight', '_source_age', '_source_weight']
 print(table.column("_source_weight").to_pylist())
-# ['mice::row_0::weight']
+# ['dict_v1:mice::row_0::weight']
 
 # Show system tag columns
 tag_schema, data_schema = source.output_schema(columns={"system_tags": True})

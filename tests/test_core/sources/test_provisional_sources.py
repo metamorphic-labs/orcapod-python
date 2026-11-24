@@ -115,7 +115,7 @@ def test_from_config_warns_too() -> None:
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         rebuilt = PollingSource.from_config(config)
-    assert rebuilt.source_id == "polled"
+    assert rebuilt.source_id == "polling_source_v1:polled"
     assert len(_provisional_warnings(caught)) == 1
 
 
@@ -144,16 +144,24 @@ def test_the_mark_enters_no_config_and_no_identity() -> None:
         "tag_columns",
         "record_id_columns",
         "polling_config",
-        "source_id",
+        "source_name",
+        "source_name_given",
+        "source_version",
         "impl_config",
     }
-    assert plain.identity_structure() == (("StubImpl", "stub"), ("id",), ("id",))
+    # The source id leads the identity, as for every root source (ITL-1425).
+    assert plain.identity_structure() == (
+        "polling_source_v1:polled",
+        ("StubImpl", "stub"),
+        ("id",),
+        ("id",),
+    )
 
 
 def test_behavior_is_unchanged_default_source_id_included() -> None:
     """The default source id is still built from the implementation's identity."""
     first, second = _polling("a"), _polling("b")
-    assert first.source_id.startswith("polling_source:")
+    assert first.source_id.startswith("polling_source_v1:")
     assert first.source_id != second.source_id
     assert _polling("a").source_id == first.source_id
 
@@ -302,7 +310,7 @@ def test_derived_source_from_config_warns(tmp_path: Any) -> None:
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         rebuilt = DerivedSource.from_config(config)
-    assert rebuilt.source_id == "copied"
+    assert rebuilt.source_id == "derived_v1:copied"
     assert [m.split(" ", 1)[0] for m in _provisional_warnings(caught)] == [
         "DerivedSource"
     ]

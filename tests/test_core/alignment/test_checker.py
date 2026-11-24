@@ -442,7 +442,7 @@ def test_exchanged_tokens_of_a_repeated_derived_value_are_named() -> None:
     sources = make_sources("unique")
     oracle = sources.oracle
     oracle.derive("p", "A", lambda o: o.values["x"] % 2)
-    origins = [o for o in oracle.origins if o.source_id == "A"]
+    origins = [o for o in oracle.origins if o.of("A")]
     sep = constants.BLOCK_SEPARATOR
     tokens = {
         o.record_id: f"fn{sep}{hashlib.md5(o.record_id.encode()).hexdigest()}{sep}p"
@@ -480,7 +480,7 @@ def test_a_derived_token_is_checked_against_an_origin_known_from_another_column(
     sources = make_sources("unique")
     oracle = sources.oracle
     oracle.derive("p", "A", lambda o: o.values["x"] % 2)
-    origins = [o for o in oracle.origins if o.source_id == "A"]
+    origins = [o for o in oracle.origins if o.of("A")]
     sep = constants.BLOCK_SEPARATOR
     tokens = {
         o.record_id: f"fn{sep}{hashlib.md5(o.record_id.encode()).hexdigest()}{sep}p"
@@ -533,7 +533,9 @@ def test_a_row_without_a_pair_for_a_source_of_its_data_fails() -> None:
 
     def pair_of(source: str) -> list[str]:
         """The source-id and record-id columns holding ``source``'s rows."""
-        lineage = f"{sep}{sources.oracle.schema_hashes[source]}{sep}"
+        lineage = (
+            f"{sep}{sources.oracle.schema_hashes[f'arrow_table_v1:{source}']}{sep}"
+        )
         return [
             c
             for prefix in (
@@ -546,7 +548,7 @@ def test_a_row_without_a_pair_for_a_source_of_its_data_fails() -> None:
 
     a_pair, b_pair = pair_of("A"), pair_of("B")
     assert len(a_pair) == len(b_pair) == 2
-    missing = re.escape("no system tag pair for the sources ['B']")
+    missing = re.escape("no system tag pair for the sources ['arrow_table_v1:B']")
     with pytest.raises(AssertionError, match=missing):
         assert_rows_aligned(
             table.drop_columns(b_pair), layout, sources.oracle, joined.data_context
@@ -597,7 +599,7 @@ def test_a_batch_table_repeating_one_batch_instead_of_another_is_named() -> None
     sources = make_sources("unique")
     batched = Batch(2)(sources.a)
     table = batched.as_table(columns={"source": True, "system_tags": True})
-    xs = [o.values["x"] for o in sources.oracle.origins if o.source_id == "A"]
+    xs = [o.values["x"] for o in sources.oracle.origins if o.of("A")]
     assert_members_cover(table, "x", xs)
     repeated = table.take([0, 0, 2])
     tag_keys, data_keys = batched.keys()
@@ -616,7 +618,7 @@ def test_an_empty_batch_table_fails_member_coverage() -> None:
     """A Batch has no expected-rows rule; an empty table must still fail coverage."""
     sources = make_sources("unique")
     table = Batch(2)(sources.a).as_table()
-    xs = [o.values["x"] for o in sources.oracle.origins if o.source_id == "A"]
+    xs = [o.values["x"] for o in sources.oracle.origins if o.of("A")]
     with pytest.raises(AssertionError, match="are not the input rows"):
         assert_members_cover(table.slice(0, 0), "x", xs)
 
@@ -712,7 +714,7 @@ def test_a_bad_token_of_a_derived_value_several_origins_share_is_named() -> None
     sources = make_sources("duplicate")
     oracle = sources.oracle
     oracle.derive("p", "A", lambda o: 0)
-    origins = [o for o in oracle.origins if o.source_id == "A"]
+    origins = [o for o in oracle.origins if o.of("A")]
     tags = [(o.values["g"], o.values["n"]) for o in origins]
     repeated = [o for o, t in zip(origins, tags) if tags.count(t) > 1]
     assert repeated, "the scenario has no repeated tag tuple"
@@ -742,7 +744,7 @@ def test_a_source_only_the_tags_name_still_needs_a_system_tag_pair() -> None:
     joined = Join()(sources.a, sources.b)
     full = joined.as_table(all_info=True)
     sep = constants.BLOCK_SEPARATOR
-    lineage = f"{sep}{sources.oracle.schema_hashes['A']}{sep}"
+    lineage = f"{sep}{sources.oracle.schema_hashes[sources.a.source_id]}{sep}"
     a_pair = [
         c
         for c in full.column_names
@@ -772,7 +774,7 @@ def test_a_source_only_the_tags_name_still_needs_a_system_tag_pair() -> None:
     nulls = [i for i, v in enumerate(table.column("m").to_pylist()) if v is None]
     assert nulls
     table = table.take(nulls)
-    with pytest.raises(AssertionError, match=re.escape("sources ['A']")):
+    with pytest.raises(AssertionError, match=re.escape("sources ['arrow_table_v1:A']")):
         assert_rows_aligned(table, layout, sources.oracle, joined.data_context)
 
 
@@ -781,7 +783,7 @@ def test_a_renamed_derived_column_resolves_through_its_derivation() -> None:
     oracle = make_sources("unique").oracle
     oracle.derive("y", "A", lambda o: 10 * o.values["x"])
     oracle.rename("z", "y")
-    origin = next(o for o in oracle.origins if o.source_id == "A")
+    origin = next(o for o in oracle.origins if o.of("A"))
     assert oracle.holds("z", origin)
     assert oracle.expected_value("z", origin) == 10 * origin.values["x"]
     assert origin in oracle.origins_for_value("z", 10 * origin.values["x"])
@@ -791,8 +793,8 @@ def test_a_merged_column_whose_elements_both_come_from_one_input_is_named() -> N
     """A and C both hold ``x=7``: ``[7, 7]`` with two tokens of A leaves C's out."""
     sources = make_sources("unique")
     oracle = sources.oracle
-    a = next(o for o in oracle.origins if o.source_id == "A")
-    c = next(o for o in oracle.origins if o.source_id == "C")
+    a = next(o for o in oracle.origins if o.of("A"))
+    c = next(o for o in oracle.origins if o.of("C"))
     c_values = cast("dict[str, Any]", c.values)
     for name in (*TAG_COLUMNS, "x"):
         c_values[name] = a.values[name]
@@ -807,8 +809,8 @@ def test_a_merged_column_whose_elements_both_come_from_one_input_is_named() -> N
             }
         )
 
-    token_a = f"A{sep}{a.token}{sep}x"
-    token_c = f"C{sep}{c.token}{sep}x"
+    token_a = f"{a.source_id}{sep}{a.token}{sep}x"
+    token_c = f"{c.source_id}{sep}{c.token}{sep}x"
     layout = Layout(tag_keys=TAG_COLUMNS, data_keys=("x",), merged=frozenset({"x"}))
     context = sources.a.data_context
     assert_rows_aligned(table_with([token_a, token_c]), layout, oracle, context)
@@ -822,5 +824,5 @@ def test_a_derivation_on_an_intermediate_rename_name_is_found() -> None:
     oracle.rename("x", "raw")
     oracle.derive("x", "A", lambda o: 2 * o.values["x"])
     oracle.rename("y", "x")
-    origin = next(o for o in oracle.origins if o.source_id == "A")
+    origin = next(o for o in oracle.origins if o.of("A"))
     assert oracle.expected_value("y", origin) == 2 * origin.values["x"]

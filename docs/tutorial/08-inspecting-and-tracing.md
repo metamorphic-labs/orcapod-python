@@ -72,13 +72,13 @@ def print_lineage(node, depth=0):
 
 print_lineage(job.nodes["session_means"])
 # session_means
-#   SelectDataColumns_2
+#   SelectDataColumns_3
 #     GroupBy
 #       rates
 #         Join
-#           SelectDataColumns_3
-#             units
 #           SelectDataColumns_1
+#             units
+#           SelectDataColumns_2
 #             sessions
 ```
 
@@ -108,11 +108,12 @@ table = job.nodes["units"].as_table(columns={"source": True})
 print(table.column_names)
 # ['subject_id', 'session', 'probe', 'unit', 'region', 'depth_um', 'n_spikes', '_source_region', '_source_depth_um', '_source_n_spikes']
 print(table.column("_source_n_spikes").to_pylist()[5])
-# units::row_5::n_spikes
+# csv_v1:units::row_5::n_spikes
 ```
 
-Row 5 of the source you named `units`, column `n_spikes`. This is what the `source_id` you
-have been passing since Part 1 is for.
+Row 5 of the source you named `units`, column `n_spikes`, read by the CSV source
+(`csv_v1`: the kind of source and the version of its reader come first in every source id).
+This is what the `source_id` you have been passing since Part 1 is for.
 
 **System tags.** Each source also adds two hidden tag columns to every row: one with the
 source's name, one with an identifier of the row. They travel with the row through every
@@ -127,7 +128,7 @@ source_columns = [c for c in table.columns if c.startswith("_tag_source_id")]
 print(len(source_columns))
 # 2
 print(table.select(source_columns).unique().rows())
-# [('sessions', 'units')]
+# [('csv_v1:sessions', 'csv_v1:units')]
 ```
 
 Two system-tag columns, because two sources feed `rates`; every row depends on one row of
@@ -267,9 +268,9 @@ result of the node, including those of earlier runs over other inputs, like
     print_lineage(job.nodes["rates"])
     # rates
     #   Join
-    #     SelectDataColumns_3
-    #       units
     #     SelectDataColumns_1
+    #       units
+    #     SelectDataColumns_2
     #       sessions
     ```
 
@@ -283,7 +284,7 @@ Use the source-info column of the `sessions` node.
     table = pl.from_arrow(job.nodes["sessions"].as_table(columns={"source": True}))
     row = table.filter((pl.col("subject_id") == "mouse_03") & (pl.col("session") == "s2"))
     print(row["_source_duration_s"].to_list())
-    # ['sessions::row_5::duration_s']
+    # ['csv_v1:sessions::row_5::duration_s']
     ```
 
     Row 5, counting data rows from 0: the sixth line after the header.

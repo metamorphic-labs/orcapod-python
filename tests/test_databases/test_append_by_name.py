@@ -439,13 +439,13 @@ def test_the_step_leaves_anything_else_as_given(
     assert in_held_column_order(given, held) is given
 
 
-@pytest.mark.parametrize("database", ["in-memory", "Delta"])
+@pytest.mark.parametrize("database", ["in-memory"])
 @pytest.mark.parametrize("when", ["after a flush", "same pending batch"])
 def test_names_differing_in_case_only_are_two_columns(
     tmp_path: Path, database: str, when: str
 ) -> None:
-    """The in-memory and Delta databases hold ``a`` and ``A`` apart; an append of them
-    in another order is matched by exact name."""
+    """The in-memory database holds ``a`` and ``A`` apart; an append of them in another
+    order is matched by exact name. (Delta refuses them: below.)"""
     with open_database(database, tmp_path) as db:
         _add(db, _table_with_id(b"r1", [ID, "a", "A"]), flush=when == "after a flush")
         _add(db, _table_with_id(b"r2", ["A", ID, "a"]))
@@ -456,6 +456,31 @@ def test_names_differing_in_case_only_are_two_columns(
             {ID: b"r1", "a": 1, "A": 2},
             {ID: b"r2", "a": 1, "A": 2},
         ]
+
+
+@pytest.mark.parametrize("when", ["after a flush", "same pending batch"])
+def test_delta_refuses_names_differing_only_in_case(tmp_path: Path, when: str) -> None:
+    """Delta column names are case-insensitive (deltalake 1.5.1 and later refuses
+    such a table): ``a`` and ``A`` in one table are refused before anything is
+    queued, in one batch and as a column added beside a held one (ITL-1403)."""
+    db = DeltaTableDatabase(tmp_path)
+    with pytest.raises(UnstorableColumnError, match="differ only in case") as info:
+        _add(db, _table_with_id(b"r1", [ID, "a", "A"]))
+    assert info.value.column == "A"
+    _add(db, _table_with_id(b"r1", [ID, "a"]), flush=when == "after a flush")
+    with pytest.raises(InputValidationError, match="'a' and 'A' differ only in case"):
+        # ``merge``: a new column beside a pending batch is otherwise refused by the
+        # schema check before the name is looked at.
+        db.add_records(
+            PATH,
+            _table_with_id(b"r2", ["A", ID]),
+            record_id_column=ID,
+            schema_handling="merge",
+        )
+    db.flush()
+    table = db.get_all_records(PATH, record_id_column=ID)
+    assert table is not None
+    assert table.select([ID, "a"]).to_pylist() == [{ID: b"r1", "a": 1}]
 
 
 def _table_with_id(rid: bytes, order: list[str]) -> pa.Table:
@@ -520,7 +545,7 @@ def _race_rows(n: int, value: int, order: tuple[str, ...]) -> pa.Table:
     ("stale_order", "other_order"),
     [(("a", "b", "rid"), ("b", "rid", "a")), (("b", "rid", "a"), ("a", "b", "rid"))],
 )
-def test_a_reordered_append_is_committed_as_insert_if_missing_across_writers(
+def test_a_reordered_append_is_stored_once_across_writers(
     tmp_path: Path,
     skip_duplicates: bool,
     stale_order: tuple[str, ...],
@@ -528,9 +553,9 @@ def test_a_reordered_append_is_committed_as_insert_if_missing_across_writers(
 ) -> None:
     """Two handles append the same new record id with different values, each in
     another order than the stored table. The second commits after the first has
-    taken its snapshot of the stored ids. As on main (where rows in another order
-    than the stored table are committed by MERGE), the stale commit fails and the id
-    keeps one row: the reorder does not turn the commit into a blind append."""
+    taken its snapshot of the stored ids. Every commit to an existing table is a
+    MERGE (ITL-1377): the stale commit fails, is retried against the table as it is
+    then, and leaves the id alone, so it keeps the first writer's row."""
     stale, other = DeltaTableDatabase(tmp_path), DeltaTableDatabase(tmp_path)
     stale.add_records(
         PATH, _race_rows(1, 10, ("rid", "a", "b")), record_id_column="rid", flush=True
@@ -548,16 +573,18 @@ def test_a_reordered_append_is_committed_as_insert_if_missing_across_writers(
         )
         return taken
 
-    with patch.object(stale, "_snapshot_for_commit", side_effect=interleave):
-        with pytest.raises(RuntimeError) as raised:
-            stale.add_records(
-                PATH,
-                _race_rows(2, 99, stale_order),
-                record_id_column="rid",
-                flush=True,
-                skip_duplicates=skip_duplicates,
-            )
-    assert type(raised.value.__cause__).__name__ == "CommitFailedError"
+    with patch.object(
+        stale, "_snapshot_for_commit", side_effect=interleave
+    ) as snapshots:
+        stale.add_records(
+            PATH,
+            _race_rows(2, 99, stale_order),
+            record_id_column="rid",
+            flush=True,
+            skip_duplicates=skip_duplicates,
+        )
+    # The first attempt lost to the other writer; the second committed nothing.
+    assert snapshots.call_count == 2
     table = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="rid")
     assert table is not None
     assert sorted(table.select(["rid", "a"]).to_pylist(), key=str) == [
@@ -734,12 +761,13 @@ def test_a_queued_row_is_read_from_memory(tmp_path: Path) -> None:
 @pytest.mark.parametrize("schema_handling", ["error", "merge", "coerce"])
 @pytest.mark.parametrize("skip_duplicates", [False, True])
 @pytest.mark.parametrize("race", [False, True], ids=["alone", "with another writer"])
-def test_a_refused_reordered_append_leaves_the_next_batch_on_mains_commit(
+def test_a_refused_reordered_append_leaves_the_next_batch_committed(
     tmp_path: Path, schema_handling: str, skip_duplicates: bool, race: bool
 ) -> None:
     """A reordered append the ITL-1334 check refuses (other field metadata) queues
-    nothing, and leaves nothing behind: the next aligned batch is committed as on
-    main, by append, also when another writer commits an unrelated id meanwhile."""
+    nothing, and leaves nothing behind: the next aligned batch is committed, by the
+    MERGE every commit to an existing table is (ITL-1377), also when another writer
+    commits an unrelated id meanwhile."""
     from deltalake import DeltaTable
 
     db = DeltaTableDatabase(tmp_path)
@@ -769,7 +797,7 @@ def test_a_refused_reordered_append_leaves_the_next_batch_on_mains_commit(
             db.add_records(PATH, _abc(2), flush=True, **kwargs)
     else:
         db.add_records(PATH, _abc(2), flush=True, **kwargs)
-    assert DeltaTable(tmp_path / "t").history()[0]["operation"] == "WRITE"
+    assert DeltaTable(tmp_path / "t").history()[0]["operation"] == "MERGE"
     table = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="rid")
     assert table is not None
     expected = [1, 2, 3] if race else [1, 2]
@@ -860,12 +888,13 @@ def test_a_delta_batch_queued_in_another_order_keeps_its_order(
     ]
 
 
-def test_a_delta_table_created_again_in_another_order_takes_mains_commit(
+def test_a_delta_table_created_again_in_another_order_takes_the_batch(
     tmp_path: Path,
 ) -> None:
     """A Delta table created again in another order while this handle holds the old
-    one: an aligned batch is committed by append as on main, also with another writer
-    committing an unrelated id meanwhile (no state of this PR forces a MERGE)."""
+    one: an aligned batch is committed by the MERGE every commit to an existing
+    table is (ITL-1377), also with another writer committing an unrelated id
+    meanwhile."""
     import shutil
 
     from deltalake import DeltaTable, write_deltalake
@@ -897,7 +926,7 @@ def test_a_delta_table_created_again_in_another_order_takes_mains_commit(
     with patch.object(db, "_snapshot_for_commit", side_effect=interleave):
         db.flush()
     history = [entry["operation"] for entry in DeltaTable(tmp_path / "t").history()]
-    assert "MERGE" not in history
+    assert history == ["MERGE", "MERGE", "WRITE"]
     table = DeltaTableDatabase(tmp_path).get_all_records(
         PATH, record_id_column="__record_id"
     )

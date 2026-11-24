@@ -406,7 +406,7 @@ def refuse_restricted_cache_config(config: Mapping[str, object]) -> None:
     saved_limit = config.get("limit")
     limit = saved_limit if isinstance(saved_limit, int) else None
     if condition or saved_limit is not None:
-        name = config.get("source_id") or config.get("source_type", "source")
+        name = config.get("source_name") or config.get("source_type", "source")
         raise _restricted_cache_error(f"{name}: {restriction_text(condition, limit)}")
 
 
