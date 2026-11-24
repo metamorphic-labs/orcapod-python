@@ -102,6 +102,7 @@ def test_an_overridden_source_read_is_never_called(
 
     class Spied(DictSource):
         def as_table(self, *args: Any, **kwargs: Any) -> Any:
+            """Record the call: provenance must never read the source this way."""
             calls.append("as_table")
             return super().as_table(*args, **kwargs)
 
@@ -624,6 +625,8 @@ def _rows_visited_tracing_a_batch(n: int, monkeypatch: pytest.MonkeyPatch) -> in
     (row,) = job.nodes["Batch"].as_table().to_pylist()
 
     def held(self: Any, node: Any) -> Any:
+        """_Reader.held, its rows wrapped to count each row a loop goes through (read
+        once per node per call, as _Reader caches it)."""
         key = id(node)
         if key not in self.rows:
             table = self.table(node)
@@ -633,6 +636,8 @@ def _rows_visited_tracing_a_batch(n: int, monkeypatch: pytest.MonkeyPatch) -> in
     real_provenance = provenance._Reader.provenance
 
     def stored(self: Any, node: Any) -> Any:
+        """_Reader.provenance, its entries wrapped to count each row gone through
+        (read once per node per call)."""
         key = id(node)
         if key not in self.stored:
             entries, by_id = real_provenance(self, node)
@@ -1303,6 +1308,10 @@ def test_stored_history_of_tied_bindings_with_one_id_is_unknown(mode: str) -> No
     answer = job.nodes["length"].why_missing(left, "row_0")
     assert answer.missing
     assert answer.reached_function is None
+    # Since ITL-1425 two bindings in one job cannot share one full id, so the store
+    # answers exactly: entries of s are stored, none for its row_0 (the Join removed
+    # it), whichever tied slot the entries came through.
+    assert answer.entry_recorded is False
     assert "reached function" not in answer.text()
 
 
@@ -1699,7 +1708,9 @@ def test_an_unread_join_input_is_not_named_as_lacking_the_key(tmp_path: Path) ->
     job.run()
     answer = job.nodes["Join"].why_missing("c", "row_0")
     assert answer.missing
-    assert "'a'" in answer.because and "'bc'" not in answer.because
+    # Only a lacks the key; the cache (its slot is named after the source it wraps,
+    # b) is not read, so it is never named as lacking it.
+    assert answer.because == "no row with k='A' in 'a' (reads a)"
 
 
 def test_an_unproven_operator_link_is_not_called_an_unread_source() -> None:
@@ -2203,12 +2214,17 @@ def test_marks_of_equal_inputs_in_one_async_run_follow_their_records() -> None:
             else "reused"
         )
 
+    # The stored __computed flag of each row's own entry, read from the store.
+    entries, _ = scores._stored_provenance()
+    assert entries is not None
+    stored = {(r["animal"], r["trial"]): r["__computed"] for r in entries.to_pylist()}
     runs = {}
     for animal in ("a1", "a2"):
         trace = scores.trace({"animal": animal, "trial": 1}, "score")
         ((node, run_),) = trace.function_runs()
         assert node == "scores"
-        assert dict(trace.highlight().marks) == {"scores": mark({run_.computed_here})}
+        assert run_.computed_here is stored[(animal, 1)]
+        assert dict(trace.highlight().marks) == {"scores": mark({stored[(animal, 1)]})}
         runs[animal] = run_
     assert True in {runs["a1"].computed_here, runs["a2"].computed_here}
     # The union over both rows merges their marks.
@@ -2374,9 +2390,8 @@ def test_several_rows_text_and_union_highlight() -> None:
     assert lines[0] == "trace of mean at node means, for every row: 2 rows match"
     # Each matching row's tree follows, in tag order.
     roots = [line for line in lines if line.startswith("means (")]
-    assert roots == [
-        line for line in roots if "animal='a1'" in line or "animal='a2'" in line
-    ]
+    assert len(roots) == 2
+    assert "animal='a1'" in roots[0] and "animal='a2'" in roots[1]
     assert [r.tags for r in means.roots] == [(("animal", "a1"),), (("animal", "a2"),)]
     highlight = means.highlight()
     assert highlight.nodes == {
@@ -2770,3 +2785,424 @@ def test_a_label_that_is_one_of_its_slots_ids_is_refused(
             crossed = node.why_missing(a.source_id, '{"rid":2}')
             assert crossed.missing and crossed.present_in == ()
             assert not node.why_missing("slot", '{"rid":2}').missing
+
+
+@pytest.mark.parametrize("valid_first", [True, False])
+@pytest.mark.parametrize("mode", ["sync", "async"])
+@pytest.mark.parametrize("kind", ["MapTags", "MapData", "MapColumns"])
+def test_an_ignored_rename_beside_a_valid_one(
+    kind: str, mode: str, valid_first: bool
+) -> None:
+    """A strict=False mapping holding an entry that applies to nothing and a valid
+    rename, in both orders, on two tags and three data columns: the valid rename
+    traces to its original column, every other column to itself."""
+    from orcapod import operators
+
+    source = DictSource(
+        [{"k": "a", "g": "1", "x": 1, "y": 2, "z": 3}],
+        tag_columns=["k", "g"],
+        tag_only_columns=True,
+        source_id="s",
+    )
+    valid = {"MapTags": ("g", "gg"), "MapData": ("x", "xx"), "MapColumns": ("y", "yy")}
+    ignored = ("ghost", "w") if kind != "MapTags" else ("x", "w")  # x is data
+    entries = [valid[kind], ignored] if valid_first else [ignored, valid[kind]]
+    mapper = getattr(operators, kind)(dict(entries), strict=False)
+    job = PipelineJob(
+        name=f"mix{kind}{mode}{valid_first}", database=InMemoryArrowDatabase()
+    )
+    with job:
+        mapper(source)
+    run(job, mode)
+    node = job.nodes[kind]
+    tags = {"k": "a", ("gg" if kind == "MapTags" else "g"): "1"}
+    data = {"x": 1, "y": 2, "z": 3}
+    old, new = valid[kind]
+    if kind != "MapTags":
+        data[new] = data.pop(old)
+    for column, value in data.items():
+        original = old if column == new else column
+        cells = node.trace(tags, column).source_cells()
+        assert [(c.column, c.value) for c in cells] == [(original, value)]
+
+
+# ---------------------------------------------------------------------------
+# CodeRabbit review of cfcb1dc5 / 17c61d1e
+# ---------------------------------------------------------------------------
+
+
+@function_pod(output_keys="y")
+def echo_x(x: int) -> int:
+    """Return x: equal inputs give equal results."""
+    return x
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_repeated_identical_inputs_before_a_batch_are_refused(mode: str) -> None:
+    """A hand-built stream holding one row twice (A, B, A: identical system tags, one
+    base entry id; no Orcapod source gives this, record ids are unique). The node
+    holds one result per entry id, so the held rows cannot be matched to what Batch
+    received: the trace refuses, never a wrong cell (when in doubt, refuse)."""
+    from orcapod.operators import Batch
+
+    s = DictSource(
+        [{"k": 0, "x": 1}, {"k": 1, "x": 2}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="s",
+    )
+    table = s.as_table(columns={"source": True, "system_tags": True})
+    repeated = pa.concat_tables(
+        [table.slice(0, 1), table.slice(1, 1), table.slice(0, 1)]
+    )
+    job = PipelineJob(name=f"emitted{mode}", database=InMemoryArrowDatabase())
+    with job:
+        Batch(batch_size=2)(
+            echo_x.pod(
+                DictSource(
+                    [{"k": 9, "x": 9}],
+                    tag_columns=["k"],
+                    tag_only_columns=True,
+                    source_id="slot",
+                ),
+                label="f",
+            )
+        )
+    job.bind(sources={"slot": ArrowTableStream(repeated, tag_columns=["k"])})
+    run(job, mode)
+    batches = job.nodes["Batch"].as_table().to_pylist()
+    assert [b["k"] for b in batches] == [[0, 1], [0]]
+    for batch in batches:
+        with pytest.raises(ProvenanceInconsistencyError):
+            job.nodes["Batch"].trace({"k": batch["k"]}, "y")
+
+
+def test_why_missing_reads_the_stores_current_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The stored-record read refreshes the node's stored tables first (another
+    handle may have committed entries since)."""
+    from orcapod.core.nodes.function_node import FunctionJobNode as FunctionNode
+
+    job = _trials_job(InMemoryArrowDatabase())
+    job.run()
+    calls: list[str] = []
+    real = FunctionNode._refresh_stored_tables
+
+    def counted(self: Any) -> None:
+        calls.append(self.label)
+        real(self)
+
+    monkeypatch.setattr(FunctionNode, "_refresh_stored_tables", counted)
+    job.nodes["scores"].why_missing("trials", "row_0")
+    assert "scores" in calls
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_a_collapsed_diagram_keeps_the_removing_step(mode: str) -> None:
+    """L feeds a Join with R, the Join feeds a function: a record of L the Join drops.
+    With collapse=True the Join (a collapsible step) stays shown, highlighted, as the
+    end of the path."""
+    left = DictSource(
+        [{"k": "a", "x": 1}, {"k": "lonely", "x": 2}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="L",
+    )
+    right = DictSource(
+        [{"k": "a", "q": 5}], tag_columns=["k"], tag_only_columns=True, source_id="R"
+    )
+    job = PipelineJob(name=f"boundary{mode}", database=InMemoryArrowDatabase())
+    with job:
+        echo_x.pod(Join()(left, right), label="F")
+    run(job, mode)
+    answer = job.nodes["F"].why_missing("L", "row_1")
+    assert answer.removed_by is not None and answer.removed_by.label == "Join"
+    collapsed = job.diagram(collapse=True, highlight=answer.highlight())
+    assert " * Join (operator)" in collapsed.to_text()
+    assert "Join" in {
+        n["label"] for n in collapsed.to_dict()["nodes"] if n["highlighted"]
+    }
+    # Without a highlight the Join folds, as before.
+    assert "Join (operator)" not in job.diagram(collapse=True).to_text()
+
+
+def test_a_selector_subclass_never_runs_its_own_equality() -> None:
+    class Loud(int):
+        def __eq__(self, other: object) -> bool:  # pyright: ignore[reportImplicitOverride]
+            raise AssertionError("the selector's __eq__ ran")
+
+        __hash__ = int.__hash__
+
+    job = _trials_job(InMemoryArrowDatabase())
+    job.run()
+    trace = job.nodes["scores"].trace({"animal": "a1", "trial": Loud(1)}, "score")
+    assert trace.matched == 1
+
+
+@function_pod(output_keys="z")
+def plus_one(x: int | None) -> int:
+    """x + 1, a null as 0."""
+    return (x or 0) + 1
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_a_narrower_bind_reads_the_snapshot_in_the_declared_form(mode: str) -> None:
+    """The slot declares x: int | None; the bound source gives x: int. A function
+    over the source compares the snapshot row's hash with its stored input hash: the
+    snapshot is read in the declared form (the rows the job consumed), so it matches
+    and traces (read raw, the hashes differ and the trace was refused)."""
+    schema = pa.schema(
+        [pa.field("k", pa.large_string(), nullable=False), pa.field("x", pa.int64())]
+    )
+    declared = ArrowTableSource(
+        pa.Table.from_pylist([{"k": "a", "x": 1}], schema=schema),
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="s",
+    )
+    narrower = ArrowTableSource(
+        pa.Table.from_pylist(
+            [{"k": "a", "x": 1}, {"k": "b", "x": 2}],
+            schema=pa.schema(
+                [
+                    pa.field("k", pa.large_string(), nullable=False),
+                    pa.field("x", pa.int64(), nullable=False),
+                ]
+            ),
+        ),
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="s",
+    )
+    job = PipelineJob(name=f"narrow{mode}", database=InMemoryArrowDatabase())
+    with job:
+        plus_one.pod(declared, label="p")
+    job.bind(sources={"s": narrower})
+    run(job, mode)
+    trace = job.nodes["p"].trace({"k": "b"}, "z")
+    assert trace.status == "traced"
+    assert [(c.record_id, c.value) for c in trace.source_cells()] == [("row_1", 2)]
+
+
+def test_a_fold_needs_every_system_tag_column_mapped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If the record-id system tag of a group cannot be mapped to its input's, the
+    fold is not checked on the source-id fold alone: refused."""
+    from orcapod.pipeline import provenance
+
+    job = _trials_job(InMemoryArrowDatabase())
+    job.run()
+    real = provenance._column_map
+
+    def partial(*args: Any, **kwargs: Any) -> dict[str, str]:
+        mapping = real(*args, **kwargs)
+        return {o: u for o, u in mapping.items() if "source" in o}
+
+    monkeypatch.setattr(provenance, "_column_map", partial)
+    with pytest.raises(ProvenanceInconsistencyError, match="one to one"):
+        job.nodes["means"].trace({"animal": "a1"}, "mean")
+
+
+def test_a_stored_result_without_the_traced_column_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from orcapod.pipeline import provenance
+
+    job = _trials_job(InMemoryArrowDatabase())
+    job.run()
+    real = provenance._Reader.provenance
+
+    def without_score(self: Any, node: Any) -> Any:
+        entries, results = real(self, node)
+        return entries, {
+            k: {c: v for c, v in r.items() if c != "score"} for k, r in results.items()
+        }
+
+    monkeypatch.setattr(provenance._Reader, "provenance", without_score)
+    with pytest.raises(ProvenanceInconsistencyError, match="holds no 'score'"):
+        job.nodes["scores"].trace({"animal": "a1", "trial": 1}, "score")
+
+
+def test_a_folded_list_needs_one_element_per_member() -> None:
+    job = _trials_job(InMemoryArrowDatabase())
+    job.run()
+    node = job.nodes["GroupBy"]
+    held = vars(node)["_cached_output_stream"]
+    table = held.as_table(columns={"system_tags": True, "source": True})
+    at = table.schema.get_field_index("score")
+    longer = pa.array(
+        [v + [0.5] for v in table.column(at).to_pylist()], table.schema.field(at).type
+    )
+    vars(node)["_cached_output_stream"] = ArrowTableStream(
+        table.set_column(at, table.schema.field(at), longer),
+        tag_columns=["animal"],
+        data_context=held.data_context,
+    )
+    with pytest.raises(ProvenanceInconsistencyError, match="one element per member"):
+        node.trace({"animal": "a1"}, "score")
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_list_tag_roots_follow_the_nan_order(mode: str) -> None:
+    """Batch(batch_size=1) makes float tags [NaN] and [1.0]: the roots order lists
+    element by element, NaN after numbers, whatever the held order."""
+    from orcapod.operators import Batch
+
+    orders = []
+    for held in ((float("nan"), 1.0), (1.0, float("nan"))):
+        source = DictSource(
+            [{"key": v, "value": 0} for v in held],
+            tag_columns=["key"],
+            tag_only_columns=True,
+            source_id="numbers",
+        )
+        job = PipelineJob(name=f"listnan{mode}", database=InMemoryArrowDatabase())
+        with job:
+            Batch(batch_size=1)(source)
+        run(job, mode)
+        keys = [
+            dict(r.tags)["key"] for r in job.nodes["Batch"].trace({}, "value").roots
+        ]
+        orders.append([["nan" if k != k else k for k in key] for key in keys])
+    assert orders == [[[1.0], ["nan"]]] * 2
+
+
+def test_texts_keep_map_entries_and_fold_positions() -> None:
+    from orcapod.types.provenance import _value_text
+
+    assert _value_text([("a", 1)]) == "[('a', 1)]"
+    assert _value_text([("a", 4)]) != _value_text([("a", 1)])
+    assert _value_text(("only",)) == "('only',)"
+    # Batch over a Filter: each member line keeps its position through the filter.
+    from orcapod.operators import Batch
+
+    source = DictSource(
+        [{"k": i, "x": i} for i in range(3)],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="s",
+    )
+    job = PipelineJob(name="positions", database=InMemoryArrowDatabase())
+    with job:
+        Batch(batch_size=0)(
+            Filter(__import__("orcapod.types", fromlist=["col"]).col("k") >= 0)(source)
+        )
+    job.run()
+    lines = job.nodes["Batch"].trace({}, "x").text().splitlines()
+    assert [line.strip()[:4] for line in lines if "s row_" in line] == [
+        "[0] ",
+        "[1] ",
+        "[2] ",
+    ]
+
+
+def test_a_trace_keeps_the_selector_it_answered() -> None:
+    from orcapod.operators import Batch
+
+    source = DictSource(
+        [{"k": "u0", "x": 1}, {"k": "u1", "x": 2}],
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="s",
+    )
+    job = PipelineJob(name="selector", database=InMemoryArrowDatabase())
+    with job:
+        Batch(batch_size=0)(source)
+    job.run()
+    units = ["u0", "u1"]
+    trace = job.nodes["Batch"].trace({"k": units}, "x")
+    units.append("u2")
+    assert trace.matched == 1
+    assert (
+        trace.header() == "trace of x at node Batch, for k=['u0', 'u1']: 1 row matches"
+    )
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_batches_of_two_cached_versions_of_one_record(
+    tmp_path: Path, mode: str
+) -> None:
+    """Batch(batch_size=1) over a cache holding two versions of one record: both
+    batches fold to one system-tag key; each is told apart by its members' values."""
+    from orcapod.operators import Batch
+
+    cache = DeltaTableDatabase(tmp_path / "cache")
+
+    def version(x: int) -> CachedSource:
+        return CachedSource(
+            DictSource(
+                [{"k": "a", "g": "1", "x": x, "y": 0}],
+                tag_columns=["k", "g"],
+                tag_only_columns=True,
+                source_id="v",
+            ),
+            cache_database=cache,
+            cache_path=("shared",),
+        )
+
+    version(1).as_table()  # the first version is cached
+    cached = version(2)
+    job = PipelineJob(name=f"vb{mode}", database=InMemoryArrowDatabase())
+    with job:
+        Batch(batch_size=1)(SelectDataColumns(["x"])(cached))
+    run(job, mode)
+    node = job.nodes["Batch"]
+    held = sorted(r["x"] for r in node.as_table().to_pylist())
+    assert held == [[1], [2]]
+    for x in held:
+        trace = node.trace({"x": x}, "x")
+        assert [c.value for c in trace.source_cells()] == x
+
+
+@pytest.mark.parametrize("keys", [("k", "g"), ("g", "k")])
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_group_members_follow_both_keys(mode: str, keys: tuple[str, str]) -> None:
+    """Rows sharing k but differing on g are two groups: each group's members are
+    exactly its own source rows, for either key order, with tags laid out k, g and g, k."""
+    for tag_order in (["k", "g"], ["g", "k"]):
+        rows = [
+            {"k": "a", "g": "1", "x": 1},
+            {"k": "a", "g": "2", "x": 2},
+            {"k": "a", "g": "1", "x": 3},
+            {"k": "b", "g": "1", "x": 4},
+        ]
+        source = DictSource(
+            rows, tag_columns=tag_order, tag_only_columns=True, source_id="s"
+        )
+        job = PipelineJob(
+            name=f"two{mode}{''.join(keys)}", database=InMemoryArrowDatabase()
+        )
+        with job:
+            GroupBy(list(keys))(source)
+        run(job, mode)
+        node = job.nodes["GroupBy"]
+        expected = {("a", "1"): [1, 3], ("a", "2"): [2], ("b", "1"): [4]}
+        for (k, g), xs in expected.items():
+            cells = node.trace({"k": k, "g": g}, "x").source_cells()
+            assert sorted((c.record_id, c.value) for c in cells) == sorted(
+                (f"row_{x - 1}", x) for x in xs
+            )
+
+
+def test_why_missing_reads_no_result_table(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The stored answer of why_missing needs the pipeline entries only: no result
+    table is read (a trace still reads them)."""
+    from orcapod.core.nodes.function_node import FunctionJobNode as FunctionNode
+
+    job = _trials_job(InMemoryArrowDatabase())
+    job.run()
+    asked: list[bool] = []
+    real = FunctionNode._stored_provenance
+
+    def spied(self: Any, *, results: bool = True) -> Any:
+        asked.append(results)
+        return real(self, results=results)
+
+    monkeypatch.setattr(FunctionNode, "_stored_provenance", spied)
+    answer = job.nodes["scores"].why_missing("trials", "row_0")
+    assert not answer.missing and answer.entry_recorded is True
+    assert asked and not any(asked)
+    job.nodes["scores"].trace({"animal": "a1", "trial": 1}, "score")
+    assert True in asked

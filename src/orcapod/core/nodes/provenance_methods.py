@@ -44,7 +44,9 @@ class ProvenanceMethods:
 
         Raises:
             ValueError: If ``column`` is not a data column of this node, or ``row``
-                names a column this node does not have.
+                names a column this node does not have. Both are checked against the
+                rows this node holds: when it holds no run (``not_computed``) there is
+                nothing to check against, and neither is checked.
             ProvenanceInconsistencyError: If a link cannot be proven from what the job
                 holds and stores (a group whose members do not fold to its values).
         """

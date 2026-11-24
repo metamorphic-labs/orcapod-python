@@ -3521,7 +3521,9 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
     # Cache-only helpers (PLT-1156)
     # ------------------------------------------------------------------
 
-    def _stored_provenance(self) -> tuple[pa.Table | None, pa.Table | None]:
+    def _stored_provenance(
+        self, *, results: bool = True
+    ) -> tuple[pa.Table | None, pa.Table | None]:
         """Read this node's stored pipeline entries and results with every column.
 
         The provenance reader (ITL-1432). Unlike ``get_all_records``, nothing is joined
@@ -3534,12 +3536,18 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         both tables. Results are read from the persistent result database and, when
         one is attached, the ephemeral one. Nothing is computed or written.
 
+        Args:
+            results: Whether to read the result tables too; ``False`` reads the pipeline
+                entries only (a question about which inputs reached the function).
+
         Returns:
             The pipeline entries and the results, each ``None`` when nothing is
             stored or no database is attached.
         """
         if self._pipeline_database is None or self._cached_function_pod is None:
             return None, None
+        # A read of what is stored: the store's current version (ITL-1408).
+        self._refresh_stored_tables()
         context_key = self._stored_data_context_key
         entries = self._pipeline_database.get_all_records(
             self._versioned_pipeline_path,
@@ -3559,6 +3567,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                     pa.bool_(),
                 )
                 entries = entries.filter(mask)
+        if not results:
+            return entries, None
         found: list[pa.Table] = []
         places: list[tuple[ArrowDatabaseProtocol, tuple[str, ...]]] = [
             (
@@ -3585,14 +3595,14 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             )
             if stored is not None:
                 found.append(keep_rows_of_data_context(stored, context_key))
-        results = (
+        result_table = (
             None
             if not found
             else found[0]
             if len(found) == 1
             else pa.concat_tables(found, promote_options="default")
         )
-        return entries, results
+        return entries, result_table
 
     def _fetch_joined_records(
         self,

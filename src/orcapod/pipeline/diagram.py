@@ -325,8 +325,15 @@ def _build_model(
             if _collapsible(node) and len(succs[label]) == 1
         }
         if highlight is not None:
-            # The node the question was asked at is always shown.
+            # The node the question was asked at is always shown, and so is a
+            # highlighted node no highlighted path leaves (where a path ends, such as
+            # the step that removed a record): folded, its emphasis would be lost.
             folded.discard(highlight.asked)
+            folded -= {
+                label
+                for label in highlight.nodes
+                if not any(s in highlight.nodes for s in succs.get(label, ()))
+            }
 
     shown = [
         label for label in _topological_labels(preds, succs) if label not in folded

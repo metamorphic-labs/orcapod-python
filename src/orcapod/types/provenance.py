@@ -27,6 +27,10 @@ def _value_text(value: Any) -> str:
     if isinstance(value, list):
         items = [_value_text(v) for v in value]  # pyright: ignore[reportUnknownVariableType]
         return "[" + ", ".join(items) + "]"
+    if isinstance(value, tuple):
+        # An Arrow map entry reads as a (key, value) tuple: shown as a tuple.
+        parts = [_value_text(v) for v in cast(tuple[Any, ...], value)]
+        return "(" + ", ".join(parts) + ("," if len(parts) == 1 else "") + ")"
     if isinstance(value, dict):
         items = cast(dict[Any, Any], value)
         inner = ", ".join(
@@ -266,23 +270,30 @@ class TraceStep:
             and self.inputs[0].member is None
         )
 
-    def lines(self, depth: int = 0, via: tuple[str, ...] = ()) -> list[str]:
+    def lines(
+        self, depth: int = 0, via: tuple[str, ...] = (), member: int | None = None
+    ) -> list[str]:
         """Return the step and the steps below it as indented text lines.
 
         A row-wise operator that only passes a cell on is not given a line of its own:
-        the line of the cell it passes names it (``via Join, Filter``).
+        the line of the cell it passes names it (``via Join, Filter``), with the fold
+        member position the skipped step carried.
 
         Args:
             depth: The indentation level.
             via: The operators passed through above this step, nearest first.
+            member: The member position of a skipped step above, if any.
 
         Returns:
             The lines.
         """
+        position = self.member if self.member is not None else member
         if self.passes_through():
-            return self.inputs[0].lines(depth, (*via, self.operator or self.node))
+            return self.inputs[0].lines(
+                depth, (*via, self.operator or self.node), position
+            )
         pad = "  " * depth
-        where = f"[{self.member}] " if self.member is not None else ""
+        where = f"[{position}] " if position is not None else ""
         through = f"  (via {', '.join(via)})" if via else ""
         if self.source is not None:
             head = f"{pad}{where}{self.source.text()}{through}"
@@ -467,12 +478,15 @@ class Trace:
         return "\n".join(lines)
 
     def __str__(self) -> str:
+        """Return ``text()``: what ``print`` shows."""
         return self.text()
 
     def _repr_pretty_(self, printer: object, cycle: bool) -> None:  # pyright: ignore[reportUnusedParameter]  # IPython's display hook
+        """Show ``text()`` in IPython's plain display."""
         printer.text(self.text())  # pyright: ignore[reportAttributeAccessIssue]  # an IPython pretty printer
 
     def _repr_html_(self) -> str:
+        """Show ``text()`` in a notebook, HTML-escaped inside a ``<pre>`` element."""
         return f"<pre>{html.escape(self.text())}</pre>"
 
 
@@ -590,10 +604,13 @@ class Absence:
         return "\n".join(lines)
 
     def __str__(self) -> str:
+        """Return ``text()``: what ``print`` shows."""
         return self.text()
 
     def _repr_pretty_(self, printer: object, cycle: bool) -> None:  # pyright: ignore[reportUnusedParameter]  # IPython's display hook
+        """Show ``text()`` in IPython's plain display."""
         printer.text(self.text())  # pyright: ignore[reportAttributeAccessIssue]  # an IPython pretty printer
 
     def _repr_html_(self) -> str:
+        """Show ``text()`` in a notebook, HTML-escaped inside a ``<pre>`` element."""
         return f"<pre>{html.escape(self.text())}</pre>"

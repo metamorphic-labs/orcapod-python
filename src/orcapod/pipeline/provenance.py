@@ -106,6 +106,9 @@ def same_value(a: Any, b: Any) -> bool:
         return map_a.keys() == map_b.keys() and all(
             same_value(map_a[k], map_b[k]) for k in map_a
         )
+    # A subclass of a built-in type is compared as its base value (read through the
+    # base type's own slots), so no subclass hook (__eq__, __int__, ...) ever runs.
+    a, b = _plain_builtin(a), _plain_builtin(b)
     numbers = isinstance(a, (int, float)) and isinstance(b, (int, float))
     if type(a) is not type(b) and not numbers:
         return False
@@ -115,12 +118,52 @@ def same_value(a: Any, b: Any) -> bool:
         return False
 
 
+def _plain_builtin(value: Any) -> Any:
+    """``value`` as its built-in base value when it is an instance of a subclass of
+    ``int``, ``float``, ``str`` or ``bytes`` (read through the base type's slots, so
+    no subclass method runs); any other value unchanged."""
+    kind = type(value)
+    if kind in (int, float, str, bytes, bool):
+        return value
+    if isinstance(value, int):
+        return int.__int__(value)
+    if isinstance(value, float):
+        return float.__float__(value)
+    if isinstance(value, str):
+        return str.__str__(value)
+    if isinstance(value, bytes):
+        return b"".join((value,))
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Node kinds and what a node holds
 # ---------------------------------------------------------------------------
 
 
+def _lists_hold(row: Row, members: list[Row], node: Any) -> bool:
+    """Whether every list-valued data column of a fold's output ``row`` holds the
+    members' values of that column, one element per member, in member order."""
+    for column in _keys(node)[1]:
+        value = row.get(column)
+        if not isinstance(value, list) or not all(column in m for m in members):
+            continue
+        if not same_value(value, [m[column] for m in members]):
+            return False
+    return True
+
+
 def _kind(node: Any) -> str:
+    """A node's kind for provenance: ``"source"``, ``"function"`` or ``"operator"``.
+
+    Decided by the node's class, never by its label.
+
+    Args:
+        node: A job node.
+
+    Returns:
+        The kind.
+    """
     from orcapod.core.nodes.function_node import FunctionJobNode
     from orcapod.core.nodes.source_node import SourceNodeBase
 
@@ -257,6 +300,16 @@ def _source_snapshot(node: Any) -> pa.Table | None:
     stream = vars(bound).get("_stream")
     if type(stream) is not ArrowTableStream:
         return None
+    form = vars(node).get("_declared_form")
+    if form is not None:
+        # A narrower bind: the job reads the rows in the declared form (nullable
+        # fields, the slot's system-tag names), so the snapshot is read in it too:
+        # the same values and row hashes the job's rows have.
+        raw = stream.as_table(
+            columns={"system_tags": True, "source": True, "context": True}
+        )
+        declared = node._declared_stream(bound, form, raw)  # pyright: ignore[reportPrivateUsage]  # the node's own declared form, library code
+        return declared.as_table(columns=_COLUMNS)
     table = stream.as_table(columns=_COLUMNS)
     # The job's source node presents the system tags under the names of its declared
     # schema: one source-id and one record-id column, matched by prefix.
@@ -453,9 +506,8 @@ def _fits(node: Any, index: int, row: Row, position: str, reader: Any) -> bool:
         pairs = _pairs(row, list(mapping))
         if not pairs:
             return False
-        snapshot = reader.held(upstream)
-        if snapshot is not None:
-            held = {p for r in snapshot for p in _pairs(r, _system_tags(r))}
+        held = reader.held_pairs(upstream)
+        if held is not None:
             return pairs <= held
         ids = _static_source_ids(upstream)
         return all(sid in ids for sid, _ in pairs)
@@ -608,6 +660,21 @@ class _Reader:
     stored: dict[int, tuple[list[Row], dict[bytes, Row]]] = field(default_factory=dict)
     folds: dict[int, dict[int, list[Row]] | None] = field(default_factory=dict)
     lookups: _Lookups = field(default_factory=dict)
+    pair_sets: dict[int, set[tuple[Any, Any]] | None] = field(default_factory=dict)
+    entry_rows: dict[int, list[Row]] = field(default_factory=dict)
+
+    def held_pairs(self, node: Any) -> set[tuple[Any, Any]] | None:
+        """The ``(source id, record id)`` pairs of the rows ``node`` holds, built once
+        per call; ``None`` when its rows are not held."""
+        key = id(node)
+        if key not in self.pair_sets:
+            rows = self.held(node)
+            self.pair_sets[key] = (
+                None
+                if rows is None
+                else {p for r in rows for p in _pairs(r, _system_tags(r))}
+            )
+        return self.pair_sets[key]
 
     def table(self, node: Any) -> pa.Table | None:
         """The rows the node holds, with system tags, tokens and row hashes.
@@ -626,11 +693,31 @@ class _Reader:
         return self.tables[key]
 
     def held(self, node: Any) -> list[Row] | None:
+        """The rows ``node`` holds, as dictionaries, read once per call.
+
+        Args:
+            node: A job node.
+
+        Returns:
+            ``None`` when its rows are not read (no run, or a source whose rows are not
+            held); ``[]`` for a completed run with no rows.
+        """
         key = id(node)
         if key not in self.rows:
             table = self.table(node)
             self.rows[key] = None if table is None else table.to_pylist()
         return self.rows[key]
+
+    def entries(self, node: Any) -> list[Row]:
+        """A function node's own stored entries, without reading its results (what
+        ``why_missing``'s stored answer needs); from ``provenance`` when already read."""
+        key = id(node)
+        if key in self.stored:
+            return self.stored[key][0]
+        if key not in self.entry_rows:
+            entries, _ = node._stored_provenance(results=False)  # pyright: ignore[reportPrivateUsage]  # the provenance reader of the node, ITL-1432
+            self.entry_rows[key] = [] if entries is None else entries.to_pylist()
+        return self.entry_rows[key]
 
     def provenance(self, node: Any) -> tuple[list[Row], dict[bytes, Row]]:
         """A function node's own stored entries, and its results by id."""
@@ -681,6 +768,16 @@ class _Reader:
             0,
             _system_tags(up_rows[0]) if up_rows else [],
         )
+        if rows and (
+            set(mapping) != set(_system_tags(rows[0]))
+            or set(mapping.values()) != set(_system_tags(up_rows[0]) if up_rows else [])
+        ):
+            # Every system-tag column must take part (source id and record id alike),
+            # or a group would be trusted on part of its fold.
+            raise ProvenanceInconsistencyError(
+                f"node {node.label!r}: its system-tag columns do not map one to one "
+                f"onto those of {upstream.label!r}, so its folds cannot be checked"
+            )
         assigned: dict[int, list[Row]] = {}
         ordered = sorted(mapping.items())
         by_folded: dict[tuple[Any, ...], list[Row]] = {}
@@ -698,6 +795,16 @@ class _Reader:
                 if mapping
                 else []
             )
+            member_rows = [up_rows[i] for i in members]
+            if len(found) > 1:
+                # Several held rows fold to these system tags (two cached versions of
+                # one record): the one whose lists hold these members' values, one
+                # element per member; still refused when several do.
+                found = [
+                    r
+                    for r in found
+                    if id(r) not in assigned and _lists_hold(r, member_rows, node)
+                ]
             if len(found) != 1 or id(found[0]) in assigned:
                 raise ProvenanceInconsistencyError(
                     f"node {node.label!r}: folding the system tags of the members of a "
@@ -874,7 +981,11 @@ def _function_run(
             f"node {node.label!r}: the stored entry names a result the result "
             "database does not hold"
         )
-    if column in result and not same_value(result[column], row.get(column)):
+    if column not in result:
+        raise ProvenanceInconsistencyError(
+            f"node {node.label!r}: the stored result holds no {column!r}"
+        )
+    if not same_value(result[column], row.get(column)):
         raise ProvenanceInconsistencyError(
             f"node {node.label!r}: the stored result holds {column}="
             f"{result[column]!r}, the node holds {row.get(column)!r}"
@@ -1676,6 +1787,22 @@ class _Tracer:
         else:
             wanted = list(range(len(members)))
             rest = ()
+        # One element per member, in the value and in its parallel token list.
+        if not isinstance(values, list) or len(cast(list[Any], values)) != len(members):
+            raise ProvenanceInconsistencyError(
+                f"node {node.label!r}: {column!r} does not hold one element per member "
+                f"of its group ({len(members)} members)"
+            )
+        if isinstance(tokens, list) and len(cast(list[Any], tokens)) != len(members):
+            raise ProvenanceInconsistencyError(
+                f"node {node.label!r}: the tokens of {column!r} are not one per member "
+                f"of its group ({len(members)} members)"
+            )
+        if any(not -len(members) <= i < len(members) for i in wanted):
+            raise ProvenanceInconsistencyError(
+                f"node {node.label!r}: position {wanted[0]} is outside its group "
+                f"of {len(members)} members"
+            )
         inputs: list[TraceStep] = []
         for i in wanted:
             m = members[i]
@@ -1752,6 +1879,17 @@ class _Tracer:
         )
 
 
+def _snapshot(value: Any) -> Any:
+    """A copy of a selector value's lists and mappings (no user method is called);
+    other values as given."""
+    if isinstance(value, list):
+        return [_snapshot(v) for v in cast(list[Any], value)]
+    if isinstance(value, dict):
+        items = cast(dict[Any, Any], value)
+        return {k: _snapshot(v) for k, v in items.items()}
+    return value
+
+
 def _select_rows(
     node: Any, rows: list[Row], row: Mapping[str, Any], known: set[str]
 ) -> list[Row]:
@@ -1780,11 +1918,14 @@ def _select_rows(
     tags = list(_keys(node)[0])
 
     def place(value: Any) -> tuple[int, Any]:
-        # A total order, as GroupBy's: values, then NaN, then null.
+        # A total order, as GroupBy's: values, then NaN, then null; inside a list
+        # (a Batch's list-valued tag) element by element, by the same rule.
         if value is None:
             return (2, 0)
         if isinstance(value, float) and value != value:
             return (1, 0)
+        if isinstance(value, list):
+            return (0, tuple(place(v) for v in cast(list[Any], value)))
         return (0, value)
 
     def typed(r: Row) -> tuple[Any, ...]:
@@ -1822,7 +1963,10 @@ def trace(node: Any, row: Mapping[str, Any], column: str) -> Trace:
             holds and stores, or is ambiguous.
     """
     tracer = _Tracer()
-    selector = tuple(row.items())  # as given: shown in the header, matched by value
+    # A snapshot, as given: shown in the header and matched by value, so a caller
+    # changing its list afterwards changes neither the match nor the header.
+    row = {name: _snapshot(value) for name, value in row.items()}
+    selector = tuple(row.items())
     rows = tracer.reader.held(node)
     if rows is None:
         status = "unavailable" if _kind(node) == "source" else "not_computed"
@@ -2269,7 +2413,7 @@ def _reached(
     """
     if function_node is None or function_node._pipeline_database is None:  # pyright: ignore[reportPrivateUsage]
         return None, None
-    entries, _ = reader.provenance(function_node)
+    entries = reader.entries(function_node)
     if not entries:
         return None, None
     names = _system_tags(entries[0])

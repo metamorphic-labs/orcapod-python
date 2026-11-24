@@ -91,12 +91,15 @@ def sessions() -> ArrowTableSource:
 
 @function_pod(output_keys=["rate_hz", "per_min"])
 def rates(n_spikes: int, duration_s: float) -> tuple[float, float]:
+    """Spikes per second and per minute; counts its calls (no call may come from a
+    provenance read). Equal inputs (u0 and u2 of m1 s1) share one stored result."""
     CALLS["rates"] += 1
     return n_spikes / duration_s, 60 * n_spikes / duration_s
 
 
 @function_pod(output_keys=["mean_hz", "n_units"])
 def means(rate_hz: list[float]) -> tuple[float, int]:
+    """The mean rate and the number of rates of a group; counts its calls."""
     CALLS["means"] += 1
     return sum(rate_hz) / len(rate_hz), len(rate_hz)
 
