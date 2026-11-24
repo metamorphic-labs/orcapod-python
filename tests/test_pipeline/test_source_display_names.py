@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 import warnings
 from collections.abc import Iterator
@@ -12,7 +13,11 @@ import pyarrow as pa
 import pytest
 
 from orcapod import PipelineJob, function_pod
-from orcapod.core.sources.display_names import LabelledSource, display_names
+from orcapod.core.sources.display_names import (
+    LabelledSource,
+    display_names,
+    labelled_source,
+)
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import RestrictedAggregationWarning
 from orcapod.sources import DictSource, SpiralDBTableSource
@@ -248,8 +253,7 @@ def _spiral(project: str, dataset: str, **kwargs: Any) -> SpiralDBTableSource:
         dataset=dataset,
         table_name="units",
         label="units",
-        tag_only_columns=True,
-        **kwargs,
+        **{"tag_only_columns": True, **kwargs},
     )
 
 
@@ -274,19 +278,87 @@ def test_one_table_of_two_datasets_or_projects(
     assert not {"units (d1)", "units (p1)"} & set(job.nodes)
 
 
-def test_the_restricted_aggregation_warning_names_the_label(spiral: None) -> None:
-    source = _spiral("p1", "d1").where(g=0)
+@pytest.mark.parametrize("use_async", [False, True])
+@pytest.mark.parametrize("by", [["g", "k"], ["k", "g"]])
+@pytest.mark.parametrize("tag_only", [True, ()])
+def test_the_restricted_aggregation_warning_names_the_label(
+    spiral: None, use_async: bool, by: list[str], tag_only: Any
+) -> None:
+    sources = [
+        _spiral("p1", dataset, tag_only_columns=tag_only).where(g=0)
+        for dataset in ("d1", "d2")
+    ]
     job = PipelineJob(name="j", database=InMemoryArrowDatabase())
     with job:
-        source.group_by(["g"], label="grouped")
+        for source, label in zip(sources, ("one", "two"), strict=True):
+            source.group_by(by, label=label)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        job.run()
+        if use_async:
+            asyncio.run(job.run_async())
+        else:
+            job.run()
     (message,) = [
         str(w.message)
         for w in caught
         if issubclass(w.category, RestrictedAggregationWarning)
     ]
-    assert "'units' feeds GroupBy 'grouped'" in message
-    assert message.endswith(f" 'units' is {source.source_id}.")
-    assert message.count(source.source_id) == 1
+    one, two = sources
+    assert (
+        "'units (d1)' feeds GroupBy 'one'; 'units (d2)' feeds GroupBy 'two'" in message
+    )
+    assert message.endswith(
+        f" 'units (d1)' is {one.source_id}. 'units (d2)' is {two.source_id}."
+    )
+
+
+# --- no code of a source runs (CodeRabbit on PR 551) ---------------------------
+
+
+class _Hooked(DictSource):
+    """A source whose attribute access runs user code while ``armed``."""
+
+    SOURCE_KIND = "hooked_display_test"
+    SOURCE_VERSION = 1
+    armed = False
+
+    def __getattribute__(self, name: str) -> Any:
+        if _Hooked.armed:
+            raise AssertionError(f"read {name}")
+        return super().__getattribute__(name)
+
+
+class _Slotted:
+    """A source-like object without an instance dictionary."""
+
+    __slots__ = ()
+
+
+def test_reading_the_label_runs_no_code_of_the_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _Hooked(
+        [{"g": 0, "k": 1, "x": 1, "x2": 2}],
+        tag_columns=["g", "k"],
+        tag_only_columns=True,
+        source_id="left",
+        label="units",
+    )
+    monkeypatch.setattr(_Hooked, "armed", True)
+    found = labelled_source(source)
+    monkeypatch.setattr(_Hooked, "armed", False)
+    assert found is not None
+    assert (found.label, found.source_id) == ("units", "hooked_display_test_v1:left")
+
+
+@pytest.mark.parametrize("label", [None, "cache"])
+def test_a_cache_over_an_object_without_a_dict_has_no_shown_name(
+    label: str | None,
+) -> None:
+    cached = _left(None).cached(InMemoryArrowDatabase(), label=label)
+    found = labelled_source(cached)
+    assert (found and (found.label, found.source_id)) == (
+        ("cache", "dict_v1:left") if label else None
+    )
+    vars(cached)["_source"] = _Slotted()
+    assert labelled_source(cached) is None

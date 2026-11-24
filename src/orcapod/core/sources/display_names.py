@@ -9,10 +9,8 @@ from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
-
-if TYPE_CHECKING:
-    from orcapod.core.sources.base import RootSource
+from types import GetSetDescriptorType
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -32,6 +30,21 @@ class LabelledSource:
     parts: tuple[str, ...]
 
 
+def _stored(source: object) -> Mapping[str, Any]:
+    """Return an object's instance dictionary, read past any hook its class defines."""
+    for cls in type(source).__mro__:
+        found = cls.__dict__.get("__dict__")
+        if isinstance(found, GetSetDescriptorType):
+            return found.__get__(source)
+    return {}
+
+
+def _stored_text(source: object, name: str) -> str:
+    """Return the text stored under ``name``, as a plain ``str``; ``""`` for none."""
+    value = _stored(source).get(name)
+    return str.__str__(value) if isinstance(value, str) else ""
+
+
 def labelled_source(stream: Any) -> LabelledSource | None:
     """Return the source as a display names it, or ``None`` when it has no label.
 
@@ -47,20 +60,25 @@ def labelled_source(stream: Any) -> LabelledSource | None:
     from orcapod.core.sources.source_ids import build_source_id
     from orcapod.core.sources.source_proxy import SourceProxy
 
-    if not isinstance(stream, RootSource) or isinstance(stream, SourceProxy):
+    if not issubclass(type(stream), RootSource):
         return None
-    label = vars(stream).get("_label")
-    source: RootSource = stream
+    label = _stored_text(stream, "_label")
+    if not label or issubclass(type(stream), SourceProxy):
+        return None
+    source = stream
     while type(source) is CachedSource:
-        source = vars(source)["_source"]
-    name = vars(source).get("_source_name")
-    if not isinstance(label, str) or not label or not isinstance(name, str):
+        source = _stored(source).get("_source")
+    # A cache accepts any source-like object; only a root source holds a name to show.
+    if not issubclass(type(source), RootSource) or issubclass(
+        type(source), SourceProxy
+    ):
         return None
-    if isinstance(source, SourceProxy):
+    name = _stored_text(source, "_source_name")
+    if not name:
         return None
     kind, version = type(source).SOURCE_KIND, type(source).SOURCE_VERSION
     near, far = type(source).DISPLAY_PARTS
-    dataset, project = (str(vars(source).get(p) or "") for p in (near, far))
+    dataset, project = _stored_text(source, near), _stored_text(source, far)
     both = f"{project}.{dataset}" if dataset and project else ""
     source_id = build_source_id(kind, version, name)
     return LabelledSource(label, source_id, (dataset, project, both, name, source_id))
