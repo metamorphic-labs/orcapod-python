@@ -16,6 +16,12 @@ from orcapod.channels import (
     WritableChannel,
 )
 from orcapod.core.operators.base import UnaryOperator
+from orcapod.core.operators.gathered_context import (
+    gathered_context_keys,
+    gathered_stream_context,
+    read_members,
+    with_context_keys,
+)
 from orcapod.core.operators.static_output_pod import (
     close_inputs,
     concatenate_batches,
@@ -51,6 +57,9 @@ class Batch(UnaryOperator):
     always simply takes anything and puts into list") is one column, so it becomes
     the same list in both roles and stays a data-tag.  Its source info is one token
     per member, as for any data column: nothing is merged, so no token is folded.
+
+    Every member of a batch has the same data context, which the batch takes; members
+    of different data contexts are refused (ITL-1359).
 
     Args:
         batch_size: Rows per batch; ``0`` puts every row in one batch.
@@ -149,8 +158,12 @@ class Batch(UnaryOperator):
 
         Returns:
             A stream with one row per batch.
+
+        Raises:
+            InputValidationError: If the members of a batch are of different data
+                contexts (ITL-1359).
         """
-        table = stream.as_table(columns={"source": True, "system_tags": True})
+        table, member_contexts, rows_context = read_members(stream)
 
         tag_columns, _ = stream.keys()
 
@@ -163,6 +176,14 @@ class Batch(UnaryOperator):
         )
         kept = table.slice(0, int(offsets[-1].as_py()))
         bounds = cast(list[int], offsets.to_pylist())
+        entry_contexts = gathered_context_keys(
+            "Batch",
+            member_contexts,
+            offsets,
+            table.select(list(tag_columns)),
+            # The members are the rows in order.
+            pa.array(np.arange(table.num_rows, dtype=np.int64), pa.int64()),
+        )
         # Every stream has a data context; StreamProtocol does not declare it.
         type_converter = stream.data_context.type_converter  # pyright: ignore[reportAttributeAccessIssue]
 
@@ -200,9 +221,9 @@ class Batch(UnaryOperator):
 
         # A data-tag stays a data-tag: the same list in both roles.
         return ArrowTableStream(
-            batched_table,
+            with_context_keys(batched_table, entry_contexts),
             tag_columns=tag_columns,
-            data_context=stream.data_context,
+            data_context=gathered_stream_context(entry_contexts, rows_context),
             data_tags=stream_data_tags(stream),
         )
 
