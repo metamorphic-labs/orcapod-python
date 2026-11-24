@@ -370,27 +370,6 @@ def _with_datagram_id(data: Data, datagram_id: uuid.UUID) -> Data:
     return data.with_datagram_uuid(datagram_id)
 
 
-def rows_as_output_stream(
-    rows: Sequence[tuple[TagProtocol, DataProtocol]], node: StreamProtocol
-) -> StreamProtocol:
-    """Return ``rows`` as ``node``'s output stream: the rows, built when read.
-
-    For the job nodes whose output is still their rows (function and side-effect
-    nodes, until ITL-1347 stages 3 and 4): ``RowsOnRead``, built by ``main``'s row path
-    where a successor reads it. One place imports the operator module for them.
-
-    Args:
-        rows: The node's output rows, in order.
-        node: The node.
-
-    Returns:
-        The node's output stream.
-    """
-    from orcapod.core.operators.static_output_pod import rows_on_read
-
-    return rows_on_read(rows, node)
-
-
 def passed_rows_output_stream(
     input_stream: StreamProtocol,
     rows: Sequence[tuple[TagProtocol, DataProtocol]],
@@ -404,7 +383,7 @@ def passed_rows_output_stream(
     table, in the node's data context, ``_slices_are_rows``) the output is F of the
     input's table taken at the rows' positions (``passed``; all rows when ``None``),
     with ``node``'s identity: the table a row-by-row rebuild of ``rows`` gives
-    (``rows_as_output_stream``), made without making the rows again (ITL-1361, stage
+    (``_materialize_upstream``), made without making the rows again (ITL-1361, stage
     4). Any other input, and a table F cannot build, hands on the rows, built when
     read by main's row path (``RowsOnRead``).
 

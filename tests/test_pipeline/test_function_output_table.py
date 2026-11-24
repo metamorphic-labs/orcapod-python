@@ -5,7 +5,7 @@ read from the store are taken from the stored rows' table, the others are built 
 their datagrams, and F's whole-table steps finish the table. It must equal the table
 rebuilt from every output row (``StaticOutputOperatorPod._materialize_upstream``), in
 identity and in every column group, whatever mix of stored and computed rows a run has:
-all stored, none stored, interleaved, duplicate inputs, a function returning ``None``,
+all stored, none stored, interleaved, duplicate inputs, a null output value,
 over the several-items arrangements (tag orders, layouts, data-tags).
 """
 
@@ -30,7 +30,7 @@ from tests.test_pipeline.test_stream_transport_equivalence import (
 
 @function_pod(output_keys="half")
 def halved(d1: int) -> int | None:
-    """``d1 / 10`` for an even tenth, ``None`` (no output row) otherwise."""
+    """``d1 / 10`` for an even tenth, ``None`` (a row with a null ``half``) otherwise."""
     return d1 // 10 if (d1 // 10) % 2 == 0 else None
 
 
@@ -100,6 +100,43 @@ def test_stored_and_computed_rows_interleave(pod: Any, compared: list[int]) -> N
     _job(_keyed(list(range(8))), pod, database).run()
     _job(_keyed([7, 6, 5, 4, 3, 2, 1, 0]), pod, database).run()
     assert len(compared) == 3
+
+
+@pytest.mark.parametrize("load_only", [False, True], ids=["run", "load_only"])
+@pytest.mark.parametrize("pod", [tripled, halved], ids=["every_row", "some_none"])
+@pytest.mark.parametrize(
+    "stored", [[], [6, 1], [5, 3, 1], list(range(8))], ids=lambda s: f"{len(s)}_stored"
+)
+def test_the_held_rows_are_the_outputs_rows_in_order(
+    stored: list[int], pod: Any, load_only: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What a read of the node gives is the table downstream received, in input order
+    (ITL-1441), also when that table mixes rows of the stored table and computed rows."""
+    handed_on: list[Any] = []
+    original = FunctionJobNode._output_stream  # pyright: ignore[reportPrivateUsage]  # what a successor reads
+
+    def output_stream(self: Any, rows: list[Any]) -> Any:
+        out = original(self, rows)
+        handed_on.append(out)
+        return out
+
+    database = InMemoryArrowDatabase()
+    if stored:
+        _job(_keyed(stored), pod, database).run()
+    monkeypatch.setattr(FunctionJobNode, "_output_stream", output_stream)
+    keys = [3, 0, 7, 1, 6, 2, 5, 4]
+    job = _job(_keyed(keys), pod, database)
+    job.run(load_only=load_only)
+    node = job.nodes["fn"]
+    expected = [j for j in keys if j in stored or not load_only]
+    config = {"system_tags": True, "source": True}
+    (output,) = handed_on
+    # The rows, before the output's table is built, and the table built from them.
+    assert [tag["j"] for tag, _ in node.iter_data()] == expected
+    if expected:
+        table = output.as_table(columns=config)
+        assert table["j"].to_pylist() == expected
+        assert node.as_table(columns=config).to_pylist() == table.to_pylist()
 
 
 def test_repeated_values_give_one_row_each(compared: list[int]) -> None:
