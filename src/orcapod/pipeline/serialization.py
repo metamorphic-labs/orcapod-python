@@ -457,6 +457,25 @@ def resolve_database_from_config(
 _CONNECTOR_KINDS = ("sqlite", "postgresql", "spiraldb")
 
 
+def saved_database_kind(config: Any) -> str:
+    """The kind of a saved database configuration, for a message.
+
+    Nothing of the saved text is returned: it may hold a credential.
+
+    Args:
+        config: A saved database configuration.
+
+    Returns:
+        A key of ``DATABASE_REGISTRY``, or ``"unknown database kind"``.
+    """
+    if isinstance(config, dict):
+        kind = cast("dict[str, Any]", config).get("type")
+        for known in DATABASE_REGISTRY:
+            if kind == known:
+                return known
+    return "unknown database kind"
+
+
 def saved_connector_kind(config: Any) -> str | None:
     """The kind of connector a saved database configuration is over, or ``None``.
 

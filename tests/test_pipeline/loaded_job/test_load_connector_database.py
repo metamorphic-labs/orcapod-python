@@ -13,6 +13,7 @@ import json
 import logging
 import traceback
 from collections.abc import Iterator
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -301,6 +302,76 @@ def test_no_saved_text_is_shown_by_a_load(
     text = "\n".join([*shown, caplog.text, *(str(w.message) for w in recwarn)])
     assert "synthetic-credential" not in text
     assert SECRET not in text
+
+
+def _delta_changes(root: Path) -> dict[str, dict[str, Any]]:
+    """Delta configurations that fail to rebuild, with ``SECRET`` in what they hold."""
+    blocked = root / "a-file"
+    blocked.write_text("not a directory")
+    return {
+        "a path that cannot be made": {"root_uri": f"{blocked}/{SECRET}"},
+        "a URI that is not supported": {"root_uri": f"{SECRET}::x"},
+        "a URI that is not text": {"root_uri": {SECRET: SECRET}},
+        "options that are not a mapping": {
+            "root_uri": f"s3://bucket/{SECRET}",
+            "storage_options": SECRET,
+        },
+        "options with a credential": {
+            "root_uri": f"{blocked}/x",
+            "storage_options": {"AWS_SECRET_ACCESS_KEY": SECRET, SECRET: SECRET},
+        },
+        "an unknown kind": {"type": SECRET},
+    }
+
+
+@pytest.mark.parametrize("slot", ["database", "result_database"])
+@pytest.mark.parametrize("fails", ["as the database does", "with the whole config"])
+def test_a_failed_delta_rebuild_logs_the_slot_kind_and_exception_type_only(
+    tmp_path: Path,
+    slot: str,
+    fails: str,
+    caplog: pytest.LogCaptureFixture,
+    recwarn: pytest.WarningsRecorder,
+) -> None:
+    """Review of PR 540: the exception's text can hold a saved path, URI or option."""
+    path = tmp_path / "job.json"
+    _save(
+        path,
+        database=DeltaTableDatabase(tmp_path / "delta"),
+        result_database=DeltaTableDatabase(tmp_path / "results"),
+    )
+    data = json.loads(path.read_text())
+    caplog.set_level(logging.DEBUG)
+    for name, change in _delta_changes(tmp_path).items():
+        changed = json.loads(json.dumps(data))
+        changed["bindings"][slot].update(change)
+        path.write_text(json.dumps(changed))
+        caplog.clear()
+
+        def refuse(config: dict[str, Any]) -> Any:
+            raise OSError(f"cannot open {config}")
+
+        with ExitStack() as stack:
+            if fails == "with the whole config":
+                stack.enter_context(
+                    patch.object(DeltaTableDatabase, "from_config", refuse)
+                )
+            # The other slot is given, so only the changed one is rebuilt.
+            other = "result_database" if slot == "database" else "database"
+            given: dict[str, Any] = {other: DeltaTableDatabase(tmp_path / "given")}
+            shown = ""
+            try:
+                PipelineJob.load(path, **given)
+            except Exception as exc:
+                shown = "".join(traceback.format_exception(exc))
+        text = "\n".join([shown, caplog.text, *(str(w.message) for w in recwarn)])
+        assert "synthetic-credential" not in text, name
+        if fails == "with the whole config":
+            assert f"bindings.{slot}" in caplog.text
+            if name == "an unknown kind":
+                assert "(unknown database kind): ValueError." in caplog.text
+            else:
+                assert "(delta_table): OSError." in caplog.text
 
 
 @pytest.mark.parametrize(

@@ -1789,6 +1789,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             require_tag_only_columns,
             resolve_source_from_config,
             saved_connector_kind,
+            saved_database_kind,
         )
 
         path = _Path(path)
@@ -1933,11 +1934,15 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     effective_database = resolve_database_from_config(store_config)
                 except Exception as exc:
                     unresolved_database = store_config
+                    # The exception's text can hold a saved path, URI or option, and
+                    # with it a credential: only its type is logged (ITL-1391).
                     logger.warning(
-                        "Could not reconstruct the database from its saved config: %s. "
+                        "Could not reconstruct the database from its saved config: "
+                        "bindings.database (%s): %s. "
                         "Node results cannot be read until a database is given: "
                         "PipelineJob.load(path, database=...) or job.bind(database=...).",
-                        exc,
+                        saved_database_kind(store_config),
+                        type(exc).__name__,
                     )
 
         # Reconstruct the job directly without going through to_invocations().
@@ -1974,11 +1979,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     unresolved_result_database = result_config
                     logger.warning(
                         "Could not reconstruct the job's separate result database "
-                        "(bindings.result_database) from its saved config: %s. The "
+                        "(bindings.result_database) from its saved config (%s): %s. The "
                         "function nodes' results cannot be read until it is given: "
                         "PipelineJob.load(path, result_database=...) or "
                         "job.bind(result_database=...).",
-                        exc,
+                        saved_database_kind(result_config),
+                        type(exc).__name__,
                     )
 
         job = cls(
