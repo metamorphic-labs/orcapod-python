@@ -11,6 +11,9 @@ throughout the OrcaPod framework, including:
       ``orcapod.types.condition``.
     - ``Explanation``, ``SourceReading``, ``Step`` -- what ``stream.explain()`` returns,
       defined in ``orcapod.types.explanation``.
+    - ``Trace``, ``TraceStep``, ``FunctionRun``, ``SourceCell``, ``Absence``,
+      ``Highlight`` -- what ``node.trace()`` and ``node.why_missing()`` return, and a
+      diagram highlight, defined in ``orcapod.types.provenance``.
 """
 
 from __future__ import annotations
@@ -37,6 +40,14 @@ from orcapod.types.condition import col as col
 from orcapod.types.explanation import Explanation as Explanation
 from orcapod.types.explanation import SourceReading as SourceReading
 from orcapod.types.explanation import Step as Step
+
+# Re-exported: what ``node.trace()`` and ``node.why_missing()`` return (ITL-1432).
+from orcapod.types.provenance import Absence as Absence
+from orcapod.types.provenance import FunctionRun as FunctionRun
+from orcapod.types.provenance import Highlight as Highlight
+from orcapod.types.provenance import SourceCell as SourceCell
+from orcapod.types.provenance import Trace as Trace
+from orcapod.types.provenance import TraceStep as TraceStep
 
 if TYPE_CHECKING:
     from orcapod.protocols.core_protocols import DataFunctionExecutorProtocol

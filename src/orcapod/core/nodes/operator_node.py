@@ -28,6 +28,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from orcapod import contexts
+from orcapod.core.nodes.provenance_methods import ProvenanceMethods
 from orcapod.core.data_tags import (
     mark_data_tags,
     data_tag_names,
@@ -803,7 +804,7 @@ class OperatorNode(OperatorNodeBase):
 # ---------------------------------------------------------------------------
 
 
-class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
+class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
     """DB-backed execution node for operator pod invocations.
 
     Stream node representing an operator invocation with optional DB persistence.

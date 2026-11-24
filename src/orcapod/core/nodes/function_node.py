@@ -24,7 +24,7 @@ import sys
 import uuid
 from abc import abstractmethod
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import datetime, timezone
 from functools import partial
 from typing import Any, Literal, NamedTuple, cast
@@ -33,6 +33,7 @@ import polars as pl
 import pyarrow as pa
 
 from orcapod import contexts
+from orcapod.core.nodes.provenance_methods import ProvenanceMethods
 from orcapod.core.function_pod import (
     fall_through_tags,
     function_input,
@@ -1400,7 +1401,7 @@ def _joined_from_stored(
     return pa.Table.from_arrays(columns, names=names)
 
 
-class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
+class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
     """DB-backed execution node for function pod invocations.
 
     Created by ``PipelineJob`` at run time; never recorded inside a plain
@@ -1429,6 +1430,9 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
     # its number of inputs; None when no run completed (ITL-1093). A class default so
     # nodes rebuilt from a saved descriptor start without a run.
     _run_entry_counts: Counter[bytes] | None = None
+    # The same base entry ids in the order the run emitted its rows (ITL-1432): the
+    # order the rows are held in, so a read gives them as downstream received them.
+    _run_entry_order: tuple[bytes, ...] = ()
     # Whether the last completed run was load-only, and how many of its inputs had no
     # stored result (ITL-1095). Class defaults for nodes rebuilt from a descriptor.
     _run_load_only: bool = False
@@ -1466,6 +1470,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         self._cached_output_table: "pa.Table | None" = None
         self._cached_content_hash_column: "pa.Array | None" = None
         self._run_entry_counts = None
+        self._run_entry_order = ()
 
         # DB persistence state (initially None; set via __init__ params or attach_databases)
         self._pipeline_database: ArrowDatabaseProtocol | None = None
@@ -1986,6 +1991,7 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         self._cached_output_table = None
         self._cached_content_hash_column = None
         self._run_entry_counts = None
+        self._run_entry_order = ()
         self._run_load_only = False
         self._run_not_stored = 0
         self._run_failed = 0
@@ -2000,20 +2006,23 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         cache may hold more (results of other inputs, read from the database), which stay
         cached for reuse but are not rows of this run (ITL-1093). Without a completed
         run in this process there are no rows, whatever the cache or the database holds
-        (ITL-1095). Rows come in the order the cache holds them. An input without output
-        (an inactive function) is not a row.
+        (ITL-1095). Rows come in the order the run passed them downstream, a stored
+        result and a computed one alike, one row per input (a repeated input's row at
+        each of its places), so every read (``iter_data``, ``as_table``, ``head``, the
+        data frames, a downstream node's own ``run()``) gives what downstream received
+        (ITL-1441). A synchronous run passes them in input order, also over a partly
+        stored history, load-only (the stored inputs) and after ``clear_cache()``. An
+        asynchronous run promises no order (ITL-1437): its rows are held in the order
+        that run emitted them. An input without output (an inactive function) is not a
+        row.
         """
-        counts = self._run_entry_counts
-        if counts is None:
+        if self._run_entry_counts is None:
             return
-        pairs: Iterable[tuple[TagProtocol, DataProtocol | None]] = (
-            pair
-            for eid, pair in self._cached_output_datas.items()
-            for _ in range(counts.get(eid, 0))
-        )
-        for tag, data in pairs:
-            if data is not None:
-                yield tag, data
+        cache = self._cached_output_datas
+        for eid in self._run_entry_order:
+            pair = cache.get(eid)
+            if pair is not None and pair[1] is not None:
+                yield pair[0], pair[1]
 
     def _set_run_rows(
         self,
@@ -2026,12 +2035,14 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         """Make the inputs of a completed run, by base entry id, the rows this node holds.
 
         Args:
-            entry_ids: The base entry ids of the run's inputs whose rows the node holds.
+            entry_ids: The base entry ids of the run's inputs whose rows the node holds,
+                in the order the run emitted them.
             load_only: Whether the run was load-only (ITL-1095).
             not_stored: How many inputs of a load-only run had no stored result.
             failed: How many rows of the run failed (error policy ``"continue"``).
         """
         self._run_entry_counts = Counter(entry_ids)
+        self._run_entry_order = tuple(entry_ids)
         self._run_load_only = load_only
         self._run_not_stored = not_stored
         self._run_failed = failed
@@ -3520,6 +3531,93 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
     # Cache-only helpers (PLT-1156)
     # ------------------------------------------------------------------
 
+    def _stored_provenance(
+        self, *, results: bool = True
+    ) -> tuple[pa.Table | None, pa.Table | None]:
+        """Read this node's stored pipeline entries and results with every column.
+
+        The provenance reader (ITL-1432). Unlike ``get_all_records``, nothing is joined
+        and nothing is dropped: the pipeline entries keep their key
+        (``__pipeline_entry_id``), ``__pipeline_base_entry_id``, the recomputation
+        index, ``__node_content_hash`` and ``__computed``; the results keep their key
+        as ``__data_id``, the column the pipeline entries name it by. Only this node's
+        entries are kept (``__node_content_hash``, when the table is shared by the
+        nodes of one pipeline hash), and only rows of the current data context, of
+        both tables. Results are read from the persistent result database and, when
+        one is attached, the ephemeral one. Each table read is first refreshed to the
+        store's current version, and only the tables read (``results=False`` touches no
+        result table). Nothing is computed or written.
+
+        Args:
+            results: Whether to read the result tables too; ``False`` reads the pipeline
+                entries only (a question about which inputs reached the function).
+
+        Returns:
+            The pipeline entries and the results, each ``None`` when nothing is
+            stored or no database is attached.
+        """
+        if self._pipeline_database is None or self._cached_function_pod is None:
+            return None, None
+        # A read of what is stored: the store's current version (ITL-1408), of each
+        # table this read fetches and of no other (entries only: no result table).
+        self._pipeline_database.refresh_table(self._versioned_pipeline_path)
+        context_key = self._stored_data_context_key
+        entries = self._pipeline_database.get_all_records(
+            self._versioned_pipeline_path,
+            record_id_column=_PIPELINE_ENTRY_ID_COL,
+        )
+        if entries is not None:
+            entries = keep_rows_of_data_context(entries, context_key)
+            if self._table_scope == "pipeline_hash":
+                own_hash = self.content_hash().to_prefixed_digest()
+                mask = pa.array(
+                    [
+                        value == own_hash
+                        for value in entries.column(
+                            constants.NODE_CONTENT_HASH_COL
+                        ).to_pylist()
+                    ],
+                    pa.bool_(),
+                )
+                entries = entries.filter(mask)
+        if not results:
+            return entries, None
+        found: list[pa.Table] = []
+        places: list[tuple[ArrowDatabaseProtocol, tuple[str, ...]]] = [
+            (
+                self._cached_function_pod.result_database,
+                self._cached_function_pod.record_path,
+            )
+        ]
+        if self._ephemeral_cached_pod is not None:
+            places.append(
+                (
+                    self._ephemeral_cached_pod.result_database,
+                    self._ephemeral_cached_pod.record_path,
+                )
+            )
+        elif self.ephemeral_result_database is not None:
+            # A loaded node has no pod to build an ephemeral cached pod from; its
+            # results are at the same path in the ephemeral database.
+            places.append(
+                (self.ephemeral_result_database, self._cached_function_pod.record_path)
+            )
+        for database, path in places:
+            database.refresh_table(path)
+            stored = database.get_all_records(
+                path, record_id_column=constants.DATA_RECORD_ID
+            )
+            if stored is not None:
+                found.append(keep_rows_of_data_context(stored, context_key))
+        result_table = (
+            None
+            if not found
+            else found[0]
+            if len(found) == 1
+            else pa.concat_tables(found, promote_options="default")
+        )
+        return entries, result_table
+
     def _fetch_joined_records(
         self,
         base_entry_ids: list[bytes] | None = None,
@@ -4492,8 +4590,11 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                                 ctx_obs.on_data_end(
                                     node_label, tag, data, cached_data, cached=True
                                 )
-                                run_entry_ids.append(base_entry_id)
                                 await output.send((cached_tag, cached_data))
+                                # Recorded once the output took the row, so the held
+                                # order is the order downstream received (a parked
+                                # send can resume after a later one).
+                                run_entry_ids.append(base_entry_id)
                             else:
                                 self._preflight_pipeline_write_schema()
                                 correlation_key = uuid.uuid4().bytes
@@ -4568,8 +4669,9 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
                         # Commits every commit_every_rows rows inside a job (ITL-919);
                         # no await in between, so no other row interleaves.
                         self._row_processed()
-                        run_entry_ids.append(base_entry_id)
                         await output.send((clean_tag, output_data))
+                        # Recorded once the output took the row (see route_inputs).
+                        run_entry_ids.append(base_entry_id)
 
                 # Capture outer self so _NodeLabelObserver methods can
                 # update FunctionJobNode state without shadowing with 'self'.
