@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 import asyncio
+import json
 from collections import defaultdict
 from contextlib import AbstractContextManager
 from pathlib import Path
@@ -105,13 +106,33 @@ def run(job: PipelineJob, asynchronous: bool, every: int | None) -> None:
 
 
 def delta_history(root: Path, kind: str) -> list[tuple[str, int]]:
-    """Read the operation and number of rows added by each Delta commit."""
+    """Read the operation and number of rows added by each Delta commit.
+
+    The rows are those of the data files each commit adds (the ``numRecords`` of its
+    add actions in the log), which holds for an append and a MERGE alike: their
+    operation metrics name the count differently (ITL-1377 makes every commit to an
+    existing table a MERGE).
+    """
     (path,) = root.rglob(f"{kind}/_delta_log")
-    counts = deltalake.DeltaTable(str(path.parent)).history()
-    return [
-        (item["operation"], int(item["operationMetrics"]["num_added_rows"]))
-        for item in reversed(counts)
-    ]
+    table = deltalake.DeltaTable(str(path.parent))
+    history = list(reversed(table.history()))
+    commits: list[tuple[str, int]] = []
+    for item in history:
+        version = int(item["version"])
+        entry = path / f"{version:020d}.json"
+        added = 0
+        for line in entry.read_text().splitlines():
+            action = json.loads(line)
+            if "add" in action:
+                added += int(json.loads(action["add"]["stats"])["numRecords"])
+        commits.append((str(item["operation"]), added))
+    return commits
+
+
+def commits_of(batches: list[int]) -> list[tuple[str, int]]:
+    """Main's cadence, one commit per batch, as ITL-1377 commits it: the first creates
+    the table (WRITE), every later one is a MERGE."""
+    return [("WRITE" if i == 0 else "MERGE", rows) for i, rows in enumerate(batches)]
 
 
 @pytest.mark.parametrize("pipeline_kind", ["memory", "delta", "noop", "connector"])
@@ -195,13 +216,9 @@ def test_mixed_database_batches_keep_main_cadence(
     elif pipeline_kind == "connector":
         assert list(connector.upserts.values()) == [pipeline_batches]
     else:
-        assert delta_history(pipeline_root, PIPELINE) == [
-            ("WRITE", rows) for rows in pipeline_batches
-        ]
+        assert delta_history(pipeline_root, PIPELINE) == commits_of(pipeline_batches)
     if result_kind == "delta":
-        assert delta_history(result_root, RESULT) == [
-            ("WRITE", rows) for rows in result_batches
-        ]
+        assert delta_history(result_root, RESULT) == commits_of(result_batches)
     elif pipeline_kind == "noop":
         assert not promotions[RESULT], (
             "main leaves separate in-memory results pending in a dry run"
@@ -243,7 +260,7 @@ def test_noop_result_store_keeps_pipeline_records(
     results = NoOpArrowDatabase()
     job = make_job(db, results)
     run(job, asynchronous, 3)
-    assert delta_history(tmp_path, PIPELINE) == [("WRITE", 3), ("WRITE", 2)]
+    assert delta_history(tmp_path, PIPELINE) == commits_of([3, 2])
     assert not results.list_table_paths()
     assert job.nodes["out"].as_table().num_rows == 5
     assert job.nodes["out"].as_source().as_table().num_rows == 0

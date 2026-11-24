@@ -325,8 +325,8 @@ def test_a_storage_typed_column_carrying_another_extension_name(tmp_path: Path) 
 # ── Second review of PR 504 (N2-N5): refuse only what the commit would refuse ──────
 
 ROUTES = {
-    "append route (every id new)": [b"2"],
-    "MERGE route (a stored id among them)": [b"1", b"2"],
+    "every id new": [b"2"],
+    "a stored id among them": [b"1", b"2"],
 }
 
 
@@ -434,8 +434,8 @@ def test_a_null_column_is_checked_like_any_column(
     """N3: a null column with no metadata takes the stored type; one carrying an
     identifier the stored logical type reads is written under the stored identifier;
     one carrying another type's identifier is refused when added wherever the commit
-    would send it (an evolving MERGE, or an append of new ids only), and stored where
-    the MERGE keeps the stored schema. Nothing reaches a flush that Delta refuses."""
+    would send it (a MERGE that evolves the schema), and stored where the MERGE keeps
+    the stored schema. Nothing reaches a flush that Delta refuses."""
     field, column, _ = _path_column()
     path_type = field.type
     identifiers: dict[str, dict[str, Any] | None] = {

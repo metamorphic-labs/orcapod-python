@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import deltalake
+from deltalake.exceptions import CommitFailedError
 import pyarrow as pa
 import pytest
 
@@ -48,10 +49,11 @@ def _struct(*fields: Any) -> Any:
     return pa.struct(list(fields))
 
 
+@pytest.mark.parametrize("failure", ["storage", "commit-conflict"])
 def test_retry_keeps_schema_check_when_a_dependent_row_is_withdrawn(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
-    """Retry the ready row after failure cancels the blocked row in the same table."""
+    """A retry checks the restored schema after either kind of failure."""
     db = DeltaTableDatabase(tmp_path, allow_schema_evolution=True)
     legacy = _rows([b"stored"], v=(I64, [0]))
     db.add_records(PATH, legacy, record_id_column="id", flush=True)
@@ -79,21 +81,43 @@ def test_retry_keeps_schema_check_when_a_dependent_row_is_withdrawn(
         with db.guard_record(PATH, b"blocked", attempt):
             db.add_records(PATH, blocked, record_id_column="id")
 
+    restored_during_merge = False
+
     def fail_write(*args: object, **kwargs: object) -> None:
-        """Fail the commit before publishing the ready row."""
+        """Fail the commit, restoring the table first for a concurrent commit."""
+        nonlocal restored_during_merge
+        if failure == "commit-conflict":
+            assert not restored_during_merge, (
+                "retry reached MERGE with the legacy schema"
+            )
+            _ = deltalake.DeltaTable(uri).restore(0)
+            restored_during_merge = True
+            raise CommitFailedError("another writer restored the table")
         raise OSError("temporary write failure")
 
     with monkeypatch.context() as patch:
-        patch.setattr(deltalake, "write_deltalake", fail_write)
-        with pytest.raises(OSError, match="temporary write failure"):
-            db.flush_batch(PATH)
-    queued = db.get_all_records(PATH, record_id_column="id")
-    assert queued is not None
-    assert sorted(cast(list[bytes], queued["id"].to_pylist())) == [b"ready", b"stored"]
+        patch.setattr(deltalake.DeltaTable, "merge", fail_write)
+        if failure == "commit-conflict":
+            with pytest.raises(
+                StoredTableSchemaError, match="Rebuild the pipeline table"
+            ):
+                db.flush_batch(PATH)
+            assert restored_during_merge
+        else:
+            with pytest.raises(OSError, match="temporary write failure"):
+                db.flush_batch(PATH)
 
-    _ = deltalake.DeltaTable(uri).restore(0)
-    with pytest.raises(StoredTableSchemaError, match="Rebuild the pipeline table"):
-        db.flush_batch(PATH)
+    if failure == "storage":
+        queued = db.get_all_records(PATH, record_id_column="id")
+        assert queued is not None
+        assert sorted(cast(list[bytes], queued["id"].to_pylist())) == [
+            b"ready",
+            b"stored",
+        ]
+        _ = deltalake.DeltaTable(uri).restore(0)
+        with pytest.raises(StoredTableSchemaError, match="Rebuild the pipeline table"):
+            db.flush_batch(PATH)
+
     db.flush_batch(PATH)
     stored = db.get_all_records(PATH, record_id_column="id")
     assert stored is not None and stored.equals(legacy)
