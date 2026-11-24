@@ -441,8 +441,7 @@ def resolve_database_from_config(
         return root_db.at(*config["path"])
     if db_type not in DATABASE_REGISTRY:
         raise ValueError(
-            f"Unknown database type: {db_type!r}. "
-            f"Known types: {sorted(DATABASE_REGISTRY.keys())}"
+            f"Unknown database type. Known types: {sorted(DATABASE_REGISTRY.keys())}"
         )
     if db_type == "in_memory":
         logger.warning(
@@ -453,19 +452,25 @@ def resolve_database_from_config(
     return cls.from_config(config)
 
 
-def saved_connector_type(config: Any) -> str | None:
+#: The kinds of connector a message may name: a saved kind outside this list is never
+#: shown, since an odd file can hold a credential there.
+_CONNECTOR_KINDS = ("sqlite", "postgresql", "spiraldb")
+
+
+def saved_connector_kind(config: Any) -> str | None:
     """The kind of connector a saved database configuration is over, or ``None``.
 
     A connector is not rebuilt from a saved file: the user supplies it at load
-    (developer, 2026-11-22, ITL-1391). Only the kind (``"sqlite"``) is read, never the
-    connection, which may hold a credential.
+    (developer, 2026-11-22, ITL-1391). Nothing of the saved text is returned: it may
+    hold a credential.
 
     Args:
         config: A saved database configuration, or ``None``.
 
     Returns:
-        The connector's kind (``"unknown"`` when the file does not say), or ``None``
-        for a database that is not over a connector.
+        ``"sqlite"``, ``"postgresql"`` or ``"spiraldb"``, ``"unknown connector kind"``
+        for anything else the file says, or ``None`` for a database that is not over
+        a connector.
     """
     from orcapod.databases.connector_arrow_database import CONNECTOR_DATABASE_TYPE
 
@@ -475,10 +480,12 @@ def saved_connector_type(config: Any) -> str | None:
     if saved.get("type") != CONNECTOR_DATABASE_TYPE:
         return None
     connector = saved.get("connector")
-    if not isinstance(connector, dict):
-        return "unknown"
-    kind = cast("dict[str, Any]", connector).get("connector_type")
-    return kind if isinstance(kind, str) else "unknown"
+    if isinstance(connector, dict):
+        kind = cast("dict[str, Any]", connector).get("connector_type")
+        for known in _CONNECTOR_KINDS:
+            if kind == known:
+                return known
+    return "unknown connector kind"
 
 
 def resolve_operator_from_config(config: dict[str, Any]) -> Any:

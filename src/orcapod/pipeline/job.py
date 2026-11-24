@@ -1788,7 +1788,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             require_current_format,
             require_tag_only_columns,
             resolve_source_from_config,
-            saved_connector_type,
+            saved_connector_kind,
         )
 
         path = _Path(path)
@@ -1805,18 +1805,18 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             raise
 
         # A connector is supplied by the user, never rebuilt from the file (ITL-1391):
-        # refused before anything is rebuilt. Only the connector's kind is named; its
-        # saved connection may hold a credential.
+        # refused before anything is rebuilt. Nothing of the saved configuration is
+        # shown: it may hold a credential.
         missing: list[str] = []
         for slot_name, given in (
             ("database", database),
             ("result_database", result_database),
         ):
-            kind = saved_connector_type(data.get("bindings", {}).get(slot_name))
+            kind = saved_connector_kind(data.get("bindings", {}).get(slot_name))
             if kind is not None and given is None:
                 missing.append(
                     f"bindings.{slot_name} is a connector database ({kind}): pass "
-                    f"{slot_name}=ConnectorArrowDatabase(<your {kind} connector>)"
+                    f"{slot_name}=ConnectorArrowDatabase(<your connector>)"
                 )
         if missing:
             raise ValueError(

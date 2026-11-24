@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import traceback
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -226,7 +228,85 @@ def test_any_given_database_is_used_whatever_connector_was_saved(
     assert PipelineJob.load(path, database=given).database is given
 
 
-@pytest.mark.parametrize("connector", [None, {}, {"connector_type": 3}, "text"])
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_resave_writes_the_databases_actually_bound(
+    databases: Databases, tmp_path: Path, kind: str
+) -> None:
+    """Databases given at load replace the recorded ones in a later save, in both slots."""
+    path, again = tmp_path / "job.json", tmp_path / "again.json"
+    results = databases.make(kind, "b")
+    _save_over(path, databases, kind, result_database=results)
+    recorded = json.loads(path.read_text())["bindings"]
+    moved = databases.make("sqlite", "moved-a")
+    moved_results = databases.make(kind, "moved-b")
+    loaded = PipelineJob.load(path, database=moved, result_database=moved_results)
+    loaded.save(again)
+    bindings = json.loads(again.read_text())["bindings"]
+    assert bindings["database"] == moved.to_config() != recorded["database"]
+    assert bindings["result_database"] == moved_results.to_config()
+    assert bindings["result_database"] != recorded["result_database"]
+
+
+SECRET = "postgresql://u:synthetic-credential@h/d"
+
+
+def _secret_files(recorded: dict[str, Any], slot: str) -> Iterator[dict[str, Any]]:
+    """The saved bindings with ``SECRET`` put in each field of ``slot`` in turn."""
+    for field in recorded[slot]:
+        for value in (SECRET, [SECRET], {SECRET: SECRET}):
+            changed = json.loads(json.dumps(recorded))
+            changed[slot][field] = value
+            yield changed
+    for field in [*recorded[slot]["connector"], "another"]:
+        for value in (SECRET, [SECRET], {SECRET: SECRET}):
+            changed = json.loads(json.dumps(recorded))
+            changed[slot]["connector"][field] = value
+            yield changed
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("slot", ["database", "result_database"])
+@pytest.mark.filterwarnings("always")
+def test_no_saved_text_is_shown_by_a_load(
+    databases: Databases,
+    tmp_path: Path,
+    kind: str,
+    slot: str,
+    caplog: pytest.LogCaptureFixture,
+    recwarn: pytest.WarningsRecorder,
+) -> None:
+    """A credential in any field of a saved connector database reaches no exception (a
+    chained one included), log or warning, whether or not the other slot is given."""
+    path = tmp_path / "job.json"
+    results = databases.make(kind, "b")
+    _save_over(path, databases, kind, result_database=results)
+    data = json.loads(path.read_text())
+    given = {
+        "database": databases.make("sqlite", "a"),
+        "result_database": results,
+    }
+    del given[slot]
+    caplog.set_level(logging.DEBUG)
+    shown: list[str] = []
+    for bindings in _secret_files(data["bindings"], slot):
+        path.write_text(json.dumps({**data, "bindings": bindings}))
+        for databases_given in ({}, given):
+            try:
+                PipelineJob.load(path, **databases_given)
+            except Exception as exc:
+                # The whole chain, causes and contexts included.
+                shown.append("".join(traceback.format_exception(exc)))
+                shown.append(repr(exc))
+    assert shown
+    text = "\n".join([*shown, caplog.text, *(str(w.message) for w in recwarn)])
+    assert "synthetic-credential" not in text
+    assert SECRET not in text
+
+
+@pytest.mark.parametrize(
+    "connector",
+    [None, {}, {"connector_type": 3}, "text", {"connector_type": ["sqlite"]}],
+)
 def test_a_connector_the_file_does_not_name_is_refused_too(
     databases: Databases, tmp_path: Path, connector: Any
 ) -> None:
@@ -235,7 +315,7 @@ def test_a_connector_the_file_does_not_name_is_refused_too(
     data = json.loads(path.read_text())
     data["bindings"]["database"]["connector"] = connector
     path.write_text(json.dumps(data))
-    with pytest.raises(ValueError, match=r"connector database \(unknown\)"):
+    with pytest.raises(ValueError, match=r"\(unknown connector kind\)"):
         PipelineJob.load(path)
 
 

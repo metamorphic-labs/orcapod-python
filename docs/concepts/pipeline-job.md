@@ -468,7 +468,9 @@ is passed again; `PipelineJob.load(path, database=...)` is also how you point a 
 at a database that has moved, and `PipelineJob.load(path, result_database=...)` at a result
 database. A connector database (SQLite, PostgreSQL, SpiralDB) is never rebuilt from the
 file: pass it, built over your connector, or the load raises an error that names what to
-pass. The file records each node's own Arrow types, so saving types
+pass. Saving a loaded job writes the database actually bound, the one you passed, in place of
+the recorded one. The recorded one is kept only while nothing is bound in its slot, which
+happens when a database of another kind could not be rebuilt and none was passed. The file records each node's own Arrow types, so saving types
 every node from its inputs' types, as previewing an empty job does, and costs what that
 preview costs: a pipeline whose joins keep many system-tag columns saves as slowly as it
 previews.
