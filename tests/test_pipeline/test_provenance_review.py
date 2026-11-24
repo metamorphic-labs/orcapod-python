@@ -84,12 +84,13 @@ def test_a_cached_source_is_never_materialized_or_written(tmp_path: Path) -> Non
         tag_only_columns=True,
         source_id="inner",
     )
-    cached = CachedSource(inner, cache_database=cache, source_id="cached")
+    cached = CachedSource(inner, cache_database=cache)
     job = PipelineJob(name="c", database=InMemoryArrowDatabase())
     with job:
         SelectDataColumns(["x"])(cached)
     assert cache.list_table_paths() == []
-    trace = job.nodes["cached"].trace({"k": "a", "g": "1"}, "x")
+    # The cache's slot is named after the source it wraps (ITL-1425).
+    trace = job.nodes["inner"].trace({"k": "a", "g": "1"}, "x")
     assert trace.status == "unavailable"
     assert cache.list_table_paths() == []  # nothing was materialized or written
 
@@ -118,7 +119,7 @@ def test_an_overridden_source_read_is_never_called(
     trace = job.nodes["SelectDataColumns"].trace({"k": "a", "g": "1"}, "x")
     assert calls == []
     (cell,) = trace.source_cells()
-    assert (cell.source_id, cell.record_id, cell.value) == ("spied", "row_0", 1)
+    assert (cell.source_id, cell.record_id, cell.value) == ("dict_v1:spied", "row_0", 1)
 
 
 # ---------------------------------------------------------------------------
@@ -139,8 +140,8 @@ def test_merge_join_of_inputs_with_equal_pipeline_hashes() -> None:
     trace = node.trace({"k": "a", "g": "1"}, "x")
     assert trace.root.value == [1, 100]
     assert [(c.source_id, c.value) for c in trace.source_cells()] == [
-        ("same", 1),
-        ("same_more", 100),
+        ("arrow_table_v1:same", 1),
+        ("arrow_table_v1:same_more", 100),
     ]
     assert not node.why_missing("same", "row_0").missing
     assert not node.why_missing("same_more", "row_0").missing
@@ -154,18 +155,14 @@ def test_two_cached_versions_of_one_record(tmp_path: Path) -> None:
         tag_only_columns=True,
         source_id="v",
     )
-    CachedSource(
-        first, cache_database=cache, cache_path=("shared",), source_id="v"
-    ).as_table()
+    CachedSource(first, cache_database=cache, cache_path=("shared",)).as_table()
     second = DictSource(
         [{"k": "a", "g": "1", "x": 2, "y": 0}],
         tag_columns=["k", "g"],
         tag_only_columns=True,
         source_id="v",
     )
-    cached = CachedSource(
-        second, cache_database=cache, cache_path=("shared",), source_id="v"
-    )
+    cached = CachedSource(second, cache_database=cache, cache_path=("shared",))
     job = PipelineJob(name="v", database=InMemoryArrowDatabase())
     with job:
         SelectDataColumns(["x"])(cached)
@@ -470,7 +467,7 @@ def aliased_job(tmp_path: Path) -> tuple[PipelineJob, DeltaTableDatabase]:
         tag_only_columns=True,
         source_id="inner",
     )
-    cached = CachedSource(inner, cache_database=cache, source_id="cache_alias")
+    cached = CachedSource(inner, cache_database=cache)
     job = PipelineJob(name="al", database=InMemoryArrowDatabase())
     with job:
         SelectDataColumns(["x"])(cached)
@@ -478,21 +475,23 @@ def aliased_job(tmp_path: Path) -> tuple[PipelineJob, DeltaTableDatabase]:
     return job, cache
 
 
-def test_a_cache_alias_traces_to_the_wrapped_source(tmp_path: Path) -> None:
+def test_a_cache_traces_to_the_wrapped_source(tmp_path: Path) -> None:
+    """A cache presents its wrapped source's id (ITL-1425): the cell is the wrapped
+    source's, and why_missing takes that id or the slot's label."""
     job, _ = aliased_job(tmp_path)
     node = job.nodes["SelectDataColumns"]
     trace = node.trace({"k": "a", "g": "1"}, "x")
     assert trace.status == "traced"
     assert [
         (c.node, c.source_id, c.record_id, c.value) for c in trace.source_cells()
-    ] == [("cache_alias", "inner", "row_0", 1)]
-    for name in ("inner", "cache_alias"):
+    ] == [("inner", "dict_v1:inner", "row_0", 1)]
+    for name in ("inner", "dict_v1:inner"):
         assert not node.why_missing(name, "row_0").missing
 
 
 def test_no_root_without_a_snapshot_is_taken_to_hold_a_record(tmp_path: Path) -> None:
     job, _ = aliased_job(tmp_path)
-    root = job.nodes["cache_alias"].why_missing("inner", "row_999")
+    root = job.nodes["inner"].why_missing("inner", "row_999")
     assert root.status == "unavailable" and root.missing
     below = job.nodes["SelectDataColumns"].why_missing("inner", "row_999")
     assert below.missing and below.present_in == ()
@@ -559,18 +558,14 @@ def test_two_versions_of_one_record_are_both_source_cells(tmp_path: Path) -> Non
         tag_only_columns=True,
         source_id="v",
     )
-    CachedSource(
-        first, cache_database=cache, cache_path=("shared",), source_id="v"
-    ).as_table()
+    CachedSource(first, cache_database=cache, cache_path=("shared",)).as_table()
     second = DictSource(
         [{"k": "a", "g": "1", "x": 2, "y": 0}],
         tag_columns=["k", "g"],
         tag_only_columns=True,
         source_id="v",
     )
-    cached = CachedSource(
-        second, cache_database=cache, cache_path=("shared",), source_id="v"
-    )
+    cached = CachedSource(second, cache_database=cache, cache_path=("shared",))
     job = PipelineJob(name="vv", database=InMemoryArrowDatabase())
     with job:
         GroupBy(["g"])(SelectDataColumns(["x"])(cached))
@@ -707,7 +702,7 @@ def test_no_source_method_runs_after_the_run() -> None:
     node = job.nodes["SelectDataColumns"]
     trace = node.trace({"k": "x", "i": 0}, "x")
     assert [(c.source_id, c.record_id, c.value) for c in trace.source_cells()] == [
-        ("s", "row_0", 1)
+        ("dict_v1:s", "row_0", 1)
     ]
     assert not node.why_missing("s", "row_0").missing
     total = job.nodes["totals"].trace({"k": "x"}, "total")
@@ -719,17 +714,15 @@ def test_no_source_method_runs_after_the_run() -> None:
 def test_two_inputs_carrying_one_id_are_told_apart_by_position(
     cache_first: bool,
 ) -> None:
-    """A cache labelled with the id of another real source keeps the ids of the source
-    it wraps; at a MergeJoin of the two, each input is read at its own position."""
+    """A cache keeps the id of the source it wraps; at a MergeJoin of it and another
+    source of one schema, each input is read at its own position."""
     inner = DictSource(
         [{"k": "x", "i": 0, "x": 1, "y": 2}],
         tag_columns=["k", "i"],
         tag_only_columns=True,
         source_id="s",
     )
-    cache = CachedSource(
-        inner, cache_database=InMemoryArrowDatabase(), source_id="other", label="cache"
-    )
+    cache = CachedSource(inner, cache_database=InMemoryArrowDatabase(), label="cache")
     other = DictSource(
         [{"k": "x", "i": 0, "x": 101, "y": 0}, {"k": "x", "i": 0, "x": 102, "y": 0}],
         tag_columns=["k", "i"],
@@ -745,7 +738,7 @@ def test_two_inputs_carrying_one_id_are_told_apart_by_position(
     value = [1, 101] if cache_first else [101, 1]
     trace = node.trace({"x": value}, "x")
     leaves = sorted((c.source_id, c.record_id, c.value) for c in trace.source_cells())
-    assert leaves == [("other", "row_0", 101), ("s", "row_0", 1)]
+    assert leaves == [("dict_v1:other", "row_0", 101), ("dict_v1:s", "row_0", 1)]
     assert node.why_missing("s", "row_1").missing  # only the other source has row_1
     assert not node.why_missing("other", "row_1").missing
     assert not node.why_missing("s", "row_0").missing
@@ -761,18 +754,14 @@ def test_date_versions_of_one_record_are_both_source_cells(tmp_path: Path) -> No
         tag_only_columns=True,
         source_id="v",
     )
-    CachedSource(
-        first, cache_database=cache, cache_path=("shared",), source_id="v"
-    ).as_table()
+    CachedSource(first, cache_database=cache, cache_path=("shared",)).as_table()
     second = DictSource(
         [{"k": "a", "g": "1", "d": date(2025, 1, 2), "y": 0}],
         tag_columns=["k", "g"],
         tag_only_columns=True,
         source_id="v",
     )
-    cached = CachedSource(
-        second, cache_database=cache, cache_path=("shared",), source_id="v"
-    )
+    cached = CachedSource(second, cache_database=cache, cache_path=("shared",))
     job = PipelineJob(name="dates", database=InMemoryArrowDatabase())
     with job:
         GroupBy(["g"])(SelectDataColumns(["d"])(cached))
@@ -828,24 +817,22 @@ def test_a_source_root_without_the_record_says_so() -> None:
 
 
 def test_a_source_known_by_structure_feeds_a_node_with_no_rows_from_it() -> None:
-    """A cache named ``alias`` over source ``s``, then a Filter rejecting every row:
-    no held row carries ``s``, yet ``s`` feeds the node (its stored id)."""
+    """A cache over source ``s``, then a Filter rejecting every row: no held row
+    carries ``s``, yet ``s`` feeds the node (by its id or its slot's label)."""
     inner = DictSource(
         [{"k": "a", "g": "1", "x": 1, "y": 0}],
         tag_columns=["k", "g"],
         tag_only_columns=True,
         source_id="s",
     )
-    cache = CachedSource(
-        inner, cache_database=InMemoryArrowDatabase(), source_id="alias"
-    )
+    cache = CachedSource(inner, cache_database=InMemoryArrowDatabase())
     job = PipelineJob(name="noneleft", database=InMemoryArrowDatabase())
     with job:
         SelectDataColumns(["x"])(Filter({"x": 999})(cache))
     node = job.nodes["SelectDataColumns"]
     assert node.why_missing("s", "row_0").status == "not_computed"
     job.run()
-    for name in ("s", "alias"):
+    for name in ("s", "dict_v1:s"):
         answer = node.why_missing(name, "row_0")
         assert answer.status == "read" and answer.missing
         assert answer.removed_by is None and "not known" in answer.because
@@ -861,11 +848,9 @@ def test_merge_join_elements_come_from_their_own_argument(left_first: bool) -> N
         if extra:
             row["z"] = 1
         inner = DictSource(
-            [row], tag_columns=["k", "i"], tag_only_columns=True, source_id="s"
+            [row], tag_columns=["k", "i"], tag_only_columns=True, source_id=name
         )
-        return CachedSource(
-            inner, cache_database=InMemoryArrowDatabase(), source_id=name
-        )
+        return CachedSource(inner, cache_database=InMemoryArrowDatabase())
 
     left, right = cached("left", 1, False), cached("right", 100, True)
     job = PipelineJob(name="slots", database=InMemoryArrowDatabase())
@@ -904,11 +889,9 @@ def _two_caches_of_one_record(name: str, left_first: bool, select: bool) -> Pipe
         if extra:
             row["z"] = 1
         inner = DictSource(
-            [row], tag_columns=["k", "i"], tag_only_columns=True, source_id="s"
+            [row], tag_columns=["k", "i"], tag_only_columns=True, source_id=source_id
         )
-        return CachedSource(
-            inner, cache_database=InMemoryArrowDatabase(), source_id=source_id
-        )
+        return CachedSource(inner, cache_database=InMemoryArrowDatabase())
 
     left, right = cached("left", 1, False), cached("right", 100, True)
     job = PipelineJob(name=name, database=InMemoryArrowDatabase())
@@ -984,7 +967,7 @@ def test_a_folded_list_passing_through_merge_join_keeps_its_members(
     trace = job.nodes["Index"].trace({"k": "a"}, "x")
     assert trace.root.value == 4
     assert [(c.source_id, c.record_id, c.value) for c in trace.source_cells()] == [
-        ("s", "row_1", 4)
+        ("dict_v1:s", "row_1", 4)
     ]
 
 
@@ -1124,8 +1107,8 @@ def test_a_shared_data_tag_at_merge_join_traces_to_both_inputs(a_first: bool) ->
     trace = job.nodes["MergeJoin"].trace({"k": "x"}, "k")
     assert trace.status == "traced"
     assert [(c.source_id, c.record_id, c.value) for c in trace.source_cells()] == [
-        ("a", "row_0", "x"),
-        ("b", "row_0", "x"),
+        ("dict_v1:a", "row_0", "x"),
+        ("dict_v1:b", "row_0", "x"),
     ]
 
 
@@ -1258,7 +1241,7 @@ def test_tied_join_inputs_are_resolved_by_value(reversed_args: bool) -> None:
             check=True,
         )
         cells, missing, _ = result.stdout.split("\n", 2)
-        assert cells == "[('a', 'row_1'), ('b', 'row_0')]"
+        assert cells == "[('dict_v1:a', 'row_1'), ('dict_v1:b', 'row_0')]"
         assert missing == "True False"
         outputs.add(result.stdout)
     assert len(outputs) == 1  # the same answer and text for every seed
@@ -1306,7 +1289,7 @@ def test_stored_history_of_tied_bindings_with_one_id_is_unknown(mode: str) -> No
     b = ArrowTableSource(
         pa.Table.from_pylist([{"k": "shared", "i": 1}], schema=schema),
         tag_columns=["k", "i"],
-        source_id="s",
+        source_id="t",
     )
     job = PipelineJob(name=f"hist{mode}", database=InMemoryArrowDatabase())
     with job:
@@ -1402,7 +1385,7 @@ def test_a_semi_join_right_input_never_reaches_its_output(mode: str) -> None:
         pa.Table.from_pylist([{"k": "x", "i": 0, "x": 70, "y": 90}], schema=schema),
         tag_columns=["k", "i"],
         tag_only_columns=True,
-        source_id="same",
+        source_id="other",
     )
     job = PipelineJob(name=f"semi{mode}", database=InMemoryArrowDatabase())
     with job:
@@ -1519,7 +1502,7 @@ def test_why_missing_does_not_follow_an_operator_subclass(mode: str) -> None:
         pa.Table.from_pylist([{"k": "shared", "i": 2, "x": 90}], schema=schema),
         tag_columns=["k", "i"],
         tag_only_columns=True,
-        source_id="same",
+        source_id="other",
     )
     job = PipelineJob(name=f"customsemi{mode}", database=InMemoryArrowDatabase())
     with job:
@@ -1564,7 +1547,7 @@ def test_many_tied_join_inputs_are_resolved_without_trying_every_order(
     trace = job.nodes["Join"].trace({"k": "x", "i": 0}, "k")
     assert time.perf_counter() - start < 20  # 10! orders would take minutes
     assert sorted(c.source_id for c in trace.source_cells()) == [
-        f"s{n:02d}" for n in range(10)
+        f"dict_v1:s{n:02d}" for n in range(10)
     ]
 
 
@@ -1579,7 +1562,7 @@ def test_a_data_tag_falling_through_a_function_traces_to_its_input() -> None:
     trace = job.nodes["sums"].trace({"k": "x", "i": 0}, "k")
     assert [
         (c.source_id, c.record_id, c.column, c.value) for c in trace.source_cells()
-    ] == [("s", "row_0", "k", "x")]
+    ] == [("dict_v1:s", "row_0", "k", "x")]
 
 
 def test_a_merged_key_token_is_verified() -> None:
@@ -1660,7 +1643,7 @@ def test_a_fold_witness_proves_receipt_despite_direct_names() -> None:
 def test_a_function_after_an_unread_source_is_not_blamed(tmp_path: Path) -> None:
     cache = DeltaTableDatabase(tmp_path / "cache")
     inner = table_source(rows_kgxy(("a", "1", 1, 2)), TWO_BY_TWO, ["k", "g"], "s")
-    cached = CachedSource(inner, cache_database=cache, source_id="cached")
+    cached = CachedSource(inner, cache_database=cache)
     job = PipelineJob(name="cachedfn", database=InMemoryArrowDatabase())
     with job:
         add.pod(cached, label="sums")
@@ -1706,7 +1689,6 @@ def test_an_unread_join_input_is_not_named_as_lacking_the_key(tmp_path: Path) ->
             source_id="b",
         ),
         cache_database=DeltaTableDatabase(tmp_path / "cache"),
-        source_id="bc",
     )
     c = DictSource(
         [{"k": "A", "r": 3}], tag_columns=["k"], tag_only_columns=True, source_id="c"
@@ -1876,10 +1858,11 @@ def k_length(k: str) -> int:
 
 @pytest.mark.parametrize("mode", ["sync", "async"])
 def test_a_stored_witness_must_be_the_held_input(mode: str) -> None:
-    """Two jobs of one name over two bindings with one source id at a tied Join, with
-    record ids swapped between the jobs: the first job's entry has the canonical system
-    tags of the second job's row but other input data, and its binding cannot be
-    proven; it is no witness."""
+    """Two jobs of one name over two bindings at a tied Join, with record ids swapped
+    between the jobs: the first job's entry is no witness for the second job's row.
+    (Since ITL-1425 two different sources cannot share one source id in a job, so the
+    bindings carry two ids; the input-hash check itself is
+    test_an_untied_witness_must_match_the_stored_input_hash.)"""
     database = InMemoryArrowDatabase()
     schema = pa.schema(
         [
@@ -1901,7 +1884,7 @@ def test_a_stored_witness_must_be_the_held_input(mode: str) -> None:
         b = ArrowTableSource(
             pa.Table.from_pylist([{"k": key, "i": 0, "rid": id_b}], schema=schema),
             tag_columns=["k", "i"],
-            source_id="s",
+            source_id="t",
             record_id_columns=["rid"],
         )
         job = PipelineJob(name="history", database=database)
@@ -1930,8 +1913,9 @@ def test_a_stored_witness_must_be_the_held_input(mode: str) -> None:
     make(False)
     binding, node = make(True)
     answer = node.why_missing(binding.label, '{"rid":0}')
+    # Not proven by the other job's entry (no stored entry names this binding's row).
     assert answer.reached_function is None
-    assert answer.entry_recorded is None
+    assert answer.entry_recorded is not True
 
 
 @pytest.mark.parametrize("mode", ["sync", "async"])
@@ -1950,7 +1934,7 @@ def test_rejoin_keeps_the_common_token_of_a_shared_column(mode: str) -> None:
     trace = job.nodes["Rejoin"].trace({}, "k")
     assert trace.status == "traced"
     assert [(c.source_id, c.record_id, c.column) for c in trace.source_cells()] == [
-        ("a", "row_0", "k")
+        ("dict_v1:a", "row_0", "k")
     ]
 
 
@@ -2320,10 +2304,10 @@ def _check_several(found: dict[str, Any]) -> None:
     assert found["two marks"] == EXPECTED_SEVERAL["two marks"]
     # Both rows' source cells, from the two records of a2 (rows 2 and 3).
     assert found["two cells"] == [
-        "trials row_2 hits = 8",
-        "trials row_2 misses = 2",
-        "trials row_3 hits = 3",
-        "trials row_3 misses = 7",
+        "dict_v1:trials row_2 hits = 8",
+        "dict_v1:trials row_2 misses = 2",
+        "dict_v1:trials row_3 hits = 3",
+        "dict_v1:trials row_3 misses = 7",
     ]
     assert found["every"] == EXPECTED_SEVERAL["every"]
     assert found["none"] == EXPECTED_SEVERAL["none"]

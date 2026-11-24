@@ -193,17 +193,22 @@ def _merge_slot(node: Any, index: int) -> int | None:
 def _static_source_ids(node: Any) -> set[str]:
     """The ids a source node's rows can carry, from stored structure only (no method or
     property of the source is called): the node's label (a slot is named by its
-    source's id), the source's stored id, and, through each ``CachedSource``, the stored
-    id of the source it wraps (a cache keeps the wrapped source's ids in its rows)."""
+    source's name), and the id built from the source's stored name and its class's
+    kind and version (``<kind>_v<N>:<name>``, ITL-1425); a ``CachedSource`` presents
+    the id of the source it wraps, so that source's is read through it."""
     from orcapod.core.sources.cached_source import CachedSource
+    from orcapod.core.sources.source_ids import build_source_id
 
     ids = {node.label}
     bound = getattr(node, "bound_source", None)
-    while bound is not None:
-        stored = vars(bound).get("_source_id")
-        if isinstance(stored, str):
-            ids.add(stored)
-        bound = vars(bound).get("_source") if type(bound) is CachedSource else None
+    while type(bound) is CachedSource:
+        bound = vars(bound).get("_source")
+    if bound is not None:
+        name = vars(bound).get("_source_name")
+        kind = getattr(type(bound), "SOURCE_KIND", None)
+        version = getattr(type(bound), "SOURCE_VERSION", None)
+        if isinstance(name, str) and isinstance(kind, str) and isinstance(version, int):
+            ids.add(build_source_id(kind, version, name))
     return ids
 
 

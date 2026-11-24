@@ -213,36 +213,36 @@ print(trace)
 #   GroupBy (subject_id='mouse_03', session='s2'): rate_hz = [4.791666666666667, 5.058333333333334, 7.366666666666666, 4.683333333333334, 5.0, 3.3333333333333335, 6.916666666666667, 3.325]  (via SelectDataColumns)
 #     [0] rates (subject_id='mouse_03', session='s2', probe='imec0', unit=0): rate_hz = 4.791666666666667
 #       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local
-#       sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
-#       units row_40 n_spikes = 575  (via Join, SelectDataColumns)
+#       csv_v1:sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
+#       csv_v1:units row_40 n_spikes = 575  (via Join, SelectDataColumns)
 #     [1] rates (subject_id='mouse_03', session='s2', probe='imec0', unit=1): rate_hz = 5.058333333333334
 #       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local
-#       sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
-#       units row_41 n_spikes = 607  (via Join, SelectDataColumns)
+#       csv_v1:sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
+#       csv_v1:units row_41 n_spikes = 607  (via Join, SelectDataColumns)
 #     [2] rates (subject_id='mouse_03', session='s2', probe='imec0', unit=2): rate_hz = 7.366666666666666
 #       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local
-#       sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
-#       units row_42 n_spikes = 884  (via Join, SelectDataColumns)
+#       csv_v1:sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
+#       csv_v1:units row_42 n_spikes = 884  (via Join, SelectDataColumns)
 #     [3] rates (subject_id='mouse_03', session='s2', probe='imec0', unit=3): rate_hz = 4.683333333333334
 #       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local
-#       sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
-#       units row_43 n_spikes = 562  (via Join, SelectDataColumns)
+#       csv_v1:sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
+#       csv_v1:units row_43 n_spikes = 562  (via Join, SelectDataColumns)
 #     [4] rates (subject_id='mouse_03', session='s2', probe='imec1', unit=0): rate_hz = 5.0
 #       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local
-#       sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
-#       units row_44 n_spikes = 600  (via Join, SelectDataColumns)
+#       csv_v1:sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
+#       csv_v1:units row_44 n_spikes = 600  (via Join, SelectDataColumns)
 #     [5] rates (subject_id='mouse_03', session='s2', probe='imec1', unit=1): rate_hz = 3.3333333333333335
 #       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local
-#       sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
-#       units row_45 n_spikes = 400  (via Join, SelectDataColumns)
+#       csv_v1:sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
+#       csv_v1:units row_45 n_spikes = 400  (via Join, SelectDataColumns)
 #     [6] rates (subject_id='mouse_03', session='s2', probe='imec1', unit=2): rate_hz = 6.916666666666667
 #       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local
-#       sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
-#       units row_46 n_spikes = 830  (via Join, SelectDataColumns)
+#       csv_v1:sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
+#       csv_v1:units row_46 n_spikes = 830  (via Join, SelectDataColumns)
 #     [7] rates (subject_id='mouse_03', session='s2', probe='imec1', unit=3): rate_hz = 3.325
 #       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local
-#       sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
-#       units row_47 n_spikes = 399  (via Join, SelectDataColumns)
+#       csv_v1:sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
+#       csv_v1:units row_47 n_spikes = 399  (via Join, SelectDataColumns)
 ```
 
 The first line repeats the question: the column traced, the node it was asked at and the
@@ -260,8 +260,9 @@ Each step is found from what the job holds and stores, not guessed:
 - The members of a group are the rows before the grouping with the group's
   `subject_id` and `session`, in `probe`, `unit` order (Part 4). Orcapod checks them
   against the group's folded system tags and raises an error if they do not agree.
-- The last step reads the source-info columns: `units row_40` is row 40 of the source
-  named `units`.
+- The last step reads the source-info columns: `csv_v1:units row_40` is row 40 of the
+  source named `units` (its id names the kind of reader, a CSV file read by version 1,
+  then its name).
 
 Nothing is computed: the trace only reads.
 
@@ -270,15 +271,15 @@ Nothing is computed: the trace only reads.
 ```python
 for cell in trace.source_cells():
     print(cell.text())
-# sessions row_5 duration_s = 120.0
-# units row_40 n_spikes = 575
-# units row_41 n_spikes = 607
-# units row_42 n_spikes = 884
-# units row_43 n_spikes = 562
-# units row_44 n_spikes = 600
-# units row_45 n_spikes = 400
-# units row_46 n_spikes = 830
-# units row_47 n_spikes = 399
+# csv_v1:sessions row_5 duration_s = 120.0
+# csv_v1:units row_40 n_spikes = 575
+# csv_v1:units row_41 n_spikes = 607
+# csv_v1:units row_42 n_spikes = 884
+# csv_v1:units row_43 n_spikes = 562
+# csv_v1:units row_44 n_spikes = 600
+# csv_v1:units row_45 n_spikes = 400
+# csv_v1:units row_46 n_spikes = 830
+# csv_v1:units row_47 n_spikes = 399
 ```
 
 **Computed here, or reused.** In session `s1` of `mouse_02`, two units have the same spike
@@ -333,14 +334,14 @@ print(job.diagram(highlight=trace.highlight()))
 # Job 'workshop': 9 nodes
 #   highlight (*): trace of mean_rate_hz at node session_means, for subject_id='mouse_03', session='s2': 1 row matches
 #  * sessions (source · CSVSource)
-#  * SelectDataColumns_1 (operator) <- sessions
+#  * SelectDataColumns_2 (operator) <- sessions
 #  * units (source · CSVSource)
-#  * SelectDataColumns_3 (operator) <- units
-#  * Join (operator) <- SelectDataColumns_1, SelectDataColumns_3
+#  * SelectDataColumns_1 (operator) <- units
+#  * Join (operator) <- SelectDataColumns_2, SelectDataColumns_1
 #  * rates (function pod · firing_rate) [computed] <- Join
 #  * GroupBy (operator) <- rates
-#  * SelectDataColumns_2 (operator) <- GroupBy
-# >* session_means (function pod · mean_rate) [computed] [traced from here] <- SelectDataColumns_2
+#  * SelectDataColumns_3 (operator) <- GroupBy
+# >* session_means (function pod · mean_rate) [computed] [traced from here] <- SelectDataColumns_3
 ```
 
 A mean is made through every step of the job, so its path covers the whole diagram. The
@@ -355,14 +356,14 @@ print(job.diagram(highlight=rate.highlight()))
 # Job 'workshop': 9 nodes
 #   highlight (*): trace of rate_hz at node rates, for subject_id='mouse_02', session='s1', probe='imec1', unit=2: 1 row matches
 #  * sessions (source · CSVSource)
-#  * SelectDataColumns_1 (operator) <- sessions
+#  * SelectDataColumns_2 (operator) <- sessions
 #  * units (source · CSVSource)
-#  * SelectDataColumns_3 (operator) <- units
-#  * Join (operator) <- SelectDataColumns_1, SelectDataColumns_3
+#  * SelectDataColumns_1 (operator) <- units
+#  * Join (operator) <- SelectDataColumns_2, SelectDataColumns_1
 # >* rates (function pod · firing_rate) [reused] [traced from here] <- Join
 #    GroupBy (operator) <- rates
-#    SelectDataColumns_2 (operator) <- GroupBy
-#    session_means (function pod · mean_rate) <- SelectDataColumns_2
+#    SelectDataColumns_3 (operator) <- GroupBy
+#    session_means (function pod · mean_rate) <- SelectDataColumns_3
 ```
 
 In a notebook the same call draws the picture. The caption is the question; the path is
@@ -420,12 +421,12 @@ that raised on a row stores no result for it); the second line says why it did n
 other nodes are dimmed, except the node asked at, marked "asked here". For `units row_4`,
 the path ends at the filter on `probe`:
 
-![The diagram of the imec0 job, captioned "highlighted: why record row_4 of units is missing at node imec0_rates: ...": the source units and the node Filter_1 outlined in a dark line; the sessions branch and the Join dimmed; the function pod imec0_rates with a second outline and the bold line "asked here"](provenance-diagram-missing-filter.svg)
+![The diagram of the imec0 job, captioned "highlighted: why record row_4 of units is missing at node imec0_rates: ...": the source units and the node Filter_2 outlined in a dark line; the sessions branch and the Join dimmed; the function pod imec0_rates with a second outline and the bold line "asked here"](provenance-diagram-missing-filter.svg)
 
 For `units row_48`, the row passes the filter and its column selection and ends at the
 Join, which has no session `s1` of `mouse_04` to match it with:
 
-![The diagram of the imec0 job, captioned "highlighted: why record row_48 of units is missing at node imec0_rates: ...": the source units, Filter_1, SelectDataColumns_1 and the Join outlined in a dark line; the sessions branch dimmed; the function pod imec0_rates with a second outline and the bold line "asked here"](provenance-diagram-missing-join.svg)
+![The diagram of the imec0 job, captioned "highlighted: why record row_48 of units is missing at node imec0_rates: ...": the source units, Filter_2, SelectDataColumns_1 and the Join outlined in a dark line; the sessions branch dimmed; the function pod imec0_rates with a second outline and the bold line "asked here"](provenance-diagram-missing-join.svg)
 
 The pictures are drawn by `job.diagram(...)` itself, from the job above.
 

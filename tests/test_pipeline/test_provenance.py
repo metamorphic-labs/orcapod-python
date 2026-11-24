@@ -158,10 +158,10 @@ def cells(trace: Any) -> set[tuple[str, str, str, Any]]:
 
 
 GROUP_M1_S1 = {
-    ("units", "row_0", "n_spikes", 10),
-    ("units", "row_1", "n_spikes", 20),
-    ("units", "row_2", "n_spikes", 10),
-    ("sessions", "row_0", "duration_s", 10.0),
+    ("arrow_table_v1:units", "row_0", "n_spikes", 10),
+    ("arrow_table_v1:units", "row_1", "n_spikes", 20),
+    ("arrow_table_v1:units", "row_2", "n_spikes", 10),
+    ("arrow_table_v1:sessions", "row_0", "duration_s", 10.0),
 }
 
 
@@ -200,8 +200,8 @@ def test_argument_order_gives_one_trace(tmp_path: Path) -> None:
         cells(traces[0])
         == cells(traces[1])
         == {
-            ("units", "row_4", "n_spikes", 40),
-            ("sessions", "row_2", "duration_s", 10.0),
+            ("arrow_table_v1:units", "row_4", "n_spikes", 40),
+            ("arrow_table_v1:sessions", "row_2", "duration_s", 10.0),
         }
     )
 
@@ -224,7 +224,11 @@ def test_shared_memoized_result_is_traced_exactly(tmp_path: Path) -> None:
         False,
     }
     assert unit_runs["u1"].computed_here is True
-    assert {c.record_id for c in trace.source_cells() if c.source_id == "units"} == {
+    assert {
+        c.record_id
+        for c in trace.source_cells()
+        if c.source_id == "arrow_table_v1:units"
+    } == {
         "row_0",
         "row_1",
         "row_2",
@@ -269,8 +273,10 @@ def test_trace_through_a_batch(tmp_path: Path, mode: str) -> None:
     members = [s for s in trace.root.walk() if s.node == "unit_rates"]
     assert [m.member for m in members] == [0, 1]
     assert [dict(m.tags)["unit"] for m in members] == first["unit"]
-    grouped = [s for s in trace.root.walk() if s.node == "SelectDataColumns_3"]
-    held_batch = job.nodes["SelectDataColumns_3"].as_table().to_pylist()
+    # The selection feeding means (by structure: numbered labels follow hashes).
+    selection = job.nodes["means"].upstreams[0].label
+    grouped = [s for s in trace.root.walk() if s.node == selection]
+    held_batch = job.nodes[selection].as_table().to_pylist()
     (batch,) = [
         b
         for b in held_batch
@@ -301,9 +307,11 @@ def test_trace_of_an_operator_and_a_source_node(tmp_path: Path) -> None:
     joined = job.nodes["Join"].trace(
         {"unit": "u1", "session": "s1", "subject": "m1"}, "n_spikes"
     )
-    assert cells(joined) == {("units", "row_1", "n_spikes", 20)}
+    assert cells(joined) == {("arrow_table_v1:units", "row_1", "n_spikes", 20)}
     leaf = job.nodes["sessions"].trace({"session": "s2", "subject": "m1"}, "rig")
-    assert leaf.root.source == SourceCell("sessions", "sessions", "row_1", "rig", "B")
+    assert leaf.root.source == SourceCell(
+        "sessions", "arrow_table_v1:sessions", "row_1", "rig", "B"
+    )
 
 
 def test_trace_is_read_only_and_not_computed_before_a_run(tmp_path: Path) -> None:
@@ -328,7 +336,7 @@ def test_trace_is_read_only_and_not_computed_before_a_run(tmp_path: Path) -> Non
     files = store_files()
     calls = dict(CALLS)
     job.nodes["means"].trace({"subject": "m1", "session": "s1"}, "mean_hz")
-    job.nodes["means"].why_missing("units", "row_5")
+    job.nodes["means"].why_missing("arrow_table_v1:units", "row_5")
     assert CALLS == calls  # no function was called
     assert store_files() == files  # nothing was written
 
@@ -359,12 +367,12 @@ def test_why_missing(tmp_path: Path, mode: str) -> None:
     run(job, mode)
     node = job.nodes["means"]
 
-    present = node.why_missing("units", "row_0")
+    present = node.why_missing("arrow_table_v1:units", "row_0")
     assert not present.missing
     assert present.reached_function is True
     assert present.present_in[-1] == "means"
 
-    filtered = node.why_missing("units", "row_5")
+    filtered = node.why_missing("arrow_table_v1:units", "row_5")
     # No stored entry proves nothing (the function might have raised): unknown.
     assert filtered.missing and filtered.reached_function is None
     assert filtered.entry_recorded is False
@@ -374,7 +382,7 @@ def test_why_missing(tmp_path: Path, mode: str) -> None:
     assert filtered.removed_by.text == "depth_um < 500"
     assert filtered.present_in == ("units",)
 
-    joined = node.why_missing("units", "row_6")
+    joined = node.why_missing("arrow_table_v1:units", "row_6")
     assert joined.missing and joined.reached_function is None
     assert joined.entry_recorded is False
     assert joined.removed_by is not None and joined.removed_by.operator == "Join"
@@ -390,9 +398,12 @@ def test_why_missing_on_a_loaded_job(tmp_path: Path) -> None:
     job.run()
     job.save(tmp_path / "job.json")
     loaded = load(tmp_path)
-    assert loaded.nodes["means"].why_missing("units", "row_5").status == "not_computed"
+    assert (
+        loaded.nodes["means"].why_missing("arrow_table_v1:units", "row_5").status
+        == "not_computed"
+    )
     loaded.run(load_only=True)
-    answer = loaded.nodes["means"].why_missing("units", "row_5")
+    answer = loaded.nodes["means"].why_missing("arrow_table_v1:units", "row_5")
     assert answer.status == "read" and answer.removed_by is not None
     assert answer.removed_by.operator == "Filter"
 
@@ -414,7 +425,7 @@ def test_diagram_highlight(tmp_path: Path) -> None:
     assert any(e["highlighted"] for e in model["edges"])
     assert "op-dag-highlight" in diagram.to_svg()
 
-    absence = job.nodes["means"].why_missing("units", "row_5")
+    absence = job.nodes["means"].why_missing("arrow_table_v1:units", "row_5")
     shown = job.diagram(highlight=absence.highlight()).to_dict()
     assert {n["label"] for n in shown["nodes"] if n["highlighted"]} == {
         "units",
@@ -465,7 +476,10 @@ def test_reader_keeps_the_nodes_own_entries(tmp_path: Path) -> None:
         assert column in mine.column_names
     # The trace of the first job reads only its own entries.
     trace = job.nodes["means"].trace({"subject": "m1", "session": "s1"}, "mean_hz")
-    assert {c.source_id for c in trace.source_cells()} == {"units", "sessions"}
+    assert {c.source_id for c in trace.source_cells()} == {
+        "arrow_table_v1:units",
+        "arrow_table_v1:sessions",
+    }
 
 
 def test_reader_of_a_loaded_node_reads_its_ephemeral_results(tmp_path: Path) -> None:

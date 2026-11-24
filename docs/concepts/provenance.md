@@ -59,12 +59,12 @@ print(trace)
 #   GroupBy (animal='a2'): accuracy = [0.8, 0.3]  (via SelectDataColumns)
 #     [0] scores (animal='a2', trial=1): accuracy = 0.8
 #       score v0.0 (body function_content_v1:...), reused a stored result, computed ... on local
-#       trials {"animal":"a2","trial":1} hits = 8
-#       trials {"animal":"a2","trial":1} misses = 2
+#       dict_v1:trials {"animal":"a2","trial":1} hits = 8
+#       dict_v1:trials {"animal":"a2","trial":1} misses = 2
 #     [1] scores (animal='a2', trial=2): accuracy = 0.3
 #       score v0.0 (body function_content_v1:...), computed here, computed ... on local
-#       trials {"animal":"a2","trial":2} hits = 3
-#       trials {"animal":"a2","trial":2} misses = 7
+#       dict_v1:trials {"animal":"a2","trial":2} hits = 3
+#       dict_v1:trials {"animal":"a2","trial":2} misses = 7
 ```
 
 ## What a trace reads
@@ -115,10 +115,10 @@ the same way: on a source node it is one cell.
 ```python
 for cell in trace.source_cells():
     print(cell.text())
-# trials {"animal":"a2","trial":1} hits = 8
-# trials {"animal":"a2","trial":1} misses = 2
-# trials {"animal":"a2","trial":2} hits = 3
-# trials {"animal":"a2","trial":2} misses = 7
+# dict_v1:trials {"animal":"a2","trial":1} hits = 8
+# dict_v1:trials {"animal":"a2","trial":1} misses = 2
+# dict_v1:trials {"animal":"a2","trial":2} hits = 3
+# dict_v1:trials {"animal":"a2","trial":2} misses = 7
 print([(label, run.computed_here) for label, run in trace.function_runs()])
 # [('per_animal', True), ('scores', False), ('scores', True)]
 ```
@@ -224,7 +224,7 @@ A missing row's highlight ends at the step that removed it, and dims the rest. I
 tutorial's second job, a unit of `mouse_04` passes the filter on `probe` and is removed by
 the Join, which has no session of `mouse_04` to match it with:
 
-![The diagram of the tutorial's imec0 job, captioned "highlighted: why record row_48 of units is missing at node imec0_rates: ...": the source units, Filter_1, SelectDataColumns_1 and the Join outlined in a dark line; the sessions branch dimmed; the function pod imec0_rates with a second outline and the bold line "asked here"](../tutorial/provenance-diagram-missing-join.svg)
+![The diagram of the tutorial's imec0 job, captioned "highlighted: why record row_48 of units is missing at node imec0_rates: ...": the source units, Filter_2, SelectDataColumns_1 and the Join outlined in a dark line; the sessions branch dimmed; the function pod imec0_rates with a second outline and the bold line "asked here"](../tutorial/provenance-diagram-missing-join.svg)
 
 A `Highlight` can also be made by hand, from node labels, `(upstream, downstream)` label
 pairs and `(label, mark)` pairs. A label the job does not have is refused with
