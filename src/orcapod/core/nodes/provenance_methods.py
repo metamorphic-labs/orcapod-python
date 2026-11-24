@@ -17,32 +17,34 @@ class ProvenanceMethods:
     """
 
     def trace(self, row: Mapping[str, Any], column: str) -> Trace:
-        """Trace one cell of this node back to the source cells it was made from.
+        """Trace cells of this node back to the source cells they were made from.
 
         Provisional in 0.4.0: answers may be refined; a case that cannot be proven is
         reported unavailable or refused (the known limits are in the provenance concept
         page).
 
-        Each step names the node, the cell's value there and its row's tags. A function
-        step says which function produced the value, with its version, body hash,
-        executor and time, and whether this row's entry computed the result or reused
-        one stored for equal inputs. A ``GroupBy`` or ``Batch`` step lists its members,
-        found by the operator's own rule and checked: their system tags must fold to
-        the group's. The leaves are source cells. A loaded job traces the same once it
-        has run with ``load_only=True``.
+        Every row this node holds whose columns equal ``row``'s values is traced (any
+        number; ``{}`` traces every row). Each step names the node, the cell's value
+        there and its row's tags. A function step says which function produced the
+        value, with its version, body hash, executor and time, and whether this row's
+        entry computed the result or reused one stored for equal inputs. A ``GroupBy``
+        or ``Batch`` step lists its members, found by the operator's own rule and
+        checked: their system tags must fold to the group's. The leaves are source
+        cells. A loaded job traces the same once it has run with ``load_only=True``.
 
         Args:
-            row: Column values that select exactly one row this node holds, usually
-                its tags: ``{"subject_id": "mouse_03", "session": "s2"}``.
-            column: The data column of the cell.
+            row: Column values selecting the rows to trace, usually tags:
+                ``{"subject_id": "mouse_03", "session": "s2"}``.
+            column: The data column of the cells.
 
         Returns:
-            The trace; its root's status is ``"not_computed"`` when this node holds no
-            run (``run()`` the job first).
+            The trace: one root per matching row, its header saying how many match
+            (status ``"no_match"`` when none does); its one root's status is
+            ``"not_computed"`` when this node holds no run (``run()`` the job first).
 
         Raises:
             ValueError: If ``column`` is not a data column of this node, or ``row``
-                names a column this node does not have or does not select one row.
+                names a column this node does not have.
             ProvenanceInconsistencyError: If a link cannot be proven from what the job
                 holds and stores (a group whose members do not fold to its values).
         """

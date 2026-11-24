@@ -401,8 +401,10 @@ def test_selectors_use_orcapods_value_rules() -> None:
     job.run()
     trace = job.nodes["GroupBy"].trace({"k": float("nan")}, "x")
     assert sorted(c.value for c in trace.source_cells()) == [1, 2]
-    with pytest.raises(ValueError, match="no row"):
-        job.nodes["SelectDataColumns"].trace({"k": 1.0, "n": False}, "x")
+    # A bool is never 0: no held row matches.
+    assert (
+        job.nodes["SelectDataColumns"].trace({"k": 1.0, "n": False}, "x").matched == 0
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -885,8 +887,8 @@ def test_a_completed_run_with_no_rows_has_its_columns() -> None:
     with job:
         add.pod(Filter({"x": 999})(source), label="sums")
     job.run()
-    with pytest.raises(ValueError, match="holds no row"):
-        job.nodes["sums"].trace({"k": "a", "g": "1"}, "s")
+    empty = job.nodes["sums"].trace({"k": "a", "g": "1"}, "s")
+    assert (empty.status, empty.matched, empty.roots) == ("no_match", 0, ())
     with pytest.raises(ValueError, match="not a data column"):
         job.nodes["sums"].trace({"k": "a", "g": "1"}, "nowhere")
 
@@ -943,8 +945,8 @@ def test_an_empty_run_rejects_a_column_that_is_not_data() -> None:
     for column in ("k", "g"):
         with pytest.raises(ValueError, match="not a data column"):
             job.nodes["sums"].trace({"k": "a", "g": "1"}, column)
-    with pytest.raises(ValueError, match="holds no row"):
-        job.nodes["sums"].trace({"k": "a", "g": "1"}, "s")
+    empty = job.nodes["sums"].trace({"k": "a", "g": "1"}, "s")
+    assert (empty.status, empty.matched, empty.roots) == ("no_match", 0, ())
 
 
 # ---------------------------------------------------------------------------
@@ -1025,8 +1027,8 @@ def test_an_underscore_data_column_of_an_empty_run_is_a_data_column() -> None:
     with job:
         underscored.pod(Filter({"x": 999})(source), label="sums")
     job.run()
-    with pytest.raises(ValueError, match="holds no row"):
-        job.nodes["sums"].trace({"k": "a", "g": "1"}, "_total")
+    empty = job.nodes["sums"].trace({"k": "a", "g": "1"}, "_total")
+    assert (empty.status, empty.matched) == ("no_match", 0)
     with pytest.raises(ValueError, match="not a data column"):
         job.nodes["sums"].trace({"k": "a", "g": "1"}, "k")
 
@@ -2228,11 +2230,16 @@ def test_the_diagram_shows_the_marks_and_the_caption() -> None:
     trace = job.nodes["means"].trace({"animal": "a2"}, "mean")
     diagram = job.diagram(highlight=trace.highlight())
     listing = str(diagram)
-    assert "* scores (function pod · hit_rate · current) [computed + reused]" in listing
-    assert "* means (function pod · mean_score · current) [computed]" in listing
+    assert " * scores (function pod · hit_rate) [computed + reused]" in listing
+    assert (
+        ">* means (function pod · mean_score) [computed] [traced from here]" in listing
+    )
     svg = diagram.to_svg()
     assert '<text class="op-dag-caption"' in svg
-    assert "highlighted: trace of means.mean animal=&#x27;a2&#x27;" in svg
+    assert (
+        "highlighted: trace of mean at node means, for animal=&#x27;a2&#x27;: "
+        "1 row matches"
+    ) in svg
     assert 'class="op-dag-mark">computed + reused</text>' in svg
     assert 'class="op-dag-mark">computed</text>' in svg
     model = diagram.to_dict()
@@ -2268,3 +2275,169 @@ def test_the_highlight_colour_is_no_status_or_kind_colour() -> None:
     for status_colour in {"#d63c3c", "#d08a16"}:
         assert f'stroke="{status_colour}" stroke-width="3.2"' not in svg
     assert 'class="op-dag-highlight" stroke="currentColor"' in svg
+
+
+# ---------------------------------------------------------------------------
+# Developer feedback on 85448829: the asked node, no status, written-out questions,
+# several rows
+# ---------------------------------------------------------------------------
+
+
+def _several(job: PipelineJob) -> dict[str, Any]:
+    scores = job.nodes["scores"]
+    two = scores.trace({"animal": "a2"}, "score")
+    every = scores.trace({}, "score")
+    none = scores.trace({"animal": "a9"}, "score")
+    return {
+        "two": (two.matched, [dict(r.tags) for r in two.roots], two.header()),
+        "two marks": dict(two.highlight().marks),
+        "two cells": [c.text() for c in two.source_cells()],
+        "every": (every.matched, len(every.roots), every.header()),
+        "none": (none.status, none.matched, none.text()),
+    }
+
+
+EXPECTED_SEVERAL = {
+    "two": (
+        2,
+        [{"animal": "a2", "trial": 1}, {"animal": "a2", "trial": 2}],
+        "trace of score at node scores, for animal='a2': 2 rows match",
+    ),
+    "two marks": {"scores": "computed + reused"},
+    "every": (4, 4, "trace of score at node scores, for every row: 4 rows match"),
+    "none": (
+        "no_match",
+        0,
+        "trace of score at node scores, for animal='a9': no held row matches",
+    ),
+}
+
+
+def _check_several(found: dict[str, Any]) -> None:
+    assert found["two"] == EXPECTED_SEVERAL["two"]
+    assert found["two marks"] == EXPECTED_SEVERAL["two marks"]
+    # Both rows' source cells, from the two records of a2 (rows 2 and 3).
+    assert found["two cells"] == [
+        "trials row_2 hits = 8",
+        "trials row_2 misses = 2",
+        "trials row_3 hits = 3",
+        "trials row_3 misses = 7",
+    ]
+    assert found["every"] == EXPECTED_SEVERAL["every"]
+    assert found["none"] == EXPECTED_SEVERAL["none"]
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_a_selector_traces_every_matching_row(mode: str) -> None:
+    _check_several(_several(_run_after_a1(InMemoryArrowDatabase(), mode)))
+
+
+def test_several_rows_on_a_loaded_job(tmp_path: Path) -> None:
+    job = _run_after_a1(DeltaTableDatabase(tmp_path / "store"), "sync")
+    job.save(tmp_path / "job.json")
+    loaded = PipelineJob.load(
+        tmp_path / "job.json", database=DeltaTableDatabase(tmp_path / "store")
+    )
+    loaded.bind(
+        sources={
+            "trials": DictSource(
+                TRIALS,
+                tag_columns=["animal", "trial"],
+                tag_only_columns=True,
+                source_id="trials",
+            )
+        }
+    )
+    loaded.run(load_only=True)
+    _check_several(_several(loaded))
+
+
+def test_several_rows_text_and_union_highlight() -> None:
+    job = _run_after_a1(InMemoryArrowDatabase(), "sync")
+    means = job.nodes["means"].trace({}, "mean")
+    lines = means.text().splitlines()
+    assert lines[0] == "trace of mean at node means, for every row: 2 rows match"
+    # Each matching row's tree follows, in tag order.
+    roots = [line for line in lines if line.startswith("means (")]
+    assert roots == [
+        line for line in roots if "animal='a1'" in line or "animal='a2'" in line
+    ]
+    assert [r.tags for r in means.roots] == [(("animal", "a1"),), (("animal", "a2"),)]
+    highlight = means.highlight()
+    assert highlight.nodes == {
+        "trials",
+        "scores",
+        "GroupBy",
+        "SelectDataColumns",
+        "means",
+    }
+    # a1's rows computed, a2 trial 1 reused: merged on the node.
+    assert dict(highlight.marks) == {
+        "scores": "computed + reused",
+        "means": "computed",
+    }
+    with pytest.raises(ValueError, match="2 rows match: read roots"):
+        _ = means.root
+    with pytest.raises(ValueError, match="no column"):
+        job.nodes["means"].trace({"nowhere": 1}, "mean")
+
+
+def test_the_asked_node_is_marked_apart_from_the_path() -> None:
+    job = _run_after_a1(InMemoryArrowDatabase(), "sync")
+    # A trace asked at scores: the node is on the path and is where it was asked.
+    trace = job.nodes["scores"].trace({"animal": "a1", "trial": 1}, "score")
+    diagram = job.diagram(highlight=trace.highlight())
+    listing = str(diagram)
+    assert (
+        ">* scores (function pod · hit_rate) [computed] [traced from here]" in listing
+    )
+    assert " * trials (source · DictSource)" in listing
+    assert "   means (function pod · mean_score)" in listing  # not on the path
+    svg = diagram.to_svg()
+    assert svg.count('class="op-dag-asked"') == 1
+    assert 'class="op-dag-mark">traced from here</text>' in svg
+    assert {n["label"]: n.get("asked") for n in diagram.to_dict()["nodes"]} == {
+        "trials": None,
+        "scores": "traced from here",
+        "GroupBy": None,
+        "SelectDataColumns": None,
+        "means": None,
+    }
+    # why_missing at a node the record does not reach: asked here, not on the path,
+    # and not dimmed.
+    filtered = DictSource(
+        TRIALS, tag_columns=["animal", "trial"], tag_only_columns=True, source_id="t"
+    )
+    other = PipelineJob(name="asked", database=InMemoryArrowDatabase())
+    with other:
+        hit_rate.pod(Filter({"animal": "a1"})(filtered), label="scores")
+    other.run()
+    answer = other.nodes["scores"].why_missing("t", "row_2")
+    assert answer.text().splitlines()[0] == (
+        "why record row_2 of t is missing at node scores"
+    )
+    shown = other.diagram(highlight=answer.highlight())
+    listing = str(shown)
+    assert listing.splitlines()[1].startswith(
+        "  highlight (*): why record row_2 of t is missing at node scores: "
+    )
+    assert ">  scores (function pod · hit_rate) [asked here] <- Filter" in listing
+    svg = shown.to_svg()
+    assert 'class="op-dag-mark">asked here</text>' in svg
+    asked = svg[svg.index('aria-label="scores') - 200 : svg.index('aria-label="scores')]
+    assert 'opacity="0.4' not in asked
+
+
+def test_a_highlight_shows_no_status() -> None:
+    job = _run_after_a1(InMemoryArrowDatabase(), "sync")
+    plain = str(job.diagram())
+    assert "current" in plain and "bound" in plain  # the plain diagram keeps them
+    highlight = job.nodes["means"].trace({"animal": "a1"}, "mean").highlight()
+    shown = job.diagram(highlight=highlight)
+    import re
+
+    shown_text = " ".join(re.findall(r">([^<>]+)<", shown.to_svg()))  # drawn text
+    for word in ("current", "bound", "stale", "not run", "failed", "partial"):
+        assert word not in shown.to_text()
+        assert word not in shown_text
+    assert "<circle" not in shown.to_svg()  # no status dot

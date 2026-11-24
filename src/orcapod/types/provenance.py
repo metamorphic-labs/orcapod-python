@@ -84,12 +84,19 @@ class Highlight:
             function node on the path is marked ``"computed"`` (its rows on the path
             computed their results), ``"reused"`` (they reused results stored for
             equal inputs) or ``"computed + reused"`` (some did each).
+        asked: The label of the node the question was asked at (the node ``trace`` or
+            ``why_missing`` was called on), or ``""``: the diagram marks it apart from
+            the path.
+        asked_text: The words that mark it: ``"traced from here"`` for a trace,
+            ``"asked here"`` for ``why_missing``.
     """
 
     nodes: frozenset[str] = frozenset()
     edges: frozenset[tuple[str, str]] = frozenset()
     note: str = ""
     marks: frozenset[tuple[str, str]] = frozenset()
+    asked: str = ""
+    asked_text: str = ""
 
     def mark(self, label: str) -> str:
         """Return the mark of the node ``label``, or ``""`` when it has none."""
@@ -275,7 +282,7 @@ class TraceStep:
 
 @dataclass(frozen=True)
 class Trace:
-    """One cell of a job node traced back to the source cells it was made from.
+    """Cells of a job node traced back to the source cells they were made from.
 
     Provisional in 0.4.0: answers may be refined; a case that cannot be proven is
     reported unavailable or refused (the known limits are in the provenance concept
@@ -283,27 +290,81 @@ class Trace:
 
     Returned by ``node.trace(row, column)``; plain data, built by reading what the job's
     nodes hold and what their databases store, without computing, calling user code,
-    polling or writing.
+    polling or writing. Every held row of the node whose columns equal the selector's
+    values is traced, one root each.
 
     Attributes:
-        root: The traced cell's step; its ``inputs`` lead to the sources.
+        node: The label of the node the trace was asked at.
+        column: The traced data column.
+        selector: The column values given, as ``(column, value)`` pairs in the order
+            given (none: every held row).
+        roots: One step per matching row, ordered by the rows' tags; its ``inputs``
+            lead to the sources. When the node holds no run, the one step that says so.
+        matched: How many held rows match, or ``None`` when the node holds no run (or
+            is a source whose rows are not read).
         edges: Every stream the trace follows, as ``(upstream label, downstream
             label)``, sorted.
     """
 
-    root: TraceStep
+    node: str
+    column: str
+    selector: tuple[tuple[str, Any], ...]
+    roots: tuple[TraceStep, ...]
+    matched: int | None
     edges: tuple[tuple[str, str], ...] = field(default=())
 
     @property
+    def root(self) -> TraceStep:
+        """The one root, when exactly one row matched (or the node holds no run).
+
+        Raises:
+            ValueError: If no row or several rows matched: read ``roots``.
+        """
+        if len(self.roots) != 1:
+            raise ValueError(f"{self.count_text()}: read roots, one per row")
+        return self.roots[0]
+
+    @property
     def status(self) -> str:
-        """``"traced"``; ``"not_computed"`` when a node on the way holds no run; or
-        ``"unavailable"`` when a source cell on the way is not read."""
-        statuses = {step.status for step in self.root.walk()}
+        """``"traced"``; ``"no_match"`` when no held row matches the selector;
+        ``"not_computed"`` when a node on the way holds no run; or ``"unavailable"``
+        when a source cell on the way is not read."""
+        if not self.roots:
+            return "no_match"
+        statuses = {step.status for step in self.walk()}
         if "not_computed" in statuses:
             return "not_computed"
         if "unavailable" in statuses:
             return "unavailable"
         return "traced"
+
+    def walk(self) -> Iterator[TraceStep]:
+        """Yield every step of every root, each root depth first."""
+        for root in self.roots:
+            yield from root.walk()
+
+    def question(self) -> str:
+        """Return what was asked, written out: ``trace of rate_hz at node rates, for
+        subject_id='mouse_02', session='s1'``."""
+        rows = f"for {_tags_text(self.selector)}" if self.selector else "for every row"
+        return f"trace of {self.column} at node {self.node}, {rows}"
+
+    def count_text(self) -> str:
+        """Return how many held rows match: ``1 row matches``, ``3 rows match``, ``no
+        held row matches``; or that the node holds no run."""
+        if self.matched is None:
+            return "the node holds no rows to trace here"
+        if self.matched == 0:
+            return "no held row matches"
+        return (
+            f"{self.matched} row matches"
+            if self.matched == 1
+            else (f"{self.matched} rows match")
+        )
+
+    def header(self) -> str:
+        """Return the first line of the text: the question and how many rows match."""
+        return f"{self.question()}: {self.count_text()}"
 
     def source_cells(self) -> tuple[SourceCell, ...]:
         """Return every source cell the value came from, once each, sorted.
@@ -313,7 +374,7 @@ class Trace:
         a list or a struct is keyed by its items, so any value is fine.
         """
         cells: dict[tuple[Any, ...], SourceCell] = {}
-        for step in self.root.walk():
+        for step in self.walk():
             cell = step.source
             if cell is not None:
                 # Two versions of one record (a cache holding both) are two cells.
@@ -332,19 +393,21 @@ class Trace:
         """Return every function step's run, as ``(node label, run)``, in trace order."""
         return tuple(
             (step.node, step.function)
-            for step in self.root.walk()
+            for step in self.walk()
             if step.function is not None
         )
 
     def nodes(self) -> tuple[str, ...]:
         """Return the labels of the nodes the trace passes, sorted."""
-        return tuple(sorted({step.node for step in self.root.walk()}))
+        return tuple(sorted({step.node for step in self.walk()}))
 
     def highlight(self) -> Highlight:
         """Return the trace's path, for ``job.diagram(highlight=...)``.
 
-        Each function node on the path is marked with how its rows on the path got
-        their results: ``"computed"``, ``"reused"`` or ``"computed + reused"``.
+        The union of every matching row's path. Each function node on it is marked
+        with how its rows on the path got their results: ``"computed"``, ``"reused"``
+        or ``"computed + reused"``; the node the trace was asked at is marked
+        ``"traced from here"``.
         """
         how: dict[str, set[bool]] = {}
         for node, run in self.function_runs():
@@ -360,17 +423,21 @@ class Trace:
             )
             for node, seen in how.items()
         )
-        row = f" {_tags_text(self.root.tags)}" if self.root.tags else ""
         return Highlight(
             nodes=frozenset(self.nodes()),
             edges=frozenset(self.edges),
-            note=f"trace of {self.root.node}.{self.root.column}{row}",
+            note=self.header(),
             marks=marks,
+            asked=self.node,
+            asked_text="traced from here",
         )
 
     def text(self) -> str:
-        """Return the trace as an indented tree, the traced cell first."""
-        return "\n".join(self.root.lines())
+        """Return the header, then each matching row's trace as an indented tree."""
+        lines = [self.header()]
+        for root in self.roots:
+            lines.extend(root.lines())
+        return "\n".join(lines)
 
     def __str__(self) -> str:
         return self.text()
@@ -442,8 +509,17 @@ class Absence:
         if self.removed_by is not None:
             kept.add(self.removed_by.label)
         return Highlight(
-            nodes=frozenset(kept), edges=frozenset(self.edges), note=self.headline()
+            nodes=frozenset(kept),
+            edges=frozenset(self.edges),
+            note=f"{self.question()}: {self.headline()}",
+            asked=self.node,
+            asked_text="asked here",
         )
+
+    def question(self) -> str:
+        """Return what was asked, written out: ``why record row_4 of units is missing
+        at node imec0_rates``."""
+        return f"why record {self.record_id} of {self.source} is missing at node {self.node}"
 
     def headline(self) -> str:
         """Return the answer as one line."""
@@ -466,8 +542,8 @@ class Absence:
         return f"{record} does not reach {self.node}: {self.because}"
 
     def text(self) -> str:
-        """Return the answer, then the details, one per line."""
-        lines = [self.headline()]
+        """Return the question, the answer, then the details, one per line."""
+        lines = [self.question(), self.headline()]
         if self.function_node is not None and self.entry_recorded is not None:
             if self.entry_recorded:
                 lines.append(

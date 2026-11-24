@@ -1735,63 +1735,79 @@ class _Tracer:
         )
 
 
-def _select_row(node: Any, rows: list[Row], row: Mapping[str, Any]) -> Row:
-    """The one held row whose values are the selector's (``same_value``).
+def _select_rows(
+    node: Any, rows: list[Row], row: Mapping[str, Any], known: set[str]
+) -> list[Row]:
+    """The held rows whose values are the selector's (``same_value``), in tag order.
 
     Args:
         node: The node, for the messages.
         rows: The rows the node holds.
-        row: Column values that must select exactly one row.
+        row: Column values; none selects every row.
+        known: The node's column names (of its held table, which a run with no rows
+            still has).
 
     Returns:
-        The selected row.
+        The matching rows (any number), ordered by the node's tags (then by every
+        column), so the order never follows the order the rows were held in.
 
     Raises:
-        ValueError: If a selector column is not a column of the rows, or the values
-            select no row or several rows.
+        ValueError: If a selector column is not a column of the node.
     """
-    known = set(rows[0]) if rows else set()
     unknown = sorted(k for k in row if k not in known)
-    if rows and unknown:
+    if unknown:
         raise ValueError(
             f"node {node.label!r} has no column {unknown[0]!r} to select a row by"
         )
     found = [r for r in rows if all(same_value(r[k], v) for k, v in row.items())]
-    if len(found) != 1:
-        given = ", ".join(f"{k}={plain_repr(v)}" for k, v in sorted(row.items()))
-        what = "no row" if not found else f"{len(found)} rows"
-        raise ValueError(
-            f"node {node.label!r} holds {what} with {given}; give columns that select "
-            "one row"
-        )
-    return found[0]
+    tags = list(_keys(node)[0])
+
+    def typed(r: Row) -> tuple[Any, ...]:
+        return tuple((r.get(t) is None, r.get(t)) for t in tags)
+
+    def text(r: Row) -> tuple[str, ...]:
+        return tuple(repr(r.get(k)) for k in (*tags, *sorted(r)))
+
+    try:
+        return sorted(found, key=lambda r: (typed(r), text(r)))
+    except TypeError:  # a tag type with no order (a struct): by its text
+        return sorted(found, key=text)
 
 
 def trace(node: Any, row: Mapping[str, Any], column: str) -> Trace:
-    """Trace one cell of a job node back to the source cells it was made from.
+    """Trace cells of a job node back to the source cells they were made from.
 
     Args:
         node: A job node (function, operator or source node).
-        row: Column values that select exactly one row the node holds (its tags,
-            usually; system-tag columns may be given too), compared by Orcapod's strict
-            value rules (``same_value``: a ``bool`` is never ``0``; NaN equals NaN).
-        column: The data column of the cell.
+        row: Column values selecting the held rows to trace (its tags, usually;
+            system-tag columns may be given too), compared by Orcapod's strict value
+            rules (``same_value``: a ``bool`` is never ``0``; NaN equals NaN). Any
+            number of rows may match; none given selects every held row.
+        column: The data column of the cells.
 
     Returns:
-        The trace. When the node holds no run its root has status ``not_computed``; a
-        source node holds no rows unless its source keeps a snapshot in memory.
+        The trace, one root per matching row (none: status ``no_match``). When the
+        node holds no run its one root has status ``not_computed``; a source node
+        holds no rows unless its source keeps a snapshot in memory.
 
     Raises:
         ValueError: If ``column`` is not a data column of the node, or ``row`` names a
-            column the node does not have or does not select exactly one row.
+            column the node does not have.
         ProvenanceInconsistencyError: If a link cannot be proven from what the job
             holds and stores, or is ambiguous.
     """
     tracer = _Tracer()
+    selector = tuple(row.items())  # as given: shown in the header, matched by value
     rows = tracer.reader.held(node)
     if rows is None:
         status = "unavailable" if _kind(node) == "source" else "not_computed"
-        return Trace(root=tracer.unread(node, column, None, status))
+        return Trace(
+            node=node.label,
+            column=column,
+            selector=selector,
+            roots=(tracer.unread(node, column, None, status),),
+            matched=None,
+        )
     if column not in _keys(node)[1]:
         table = tracer.reader.table(node)
         # A completed function run with no rows holds no row to read its columns
@@ -1817,8 +1833,23 @@ def trace(node: Any, row: Mapping[str, Any], column: str) -> Trace:
         )
         if not held_column:
             raise ValueError(f"{column!r} is not a data column of node {node.label!r}")
-    root = tracer.step(node, _Cell(_select_row(node, rows, row), column))
-    return Trace(root=root, edges=tuple(sorted(tracer.edges)))
+    table = tracer.reader.table(node)
+    if rows:
+        known = set(rows[0])
+    elif table is not None:
+        known = set(table.column_names)
+    else:
+        known = {*_keys(node)[0], *_keys(node)[1]}
+    found = _select_rows(node, rows, row, known)
+    roots = tuple(tracer.step(node, _Cell(r, column)) for r in found)
+    return Trace(
+        node=node.label,
+        column=column,
+        selector=selector,
+        roots=roots,
+        matched=len(found),
+        edges=tuple(sorted(tracer.edges)),
+    )
 
 
 # ---------------------------------------------------------------------------

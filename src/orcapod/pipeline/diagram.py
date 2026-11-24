@@ -85,6 +85,7 @@ class _Node:
     facts: tuple[tuple[str, str], ...]
     highlighted: bool = False
     mark: str = ""
+    asked: str = ""
 
     @property
     def kind_line(self) -> str:
@@ -380,10 +381,14 @@ def _build_model(
                 detail=_node_detail(node),
                 tag_schema=_schema_pairs(tag_schema),
                 data_schema=_schema_pairs(data_schema),
-                status=statuses.get(label, ""),
+                # A highlight shows the provenance question only: no run status.
+                status="" if highlight is not None else statuses.get(label, ""),
                 facts=facts,
                 highlighted=highlight is not None and label in highlight.nodes,
                 mark="" if highlight is None else highlight.mark(label),
+                asked=highlight.asked_text or "asked here"
+                if highlight is not None and highlight.asked == label
+                else "",
             )
         )
 
@@ -467,7 +472,7 @@ class _Layout:
 def _text_room(node: _Node) -> float:
     """The width of a node's text: its label or the widest part of its kind line (the
     kind, the detail, the status), within the node width limits (ITL-1232)."""
-    parts = [*node.kind_line.split(" · "), node.mark]
+    parts = [*node.kind_line.split(" · "), node.mark, node.asked]
     text = max(
         len(node.label) * _CHAR_W, max(len(part) for part in parts) * _SMALL_CHAR_W
     )
@@ -492,6 +497,9 @@ def _kind_lines(node: _Node) -> tuple[str, ...]:
     if node.mark:
         # A highlight's mark (a trace's computed / reused) on a line of its own.
         lines.append(node.mark)
+    if node.asked:
+        # The node the question was asked at ("traced from here"), on its own line.
+        lines.append(node.asked)
     return tuple(lines)
 
 
@@ -920,7 +928,7 @@ def _svg(
             emphasis = " op-dag-highlight"
             stroke_width = "3.2"
             stroke = _HIGHLIGHT_COLOUR
-        elif lit:
+        elif lit and not node.asked:
             emphasis = '" opacity="0.4'
         parts.append(
             f'<g class="op-dag-node{emphasis}" data-index="{node.index}" tabindex="0" '
@@ -931,6 +939,14 @@ def _svg(
             f'fill="{colour}" fill-opacity="0.14" stroke="{stroke}" '
             f'stroke-width="{stroke_width}"{dash}/>'
         )
+        if node.asked:
+            # The node the question was asked at: a second outline around it, in the
+            # text colour (readable on a light and a dark page).
+            parts.append(
+                f'<rect class="op-dag-asked" x="-5" y="-5" width="{_num(w + 10)}" '
+                f'height="{_num(h + 10)}" rx="{_num(radius + 5)}" fill="none" '
+                'stroke="currentColor" stroke-width="1.6"/>'
+            )
         if node.kind in ("side_effect", "side_effect_function"):
             parts.append(
                 f'<rect x="3" y="3" width="{_num(w - 6)}" height="{_num(h - 6)}" '
@@ -944,8 +960,10 @@ def _svg(
             )
         kind_lines = _kind_lines(node)
         for line_number, line in enumerate(kind_lines):
-            # A highlight's mark (the last line) is drawn in bold at full strength.
-            is_mark = bool(node.mark) and line_number == len(kind_lines) - 1
+            # A highlight's mark and the asked-at line (the last lines) are drawn in
+            # bold at full strength.
+            emphasized = bool(node.mark) + bool(node.asked)
+            is_mark = line_number >= len(kind_lines) - emphasized
             weight = (
                 ' font-weight="600" class="op-dag-mark"'
                 if is_mark
@@ -1160,6 +1178,7 @@ class PipelineDiagram:
                     *highlight.nodes,
                     *(end for edge in highlight.edges for end in edge),
                     *(label for label, _ in highlight.marks),
+                    *((highlight.asked,) if highlight.asked else ()),
                 }
                 - labels
             )
@@ -1228,6 +1247,8 @@ class PipelineDiagram:
                 entry["highlighted"] = node.highlighted
                 if node.mark:
                     entry["mark"] = node.mark
+                if node.asked:
+                    entry["asked"] = node.asked
             for entry, edge in zip(model["edges"], edges):
                 entry["highlighted"] = edge.highlighted
         return model
@@ -1266,18 +1287,27 @@ class PipelineDiagram:
         Returns:
             A title line, then ``  <label> (<kind> · <detail> · <status>) <- <inputs>``
             per node, in topological order with ties broken by label. With a
-            highlight, a line with its note follows the title, and each highlighted
-            node's line starts with ``*``.
+            highlight, a line with its note follows the title, no status is shown, each
+            highlighted node's line starts with ``*`` and the node the question was
+            asked at with ``>`` (and ends with ``[traced from here]`` or
+            ``[asked here]``); a node's mark follows in brackets.
         """
         inputs = self._inputs()
         lines = [f"{self.title}: {len(self._nodes)} nodes"]
         if self._highlight is not None and self._highlight.note:
             lines.append(f"  highlight (*): {self._highlight.note}")
         for node in self._nodes:
-            mark = "* " if node.highlighted else "  "
+            if self._highlight is None:
+                mark = "  "
+            else:
+                mark = (">" if node.asked else " ") + (
+                    "* " if node.highlighted else "  "
+                )
             line = f"{mark}{node.label} ({node.kind_line})"
             if node.mark:
                 line += f" [{node.mark}]"
+            if node.asked:
+                line += f" [{node.asked}]"
             if node.index in inputs:
                 line += " <- " + ", ".join(inputs[node.index])
             lines.append(line)

@@ -341,10 +341,16 @@ def test_row_selection_errors(tmp_path: Path) -> None:
         node.trace({"subject": "m1", "session": "s1"}, "subject")
     with pytest.raises(ValueError, match="no column"):
         node.trace({"probe": "x"}, "mean_hz")
-    with pytest.raises(ValueError, match="2 rows"):
-        node.trace({"subject": "m1"}, "mean_hz")
-    with pytest.raises(ValueError, match="no row"):
-        node.trace({"subject": "m9", "session": "s1"}, "mean_hz")
+    # A selector matching several rows, or none, is an answer, not an error.
+    assert node.trace({"subject": "m1"}, "mean_hz").matched == 2
+    none = node.trace({"subject": "m9", "session": "s1"}, "mean_hz")
+    assert (none.status, none.matched, none.roots) == ("no_match", 0, ())
+    assert none.text() == (
+        "trace of mean_hz at node means, for subject='m9', session='s1': "
+        "no held row matches"
+    )
+    with pytest.raises(ValueError, match="read roots"):
+        _ = none.root
 
 
 @pytest.mark.parametrize("mode", ["sync", "async"])
@@ -397,8 +403,11 @@ def test_diagram_highlight(tmp_path: Path) -> None:
     trace = job.nodes["means"].trace({"subject": "m1", "session": "s1"}, "mean_hz")
     diagram = job.diagram(highlight=trace.highlight())
     text = diagram.to_text()
-    assert "highlight (*): trace of means.mean_hz" in text
-    assert "* unit_rates" in text
+    assert (
+        "highlight (*): trace of mean_hz at node means, for subject='m1', "
+        "session='s1': 1 row matches"
+    ) in text
+    assert " * unit_rates" in text
     model = diagram.to_dict()
     lit = {n["label"] for n in model["nodes"] if n["highlighted"]}
     assert lit == set(trace.nodes())

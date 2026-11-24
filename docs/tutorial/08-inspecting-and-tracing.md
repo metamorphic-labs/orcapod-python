@@ -206,6 +206,7 @@ for you, for one cell: give the node, the tags of the row and the column.
 means = job.nodes["session_means"]
 trace = means.trace({"subject_id": "mouse_03", "session": "s2"}, "mean_rate_hz")
 print(trace)
+# trace of mean_rate_hz at node session_means, for subject_id='mouse_03', session='s2': 1 row matches
 # session_means (subject_id='mouse_03', session='s2'): mean_rate_hz = 5.059375
 #   mean_rate v0.0 (body function_content_v1:...), computed here, computed ... on local
 #   GroupBy (subject_id='mouse_03', session='s2'): rate_hz = [4.791666666666667, 5.058333333333334, 7.366666666666666, 4.683333333333334, 5.0, 3.3333333333333335, 6.916666666666667, 3.325]  (via SelectDataColumns)
@@ -243,7 +244,9 @@ print(trace)
 #       units row_47 n_spikes = 399  (via Join, SelectDataColumns)
 ```
 
-Read it from the top. The mean of `mouse_03`, session `s2`, was computed by `mean_rate`
+The first line repeats the question: the column traced, the node it was asked at and the
+row selector, and how many held rows match it. Read the rest from the top. The mean of
+`mouse_03`, session `s2`, was computed by `mean_rate`
 (its version, the hash of its body, when and where it ran). Its input was the grouped row
 of eight rates. Each rate was computed by `firing_rate` from one row of `units.csv` and the
 one row of `sessions.csv` for that session; the operators it passed through are listed
@@ -301,24 +304,42 @@ for step in shared.root.walk():
 `imec1` unit 2 reused the result that `imec0` unit 0 computed: one stored result, two
 rows, both traced to their own row of `units.csv`.
 
+**Several rows at once.** The selector need not pick one row: every held row whose columns
+equal the values given is traced, and `{}` traces every row. Each matching row has its own
+tree, in `trace.roots`, in tag order; `source_cells()` and the highlight cover them all:
+
+```python
+both = means.trace({"subject_id": "mouse_02"}, "mean_rate_hz")
+print(both.header())
+# trace of mean_rate_hz at node session_means, for subject_id='mouse_02': 2 rows match
+print([dict(root.tags) for root in both.roots])
+# [{'subject_id': 'mouse_02', 'session': 's1'}, {'subject_id': 'mouse_02', 'session': 's2'}]
+print(len(both.source_cells()))
+# 18
+```
+
+A selector that matches no held row gives a trace that says so (`no held row matches`,
+status `no_match`); one that names a column the node does not have is an error.
+
 **On the diagram.** `trace.highlight()` marks the trace's path on the job's diagram. The
-listing marks the nodes on the path with `*`, and each function node on it with how its
-rows on the path got their results: `[computed]`, `[reused]` (a result stored for equal
-inputs), or `[computed + reused]` (some rows each):
+listing shows the provenance question only, with no run status. It marks the nodes on the
+path with `*`, the node the trace was asked at with `>` and `[traced from here]`, and each
+function node on the path with how its rows on the path got their results: `[computed]`,
+`[reused]` (a result stored for equal inputs), or `[computed + reused]` (some rows each):
 
 ```python
 print(job.diagram(highlight=trace.highlight()))
 # Job 'workshop': 9 nodes
-#   highlight (*): trace of session_means.mean_rate_hz subject_id='mouse_03', session='s2'
-# * sessions (source · CSVSource · bound)
-# * SelectDataColumns_1 (operator · current) <- sessions
-# * units (source · CSVSource · bound)
-# * SelectDataColumns_3 (operator · current) <- units
-# * Join (operator · current) <- SelectDataColumns_1, SelectDataColumns_3
-# * rates (function pod · firing_rate · current) [computed] <- Join
-# * GroupBy (operator · current) <- rates
-# * SelectDataColumns_2 (operator · current) <- GroupBy
-# * session_means (function pod · mean_rate · current) [computed] <- SelectDataColumns_2
+#   highlight (*): trace of mean_rate_hz at node session_means, for subject_id='mouse_03', session='s2': 1 row matches
+#  * sessions (source · CSVSource)
+#  * SelectDataColumns_1 (operator) <- sessions
+#  * units (source · CSVSource)
+#  * SelectDataColumns_3 (operator) <- units
+#  * Join (operator) <- SelectDataColumns_1, SelectDataColumns_3
+#  * rates (function pod · firing_rate) [computed] <- Join
+#  * GroupBy (operator) <- rates
+#  * SelectDataColumns_2 (operator) <- GroupBy
+# >* session_means (function pod · mean_rate) [computed] [traced from here] <- SelectDataColumns_2
 ```
 
 A mean is made through every step of the job, so its path covers the whole diagram. The
@@ -331,23 +352,24 @@ rate = job.nodes["rates"].trace(
 )
 print(job.diagram(highlight=rate.highlight()))
 # Job 'workshop': 9 nodes
-#   highlight (*): trace of rates.rate_hz subject_id='mouse_02', session='s1', probe='imec1', unit=2
-# * sessions (source · CSVSource · bound)
-# * SelectDataColumns_1 (operator · current) <- sessions
-# * units (source · CSVSource · bound)
-# * SelectDataColumns_3 (operator · current) <- units
-# * Join (operator · current) <- SelectDataColumns_1, SelectDataColumns_3
-# * rates (function pod · firing_rate · current) [reused] <- Join
-#   GroupBy (operator · current) <- rates
-#   SelectDataColumns_2 (operator · current) <- GroupBy
-#   session_means (function pod · mean_rate · current) <- SelectDataColumns_2
+#   highlight (*): trace of rate_hz at node rates, for subject_id='mouse_02', session='s1', probe='imec1', unit=2: 1 row matches
+#  * sessions (source · CSVSource)
+#  * SelectDataColumns_1 (operator) <- sessions
+#  * units (source · CSVSource)
+#  * SelectDataColumns_3 (operator) <- units
+#  * Join (operator) <- SelectDataColumns_1, SelectDataColumns_3
+# >* rates (function pod · firing_rate) [reused] [traced from here] <- Join
+#    GroupBy (operator) <- rates
+#    SelectDataColumns_2 (operator) <- GroupBy
+#    session_means (function pod · mean_rate) <- SelectDataColumns_2
 ```
 
-In a notebook the same call draws the picture. The caption says what is highlighted; the
-path is outlined in the text colour and the rest is dimmed (no status of a node is shown
-in that colour: red is kept for failed). The mark is the bold line on `rates`:
+In a notebook the same call draws the picture. The caption is the question; the path is
+outlined in the text colour and the rest is dimmed (no status of a node is shown in that
+colour: red is kept for failed). The node it was asked at has a second outline and the
+bold line "traced from here"; the mark is the bold line "reused":
 
-![The diagram of the workshop job, captioned "highlighted: trace of rates.rate_hz subject_id='mouse_02', session='s1', probe='imec1', unit=2": the sources sessions and units, their column selections, the Join and the function pod rates outlined in a dark line, rates with the bold line "reused"; GroupBy, its selection and the function pod session_means dimmed](provenance-diagram-trace.svg)
+![The diagram of the workshop job, captioned "highlighted: trace of rate_hz at node rates, for subject_id='mouse_02', session='s1', probe='imec1', unit=2: 1 row matches": the sources sessions and units, their column selections, the Join and the function pod rates outlined in a dark line; rates has a second outline and the bold lines "reused" and "traced from here"; GroupBy, its selection and the function pod session_means dimmed](provenance-diagram-trace.svg)
 
 **Why is a row missing?** A second job keeps only the `imec0` probe and leaves out the
 sessions of `mouse_04`. Row 4 of `units.csv` is an `imec1` unit, and row 48 is a unit of
@@ -377,29 +399,32 @@ with imec0:
     )
 imec0.run()
 print(imec0.nodes["imec0_rates"].why_missing("units", "row_4"))
+# why record row_4 of units is missing at node imec0_rates
 # units row_4 is removed by Filter[...]: probe='imec0'
 #   no successful entry of function node 'imec0_rates' is stored for it (the function raised on it, or never received it)
 #   present in: units
 print(imec0.nodes["imec0_rates"].why_missing("units", "row_48"))
+# why record row_48 of units is missing at node imec0_rates
 # units row_48 is removed by Join: rows without a match in 'sessions' are dropped
 #   no successful entry of function node 'imec0_rates' is stored for it (the function raised on it, or never received it)
 #   present in: units, ...
 #   because: no row with session='s1', subject_id='mouse_04' in ... (reads sessions)
 ```
 
-The first line answers the question: which step removed the row. The second is read from
-the stored records of `imec0_rates`: no run of this job stored a result for the row. On
-its own that does not prove the function never saw it (a function that raised on a row
-stores no result for it); the first line says why it did not.
+The first line repeats the question. The second answers it: which step removed the row.
+The third is read from the stored records of `imec0_rates`: no run of this job stored a
+result for the row. On its own that does not prove the function never saw it (a function
+that raised on a row stores no result for it); the second line says why it did not.
 `why_missing(...).highlight()` marks the path up to the step that removed the row; the
-other nodes are dimmed. For `units row_4`, the path ends at the filter on `probe`:
+other nodes are dimmed, except the node asked at, marked "asked here". For `units row_4`,
+the path ends at the filter on `probe`:
 
-![The diagram of the imec0 job with the path of units row_4 highlighted: the source units and the node Filter_1 outlined in a dark line; the sessions branch, the Join and the function pod imec0_rates dimmed](provenance-diagram-missing-filter.svg)
+![The diagram of the imec0 job, captioned "highlighted: why record row_4 of units is missing at node imec0_rates: ...": the source units and the node Filter_1 outlined in a dark line; the sessions branch and the Join dimmed; the function pod imec0_rates with a second outline and the bold line "asked here"](provenance-diagram-missing-filter.svg)
 
 For `units row_48`, the row passes the filter and its column selection and ends at the
 Join, which has no session `s1` of `mouse_04` to match it with:
 
-![The diagram of the imec0 job with the path of units row_48 highlighted: the source units, Filter_1, SelectDataColumns_1 and the Join outlined in a dark line; the sessions branch and the function pod imec0_rates dimmed](provenance-diagram-missing-join.svg)
+![The diagram of the imec0 job, captioned "highlighted: why record row_48 of units is missing at node imec0_rates: ...": the source units, Filter_1, SelectDataColumns_1 and the Join outlined in a dark line; the sessions branch dimmed; the function pod imec0_rates with a second outline and the bold line "asked here"](provenance-diagram-missing-join.svg)
 
 The pictures are drawn by `job.diagram(...)` itself, from the job above.
 

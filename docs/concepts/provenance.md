@@ -53,6 +53,7 @@ job.run()
 
 trace = job.nodes["per_animal"].trace({"animal": "a2"}, "mean_accuracy")
 print(trace)
+# trace of mean_accuracy at node per_animal, for animal='a2': 1 row matches
 # per_animal (animal='a2'): mean_accuracy = 0.55
 #   average v0.0 (body function_content_v1:...), computed here, computed ... on local
 #   GroupBy (animal='a2'): accuracy = [0.8, 0.3]  (via SelectDataColumns)
@@ -68,9 +69,15 @@ print(trace)
 
 ## What a trace reads
 
-The `row` argument selects one row the node holds, by its tags (all of them, or enough to
-pick one row). The `column` is one of its data columns. Each step of the trace is a
-`TraceStep`; it is found from three records the job keeps.
+The `row` argument selects the held rows to trace, by column values (usually tags): every
+row of the node whose columns equal them is traced, any number, and `{}` traces every
+row. The `column` is one of its data columns. The trace's first line repeats the question
+and says how many rows match (`trace of mean_accuracy at node per_animal, for
+animal='a2': 1 row matches`). `trace.roots` holds one tree per matching row, in tag
+order; `trace.root` is the one tree when exactly one row matches. A selector that matches
+no held row gives a trace with status `no_match`; one that names a column the node does
+not have raises `ValueError`. Each step of the trace is a `TraceStep`; it is found from
+three records the job keeps.
 
 - **The system tags of each row.** Every row carries hidden tags naming the source rows it
   came from (`as_table(columns={"system_tags": True})`). An operator that works row by row,
@@ -130,6 +137,7 @@ fresh = PipelineJob(name="behaviour", database=InMemoryArrowDatabase())
 with fresh:
     fresh_scores = score.pod(trials, label="scores")
 print(fresh.nodes["scores"].trace({"animal": "a1", "trial": 1}, "accuracy"))
+# trace of accuracy at node scores, for animal='a1', trial=1: the node holds no rows to trace here
 # scores: accuracy = None
 #   not computed: run() the job first
 ```
@@ -159,6 +167,7 @@ It answers in two steps:
 ```python
 answer = job.nodes["per_animal"].why_missing("trials", '{"animal":"a3","trial":1}')
 print(answer)
+# why record {"animal":"a3","trial":1} of trials is missing at node per_animal
 # trials {"animal":"a3","trial":1} does not reach per_animal: source 'trials' holds no record '{"animal":"a3","trial":1}'
 #   no successful entry of function node 'scores' is stored for it (the function raised on it, or never received it)
 ```
@@ -177,23 +186,28 @@ and one removed by a join.
 ## On the diagram
 
 `trace.highlight()` and `answer.highlight()` give a `Highlight`: the nodes and streams on
-the path, with a note. `job.diagram(highlight=...)` outlines them in the text colour (which
-no node status uses: red means failed), dims the rest, and shows the note as a caption.
+the path (for several rows, the union of their paths), with a note, the question written
+out. `job.diagram(highlight=...)` outlines them in the text colour (which no node status
+uses: red means failed), dims the rest, shows the note as a caption, and leaves out every
+node's run status: it shows the provenance question only. The node the question was asked
+at (`Highlight.asked`) gets a second outline and the line "traced from here" or "asked
+here"; in the listing it is marked `>`.
 A trace's highlight also marks each function node on the path with how its rows on the
 path got their results (`Highlight.marks`): `computed`, `reused` (a result stored for equal
 inputs) or `computed + reused` (some rows each). Its text listing marks the highlighted
-nodes with `*` and a function node's mark in brackets. Here `scores` computed the score of
+nodes with `*` and a function node's mark in brackets; a mark of several rows is merged
+per node. Here `scores` computed the score of
 trial 2 of `a2` and reused the one stored for trial 1 (above):
 
 ```python
 print(job.diagram(highlight=trace.highlight()))
 # Job 'behaviour': 5 nodes
-#   highlight (*): trace of per_animal.mean_accuracy animal='a2'
-# * trials (source · DictSource · bound)
-# * scores (function pod · score · current) [computed + reused] <- trials
-# * GroupBy (operator · current) <- scores
-# * SelectDataColumns (operator · current) <- GroupBy
-# * per_animal (function pod · average · current) [computed] <- SelectDataColumns
+#   highlight (*): trace of mean_accuracy at node per_animal, for animal='a2': 1 row matches
+#  * trials (source · DictSource)
+#  * scores (function pod · score) [computed + reused] <- trials
+#  * GroupBy (operator) <- scores
+#  * SelectDataColumns (operator) <- GroupBy
+# >* per_animal (function pod · average) [computed] [traced from here] <- SelectDataColumns
 ```
 
 In a notebook the diagram is drawn as a picture, the mark as a bold line on its node. Here
@@ -204,13 +218,13 @@ marked `reused`:
 
 ![The diagram of the tutorial's workshop job: the sources sessions and units on the left, through column selections and a Join into the function pod rates, then GroupBy, a selection and the function pod session_means on the right](../tutorial/provenance-diagram-plain.svg)
 
-![The same diagram captioned "highlighted: trace of rates.rate_hz subject_id='mouse_02', session='s1', probe='imec1', unit=2": the sources, their column selections, the Join and rates outlined in a dark line, rates with the bold line "reused"; GroupBy, its selection and session_means dimmed](../tutorial/provenance-diagram-trace.svg)
+![The same diagram captioned "highlighted: trace of rate_hz at node rates, for subject_id='mouse_02', session='s1', probe='imec1', unit=2: 1 row matches": the sources, their column selections, the Join and rates outlined in a dark line; rates has a second outline and the bold lines "reused" and "traced from here"; GroupBy, its selection and session_means dimmed](../tutorial/provenance-diagram-trace.svg)
 
 A missing row's highlight ends at the step that removed it, and dims the rest. In the
 tutorial's second job, a unit of `mouse_04` passes the filter on `probe` and is removed by
 the Join, which has no session of `mouse_04` to match it with:
 
-![The diagram of the tutorial's imec0 job with the path of units row_48 highlighted: the source units, Filter_1, SelectDataColumns_1 and the Join outlined in a dark line; the sessions branch and the function pod imec0_rates dimmed](../tutorial/provenance-diagram-missing-join.svg)
+![The diagram of the tutorial's imec0 job, captioned "highlighted: why record row_48 of units is missing at node imec0_rates: ...": the source units, Filter_1, SelectDataColumns_1 and the Join outlined in a dark line; the sessions branch dimmed; the function pod imec0_rates with a second outline and the bold line "asked here"](../tutorial/provenance-diagram-missing-join.svg)
 
 A `Highlight` can also be made by hand, from node labels, `(upstream, downstream)` label
 pairs and `(label, mark)` pairs. A label the job does not have is refused with
