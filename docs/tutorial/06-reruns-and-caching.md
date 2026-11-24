@@ -65,7 +65,7 @@ the same with a `DeltaTableDatabase`.
 
 The helper `run` builds the job from Part 5 (without the per-session mean, to keep the
 output short), runs it over the one shared `database`, and returns the result sorted. The first
-run computed 63 results for 64 units, as before.
+run computed 63 results for 64 units, as before (a count of `job.run()`; see Part 5).
 
 ## New rows: only the new rows are computed
 

@@ -385,10 +385,10 @@ Reading a Delta table yourself with `deltalake.DeltaTable(...).to_pyarrow_table(
 
 - **`pygraphviz` fails to build** (`fatal error: 'graphviz/cgraph.h' file not found`). You
   are installing a version of Orcapod older than 0.2, which required the Graphviz
-  development headers. Install Orcapod 0.2 or newer. Until 0.4.0 is released, a plain
-  `uv add orcapod` installs 0.1.4 (0.3.0 was withdrawn): install the development version,
-  `uv add git+https://github.com/metamorphic-labs/orcapod-python`.
+  development headers. The latest stable release on PyPI, which a plain `uv add orcapod`
+  installs, is 0.1.4 (0.3.0 was withdrawn). Install the release candidate the workshop uses:
+  `uv add "orcapod==0.4.0rc4"`.
 - **Python version.** Orcapod needs Python 3.11 or newer.
 - **A release candidate is not installed.** `uv add orcapod` (like `pip install orcapod`)
   takes the latest stable release and skips pre-releases. Name the release candidate:
-  `uv add "orcapod==0.4.0rc1"`.
+  `uv add "orcapod==0.4.0rc4"`.

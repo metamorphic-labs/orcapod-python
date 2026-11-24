@@ -14,7 +14,7 @@ new directory, and `uv add` adds Orcapod to it):
 ```bash
 mkdir orcapod-workshop && cd orcapod-workshop
 uv init
-uv add git+https://github.com/metamorphic-labs/orcapod-python
+uv add "orcapod==0.4.0rc4"
 ```
 
 Without uv, with `pip` in a virtual environment:
@@ -23,14 +23,13 @@ Without uv, with `pip` in a virtual environment:
 mkdir orcapod-workshop && cd orcapod-workshop
 python -m venv .venv
 source .venv/bin/activate        # on Windows: .venv\Scripts\activate
-pip install git+https://github.com/metamorphic-labs/orcapod-python
+pip install "orcapod>=0.4.0rc4"
 ```
 
-Both install the development version from the repository: until 0.4.0 is released, PyPI has
-no current stable release (0.3.0 was withdrawn), so a plain `uv add orcapod` installs 0.1.4,
-which this tutorial does not cover. If your workshop organiser asked you to install a release
-candidate, name it instead: `uv add "orcapod==0.4.0rc1"`. Once 0.4.0 is out, `uv add orcapod`
-(or `pip install orcapod`) installs the latest stable release.
+The workshop uses 0.4.0rc4, a release candidate, so the commands name it. The latest stable
+release on PyPI is 0.1.4 (0.3.0 was withdrawn), which a plain `uv add orcapod` installs and
+this tutorial does not cover. For the development version, install from the repository:
+`uv add git+https://github.com/metamorphic-labs/orcapod-python`.
 
 The tutorial needs nothing beyond this. Orcapod already depends on `pandas`, `polars` and
 `pyarrow`, which the samples use.
@@ -76,10 +75,17 @@ every piece of it is introduced in the parts that follow.
 
 ### Messages you can ignore
 
-Depending on what else is installed, you may see these on your screen. They are harmless.
+You may see these on your screen. They are harmless.
 
+- `ProvisionalHashWarning: Filter is provisional: its identity is not frozen ...`, once per
+  Python session for each provisional step you use: `filter`, `group_by`, `batch`,
+  `MergeJoin`, `polars_filter` and `as_source()` in this tutorial. The step works; what may still
+  change is the identity Orcapod gives it. If a later release changes it, the results of
+  that step and of every step after it are computed again instead of reused; nothing stored is lost
+  or wrong. See [Provisional operators](../concepts/operators.md#provisional-operators).
 - `UserWarning: Protobuf gencode version ... is exactly one major version older than the
-  runtime version ...`, several times, when Orcapod is imported.
+  runtime version ...`, several times, when Orcapod is imported. It
+  depends on what else is installed.
 
 ## Get the dataset
 
@@ -102,7 +108,8 @@ directory described on the [tutorial front page](index.md#the-dataset). The data
 on every machine and every run, so your output will match these pages exactly.
 
 Keep `workshop_data.py` in your working directory. Every part of the tutorial starts with
-these two lines, which generate the data if it is missing and give you its location:
+these two lines. `make_dataset()` writes the original files again on every call, overwriting
+any edits you made to them, and gives you their location:
 
 ```python
 from workshop_data import make_dataset

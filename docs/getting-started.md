@@ -7,19 +7,19 @@ the results.
 ## Installing
 
 Install Orcapod with [uv](https://docs.astral.sh/uv/), the recommended way: start a project
-with `uv init` (in a new directory), add Orcapod to it, and run your scripts with `uv run`:
+with `uv init` (in a new directory) and add Orcapod to it:
 
 ```bash
 uv init
-uv add git+https://github.com/metamorphic-labs/orcapod-python
-uv run python my_pipeline.py
+uv add "orcapod==0.4.0rc4"
 ```
 
-In an environment not managed by uv, `pip install git+https://github.com/metamorphic-labs/orcapod-python` installs it instead.
+In an environment not managed by uv, `pip install "orcapod>=0.4.0rc4"` installs it instead.
 
-Until 0.4.0 is released, these commands install the development version from the repository:
-PyPI has no current version (0.3.0 was withdrawn, and a plain `uv add orcapod` would install
-0.1.4). Once 0.4.0 is out, `uv add orcapod` (or `pip install orcapod`) installs it.
+0.4.0rc4 is the release candidate the workshop uses. The latest stable release on PyPI is
+0.1.4 (0.3.0 was withdrawn), which a plain `uv add orcapod` installs and this guide does not
+cover. For the development version, install from the repository:
+`uv add git+https://github.com/metamorphic-labs/orcapod-python`.
 
 ## Creating a source
 
@@ -199,7 +199,7 @@ print(result.as_table().to_pandas())
 
 ## Putting it all together
 
-Here is the complete example in one block:
+Here is the complete example in one block. Save it as `my_pipeline.py`:
 
 ```python
 from orcapod import function_pod
@@ -231,6 +231,14 @@ print(result.as_table().to_pandas())
 # 1    exp_002            72.14             False
 # 2    exp_003            67.64              True
 ```
+
+Then run it:
+
+```bash
+uv run python my_pipeline.py
+```
+
+With `pip`, in the activated environment: `python my_pipeline.py`.
 
 ## Keeping results
 
