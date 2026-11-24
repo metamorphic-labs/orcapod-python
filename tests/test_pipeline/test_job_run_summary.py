@@ -9,14 +9,17 @@ traceback. A clean run stays quiet.
 from __future__ import annotations
 
 import ast
+import asyncio
 import warnings
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
+from typing_extensions import override
 
 from orcapod import PipelineJob, function_pod
+from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import RowFailuresWarning
 from orcapod.pipeline import (
@@ -24,6 +27,8 @@ from orcapod.pipeline import (
     RunSummary,
     SyncPipelineOrchestrator,
 )
+from orcapod.pipeline.observer import NoOpObserver
+from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
 from orcapod.sources import DictSource
 
 # --- The public names this feature adds, in one place ---------------------------------
@@ -204,14 +209,91 @@ def test_notebook_representation_names_the_failing_node() -> None:
 
 def test_run_async_returns_the_same_summary(store: Any) -> None:
     """``run_async`` returns the summary, warns, and keeps it as ``last_run``."""
-    import asyncio
-
     job = make_job(store, even_only, "evens")
     with pytest.warns(RowFailuresWarning, match="2 of 4 rows failed in node 'evens'"):
         summary = asyncio.run(job.run_async())
 
     assert node_counts(summary, "evens") == (2, 0, 2)
     assert last_run(job) is summary
+
+
+@pytest.mark.parametrize("first_async_source", [None, "a", "b"], ids=["sync", "a", "b"])
+def test_equal_inputs_report_the_work_each_source_did(
+    first_async_source: str | None,
+) -> None:
+    """Three sources share results, while async arrival determines who computes."""
+    source_ids = ("a", "b", "c")
+    first_finished = asyncio.Event()
+    first_rows = 0
+
+    class GatedSource(DictSource):
+        @override
+        async def async_iter_data(
+            self,
+        ) -> AsyncIterator[tuple[TagProtocol, DataProtocol]]:
+            if self.source_id != f"dict_v1:{first_async_source}":
+                _ = await first_finished.wait()
+            async for row in super().async_iter_data():
+                yield row
+
+    class ReleaseLaterSources(NoOpObserver):
+        @override
+        def on_data_end(
+            self,
+            node_label: str,
+            tag: TagProtocol,
+            input_data: DataProtocol,
+            output_data: DataProtocol | None,
+            cached: bool,
+        ) -> None:
+            nonlocal first_rows
+            if node_label == f"double_{first_async_source}":
+                first_rows += 1
+                if first_rows == 2:
+                    first_finished.set()
+
+    job = PipelineJob(name="equal_inputs", database=InMemoryArrowDatabase())
+    with job:
+        for source_id in source_ids:
+            source = GatedSource(
+                [{"k": "first", "x": 4}, {"k": "second", "x": 6}],
+                tag_columns=["k"],
+                tag_only_columns=True,
+                source_id=source_id,
+            )
+            _ = double.pod(source, label=f"double_{source_id}")
+
+    async def run_gated() -> RunSummary:
+        return await asyncio.wait_for(
+            job.run_async(observer=ReleaseLaterSources()), timeout=10
+        )
+
+    summary = job.run() if first_async_source is None else asyncio.run(run_gated())
+    computed_source = first_async_source or "a"
+    for source_id in source_ids:
+        label = f"double_{source_id}"
+        node = job.nodes[label]
+        assert isinstance(node, FunctionJobNode)
+        computed = source_id == computed_source
+        assert node_counts(summary, label) == ((2, 0, 0) if computed else (0, 2, 0))
+        rows = [
+            (tag.as_dict()["k"], data.as_dict()["y"]) for tag, data in node.iter_data()
+        ]
+        expected = [("first", 8), ("second", 12)]
+        if first_async_source is None:
+            assert rows == expected
+        else:
+            assert len(rows) == len(expected)
+            assert set(rows) == set(expected)
+        for key, _ in expected:
+            ((trace_label, invocation),) = node.trace({"k": key}, "y").function_runs()
+            assert trace_label == label
+            assert invocation.computed_here is computed
+
+    note = "Computed and from-store counts reflect this run"
+    assert (note in repr(summary)) == (first_async_source is not None)
+    html = summary._repr_html_()  # pyright: ignore[reportPrivateUsage]  # notebook display hook under test
+    assert (note in html) == (first_async_source is not None)
 
 
 @function_pod(output_keys="z")
