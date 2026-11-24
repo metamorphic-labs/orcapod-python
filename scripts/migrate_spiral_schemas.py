@@ -40,6 +40,7 @@ ROW_FORMAT = "orcapod.table_schema"
 ROW_FORMAT_VERSION = 1
 FIRST_ROWS = 20
 CREATING = "creating"
+REFUSED = "refused"
 
 
 class MigrationError(Exception):
@@ -393,7 +394,8 @@ def read_note(args: argparse.Namespace) -> dict[str, str]:
 
 
 def write_note(args: argparse.Namespace, dataset: str, value: str) -> None:
-    """Note what this plan's write creates in a dataset: ``CREATING``, then the table id.
+    """Note what this plan's write creates in a dataset: ``CREATING``, then the table id,
+    or ``REFUSED``.
 
     The note is replaced as a whole, so it is never half written.
     """
@@ -422,12 +424,20 @@ def require_own_schema_table(
         and list(table.key_columns) == ["table_id"]
         and int(table.version_id) == 0
     ):
-        # Stopped between creating the table and noting its id: it holds nothing.
+        # Stopped around the creation. An empty table looks the same whoever made it, so
+        # a person says that it is this plan's.
+        if args.adopt != table.resource_id:
+            raise MigrationError(
+                f"{dataset}: an earlier run stopped while creating {SCHEMA_TABLE}, and "
+                f"there is an empty one ({table.resource_id}). If that run made it, and "
+                f"nobody else, run again with --adopt {table.resource_id}"
+            )
         write_note(args, dataset, table.resource_id)
         return table
-    if table is not None and noted != table.resource_id:
+    if noted == REFUSED or (table is not None and noted != table.resource_id):
+        found = "none now" if table is None else table.resource_id
         raise MigrationError(
-            f"{dataset}: {SCHEMA_TABLE} ({table.resource_id}) was not created by this "
+            f"{dataset}: {SCHEMA_TABLE} ({found}) was not created by this "
             f"plan's write ({note_path(args)} does not name it)"
         )
     return table
@@ -488,9 +498,18 @@ def write(args: argparse.Namespace) -> None:
         if handle is None:
             # Created once, exclusively; the note is there before and after.
             write_note(args, dataset, CREATING)
-            handle = client.project(project).create_keyed_table(
-                dataset, SCHEMA_TABLE, st.KEY_SCHEMA, exist_ok=False
-            )
+            try:
+                handle = client.project(project).create_keyed_table(
+                    dataset, SCHEMA_TABLE, st.KEY_SCHEMA, exist_ok=False
+                )
+            except Exception as exc:
+                if "status 409" not in str(exc):
+                    raise
+                # Another's: never to be adopted, by this run or a later one.
+                write_note(args, dataset, REFUSED)
+                raise MigrationError(
+                    f"{dataset}: another program created {SCHEMA_TABLE} just now"
+                ) from exc
             write_note(args, dataset, handle.resource_id)
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         values = {**values, "written_at": now, "written_by": by}
@@ -614,6 +633,11 @@ def main() -> int:
         step.set_defaults(run=run)
         if name == "write":
             step.add_argument("--digest", required=True)
+            step.add_argument(
+                "--adopt",
+                help="the id of an empty schema table that an earlier, stopped run of "
+                "this plan created",
+            )
             step.add_argument("--stop-after", type=int, help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:

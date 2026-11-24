@@ -27,7 +27,7 @@ import warnings
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from copy import copy
-from threading import Lock
+from threading import RLock
 from typing import TYPE_CHECKING, Any, cast
 
 import pyarrow as pa
@@ -75,7 +75,7 @@ _NO_WRITES = (
 )
 # Tables a warning was issued for in this process (``UnrecordedTableSchemaWarning``).
 _warned_unrecorded: set[tuple[str, str]] = set()
-_warned_lock = Lock()
+_warned_lock = RLock()  # a warning hook may read a table itself
 
 
 # ---------------------------------------------------------------------------
@@ -193,21 +193,17 @@ def _warn_once(about: tuple[str, str], message: str) -> None:
         about: What the warning is about.
         message: The warning.
     """
+    # Held over the check, the warning and the record: while one thread's warning is
+    # turned into an error, another does not pass as if it had been shown.
     with _warned_lock:
         if about in _warned_unrecorded:
             return
-        _warned_unrecorded.add(about)
-    try:
         warnings.warn(
             message,
             UnrecordedTableSchemaWarning,
             stacklevel=outside_orcapod_stacklevel(),
         )
-    except BaseException:
-        # Not shown: a warning turned into an error is raised every time.
-        with _warned_lock:
-            _warned_unrecorded.discard(about)
-        raise
+        _warned_unrecorded.add(about)
 
 
 # ---------------------------------------------------------------------------

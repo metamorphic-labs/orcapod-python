@@ -135,6 +135,7 @@ def args(
         plan=str(path),
         digest=tool.plan_digest(plan),
         stop_after=None,
+        adopt=None,
     )
 
 
@@ -360,8 +361,52 @@ def test_a_stop_while_the_schema_table_is_created_is_resumed(
         tool.write(args)
     monkeypatch.setattr(fake.FakeProject, "create_keyed_table", create)
     monkeypatch.setattr(tool, "write_note", note)
+    if when != "before the creation":
+        # An empty table of that name may be anyone's: a person names it.
+        table = fake.FakeClient().keyed_table("p", "one", st.SCHEMA_TABLE)
+        for adopt in (None, "table_other"):
+            args.adopt = adopt
+            with pytest.raises(tool.MigrationError, match=table.resource_id):
+                tool.write(args)
+        args.adopt = table.resource_id
     tool.write(args)
     tool.verify(args)
+
+
+def test_a_table_made_after_a_stop_before_the_creation_is_not_adopted(
+    tool: ModuleType, args: argparse.Namespace
+) -> None:
+    tool.write_note(args, "one", tool.CREATING)
+    other = fake.FakeClient().project("p")
+    made = other.create_keyed_table("one", st.SCHEMA_TABLE, st.KEY_SCHEMA)
+    with pytest.raises(tool.MigrationError, match="nobody else"):
+        tool.write(args)
+    assert fake.FakeClient().keyed_table_by_id(made.resource_id).version_id == "0"
+
+
+def test_a_table_another_program_creates_first_is_never_adopted(
+    tool: ModuleType, args: argparse.Namespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The exclusive create is refused (409): no retry takes the other's empty table,
+    which looks exactly like one of ours."""
+    create = fake.FakeProject.create_keyed_table
+    calls = []
+
+    def second(self: Any, *given: Any, **options: Any) -> Any:
+        calls.append(options)
+        if len(calls) == 1:
+            create(self, *given, exist_ok=True)  # the other program is first
+        return create(self, *given, **options)
+
+    monkeypatch.setattr(fake.FakeProject, "create_keyed_table", second)
+    with pytest.raises(tool.MigrationError, match="another program created"):
+        tool.write(args)
+    for _ in range(2):
+        with pytest.raises(tool.MigrationError, match="not created by this plan"):
+            tool.write(args)
+    table = fake.FakeClient().keyed_table("p", "one", st.SCHEMA_TABLE)
+    assert table.version_id == "0"  # nothing was written to it
+    assert len(calls) == 1
 
 
 def test_a_noted_creation_does_not_adopt_a_table_that_holds_rows(

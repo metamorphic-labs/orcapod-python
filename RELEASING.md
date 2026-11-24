@@ -369,7 +369,8 @@ uv run --no-project --isolated --python 3.12 \
 
 `--dataset` can be repeated. `write` refuses unless the plan and every table are as the dry run
 found them; an interrupted `write` is refused by every read of the dataset and is finished by
-running it again. `verify` compares schemas, table ids, versions, source ids, content and pipeline
+running it again (one stopped while it created the schema table asks for `--adopt <table id>`, for
+a table you know that run made). `verify` compares schemas, table ids, versions, source ids, content and pipeline
 hashes and each table's first rows with the plan; it does not read every row.
 
 ## Pre-releases

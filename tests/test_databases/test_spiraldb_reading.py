@@ -436,6 +436,41 @@ def test_one_warning_from_many_threads(project: Any) -> None:
     assert len([w for w in seen if w.category is UnrecordedTableSchemaWarning]) == 1
 
 
+def test_a_second_reader_does_not_pass_while_the_first_warning_raises(
+    project: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first thread is held inside the warning until the second had its chance."""
+    inside, second_done = threading.Event(), threading.Event()
+    warn = warnings.warn
+
+    def slow(*given: Any, **options: Any) -> None:
+        if not inside.is_set():
+            inside.set()
+            second_done.wait(0.5)
+        warn(*given, **options)
+
+    def build() -> str:
+        try:
+            SpiralDBConnector("p").get_arrow_schema("units")
+        except UnrecordedTableSchemaWarning:
+            return "raised"
+        return "passed"
+
+    def second() -> str:
+        assert inside.wait(10)
+        try:
+            return build()
+        finally:
+            second_done.set()
+
+    monkeypatch.setattr(connector_module.warnings, "warn", slow)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UnrecordedTableSchemaWarning)
+        with ThreadPoolExecutor(2) as pool:
+            results = [pool.submit(build), pool.submit(second)]
+            assert [r.result(20) for r in results] == ["raised", "raised"]
+
+
 def test_a_count_is_remembered_per_version(project: Any) -> None:
     fake.migrate("p", {"units": _WRITTEN})
     fake.count_log.clear()
