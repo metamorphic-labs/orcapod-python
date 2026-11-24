@@ -51,7 +51,8 @@ rates = firing_rate.pod(
 ## Group by tags
 
 `group_by` takes a list of tag columns. All rows with the same values in those columns
-become one row:
+become one row. The first call prints a `ProvisionalHashWarning`
+(see [Messages you can ignore](00-setup.md#messages-you-can-ignore)):
 
 ```python
 per_session = rates.group_by(["subject_id", "session"])
@@ -166,7 +167,7 @@ through with what you know so far.
 ## Batch: group by count
 
 `batch` gathers rows without looking at their values. With no argument, the whole stream
-becomes a single row:
+becomes a single row (with the same warning, once, for `Batch`):
 
 ```python
 everyone = subjects.batch()

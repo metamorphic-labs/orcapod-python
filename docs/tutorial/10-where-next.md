@@ -173,7 +173,8 @@ the job a new name, and run it twice. How many deliveries are there after each r
 
     You can make the decision in the function, or filter the stream before the sink with
     `filter` (Part 3), which works inside a job like any other operator. Filtering keeps the
-    sink itself unchanged:
+    sink itself unchanged (it prints a `ProvisionalHashWarning`: see
+    [Messages you can ignore](00-setup.md#messages-you-can-ignore)):
 
     ```python
     from orcapod import col

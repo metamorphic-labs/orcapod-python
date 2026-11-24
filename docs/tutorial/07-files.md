@@ -292,12 +292,15 @@ Without `ignore`, any change to any file in the folder makes it a new input.
 
 Identifying a file by content means reading it. For files of many gigabytes that takes
 longer than you want to wait on every run. Orcapod can remember a file's hash and reuse it
-as long as the file's size and modification time are unchanged. Turn this on once, at the
-start of your script:
+as long as the file's size and modification time are unchanged. To turn this on
+(optional), call this once, at the start of your script:
 
 ```python
-op.enable_file_hash_caching()
+op.enable_file_hash_caching(db_path=Path("workshop_hashes.sqlite"))
 ```
+
+This keeps the hashes in a file in your working directory. Without `db_path` they go to
+`~/.orcapod/file_hash_cache.db`, in your home directory.
 
 The details and options are on the [File Hash Caching](../concepts/file-hash-caching.md)
 page. With the small files of this tutorial it makes no noticeable difference.
@@ -354,7 +357,8 @@ containing the total number of spikes over both probes. (Hint: Part 4. After
 ??? success "Solution"
     Group the spike files by session, then hand the list of files to one function call.
     The function has no access to the tags, so it takes the session's name from the folder
-    the files are in.
+    the files are in. (The first `group_by`, like the first `filter`, prints a
+    `ProvisionalHashWarning`: see [Messages you can ignore](00-setup.md#messages-you-can-ignore).)
 
     ```python
     totals_dir = Path("session_totals")
@@ -377,7 +381,8 @@ containing the total number of spikes over both probes. (Hint: Part 4. After
     # Schema({'spikes': list[orcapod.logical_types.file_type.File]})
 
     totals = write_session_total.pod(per_session)
-    for tag, data in totals:
+    rows = sorted(totals, key=lambda row: (row[0]["subject_id"], row[0]["session"]))
+    for tag, data in rows:
         path = data.as_dict()["total_file"]
         print(path.name, path.read_text().strip())
     # mouse_01_s1_total.txt 2897
@@ -389,6 +394,9 @@ containing the total number of spikes over both probes. (Hint: Part 4. After
     # mouse_04_s1_total.txt 4931
     # mouse_04_s2_total.txt 2462
     ```
+
+    The rows of a stream have no promised order, so they are sorted by their tags before
+    printing.
 
 **3.** In `run_folders`, remove `ignore=["notes.txt"]` and run it twice, editing a
 `notes.txt` in between. How many calls does each run make, and why?

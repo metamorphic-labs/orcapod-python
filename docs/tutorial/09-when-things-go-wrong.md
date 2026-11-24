@@ -139,8 +139,8 @@ for example a `float` from a function annotated `-> int`. That raises an `Output
 (from `orcapod.errors`) naming the function, the output and both types; Orcapod does not
 convert the value for you. Inside a job it is skipped and reported like any other failure.
 
-Failures are not stored. Run again and the failed rows are tried again, and only those (they
-fail again, so the warning appears again):
+Failures are not stored. Run again and the failed rows are tried again, and only those. Expect
+the same warning again, 3 of 64 rows failed, from this run:
 
 ```python
 calls.clear()
@@ -175,7 +175,7 @@ first exception a function raises; `"continue"`, the default, skips the row.
 Reading tracebacks off the screen does not scale. An **observer** records what happens
 during a run in a table you can query afterwards. `StatusObserver` records the state of
 every row; `LoggingObserver` records the traceback and captured output of failures.
-`CompositeObserver` lets you use both:
+`CompositeObserver` lets you use both. Expect the same 3-of-64 warning again here:
 
 ```python
 import polars as pl
@@ -297,7 +297,8 @@ one.
     share a column name, rename one side or use `MergeJoin` (Part 3).
 
 **2.** Run the failing version of `firing_rate` (the one with the 1200 limit) in a job with
-only a `StatusObserver`, and print how many rows ended in each state.
+only a `StatusObserver`, and print how many rows ended in each state. (Expect the same
+3-of-64 warning again.)
 
 ??? success "Solution"
     ```python
@@ -326,7 +327,8 @@ session contain?
     `group_by` gathers seven units for that session where there should be eight, and the
     mean is computed over seven. `job.run()` reports failed rows in its warning and its
     summary, but raises no exception, and nothing in the mean's row says that a unit is
-    missing.
+    missing. (The same 3-of-64 warning appears again, and `group_by` prints a
+    `ProvisionalHashWarning`: see [Messages you can ignore](00-setup.md#messages-you-can-ignore).)
 
     ```python
     @function_pod(output_keys=["n_units", "mean_rate_hz"])

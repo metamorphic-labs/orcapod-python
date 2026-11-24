@@ -88,7 +88,9 @@ print(everything.as_table().num_rows)
 ## Filter: keep some rows
 
 `filter` keeps the rows that satisfy a condition. The simplest form is equality on one or more
-columns, written as keyword arguments:
+columns, written as keyword arguments. The first filter prints a `ProvisionalHashWarning`
+(see [Messages you can ignore](00-setup.md#messages-you-can-ignore)); `polars_filter` and `MergeJoin`, below, print
+one each too:
 
 ```python
 knockouts = subjects.filter(genotype="knockout")
