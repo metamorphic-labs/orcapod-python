@@ -560,6 +560,77 @@ def first_logical_identity_change(
     return None
 
 
+def declared_null_path(rows: "pa.Table") -> str | None:
+    """The first place, at any depth, where ``rows`` hold a null their own schema
+    declares non-nullable (ITL-1381).
+
+    A value under a null list, struct or map is not a value of the rows and never
+    counts. A schema that declares nothing non-nullable costs no look at the values.
+
+    Args:
+        rows: The rows, under the schema they were given with.
+
+    Returns:
+        The path, e.g. ``"a"``, ``"g.x"`` or ``"items[]"``, or ``None``.
+    """
+    for field, column in zip(rows.schema, rows.columns):
+        found = _declared_null_below(field, list(column.chunks), field.name)
+        if found is not None:
+            return found
+    return None
+
+
+def _declares_non_null(field: "pa.Field[Any]") -> bool:
+    """Whether ``field`` or any field nested in it is non-nullable."""
+    return not field.nullable or any(
+        _declares_non_null(child) for _, child in _child_fields(field.type)
+    )
+
+
+def _child_fields(data_type: "pa.DataType") -> "list[tuple[str, pa.Field[Any]]]":
+    """The nested fields whose values can be null, with their path text. A map's keys
+    are never null."""
+    if isinstance(data_type, pa.BaseExtensionType):
+        data_type = data_type.storage_type
+    if pa.types.is_struct(data_type):
+        return [(f".{f.name}", f) for f in data_type]
+    if pa.types.is_map(data_type):
+        return [("{}", data_type.item_field)]
+    if (
+        pa.types.is_list(data_type)
+        or pa.types.is_large_list(data_type)
+        or pa.types.is_fixed_size_list(data_type)
+    ):
+        return [("[]", data_type.value_field)]
+    return []
+
+
+def _declared_null_below(
+    field: "pa.Field[Any]", arrays: list[Any], path: str
+) -> str | None:
+    if not _declares_non_null(field):
+        return None
+    if not field.nullable and any(a.null_count for a in arrays):
+        return path
+    # Only the values of valid rows: what a null row hides is not a value.
+    arrays = [a.storage if isinstance(a, pa.ExtensionArray) else a for a in arrays]
+    arrays = [a.drop_null() if a.null_count else a for a in arrays]
+    for index, (segment, child) in enumerate(_child_fields(field.type)):
+        if segment == "[]":
+            below = [a.flatten() for a in arrays]
+        elif segment == "{}":
+            # ``MapArray.items`` ignores a slice; the list over its offsets does not.
+            below = [
+                pa.ListArray.from_arrays(a.offsets, a.items).flatten() for a in arrays
+            ]
+        else:
+            below = [a.field(index) for a in arrays]
+        found = _declared_null_below(child, below, path + segment)
+        if found is not None:
+            return found
+    return None
+
+
 def in_held_column_order(
     records: "pa.Table", held: "Sequence[pa.Field[Any]] | None"
 ) -> "pa.Table":

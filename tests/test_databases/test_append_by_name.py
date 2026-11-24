@@ -14,6 +14,7 @@ exactly, keep the database's own rule.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import sqlite3
 import uuid
@@ -34,10 +35,11 @@ from orcapod.databases import (
     SpiralDBConnector,
     SQLiteConnector,
 )
-from orcapod.databases.utils import in_held_column_order
+from orcapod.databases.utils import declared_null_path, in_held_column_order
 from orcapod.errors import (
     InputValidationError,
     NullabilityRecordMismatchError,
+    NullInNonNullableColumnError,
     UnstorableColumnError,
 )
 from tests.test_databases.type_matrix import open_database
@@ -1166,6 +1168,182 @@ def test_a_refused_batch_leaves_the_queued_rows_to_be_flushed(
         else:
             db.flush()
         _check(db.get_all_records(PATH, record_id_column=ID), given, ns)
+
+
+def _int_list(values: list[int | None], *, declared: bool) -> Any:
+    item = pa.field("item", pa.int64(), nullable=not declared)
+    offsets = pa.array(range(len(values) + 1), pa.int64())
+    return pa.LargeListArray.from_arrays(
+        offsets, pa.array(values, pa.int64()), type=pa.large_list(item)
+    )
+
+
+def _null_case(place: str, n: int, *, null: bool, not_null: bool) -> pa.Table:
+    """Row ``n`` whose value at ``place`` (declared ``NOT NULL`` there, at the top level
+    only with ``not_null``) is null with ``null``; built without Arrow checking it."""
+    value = [None if null else n]
+    other = pa.array([n], pa.int64())
+    nullable = not not_null
+    if place == "column":
+        column = pa.array(value, pa.int64())
+    elif place == "struct":
+        column = pa.StructArray.from_arrays(
+            [other, pa.array(value, pa.int64())],
+            fields=[pa.field("o", pa.int64()), pa.field("x", pa.int64(), False)],
+        )
+    elif place == "list":
+        column = _int_list(value, declared=True)
+    else:
+        column = pa.StructArray.from_arrays(
+            [other, _int_list(value, declared=True)],
+            fields=[
+                pa.field("o", pa.int64()),
+                pa.field("xs", pa.large_list(pa.field("item", pa.int64(), False))),
+            ],
+        )
+    ids = pa.array([f"r{n}".encode()], pa.large_binary())
+    return pa.Table.from_arrays(
+        [ids, column, other],
+        schema=pa.schema(
+            [
+                pa.field(ID, pa.large_binary()),
+                pa.field("v", column.type, nullable=nullable),
+                pa.field("w", pa.int64()),
+            ]
+        ),
+    )
+
+
+NULL_PATHS = {
+    "column": "v",
+    "struct": "v.x",
+    "list": "v[]",
+    "list in struct": "v.xs[]",
+}
+NULL_CASES = [
+    *[(kind, "column") for kind in CONNECTOR_DATABASES],
+    *[("SpiralDB", place) for place in NULL_PATHS if place != "column"],
+]
+
+
+@pytest.mark.parametrize(("kind", "place"), NULL_CASES)
+@pytest.mark.parametrize("violating_first", [True, False])
+@pytest.mark.parametrize("existing", [True, False])
+@pytest.mark.parametrize("skip", [True, False])
+@pytest.mark.parametrize("run_async", [True, False])
+def test_rows_are_checked_against_their_own_declaration_before_they_are_queued(
+    tmp_path: Path,
+    kind: str,
+    place: str,
+    violating_first: bool,
+    existing: bool,
+    skip: bool,
+    run_async: bool,
+) -> None:
+    """Review of PR 539: a null declared ``NOT NULL``, combined with a valid nullable
+    batch, was stored. It is refused when queued, whichever batch comes first, and the
+    valid batch is stored alone. Queued from this thread or from an event loop's tasks
+    (a connector database has no async path of its own)."""
+
+    def queue(db: Any, violating: bool) -> None:
+        rows = _null_case(
+            place, 3 if violating else 2, null=violating, not_null=violating
+        )
+        if violating:
+            with pytest.raises(NullInNonNullableColumnError) as refused:
+                db.add_records(PATH, rows, record_id_column=ID, skip_duplicates=skip)
+            assert refused.value.column == NULL_PATHS[place]
+        else:
+            db.add_records(PATH, rows, record_id_column=ID, skip_duplicates=skip)
+
+    async def queue_async(db: Any) -> None:
+        for violating in (violating_first, not violating_first):
+            await asyncio.create_task(asyncio.to_thread(queue, db, violating))
+
+    with _connector_database(kind, tmp_path) as db:
+        if existing:
+            _add(db, _null_case(place, 1, null=False, not_null=False), flush=True)
+        if run_async and not kind.startswith("SQLite"):
+            asyncio.run(queue_async(db))
+        elif run_async:
+
+            async def on_loop() -> None:
+                # A SQLite connection stays on its own thread.
+                for violating in (violating_first, not violating_first):
+                    queue(db, violating)
+
+            asyncio.run(on_loop())
+        else:
+            for violating in (violating_first, not violating_first):
+                queue(db, violating)
+        ids = [b"r1", b"r2"] if existing else [b"r2"]
+        for flush in (False, True):
+            if flush:
+                db.flush()
+            rows = db.get_all_records(PATH, record_id_column=ID)
+            assert sorted(rows.column(ID).to_pylist()) == ids
+            assert rows.column("v").null_count == 0
+
+
+@pytest.mark.parametrize("violating_first", [True, False])
+def test_a_postgresql_database_checks_the_declaration_before_anything_is_sent(
+    tmp_path: Path, violating_first: bool
+) -> None:
+    with open_database("PostgreSQL", tmp_path) as db:
+        valid = _null_case("column", 2, null=False, not_null=False)
+        violating = _null_case("column", 3, null=True, not_null=True)
+        if not violating_first:
+            _add(db, valid)
+        with pytest.raises(NullInNonNullableColumnError, match="'v'"):
+            _add(db, violating)
+        if violating_first:
+            _add(db, valid)
+        assert list(db._pending_batches["/".join(PATH)]["__record_id"].to_pylist()) == [
+            b"r2"
+        ]
+
+
+def test_the_declared_null_rule_reads_only_the_values_of_the_rows() -> None:
+    """A value under a null struct, outside a slice, or at a nullable place never
+    counts; a map's values do."""
+
+    def path(array: Any, nullable: bool = True) -> str | None:
+        field = pa.field("c", array.type, nullable=nullable)
+        return declared_null_path(
+            pa.Table.from_arrays([array], schema=pa.schema([field]))
+        )
+
+    ints = pa.array([1, None, 3])
+    x = pa.field("x", pa.int64(), nullable=False)
+    assert (path(ints), path(ints, False)) == (None, "c")
+    assert path(pa.StructArray.from_arrays([ints], fields=[x])) == "c.x"
+    hidden = pa.array([False, True, False])
+    masked = pa.StructArray.from_arrays([ints], fields=[x], mask=hidden)
+    assert (path(masked), path(masked, False)) == (None, "c")
+    lists = _int_list([1, None], declared=True)
+    assert (path(lists), path(lists.slice(0, 1)), path(lists.slice(1))) == (
+        "c[]",
+        None,
+        "c[]",
+    )
+    assert path(_int_list([1, None], declared=False)) is None
+    # The pyarrow stubs do not know the ``type`` argument of ``from_arrays``.
+    arrow: Any = pa
+    fixed = arrow.FixedSizeListArray.from_arrays(
+        pa.array([1, None, 3, 4]), type=pa.list_(pa.field("item", pa.int64(), False), 2)
+    )
+    assert (path(fixed), path(fixed.slice(1))) == ("c[]", None)
+    maps = arrow.MapArray.from_arrays(
+        pa.array([0, 1, 2], pa.int32()),
+        pa.array(["a", "b"]),
+        pa.array([1, None]),
+        type=arrow.map_(pa.string(), x),
+    )
+    assert (path(maps), path(maps.slice(0, 1)), path(maps.slice(1))) == (
+        "c{}",
+        None,
+        "c{}",
+    )
 
 
 # ── PostgreSQL (a live server: the PostgreSQL CI job) ──────────────────────────
