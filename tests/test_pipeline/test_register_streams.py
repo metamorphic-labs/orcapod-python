@@ -14,6 +14,7 @@ import asyncio
 import itertools
 import json
 import re
+from collections import Counter
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -33,9 +34,9 @@ from orcapod.pipeline import PipelineJob
 from orcapod.side_effects import SideEffectPod
 from tests.test_core.operators.several_items import (
     DATA_TAGS,
+    DATA_FIRST_REVERSED,
     MAIN,
-    MIXED,
-    PLAIN,
+    ROLES,
     TAGS_FIRST,
     P,
     Q,
@@ -59,14 +60,24 @@ _RANDOM_ID = re.compile(r"::[0-9a-f]{32}::")
 Mode = str  # "sync" or "async"
 
 
-def _rows(table: pa.Table, mode: Mode) -> list[str] | set[str]:
-    """Compare stable row values in sync order or as a set for async runs."""
+def _rows(table: pa.Table, mode: Mode) -> list[str] | set[tuple[str, int]]:
+    """Compare ordered sync rows or an async set of row and count pairs."""
     keep = [name for name in table.column_names if name not in _RUN_DEPENDENT]
     rows = [
         _RANDOM_ID.sub("::<id>::", repr(sorted(row.items())))
         for row in table.select(keep).to_pylist()
     ]
-    return rows if mode == "sync" else set(rows)
+    return rows if mode == "sync" else set(Counter(rows).items())
+
+
+def test_async_row_comparison_checks_each_rows_multiplicity() -> None:
+    """Async comparisons ignore order and detect a changed count per row."""
+    original = pa.table({"x": [1, 1, 2]})
+    reordered = pa.table({"x": [2, 1, 1]})
+    changed = pa.table({"x": [1, 2, 2]})
+    assert _rows(original, "async") == _rows(reordered, "async")
+    assert _rows(original, "async") != _rows(changed, "async")
+    assert _rows(original, "sync") != _rows(reordered, "sync")
 
 
 def _run(job: PipelineJob, mode: Mode) -> None:
@@ -146,10 +157,20 @@ OPERATOR_PARAMS = [
 
 
 @pytest.mark.parametrize("mode", ["sync", "async"])
-@pytest.mark.parametrize("role", [PLAIN, MIXED])
+@pytest.mark.parametrize("role", ROLES)
+@pytest.mark.parametrize(
+    "tag_order, layout",
+    [(0, TAGS_FIRST), (1, TAGS_FIRST), (0, DATA_FIRST_REVERSED)],
+    ids=["declared", "tags_reversed", "data_first"],
+)
 @pytest.mark.parametrize("case", OPERATOR_PARAMS)
 def test_every_operator_by_register_and_block_equals_hand_written(
-    case: OperatorCase, role: str, mode: Mode, tmp_path: Path
+    case: OperatorCase,
+    tag_order: int,
+    layout: str,
+    role: str,
+    mode: Mode,
+    tmp_path: Path,
 ) -> None:
     """Each exported operator, after one step over each input: registered (the end
     stream alone, and with the prepared streams in two orders) and recorded in a block
@@ -158,12 +179,12 @@ def test_every_operator_by_register_and_block_equals_hand_written(
         pytest.skip(f"{case.label} does not take {role} tags")
     hand, hand_db = _new_job()
     with hand:
-        _apply(case, _prepare(case.sources(role, 0, TAGS_FIRST)))
+        _apply(case, _prepare(case.sources(role, tag_order, layout)))
     _run(hand, mode)
     expected = fingerprint(hand, hand_db, tmp_path, "hand", mode)
 
     def registered(order: Callable[[Any, list[Any]], list[Any]]) -> None:
-        prepared = _prepare(case.sources(role, 0, TAGS_FIRST))
+        prepared = _prepare(case.sources(role, tag_order, layout))
         end = _apply(case, prepared)
         job, db = _new_job()
         job.register(*order(end, prepared))
@@ -174,7 +195,7 @@ def test_every_operator_by_register_and_block_equals_hand_written(
     registered(lambda end, prepared: [end, *prepared])
     registered(lambda end, prepared: [*reversed(prepared), end])
 
-    prepared = _prepare(case.sources(role, 0, TAGS_FIRST))
+    prepared = _prepare(case.sources(role, tag_order, layout))
     job, db = _new_job()
     with job:
         _apply(case, prepared)
@@ -833,6 +854,63 @@ def test_an_exact_keyword_name_survives_a_smaller_label_in_the_block() -> None:
         job.register(z=step)
         source.select_data_columns(["x"], label="a")
     assert list(job.nodes) == ["s", "z"]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_equal_end_steps_check_labels_on_both_paths(reverse: bool) -> None:
+    """Equal downstream hashes can hide different labels on the upstream objects."""
+    source = _two_rows("s", 1)
+    left = source.select_data_columns(["x"], label="left")
+    right = source.select_data_columns(["x"], label="right")
+    rename = MapData({"x": "renamed"})
+    ends = (rename(left), rename(right))
+    assert ends[0].content_hash() == ends[1].content_hash()
+    job, _ = _new_job()
+    with pytest.raises(ValueError, match=r"two labels.*(left.*right|right.*left)"):
+        job.register(*ends[::-1] if reverse else ends)
+    assert job.nodes == {}
+
+
+def test_keyword_registration_reserves_a_held_positional_name() -> None:
+    """Reserving a held name keeps the compiled node and its completed run."""
+    source = _two_rows("s", 1)
+    chosen = source.select_data_columns(["x"], label="chosen")
+    job, _ = _new_job()
+    job.register(chosen)
+    run = job.run()
+    node = job.chosen
+    job.register(chosen=chosen)
+    assert job.chosen is node
+    assert job.last_run is run
+    with pytest.raises(ValueError, match="'chosen'"):
+        job.register(source.select_data_columns(["y"], label="chosen"))
+    assert job.chosen is node
+
+
+def test_a_refused_block_restores_a_rebound_slot_and_its_current_results() -> None:
+    """A refused block restores the slot's identity and existing result freshness."""
+    source = _two_rows("s", 1)
+    replacement = _two_rows("replacement", 10)
+    job, _ = _new_job()
+    job.register(doubled_x.pod(source, label="double"))
+    job.run()
+    slot = job.s
+    original_hash = slot.content_hash()
+    original_modified = slot.last_modified
+    original_rows = job.double.as_table().to_pylist()
+    assert original_rows
+    with pytest.raises(ValueError, match="refuse the block"):
+        with job:
+            job.bind(sources={"s": replacement})
+            assert slot.bound_source is replacement
+            assert slot.content_hash() != original_hash
+            raise ValueError("refuse the block")
+    assert job.s is slot
+    assert job.sources["s"] is source
+    assert slot.bound_source is source
+    assert slot.content_hash() == original_hash
+    assert slot.last_modified == original_modified
+    assert job.double.as_table().to_pylist() == original_rows
 
 
 @pytest.mark.parametrize("assigned_first", [False, True])

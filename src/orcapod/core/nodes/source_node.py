@@ -1696,6 +1696,19 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         """The concrete stream bound to this slot, or ``None``."""
         return self._bound_source
 
+    def _binding_state(self) -> tuple[StreamProtocol | None, datetime | None]:
+        """Capture the source and when it was bound for a recording rollback."""
+        return self._bound_source, self._modified_time
+
+    def _restore_binding(
+        self, state: tuple[StreamProtocol | None, datetime | None]
+    ) -> None:
+        """Restore the source and its timestamp, invalidating cached identities."""
+        source, modified_time = state
+        if source is not self._bound_source:
+            self._bind(source)
+        self._modified_time = modified_time
+
     def _bind(self, value: StreamProtocol | None) -> None:
         """Check *value* and bind it, invalidating both hash caches.
 

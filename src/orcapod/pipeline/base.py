@@ -478,7 +478,7 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         """
         names = names or {}
         planned: dict[str, PodInvocation] = {}
-        expanded_keys: set[str] = set()
+        expanded_streams: dict[int, Any] = {}
         # Iterative post-order walk: (stream, upstreams visited).
         stack: list[tuple[Any, bool]] = [
             (stream, False) for stream in reversed(streams)
@@ -489,6 +489,20 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                 continue
             key = stream.content_hash().to_string()
             if key in self._invocation_lut:
+                continue
+            producer = stream.producer
+            if producer is None:
+                if _is_node(stream):
+                    raise ValueError(_unattached_message(stream))
+                continue  # a leaf: the bind check decides when the pipeline compiles
+            if not expanded:
+                # Equal content can have distinct upstream objects with different labels.
+                # Keep visited objects alive so their ids cannot be reused during the walk.
+                if id(stream) in expanded_streams:
+                    continue
+                expanded_streams[id(stream)] = stream
+                stack.append((stream, True))
+                stack.extend((up, False) for up in reversed(tuple(stream.upstreams)))
                 continue
             label = names.get(key, _recorded_label(stream))
             if key in planned:
@@ -501,18 +515,6 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                         )
                     if earlier is None or label < earlier:
                         planned[key] = _with_label(planned[key], label)
-                continue
-            producer = stream.producer
-            if producer is None:
-                if _is_node(stream):
-                    raise ValueError(_unattached_message(stream))
-                continue  # a leaf: the bind check decides when the pipeline compiles
-            if not expanded:
-                if key in expanded_keys:
-                    continue
-                expanded_keys.add(key)
-                stack.append((stream, True))
-                stack.extend((up, False) for up in reversed(tuple(stream.upstreams)))
                 continue
             planned[key] = _invocation_of(stream, producer, label)
         return list(planned.values())
@@ -622,19 +624,19 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
             names[key] = name
         planned = self._plan_steps(given, names, refuse_label_conflicts=True)
         self._require_exact_names(names, planned)
+        reservations = {name: key for key, name in names.items()}
         if not planned:
-            # Every step is held: nothing to record, nothing to compile. Only the
-            # restriction rule is checked, since a held step's identity does not
-            # show under which restriction this stream reads its source.
+            # Every step is held. The identity does not show the source restriction,
+            # so check it before reserving any names. There is nothing to compile.
             from orcapod.pipeline.restrictions import require_one_restriction
 
             require_one_restriction([*self._held_streams(), *given])
+            self._exact_names.update(reservations)
             return
         saved = self._state()
         try:
             self._record_planned(planned, also_read=given)
-            for key, name in names.items():
-                self._exact_names[name] = key
+            self._exact_names.update(reservations)
             if not self.is_active() and self._compiles_on_exit():
                 self.compile()
         except BaseException:

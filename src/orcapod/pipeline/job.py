@@ -222,6 +222,23 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         "_compiled_pipeline",
     )
 
+    def _state(self) -> dict[str, Any]:
+        """Capture the job's state, including bindings held by the existing slots."""
+        saved = super()._state()
+        saved["_slot_bindings"] = [
+            (node, node._binding_state())  # pyright: ignore[reportPrivateUsage]  # a job owns its slots
+            for node in self._persistent_node_map.values()
+            if isinstance(node, SourceJobNode)
+        ]
+        return saved
+
+    def _restore_state(self, saved: dict[str, Any]) -> None:
+        """Restore the existing slots in place so their identity and results survive."""
+        bindings = saved.pop("_slot_bindings")
+        super()._restore_state(saved)
+        for node, binding in bindings:
+            node._restore_binding(binding)
+
     def _require_recordable(self) -> None:
         """Refuse ``register`` on a loaded job, which is read-only (ITL-1387).
 

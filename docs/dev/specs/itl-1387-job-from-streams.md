@@ -83,7 +83,7 @@ its invocation's key, so `job.doubled` is recognised as a held step and not take
 Two properties of reopening that this design inherits (`reopen_renumbers.py`):
 
 - `compile()` rebuilds every node object. A node object taken from the job before reopening
-  is not the node the job holds afterwards.
+  is not the node the job holds afterward.
 - Disambiguation suffixes are given at every compile: a job with one unlabelled `MapData`
   that gains a second one has `MapData_1` and `MapData_2`, and the first is no longer called
   `MapData`. The names never depend on recording order (content-hash order), but they are not
@@ -356,7 +356,7 @@ without:
 
 - A loaded **function node has no producer in both cases** (`producer is None`):
   `PipelineJob.load` (through `Pipeline.load`) always builds function nodes with
-  `function_pod=None`, whether or not the function could be imported. There is nothing to
+  `function_pod=None`, regardless of whether the function could be imported. There is nothing to
   walk.
 - A loaded **operator node has a producer**: operators are rebuilt from their saved config.
   The walk records it and reaches the function node beneath it.
@@ -524,7 +524,7 @@ records every test in which `compile()` meets a leaf that has a producer, and ev
 `with` block. Each listed test changes in P1 (its expectation becomes the walked pipeline, or
 the refusal moves to recording time):
 
-The probe run (36,543 passed, 189 skipped for want of a PostgreSQL or SpiralDB server or an
+The probe run (36,543 passed, 189 skipped because the environment lacked a PostgreSQL or SpiralDB server or an
 optional package, 258 expected failures; the 8 failures, all in
 `tests/test_core/test_tag_schema_order.py`, belong to the measured base fc1df420 and are
 fixed on `main` by #499) found:
@@ -644,7 +644,7 @@ alone). In risk:
   inputs in that order, so a saved and loaded `MergeJoin` could swap its arguments (on `main`
   too). Fixed in review round 1 (11.2): the saved list is canonical, each node's inputs in
   argument order, and the loader keeps that order.
-- Refusals: each refusal of sections 3, 5 and 8 with the job unchanged afterwards (names,
+- Refusals: each refusal of sections 3, 5 and 8 with the job unchanged afterward (names,
   `job.nodes`, recorded state through a subsequent `with` block that succeeds).
 - Restrictions: one source restricted two ways across two registered streams refused; the
   restriction shown in `RunSummary` and saved (SpiralDB tests run where SpiralDB is available,
