@@ -10,8 +10,10 @@ import asyncio
 import datetime as dt
 import math
 import os
+import signal
 import sys
 import threading
+import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -651,6 +653,70 @@ def test_a_forked_child_is_refused_instead_of_hanging(
     monkeypatch.setattr(os, "getpid", lambda: -1)
     with pytest.raises(RuntimeError, match="after a fork"):
         connector.lookup_table("units")
+
+
+_AFTER_FORK = {
+    "read": lambda source: source.as_table(),
+    "head": lambda source: source.head(),
+    "check": lambda source: source.check_for_new_data(),
+    "where": lambda source: source.where(k1="a"),
+    "close": lambda source: source.close(),
+}
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork is POSIX")
+@pytest.mark.parametrize("held", [False, True], ids=["lock free", "lock held"])
+@pytest.mark.parametrize("use", sorted(_AFTER_FORK))
+def test_a_source_in_a_forked_child_is_refused_and_never_waits(
+    project: Any, use: str, held: bool
+) -> None:
+    """Review finding B7: the process is checked before the inherited lock, which a
+    thread that does not exist in the child may hold for ever."""
+    fake.migrate("p", {"units": _WRITTEN})
+    source = SpiralDBTableSource("p", "units")
+    lock = source._connection_lock  # pyright: ignore[reportPrivateUsage]  # the inherited lock is the subject
+    taken, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with lock:
+            taken.set()
+            release.wait(30)
+
+    holder = threading.Thread(target=hold)
+    if held:
+        holder.start()
+        assert taken.wait(10)
+    try:
+        with warnings.catch_warnings():
+            # Python warns of a fork with threads: that is what is tested.
+            warnings.simplefilter("ignore")
+            pid = os.fork()
+        if pid == 0:  # the child: never returns to pytest
+            code = 3
+            try:
+                _AFTER_FORK[use](source)
+                code = 1
+            except RuntimeError as exc:
+                code = 0 if "after a fork" in str(exc) else 2
+            finally:
+                os._exit(code)
+        status: int | None = None
+        for _ in range(1000):
+            done, found = os.waitpid(pid, os.WNOHANG)
+            if done:
+                status = os.waitstatus_to_exitcode(found)
+                break
+            time.sleep(0.01)
+        if status is None:
+            os.kill(pid, signal.SIGKILL)
+            _ = os.waitpid(pid, 0)
+        assert status == 0, "the child waited for the lock" if status is None else ""
+    finally:
+        release.set()
+        if held:
+            holder.join(10)
+    # The parent is not affected.
+    assert source.as_table().num_rows == 3
 
 
 def test_a_missing_table_is_told_apart_from_other_failures(

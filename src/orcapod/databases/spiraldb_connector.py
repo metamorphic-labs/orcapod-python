@@ -209,6 +209,23 @@ def _warn_once(about: tuple[str, str], message: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def require_same_process(pid: int) -> None:
+    """Refuse a SpiralDB client made in another process: after a fork a call of it hangs,
+    and a lock another thread held stays locked.
+
+    Args:
+        pid: The process that made the client.
+
+    Raises:
+        RuntimeError: If this is another process.
+    """
+    if pid != os.getpid():
+        raise RuntimeError(
+            "this SpiralDB client was made in another process, and cannot be used after "
+            "a fork. Make a new one in a process started with 'spawn'"
+        )
+
+
 def _api_url(overrides: Mapping[str, str] | None) -> str | None:
     """Return the service address that saved ``overrides`` name, if any.
 
@@ -621,13 +638,7 @@ class SpiralDBConnector:
         """Raise RuntimeError if this connector has been closed."""
         if self._closed:
             raise RuntimeError("SpiralDBConnector is closed")
-        if self._pid != os.getpid():
-            # The SDK's client does not survive a fork: a call in the child hangs.
-            raise RuntimeError(
-                "this SpiralDBConnector was made in another process; a SpiralDB client "
-                "cannot be used after a fork. Make a new one in a process started with "
-                "'spawn'"
-            )
+        require_same_process(self._pid)
 
     def share_client(self) -> SpiralDBConnector:
         """Return an independently closable connector in the same SDK client scope."""

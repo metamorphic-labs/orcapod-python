@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import dataclasses
+import os
 from collections.abc import AsyncIterator, Collection, Generator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
@@ -67,6 +68,7 @@ from orcapod.databases.spiraldb_connector import (
     SpiralDBConnector,
     SpiralDBTable,
     SpiralDBTableNotFoundError,
+    require_same_process,
 )
 from orcapod.errors import InputValidationError, RowIdentifierError, SourceTooLargeError
 from orcapod.types import ColumnConfig, Condition
@@ -345,6 +347,7 @@ class SpiralDBTableSource(RootSource):
         self._overrides = None if overrides is None else dict(overrides)
         self._connection: SpiralDBConnector | None = None
         self._connection_lock = Lock()
+        self._pid = os.getpid()
         self._closed = False
         self._condition = Condition()
         self._limit = limit
@@ -587,6 +590,7 @@ class SpiralDBTableSource(RootSource):
         The modified time is carried over until ``_apply_restriction`` moves it.
         A SpiralDB source holds no rows it read.
         """
+        require_same_process(self._pid)  # before a lock inherited by a fork
         with self._connection_lock:
             connection = self._connection
             if connection is None:
@@ -686,6 +690,7 @@ class SpiralDBTableSource(RootSource):
 
     def _connector(self) -> SpiralDBConnector:
         """Return the connector owned by this source."""
+        require_same_process(self._pid)  # before a lock inherited by a fork
         with self._connection_lock:
             if self._closed:
                 raise RuntimeError("SpiralDBTableSource is closed")
@@ -699,6 +704,7 @@ class SpiralDBTableSource(RootSource):
 
     def close(self) -> None:
         """Release this source's reference to the SDK client after its reads finish."""
+        require_same_process(self._pid)  # before a lock inherited by a fork
         with self._connection_lock:
             self._closed = True
             if self._connection is not None:
