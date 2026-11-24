@@ -81,33 +81,45 @@ def _ks(rows: list[dict[str, Any]]) -> list[int]:
     return [r["k"] for r in rows]
 
 
+def _batch_rows(table: Any) -> list[tuple[Any, ...]]:
+    """Each Batch row as (members' k, their y, their w, folded record id)."""
+    return list(
+        zip(
+            *(table.column(c).to_pylist() for c in ("k", "y", "w")),
+            _record_ids(table),
+            strict=True,
+        )
+    )
+
+
+def _same_items(a: list[Any], b: list[Any]) -> bool:
+    """Whether two lists hold the same items, in any order."""
+    return sorted(map(repr, a)) == sorted(map(repr, b))
+
+
 def _record_ids(table: Any) -> list[Any]:
     name = next(c for c in table.column_names if c.startswith("_tag_record_id"))
     return table.column(name).to_pylist()
 
 
-@pytest.mark.parametrize(
-    ("tag_order", "data_order"), [(["k", "g"], ("x", "z")), (["g", "k"], ("z", "x"))]
-)
-@pytest.mark.parametrize("scenario", ["run", "load_only", "clear_cache"])
-@pytest.mark.parametrize("stored", [(), (1, 3), (3, 1), (0, 2), (2,), (0, 1, 2, 3)])
-@pytest.mark.parametrize("mode", ["sync", "async"])
-def test_held_rows_follow_what_the_run_passed_downstream(
-    tmp_path: Path,
+LAYOUTS = [(["k", "g"], ("x", "z")), (["g", "k"], ("z", "x"))]
+SCENARIOS = ["run", "load_only", "clear_cache"]
+HISTORIES = [(), (1, 3), (3, 1), (0, 2), (2,), (0, 1, 2, 3)]
+
+
+def _run_scenario(
+    path: Path,
     mode: str,
     stored: tuple[int, ...],
     scenario: str,
     tag_order: list[str],
     data_order: tuple[str, ...],
-) -> None:
-    """Every read of the function node gives its rows in the order the run passed
-    them downstream (input order on the sync path), and a downstream node run on
-    its own (Batch and its sum, GroupBy) gives what the whole job gave: memberships,
-    sums, folded record ids and stored entries, for several stored histories, with
-    two tags and two data columns laid out two ways. Each row's two outputs (y and w,
-    of distinct values) stay together in every read and every fold."""
+) -> PipelineJob:
+    """Store the ``stored`` rows' results with one job, then run the job over every
+    row: an ordinary run, a load-only run of the saved job, or a run, ``clear_cache()``
+    of the function node and a second run."""
     orchestrator = ORCHESTRATORS[mode]
-    database = DeltaTableDatabase(tmp_path / "db")
+    database = DeltaTableDatabase(path / "db")
     if stored:
         _job(database, [ROWS[i] for i in stored], tag_order, data_order).run(
             orchestrator=orchestrator()
@@ -115,26 +127,61 @@ def test_held_rows_follow_what_the_run_passed_downstream(
     job = _job(database, ROWS, tag_order, data_order)
     load_only = scenario == "load_only"
     if load_only:
-        job.save(tmp_path / "job.json")
-        job = PipelineJob.load(tmp_path / "job.json", database=database)
+        job.save(path / "job.json")
+        job = PipelineJob.load(path / "job.json", database=database)
         job.bind(sources={"input": _source(ROWS, tag_order, data_order)})
     job.run(orchestrator=orchestrator(), load_only=load_only)
     if scenario == "clear_cache":
         job.nodes["f"].clear_cache()
         job.run(orchestrator=orchestrator())
+    return job
+
+
+def _row_set(table: Any) -> list[str]:
+    """A table's rows as a multiset (sorted texts): order ignored, every column kept.
+
+    A function output's source-info token holds the id of the stored result, a random
+    identifier each store makes (``<function>::<result id>::<column>``): it is kept
+    as ``<function>::*::<column>``, so runs over different stores compare.
+    """
+    names = sorted(table.column_names)
+
+    def cell(name: str, value: Any) -> Any:
+        if name in ("_source_y", "_source_w") and isinstance(value, str):
+            function, _, rest = value.partition("::")
+            return f"{function}::*::{rest.rpartition('::')[2]}"
+        return value
+
+    return sorted(repr([(n, cell(n, r[n])) for n in names]) for r in table.to_pylist())
+
+
+@pytest.mark.parametrize(("tag_order", "data_order"), LAYOUTS)
+@pytest.mark.parametrize("scenario", SCENARIOS)
+@pytest.mark.parametrize("stored", HISTORIES)
+def test_sync_held_rows_follow_what_the_run_passed_downstream(
+    tmp_path: Path,
+    stored: tuple[int, ...],
+    scenario: str,
+    tag_order: list[str],
+    data_order: tuple[str, ...],
+) -> None:
+    """Synchronous runs: every read of the function node gives its rows in input
+    order, the order the run passed them downstream, and a downstream node run on
+    its own (Batch and its sum, GroupBy) gives exactly what the whole job gave:
+    memberships, sums, folded record ids and stored entries, for several stored
+    histories, with two tags and two data columns laid out two ways. Each row's two
+    outputs (y and w, of distinct values) stay together in every read and fold."""
+    job = _run_scenario(tmp_path, "sync", stored, scenario, tag_order, data_order)
+    load_only = scenario == "load_only"
     node = job.nodes["f"]
 
     passed = [t.as_dict()["k"] for t, _ in node.iter_data()]
-    if mode == "sync":
-        # Input order, of the inputs the run passed on (a load-only run passes the
-        # stored ones only).
-        expected = sorted(stored) if load_only else [0, 1, 2, 3]
-        assert passed == expected
+    # Input order, of the inputs the run passed on (load-only: the stored ones).
+    assert passed == (sorted(stored) if load_only else [0, 1, 2, 3])
     assert _ks(node.as_table(columns={"sort_by_tags": False}).to_pylist()) == passed
     assert _ks(node.head(len(passed) or 1).table.to_pylist()) == passed
     assert node.as_polars_df()["k"].to_list() == passed
     assert node.as_pandas_df()["k"].to_list() == passed
-    # Both outputs of each row, read together, are that row's own.
     by_k = {r["k"]: r for r in ROWS}
     assert [(d.as_dict()["y"], d.as_dict()["w"]) for _, d in node.iter_data()] == [
         (by_k[k]["x"] * 10, -by_k[k]["z"]) for k in passed
@@ -147,18 +194,10 @@ def test_held_rows_follow_what_the_run_passed_downstream(
     job_groups = job.nodes["GroupBy"].as_table().to_pylist()
     job_entries, _ = leaf._stored_provenance(results=False)
     held_batches = Batch(batch_size=2)(node).as_table(columns={"system_tags": True})
-    assert held_batches.column("k").to_pylist() == job_batches.column("k").to_pylist()
-    for column in ("y", "w"):
-        assert (
-            held_batches.column(column).to_pylist()
-            == job_batches.column(column).to_pylist()
-        )
-    for members, ys, ws in zip(
-        *(job_batches.column(c).to_pylist() for c in ("k", "y", "w")), strict=True
-    ):
+    assert _batch_rows(held_batches) == _batch_rows(job_batches)
+    for members, ys, ws, _ in _batch_rows(job_batches):
         assert ys == [by_k[k]["x"] * 10 for k in members]
         assert ws == [-by_k[k]["z"] for k in members]
-    assert _record_ids(held_batches) == _record_ids(job_batches)
     assert GroupBy(["g"])(node).as_table().to_pylist() == job_groups
     batch.clear_cache()
     leaf.clear_cache()
@@ -167,18 +206,75 @@ def test_held_rows_follow_what_the_run_passed_downstream(
     after, _ = leaf._stored_provenance(results=False)
     count = 0 if job_entries is None else job_entries.num_rows
     assert (0 if after is None else after.num_rows) == count
-    if mode == "sync" and not load_only:
+    if not load_only:
         assert [(t["total_y"], t["total_w"]) for t in job_totals] == [
             (30, -(ROWS[0]["z"] + ROWS[1]["z"])),
             (70, -(ROWS[2]["z"] + ROWS[3]["z"])),
         ]
 
 
+@pytest.mark.parametrize(("tag_order", "data_order"), LAYOUTS)
+@pytest.mark.parametrize("scenario", SCENARIOS)
+@pytest.mark.parametrize("stored", HISTORIES)
+def test_async_held_rows_are_the_sync_rows_as_a_set(
+    tmp_path: Path,
+    stored: tuple[int, ...],
+    scenario: str,
+    tag_order: list[str],
+    data_order: tuple[str, ...],
+) -> None:
+    """Asynchronous runs promise no order (ITL-1437): a node's output is a set of
+    rows. Two asynchronous runs of the same scenario and the synchronous run give the
+    function node the same multiset of rows (tags, values, source info, system tags),
+    by every read; GroupBy, whose result does not depend on row order here, gives the
+    same rows. Batch, whose groups follow arrival order, is checked only for being a
+    valid grouping of those rows (sizes, members' own values, and, when the run
+    computes, the totals' sums)."""
+    sync = _run_scenario(
+        tmp_path / "s", "sync", stored, scenario, tag_order, data_order
+    )
+    runs = [
+        _run_scenario(
+            tmp_path / f"a{i}", "async", stored, scenario, tag_order, data_order
+        )
+        for i in range(2)
+    ]
+    columns = {"source": True, "system_tags": True, "sort_by_tags": False}
+    expected = _row_set(sync.nodes["f"].as_table(columns=columns))
+    expected_groups = _row_set(sync.nodes["GroupBy"].as_table())
+    by_k = {r["k"]: r for r in ROWS}
+    for job in runs:
+        node = job.nodes["f"]
+        assert _row_set(node.as_table(columns=columns)) == expected
+        ks = sorted(t.as_dict()["k"] for t, _ in node.iter_data())
+        assert sorted(_ks(node.head(len(ks) or 1).table.to_pylist())) == ks
+        assert sorted(node.as_polars_df()["k"].to_list()) == ks
+        assert sorted(node.as_pandas_df()["k"].to_list()) == ks
+        assert _row_set(job.nodes["GroupBy"].as_table()) == expected_groups
+        batches = _batch_rows(
+            job.nodes["Batch"].as_table(columns={"system_tags": True})
+        )
+        assert sorted(k for members, *_ in batches for k in members) == ks
+        assert all(1 <= len(members) <= 2 for members, *_ in batches)
+        for members, ys, ws, _ in batches:
+            assert ys == [by_k[k]["x"] * 10 for k in members]
+            assert ws == [-by_k[k]["z"] for k in members]
+        if scenario == "load_only":
+            # A load-only run serves only the totals stored for its own batches.
+            continue
+        totals = job.nodes["batch_total"].as_table().to_pylist()
+        assert sum(t["total_y"] for t in totals) == sum(by_k[k]["x"] * 10 for k in ks)
+        assert sum(t["total_w"] for t in totals) == sum(-by_k[k]["z"] for k in ks)
+
+
 @pytest.mark.parametrize("mode", ["sync", "async"])
 def test_tied_group_members_follow_the_held_order(mode: str) -> None:
     """Two cached versions of one record (identical system tags, so GroupBy's member
-    order ties) with only the newer result stored beforehand: GroupBy over the held
-    rows gives the members in the order the whole job's GroupBy received them."""
+    order ties) with only the newer result stored beforehand. Synchronous: GroupBy
+    over the held rows gives the members in the order the whole job's GroupBy
+    received them (the held order). Asynchronous (no order promised, ITL-1437): the
+    held rows and the group's members are the same set of rows as the synchronous
+    run's."""
     orchestrator = ORCHESTRATORS[mode]
     store, cache = InMemoryArrowDatabase(), InMemoryArrowDatabase()
     old = ROWS[0]
@@ -196,12 +292,16 @@ def test_tied_group_members_follow_the_held_order(mode: str) -> None:
     job.run(orchestrator=orchestrator())
     node = job.nodes["f"]
     held = [(d.as_dict()["y"], d.as_dict()["w"]) for _, d in node.iter_data()]
-    if mode == "sync":
-        # The cache's order: the old version first.
-        assert held == [(10, -old["z"]), (90, -5)]
+    versions_rows = [(10, -old["z"]), (90, -5)]  # the cache's order: old first
     groups = job.nodes["GroupBy"].as_table().to_pylist()
-    assert [list(zip(g["y"], g["w"], strict=True)) for g in groups] == [held]
-    assert GroupBy(["g"])(node).as_table().to_pylist() == groups
+    members = [list(zip(g["y"], g["w"], strict=True)) for g in groups]
+    if mode == "sync":
+        assert held == versions_rows
+        assert members == [held]
+        assert GroupBy(["g"])(node).as_table().to_pylist() == groups
+    else:
+        assert sorted(held) == sorted(versions_rows)
+        assert len(members) == 1 and sorted(members[0]) == sorted(versions_rows)
 
 
 def test_async_held_order_is_the_order_the_output_took_the_rows() -> None:

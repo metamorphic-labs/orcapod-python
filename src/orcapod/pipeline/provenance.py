@@ -1184,6 +1184,7 @@ class _Tracer:
         member: int | None,
         within: tuple[PathStep, ...] = (),
         input_hash: str | None = None,
+        token_column: str | None = None,
     ) -> TraceStep:
         """A source cell named by a token, checked against a held snapshot if any.
 
@@ -1197,6 +1198,10 @@ class _Tracer:
             within: The path inside the source cell's own value (``Index``, ``Pick``).
             input_hash: For a function that read the source directly, the input data
                 hash its stored entry holds: the snapshot row must have that hash.
+            token_column: For such a function, the source-info column the stored token
+                was read from: the snapshot row's own token in that column must be
+                the stored token (a token naming another cell of the same record
+                is refused).
         """
         source_id, record_id, source_column = _parse_token(token)
         snapshot = self.reader.held(source_node)
@@ -1229,6 +1234,13 @@ class _Tracer:
                     f"source {source_id!r} record {record_id!r} has no column "
                     f"{source_column!r}, which a stored token names"
                 )
+            if token_column is not None and token_column in rows[0]:
+                own = rows[0][token_column]
+                if own != token:
+                    raise ProvenanceInconsistencyError(
+                        f"source {source_id!r} record {record_id!r}: the stored token "
+                        f"{token_column} is {token!r}, the source row's is {own!r}"
+                    )
             stored = _at(rows[0][source_column], within)
             if not held:
                 value = stored
@@ -1707,6 +1719,7 @@ class _Tracer:
                                 None,
                                 held=False,
                                 member=None,
+                                token_column=name,
                                 input_hash=_hash_text(
                                     entry[constants.INPUT_DATA_HASH_COL]
                                 ),

@@ -3589,3 +3589,53 @@ def test_a_stored_token_naming_an_absent_column_is_refused(
     for k in (0, 1):
         with pytest.raises(ProvenanceInconsistencyError, match="has no column"):
             node.trace({"k": k}, "y")
+
+
+@function_pod(output_keys=["s", "d"])
+def sum_and_difference(x: int | None, z: int) -> tuple[int | None, int | None]:
+    """Return x + z and x - z, null when x is null."""
+    return (None, None) if x is None else (x + z, x - z)
+
+
+def test_a_stored_token_must_be_the_source_rows_own_token_for_its_column(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A function over a source with two inputs, x=10 and z=20 in one record: a
+    stored _source_x token changed to name z in that same record (record, input
+    hash and column all exist) is refused, never traced as x's input; a record whose
+    x is null still traces both inputs, x to its null cell."""
+    from orcapod.pipeline import provenance
+
+    source = DictSource(
+        [{"k": 0, "g": "a", "x": 10, "z": 20}, {"k": 1, "g": "b", "x": None, "z": 5}],
+        tag_columns=["k", "g"],
+        tag_only_columns=True,
+        source_id="s",
+    )
+    job = PipelineJob(name="binding", database=InMemoryArrowDatabase())
+    with job:
+        sum_and_difference.pod(source, label="f")
+    job.run()
+    node = job.nodes["f"]
+    assert sorted(
+        (c.column, c.value) for c in node.trace({"k": 0}, "s").source_cells()
+    ) == [("x", 10), ("z", 20)]
+    assert sorted(
+        (c.column, c.value) for c in node.trace({"k": 1}, "d").source_cells()
+    ) == [("x", None), ("z", 5)]
+    real = provenance._entries_for
+
+    def swapped(*args: Any, **kwargs: Any) -> Any:
+        x_token = constants.SOURCE_PREFIX + "x"
+        return [
+            {
+                **entry,
+                x_token: entry[x_token].replace("::x", "::z"),
+            }
+            for entry in real(*args, **kwargs)
+        ]
+
+    monkeypatch.setattr(provenance, "_entries_for", swapped)
+    for k in (0, 1):
+        with pytest.raises(ProvenanceInconsistencyError, match="the source row's is"):
+            node.trace({"k": k}, "s")
