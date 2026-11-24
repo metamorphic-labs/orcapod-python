@@ -2837,12 +2837,18 @@ def echo_x(x: int) -> int:
     return x
 
 
+@pytest.mark.parametrize("order", [(0, 1, 0), (0, 0, 1), (1, 0, 0)])
 @pytest.mark.parametrize("mode", ["sync", "async"])
-def test_repeated_identical_inputs_before_a_batch_are_refused(mode: str) -> None:
-    """A hand-built stream holding one row twice (A, B, A: identical system tags, one
-    base entry id; no Orcapod source gives this, record ids are unique). The node
-    holds one result per entry id, so the held rows cannot be matched to what Batch
-    received: the trace refuses, never a wrong cell (when in doubt, refuse)."""
+def test_repeated_identical_inputs_before_a_batch_are_refused(
+    mode: str, order: tuple[int, ...]
+) -> None:
+    """A hand-built stream holding one row twice (identical system tags, one base
+    entry id; no Orcapod source gives this, record ids are unique). The node holds
+    one result per entry id, so the held rows may not match what Batch received:
+    each batch's trace is then refused, never a wrong cell (when in doubt, refuse).
+    How the rows are grouped follows arrival order on the async path (ITL-1437), so
+    the test asserts, for every batch, a refusal or members that each trace to their
+    own record and value; with A, B, A on the sync path, both batches are refused."""
     from orcapod.operators import Batch
 
     s = DictSource(
@@ -2852,9 +2858,7 @@ def test_repeated_identical_inputs_before_a_batch_are_refused(mode: str) -> None
         source_id="s",
     )
     table = s.as_table(columns={"source": True, "system_tags": True})
-    repeated = pa.concat_tables(
-        [table.slice(0, 1), table.slice(1, 1), table.slice(0, 1)]
-    )
+    repeated = pa.concat_tables([table.slice(i, 1) for i in order])
     job = PipelineJob(name=f"emitted{mode}", database=InMemoryArrowDatabase())
     with job:
         Batch(batch_size=2)(
@@ -2871,10 +2875,26 @@ def test_repeated_identical_inputs_before_a_batch_are_refused(mode: str) -> None
     job.bind(sources={"slot": ArrowTableStream(repeated, tag_columns=["k"])})
     run(job, mode)
     batches = job.nodes["Batch"].as_table().to_pylist()
-    assert [b["k"] for b in batches] == [[0, 1], [0]]
+    assert sorted(k for b in batches for k in b["k"]) == sorted(order)
+    refused = 0
     for batch in batches:
-        with pytest.raises(ProvenanceInconsistencyError):
-            job.nodes["Batch"].trace({"k": batch["k"]}, "y")
+        try:
+            trace = job.nodes["Batch"].trace({"k": batch["k"]}, "y")
+        except ProvenanceInconsistencyError:
+            refused += 1
+            continue
+        assert trace.root.value == batch["y"]
+        members = sorted(trace.root.inputs, key=lambda step: step.member or 0)
+        assert [m.member for m in members] == list(range(len(batch["k"])))
+        for k, member in zip(batch["k"], members, strict=True):
+            assert dict(member.tags)["k"] == k
+            assert member.value == k + 1
+            cells = [step.source for step in member.walk() if step.source]
+            assert [(c.source_id, c.record_id) for c in cells] == [
+                (s.source_id, f"row_{k}")
+            ]
+    if mode == "sync" and order == (0, 1, 0):
+        assert refused == len(batches) == 2
 
 
 def test_why_missing_reads_the_stores_current_version(
