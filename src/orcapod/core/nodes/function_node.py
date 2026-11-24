@@ -2006,10 +2006,15 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         cache may hold more (results of other inputs, read from the database), which stay
         cached for reuse but are not rows of this run (ITL-1093). Without a completed
         run in this process there are no rows, whatever the cache or the database holds
-        (ITL-1095). Rows come in the order the run emitted them (a stored result and a
-        computed one alike, as downstream received them; ITL-1432), one row per input:
-        a repeated input's row is repeated at each of its places. An input without
-        output (an inactive function) is not a row.
+        (ITL-1095). Rows come in the order the run passed them downstream, a stored
+        result and a computed one alike, one row per input (a repeated input's row at
+        each of its places), so every read (``iter_data``, ``as_table``, ``head``, the
+        data frames, a downstream node's own ``run()``) gives what downstream received
+        (ITL-1441). A synchronous run passes them in input order, also over a partly
+        stored history, load-only (the stored inputs) and after ``clear_cache()``. An
+        asynchronous run promises no order (ITL-1437): its rows are held in the order
+        that run emitted them. An input without output (an inactive function) is not a
+        row.
         """
         if self._run_entry_counts is None:
             return
