@@ -360,7 +360,8 @@ def test_a_null_child_of_an_evolving_struct_appends(
     tmp_path: Path, appended: Any
 ) -> None:
     """Delta's MERGE panicked on a ``null`` child of a struct that gains a field
-    (pre-existing); the child is written as typed nulls of its stored type."""
+    (pre-existing); the child is written as typed nulls of its stored type. Inside a
+    list (a recorded column) Delta refuses the evolution, once, at the flush (ITL-1403)."""
     stored_type = _struct(pa.field("a", I64))
     in_list = pa.types.is_large_list(appended)
     db = DeltaTableDatabase(tmp_path)
@@ -377,9 +378,21 @@ def test_a_null_child_of_an_evolving_struct_appends(
         flush=True,
     )
     value = {"a": None, "b": 2}
+    if in_list:
+        # A list column is recorded, and its record would change: Delta refuses the
+        # commit; the flush raises once and the batch leaves the queue (ITL-1403).
+        with pytest.raises(InputValidationError, match="Delta refused the commit"):
+            db.add_records(
+                PATH,
+                _rows([b"2"], x=(appended, [[value]])),
+                record_id_column="id",
+                flush=True,
+            )
+        assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+        return
     db.add_records(
         PATH,
-        _rows([b"2"], x=(appended, [[value]] if in_list else [value])),
+        _rows([b"2"], x=(appended, [value])),
         record_id_column="id",
         flush=True,
     )

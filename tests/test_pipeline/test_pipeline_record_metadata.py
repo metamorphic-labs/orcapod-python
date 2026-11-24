@@ -542,6 +542,7 @@ def test_pipeline_schema_opens_do_not_grow_with_rows(
 ) -> None:
     """Preflight opens one metadata snapshot and the flush uses its own snapshot."""
     original = deltalake.DeltaTable.__init__
+    original_schema = DeltaTableDatabase.get_table_schema
     counts: list[tuple[int, int]] = []
     for count in (3, 63):
         store = DeltaTableDatabase(tmp_path / str(count))
@@ -549,21 +550,33 @@ def test_pipeline_schema_opens_do_not_grow_with_rows(
             initial, _ = job_and_node(store)
             _ = initial.run()
         job, node = job_and_node(store, count=count)
-        opens: list[bool] = []
+        opens = 0
+        schema_reads = 0
 
         def observe(table: deltalake.DeltaTable, uri: str, **options: object) -> None:
-            """Count pipeline log opens, distinguishing preflight from reads and commits."""
+            """Count pipeline log opens for reads, preflight and commits."""
+            nonlocal opens
             if Path(uri).name == PIPELINE_DB_SCHEMA_VERSION:
-                opens.append(options.get("without_files") is True)
+                opens += 1
             original(table, uri, **options)  # pyright: ignore[reportArgumentType]  # forward Delta's unchanged keyword arguments
+
+        def observe_schema(
+            database: DeltaTableDatabase, path: tuple[str, ...]
+        ) -> pa.Schema | None:
+            """Count preflight schema lookups separately from commit snapshots."""
+            nonlocal schema_reads
+            if path[-1] == PIPELINE_DB_SCHEMA_VERSION:
+                schema_reads += 1
+            return original_schema(database, path)
 
         with monkeypatch.context() as patch:
             patch.setattr(deltalake.DeltaTable, "__init__", observe)
+            patch.setattr(DeltaTableDatabase, "get_table_schema", observe_schema)
             _ = job.run(
                 orchestrator=ORCHESTRATORS[orchestrator](), commit_every_rows=100
             )
         assert node.as_table().num_rows == count
-        counts.append((sum(opens), len(opens)))
+        counts.append((schema_reads, opens))
     assert counts[0][0] == counts[1][0] == 1
     assert counts[0][1] == counts[1][1]
 
