@@ -1,11 +1,11 @@
 # ITL-1186 — Move SpiralDB support to spiral-sdk
 
-**Draft implementation plan.** Switch Orcapod's existing SpiralDB integrations
-to `spiral-sdk==0.16.74` in **one independent PR from `origin/main`**. Use the
-SDK's `KeyedTable` API for the tables Orcapod already reads and writes.
-Preserve connector behavior, streaming and source identity, saved jobs,
-offline tests, opt-in live CI, packaging and published docs. The switch takes
-no commits, merges or cherry-picks from #541, #542, #544, #545, #546 or #547.
+**Draft implementation plan.** Switch to `spiral-sdk==0.16.74` in one
+independent PR from `origin/main`. Scenario 1 preserves Keyed reads and writes.
+Scenario 2 switches to new Tables and treats Keyed reads as a migration
+bridge. Spiral has yet to confirm a retirement timeline. Neither scenario
+takes commits, merges or cherry-picks from #541, #542, #544, #545, #546 or
+#547.
 
 ## Evidence and scope
 
@@ -55,7 +55,9 @@ response bodies. The documented HTTP list remains a candidate to validate
 independently. Rename was observed as a gap but is outside today's Orcapod
 connector API.
 
-## Calls and behavior
+## Scenario 1 — Keep Keyed tables
+
+### Calls and behavior
 
 The table handle pins an immutable snapshot. Reuse it within reads, and
 resolve again to observe a new version. Lookups, metadata operations, plans,
@@ -77,7 +79,7 @@ and memory rather than inferring them from wrapper calls.
 | `get_metadata`, `set_metadata`, `drop_metadata`; N writes chunks then the marker, C stages Arrow metadata before rows and cleans up on failure (C 1038–1133, N 179–299) | No public methods in the pin; Keyed WAL writer stages rows and column changes only. Keep the existing record format and failure/cleanup semantics through a supported KV bridge. Verify old records, new writes, first-write failure, existing records on failure, and races. Retain current refusal and metadata capability reporting until proved. `_lib.pyi:289–319`, `keyed_tables.py:184–209`. |
 | `project.drop_table(dataset.table)` after list, missing is a no-op (C 907–916) | The pinned SDK and current public Keyed HTTP reference expose no drop. Require a vendor-supported delete-by-ID path, check absence without masking other errors, and test lookup/drop concurrent with name reuse. Use authorized disposable fixtures while investigating retirement. `_lib.pyi:289–341`. [Tables API](https://docs.spiraldb.com/docs/services/tables/api). |
 
-## Connector gaps and proposed behavior
+### Connector gaps and proposed behavior
 
 The SDK wheel alone cannot implement the following current calls. A
 documented, vendor-supported transport is acceptable inside the same small
@@ -100,7 +102,7 @@ these are resolved or the developer explicitly approves a behavior change.
 Live tests for such a change must assert the new explicit failure and the
 absence of unintended mutations.
 
-### Metadata is the main gate
+#### Metadata is the main gate
 
 A keyed table can store a nullability record that restores a field's
 declared `T`. Reading through the SDK without that record can produce
@@ -117,7 +119,7 @@ explicit developer decision.
 | One-time pyspiral export into a companion table | An isolated legacy process copies the intact records, tied to stable table ID, schema fingerprint and capture point. Adds an export/check step for each covered table, an extra read, permissions and operational ownership. It can preserve reads for a captured set after exact parity checks, but can go stale and does not preserve the original write/rollback contract. This is a fallback requiring developer approval, not part of the smallest parity switch. |
 | Wait for Spiral | Keep today's client until a supported KV path or SDK release exists, then repeat the pinned conformance. Avoids a second metadata representation and keeps compatibility, at the cost of delaying the switch and retaining exposure to the old client's support window. Prefer waiting over silently changing schemas or hashes. |
 
-## Keep existing keyed sources readable
+### Keep existing keyed sources readable
 
 1. Keep `source_type="spiraldb_table"`, existing project/dataset/table
    selection, and natural-name format
@@ -166,7 +168,7 @@ read is in flight. The pipeline can still materialize all delivered rows.
 The cap/preview behavior in S 835–919, 957–1043 stays a separate test from
 SDK read-ahead.
 
-## Other Orcapod entry points and saved artifacts
+### Other Orcapod entry points and saved artifacts
 
 The inventory starts with `git grep -ilE 'pyspiral|spiraldb|\bspiral\b'` on the
 baseline and covers executable imports, transitive callers and test fixtures. The following covers active integrations. Historical changelog,
@@ -199,7 +201,7 @@ historical evidence, the wrong-distribution check or the explicit conversion
 of saved nonsecret options. `import spiral` itself stays. Tests run without
 either client installed by injecting the fake at Orcapod's client boundary.
 
-## Fake and conformance
+### Fake and conformance
 
 Build an Arrow-backed, disk-scoped fake for only the operations above. Reuse
 the fixture isolation and call-observation idea from F 237–356, 800–881.
@@ -215,7 +217,7 @@ Orcapod adapter and contract with both providers.
 | Model the selected list/count/KV/drop path, including page tokens, absent vs denied, malformed old records, pinned metadata bound, and cleanup errors. | [Keyed list](https://docs.spiraldb.com/docs/services/tables/api/keyed-tables/list-tables), C 584–627, 752–812, 891–916, N 179–299. Use live-confirmed contracts for the gaps. The fake must not fabricate a bridge or certify a metadata approximation. |
 | Inject blocking and auth/transport failures at the adapter boundary. | `client.py:103–137`, `_lib.pyi:19–30`, S 926–944. Unit tests cover cleanup and cancellation. Verify authorization and native scheduling separately. |
 
-### What PR 544 established for the fake
+#### What PR 544 established for the fake
 
 Use its [probe record](https://github.com/metamorphic-labs/orcapod-python/blob/fd72822faf0d58464fc8530ec294c659a3c18409/docs/dev/plans/2026-11-24-itl-1446-strict-fake.md)
 as evidence about pyspiral 0.16.33 and the then-running Keyed service. PR 544
@@ -233,7 +235,7 @@ them.
 | A live legacy zero-row write caused a native panic. PR 544 used a normal exception as its fake substitute. Key-only write refusal, duplicates within a batch, `$` on a value name and Null key-schema type had legacy native diagnostics. Across-batch duplicates were unverified. | Probe SDK empty append and key-only write separately from empty table creation. Model an ordinary error for an SDK refusal and never a synthetic panic. Do not equate key-only schema with zero rows unless the new writer confirms it. Test single and multiple batches, reserved value names and Null keys before inheriting those native restrictions. |
 | Legacy `Scan.to_table(key_table=...)` emitted a null placeholder for an absent key. The coordinator's SDK probe saw absent keys omitted from key ranges. PR 544 also modeled legacy existing-name errors and exact strings. | Omit the unused key-table request and placeholder rule. The current connector has no key-range lookup to add to the fake. Model exclusive create and test public Orcapod errors without copying the old client strings or assuming the SDK exposes error bodies. |
 
-### Live gates for merging the switch
+#### Live gates for merging the switch
 
 Run one Keyed conformance module unchanged with two fixture providers. The
 default Arrow fake needs no Spiral package. The opt-in live provider uses
@@ -251,7 +253,7 @@ pass or an SDK wrapper signature alone cannot satisfy these gates.
 | Bounded read, cancellation and cost | Show count/metadata lookup needs no rows, cap refusal precedes any row delivery, and filter/limit reads remain streaming in key order. Measure cold/warm calls, bytes and memory on selective and full reads, including above 10,000 rows and the default 100,000 cap. Evaluate the existing full-table cost of `skip_existing`; this PR does not change its algorithm. Exercise simultaneous readers, cancellation and close. |
 | CI, package and docs | Complete serial live connector and source conformance on the trusted OIDC runner, including user-vs-workload permission checks and explicit failure on missing settings. Prove clean base and SDK-only installs, wrong-distribution guards, successful platform builds, executed docs samples and type/format/golden checks. |
 
-## CI sign-in and distribution
+### CI sign-in and distribution
 
 The current job runs the connector integration file on Python 3.11, serially,
 only on push/manual triggers in the canonical repository. It hands a workload
@@ -333,7 +335,7 @@ developer decision for this optional distribution, and keep dependency
 review and base license CI intact. Do not broaden a license allow-list to
 all proprietary dependencies. [Pinned wheel and metadata](https://pypi.org/project/spiral-sdk/0.16.74/).
 
-## Smallest switch and PR order
+### Smallest switch and PR order
 
 PR #548 is the offline study. Implement its switch as one reviewable PR,
 size **L**, with the following changes together. Start it from then-current
@@ -367,6 +369,200 @@ switch.
 | SDK/client support | Keep the extra name, use one pinned SDK in a clean environment, and report the hosted Keyed support and platforms actually verified. Keep saved IDs and hashes and test them before switching. |
 | CI and licensing | Approve a main-only OIDC workload and a narrow review of the optional native runtime license. Require a successful live conformance run and preserve existing offline CI. |
 
+## Scenario 2 — Switch to new Tables, migrate Keyed tables
+
+This alternative replaces Keyed writes with the SDK's branch-and-commit
+`Table` model. Existing Keyed sources are readable only during a documented
+migration window, subject to service availability and verified metadata
+access. The developer suspects Keyed tables may be retired. Spiral has
+yet to confirm whether or when reads, writes, or historical versions will
+end. Ask for that timeline, supported export options and an escalation path.
+The separate live observation supplied for this study is that new Tables
+preserve and enforce declared Arrow nullability. Keyed reads lose it, even
+for data written by the SDK. The transition cannot be justified by assuming
+that `KeyedTable.append` repairs the schema.
+
+### Names, identities and existing jobs
+
+- **Physical locator.** Use project, Table path and an explicit branch or
+  version selector. Start with `main`. A Table path has no dataset.
+  The service allows slash-separated namespace segments and reserves
+  `@` for a ref. At this SDK pin, `Commit.create_table(name, table)`
+  documents a root binding. Verify a supported creation path before
+  promising nested creation. For migration, let the owner select a unique
+  destination path, preflight collisions across legacy datasets, and record
+  the old project/dataset/name/ID and new project/path/ID/version. Never
+  resolve an old saved dataset by guessing a similarly named Table.
+  [Resource names and refs](https://docs.spiraldb.com/docs/platform/concepts/resources).
+- **Default source ID.** Today S 156–190 includes the old native table ID
+  in the default. A newly constructed source over a copy uses a distinct
+  location name built from the new project/path and resource ID, under the
+  existing `spiraldb_table_v1` kind if the developer approves. The default
+  must be unambiguous and include the resource ID so drop/recreate creates
+  a different default. Its pin belongs to read state. Verify path/ref
+  semantics before supporting more than `main`. A copied table has a new
+  resource ID even when its rows are identical.
+- **Preserved source ID.** Retain an explicit source name, or deliberately
+  reuse the old default's saved `source_name` after verification. Preserve
+  `source_type` and `source_version` as well. The user-facing
+  `source_id=` parameter is the name part. Passing the full old ID as that
+  argument prefixes it again. The preserved name keeps the source ID,
+  its system-tag value and the source component of provenance tokens.
+  It does not change the destination's physical ID or replace the
+  drop/recreate check. Record IDs independently follow the same ordered
+  logical keys and values. Keep the schema, nullability, metadata, tag
+  configuration and data context to retain full provenance, source
+  content hash and cache identity.
+  The root pipeline hash is schema-only. Merely keeping the source name
+  neither repairs schema drift nor guarantees downstream cache reuse.
+  [Root source identity and saved names](../../../src/orcapod/core/sources/base.py),
+  [record IDs and provenance](../../../src/orcapod/core/sources/stream_builder.py).
+- **Record IDs without a primary key.** Require a nonempty, ordered
+  `record_id_columns` for a keyless source, and propose no positional
+  fallback. On copy, freeze the previous effective key list in this field,
+  including its order and any override. Preserve the previous effective
+  tag columns separately. On construction, check key names exist once
+  each, preserve types and reuse Orcapod's allowed-type check (strings,
+  integers, booleans, dates and timestamps). For each pinned copy, scan
+  the entire key projection for nulls or duplicates of the canonical
+  composite identifier, including across batches. The ordinary streaming
+  reader still checks all delivered batches. Restricted reads alone
+  cannot establish global uniqueness. Neither the SDK's storage row ID
+  nor its stored order is the Orcapod record ID. The direct connector
+  also needs a declared merge key per Table in caller configuration or a
+  verified native schema property. Validate it and the target's uniqueness
+  on create/adoption and maintain that invariant on all writes. SDK
+  `merge_rows` can update multiple target rows for one input key.
+  [Key validation and encoding](../../../src/orcapod/core/sources/stream_builder.py),
+  [SDK merge behavior](https://docs.spiraldb.com/docs/services/tables/write-rows#merge-rows-by-key).
+- **Saved jobs.** Read unchanged Keyed descriptors through the temporary
+  reader while possible. To switch one, back up the job, explicitly
+  replace its physical locator and expected table ID with the independently
+  verified destination, preserve the name/kind/version and other source
+  settings, and test the real loader. S 1104–1182 already refuses a
+  different table ID, so there is no automatic fallback by name. A saved
+  integer `asof` requires a copy of that exact old snapshot and a recorded
+  destination version. Preserve implicit-current and explicit-pin
+  semantics separately. If there is no verified copy, the job cannot be
+  reconstructed as a readable source. Where the loader supports it, its
+  existing proxy is for inspection.
+
+### Copy and verify each snapshot
+
+1. **Inventory and freeze.** Publish a migration runbook for user-owned
+   tables. The owner chooses the timing, target project/path, permissions
+   and whether to retain prior source identity. Inventory active and saved
+   jobs, key declarations, source IDs, schema, KV metadata and all
+   historical pins needed. Stop writes for final capture, or arrange an
+   explicitly validated catch-up and choose one final snapshot. Old KV
+   can change independently of the row snapshot, so capture it while
+   quiescent and record its capture point. Each owner brings their own
+   read and destination-write access.
+2. **Export with pyspiral, write with the SDK.** Use separate clean
+   environments because both distributions own `spiral`. Read the
+   chosen Keyed snapshot with pyspiral and restore its Orcapod
+   nullability and Arrow metadata records using C/N. Validate every
+   recorded non-nullable path before exporting first-class Arrow fields
+   and batches, for example in a protected Arrow IPC export. A table
+   without a record retains its observed flags. Never infer `NOT NULL`
+   from a sample. In the SDK environment, create using the restored Arrow
+   schema and stream the batches with `Project.table_writer(schema)`
+   or `Project.write_table(reader)`. Finish a candidate version, then
+   verify and publish it with the documented naming/commit API. Copying
+   through raw SDK Keyed reads would miss the old KV restoration.
+   `projects.py:113–126,273–276,322–377`.
+3. **Refusals and type fidelity.** An offline probe of the pinned macOS
+   arm64 wheel wrote small, synthetic Arrow batches into a new temporary
+   directory per case with `Client._without_control_plane()`,
+   `_create_table_at`, `append`, `finish` and `to_arrow()`
+   (`client.py:139–144,226–237`, `tables.py:883–918`).
+   These private entry points isolated native conversion. The proposed
+   implementation uses the public hosted writer. The probe used PyArrow
+   23.0.1 and no authentication or service. It found the following.
+
+   | Observed result | Example input in the local native Table probe |
+   | --- | --- |
+   | Rejected at append | Fixed-size binary (2 bytes), nanosecond duration, month-day-nano interval, dense union, nonempty map and a one-row empty struct. A null in a declared non-nullable int64 field also failed. |
+   | Values read back in the tested type | Arrow null, decimal128(12, 2), decimal256(40, 2), fixed-size list of int32, UTC nanosecond timestamp, a null struct with an int64 child, float16, and Arrow UUID. These examples do not certify nested combinations or every value. |
+   | Read back with a different layout | String view and list view became ordinary string and list, and dictionary and run-end string examples became plain strings. Require exact prepared schema and bit parity before accepting even a layout conversion. |
+   | Flags and metadata | A non-null int64 stayed non-null in both description and scan. Its arbitrary field metadata appeared in the description only. Arbitrary schema metadata was absent from both. A native nullability pass alone is insufficient for a metadata-bearing Orcapod source. |
+
+   This is evidence about native conversion at the pin, with hosted
+   validation still required. The documented continuous `ingest`
+   restrictions are separate. Ordinary appends require the table's
+   columns and stored types, and merges reject duplicate input keys.
+   Repeat these cases on the hosted ordinary writer, plus typed empties,
+   nested nullability, field/schema metadata and extension identity.
+   Verify direct writes and merge keys separately. Preserve current
+   Orcapod refusals unless the developer agrees to change them. Refuse
+   any unproved, rejected or lossy column before publishing the copy.
+   If the hosted description preserves metadata that the scan omits,
+   test safe restoration from that exact version. If no hosted path
+   preserves released schema semantics, hold the migration or seek
+   approval for the explicit schema and hash change.
+   [Documented write constraints](https://docs.spiraldb.com/docs/services/tables/write-rows).
+4. **Read back and compare.** Independently count every visible row on
+   both exact versions, including the empty case. Compare the key sets
+   and ensure one row per canonical composite key. Align batches by key
+   and use the repository type matrix's exact field and bit-level
+   comparison rules. Compare null validity, ordered schema and metadata,
+   nested values and temporal integers, and compare floats by bits
+   including NaN payloads and signed zero. Chunking and physical layout
+   may differ, with only Orcapod's existing normalization allowed before
+   the logical comparison. Compare record IDs, source-info tokens, data
+   and context hashes, source content and pipeline hashes, and stored
+   result paths using the preserved source name. Then load and run a
+   representative saved job and prove result reuse. A new default name
+   should change the source ID and provenance as designed. Verify deterministic
+   sync order and prefix/limit behavior separately from equality by key.
+   Async comparisons use sets of rows. Fail the cutover on any unexplained
+   mismatch. Keep the restorable old artifact and the verified locator
+   manifest until owners accept the copy. [Type-matrix oracle](../../../tests/test_databases/type_matrix.py).
+5. **If Keyed reads stop early.** Prioritize permissioned exports and
+   historical pins now. If reads end before an owner has a verified copy,
+   restore from a validated Arrow export or backup with the original
+   schema, KV and key/identity information. Ask Spiral for a supported
+   recovery/export path if none is available. Keep the affected job
+   unavailable and report which tables and pins cannot be recovered.
+   A proxy, partial backup or guessed schema cannot substitute for data
+   or justify reusing the old identity. Never promise history the service
+   no longer retains.
+
+### Independent PR and release gates
+
+This alternative is **larger than Scenario 1**. It drops the need for
+general Keyed write/retirement parity, but adds a new connector contract,
+identity and saved-job migration, two kinds of reads during the transition,
+and a user-controlled copy and verification workflow. Keep the switch
+from `origin/main` and independent of ITL-1446 and the same six PRs. Review
+it as one atomic default change if feasible. If the migration workflow
+needs its own review, ship its read/export/verify tooling independently
+first. It must leave the current default client unchanged. The switch
+would include the following.
+
+- A new Table connector for typed create, lookup/list/drop, scan, row-count
+  and version handling, and upsert/skip-existing through a declared key.
+  Test typed empty initialization, namespace pagination and missing/no-op
+  semantics. Use `merge_rows(..., matched="ignore")` for skip-existing and
+  prove the all-hit no-write behavior. Publish writes through branch
+  commits. Verify merge behavior,
+  non-null and unique keys, recomputation on known conflicts and recovery
+  of unknown publication outcomes. Plain append is not upsert.
+- Source path/ref configuration, verified rebinding of saved Keyed
+  sources, and the time-limited read-only Keyed path. Preserve count
+  preflight and old first-by-key semantics for migrated sources or get
+  approval for explicit differences. New Table scans return stored order.
+  Verify an exact bounded key-order read before promising former
+  `head` and `limit` behavior. Confirm a conservative metadata count for
+  `max_rows`, or document and approve a fail-closed difference.
+- Fake/native conformance, new Table copy fixtures and the existing
+  legacy identity oracle, SDK dependency and import guard, OIDC CI,
+  platform/license checks and migration documentation. Release after
+  native nullability and exact schema/value parity, read/write and
+  conflict tests, and a successful saved-job migration through the
+  live runner. A released source's schema or identity changes only
+  after the developer agrees to the specific impact.
+
 ## Afterwards
 
 ITL-1446 starts from the merged SDK switch. The former PR 5 belongs there.
@@ -377,5 +573,5 @@ remain candidates for that follow-on. Re-evaluate physical name mapping
 and the legacy KV manifest before fixing a new store format. The keyless
 `Table` API has stored-order scans and caller-selected merge keys
 (`tables.py:459–495,602–631`), and a project commit can publish several table
-versions together (`projects.py:244–276,322–377`). Those capabilities and
-their live validation belong to the subsequent store design.
+versions together (`projects.py:244–276,322–377`). Multi-table store
+publication and its failure tests belong to the subsequent store work.
