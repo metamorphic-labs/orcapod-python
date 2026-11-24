@@ -430,17 +430,28 @@ there is no created-at column, so two writers write the same row.
 - **Cost.** One read a handle at the start of a run (about 300 bytes a table; kept until
   `refresh_table`), none per row, one commit per **new** table (five for the prototype's job, first
   run only), and nothing on a rerun. `list_table_paths` is this read plus one listing.
-- **Scope: dataset or project** (under discussion with the developer):
+- **Scope: one catalog per dataset** (decided, developer, 2026-11-24). A dataset is one
+  self-contained Orcapod store: its tables, its catalog and its lease. The database sees nothing
+  of other datasets, and a path names a table within its dataset only.
 
-| | per dataset | per project |
+### 5.5 What a dataset is, and who may write
+
+| Question | Answer | Source |
 |---|---|---|
-| A dataset moved, copied or dropped takes its catalog along | yes | no: rows dangle |
-| Permissions | the dataset's own | write access where the catalog lives, for every store |
-| All stores of a project listed at once | no | yes |
-| Key | `physical_name` | dataset and name |
-| Lease | one per dataset, beside it | the lease stays per dataset |
+| Must a dataset be created first? | **Unknown.** The client has no call that creates one: `create_table("dataset.table")` takes the name, and tables are listed, filtered and moved by it, so it looks implicit. The public documentation does not mention datasets | pyspiral 0.16.33 source; documentation; P13 |
+| Dataset name | at most 128 characters, `[a-zA-Z_][a-zA-Z0-9_-]+`, so at least two | pyspiral `api/types.py` |
+| Level of permissions | **the project**: "A grant gives one role on one Project to a principal." Roles `viewer`, `editor`, `admin`. Dataset or table grants: not in the documentation, and the client's grant call is on the project only | docs.spiraldb.com, Platform > Access; pyspiral `Projects.grant_role` |
+| Roles the store needs | a reader `viewer`, a writer `editor` (create, write, drop): **unknown in detail**. The live test job runs as `editor` | `test_spiraldb_connector_integration.py`; P13 |
 
-The rest of this design is the same either way; per dataset is the smaller one.
+So separate datasets do **not** separate permissions: anyone who may write one store of a project
+may write all of them, its lease and catalog included. Different writers need different projects.
+
+The current documentation describes the newer platform (catalog, branches, commits, `spiral-sdk`),
+not pyspiral's `dataset.table` model, so it may not apply to this client unchanged. It states
+conflict checks that pyspiral does not expose: a commit compares names and versions and fails
+with a conflict, and one commit may change several tables of a project. With that client
+(ITL-931) the lease could be a conditional publish, and results and records one commit. It states
+no read-after-commit guarantee, so C1 is not documented.
 
 ## 6. Concurrent writers and failed writes
 
@@ -534,7 +545,8 @@ stopped.
 | The claim's commit fails or its reply is lost | nothing has run. The writer tries to delete its token and raises. A claim that lands later is a stale one: others are refused, two never hold |
 | A crashed job | its claim stays, and the next run is refused. A crash cannot be told from a pause, a lost network or a suspended laptop from outside, so **no claim ever expires by time**. The holder renews its row's time (about once a minute, at a commit or from a background thread); the refusal shows how old the renewal is, as information |
 | Clearing a stale claim | by a person: `database.clear_lease(token)`, with the token from the error. It deletes exactly that row, so clearing twice or late never removes a newer claim. The message says what to check: that the named process no longer runs. Never automatic, not even when the process id looks dead on this machine (containers share hostnames and reuse ids) |
-| Separate pipeline and result databases | a run takes the lease of **every** dataset it may write: both databases, a pod's own `result_database` and `pod_cache_database`, a cached operator's, a `CachedSource`'s, an observer's. One per dataset (views by `at()`, and two connectors to one dataset, count once per run), in sorted order. If one is refused, those taken are released |
+| Separate pipeline and result databases | a run takes the lease of **every** dataset it may write: both databases, a pod's own `result_database` and `pod_cache_database`, a cached operator's, a `CachedSource`'s, an observer's. The refusal is per dataset. Two datasets: the run holds both leases, taken in sorted order; if one is refused the other is released, and another job that shares **either** dataset is refused. A job sharing only the result dataset is refused too, although it would write other tables. Two jobs in disjoint datasets run together |
+| One dataset, two connectors or database objects | in one run (its pipeline and result databases, or `at()` views): one lease, recognised by server, project and dataset, not by object. In two runs: the second is refused, also in one process. A connector opened under another server address for the same service is not recognised as the same: it is then refused by its own run's claim, which is safe |
 | Several jobs in one process | a claim belongs to a run, not to a process: one after the other works; a second run while the first one runs (threads, `run_async`, a function that runs a job) is refused if it shares a dataset |
 | One database object used by two threads | the second run's acquisition is refused. A bare `add_records` by another thread through the same object during a run uses that run's lease: one object has one queue |
 | A forked child | refused: the lease records the process id and a write checks it. Ray workers do not write |
@@ -588,6 +600,7 @@ store by default (give them an in-memory or Delta store) until they batch.
 | P9 | time of list, look up, metadata, commit (1, 100, 10,000 rows), and of a rerun | 4 |
 | P11 | `create_table(exist_ok=False)` of one name by two clients, 50 times: exactly one succeeds? the name's reuse after `drop_table` | 6.3 |
 | P12 | the lease itself: two processes claim at once, 50 times; a process killed while holding; `delete_keys` of one token | 6.3 |
+| P13 | `create_table` in a dataset that does not exist; what `viewer` and `editor` may do to tables, rows and metadata | 5.5 |
 | P10 | duplicate key in one write; a write killed midway | 6.4 |
 
 ## 8. First working version, in order
@@ -617,7 +630,7 @@ save an override that is not a known non-secret key (`server.url`).
 | 1 | Where the mapping lives: (a) the store, (b) rename everywhere, (c) mixed | (a) |
 | 2 | *Decided: one writer, a second refused.* To confirm: the lease's conditions C1 and C2 are acceptable, and what ships if P8 refutes C1 (named-table lease if P11 holds, else detection only) | lease; do not ship a "refusal" resting on neither |
 | 3 | Row order: store `ox_order` so reads follow the written order | yes; otherwise results differ from Delta |
-| 4 | *Decided: digest names and the catalog.* Open: its scope, dataset or project (5.4) | dataset |
+| 4 | *Decided: digest names, and one catalog per dataset.* To note: permissions are per project (5.5) | - |
 | 5 | Two different manifests in one table stop the job, rather than one winning | stop |
 | 6 | Use the collision-free path mapping for SQLite and PostgreSQL too (their existing tables would no longer be found) | yes, in its own PR before 0.4.0, while nobody has such a store |
 | 7 | Null structs refused in the first version (a `T \| None` user-class output holding a null) | yes |
