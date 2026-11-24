@@ -501,19 +501,22 @@ def write(args: argparse.Namespace) -> None:
             require_unchanged(
                 client, project, dataset, plan["datasets"][dataset]["tables"], rows
             )
-        except MigrationError as exc:
-            # No valid marker is left: every read of the dataset is refused.
-            put(dataset, {**final, "rows_digest": "withdrawn: the dataset changed"})
+            present, marker = open_rows(client, project, dataset)
+            st.require_complete(project, dataset, present, marker)
+            if {i: r.content() for i, r in present.items()} != {
+                r.table_id: r.content() for r in rows
+            }:
+                raise MigrationError(
+                    f"{dataset}: the schema table is not what was planned"
+                )
+        except BaseException as exc:
+            # Whatever happened, no valid marker is left: reads of the dataset are
+            # refused until a write step ends well.
+            put(dataset, {**final, "rows_digest": "withdrawn: not checked to the end"})
             raise MigrationError(
-                f"{exc}. It changed while it was migrated, so its completion marker was "
-                "withdrawn: run the dry run again"
+                f"{exc or type(exc).__name__}. The completion marker was withdrawn: run "
+                "write again, or the dry run if the dataset changed"
             ) from exc
-        present, marker = open_rows(client, project, dataset)
-        st.require_complete(project, dataset, present, marker)
-        if {i: r.content() for i, r in present.items()} != {
-            r.table_id: r.content() for r in rows
-        }:
-            raise MigrationError(f"{dataset}: the schema table is not what was planned")
         print(f"{dataset}: complete, {len(rows)} tables")
     print(f"wrote {written} rows; now run verify")
 

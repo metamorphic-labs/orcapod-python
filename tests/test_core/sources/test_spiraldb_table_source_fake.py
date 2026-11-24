@@ -21,7 +21,6 @@ from orcapod import PipelineJob, function_pod
 from orcapod.databases import DeltaTableDatabase
 from orcapod.errors import TableSchemaError
 from orcapod.operators import Join, SelectDataColumns
-from orcapod.databases import SpiralDBConnector
 from orcapod.sources import SpiralDBTableSource
 from orcapod.types import Schema
 from tests.test_databases import fake_spiral_sdk

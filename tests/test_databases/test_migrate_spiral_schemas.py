@@ -262,6 +262,33 @@ def test_a_change_during_the_write_leaves_no_valid_marker(
         tool.verify(args)
 
 
+@pytest.mark.parametrize("error", [RuntimeError("network"), KeyboardInterrupt()])
+def test_any_failure_after_the_marker_withdraws_it_and_is_resumed(
+    tool: ModuleType,
+    args: argparse.Namespace,
+    monkeypatch: pytest.MonkeyPatch,
+    error: BaseException,
+) -> None:
+    original = tool.require_unchanged
+    calls = []
+
+    def fail_after_marker(*given: Any) -> None:
+        calls.append(given)
+        # 1 and 2: before anything, per dataset; 3: before the first marker; 4: after.
+        if len(calls) == 4:
+            raise error
+        original(*given)
+
+    monkeypatch.setattr(tool, "require_unchanged", fail_after_marker)
+    with pytest.raises(tool.MigrationError, match="withdrawn"):
+        tool.write(args)
+    with pytest.raises(TableSchemaError, match="does not fit"):
+        SpiralDBTableSource("p", "trials", dataset="one")
+    monkeypatch.setattr(tool, "require_unchanged", original)
+    tool.write(args)
+    tool.verify(args)
+
+
 def test_verify_finds_what_changed_after_it(
     tool: ModuleType, args: argparse.Namespace, project: Any
 ) -> None:

@@ -353,176 +353,7 @@ class TestConnectorRule:
         assert (reason is None) is storable, reason
 
 
-# ---------------------------------------------------------------------------
-# SpiralDB: reserved column names (ITL-1164), through the pyspiral fake
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def spiral_database(tmp_path: pathlib.Path):
-    """A ``ConnectorArrowDatabase`` over ``SpiralDBConnector``, stored by the fake."""
-    from orcapod.databases import SpiralDBConnector
-    from tests.test_databases import fake_spiral_sdk
-
-    with fake_spiral_sdk.install(tmp_path / "spiral"):
-        connector = SpiralDBConnector("p")
-        try:
-            yield ConnectorArrowDatabase(connector)
-        finally:
-            connector.close()
-
-
-class TestSpiralDBRefusesReservedNames:
-    def test_function_node_refused_before_anything_runs(self, spiral_database):
-        job = PipelineJob(name="p", database=spiral_database)
-
-        with pytest.raises(UnstorableColumnError) as exc_info:
-            with job:
-                _ = double.pod(_source(), label="dbl")
-
-        err = exc_info.value
-        assert err.node_label == "dbl"
-        assert err.database_kind == "SpiralDBConnector"
-        assert err.column == "__input_data_hash"
-        assert "'__' prefix" in err.reason
-        assert "InMemoryArrowDatabase" in str(err)
-        assert CALLS == []
-        assert spiral_database.list_table_paths() == []
-
-    def test_side_effect_node_refused_before_delivery(self, spiral_database):
-        job = PipelineJob(name="p", database=spiral_database)
-
-        with pytest.raises(UnstorableColumnError) as exc_info:
-            with job:
-                _ = deliver.process(_source(), label="out")
-
-        assert exc_info.value.node_label == "out"
-        # The first column it cannot store: the time-zone-aware timestamp.
-        assert exc_info.value.column == "executed_at"
-        assert DELIVERED == []
-
-    def test_operator_cache_refused_when_attached(self, spiral_database):
-        job = PipelineJob(name="p", database=spiral_database)
-        with job:
-            _ = SelectDataColumns(["x"])(_source(), label="sel")
-
-        with pytest.raises(UnstorableColumnError) as exc_info:
-            job.nodes["sel"].attach_databases(
-                pipeline_database=spiral_database.at("p"), cache_mode=CacheMode.LOG
-            )
-
-        assert exc_info.value.node_label == "sel"
-        assert exc_info.value.column == "__node_content_hash"
-
-    def test_operator_without_cache_runs(self, spiral_database):
-        """An operator whose cache is off stores nothing, so nothing is refused."""
-        job = PipelineJob(name="p", database=spiral_database)
-        with job:
-            _ = SelectDataColumns(["x"])(_source(), label="sel")
-        _ = job.run()
-        assert sorted(job.nodes["sel"].as_table()["x"].to_pylist()) == [1, 2]
-
-    def test_cached_source_refused_when_built(self, spiral_database):
-        from orcapod.core.sources.cached_source import CachedSource
-
-        with pytest.raises(UnstorableColumnError) as exc_info:
-            _ = CachedSource(_source(), cache_database=spiral_database)
-
-        assert exc_info.value.column == "__data_context"
-
-    @pytest.mark.parametrize(
-        "name, reason",
-        [
-            ("__value", "'__' prefix"),
-            ("a.b", "'.'"),
-        ],
-    )
-    def test_write_refuses_reserved_name(self, spiral_database, name, reason):
-        table = pa.table({name: pa.array([1], type=pa.int64())})
-
-        with pytest.raises(UnstorableColumnError) as exc_info:
-            spiral_database.add_record(("t",), b"1", table)
-
-        assert exc_info.value.column == name
-        assert reason in exc_info.value.reason
-        spiral_database.flush()
-        assert spiral_database.list_table_paths() == []
-
-    def test_write_refuses_time_zone_aware_timestamp(self, spiral_database):
-        """SpiralDB drops the time zone, so the column would read back as another type."""
-        table = pa.table(
-            {
-                "ts": pa.array(
-                    [datetime.datetime(2026, 1, 1, tzinfo=datetime.timezone.utc)],
-                    type=pa.timestamp("us", tz="UTC"),
-                )
-            }
-        )
-
-        with pytest.raises(UnstorableColumnError) as exc_info:
-            spiral_database.add_record(("t",), b"1", table)
-
-        assert exc_info.value.column == "ts"
-        assert "time zone" in exc_info.value.reason
-        assert "timestamp[us]" in exc_info.value.reason
-        spiral_database.flush()
-        assert spiral_database.list_table_paths() == []
-
-    def test_key_column_may_start_with_double_underscore(self, spiral_database):
-        """``__record_id`` is the key, which SpiralDB accepts; lists are stored."""
-        table = pa.table(
-            {
-                "v": pa.array([[{"key": "a", "value": "b"}]], type=EXECUTOR_INFO_TYPE),
-                "ts": pa.array(
-                    [datetime.datetime(2026, 1, 1)], type=pa.timestamp("us")
-                ),
-            }
-        )
-        spiral_database.add_record(("t",), b"1", table, flush=True)
-        stored = spiral_database.get_all_records(("t",))
-        assert stored is not None
-        assert stored.num_rows == 1
-
-
-class TestSpiralFakeRefusesLikeSpiralDB:
-    """The fake refuses the names SpiralDB refuses, with its messages (ITL-1164)."""
-
-    @pytest.mark.parametrize(
-        "name, message",
-        [
-            (
-                "__input_data_hash",
-                "Column name '__input_data_hash' has reserved prefix: column group "
-                "columns must not start with '__'",
-            ),
-            ("a.b", "Column 'a.b' contains a reserved dot-separator"),
-        ],
-    )
-    def test_connector_write_refused(self, tmp_path: pathlib.Path, name, message):
-        from orcapod.databases import SpiralDBConnector
-        from orcapod.types import ColumnInfo
-        from tests.test_databases import fake_spiral_sdk
-
-        with fake_spiral_sdk.install(tmp_path / "spiral"):
-            connector = SpiralDBConnector("p")
-            connector.create_table_if_not_exists(
-                "t",
-                [
-                    ColumnInfo("k", pa.large_string(), nullable=False),
-                    ColumnInfo(name, pa.int64(), nullable=True),
-                ],
-                pk_column="k",
-            )
-            rows = pa.table(
-                {
-                    "k": pa.array(["a"], type=pa.large_string()),
-                    name: pa.array([1], type=pa.int64()),
-                }
-            )
-            with pytest.raises(ValueError, match="reserved") as exc_info:
-                connector.upsert_records("t", rows, id_column="k")
-            connector.close()
-        assert message in str(exc_info.value)
+# SpiralDB refuses every write for now: tests/test_databases/test_spiraldb_reading.py.
 
 
 # ---------------------------------------------------------------------------
@@ -621,16 +452,6 @@ class TestWriteChecksOrder:
             database.add_record(("t",), b"1", table)
 
         assert exc_info.value.column == "u"
-
-    def test_null_column_is_not_a_large_string_column(self, spiral_database):
-        """The schema comparison keeps ``null``: a later ``large_string`` is a change."""
-        null_table = pa.table({"v": pa.array([None], type=pa.null())})
-        text_table = pa.table({"v": pa.array(["a"], type=pa.large_string())})
-        spiral_database.add_record(("t",), b"1", null_table, flush=True)
-
-        spiral_database.add_record(("t",), b"2", text_table)
-        with pytest.raises(ValueError, match="Schema mismatch"):
-            spiral_database.flush()
 
     def test_buffered_text_reads_with_committed_text(self, tmp_path: pathlib.Path):
         """Buffered ``string`` rows read together with committed ``large_string`` rows."""
@@ -812,24 +633,6 @@ class TestReviewFollowUps:
         finally:
             connector._conn = None
         assert reason is not None and "system column" in reason
-
-    @pytest.mark.parametrize(
-        "arrow_type",
-        [
-            pa.large_list(pa.timestamp("us", tz="UTC")),
-            pa.struct([("t", pa.timestamp("us", tz="UTC"))]),
-            pa.map_(pa.large_string(), pa.timestamp("ms", tz="UTC")),
-        ],
-    )
-    def test_spiraldb_refuses_nested_time_zone_aware_timestamp(
-        self, spiral_database, arrow_type
-    ):
-        table = pa.table({"v": pa.array([None], type=arrow_type)})
-
-        with pytest.raises(UnstorableColumnError) as exc_info:
-            spiral_database.add_record(("t",), b"1", table)
-
-        assert "time zone" in exc_info.value.reason
 
     def test_union_refused_before_any_cast(self, tmp_path: pathlib.Path):
         """A refused column raises the refusal, not an Arrow cast error."""
