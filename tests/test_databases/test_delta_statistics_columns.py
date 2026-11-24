@@ -20,6 +20,7 @@ import pyarrow as pa
 import pytest
 
 from orcapod.databases import DeltaTableDatabase
+from orcapod.errors import InputValidationError, UnstorableColumnError
 from orcapod.databases.delta_statistics import (
     NUM_INDEXED_COLUMNS_PROPERTY,
     STATS_COLUMNS_PROPERTY,
@@ -376,23 +377,52 @@ class TestEveryColumnKind:
             == _every_kind(range(0, 1)).select(compared).to_pylist()
         )
 
-    def test_backtick_name_is_left_out_and_written(
-        self, tmp_path: Path, capfd: pytest.CaptureFixture[str]
+    def test_backtick_name_is_refused_before_anything_is_queued(
+        self, tmp_path: Path
     ) -> None:
-        """Create and append work; delta-rs cannot MERGE such a table either way."""
+        """delta-rs cannot MERGE such a table, and every later commit is one (ITL-1375)."""
         db = DeltaTableDatabase(tmp_path)
-
-        def table(ids: range) -> pa.Table:
-            return rows(ids).append_column("x`y", pa.array(list(ids), pa.int64()))
-
-        capfd.readouterr()
-        db.add_records(PATH, table(range(0, 3)), flush=True)
-        db.add_records(PATH, table(range(3, 6)), flush=True)
-        assert stats_warnings(capfd) == []
-        assert configuration(tmp_path / "t") == {
-            STATS_COLUMNS_PROPERTY: "`v`,`__data_context`"
-        }
+        with pytest.raises(UnstorableColumnError) as info:
+            # No flush: the refusal is when the rows are added (review of PR 511).
+            db.add_records(
+                PATH,
+                rows(range(0, 3)).append_column("x`y", pa.array([0, 1, 2], pa.int64())),
+            )
+        assert info.value.column == "x`y"
+        assert "backtick" in info.value.reason
+        assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
+        db.flush()
+        assert not (tmp_path / "t" / "_delta_log").exists()
+        # A backtick inside a nested field's name is merged as any other.
+        nested = pa.array([{"x`y": i} for i in range(3)])
+        db.add_records(PATH, rows(range(0, 3)).append_column("s", nested), flush=True)
+        db.add_records(
+            PATH,
+            rows(range(3, 6)).append_column("s", pa.array([{"x`y": 3}] * 3)),
+            flush=True,
+        )
         assert len(stored_ids(db)) == 6
+
+    def test_a_stored_table_with_a_backtick_name_takes_no_append(
+        self, tmp_path: Path
+    ) -> None:
+        """A table written with such a column before ITL-1375 is refused, rows unchanged."""
+        deltalake.write_deltalake(
+            str(tmp_path / "t"),
+            rows(range(0, 3)).append_column("x`y", pa.array([0, 1, 2], pa.int64())),
+        )
+        db = DeltaTableDatabase(tmp_path)
+        # Rows holding the column are refused as new ones are (above); rows without
+        # it are refused by the stored table.
+        with pytest.raises(UnstorableColumnError):
+            db.add_records(
+                PATH,
+                rows(range(3, 6)).append_column("x`y", pa.array([3, 4, 5], pa.int64())),
+            )
+        with pytest.raises(InputValidationError, match="backtick") as info:
+            db.add_records(PATH, rows(range(3, 6)), flush=True)
+        assert "'x`y'" in str(info.value)
+        assert len(stored_ids(db)) == 3
 
     def test_names_of_nested_parts_are_left_out_and_written(
         self, tmp_path: Path, capfd: pytest.CaptureFixture[str]
@@ -478,11 +508,11 @@ class TestTablesCreatedElsewhere:
         # deltalake 1.6 no longer logs the binary-column warning (1.0.2 did); what
         # the property was about stays: no min/max is kept for a binary column.
         assert configuration(tmp_path / "t") == {}
-        added = pa.table(
-            deltalake.DeltaTable(str(tmp_path / "t")).get_add_actions(flatten=True)
-        )
-        assert "min.v" in added.column_names
-        assert not any(n.startswith("min.h") for n in added.column_names)
+        # Every data file, those the two MERGEs added included, has a minimum for
+        # ``v`` and none for the binary ``h`` (review of PR 511).
+        per_file = columns_with_statistics(tmp_path / "t")
+        assert len(per_file) >= 3
+        assert all("v" in stats and "h" not in stats for stats in per_file)
         assert stored_ids(db) == sorted(f"id{i}".encode() for i in range(30))
 
     def test_plain_deltalake_appends_to_a_table_with_the_property(

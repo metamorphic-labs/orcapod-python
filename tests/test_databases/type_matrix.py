@@ -1072,6 +1072,13 @@ Some refusals depend on the values or names as well as the type:
   field, so a map with such metadata is refused there.
 - A fixed-size list or fixed-size binary read back by Delta with another length or width
   than its type is refused on read, never padded or cut.
+- Delta refuses a column whose name holds a backtick, or is one deltalake's MERGE reserves
+  for its own columns (`__delta_rs_source`, `__delta_rs_target`, `__delta_rs_operation`,
+  `__delta_rs_delete`, `__delta_rs_target_insert`, `__delta_rs_target_update`,
+  `__delta_rs_target_delete`, `__delta_rs_target_copy`), of any type: delta-rs cannot
+  MERGE such a table, and every commit to an existing Delta table is a MERGE. A table
+  that already holds such a column takes no further append. A nested field with such a
+  name is kept.
 
 A table holds one type per column. An append whose columns differ from the held ones
 (stored, or still pending) in field metadata (the column's own, or a nested field's: a
@@ -1104,9 +1111,11 @@ a changed field metadata (`SchemaMismatchError`), two names equal under Delta's 
 folding, a type DataFusion cannot insert or cast into the stored one, and a row Delta
 finds invalid (a null in a non-nullable column, a failed CHECK constraint). A CHECK
 constraint whose verdict changes by chance would accept such rows on a later try;
-Orcapod writes none. Any other failure keeps its rows queued and is raised again by the
-next flush, as before: a storage error, a constraint whose evaluation itself fails, a
-stored table unreadable for another reason. So a column whose Arrow type Delta keeps
+Orcapod writes none. Any other failure keeps its rows queued, as before, and the next
+flush tries them again: it writes them if the cause has passed (storage recovered,
+another writer no longer committing first) and raises only if that try fails too: a
+storage error, a constraint whose evaluation itself fails, a stored table that cannot be
+loaded. So a column whose Arrow type Delta keeps
 through a recorded type (the "(recorded type)" cells below, every list and map included)
 cannot gain a field when schema evolution is on, nor have a nested nullability change:
 the record is the column's field metadata, which deltalake 1.5 and later does not let a
@@ -1117,7 +1126,10 @@ An append matches columns by name, exactly as Arrow matches them (`a` and `A` ar
 columns), never by position. Delta alone refuses two columns, or two fields of one
 struct, whose names differ only in case: Delta column names are case-insensitive, so
 such a table, or an append that would make one, is refused naming both, before anything
-is queued. Rows whose columns are the held table's columns in another
+is queued, when Python's `str.lower` finds the pair. Delta folds case as Rust's
+`to_lowercase` does, which differs for a few code points (U+1C89 and U+1C8A, for
+example): such a pair is found by Delta only, at the flush, which raises once naming the
+column (`UnstorableColumnError`), and those rows leave the queue. Rows whose columns are the held table's columns in another
 order, each field equal to the held one (the same type at every depth, the same logical
 type, the same field attributes), are put in the held order, whether the table was
 flushed in between or not. The in-memory database matches them to the rows still pending,
