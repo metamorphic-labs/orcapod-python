@@ -1,7 +1,7 @@
 """SpiralDBConnector read path against the disk-backed pyspiral fake (no live SpiralDB).
 
 These tests push real Arrow tables through the connector, unlike the ``MagicMock`` tests in
-``test_spiraldb_connector.py``. See ``fake_pyspiral`` for the storage behaviour modelled.
+``test_spiraldb_connector.py``. See ``fake_spiral_sdk`` for the storage behaviour modelled.
 """
 
 from __future__ import annotations
@@ -16,19 +16,17 @@ import pytest
 from orcapod.databases import (
     ConnectorArrowDatabase,
     SpiralDBConnector,
-    read_nullability_record,
     spiraldb_connector,
-    write_nullability_record,
 )
 from orcapod.errors import (
-    NullabilityRecordError,
+    TableSchemaError,
     NullabilityRecordMismatchError,
     NullInNonNullableColumnError,
     UnsupportedValueError,
 )
 from orcapod.utils import arrow_utils
 from orcapod.sources import ArrowTableSource, SpiralDBTableSource
-from tests.test_databases import fake_pyspiral
+from tests.test_databases import fake_spiral_sdk
 from tests.test_databases.type_matrix import map_of_fields
 
 _NESTED = pa.schema(
@@ -84,8 +82,8 @@ def _nested_table() -> pa.Table:
 @pytest.fixture()
 def spiral_root(tmp_path: Path):
     """Provide a fake SpiralDB root holding table ``default.nested`` in project ``p``."""
-    with fake_pyspiral.install(tmp_path / "spiral"):
-        project = fake_pyspiral.FakeSpiral().project("p")
+    with fake_spiral_sdk.install(tmp_path / "spiral"):
+        project = fake_spiral_sdk.ExternalProject("p")
         project.create_table("default.nested", key_schema=[("id", pa.int64())])
         connector = SpiralDBConnector("p")
         # Written through the connector, which records the non-nullable columns (ITL-936):
@@ -193,8 +191,8 @@ class TestNullabilityRecord:
     @pytest.fixture()
     def fake(self, tmp_path: Path):
         """Provide the fake project ``p`` with an empty table ``default.t`` keyed on k."""
-        with fake_pyspiral.install(tmp_path / "spiral"):
-            project = fake_pyspiral.FakeSpiral().project("p")
+        with fake_spiral_sdk.install(tmp_path / "spiral"):
+            project = fake_spiral_sdk.ExternalProject("p")
             project.create_table("default.t", key_schema=[("k", pa.int64())])
             yield project
 
@@ -291,7 +289,7 @@ class TestNullabilityRecord:
 
         db = ConnectorArrowDatabase(SpiralDBConnector("p"))
         with monkeypatch.context() as m:
-            m.setattr(fake_pyspiral.FakeTable, "write", failing_write)
+            m.setattr(fake_spiral_sdk.FakeTable, "write", failing_write)
             db.add_record(_PATH, "r1", _result(1))
             with pytest.raises(RuntimeError, match="network down"):
                 db.flush()
@@ -314,14 +312,14 @@ class TestNullabilityRecord:
         self, fake, monkeypatch
     ):
         """A failed first write keeps the record if another writer's rows landed meanwhile."""
-        real = fake_pyspiral.FakeTable.write
+        real = fake_spiral_sdk.FakeTable.write
 
         def other_writer_then_fail(self, table, **kwargs):
             real(self, _rows(k=[7, 8, 9]))  # a concurrent writer's rows land first
             raise RuntimeError("network down")
 
         with monkeypatch.context() as m:
-            m.setattr(fake_pyspiral.FakeTable, "write", other_writer_then_fail)
+            m.setattr(fake_spiral_sdk.FakeTable, "write", other_writer_then_fail)
             with pytest.raises(RuntimeError, match="network down"):
                 SpiralDBConnector("p").upsert_records("t", _rows(), id_column="k")
         table = fake.table("default.t")
@@ -330,7 +328,7 @@ class TestNullabilityRecord:
 
     def test_half_written_record_counts_as_none(self, fake, monkeypatch):
         """Chunks written but not the header: no record, and the next write records."""
-        real = fake_pyspiral.FakeTable.set_metadata
+        real = fake_spiral_sdk.FakeTable.set_metadata
 
         def header_fails(self, metadata):
             if "__orcapod_nullability__" in metadata:
@@ -338,7 +336,7 @@ class TestNullabilityRecord:
             real(self, metadata)
 
         with monkeypatch.context() as m:
-            m.setattr(fake_pyspiral.FakeTable, "set_metadata", header_fails)
+            m.setattr(fake_spiral_sdk.FakeTable, "set_metadata", header_fails)
             with pytest.raises(RuntimeError, match="network down"):
                 SpiralDBConnector("p").upsert_records("t", _rows(), id_column="k")
         table = fake.table("default.t")
@@ -376,7 +374,7 @@ class TestNullabilityRecord:
             lambda: list(connector.iter_batches('SELECT * FROM "t"')),
             lambda: connector.upsert_records("t", _rows(), id_column="k"),
         ):
-            with pytest.raises(NullabilityRecordError, match="version 2") as info:
+            with pytest.raises(TableSchemaError, match="version 2") as info:
                 read()
             assert info.value.table == _TABLE
 
@@ -387,7 +385,7 @@ class TestNullabilityRecord:
         write_nullability_record(
             table, _RECORDED.append(pa.field("gone", pa.int8(), False))
         )
-        with pytest.raises(NullabilityRecordError, match="gone") as info:
+        with pytest.raises(TableSchemaError, match="gone") as info:
             SpiralDBConnector("p").get_column_info("t")
         assert info.value.table == _TABLE
 
@@ -396,7 +394,7 @@ class TestNullabilityRecord:
         """A null in a recorded column raises on read, naming the table and column."""
         table = fake.table("default.t")
         table.write(_rows())
-        write_nullability_record(table, _with(_RECORDED, "w", False))
+        table.record(_with(_RECORDED, "w", False))
         with pytest.raises(NullInNonNullableColumnError) as info:
             list(SpiralDBConnector("p").iter_batches('SELECT * FROM "t"'))
         assert info.value.column == "w"
@@ -464,7 +462,7 @@ class TestResultStoreOnSpiral:
     @pytest.fixture()
     def db(self, tmp_path: Path):
         """Provide a ConnectorArrowDatabase on a fake SpiralDB project."""
-        with fake_pyspiral.install(tmp_path / "spiral"):
+        with fake_spiral_sdk.install(tmp_path / "spiral"):
             yield ConnectorArrowDatabase(SpiralDBConnector("p"))
 
     def test_results_read_back_with_the_written_schema(self, db):
@@ -530,8 +528,8 @@ class TestStructLevelNulls:
     @pytest.fixture()
     def fake(self, tmp_path: Path):
         """Provide the fake project ``p`` with an empty table ``default.t`` keyed on k."""
-        with fake_pyspiral.install(tmp_path / "spiral"):
-            project = fake_pyspiral.FakeSpiral().project("p")
+        with fake_spiral_sdk.install(tmp_path / "spiral"):
+            project = fake_spiral_sdk.ExternalProject("p")
             project.create_table("default.t", key_schema=[("k", pa.int64())])
             yield project
 
@@ -590,12 +588,12 @@ class TestStructLevelNulls:
             ),
             push_down_nulls=True,
         )
-        stored = fake_pyspiral.FakeSpiral().scan(table.select()).to_table()
+        stored = fake_spiral_sdk.FakeSpiral().scan(table.select()).to_table()
         assert stored.column("g").to_pylist() == [{"a": 1}, {"a": None}]
 
     def test_result_store_refuses_a_null_struct(self, tmp_path: Path):
         """A result-store flush of a null struct raises UnsupportedValueError."""
-        with fake_pyspiral.install(tmp_path / "spiral"):
+        with fake_spiral_sdk.install(tmp_path / "spiral"):
             db = ConnectorArrowDatabase(SpiralDBConnector("p"))
             db.add_record(
                 ("results", "fn"),
@@ -612,8 +610,8 @@ class TestKeptOrRefused:
     @pytest.fixture()
     def database(self, tmp_path: Path):
         """A connector database over the fake project ``p``."""
-        with fake_pyspiral.install(tmp_path / "spiral"):
-            fake_pyspiral.FakeSpiral().project("p")
+        with fake_spiral_sdk.install(tmp_path / "spiral"):
+            fake_spiral_sdk.ExternalProject("p")
             yield ConnectorArrowDatabase(SpiralDBConnector("p"))
 
     @pytest.mark.parametrize("python_type", [Path, set[int]], ids=["Path", "set[int]"])

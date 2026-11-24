@@ -41,7 +41,7 @@ from orcapod.logical_types.identifier import LogicalTypeIdentifier
 from orcapod.logical_types.registry import make_arrow_extension_type
 from orcapod.logical_types.registry import LogicalTypeRegistry
 from orcapod.semantic_types.universal_converter import UniversalTypeConverter
-from tests.test_databases import fake_pyspiral
+from tests.test_databases import fake_spiral_sdk
 
 NAME = b"ARROW:extension:name"
 META = b"ARROW:extension:metadata"
@@ -174,8 +174,8 @@ def _store(kind: str, root: Path) -> Iterator[_Store]:
         yield _Store(lambda: DeltaTableDatabase(root / "delta"))
     else:
         assert kind == "SpiralDB"
-        with fake_pyspiral.install(root / "spiral"):
-            fake_pyspiral.FakeSpiral().project("p")
+        with fake_spiral_sdk.install(root / "spiral"):
+            fake_spiral_sdk.ExternalProject("p")
             yield _Store(lambda: ConnectorArrowDatabase(SpiralDBConnector("p")))
 
 
@@ -2134,8 +2134,8 @@ def test_connector_compares_against_its_cached_stored_schema(tmp_path: Path) -> 
     connection replaces the table (same ids, another identifier), the original
     handle still refuses by the replaced identifier and a new handle by the one
     stored now."""
-    with fake_pyspiral.install(tmp_path / "spiral"):
-        fake_pyspiral.FakeSpiral().project("p")
+    with fake_spiral_sdk.install(tmp_path / "spiral"):
+        fake_spiral_sdk.ExternalProject("p")
         held = ConnectorArrowDatabase(SpiralDBConnector("p"))
         held.add_records(
             PATH, _annotated_top(b"m", [b"1"]), record_id_column="id", flush=True
@@ -2147,7 +2147,7 @@ def test_connector_compares_against_its_cached_stored_schema(tmp_path: Path) -> 
             skip_duplicates=True,
         )
         connector = SpiralDBConnector("p")
-        fake_pyspiral.FakeSpiral().project("p").drop_table(
+        fake_spiral_sdk.ExternalProject("p").drop_table(
             connector._table_id("t")  # pyright: ignore[reportPrivateUsage]  # the fake's id of the table
         )
         fresh = ConnectorArrowDatabase(connector)
@@ -2371,8 +2371,8 @@ def test_connector_lists_its_tables_once_per_append(tmp_path: Path) -> None:
     """The identity check and the ordinary check share one gathering of the held
     schemas: an append to a table not stored yet lists the backend's tables once, as
     on main (CodeRabbit, 6eab211e)."""
-    with fake_pyspiral.install(tmp_path / "spiral"):
-        fake_pyspiral.FakeSpiral().project("p")
+    with fake_spiral_sdk.install(tmp_path / "spiral"):
+        fake_spiral_sdk.ExternalProject("p")
         connector = SpiralDBConnector("p")
         calls = {"n": 0}
         listing = connector.get_table_names

@@ -39,7 +39,7 @@ from orcapod.protocols.database_protocols import (
     keeps_field_metadata,
 )
 from orcapod.types import CacheMode
-from tests.test_databases import fake_pyspiral
+from tests.test_databases import fake_spiral_sdk
 
 CALLS: list[float] = []
 
@@ -92,7 +92,7 @@ def _adapter(cls: type[ThirdPartyDatabase]) -> Any:
 
 @pytest.fixture()
 def spiral(tmp_path: Path) -> Iterator[None]:
-    with fake_pyspiral.install(tmp_path / "spiral"):
+    with fake_spiral_sdk.install(tmp_path / "spiral"):
         yield
 
 
@@ -293,7 +293,7 @@ def test_spiraldb_failed_marker_write_stores_no_row(
     db = ConnectorArrowDatabase(SpiralDBConnector("p"))
     path = ("node", "table")
     db.add_records(path, _rows([1]), record_id_column="rid", flush=True)
-    real_set_metadata = fake_pyspiral.FakeTable.set_metadata
+    real_set_metadata = fake_spiral_sdk.FakeTable.set_metadata
 
     def failing_set_metadata(self: Any, metadata: dict[str, bytes]) -> None:
         # Only the Arrow metadata entry (the marker) fails.
@@ -301,7 +301,7 @@ def test_spiraldb_failed_marker_write_stores_no_row(
             raise RuntimeError("metadata service unavailable")
         real_set_metadata(self, metadata)
 
-    monkeypatch.setattr(fake_pyspiral.FakeTable, "set_metadata", failing_set_metadata)
+    monkeypatch.setattr(fake_spiral_sdk.FakeTable, "set_metadata", failing_set_metadata)
     with pytest.raises(RuntimeError, match="metadata service unavailable"):
         db.add_records(
             path,
@@ -310,7 +310,7 @@ def test_spiraldb_failed_marker_write_stores_no_row(
             skip_duplicates=True,
             flush=True,
         )
-    monkeypatch.setattr(fake_pyspiral.FakeTable, "set_metadata", real_set_metadata)
+    monkeypatch.setattr(fake_spiral_sdk.FakeTable, "set_metadata", real_set_metadata)
     stored = ConnectorArrowDatabase(SpiralDBConnector("p")).get_all_records(path)
     assert stored is not None and stored.column("unit").to_pylist() == [1]
 
@@ -375,15 +375,15 @@ def test_spiraldb_failed_first_write_leaves_no_marker(
     connector.create_table_if_not_exists(
         "t", [ColumnInfo("rid", pa.large_binary())], pk_column="rid"
     )
-    real_write = fake_pyspiral.FakeTable.write
+    real_write = fake_spiral_sdk.FakeTable.write
 
     def failing_write(self: Any, *args: Any, **kwargs: Any) -> None:
         raise RuntimeError("write failed")
 
-    monkeypatch.setattr(fake_pyspiral.FakeTable, "write", failing_write)
+    monkeypatch.setattr(fake_spiral_sdk.FakeTable, "write", failing_write)
     with pytest.raises(RuntimeError, match="write failed"):
         connector.upsert_records("t", _rows([1]), id_column="rid")
-    monkeypatch.setattr(fake_pyspiral.FakeTable, "write", real_write)
+    monkeypatch.setattr(fake_spiral_sdk.FakeTable, "write", real_write)
 
     rows = _rows([1])
     unmarked = rows.cast(pa.schema([field.remove_metadata() for field in rows.schema]))
@@ -410,15 +410,15 @@ def test_spiraldb_failed_write_keeps_the_metadata_of_stored_rows(
         )
 
     connector.upsert_records("k", key_only([1]), id_column="rid")
-    real_write = fake_pyspiral.FakeTable.write
+    real_write = fake_spiral_sdk.FakeTable.write
 
     def failing_write(self: Any, *args: Any, **kwargs: Any) -> None:
         raise RuntimeError("write failed")
 
-    monkeypatch.setattr(fake_pyspiral.FakeTable, "write", failing_write)
+    monkeypatch.setattr(fake_spiral_sdk.FakeTable, "write", failing_write)
     with pytest.raises(RuntimeError, match="write failed"):
         connector.upsert_records("k", key_only([2]), id_column="rid")
-    monkeypatch.setattr(fake_pyspiral.FakeTable, "write", real_write)
+    monkeypatch.setattr(fake_spiral_sdk.FakeTable, "write", real_write)
 
     table = pa.Table.from_batches(list(connector.iter_batches('SELECT * FROM "k"')))
     assert table.column("rid").to_pylist() == [b"1"]
@@ -435,8 +435,8 @@ def test_spiraldb_failed_metadata_read_leaves_no_nullability_record(
     connector.create_table_if_not_exists(
         "t", [ColumnInfo("rid", pa.large_binary())], pk_column="rid"
     )
-    real_get_metadata = fake_pyspiral.FakeTable.get_metadata
-    real_set_metadata = fake_pyspiral.FakeTable.set_metadata
+    real_get_metadata = fake_spiral_sdk.FakeTable.get_metadata
+    real_set_metadata = fake_spiral_sdk.FakeTable.set_metadata
     record_written: list[bool] = []
 
     def tracking_set_metadata(self: Any, metadata: dict[str, bytes]) -> None:
@@ -450,8 +450,10 @@ def test_spiraldb_failed_metadata_read_leaves_no_nullability_record(
             raise RuntimeError("metadata read failed")
         return real_get_metadata(self)
 
-    monkeypatch.setattr(fake_pyspiral.FakeTable, "set_metadata", tracking_set_metadata)
-    monkeypatch.setattr(fake_pyspiral.FakeTable, "get_metadata", failing_get_metadata)
+    monkeypatch.setattr(
+        fake_spiral_sdk.FakeTable, "set_metadata", tracking_set_metadata
+    )
+    monkeypatch.setattr(fake_spiral_sdk.FakeTable, "get_metadata", failing_get_metadata)
     try:
         connector.upsert_records("t", _rows([1]), id_column="rid")
         wrote = True

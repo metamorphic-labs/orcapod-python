@@ -1,7 +1,7 @@
-"""Count SDK calls for sources and jobs using the repository's pyspiral fake.
+"""Count SDK calls for sources and jobs using the repository's spiral-sdk fake.
 
 Construction and each freshness check get metadata from one lookup (ITL-1350).
-Each read has its own table lookup, including reads that also use a manifest count,
+Each read has its own table lookup, including reads that also count rows,
 and the source reuses its SDK client (ITL-1431).
 """
 
@@ -22,12 +22,12 @@ from orcapod import PipelineJob
 from orcapod.databases import (
     InMemoryArrowDatabase,
     SpiralDBConnector,
-    write_nullability_record,
 )
+from orcapod.databases.spiraldb_schema_table import SCHEMA_TABLE
 from orcapod.operators import SelectColumns
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.sources import SpiralDBTableSource
-from tests.test_databases import fake_pyspiral
+from tests.test_databases import fake_spiral_sdk
 
 _PROJECT = "lookups"
 # Two key columns (tags) and two data columns, in two arrangements: the key order of the
@@ -45,16 +45,9 @@ _FIELDS = {
     "x": pa.field("x", pa.int64(), nullable=False),
     "y": pa.field("y", pa.large_string(), nullable=True),
 }
-COUNTED = {
-    (fake_pyspiral.FakeSpiral, "__init__"): "client",
-    (fake_pyspiral.FakeSpiral, "manifest_stats"): "manifest",
-    (fake_pyspiral.FakeSpiral, "scan"): "scan",
-    (fake_pyspiral.FakeProject, "table"): "lookup",
-    (fake_pyspiral.FakeProject, "list_tables"): "list_tables",
-    (fake_pyspiral.FakeTable, "schema"): "schema",
-    (fake_pyspiral.FakeTable, "last_modified_at"): "version",
-    (fake_pyspiral.FakeTable, "get_metadata"): "metadata",
-}
+# What is counted: "client" built; "lookup" of the user's table by name; "open_schemas" and
+# "read_schemas", the opening of the dataset's schema table and the reads of its rows;
+# "schema" of the user's table; "scan" of its rows and "count" of its keys.
 
 
 def _schema(layout: list[str]) -> pa.Schema:
@@ -79,28 +72,52 @@ def _rows(layout: list[str], ks: list[int]) -> pa.Table:
 def calls(
     request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[collections.Counter[str]]:
-    """A fake project with table ``default.t`` in one arrangement; counts the pyspiral
+    """A fake project with table ``default.t`` in one arrangement; counts the SDK
     calls made on it."""
     keys, layout = ARRANGEMENTS[request.param]
     counts: collections.Counter[str] = collections.Counter()
-    for (cls, name), label in COUNTED.items():
+
+    def is_schemas(name: str) -> bool:
+        return name == SCHEMA_TABLE
+
+    def lookup_label(args: tuple[Any, ...], kwargs: Any) -> str:  # pyright: ignore[reportExplicitAny]  # the call's
+        return "open_schemas" if is_schemas(args[3]) else "lookup"
+
+    def handle_label(user: str) -> Callable[..., str | None]:
+        def label(args: tuple[Any, ...], kwargs: Any) -> str | None:  # pyright: ignore[reportExplicitAny]  # the call's
+            if is_schemas(args[0]._table["name"]):
+                return "read_schemas" if user == "scan" else None
+            columns = args[1] if len(args) > 1 else kwargs.get("columns")
+            return "count" if user == "scan" and columns else user
+
+        return label
+
+    counted: dict[tuple[type, str], Callable[..., str | None]] = {
+        (fake_spiral_sdk.FakeClient, "__init__"): lambda args, kwargs: "client",
+        (fake_spiral_sdk.FakeClient, "keyed_table"): lookup_label,
+        (fake_spiral_sdk.FakeKeyedTable, "schema"): handle_label("schema"),
+        (fake_spiral_sdk.FakeKeyedTable, "scan"): handle_label("scan"),
+    }
+    for (cls, name), label_of in counted.items():
         original: Callable[..., Any] = getattr(cls, name)  # pyright: ignore[reportExplicitAny]  # the fake's method
 
         def wrapper(
             *args: Any,  # pyright: ignore[reportExplicitAny]  # passed through
             _original: Callable[..., Any] = original,  # pyright: ignore[reportExplicitAny]
-            _label: str = label,
+            _label_of: Callable[..., str | None] = label_of,
             **kwargs: Any,  # pyright: ignore[reportExplicitAny]
         ) -> Any:  # pyright: ignore[reportExplicitAny]
-            counts[_label] += 1
+            label = _label_of(args, kwargs)
+            if label is not None:
+                counts[label] += 1
             return _original(*args, **kwargs)
 
         monkeypatch.setattr(cls, name, wrapper)
-    with fake_pyspiral.install(tmp_path / "spiral"):
-        project = fake_pyspiral.FakeSpiral().project(_PROJECT)
+    with fake_spiral_sdk.install(tmp_path / "spiral"):
+        project = fake_spiral_sdk.ExternalProject(_PROJECT)
         table = project.create_table("default.t", key_schema=_keys(keys))
         table.write(_rows(layout, [0, 1, 2]))
-        write_nullability_record(table, _schema(layout))
+        table.record(_schema(layout))
         _ARRANGED["keys"], _ARRANGED["layout"] = keys, layout
         counts.clear()
         yield counts
@@ -149,8 +166,8 @@ def test_a_source_looks_its_table_up_once_to_build(
         "client": 1,
         "lookup": 1,
         "schema": 1,
-        "metadata": 1,
-        "version": 1,
+        "open_schemas": 1,
+        "read_schemas": 1,
     }
     # Its reads are those of every source: the key order, layout and role it has.
     tags, data = source.keys()
@@ -167,7 +184,13 @@ def test_a_source_with_a_given_version_reads_no_version(
 ) -> None:
     _source(role, asof=1)
     # Before ITL-1350: 3 lookups (key, id, schema).
-    assert calls == {"client": 1, "lookup": 1, "schema": 1, "metadata": 1}
+    assert calls == {
+        "client": 1,
+        "lookup": 1,
+        "schema": 1,
+        "open_schemas": 1,
+        "read_schemas": 1,
+    }
 
 
 @pytest.mark.parametrize("role", sorted(ROLES))
@@ -179,7 +202,7 @@ def test_each_check_looks_the_table_up_once(
         calls.clear()
         assert source.check_for_new_data() is False
         # Before ITL-1350: 3 lookups (id, schema, version).
-        assert calls == {"lookup": 1, "schema": 1, "metadata": 1, "version": 1}
+        assert calls == {"lookup": 1, "schema": 1, "open_schemas": 1}
     sync, async_ = _sync_and_async_rows(source)
     assert sorted(sync) == sorted(async_) == _expected_rows([0, 1, 2])
 
@@ -190,11 +213,11 @@ def test_a_check_still_finds_a_table_created_again(
 ) -> None:
     source = _source(role)
     keys, layout = _ARRANGED["keys"], _ARRANGED["layout"]
-    project = fake_pyspiral.FakeSpiral().project(_PROJECT)
+    project = fake_spiral_sdk.ExternalProject(_PROJECT)
     project.drop_table("default.t")
     again = project.create_table("default.t", key_schema=_keys(keys))
     again.write(_rows(layout, [0, 1, 2, 3]))
-    write_nullability_record(again, _schema(layout))
+    again.record(_schema(layout))
     calls.clear()
     with pytest.raises(ValueError, match="dropped and created again"):
         source.check_for_new_data()
@@ -220,10 +243,10 @@ def test_lookup_preserves_unrelated_sdk_errors(
 ) -> None:
     error = ValueError("Invalid SDK configuration")
 
-    def fail(_project: fake_pyspiral.FakeProject, _identifier: str) -> None:
+    def fail(*_args: object, **_kwargs: object) -> None:
         raise error
 
-    monkeypatch.setattr(fake_pyspiral.FakeProject, "table", fail)
+    monkeypatch.setattr(fake_spiral_sdk.FakeClient, "keyed_table", fail)
     with pytest.raises(ValueError) as exc:
         _source("plain")
     assert exc.value is error
@@ -238,26 +261,25 @@ def test_restricted_copy_keeps_client_after_parent_closes(
     source.close()
     calls.clear()
     assert sorted(cast("list[int]", restricted.as_table()["k"].to_pylist())) == [0, 2]
-    assert calls == {"lookup": 1, "metadata": 1, "scan": 1}
+    assert calls == {"lookup": 1, "open_schemas": 1, "schema": 1, "scan": 1}
     restricted.close()
 
 
 def test_invalid_where_releases_client_with_exception_retained(
     calls: collections.Counter[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    clients: list[weakref.ReferenceType[fake_pyspiral.FakeSpiral]] = []
-    original = fake_pyspiral.FakeSpiral.__init__
+    clients: list[weakref.ReferenceType[fake_spiral_sdk.FakeClient]] = []
+    original = fake_spiral_sdk.FakeClient.__init__
 
     def track(
-        sdk: fake_pyspiral.FakeSpiral,
+        sdk: fake_spiral_sdk.FakeClient,
         *,
-        config: object = None,
-        overrides: dict[str, str] | None = None,
+        api_url: str | None = None,
     ) -> None:
-        original(sdk, config=config, overrides=overrides)
+        original(sdk, api_url=api_url)
         clients.append(weakref.ref(sdk))
 
-    monkeypatch.setattr(fake_pyspiral.FakeSpiral, "__init__", track)
+    monkeypatch.setattr(fake_spiral_sdk.FakeClient, "__init__", track)
     source = _source("plain")
     assert len(clients) == 1 and clients[0]() is not None
     with pytest.raises(ValueError, match="missing_column") as held:
@@ -285,7 +307,7 @@ def test_each_read_resolves_once_and_reuses_its_client(
             keys.append(key)
         return keys
 
-    for _ in range(2):
+    for round_ in range(2):
         calls.clear()
         keys = (
             asyncio.run(collect())
@@ -293,15 +315,20 @@ def test_each_read_resolves_once_and_reuses_its_client(
             else cast("list[int]", source.as_table()["k"].to_pylist())
         )
         assert sorted(keys) == expected
-        assert calls == {"lookup": 1, "metadata": 1, "scan": 1} | (
-            {} if restricted else {"manifest": 1}
+        assert calls == {"lookup": 1, "open_schemas": 1, "schema": 1, "scan": 1} | (
+            {} if restricted or round_ else {"count": 1}
         )
 
     calls.clear()
     head = source.head(1)
     assert head.table.num_rows == 1
     assert head.total_rows == 3
-    assert calls == {"lookup": 1, "metadata": 1, "scan": 1, "manifest": 1}
+    assert calls == {
+        "lookup": 1,
+        "open_schemas": 1,
+        "schema": 1,
+        "scan": 1,
+    }
 
 
 @pytest.mark.parametrize(
@@ -321,12 +348,12 @@ def test_source_rejects_malformed_names_before_sdk_lookup(
         f"SpiralDB project {_PROJECT!r}, dataset {dataset!r}: "
         f"Table {name!r} not found in database."
     )
-    assert calls["lookup"] == calls["metadata"] == calls["scan"] == 0
+    assert calls["lookup"] == calls["open_schemas"] == calls["scan"] == 0
 
 
 def _write_scope_table(root_layout: list[str], value: int) -> str:
     """Write the same-shaped table with a recognizable value in this fake endpoint."""
-    project = fake_pyspiral.FakeSpiral().project(_PROJECT)
+    project = fake_spiral_sdk.ExternalProject(_PROJECT)
     table = project.create_table("default.t", key_schema=_keys(["subject", "k"]))
     rows = _rows(root_layout, [0])
     rows = rows.set_column(
@@ -335,7 +362,7 @@ def _write_scope_table(root_layout: list[str], value: int) -> str:
         pa.array([value], type=pa.int64()),
     )
     table.write(rows)
-    write_nullability_record(table, rows.schema)
+    table.record(rows.schema)
     return table.table_id
 
 
@@ -347,13 +374,13 @@ async def _async_x(source: SpiralDBTableSource) -> list[object]:
 @pytest.mark.parametrize("async_read", [False, True])
 def test_copy_keeps_its_original_endpoint(tmp_path: Path, async_read: bool) -> None:
     layout = ["subject", "k", "x", "y"]
-    with fake_pyspiral.install(tmp_path / "endpoint-a"):
+    with fake_spiral_sdk.install(tmp_path / "endpoint-a"):
         original_id = _write_scope_table(layout, 14)
         source = _source("plain", asof=1)
         restricted = source.where(subject="s0")
         assert restricted.table_id == original_id
 
-    with fake_pyspiral.install(tmp_path / "endpoint-b"):
+    with fake_spiral_sdk.install(tmp_path / "endpoint-b"):
         assert _write_scope_table(layout, 29) != original_id
         if async_read:
             assert asyncio.run(_async_x(restricted)) == [14]
@@ -367,12 +394,12 @@ def test_each_read_refuses_a_replacement_before_scanning(
     calls: collections.Counter[str], asof: int | None, mode: str
 ) -> None:
     source = _source("plain", asof=asof)
-    project = fake_pyspiral.FakeSpiral().project(_PROJECT)
+    project = fake_spiral_sdk.ExternalProject(_PROJECT)
     project.drop_table("default.t")
     keys, layout = _ARRANGED["keys"], _ARRANGED["layout"]
     replacement = project.create_table("default.t", key_schema=_keys(keys))
     replacement.write(_rows(layout, [0]))
-    write_nullability_record(replacement, _schema(layout))
+    replacement.record(_schema(layout))
     reads: dict[str, Callable[[], object]] = {
         "table": source.as_table,
         "iter": lambda: list(source.iter_data()),
@@ -390,21 +417,21 @@ def test_two_async_job_readers_use_the_restricted_sources_endpoint(
     tmp_path: Path,
 ) -> None:
     layout = ["subject", "k", "x", "y"]
-    with fake_pyspiral.install(tmp_path / "endpoint-a"):
+    with fake_spiral_sdk.install(tmp_path / "endpoint-a"):
         _write_scope_table(layout, 14)
         restricted = _source("plain", asof=1).where(subject="s0")
-    with fake_pyspiral.install(tmp_path / "endpoint-b"):
+    with fake_spiral_sdk.install(tmp_path / "endpoint-b"):
         _write_scope_table(layout, 29)
         job = PipelineJob(name="two-readers", database=InMemoryArrowDatabase())
         with job:
             SelectColumns(["subject", "x"])(restricted, label="left")
             SelectColumns(["k", "x"])(restricted, label="right")
-        start = len(fake_pyspiral.scan_log)
+        start = len(fake_spiral_sdk.scan_log)
         job.run(orchestrator=AsyncPipelineOrchestrator())
         assert job.nodes["left"].as_table()["x"].to_pylist() == [14]
         assert job.nodes["right"].as_table()["x"].to_pylist() == [14]
         # The async job fans one scan out to both readers of this source.
-        assert len(fake_pyspiral.scan_log) - start == 1
+        assert len(fake_spiral_sdk.scan_log) - start == 1
 
 
 @pytest.mark.parametrize("orchestrator", [None, AsyncPipelineOrchestrator])
@@ -423,16 +450,15 @@ def test_job_reuses_client_but_refreshes_table_each_run(
     assert job.nodes["read"].as_table().num_rows == 3
     assert calls == {
         "lookup": 2,
-        "metadata": 2,
-        "schema": 1,
-        "version": 1,
-        "manifest": 1,
+        "open_schemas": 2,
+        "schema": 2,
+        "count": 1,
         "scan": 1,
     }
 
     calls.clear()
     job.run(orchestrator=runner)
-    assert calls == {"lookup": 1, "metadata": 1, "schema": 1, "version": 1}
+    assert calls == {"lookup": 1, "open_schemas": 1, "schema": 1}
 
 
 def test_freshness_catches_metadata_schema_changes(
@@ -440,27 +466,27 @@ def test_freshness_catches_metadata_schema_changes(
 ) -> None:
     source = _source("plain")
     layout = _ARRANGED["layout"]
-    table = fake_pyspiral.FakeSpiral().project(_PROJECT).table("default.t")
+    table = fake_spiral_sdk.ExternalProject(_PROJECT).table("default.t")
     changed = pa.schema(
         [
             _FIELDS[name].with_nullable(True) if name == "x" else _FIELDS[name]
             for name in layout
         ]
     )
-    write_nullability_record(table, changed)
+    table.record(changed)
     calls.clear()
     with pytest.raises(ValueError, match="the table has column .x."):
         source.check_for_new_data()
-    assert calls == {"lookup": 1, "metadata": 1, "schema": 1}
+    assert calls == {"lookup": 1, "open_schemas": 1, "read_schemas": 1, "schema": 1}
 
 
 def test_freshness_pins_newer_version(calls: collections.Counter[str]) -> None:
     source = _source("plain")
-    table = fake_pyspiral.FakeSpiral().project(_PROJECT).table("default.t")
+    table = fake_spiral_sdk.ExternalProject(_PROJECT).table("default.t")
     table.write(_rows(_ARRANGED["layout"], [3]))
     calls.clear()
     assert source.check_for_new_data()
-    assert calls == {"lookup": 1, "metadata": 1, "schema": 1, "version": 1}
+    assert calls == {"lookup": 1, "open_schemas": 1, "schema": 1}
     assert sorted(cast("list[int]", source.as_table()["k"].to_pylist())) == [0, 1, 2, 3]
 
 
@@ -491,13 +517,13 @@ def test_the_arrangements_give_the_same_rows_and_pipeline_hash(
     """Two tables holding the same rows in the two arrangements: the same rows and the
     same pipeline hash (a schema, in no column order); different content hashes, since
     they are two tables (two table ids) and the key order is part of a row's record id."""
-    with fake_pyspiral.install(tmp_path / "spiral"):
-        project = fake_pyspiral.FakeSpiral().project(_PROJECT)
+    with fake_spiral_sdk.install(tmp_path / "spiral"):
+        project = fake_spiral_sdk.ExternalProject(_PROJECT)
         sources = {}
         for name, (keys, layout) in ARRANGEMENTS.items():
             table = project.create_table(f"default.{name}", key_schema=_keys(keys))
             table.write(_rows(layout, [0, 1, 2]))
-            write_nullability_record(table, _schema(layout))
+            table.record(_schema(layout))
             sources[name] = SpiralDBTableSource(
                 project_id=_PROJECT, table_name=name, tag_only_columns=ROLES[role]
             )

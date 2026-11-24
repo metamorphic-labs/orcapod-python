@@ -32,7 +32,7 @@ from orcapod.core.sources.cached_source import CachedSource
 from orcapod.sources import SpiralDBTableSource
 from orcapod.core.operators import MapData
 from orcapod.types import CacheMode, Condition, col
-from tests.test_databases import fake_pyspiral
+from tests.test_databases import fake_spiral_sdk
 
 _PROJECT = "workshop-sample"
 _KEYS = pa.schema(
@@ -62,15 +62,15 @@ def _rows(subjects: list[str], timestamps: list[int]) -> pa.Table:
 @pytest.fixture()
 def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Provide a fake project holding a 5-row ``event`` table read 2 rows per batch."""
-    monkeypatch.setattr(fake_pyspiral, "scan_batch_rows", 2)
-    with fake_pyspiral.install(tmp_path / "spiral"):
-        project = fake_pyspiral.FakeSpiral().project(_PROJECT)
+    monkeypatch.setattr(fake_spiral_sdk, "scan_batch_rows", 2)
+    with fake_spiral_sdk.install(tmp_path / "spiral"):
+        project = fake_spiral_sdk.ExternalProject(_PROJECT)
         project.create_table("default.event", key_schema=_KEYS).write(
             _rows(["m1", "m1", "m1", "m2", "m2"], [1, 2, 3, 4, 5])
         )
-        fake_pyspiral.scan_log.clear()
+        fake_spiral_sdk.scan_log.clear()
         yield project
-        fake_pyspiral.scan_log.clear()
+        fake_spiral_sdk.scan_log.clear()
 
 
 def _source(**kwargs: Any) -> SpiralDBTableSource:
@@ -107,7 +107,9 @@ class TestSurface:
         """The condition is applied by SpiralDB in the scan, as ``where=`` is."""
         _source().where(subject_id="m2").as_table()
 
-        assert repr(fake_pyspiral.scan_log[-1].kwargs["where"]) == "subject_id == 'm2'"
+        assert (
+            repr(fake_spiral_sdk.scan_log[-1].kwargs["where"]) == "subject_id == 'm2'"
+        )
 
     def test_mapping_and_keywords_combine(self, project):
         """A mapping and keywords are one set of conditions, all of which must hold."""
@@ -261,7 +263,7 @@ class TestSeveralConditionsInOneCall:
         """SpiralDB receives one expression joining both equalities, in call order."""
         _source().where(**conditions).as_table()
 
-        assert repr(fake_pyspiral.scan_log[-1].kwargs["where"]) == expression
+        assert repr(fake_spiral_sdk.scan_log[-1].kwargs["where"]) == expression
 
     @pytest.mark.parametrize("form", list(_FORMS_OF_ONE_RESTRICTION))
     def test_every_form_is_the_same_restriction(self, project, form):
@@ -300,7 +302,7 @@ class TestSeveralConditionsInOneCall:
 
         with pytest.raises(TypeError, match=rf"{column}.*convert"):
             source.where(**conditions)
-        assert fake_pyspiral.scan_log == []
+        assert fake_spiral_sdk.scan_log == []
         assert source.to_config()["where"] == {}
 
     @pytest.mark.parametrize("form", list(_REPEATED_CONDITIONS))
@@ -462,7 +464,7 @@ class TestRefusals:
         source = restrict(value)
         source.as_table()
 
-        pushed = dict(fake_pyspiral.scan_log[-1].kwargs["where"].equalities)
+        pushed = dict(fake_spiral_sdk.scan_log[-1].kwargs["where"].equalities)
         assert set(pushed) == {"amplitude", "subject_id"}
         sent = pushed["amplitude"]
         assert (
@@ -504,7 +506,7 @@ class TestRefusals:
         with pytest.raises(TypeError):
             _source().where(channel="0")
 
-        assert fake_pyspiral.scan_log == []
+        assert fake_spiral_sdk.scan_log == []
 
 
 _UNITS: list[Any] = ["s", "ms", "us", "ns"]  # pyarrow types the unit as a literal
@@ -559,11 +561,11 @@ def _typed_rows() -> pa.Table:
 def typed(tmp_path: Path):
     """Provide a ``typed`` table in a fake that keeps time zones."""
     root = tmp_path / "typed"
-    fake_pyspiral.write_behaviour(
-        root, fake_pyspiral.StorageBehaviour(drop_timezone=False)
+    fake_spiral_sdk.write_behaviour(
+        root, fake_spiral_sdk.StorageBehaviour(drop_timezone=False)
     )
-    with fake_pyspiral.install(root):
-        project = fake_pyspiral.FakeSpiral().project(_PROJECT)
+    with fake_spiral_sdk.install(root):
+        project = fake_spiral_sdk.ExternalProject(_PROJECT)
         project.create_table(
             "default.typed", key_schema=pa.schema([pa.field("k", pa.int64())])
         ).write(_typed_rows())
@@ -726,11 +728,11 @@ def roles(request, tmp_path: Path):
     rows = _role_rows()
     table = pa.table({name: rows[name] for name in columns})
     root = tmp_path / "roles"
-    fake_pyspiral.write_behaviour(
-        root, fake_pyspiral.StorageBehaviour(drop_timezone=False)
+    fake_spiral_sdk.write_behaviour(
+        root, fake_spiral_sdk.StorageBehaviour(drop_timezone=False)
     )
-    with fake_pyspiral.install(root):
-        fake_pyspiral.FakeSpiral().project(_PROJECT).create_table(
+    with fake_spiral_sdk.install(root):
+        fake_spiral_sdk.ExternalProject(_PROJECT).create_table(
             "default.roles", key_schema=pa.schema([table.schema.field(k) for k in keys])
         ).write(table)
         yield
@@ -908,7 +910,7 @@ class TestCarriedOver:
 
         source.where(subject_id="m2").as_table()
 
-        assert fake_pyspiral.scan_log[-1].kwargs["asof"] == version
+        assert fake_spiral_sdk.scan_log[-1].kwargs["asof"] == version
         assert source.where(subject_id="m2").to_config()["asof"] is None
 
     def test_a_given_asof_is_carried_over(self, project):
@@ -929,7 +931,7 @@ class TestCarriedOver:
         restricted.as_table()
         source.as_table()
 
-        new, kept = (scan.kwargs["asof"] for scan in fake_pyspiral.scan_log[-2:])
+        new, kept = (scan.kwargs["asof"] for scan in fake_spiral_sdk.scan_log[-2:])
         assert (new, kept) == (old + 1, old)
 
     def test_no_mutable_state_is_shared(self, project):
@@ -991,8 +993,8 @@ class TestReads:
         view = _source().where(subject_id="m1").head(2)
 
         assert view.as_table().column("timestamp").to_pylist() == [1, 2]
-        assert len(fake_pyspiral.scan_log) == 1
-        assert fake_pyspiral.scan_log[0].kwargs["limit"] == 2
+        assert len(fake_spiral_sdk.scan_log) == 1
+        assert fake_spiral_sdk.scan_log[0].kwargs["limit"] == 2
         assert view.description is not None
         assert "where subject_id='m1'" in view.description
 
@@ -1569,7 +1571,7 @@ class TestCachedSourceOverARestriction:
 
         for text in named:
             assert text in str(caught.value)
-        assert fake_pyspiral.scan_log == []
+        assert fake_spiral_sdk.scan_log == []
 
     def test_an_unrestricted_cache_still_works(self, project, tmp_path):
         """A cache over the whole table reads every row."""
@@ -1719,7 +1721,7 @@ class TestOperatorCacheOverARestriction:
         job = self._job(store, events)
         self._cache(job, "rename", mode, store)
         job.nodes["events"].bound_source = events.where(subject_id="m1")
-        scans = len(fake_pyspiral.scan_log)
+        scans = len(fake_spiral_sdk.scan_log)
 
         with pytest.raises(ValueError, match="cannot cache a restricted read"):
             if run == "job.run":
@@ -1729,7 +1731,7 @@ class TestOperatorCacheOverARestriction:
             else:
                 job.nodes["rename"].run()
 
-        assert len(fake_pyspiral.scan_log) == scans
+        assert len(fake_spiral_sdk.scan_log) == scans
         assert not folder.exists() or not any(folder.rglob("*.parquet"))
 
     @pytest.mark.parametrize("mode", _CACHING, ids=lambda m: m.name)
@@ -1874,12 +1876,12 @@ class TestOperatorCacheEntryPoints:
         restricted = _RESTRICTIONS[restriction](
             _source(source_id="events", tag_only_columns=True)
         )
-        scans = len(fake_pyspiral.scan_log)
+        scans = len(fake_spiral_sdk.scan_log)
 
         with pytest.raises(ValueError, match="cannot cache a restricted read"):
             node.execute(restricted.select_data_columns(["amplitude", "channel"]))
 
-        assert len(fake_pyspiral.scan_log) == scans
+        assert len(fake_spiral_sdk.scan_log) == scans
         assert self._stored_files(folder) == []
 
     @pytest.mark.parametrize("mode", _CACHING, ids=lambda m: m.name)
@@ -1956,12 +1958,12 @@ class TestOperatorCacheEntryPoints:
             node.attach_databases(
                 pipeline_database=store.at("events"), cache_mode=CacheMode.REPLAY
             )
-            scans = len(fake_pyspiral.scan_log)
+            scans = len(fake_spiral_sdk.scan_log)
 
             replayed = list(node.execute(other).iter_data())
 
             assert self._keyed(replayed) == expected
-            assert len(fake_pyspiral.scan_log) == scans
+            assert len(fake_spiral_sdk.scan_log) == scans
 
 
 def _proxy_for(source: SpiralDBTableSource) -> Any:
@@ -2064,12 +2066,12 @@ class TestRestrictionThroughWrappers:
         proxy = _proxy_for(_events())
         cached = proxy.cached(cache_database=DeltaTableDatabase(tmp_path / "c"))
         proxy.bind(_events().where(subject_id="m1"))
-        scans = len(fake_pyspiral.scan_log)
+        scans = len(fake_spiral_sdk.scan_log)
 
         with pytest.raises(ValueError, match="cannot hold a restricted read"):
             cached.as_table()
 
-        assert len(fake_pyspiral.scan_log) == scans
+        assert len(fake_spiral_sdk.scan_log) == scans
         assert not (tmp_path / "c").exists() or not any(
             (tmp_path / "c").rglob("*.parquet")
         )
@@ -2328,7 +2330,7 @@ class TestASlotOverTwoTables:
         project.create_table("default.other", key_schema=_KEYS).write(
             _rows(["m1", "m2", "m1", "m2", "m2"], [1, 2, 3, 4, 5])
         )
-        fake_pyspiral.scan_log.clear()
+        fake_spiral_sdk.scan_log.clear()
 
     def _job(self, tmp_path: Path, others: SpiralDBTableSource) -> PipelineJob:
         """Slot ``events`` (unrestricted) and slot ``others`` bound to ``others``;
@@ -2376,7 +2378,7 @@ class TestASlotOverTwoTables:
         job.nodes["events"].bound_source = _events().semi_join(
             self._others().where(subject_id="m2")
         )
-        scans = len(fake_pyspiral.scan_log)
+        scans = len(fake_spiral_sdk.scan_log)
 
         with pytest.raises(ValueError, match="different rows in one pipeline"):
             if run == "job.run":
@@ -2385,7 +2387,7 @@ class TestASlotOverTwoTables:
                 asyncio.run(asyncio.wait_for(job.run_async(), timeout=120))
             else:
                 job.nodes["both"].run()
-        assert len(fake_pyspiral.scan_log) == scans
+        assert len(fake_spiral_sdk.scan_log) == scans
 
     @pytest.mark.parametrize("order", ["events first", "others first"])
     def test_two_tables_restricted_once_each_are_accepted(

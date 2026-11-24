@@ -17,8 +17,8 @@ import pyarrow as pa
 import pytest
 
 from orcapod.databases import read_nullability_record, write_nullability_record
-from orcapod.errors import NullabilityRecordError
-from tests.test_databases import fake_pyspiral
+from orcapod.errors import TableSchemaError
+from tests.test_databases import fake_spiral_sdk
 
 _KEY = "__orcapod_nullability__"
 
@@ -49,20 +49,20 @@ _PATHS = frozenset({("k",), ("g",), ("g", "x"), ("l",), ("l", "[]"), ("n", "[]",
 @pytest.fixture()
 def table(tmp_path: Path):
     """Provide an empty fake Spiral table to hold metadata."""
-    with fake_pyspiral.install(tmp_path / "spiral"):
+    with fake_spiral_sdk.install(tmp_path / "spiral"):
         yield (
-            fake_pyspiral.FakeSpiral()
+            fake_spiral_sdk.FakeSpiral()
             .project("p")
             .create_table("default.t", key_schema=[("k", pa.int64())])
         )
 
 
-def _header(table: fake_pyspiral.FakeTable) -> dict[str, Any]:
+def _header(table: fake_spiral_sdk.FakeTable) -> dict[str, Any]:
     """Return the decoded header of ``table``'s nullability record."""
     return json.loads(table.get_metadata()[_KEY])
 
 
-def _chunk_keys(table: fake_pyspiral.FakeTable) -> list[str]:
+def _chunk_keys(table: fake_spiral_sdk.FakeTable) -> list[str]:
     """Return the chunk keys of ``table``'s nullability record, sorted."""
     return sorted(k for k in table.get_metadata() if k.startswith(_KEY + "/"))
 
@@ -141,7 +141,7 @@ class TestRoundTrip:
                 )
             ]
         )
-        with pytest.raises(NullabilityRecordError, match="'m'"):
+        with pytest.raises(TableSchemaError, match="'m'"):
             write_nullability_record(table, schema)
         assert read_nullability_record(table.get_metadata()) is None
 
@@ -155,7 +155,7 @@ class TestIntegrity:
         header = _header(table)
         header["version"] = 2
         table.set_metadata({_KEY: json.dumps(header).encode()})
-        with pytest.raises(NullabilityRecordError, match="version 2"):
+        with pytest.raises(TableSchemaError, match="version 2"):
             read_nullability_record(table.get_metadata())
 
     def test_unknown_format(self, table):
@@ -164,27 +164,27 @@ class TestIntegrity:
         header = _header(table)
         header["format"] = "something.else"
         table.set_metadata({_KEY: json.dumps(header).encode()})
-        with pytest.raises(NullabilityRecordError, match="format"):
+        with pytest.raises(TableSchemaError, match="format"):
             read_nullability_record(table.get_metadata())
 
     def test_header_not_json(self, table):
         """A header that is not JSON raises."""
         table.set_metadata({_KEY: b"not json"})
-        with pytest.raises(NullabilityRecordError):
+        with pytest.raises(TableSchemaError):
             read_nullability_record(table.get_metadata())
 
     def test_missing_chunk(self, table):
         """A missing chunk raises."""
         write_nullability_record(table, _SCHEMA)
         table.drop_metadata(_chunk_keys(table)[:1])
-        with pytest.raises(NullabilityRecordError, match="missing"):
+        with pytest.raises(TableSchemaError, match="missing"):
             read_nullability_record(table.get_metadata())
 
     def test_digest_mismatch(self, table):
         """A chunk that does not match the header's digest raises."""
         write_nullability_record(table, _SCHEMA)
         table.set_metadata({_chunk_keys(table)[0]: b'[["v"]]'})
-        with pytest.raises(NullabilityRecordError, match="digest"):
+        with pytest.raises(TableSchemaError, match="digest"):
             read_nullability_record(table.get_metadata())
 
     def test_payload_not_a_list_of_paths(self, table):
@@ -198,7 +198,7 @@ class TestIntegrity:
         # Chunk keys are named by the payload digest (the documented format).
         chunk = f"{_KEY}/{digest[:16]}/0"
         table.set_metadata({chunk: payload, _KEY: json.dumps(header).encode()})
-        with pytest.raises(NullabilityRecordError, match="path"):
+        with pytest.raises(TableSchemaError, match="path"):
             read_nullability_record(table.get_metadata())
 
     def test_chunks_without_header_are_no_record(self, table):

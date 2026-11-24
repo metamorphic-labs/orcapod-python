@@ -23,7 +23,7 @@ SQLite, over PostgreSQL and over SpiralDB. No PostgreSQL server and no SpiralDB 
 the PostgreSQL cell comes from the connector's own storability rule
 (``unstorable_column_reason`` and ``validate_records``, over a mocked connection), so it
 is ``KEPT BY RULE`` or ``REFUSED``, never a measured read; the SpiralDB cell is measured
-through the disk fake (``tests/test_databases/fake_pyspiral.py``). No database tells tag
+through the disk fake (``tests/test_databases/fake_spiral_sdk.py``). No database tells tag
 columns from data columns: the connector databases tell only the record-id key, which
 Orcapod always writes as ``large_binary``.
 """
@@ -637,10 +637,10 @@ def open_database(name: str, root: Path) -> Iterator[Any]:
     elif name == "SQLite":
         yield ConnectorArrowDatabase(SQLiteConnector(str(root / "store.db")))
     elif name == "SpiralDB":
-        from tests.test_databases import fake_pyspiral
+        from tests.test_databases import fake_spiral_sdk
 
-        with fake_pyspiral.install(root / "spiral"):
-            fake_pyspiral.FakeSpiral().project("p")
+        with fake_spiral_sdk.install(root / "spiral"):
+            fake_spiral_sdk.ExternalProject("p")
             yield ConnectorArrowDatabase(SpiralDBConnector("p"))
     elif name == "PostgreSQL":
         with patch("psycopg.connect") as connect:

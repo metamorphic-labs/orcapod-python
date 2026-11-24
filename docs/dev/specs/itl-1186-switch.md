@@ -1,8 +1,12 @@
 # ITL-1186: the switch to spiral-sdk — design
 
-Status: for approval. Scope: one PR from `origin/main`, keyed tables kept, no store feature.
+Status: superseded in part. After an independent design review the first step is narrowed
+(November 24, 2026): **reading only**. The schema table is written by the migration tool
+alone, one row per table keyed by SpiralDB's table id, one schema per table, and a completion
+marker last (`src/orcapod/databases/spiraldb_schema_table.py` is the statement). The connector
+refuses writes; sections 1 and 2 below (a row per write, `earlier_schemas`) are not built.
 "Measured" means measured on the service with spiral-sdk 0.16.74 (and pyspiral 0.16.33 for
-comparison) on throwaway tables; everything else is marked.
+comparison) on throwaway tables.
 
 ## 1. The schema table
 

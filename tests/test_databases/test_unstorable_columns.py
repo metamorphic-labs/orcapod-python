@@ -362,9 +362,9 @@ class TestConnectorRule:
 def spiral_database(tmp_path: pathlib.Path):
     """A ``ConnectorArrowDatabase`` over ``SpiralDBConnector``, stored by the fake."""
     from orcapod.databases import SpiralDBConnector
-    from tests.test_databases import fake_pyspiral
+    from tests.test_databases import fake_spiral_sdk
 
-    with fake_pyspiral.install(tmp_path / "spiral"):
+    with fake_spiral_sdk.install(tmp_path / "spiral"):
         connector = SpiralDBConnector("p")
         try:
             yield ConnectorArrowDatabase(connector)
@@ -501,9 +501,9 @@ class TestSpiralFakeRefusesLikeSpiralDB:
     def test_connector_write_refused(self, tmp_path: pathlib.Path, name, message):
         from orcapod.databases import SpiralDBConnector
         from orcapod.types import ColumnInfo
-        from tests.test_databases import fake_pyspiral
+        from tests.test_databases import fake_spiral_sdk
 
-        with fake_pyspiral.install(tmp_path / "spiral"):
+        with fake_spiral_sdk.install(tmp_path / "spiral"):
             connector = SpiralDBConnector("p")
             connector.create_table_if_not_exists(
                 "t",

@@ -17,12 +17,11 @@ import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.databases import DeltaTableDatabase
-from orcapod.databases.spiraldb_connector import _serialize_arrow_metadata
 from orcapod.errors import RowIdentifierError, SourceTooLargeError
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.serialization import resolve_source_from_config
 from orcapod.sources import SpiralDBTableSource
-from tests.test_databases import fake_pyspiral
+from tests.test_databases import fake_spiral_sdk
 
 _PROJECT = "edi-sample"
 _KEYS = pa.schema(
@@ -46,15 +45,15 @@ def _rows(timestamps: list[int], subject: str = "m1") -> pa.Table:
 @pytest.fixture()
 def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Provide a fake project holding a 5-row ``event`` table read 2 rows per batch."""
-    monkeypatch.setattr(fake_pyspiral, "scan_batch_rows", 2)
-    with fake_pyspiral.install(tmp_path / "spiral"):
-        project = fake_pyspiral.FakeSpiral().project(_PROJECT)
+    monkeypatch.setattr(fake_spiral_sdk, "scan_batch_rows", 2)
+    with fake_spiral_sdk.install(tmp_path / "spiral"):
+        project = fake_spiral_sdk.ExternalProject(_PROJECT)
         project.create_table("default.event", key_schema=_KEYS).write(
             _rows([1, 2, 3, 4, 5])
         )
-        fake_pyspiral.scan_log.clear()
+        fake_spiral_sdk.scan_log.clear()
         yield project
-        fake_pyspiral.scan_log.clear()
+        fake_spiral_sdk.scan_log.clear()
 
 
 def _timestamps(source: SpiralDBTableSource) -> list[int]:
@@ -84,7 +83,7 @@ class TestNoRowIsReadUntilAsked:
         source.to_config()
         assert source.row_count_estimate == _ROWS
 
-        assert fake_pyspiral.scan_log == []
+        assert fake_spiral_sdk.scan_log == []
 
     def test_iter_data_reads_batches_only_as_rows_are_consumed(self, project):
         """``iter_data`` takes a batch from the scan only as its rows are consumed."""
@@ -92,14 +91,14 @@ class TestNoRowIsReadUntilAsked:
         rows = iter(source.iter_data())
 
         next(rows)
-        assert [scan.batches_read for scan in fake_pyspiral.scan_log] == [1]
+        assert [scan.batches_read for scan in fake_spiral_sdk.scan_log] == [1]
 
         assert sum(1 for _ in rows) == _ROWS - 1
-        assert [scan.batches_read for scan in fake_pyspiral.scan_log] == [3]
+        assert [scan.batches_read for scan in fake_spiral_sdk.scan_log] == [3]
 
     def test_batches_handed_on_hold_at_most_batch_rows(self, project, monkeypatch):
         """Batches handed on hold at most ``batch_rows`` rows, whatever is scanned."""
-        monkeypatch.setattr(fake_pyspiral, "scan_batch_rows", 4)
+        monkeypatch.setattr(fake_spiral_sdk, "scan_batch_rows", 4)
         source = SpiralDBTableSource(
             _PROJECT, "event", batch_rows=3, tag_only_columns=True
         )
@@ -133,11 +132,7 @@ class TestNoRowIsReadUntilAsked:
                 ]
             )
         )
-        # About the connector's non-public metadata encoding: it is how a table's
-        # field metadata is stored, and the test changes only that.
-        kv = _serialize_arrow_metadata(marked)  # pyright: ignore[reportPrivateUsage]
-        assert kv is not None
-        project.table("default.event").set_metadata(kv)
+        project.table("default.event").record(marked.schema)
 
         with pytest.raises(
             ValueError, match="column 'amplitude'.*build the source again"
@@ -239,7 +234,7 @@ class TestRestrictions:
         source = SpiralDBTableSource(_PROJECT, "event", limit=2, tag_only_columns=True)
 
         assert _timestamps(source) == [1, 2]
-        assert fake_pyspiral.scan_log[-1].kwargs["limit"] == 2
+        assert fake_spiral_sdk.scan_log[-1].kwargs["limit"] == 2
 
     def test_where_reads_only_matching_rows(self, project):
         """``where`` reads only the rows whose columns equal the given values."""
@@ -297,7 +292,9 @@ class TestRestrictions:
         source.as_table()
         list(source.iter_data())
 
-        assert [scan.kwargs["asof"] for scan in fake_pyspiral.scan_log] == [version] * 2
+        assert [scan.kwargs["asof"] for scan in fake_spiral_sdk.scan_log] == [
+            version
+        ] * 2
 
     def test_a_given_version_is_used(self, project):
         """A given ``asof`` is passed to the scan and kept in the config."""
@@ -305,7 +302,7 @@ class TestRestrictions:
 
         source.as_table()
 
-        assert fake_pyspiral.scan_log[-1].kwargs["asof"] == 1
+        assert fake_spiral_sdk.scan_log[-1].kwargs["asof"] == 1
         assert source.to_config()["asof"] == 1
 
     def test_a_given_version_zero_is_used(self, project):
@@ -314,7 +311,7 @@ class TestRestrictions:
 
         source.as_table()
 
-        assert fake_pyspiral.scan_log[-1].kwargs["asof"] == 0
+        assert fake_spiral_sdk.scan_log[-1].kwargs["asof"] == 0
         assert source.to_config()["asof"] == 0
 
 
@@ -330,7 +327,7 @@ class TestRowCap:
         with pytest.raises(SourceTooLargeError) as raised:
             source.as_table()
 
-        assert fake_pyspiral.scan_log == []
+        assert fake_spiral_sdk.scan_log == []
         message = str(raised.value)
         assert "up to 5 rows" in message and "max_rows=3" in message
         assert "records about 5 rows" in message
@@ -523,7 +520,7 @@ class TestSaveAndLoad:
 
         loaded = resolve_source_from_config(config)
 
-        assert fake_pyspiral.scan_log == []
+        assert fake_spiral_sdk.scan_log == []
         assert isinstance(loaded, SpiralDBTableSource)
         assert loaded.to_config() == config
         assert loaded.content_hash() == source.content_hash()
@@ -657,13 +654,13 @@ class TestNotebookPreview:
         project.create_table("default.big", key_schema=_KEYS).write(
             _rows(list(range(1, 26)))
         )
-        fake_pyspiral.scan_log.clear()
+        fake_spiral_sdk.scan_log.clear()
         return project
 
     @staticmethod
     def _scan_limits() -> list[object]:
         """Return the ``limit`` of every scan opened, oldest first."""
-        return [scan.kwargs.get("limit") for scan in fake_pyspiral.scan_log]
+        return [scan.kwargs.get("limit") for scan in fake_spiral_sdk.scan_log]
 
     def test_display_reads_one_head_of_ten_rows(self, big):
         """The notebook display is ``head()``: one 10-row scan, headed with the size."""
@@ -705,7 +702,7 @@ class TestNotebookPreview:
         table = project.create_table("default.mixed", key_schema=_KEYS)
         table.write(_rows([10, 20, 30, 40, 50], subject="m1"))
         table.write(_rows([1, 2, 3, 4, 5, 6], subject="m2"))
-        fake_pyspiral.scan_log.clear()
+        fake_spiral_sdk.scan_log.clear()
         source = SpiralDBTableSource(
             _PROJECT,
             "mixed",
@@ -737,7 +734,7 @@ class TestNotebookPreview:
         )
         with pytest.raises(SourceTooLargeError):
             source.as_table()
-        fake_pyspiral.scan_log.clear()
+        fake_spiral_sdk.scan_log.clear()
 
         html = source._repr_html_()
 
@@ -813,7 +810,7 @@ class TestNotebookPreview:
         source = SpiralDBTableSource(_PROJECT, "big", tag_only_columns=True)
 
         assert repr(source) == "SpiralDBTableSource"
-        assert fake_pyspiral.scan_log == []
+        assert fake_spiral_sdk.scan_log == []
 
     def test_switched_off_preview_shows_the_schema_without_a_scan(
         self, big, monkeypatch
@@ -828,7 +825,7 @@ class TestNotebookPreview:
         head = source.head()
         html = source._repr_html_()
 
-        assert fake_pyspiral.scan_log == []
+        assert fake_spiral_sdk.scan_log == []
         assert head.header() == (
             "SpiralDBTableSource[big] — rows not read; the table has about 25 rows"
         )

@@ -23,7 +23,7 @@ from orcapod.errors import RestrictedAggregationWarning
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.sources import SpiralDBTableSource
 from orcapod.types import CacheMode, Condition
-from tests.test_databases import fake_pyspiral
+from tests.test_databases import fake_spiral_sdk
 
 pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
 
@@ -180,9 +180,9 @@ _KEYS = pa.schema(
 @pytest.fixture()
 def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """A fake SpiralDB project holding a 6-row ``event`` table."""
-    monkeypatch.setattr(fake_pyspiral, "scan_batch_rows", 2)
-    with fake_pyspiral.install(tmp_path / "spiral"):
-        project = fake_pyspiral.FakeSpiral().project(_PROJECT)
+    monkeypatch.setattr(fake_spiral_sdk, "scan_batch_rows", 2)
+    with fake_spiral_sdk.install(tmp_path / "spiral"):
+        project = fake_spiral_sdk.ExternalProject(_PROJECT)
         project.create_table("default.event", key_schema=_KEYS).write(
             pa.table(
                 {
