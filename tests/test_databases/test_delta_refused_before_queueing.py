@@ -34,6 +34,7 @@ from orcapod.errors import (
     OrcapodDatabaseReadError,
     UnstorableColumnError,
 )
+from orcapod.system_constants import constants
 
 PATH = ("t",)
 
@@ -296,6 +297,28 @@ def test_names_folded_alike_only_by_delta_are_refused_once(
     assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
     db.flush()
     assert not (tmp_path / "t" / "_delta_log").exists()
+
+
+@pytest.mark.parametrize("include_data", [True, False], ids=["both", "source only"])
+def test_the_backstop_reports_the_data_column_first(
+    tmp_path: Path, include_data: bool
+) -> None:
+    upper, lower = (name + "'q" for name in RUST_ONLY_FOLDS[0])
+    source_prefix = constants.SOURCE_PREFIX
+    columns: dict[str, pa.Array[Any]] = {
+        f"{source_prefix}{upper}": pa.array(["first"]),
+        f"{source_prefix}{lower}": pa.array(["second"]),
+    }
+    if include_data:
+        columns[upper] = pa.array([1], pa.int32())
+        columns[lower] = pa.array([2], pa.int32())
+    db = DeltaTableDatabase(tmp_path)
+    _add(db, _rows(b"1", **columns))
+    with pytest.raises(UnstorableColumnError) as info:
+        db.flush()
+    assert info.value.column == (lower if include_data else f"{source_prefix}{lower}")
+    assert info.value.arrow_type == (pa.int32() if include_data else pa.string())
+    assert not db._pending_batches  # pyright: ignore[reportPrivateUsage]
 
 
 def test_a_storage_typed_column_carrying_another_extension_name(tmp_path: Path) -> None:

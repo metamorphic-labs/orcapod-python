@@ -64,6 +64,7 @@ from orcapod.errors import (
     TypeIdentityError,
     UnstorableColumnError,
 )
+from orcapod.system_constants import constants
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
 
@@ -774,24 +775,37 @@ def _reported_field(error: BaseException, schema: pa.Schema) -> tuple[str, Any]:
     ``int64``, so a collision deeper down is not seen there. The struct Delta refuses
     holds the pair, and the field is named by its path (``outer.right.ᲊ``) with its
     type. Names come from the schema, the longest one Delta's message quotes, so a
-    name holding a quote is named whole. ``(the reported text, null)`` when no struct
-    is refused.
+    name holding a quote is named whole. If Delta names a top-level source-info
+    column, the probe checks user columns first to find a user-facing collision.
+    ``(the reported text, null)`` when no struct is refused.
     """
     messages = [str(seen) for seen in _error_chain(error)]
+    reported = _duplicate_name_in(error) or ""
 
     def quoted(field: "pa.Field[Any]") -> bool:
         return any(f"(case-insensitive): '{field.name}'" in m for m in messages)
 
     for prefix, children in _structs_of(schema):
-        probe = pa.schema([pa.field(c.name, pa.int64()) for c in children])
+        prioritize_data = not prefix and reported.startswith(constants.SOURCE_PREFIX)
+        probe_fields = children
+        if prioritize_data:
+            probe_fields = sorted(
+                children, key=lambda c: c.name.startswith(constants.SOURCE_PREFIX)
+            )
+        probe = pa.schema([pa.field(c.name, pa.int64()) for c in probe_fields])
         try:
             deltalake.Schema.from_arrow(probe)
         except Exception as refused:  # noqa: BLE001  # only a duplicate name is looked at
-            if _duplicate_name_in(refused) is None:
+            collision = _duplicate_name_in(refused)
+            if collision is None:
                 continue
             named = [c for c in children if quoted(c)]
             if named:
                 field = max(named, key=lambda c: len(c.name))
+                if prioritize_data and not collision.startswith(
+                    constants.SOURCE_PREFIX
+                ):
+                    field = next((c for c in children if c.name == collision), field)
                 return prefix + field.name, field.type
     # No struct of the batch is refused on its own: the pair is a batch column and a
     # stored column. Name the batch's column, with its type.
@@ -799,7 +813,7 @@ def _reported_field(error: BaseException, schema: pa.Schema) -> tuple[str, Any]:
     if top:
         field = max(top, key=lambda f: len(f.name))
         return field.name, field.type
-    return _duplicate_name_in(error) or "", pa.null()
+    return reported, pa.null()
 
 
 def _structs_of(schema: pa.Schema) -> list[tuple[str, list["pa.Field[Any]"]]]:
