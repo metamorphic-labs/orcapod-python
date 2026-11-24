@@ -99,7 +99,7 @@ PIPELINES = {
 def stored_records(
     pipeline: str, orchestrator: str, store: ArrowDatabaseProtocol, reordered: bool
 ) -> pa.Table:
-    """The function node's stored records after a run, rows in tag order."""
+    """Return the function node's stored records after a run."""
     job = PipelineJob(name="itl1040", database=store)
     with job:
         PIPELINES[pipeline](source(reordered))
@@ -110,7 +110,12 @@ def stored_records(
     )
     records = job.nodes["node"].get_all_records(all_info=True)
     assert records is not None
-    return records.sort_by("k")
+    return records
+
+
+def row_set(table: pa.Table) -> set[str]:
+    """Compare stored row values, including nested values, in any read order."""
+    return {json.dumps(row, sort_keys=True, default=repr) for row in table.to_pylist()}
 
 
 @pytest.mark.parametrize("reordered", [False, True], ids=["mixed", "reordered"])
@@ -132,16 +137,13 @@ def test_async_stores_the_records_a_sync_run_stores(
     assert "_source_m" not in async_.column_names
     stable_sync = sync.drop_columns(list(PER_RUN_COLUMNS))
     stable_async = async_.drop_columns(list(PER_RUN_COLUMNS))
-    assert {
-        json.dumps(row, sort_keys=True, default=repr)
-        for row in stable_async.to_pylist()
-    } == {
-        json.dumps(row, sort_keys=True, default=repr) for row in stable_sync.to_pylist()
-    }
+    assert row_set(stable_async) == row_set(stable_sync)
 
     with open_stores("delta", tmp_path / "reference") as reference:
         delta_sync = stored_records(pipeline, "sync", reference("sync"), reordered)
-    assert stable_sync.equals(delta_sync.drop_columns(list(PER_RUN_COLUMNS)))
+    stable_delta = delta_sync.drop_columns(list(PER_RUN_COLUMNS))
+    assert stable_sync.schema == stable_delta.schema
+    assert row_set(stable_sync) == row_set(stable_delta)
 
 
 @pytest.mark.parametrize("pipeline_store_factory", STORE_KINDS, indirect=True)
@@ -162,8 +164,6 @@ def test_the_operator_node_table_is_the_same_on_both_orchestrators(
             else:
                 DropDataColumns(["s", "m"])(src, label="op")
         job.run(orchestrator=orchestrator())
-        tables.append(job.nodes["op"].as_table(all_info=True).sort_by("k"))
+        tables.append(job.nodes["op"].as_table(all_info=True))
     assert tables[1].schema == tables[0].schema
-    assert {tuple(row.values()) for row in tables[1].to_pylist()} == {
-        tuple(row.values()) for row in tables[0].to_pylist()
-    }
+    assert row_set(tables[1]) == row_set(tables[0])

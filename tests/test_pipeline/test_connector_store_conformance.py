@@ -63,18 +63,16 @@ def test_a_scan_includes_committed_and_pending_rows_in_different_column_orders(
     pipeline_store: ArrowDatabaseProtocol,
 ) -> None:
     path = ("ordered", "rows")
-    for tag, order in enumerate(ORDERS, start=1):
+    for tag, order in zip((3, 1, 2), ORDERS, strict=True):
         pipeline_store.add_record(
-            path, bytes([tag]), _row(tag).select(list(order)), flush=tag == 1
+            path, bytes([tag]), _row(tag).select(list(order)), flush=tag == 3
         )
 
     table = pipeline_store.get_all_records(path)
     assert table is not None
-    assert (
-        table.sort_by("tag")
-        .select(list(COLUMNS))
-        .equals(pa.concat_tables([_row(tag) for tag in (1, 2, 3)]))
-    )
+    assert {tuple(row.values()) for row in table.select(list(COLUMNS)).to_pylist()} == {
+        (tag, "a", 10 * tag, f"n{tag}") for tag in (1, 2, 3)
+    }
 
 
 @pytest.mark.parametrize("pipeline_store_factory", _SHADOWED_PATHS, indirect=True)

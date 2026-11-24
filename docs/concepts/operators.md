@@ -428,6 +428,12 @@ batch = Batch(batch_size=10, drop_partial_batch=True)
 of tag values are the only thing that tells a batch's members apart. `GroupBy` (below) has a
 key and keeps only that.
 
+`Batch` uses the order in which its source supplies rows. Treat rows read from a database
+as a set unless the database documents an ordering guarantee. A stored source read from
+SpiralDB can therefore produce different batch members than the same rows read from Delta.
+Reading the rows a node holds for its current synchronous run still gives the order in
+which that run passed them downstream.
+
 ### GroupBy
 
 Collapses every set of rows that share a tag tuple into a single row -- the one many-to-one
