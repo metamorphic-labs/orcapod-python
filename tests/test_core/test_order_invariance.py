@@ -1368,7 +1368,16 @@ def test_restricted_job_order_is_independent_of_hash_seed_and_definition_order(
             for line in result["summary"].splitlines()
             if line.lstrip().startswith("restricted sources:")
         )
-        assert re.findall(r"(\w+) \(\w+\):", restrictions) == list(names)
+        entries = restrictions.lstrip().removeprefix("restricted sources: ").split("; ")
+        slots = []
+        for entry in entries:
+            match = re.fullmatch(
+                r"(?P<slot>\w+) \(spiraldb_table_v1:(?P=slot)\): where subject='a'",
+                entry,
+            )
+            assert match is not None, entry
+            slots.append(match["slot"])
+        assert slots == list(names)
         assert re.findall(r"'(\w+)' feeds \w+ '(\w+)'", result["warning"]) == [
             ("alpha3", "another_alpha"),
             ("alpha3", "group_3"),
