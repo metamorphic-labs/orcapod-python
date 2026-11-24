@@ -27,6 +27,7 @@ import json
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
+from functools import cached_property
 from threading import Lock
 from typing import Any
 
@@ -136,15 +137,22 @@ class SchemaRow:
         table_id: SpiralDB's id of the table.
         table_name: The table's plain name.
         key_columns: The table's key columns, in key order.
-        schema: The schema the table is read with.
+        schema_bytes: The schema the table is read with, as Arrow IPC bytes. They are
+            what is stored and digested, never bytes encoded again from ``schema``:
+            which extension types a process has registered changes those.
         nullability: ``FROM_RECORD`` or ``FROM_SERVICE``.
     """
 
     table_id: str
     table_name: str
     key_columns: tuple[str, ...]
-    schema: pa.Schema
+    schema_bytes: bytes
     nullability: str
+
+    @cached_property
+    def schema(self) -> pa.Schema:
+        """The schema in ``schema_bytes``."""
+        return read_schema(self.schema_bytes)
 
     def content(self) -> dict[str, Any]:
         """Return the row's canonical content, as JSON values (what is digested)."""
@@ -154,7 +162,7 @@ class SchemaRow:
             "format": FORMAT,
             "format_version": FORMAT_VERSION,
             "nullability": self.nullability,
-            "schema": base64.b64encode(self.schema.serialize().to_pybytes()).decode(),
+            "schema": base64.b64encode(self.schema_bytes).decode(),
             "key_columns": list(self.key_columns),
             "nullable_columns": [list(p) for p in nullable_paths(self.schema)],
         }
@@ -164,7 +172,7 @@ class SchemaRow:
         content = self.content()
         return {
             **content,
-            "schema": base64.b64decode(content["schema"]),
+            "schema": self.schema_bytes,
             "key_columns": canonical_json(content["key_columns"]),
             "nullable_columns": canonical_json(content["nullable_columns"]),
         }
@@ -186,7 +194,8 @@ class SchemaRow:
                 f"a row has the unknown nullability {row['nullability']!r}"
             )
         try:
-            schema = read_schema(row["schema"])
+            schema_bytes = bytes(row["schema"])
+            schema = read_schema(schema_bytes)
             keys = json.loads(row["key_columns"])
         except (pa.ArrowInvalid, OSError, TypeError, ValueError) as exc:
             raise TableSchemaError(f"a row cannot be decoded ({exc})") from exc
@@ -208,7 +217,11 @@ class SchemaRow:
                 f"{schema.names}"
             )
         return cls(
-            row["table_id"], row["table_name"], tuple(keys), schema, row["nullability"]
+            row["table_id"],
+            row["table_name"],
+            tuple(keys),
+            schema_bytes,
+            row["nullability"],
         )
 
 
@@ -371,6 +384,16 @@ class SchemaTable:
         Raises:
             TableSchemaError: If the table cannot be read in full or is not complete.
         """
+        rows = self.rows()
+        return None if rows is None else rows.get(table_id)
+
+    def rows(self) -> Mapping[str, SchemaRow] | None:
+        """Return every row by table id, as stored now; ``None`` when the dataset has no
+        schema table.
+
+        Raises:
+            TableSchemaError: If the table cannot be read in full or is not complete.
+        """
         table = self._open()
         if table is None:
             return None
@@ -392,4 +415,4 @@ class SchemaTable:
                     or self._kept[0][1] < snapshot[1]
                 ):
                     self._kept = kept
-        return kept[1].get(table_id)
+        return kept[1]

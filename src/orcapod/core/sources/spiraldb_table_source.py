@@ -997,7 +997,7 @@ class SpiralDBTableSource(RootSource):
         """
         if not self._preview_reads_rows:
             schema_only = self._stream.as_table(columns=columns, all_info=all_info)
-            return _Head(schema_only, False, self.row_count_estimate, True)
+            return _Head(schema_only, False, self._bounded_count(PREVIEW_ROWS), True)
         limit = self._limit
         head_limit = n if limit is None else min(n, limit)
         asof = self._asof
@@ -1009,16 +1009,31 @@ class SpiralDBTableSource(RootSource):
         )
         if rows.num_rows < head_limit or head_limit == limit:
             return _Head(rows, True, rows.num_rows, False)
-        # Counting stops one past the bound: a preview never reads every key of a
-        # table of any size.
-        bound = max(min(self._max_rows or DEFAULT_MAX_ROWS, DEFAULT_MAX_ROWS), n)
-        total: int | None = table.count_rows(asof=asof, at_most=bound + 1)
-        if total > bound:
-            total = None
+        bound = self._count_bound(n)
+        total = self._bounded_count(n, table)
         if limit is not None and not self._condition:
             total = limit if total is None and limit <= bound else total
             total = None if total is None else min(limit, total)
         return _Head(rows, True, total, True)
+
+    def _count_bound(self, shown: int) -> int:
+        """Return the most rows a preview of ``shown`` rows counts."""
+        return max(min(self._max_rows or DEFAULT_MAX_ROWS, DEFAULT_MAX_ROWS), shown)
+
+    def _bounded_count(
+        self, shown: int, table: SpiralDBTable | None = None
+    ) -> int | None:
+        """Return the table's row count, or ``None`` above the bound: a preview never
+        reads every key of a table of any size.
+
+        Args:
+            shown: The rows the preview shows.
+            table: The handle resolved for this read; looked up when not given.
+        """
+        bound = self._count_bound(shown)
+        handle = self._lookup_table() if table is None else table
+        total = handle.count_rows(asof=self._asof, at_most=bound + 1)
+        return None if total > bound else total
 
     def _head_note(self, head: "_Head", sorted_by_tags: bool = False) -> str:
         """Return the words a notebook display puts after the header: the one place.
@@ -1027,7 +1042,7 @@ class SpiralDBTableSource(RootSource):
         rows of the table in tag order, and the words say so.
         """
         shown = head.rows.num_rows
-        bound = max(min(self._max_rows or DEFAULT_MAX_ROWS, DEFAULT_MAX_ROWS), shown)
+        bound = self._count_bound(shown)
         total = (
             f"more than {bound:,}"
             if head.total_rows is None

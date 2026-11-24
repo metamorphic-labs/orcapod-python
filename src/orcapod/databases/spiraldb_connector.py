@@ -11,9 +11,7 @@ is read with is in the dataset's schema table (``spiraldb_schema_table``).
 Example::
 
     connector = SpiralDBConnector(project_id="my-project-123456", dataset="default")
-    db = ConnectorArrowDatabase(connector)
-    db.add_record(("results", "my_fn"), record_id="abc", record=table)
-    db.flush()
+    rows = pa.Table.from_batches(connector.scan_batches("units"))
 """
 
 from __future__ import annotations
@@ -47,8 +45,10 @@ from orcapod.databases.spiraldb_schema_table import (
     compared_columns,
     describe_difference,
 )
+from orcapod.databases.spiraldb_sign_in import require_sign_in
 from orcapod.errors import (
     NullInNonNullableColumnError,
+    SpiralDBWriteNotSupportedError,
     TableSchemaError,
     UnrecordedTableSchemaWarning,
 )
@@ -68,7 +68,11 @@ logger = logging.getLogger(__name__)
 # The largest batch a scan hands out. SpiralDB's default is 1,024 rows.
 _SCAN_BATCH_ROWS = 8_192
 _LIST_TIMEOUT_S = 60
-_NO_WRITES = "Orcapod does not write SpiralDB tables through spiral-sdk yet (ITL-1186): it reads them"
+_NO_WRITES = (
+    "Orcapod does not write SpiralDB tables through spiral-sdk yet; it reads them. Writing "
+    "is a follow-up of ITL-1186. Nothing was written. Store a job's results in another "
+    "database, for example DeltaTableDatabase."
+)
 # Tables a warning was issued for in this process (``UnrecordedTableSchemaWarning``).
 _warned_unrecorded: set[tuple[str, str]] = set()
 _warned_lock = Lock()
@@ -127,76 +131,6 @@ def _about_table(table: str) -> Iterator[None]:
 # ---------------------------------------------------------------------------
 
 
-def _holds_zone_aware_timestamp(arrow_type: pa.DataType) -> bool:
-    """Whether ``arrow_type`` is or nests a timestamp with a time zone (ITL-1162).
-
-    Args:
-        arrow_type: The column's Arrow type.
-
-    Returns:
-        ``True`` for a zone-aware timestamp at any depth of lists, structs and maps.
-    """
-    if pa.types.is_timestamp(arrow_type):
-        return arrow_type.tz is not None
-    if isinstance(arrow_type, pa.ExtensionType):
-        return _holds_zone_aware_timestamp(arrow_type.storage_type)
-    return any(
-        _holds_zone_aware_timestamp(arrow_type.field(i).type)
-        for i in range(arrow_type.num_fields)
-    )
-
-
-def _holds_extension_type(arrow_type: pa.DataType) -> bool:
-    """Whether ``arrow_type`` is or nests an extension (logical) type (ITL-1334).
-
-    Args:
-        arrow_type: The column's Arrow type.
-
-    Returns:
-        ``True`` for an extension type at any depth of lists, structs and maps.
-    """
-    # BaseExtensionType: Python-defined types and Arrow's canonical ones (uuid, json).
-    if isinstance(arrow_type, pa.BaseExtensionType):
-        return True
-    return any(
-        _holds_extension_type(arrow_type.field(i).type)
-        for i in range(arrow_type.num_fields)
-    )
-
-
-def _holds_map_field_metadata(arrow_type: pa.DataType) -> bool:
-    """Whether ``arrow_type`` is or nests a map with field metadata at any depth below
-    it: on its key or item field, or on a field inside them.
-
-    The connector's schema row (``spiraldb_schema_table``) does not descend
-    into a map, so such metadata would read back dropped (ITL-1334).
-
-    Args:
-        arrow_type: The column's Arrow type.
-
-    Returns:
-        ``True`` for such a map at any depth of lists, structs and maps.
-    """
-    if pa.types.is_map(arrow_type):
-        return any(
-            field.metadata or _holds_nested_field_metadata(field.type)
-            for field in (arrow_type.key_field, arrow_type.item_field)
-        )
-    return any(
-        _holds_map_field_metadata(arrow_type.field(i).type)
-        for i in range(arrow_type.num_fields)
-    )
-
-
-def _holds_nested_field_metadata(arrow_type: pa.DataType) -> bool:
-    """Whether a field nested in ``arrow_type``, at any depth, has metadata."""
-    return any(
-        arrow_type.field(i).metadata
-        or _holds_nested_field_metadata(arrow_type.field(i).type)
-        for i in range(arrow_type.num_fields)
-    )
-
-
 class SpiralDBTableNotFoundError(ValueError):
     """An exact table lookup found no matching table."""
 
@@ -243,17 +177,28 @@ def _warn_unrecorded(table: str, table_id: str) -> None:
         table: The table, as ``"<project>/<dataset>/<table>"``.
         table_id: SpiralDB's id of it.
     """
-    with _warned_lock:
-        if (table, table_id) in _warned_unrecorded:
-            return
-        _warned_unrecorded.add((table, table_id))
-    warnings.warn(
+    _warn_once(
+        (table, table_id),
         f"SpiralDB table {table} has no row in its dataset's {SCHEMA_TABLE}: every column "
         "is read as nullable and without Arrow metadata. If an Orcapod release on "
         "pyspiral wrote it, migrate the dataset with scripts/migrate_spiral_schemas.py "
         "(its schema and hashes differ until then).",
-        UnrecordedTableSchemaWarning,
-        stacklevel=outside_orcapod_stacklevel(),
+    )
+
+
+def _warn_once(about: tuple[str, str], message: str) -> None:
+    """Issue an ``UnrecordedTableSchemaWarning`` once per ``about`` and process.
+
+    Args:
+        about: What the warning is about.
+        message: The warning.
+    """
+    with _warned_lock:
+        if about in _warned_unrecorded:
+            return
+        _warned_unrecorded.add(about)
+    warnings.warn(
+        message, UnrecordedTableSchemaWarning, stacklevel=outside_orcapod_stacklevel()
     )
 
 
@@ -286,6 +231,7 @@ def _new_client(overrides: Mapping[str, str] | None) -> Any:
     """Return a spiral-sdk client.
 
     Raises:
+        SpiralDBSignInError: If spiral-sdk would have to ask a person to sign in.
         ImportError: If spiral-sdk is not installed, or another package provides the
             ``spiral`` module (``pyspiral``, which must not be installed beside it).
     """
@@ -298,6 +244,7 @@ def _new_client(overrides: Mapping[str, str] | None) -> Any:
             "module name and must not be installed beside it): uninstall both, then "
             'install "orcapod[spiraldb]"'
         ) from exc
+    require_sign_in()
     return client_class(api_url=api_url)
 
 
@@ -327,8 +274,8 @@ def _http_get_json(url: str, token: str | None) -> dict[str, Any]:
         return json.load(response)
 
 
-def _list_keyed_tables(client: Any, project_id: str, dataset: str) -> list[str]:
-    """Return the names of a dataset's keyed tables.
+def _list_keyed_tables(client: Any, project_id: str, dataset: str) -> dict[str, str]:
+    """Return a dataset's keyed tables: their names by table id.
 
     spiral-sdk offers no listing of keyed tables, so this is the documented endpoint
     (docs.spiraldb.com, "List Keyed tables"), called with the client's address and
@@ -344,7 +291,7 @@ def _list_keyed_tables(client: Any, project_id: str, dataset: str) -> list[str]:
         f"{str(native.api_url).rstrip('/')}/api/keyed-tables/projects/"
         f"{urllib.parse.quote(project_id, safe='')}/tables"
     )
-    names: list[str] = []
+    names: dict[str, str] = {}
     token: str | None = None
     while True:
         query = {"dataset": dataset}
@@ -354,7 +301,9 @@ def _list_keyed_tables(client: Any, project_id: str, dataset: str) -> list[str]:
             f"{base}?{urllib.parse.urlencode(query)}", native.access_token()
         )
         # A page can be empty before the last one.
-        names.extend(t["table"] for t in page["items"] if t["dataset"] == dataset)
+        names.update(
+            (t["id"], t["table"]) for t in page["items"] if t["dataset"] == dataset
+        )
         following = page.get("nextPageToken")
         if following is None:
             return names
@@ -546,6 +495,8 @@ class SpiralDBTable:
         """
         connector = self._connector
         table = self._at(asof)
+        # Refuses what a read would: a schema table that is not complete.
+        _ = self._reading(table)
         counts = connector._counts  # pyright: ignore[reportPrivateUsage]  # owns the handle
         known = (self.table_id, str(table.version_id))
         counted, exact = counts.get(known, (0, False))
@@ -601,9 +552,27 @@ class _Reading:
             self.schema = recorded
             self._paths = schema_paths(recorded)
         self._table = table
+        # The batch schema last found to have the snapshot's columns.
+        self._accepted = found
 
     def prepare(self, batch: pa.RecordBatch) -> pa.RecordBatch:
-        """Return a scanned batch under ``schema``, its non-null columns checked."""
+        """Return a scanned batch under ``schema``, its non-null columns checked.
+
+        Raises:
+            TableSchemaError: If the batch's columns are not the snapshot's.
+            NullInNonNullableColumnError: If a non-nullable column holds a null.
+        """
+        if not batch.schema.equals(self._accepted, check_metadata=True):
+            # By name, and only a batch with exactly the snapshot's columns.
+            if sorted(batch.schema.names) == sorted(self.found.names):
+                batch = batch.select(self.found.names)
+            if compared_columns(batch.schema) != compared_columns(self.found):
+                raise TableSchemaError(
+                    "a batch's columns are not those of the version it was read from: "
+                    f"{describe_difference(batch.schema, self.found)}",
+                    table=self._table,
+                )
+            self._accepted = batch.schema
         with _about_table(self._table):
             check_no_nulls(batch, self._paths)
         if batch.schema.equals(self.schema, check_metadata=True):
@@ -680,15 +649,30 @@ class SpiralDBConnector:
     def get_table_names(self) -> list[str]:
         """Return all table names in this connector's dataset, sorted alphabetically.
 
-        The dataset's schema table is not one of them.
+        The dataset's schema table is not one of them. A table it records that the
+        dataset no longer holds is warned about.
+
+        Raises:
+            TableSchemaError: If the dataset's schema table is not complete.
 
         Returns:
             Sorted list of plain table name strings (no ``dataset.`` prefix).
         """
         self._require_open()
         with self._service_call("list the tables of", "*"):
-            names = _list_keyed_tables(self._client, self._project_id, self._dataset)
-        return sorted(name for name in names if name != SCHEMA_TABLE)
+            listed = _list_keyed_tables(self._client, self._project_id, self._dataset)
+        with _about_table(f"{self._project_id}/{self._dataset}"):
+            recorded = (
+                (self._schemas.rows() or {}) if SCHEMA_TABLE in listed.values() else {}
+            )
+        gone = sorted(row.table_name for i, row in recorded.items() if i not in listed)
+        if gone:
+            _warn_once(
+                (f"{self._project_id}/{self._dataset}", str(gone)),
+                f"the {SCHEMA_TABLE} of SpiralDB dataset {self._project_id}/"
+                f"{self._dataset} records tables that the dataset no longer holds: {gone}",
+            )
+        return sorted(name for name in listed.values() if name != SCHEMA_TABLE)
 
     def lookup_table(self, table_name: str) -> SpiralDBTable:
         """Look the table up once, for several items of its metadata (ITL-1350).
@@ -948,23 +932,20 @@ class SpiralDBConnector:
         return self.lookup_table(table_name).row_count_estimate(asof=asof)
 
     def delete_table(self, table_name: str) -> None:
-        """Refuse to drop an existing table: spiral-sdk cannot drop a keyed table.
+        """Refuse to drop a table: spiral-sdk offers no way to drop a keyed table.
 
         Args:
             table_name: Plain table name (no dataset prefix). Nothing is done if the
                 table does not exist.
 
         Raises:
-            NotImplementedError: If the table exists.
+            SpiralDBWriteNotSupportedError: If the table exists.
         """
         try:
             self.lookup_table(table_name)
         except SpiralDBTableNotFoundError:
             return
-        raise NotImplementedError(
-            f"table {self._qualified(table_name)} was not dropped: spiral-sdk offers no "
-            "way to drop a keyed table. Use SpiralDB's own tools."
-        )
+        raise SpiralDBWriteNotSupportedError(_NO_WRITES)
 
     def create_table_if_not_exists(
         self,
@@ -975,10 +956,10 @@ class SpiralDBConnector:
         """Refuse to create a table: Orcapod does not write SpiralDB yet.
 
         Raises:
-            NotImplementedError: Always (ITL-1186).
+            SpiralDBWriteNotSupportedError: Always (ITL-1186).
         """
         self._require_open()
-        raise NotImplementedError(_NO_WRITES)
+        raise SpiralDBWriteNotSupportedError(_NO_WRITES)
 
     def upsert_records(
         self,
@@ -990,10 +971,10 @@ class SpiralDBConnector:
         """Refuse to write rows: Orcapod does not write SpiralDB yet.
 
         Raises:
-            NotImplementedError: Always (ITL-1186).
+            SpiralDBWriteNotSupportedError: Always (ITL-1186).
         """
         self._require_open()
-        raise NotImplementedError(_NO_WRITES)
+        raise SpiralDBWriteNotSupportedError(_NO_WRITES)
 
     @property
     def keeps_field_metadata(self) -> bool:
@@ -1005,56 +986,18 @@ class SpiralDBConnector:
     def unstorable_column_reason(
         self, name: str, arrow_type: pa.DataType, *, primary_key: bool
     ) -> str | None:
-        """Say why SpiralDB cannot store a column, or ``None`` when it can (ITL-1162).
-
-        SpiralDB stores Arrow tables natively, but not every column as written
-        (ITL-1164). It reserves ``.`` as its column-group separator in every name,
-        and the ``__`` prefix on value (column group) columns; a key column may
-        start with ``__`` (``__record_id``). Orcapod does not store a time-zone-aware
-        timestamp there (SpiralDB was seen to drop the zone; what later versions keep is
-        not relied on), nor an extension (logical) type at any depth (``File``, ``Path``,
-        ``UUID``, a user class, ``set[int]``, a NumPy array), which would read back as
-        its storage type (ITL-1334; keeping it is a follow-up). A map whose key or item
-        field has another name than ``key`` / ``value`` reads back with those names,
-        and is refused too.
+        """Refuse every column: Orcapod does not write SpiralDB yet. A job whose database
+        is on this connector is refused when the database is attached, before it runs.
 
         Args:
             name: The column's name.
             arrow_type: The column's Arrow type.
             primary_key: Whether the column is the table's primary key.
 
-        Returns:
-            A short reason, or ``None`` when SpiralDB stores the column.
+        Raises:
+            SpiralDBWriteNotSupportedError: Always (ITL-1186).
         """
-        if "." in name:
-            return "SpiralDB reserves '.' in column names as its column-group separator"
-        if name.startswith("__") and not primary_key:
-            return "SpiralDB reserves the '__' prefix on value columns"
-        if pa.types.is_timestamp(arrow_type) and arrow_type.tz is not None:
-            return (
-                "SpiralDB drops a timestamp's time zone, so it reads back as "
-                f"timestamp[{arrow_type.unit}]"
-            )
-        if _holds_zone_aware_timestamp(arrow_type):
-            return (
-                "SpiralDB drops the time zone of a timestamp nested in it, so it "
-                "reads back as another type"
-            )
-        if _holds_extension_type(arrow_type):
-            return (
-                "SpiralDB drops Arrow field metadata, so a logical (extension) type "
-                "reads back as its storage type"
-            )
-        if arrow_utils.holds_renamed_map(arrow_type):
-            return (
-                "SpiralDB gives a map's key and item fields back as 'key' and 'value'"
-            )
-        if _holds_map_field_metadata(arrow_type):
-            return (
-                "the connector does not keep field metadata below a map (on its key "
-                "or item, or inside them), so it would read back without it"
-            )
-        return None
+        raise SpiralDBWriteNotSupportedError(_NO_WRITES)
 
     def unstorable_table_name_reason(self, table_name: str) -> str | None:
         """Say why SpiralDB cannot hold a table of this name: it holds every name.
@@ -1070,7 +1013,16 @@ class SpiralDBConnector:
         return None
 
     def validate_records(self, records: pa.Table) -> None:
-        """No-op: ``SpiralDBConnector`` preserves Arrow field metadata in the schema table."""
+        """Refuse the rows: Orcapod does not write SpiralDB yet. Called before a database
+        on this connector buffers them.
+
+        Args:
+            records: The rows.
+
+        Raises:
+            SpiralDBWriteNotSupportedError: Always (ITL-1186).
+        """
+        raise SpiralDBWriteNotSupportedError(_NO_WRITES)
 
     def close(self) -> None:
         """Close this connector and release its SDK client. Idempotent."""

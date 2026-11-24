@@ -52,8 +52,10 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
             _rows([1, 2, 3, 4, 5])
         )
         fake_spiral_sdk.scan_log.clear()
+        fake_spiral_sdk.count_log.clear()
         yield project
         fake_spiral_sdk.scan_log.clear()
+        fake_spiral_sdk.count_log.clear()
 
 
 def _timestamps(source: SpiralDBTableSource) -> list[int]:
@@ -329,9 +331,9 @@ class TestRowCap:
 
         assert fake_spiral_sdk.scan_log == []
         message = str(raised.value)
-        assert "up to 5 rows" in message and "max_rows=3" in message
-        assert "records about 5 rows" in message
-        assert "deleted rows not yet compacted" in message
+        assert "more than 3 rows" in message and "max_rows=3" in message
+        # Counting stopped one past the cap.
+        assert [c.limit for c in fake_spiral_sdk.count_log] == [4]
         assert "limit=" in message and "where=" in message
         with pytest.raises(SourceTooLargeError):
             list(source.iter_data())
@@ -350,7 +352,7 @@ class TestRowCap:
             _PROJECT, "event", max_rows=3, limit=4, tag_only_columns=True
         )
 
-        with pytest.raises(SourceTooLargeError, match="4 rows"):
+        with pytest.raises(SourceTooLargeError, match="limit=4"):
             source.as_table()
 
     def test_a_filtered_read_over_the_cap_stops_while_reading(self, project):
@@ -655,6 +657,7 @@ class TestNotebookPreview:
             _rows(list(range(1, 26)))
         )
         fake_spiral_sdk.scan_log.clear()
+        fake_spiral_sdk.count_log.clear()
         return project
 
     @staticmethod
@@ -703,6 +706,7 @@ class TestNotebookPreview:
         table.write(_rows([10, 20, 30, 40, 50], subject="m1"))
         table.write(_rows([1, 2, 3, 4, 5, 6], subject="m2"))
         fake_spiral_sdk.scan_log.clear()
+        fake_spiral_sdk.count_log.clear()
         source = SpiralDBTableSource(
             _PROJECT,
             "mixed",
@@ -735,11 +739,12 @@ class TestNotebookPreview:
         with pytest.raises(SourceTooLargeError):
             source.as_table()
         fake_spiral_sdk.scan_log.clear()
+        fake_spiral_sdk.count_log.clear()
 
         html = source._repr_html_()
 
         assert self._scan_limits() == [10]
-        assert "10 rows read, sorted by tags, of about 25" in html
+        assert "10 rows read, sorted by tags, of more than 20" in html
 
     def test_a_small_table_shows_all_its_rows(self, project):
         """A table of fewer than 10 rows is shown whole, saying so."""

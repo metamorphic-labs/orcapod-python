@@ -323,12 +323,13 @@ def test_each_read_resolves_once_and_reuses_its_client(
     head = source.head(1)
     assert head.table.num_rows == 1
     assert head.total_rows == 3
+    # The count was made by the reads above (or is made here, after a restricted read).
     assert calls == {
         "lookup": 1,
         "open_schemas": 1,
         "schema": 1,
         "scan": 1,
-    }
+    } | ({"count": 1} if restricted else {})
 
 
 @pytest.mark.parametrize(

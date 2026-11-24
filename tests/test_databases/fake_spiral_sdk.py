@@ -102,9 +102,16 @@ class ScanRecord:
     batches_read: int = 0
     closed: bool = False
 
+    @property
+    def kwargs(self) -> dict[str, Any]:
+        """The scan's restriction: ``where``, ``limit`` and the version (``asof``)."""
+        return {"where": self.filter, "limit": self.limit, "asof": self.version}
+
 
 # Every scan of a user's table read in this process, oldest first. Tests clear and read it.
 scan_log: list[ScanRecord] = []
+# Every count: a scan of some columns only.
+count_log: list[ScanRecord] = []
 # Every read of a schema table's rows.
 schema_scan_log: list[ScanRecord] = []
 # Rows per batch a scan hands out (the service's batches follow its stored fragments).
@@ -499,7 +506,16 @@ class _Literal:
 class FakePredicate:
     """Equalities a row must all match."""
 
-    equalities: tuple[tuple[str, _Literal], ...]
+    terms: tuple[tuple[str, _Literal], ...]
+
+    @property
+    def equalities(self) -> list[tuple[str, Any]]:
+        """The ``(column, value)`` pairs, in the order given."""
+        return [(name, wanted.value) for name, wanted in self.terms]
+
+    def __repr__(self) -> str:
+        """Return the equalities as ``name == value`` terms joined by ``&``."""
+        return " & ".join(f"{name} == {value!r}" for name, value in self.equalities)
 
 
 def column(name: str) -> _Column:
@@ -521,7 +537,7 @@ def eq(left: _Column, right: _Literal) -> FakePredicate:
 
 def and_(left: FakePredicate, right: FakePredicate) -> FakePredicate:
     """Stand in for ``spiral.and_``."""
-    return FakePredicate(left.equalities + right.equalities)
+    return FakePredicate(left.terms + right.terms)
 
 
 # -------------------------------------------------------------------------------- the client
@@ -568,7 +584,7 @@ class FakeScan:
         log = (
             schema_scan_log
             if self._record.identifier.endswith(f".{SCHEMA_TABLE}")
-            else scan_log
+            else (count_log if self._record.columns else scan_log)
         )
         log.append(self._record)
         return FakeReader(self._rows, self._record, self._batch_rows)
@@ -614,7 +630,7 @@ class FakeKeyedTable:
     ) -> FakeScan:
         """Plan a scan (``rows``, ``literal``, ``float-eq``)."""
         rows = self._store.read(self.resource_id, self._version)
-        for name, wanted in filter.equalities if filter else ():
+        for name, wanted in filter.terms if filter else ():
             if rows.schema.field(name).type != wanted.type:
                 raise SpiralError(
                     "scan filter is unsupported: Comparison requires equal dtypes, got "
@@ -854,6 +870,10 @@ class ExternalTable:
         """The table's id."""
         return self._table["id"]
 
+    def last_modified_at(self) -> int:
+        """Return the table's version."""
+        return int(_open(self._store, self._table, None).version_id)
+
     def write(self, rows: pa.Table) -> None:
         """Upsert rows."""
         _open(self._store, self._table, None).append(rows)
@@ -902,6 +922,7 @@ def install(root: Path | str):
     with (
         patch.dict(os.environ, {_ROOT_ENV: str(root)}),
         patch("orcapod.databases.spiraldb_connector.sp", fake_module),
+        patch("orcapod.databases.spiraldb_connector.require_sign_in", lambda: None),
         patch(
             "orcapod.databases.spiraldb_connector._http_get_json", fake_http_get_json
         ),
@@ -962,7 +983,7 @@ def migrate(
             table["id"],
             table["name"],
             tuple(table["keys"]),
-            schema,
+            schema.serialize().to_pybytes(),
             st.FROM_SERVICE if given is None else st.FROM_RECORD,
         )
     rows = list(by_id.values())

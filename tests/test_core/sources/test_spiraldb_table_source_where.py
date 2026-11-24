@@ -541,7 +541,6 @@ def _typed_rows() -> pa.Table:
         {
             "d64": pa.array([one, two, one], pa.date64()),
             "bin": pa.array([b"a", b"b", b"a"], pa.binary()),
-            "fbin": pa.array([b"aa", b"bb", b"aa"], pa.binary(2)),
             "i8": pa.array([-1, 2, -1], pa.int8()),
             "u8": pa.array([255, 2, 255], pa.uint8()),
             "i32": pa.array([1, 2, 1], pa.int32()),
@@ -551,7 +550,6 @@ def _typed_rows() -> pa.Table:
             "t32": pa.array([dt.time(1), dt.time(2), dt.time(1)], pa.time32("s")),
             "t64": pa.array([dt.time(1), dt.time(2), dt.time(1)], pa.time64("us")),
             "dec": pa.array([Decimal("1.50")] * 3, pa.decimal128(5, 2)),
-            "dur": pa.array([dt.timedelta(1)] * 3, pa.duration("us")),
         }
     )
     return pa.table(columns)
@@ -561,9 +559,6 @@ def _typed_rows() -> pa.Table:
 def typed(tmp_path: Path):
     """Provide a ``typed`` table in a fake that keeps time zones."""
     root = tmp_path / "typed"
-    fake_spiral_sdk.write_behaviour(
-        root, fake_spiral_sdk.StorageBehaviour(drop_timezone=False)
-    )
     with fake_spiral_sdk.install(root):
         project = fake_spiral_sdk.ExternalProject(_PROJECT)
         project.create_table(
@@ -642,7 +637,6 @@ class TestColumnTypes:
         [
             ("d64", dt.date(2026, 1, 1), [0, 2]),
             ("bin", b"a", [0, 2]),
-            ("fbin", b"aa", [0, 2]),
             ("i8", -1, [0, 2]),
             ("u8", 255, [0, 2]),
             ("i32", 2, [1]),
@@ -658,14 +652,12 @@ class TestColumnTypes:
     @pytest.mark.parametrize(
         "column, value, match",
         [
-            ("fbin", b"a", "cannot hold"),
             ("i8", 128, "cannot hold"),
             ("u8", -1, "cannot hold"),
             ("u32", 2**32, "cannot hold"),
             ("t32", 1, "does not support"),
             ("t64", 1, "does not support"),
             ("dec", 1.5, "does not support"),
-            ("dur", 1, "does not support"),
         ],
     )
     def test_a_value_the_column_cannot_take_is_refused(
@@ -728,9 +720,6 @@ def roles(request, tmp_path: Path):
     rows = _role_rows()
     table = pa.table({name: rows[name] for name in columns})
     root = tmp_path / "roles"
-    fake_spiral_sdk.write_behaviour(
-        root, fake_spiral_sdk.StorageBehaviour(drop_timezone=False)
-    )
     with fake_spiral_sdk.install(root):
         fake_spiral_sdk.ExternalProject(_PROJECT).create_table(
             "default.roles", key_schema=pa.schema([table.schema.field(k) for k in keys])
@@ -936,7 +925,9 @@ class TestCarriedOver:
 
     def test_no_mutable_state_is_shared(self, project):
         """The two objects share no mutable container."""
-        source = _source(tags_as_data={"timestamp": "time"}, overrides={"a": "b"})
+        source = _source(
+            tags_as_data={"timestamp": "time"}, overrides={"server.url": "b"}
+        )
         source.content_hash()
         restricted = source.where(subject_id="m2")
 

@@ -596,6 +596,22 @@ class TableSchemaError(ValueError):
         super().__init__(_in_table(f"table schema: {reason}", table))
 
 
+class SpiralDBWriteNotSupportedError(NotImplementedError):
+    """Orcapod does not write SpiralDB through spiral-sdk yet (ITL-1186): it reads it.
+
+    Raised by every write of ``SpiralDBConnector`` (creating or deleting a table, storing
+    rows), so also by a job whose database is a ``ConnectorArrowDatabase`` on one. Nothing
+    is written. Writing is a follow-up of ITL-1186.
+    """
+
+
+class SpiralDBSignInError(RuntimeError):
+    """SpiralDB cannot be reached without a person signing in; the message says how.
+
+    Raised before spiral-sdk would start a device sign-in inside a source or a job.
+    """
+
+
 class UnrecordedTableSchemaWarning(UserWarning):
     """A SpiralDB table that holds rows has no row in its dataset's schema table.
 
