@@ -54,6 +54,15 @@ def records_matching_values(
     if pa.types.is_null(keys.type):
         return table.slice(0, 0)
     value_set = pa.array(values, type=keys.type)
+    # Entries and results from one commit often have identical ID columns.
+    # Arrow can compare those buffers directly before building a lookup set.
+    if (
+        column == STORED_RECORD_ID_COLUMN
+        and keys.num_chunks == 1
+        and value_set.null_count == 0
+        and keys.chunk(0).equals(value_set)
+    ):
+        return table
     matches = pc.is_in(keys, value_set, skip_nulls=True)
     return table if pc.all(matches).as_py() else table.filter(matches)
 
