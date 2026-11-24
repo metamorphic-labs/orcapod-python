@@ -373,9 +373,13 @@ class TestNullabilityErrors:
             project = fake_pyspiral.FakeSpiral().project(_PROJECT)
             keys = pa.schema([pa.field("subject_id", pa.string(), False)])
             project.create_table("default.subject", key_schema=keys)
+            # SpiralDB requires a value column alongside the key.
+            rows = pa.table({"subject_id": ["m1"]}, schema=keys).append_column(
+                "value", pa.array([1])
+            )
             SpiralDBConnector(_PROJECT).upsert_records(
                 "subject",
-                pa.table({"subject_id": ["m1"]}, schema=keys),
+                rows,
                 id_column="subject_id",
             )
             table = project.table("default.subject")

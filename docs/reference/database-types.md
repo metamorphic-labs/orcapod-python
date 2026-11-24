@@ -181,7 +181,7 @@ fields is not covered: a struct whose fields are in another order is another typ
 
 | Type | in-memory | Delta | SQLite | PostgreSQL | SpiralDB |
 |---|---|---|---|---|---|
-| `null` | kept | refused | refused | refused | kept |
+| `null` | kept | refused | refused | refused | refused |
 
 ## Temporal
 
@@ -205,10 +205,10 @@ fields is not covered: a struct whose fields are in another order is another typ
 | `timestamp[ms, tz=Europe/Berlin]` | kept | kept (recorded type) | refused | refused | refused |
 | `timestamp[us, tz=Europe/Berlin]` | kept | kept (recorded type) | refused | refused | refused |
 | `timestamp[ns, tz=Europe/Berlin]` | kept | kept (recorded type) | refused | refused | refused |
-| `duration[s]` | kept | kept (recorded type) | refused | refused | kept |
-| `duration[ms]` | kept | kept (recorded type) | refused | refused | kept |
-| `duration[us]` | kept | kept (recorded type) | refused | refused | kept |
-| `duration[ns]` | kept | kept (recorded type) | refused | refused | kept |
+| `duration[s]` | kept | kept (recorded type) | refused | refused | refused |
+| `duration[ms]` | kept | kept (recorded type) | refused | refused | refused |
+| `duration[us]` | kept | kept (recorded type) | refused | refused | refused |
+| `duration[ns]` | kept | kept (recorded type) | refused | refused | refused |
 
 ## String and binary
 
@@ -218,7 +218,7 @@ fields is not covered: a struct whose fields are in another order is another typ
 | `large_string` | kept | kept | kept | kept (by rule) | kept |
 | `binary` | kept | kept | kept | kept (by rule) | kept |
 | `large_binary` | kept | kept | kept | kept (by rule) | kept |
-| `fixed_size_binary[4]` | kept | kept (recorded type) | refused | refused | kept |
+| `fixed_size_binary[4]` | kept | kept (recorded type) | refused | refused | refused |
 
 ## List
 

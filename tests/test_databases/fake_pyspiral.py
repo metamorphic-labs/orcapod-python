@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import types
 import uuid
 from collections.abc import Iterator
@@ -97,6 +98,21 @@ class StorageBehaviour:
     decode_dictionaries: bool = True
     server_nullability: bool = True
     reject_struct_nulls: bool = True
+
+
+def _check_arrow_type(arrow_type: pa.DataType) -> None:
+    """Mirror the unsupported inputs to pyspiral 0.16.33's Schema.from_arrow."""
+    if (
+        pa.types.is_fixed_size_binary(arrow_type)
+        or pa.types.is_duration(arrow_type)
+        or pa.types.is_union(arrow_type)
+        or pa.types.is_interval(arrow_type)
+    ):
+        raise ValueError(f"Arrow data type not supported: {arrow_type}")
+    if pa.types.is_dictionary(arrow_type):
+        _check_arrow_type(arrow_type.value_type)
+    for index in range(arrow_type.num_fields):
+        _check_arrow_type(arrow_type.field(index).type)
 
 
 def _stored_type(t: pa.DataType, b: StorageBehaviour) -> pa.DataType:
@@ -557,9 +573,9 @@ class FakeTable:
             **kwargs: Accepted for signature compatibility; unused.
 
         Raises:
-            ValueError: If a key column is missing, a column name is one SpiralDB
-                reserves (a ``.`` anywhere, or a ``__`` prefix on a value column), a
-                struct value is null without ``push_down_nulls``, or the column set
+            ValueError: If key columns are missing, the write has no value columns
+                or a batch repeats a key, a column uses an unsupported name or type,
+                a struct value is null without ``push_down_nulls``, or the column set
                 differs from the stored table (live SpiralDB adds a new column: the
                 fake does not model it).
         """
@@ -568,6 +584,18 @@ class FakeTable:
         missing = [k for k in keys.names if k not in table.column_names]
         if missing:
             raise ValueError(f"write is missing key columns {missing}")
+        values = sorted(name for name in table.column_names if name not in keys.names)
+        if not values:
+            # pyspiral 0.16.33 native writer diagnostic.
+            raise ValueError(
+                "Write array contains only key columns, no data columns to write"
+            )
+        if keys.names:
+            for batch in table.select(keys.names).to_batches():
+                # pyspiral 0.16.33 native writer diagnostic names the input batch.
+                batch_keys = set(zip(*batch.columns))
+                if len(batch_keys) != batch.num_rows:
+                    raise ValueError("Duplicate keys found in input batch")
         for name in table.column_names:
             # SpiralDB's own refusals, with its messages as observed live (ITL-1164).
             if "." in name:
@@ -577,6 +605,13 @@ class FakeTable:
                     f"Column name '{name}' has reserved prefix: column group columns "
                     "must not start with '__'"
                 )
+            if name.startswith("$") and name not in keys.names:
+                # pyspiral 0.16.33 native writer diagnostic in writer/extract.rs.
+                raise ValueError(
+                    f"Field name {name!r} starts with '$', which is reserved for key columns."
+                )
+        for field in table.schema:
+            _check_arrow_type(field.type)
         if b.reject_struct_nulls and not push_down_nulls:
             for name in table.column_names:
                 if _has_struct_nulls(table.column(name)):
@@ -613,7 +648,6 @@ class FakeTable:
         # then the value columns sorted by name, by code point (observed live,
         # ITL-1367). Struct children are sorted live too; the fake keeps them as
         # written (struct field order: ITL-1368).
-        values = sorted(n for n in incoming.column_names if n not in keys.names)
         incoming = incoming.select([*keys.names, *values])
         existing = self._store.read(self._project_id, self._identifier)
         if existing is not None:
@@ -751,13 +785,13 @@ class FakeProject:
         root_uri: Any = None,
         exist_ok: bool = False,
     ) -> FakeTable:
-        """Create the table ``"<dataset>.<table>"`` with ``key_schema`` and open it.
+        """Create a table with ``key_schema`` and open it.
 
         Key columns are stored the way SpiralDB stores them, nullable under
         ``server_nullability`` however they were declared.
 
         Args:
-            identifier: ``"<dataset>.<table>"``.
+            identifier: ``"<dataset>.<table>"`` or a name in the default dataset.
             key_schema: An Arrow schema, or ``(name, type)`` pairs as pyspiral accepts.
             root_uri: Accepted for signature compatibility; unused.
             exist_ok: Open an existing table instead of raising.
@@ -766,16 +800,35 @@ class FakeProject:
             The new table, or with ``exist_ok`` the existing one.
 
         Raises:
-            ValueError: If the table exists and ``exist_ok`` is false.
+            ValueError: If the name or key schema is invalid, or the table exists
+                and ``exist_ok`` is false.
         """
-        if self._store.exists(self._project_id, identifier):
-            if not exist_ok:
-                raise ValueError(f"Table already exists: {identifier}")
-            return self.table(identifier)
+        parts = identifier.split(".")
+        if len(parts) == 1:
+            identifier = f"default.{identifier}"
+        # The pyspiral 0.16.33 spiral.api.types.TableName annotation on create_table.
+        name = parts[-1]
+        if (
+            len(parts) > 2
+            or len(name) > 128
+            or re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_-]*", name) is None
+        ):
+            raise ValueError(f"Invalid table name: {identifier!r}")
         if isinstance(key_schema, pa.Schema):
             schema = key_schema
         else:
             schema = pa.schema([pa.field(n, t, True) for n, t in key_schema])
+        for field in schema:
+            _check_arrow_type(field.type)
+            if pa.types.is_null(field.type):
+                # pyspiral 0.16.33 native key schema diagnostic.
+                raise ValueError(
+                    f"Key schema cannot contain Null type field: {field.name}"
+                )
+        if self._store.exists(self._project_id, identifier):
+            if not exist_ok:
+                raise ValueError(f"Table already exists: {identifier}")
+            return self.table(identifier)
         b = self._store.behaviour
         # SpiralDB reports key columns nullable however they were declared (ITL-936).
         schema = pa.schema(
