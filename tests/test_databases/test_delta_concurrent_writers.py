@@ -69,7 +69,7 @@ def _stored(root: Path) -> list[tuple[bytes, int]]:
 
 def _operations(root: Path) -> list[str]:
     """The table's commit operations, oldest first."""
-    history = deltalake.DeltaTable(str(root / "t")).history()
+    history = list(deltalake.DeltaTable(str(root / "t")).history())
     return [str(entry["operation"]) for entry in reversed(history)]
 
 

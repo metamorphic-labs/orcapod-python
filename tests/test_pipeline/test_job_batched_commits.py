@@ -96,7 +96,7 @@ def table_dirs(root: Path) -> dict[str, Path]:
 
 def operations(table: Path) -> list[str]:
     """The table's commit operations, oldest first."""
-    history = deltalake.DeltaTable(str(table)).history()
+    history = list(deltalake.DeltaTable(str(table)).history())
     return [str(entry["operation"]) for entry in reversed(history)]
 
 
@@ -577,8 +577,8 @@ def test_results_are_committed_before_their_records_just_below_batch_size(
         orchestrator=ORCHESTRATORS[orchestrator](), commit_every_rows=49
     )
     tables = table_dirs(tmp_path)
-    pipeline_history = deltalake.DeltaTable(str(tables["pipeline"])).history()
-    result_history = deltalake.DeltaTable(str(tables["result"])).history()
+    pipeline_history = list(deltalake.DeltaTable(str(tables["pipeline"])).history())
+    result_history = list(deltalake.DeltaTable(str(tables["result"])).history())
     # 120 rows at 49 per commit: 3 pipeline-record commits, none by the database alone.
     assert len(pipeline_history) == 3
     for entry in pipeline_history:
@@ -609,7 +609,7 @@ def test_results_are_committed_before_their_records_just_below_batch_size(
 def _assert_records_point_at_committed_results(root: Path) -> None:
     """Every committed pipeline-record version references only committed results."""
     tables = table_dirs(root)
-    result_history = deltalake.DeltaTable(str(tables["result"])).history()
+    result_history = list(deltalake.DeltaTable(str(tables["result"])).history())
     for entry in deltalake.DeltaTable(str(tables["pipeline"])).history():
         records = deltalake.DeltaTable(
             str(tables["pipeline"]), version=entry["version"]
@@ -669,7 +669,7 @@ def test_writes_pending_before_the_run_are_committed_first(tmp_path: Path) -> No
     leftover = pa.table({"v": pa.array([1], pa.int64())})
     store.add_record(("leftover",), b"left-1", leftover)  # pending, never flushed
     build_job(store, 30).run()
-    leftover_commit = deltalake.DeltaTable(str(tmp_path / "leftover")).history()
+    leftover_commit = list(deltalake.DeltaTable(str(tmp_path / "leftover")).history())
     first_job_commit = min(
         entry["timestamp"]
         for table in table_dirs_except(tmp_path, "leftover")

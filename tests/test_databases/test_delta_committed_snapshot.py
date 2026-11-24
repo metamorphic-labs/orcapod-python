@@ -156,7 +156,7 @@ def test_a_failed_snapshot_extension_is_rebuilt(
 
 def _operations(path: Path) -> list[str]:
     """Return the Delta history's operations, oldest first."""
-    history = deltalake.DeltaTable(str(path)).history()
+    history = list(deltalake.DeltaTable(str(path)).history())
     return [str(entry["operation"]) for entry in reversed(history)]
 
 
@@ -196,3 +196,51 @@ def test_ids_another_writer_stored_are_not_appended_twice(tmp_path: Path) -> Non
     assert stored is not None
     assert sorted(cast(list[bytes], stored["rid"].to_pylist())) == [b"a", b"b", b"c"]
     assert _values(stored) == [1, 2, 3]
+
+
+@pytest.mark.parametrize("shape", ["list", "iterator"])
+def test_a_create_is_recognised_whatever_shape_history_has(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    shape: str,
+) -> None:
+    """ITL-1443: ``DeltaTable.history`` gives a list before deltalake 1.7 and an iterator
+    from it. Either way the commit that creates a table is recognised by its token: its
+    ids are carried forward in memory, and no failed reload is logged."""
+    real_history = deltalake.DeltaTable.history
+
+    def history(table: deltalake.DeltaTable, limit: int | None = None) -> Any:
+        entries = list(real_history(table, limit))
+        return entries if shape == "list" else iter(entries)
+
+    monkeypatch.setattr(deltalake.DeltaTable, "history", history)
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(PATH, _rows(["a", "b"], [1, 2]), flush=True)
+    assert "Could not reload" not in caplog.text
+    assert db._snapshots["table"].ids == {b"a", b"b"}  # pyright: ignore[reportPrivateUsage]
+    db.add_records(PATH, _rows(["b", "c"], [9, 3]), skip_duplicates=True, flush=True)
+    assert _values(DeltaTableDatabase(tmp_path).get_all_records(PATH)) == [1, 2, 3]
+
+
+@pytest.mark.parametrize("failure", ["empty", "raises when read"])
+def test_a_create_whose_history_cannot_be_read_is_not_seeded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure: str,
+) -> None:
+    """ITL-1443: with no readable create commit the ids are left to the next read; the
+    reload itself does not fail, also when a lazy history raises only when read."""
+
+    def history(table: deltalake.DeltaTable, limit: int | None = None) -> Any:
+        if failure == "raises when read":
+            raise OSError("commit file unreadable")
+        yield from ()
+
+    monkeypatch.setattr(deltalake.DeltaTable, "history", history)
+    db = DeltaTableDatabase(tmp_path)
+    db.add_records(PATH, _rows(["a", "b"], [1, 2]), flush=True)
+    assert "Could not reload" not in caplog.text
+    assert db._snapshots["table"].ids is None  # pyright: ignore[reportPrivateUsage]
+    assert _values(db.get_all_records(PATH)) == [1, 2]
