@@ -130,7 +130,7 @@ class ArrowDatabaseProtocol(Protocol):
         values: Collection[Any] | pa.Array[Any],
         record_id_column: str | None = None,
     ) -> pa.Table | None:
-        """Read rows whose stored column contains a requested value.
+        """Read rows whose stored column equals any requested value in Arrow.
 
         Includes pending rows according to the database's normal read rules.
         Repeated values never repeat rows, and nulls never match. Returns None

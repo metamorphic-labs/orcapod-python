@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 import pyarrow as pa
 import pytest
 
+from orcapod import function_pod
 from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes.function_node import (
@@ -14,7 +17,10 @@ from orcapod.core.nodes.function_node import (
     _PIPELINE_BASE_ENTRY_ID_COL,
 )
 from orcapod.core.sources import ArrowTableSource
-from orcapod.databases import InMemoryArrowDatabase
+from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
+from orcapod.protocols.core_protocols import FunctionPodProtocol
+from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+from orcapod.sources import DictSource
 from orcapod.system_constants import constants
 
 
@@ -150,3 +156,73 @@ class TestFetchJoinedRecords:
         assert (
             "1 pipeline DB entries have no match in persistent result DB" in caplog.text
         )
+
+
+def test_delta_stored_and_sync_order_agree_with_the_original_read_path(tmp_path):
+    source = DictSource(
+        [{"id": i, "value": i + 1} for i in range(5)],
+        tag_columns=["id"],
+        tag_only_columns=True,
+    )
+    pipeline_db = InMemoryArrowDatabase()
+    result_db = DeltaTableDatabase(str(tmp_path))
+    pod = function_pod(output_keys="result")(double_value).pod
+    assert isinstance(pod, FunctionPodProtocol)
+    node = FunctionJobNode(
+        pod, source, pipeline_database=pipeline_db, result_database=result_db
+    )
+    rows = list(source.iter_data())
+    for row in rows[:2]:
+        node.execute_data(*row)
+    result_db.flush()
+    assert node.get_all_records() is not None
+    for row in rows[2:]:
+        node.execute_data(*row)
+        result_db.flush()
+        assert node.get_all_records() is not None
+
+    fresh = FunctionJobNode(
+        pod,
+        source,
+        pipeline_database=pipeline_db,
+        result_database=DeltaTableDatabase(str(tmp_path)),
+    )
+    expected = fresh.get_all_records()
+    actual = node.get_all_records()
+    assert actual is not None and expected is not None
+    assert actual.to_pylist() == expected.to_pylist()
+
+    sync_rows = node.execute(source)
+    assert [tag.as_dict()["id"] for tag, _ in sync_rows.iter_data()] == list(range(5))
+
+
+def test_readback_uses_existing_reads_with_a_legacy_result_wrapper():
+    class LegacyResultStore:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def at(self, *parts):
+            return LegacyResultStore(self.inner.at(*parts))
+
+        def __getattr__(self, name):
+            if name == "get_records_by_column":
+                raise AttributeError(name)
+            return getattr(self.inner, name)
+
+    source = DictSource(
+        [{"id": 0, "value": 10}], tag_columns=["id"], tag_only_columns=True
+    )
+    store = LegacyResultStore(InMemoryArrowDatabase())
+    assert not isinstance(store, ArrowDatabaseProtocol)
+    pod = function_pod(output_keys="result")(double_value).pod
+    assert isinstance(pod, FunctionPodProtocol)
+    node = FunctionJobNode(
+        pod,
+        source,
+        pipeline_database=InMemoryArrowDatabase(),
+        result_database=cast("ArrowDatabaseProtocol", cast(object, store)),
+    )
+    node.execute_data(*next(source.iter_data()))
+    result = node.get_all_records()
+    assert result is not None
+    assert result["result"].to_pylist() == [20]

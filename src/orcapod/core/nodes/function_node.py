@@ -105,10 +105,7 @@ from orcapod.protocols.core_protocols import (
     TagProtocol,
     TrackerManagerProtocol,
 )
-from orcapod.protocols.database_protocols import (
-    STORED_RECORD_ID_COLUMN,
-    ArrowDatabaseProtocol,
-)
+from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.protocols.observability_protocols import (
     DataExecutionLoggerProtocol,
     ExecutionObserverProtocol,
@@ -3636,9 +3633,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         WARNING-level log. Ephemeral miss rows (cross-session miss) are silently
         dropped.
 
-        Every pipeline entry participates in the missing-result diagnostics and
-        ephemeral bookkeeping. Result tables are read by the referenced ids.
-        The final selection by ``base_entry_ids`` applies to the joined rows.
+        If ``base_entry_ids`` is provided, the result is filtered to matching
+        ``_PIPELINE_BASE_ENTRY_ID_COL`` values before conversion to Arrow.
 
         Args:
             base_entry_ids: If given, return only rows whose
@@ -3713,10 +3709,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         eph_results: pa.Table | None = None
         persistent_df = pl.DataFrame()
         if persistent_taginfo_df.height > 0:
-            results = self._cached_function_pod.result_database.get_records_by_column(
+            results = self._cached_function_pod.result_database.get_all_records(
                 self._cached_function_pod.record_path,
-                STORED_RECORD_ID_COLUMN,
-                persistent_taginfo_df.get_column(constants.DATA_RECORD_ID).to_arrow(),
                 record_id_column=constants.DATA_RECORD_ID,
             )
             if results is not None:
@@ -3764,12 +3758,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             eph_frame: pl.DataFrame | None = None
             if self._ephemeral_cached_pod is not None:
                 eph_results = (
-                    self._ephemeral_cached_pod.result_database.get_records_by_column(
+                    self._ephemeral_cached_pod.result_database.get_all_records(
                         self._ephemeral_cached_pod.record_path,
-                        STORED_RECORD_ID_COLUMN,
-                        ephemeral_taginfo_df.get_column(
-                            constants.DATA_RECORD_ID
-                        ).to_arrow(),
                         record_id_column=constants.DATA_RECORD_ID,
                     )
                 )

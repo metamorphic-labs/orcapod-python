@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -172,3 +173,73 @@ def test_delta_reuses_the_loaded_rows_across_lookup_batches(
         assert hits is not None
         assert hits["group"].to_pylist() == [group] * 10
     assert whole_reads == 1
+
+
+@pytest.mark.parametrize(
+    ("kind", "stored", "requested"),
+    [
+        (pa.float64(), [-0.0, 0.0, float("nan"), 1.5, None], [0.0]),
+        (pa.float64(), [-0.0, 0.0, float("nan"), 1.5, None], [float("nan")]),
+        (pa.float32(), [-0.0, 0.0, 1.5, None], [0.0, None]),
+        (pa.int64(), [1, 2, None], [1.5]),
+        (
+            pa.decimal128(7, 2),
+            [Decimal("1.00"), Decimal("2.10"), None],
+            [Decimal("2.10")],
+        ),
+        (
+            pa.decimal256(40, 2),
+            [Decimal("1.00"), Decimal("2.10"), None],
+            [Decimal("2.10")],
+        ),
+    ],
+)
+def test_scalar_membership_matches_original_one_value_predicates(
+    kind: pa.DataType, stored: list[Any], requested: list[Any]
+) -> None:
+    db = InMemoryArrowDatabase()
+    db.add_records(
+        _PATH,
+        pa.table(
+            {
+                "rid": pa.array(
+                    [str(i).encode() for i in range(len(stored))], pa.large_binary()
+                ),
+                "value": pa.array(stored, kind),
+            }
+        ),
+        record_id_column="rid",
+        flush=True,
+    )
+    prior = {
+        key
+        for value in requested
+        if (match := db.get_records_with_column_value(_PATH, {"value": value}, "rid"))
+        is not None
+        for key in match["rid"].to_pylist()
+    }
+    actual = db.get_records_by_column(_PATH, "value", requested, "rid")
+    assert actual is not None
+    assert set(actual["rid"].to_pylist()) == prior
+
+
+def test_delta_sparse_id_lookup_uses_the_resident_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db = DeltaTableDatabase(str(tmp_path))
+    db.add_records(_PATH, _rows(0, 10_000), record_id_column="rid", flush=True)
+    assert db.get_record_by_id(_PATH, b"42") is not None
+
+    def unexpected_scan(*args: Any, **kwargs: Any):
+        pytest.fail("a sparse ID lookup scanned the column")
+
+    monkeypatch.setattr(
+        delta_lake_databases, "records_matching_values", unexpected_scan
+    )
+    for values, expected in [
+        ([b"42"], {b"42"}),
+        ([b"42", "404", "42", b"absent"], {b"42", b"404"}),
+    ]:
+        result = db.get_records_by_column(_PATH, STORED_RECORD_ID_COLUMN, values, "rid")
+        assert result is not None
+        assert set(result["rid"].to_pylist()) == expected
