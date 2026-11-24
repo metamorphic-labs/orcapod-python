@@ -27,8 +27,8 @@ def member(*origins: Origin) -> tuple[tuple[str, str], ...]:
 
 
 def of_source(oracle: Oracle, source_id: str) -> list[Origin]:
-    """The rows of ``source_id``, in the order the test wrote them."""
-    return [o for o in oracle.origins if o.source_id == source_id]
+    """The rows of ``source_id`` (its full id or its name), in the order written."""
+    return [o for o in oracle.origins if o.of(source_id)]
 
 
 def rows(

@@ -1,0 +1,7 @@
+base revision: 1e2e64d5
+approved entries (TSV): 684
+approved entries regenerated with the TSV live value: 684
+other entries, value unchanged: 1820
+entries pinned at the base: 2504; in the working tree: 2504
+entries now pinned in another file: 4 (tests/test_hashing/golden/data/v1/pipeline-01.json -> tests/test_hashing/golden/data/v1/pipeline-02.json)
+problems: 0

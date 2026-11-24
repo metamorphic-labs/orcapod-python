@@ -51,12 +51,14 @@ class TestDictSourceBuilder:
         assert config["source_type"] == "dict"
         assert config["tag_columns"] == ["id"]
 
-    def test_identity_uses_class_name(self):
+    def test_identity_starts_with_the_source_id(self):
         src = DictSource(
             data=[{"id": 1, "x": 10}], tag_columns=["id"], tag_only_columns=True
         )
         identity = src.identity_structure()
-        assert identity[0] == "DictSource"
+        assert identity[0] == src.source_id
+        assert identity[0].startswith("dict_v1:")
+        assert "DictSource" not in identity
 
     def test_source_id_defaults(self):
         src = DictSource(
@@ -90,12 +92,13 @@ class TestDataFrameSourceBuilder:
         )
         assert len(list(src.iter_data())) == 2
 
-    def test_identity_uses_class_name(self):
+    def test_identity_starts_with_the_source_id(self):
         src = DataFrameSource(
             data={"id": [1], "x": [10]}, tag_columns=["id"], tag_only_columns=True
         )
         identity = src.identity_structure()
-        assert identity[0] == "DataFrameSource"
+        assert identity[0] == src.source_id
+        assert identity[0].startswith("data_frame_v1:")
 
 
 class TestCSVSourceBuilder:
@@ -138,13 +141,13 @@ class TestCSVSourceBuilder:
         src2 = CSVSource.from_config(config)
         assert src2.source_id == src.source_id
 
-    def test_identity_uses_class_name(self, tmp_path):
+    def test_identity_starts_with_the_source_id(self, tmp_path):
         csv_file = tmp_path / "test.csv"
         csv_file.write_text("id,x\n1,10\n")
         src = CSVSource(
             file_path=str(csv_file), tag_columns=["id"], tag_only_columns=True
         )
-        assert src.identity_structure()[0] == "CSVSource"
+        assert src.identity_structure()[0] == src.source_id == f"csv_v1:{csv_file}"
 
 
 class TestDeltaTableSourceBuilder:
@@ -178,11 +181,12 @@ class TestDeltaTableSourceBuilder:
         src2 = DeltaTableSource.from_config(config)
         assert src2.source_id == src.source_id
 
-    def test_identity_uses_class_name(self, delta_path):
+    def test_identity_starts_with_the_source_id(self, delta_path):
         src = DeltaTableSource(
             delta_table_path=delta_path, tag_columns=["id"], tag_only_columns=True
         )
-        assert src.identity_structure()[0] == "DeltaTableSource"
+        assert src.identity_structure()[0] == src.source_id
+        assert src.source_id.startswith("delta_table_v1:")
 
 
 class TestListSourceBuilder:
@@ -199,12 +203,12 @@ class TestListSourceBuilder:
         assert len(list(src.iter_data())) == 3
 
     def test_identity_structure_is_that_of_every_root_source(self):
-        """Class name, Arrow schema identity, source id, key columns (ITL-1272)."""
+        """Source id, Arrow schema identity, key columns (ITL-1272, ITL-1425)."""
         src = ListSource(name="val", data=[1, 2, 3])
         identity = src.identity_structure()
         assert identity == RootSource.identity_structure(src)
-        assert identity[0] == "ListSource"
-        assert identity[2:] == (src.source_id, ())
+        assert identity[0] == src.source_id
+        assert identity[2:] == ((),)
 
     def test_with_tag_function(self):
         src = ListSource(

@@ -186,7 +186,7 @@ class TestPKAsDefaultTags:
             src = PostgreSQLTableSource(DSN, "measurements", tag_only_columns=True)
         assert (
             src.source_id
-            == "postgresql_table:localhost:5432/orcapod.public.measurements"
+            == "postgresql_table_v1:localhost:5432/orcapod.public.measurements"
         )
 
     def test_explicit_source_id_overrides_default(self):
@@ -197,7 +197,7 @@ class TestPKAsDefaultTags:
             src = PostgreSQLTableSource(
                 DSN, "measurements", source_id="meas", tag_only_columns=True
             )
-        assert src.source_id == "meas"
+        assert src.source_id == "postgresql_table_v1:meas"
 
 
 # ===========================================================================
@@ -446,11 +446,11 @@ class TestToConfig:
     def test_has_tag_columns(self):
         assert "session_id" in self._make_src().to_config()["tag_columns"]
 
-    def test_has_source_id(self):
-        assert (
-            self._make_src().to_config()["source_id"]
-            == "postgresql_table:localhost:5432/orcapod.public.measurements"
-        )
+    def test_has_source_name_and_version(self):
+        config = self._make_src().to_config()
+        assert config["source_name"] == "localhost:5432/orcapod.public.measurements"
+        assert config["source_version"] == 1
+        assert "source_id" not in config
 
     def test_has_content_hash(self):
         assert "content_hash" in self._make_src().to_config()
@@ -723,10 +723,10 @@ class TestDefaultSourceIdNamesServer:
         ]
         ids = [self._source(_server_connector(h, p)).source_id for h, p in servers]
         assert ids == [
-            "postgresql_table:db.example.org:5432/orcapod.public.measurements",
-            "postgresql_table:db.example.org:5433/orcapod.public.measurements",
-            "postgresql_table:db2.example.org:5432/orcapod.public.measurements",
-            "postgresql_table:/var/run/postgresql:5432/orcapod.public.measurements",
+            "postgresql_table_v1:db.example.org:5432/orcapod.public.measurements",
+            "postgresql_table_v1:db.example.org:5433/orcapod.public.measurements",
+            "postgresql_table_v1:db2.example.org:5432/orcapod.public.measurements",
+            "postgresql_table_v1:/var/run/postgresql:5432/orcapod.public.measurements",
         ]
         # In the reverse order each source keeps its own id.
         reversed_ids = [
@@ -746,7 +746,7 @@ class TestDefaultSourceIdNamesServer:
             for dsn in dsns
         }
         assert ids == {
-            "postgresql_table:db.example.org:5432/orcapod.public.measurements"
+            "postgresql_table_v1:db.example.org:5432/orcapod.public.measurements"
         }
 
     @pytest.mark.parametrize(
@@ -817,7 +817,7 @@ class TestDefaultSourceIdNamesServer:
     ) -> None:
         connector = _server_connector(host, 5432, given=(host, hostaddr))
         source_id = self._source(connector).source_id
-        assert source_id.startswith("postgresql_table:[")
+        assert source_id.startswith("postgresql_table_v1:[")
         assert source_id.endswith("]:5432/orcapod.public.measurements")
 
     @pytest.mark.parametrize(
@@ -852,7 +852,7 @@ class TestDefaultSourceIdNamesServer:
         for given in [("", "192.0.2.1"), ("192.0.2.1", "192.0.2.1")]:
             connector = _server_connector("192.0.2.1", 5432, given=given)
             assert self._source(connector).source_id == (
-                "postgresql_table:192.0.2.1:5432/orcapod.public.measurements"
+                "postgresql_table_v1:192.0.2.1:5432/orcapod.public.measurements"
             )
 
     @pytest.mark.parametrize(
@@ -861,6 +861,6 @@ class TestDefaultSourceIdNamesServer:
     def test_given_source_id_is_used_as_given(self, given: tuple[str, str]) -> None:
         connector = _server_connector("db.example.org", 5432, given=given)
         src = self._source(connector, source_id="measurements_v1")
-        assert src.source_id == "measurements_v1"
+        assert src.source_id == "postgresql_table_v1:measurements_v1"
         connector.current_location.assert_not_called()
         connector.given_server.assert_not_called()

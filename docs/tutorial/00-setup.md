@@ -80,9 +80,6 @@ Depending on what else is installed, you may see these on your screen. They are 
 
 - `UserWarning: Protobuf gencode version ... is exactly one major version older than the
   runtime version ...`, several times, when Orcapod is imported.
-- `WARN deltalake_core::writer::stats] Skipping column ... because it's a binary field.`,
-  many times, whenever results are written to an on-disk database (from
-  [Part 5](05-pipeline-job.md) on).
 
 ## Get the dataset
 

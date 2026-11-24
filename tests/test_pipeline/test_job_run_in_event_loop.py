@@ -24,6 +24,10 @@ import pyarrow as pa
 import pytest
 
 from orcapod import PipelineJob, function_pod
+from orcapod.core.nodes.function_node import (
+    PIPELINE_RECORDED_AT_COL,
+    PIPELINE_RUN_ID_COL,
+)
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.pipeline.observer import NoOpObserver
@@ -33,6 +37,7 @@ from orcapod.sources import DictSource
 # result's datagram uuid, the output's source-info token (which carries that uuid) and the
 # time the result was computed.
 PER_RUN_COLUMNS = ("__data_id", "_source_y", "__pod_ts")
+ENTRY_RECORDING_COLUMNS = (PIPELINE_RUN_ID_COL, PIPELINE_RECORDED_AT_COL)
 
 STORES: dict[str, Callable[[Path], Any]] = {
     "in_memory": lambda _: InMemoryArrowDatabase(),
@@ -71,10 +76,14 @@ def make_job(store: Any) -> PipelineJob:
     return job
 
 
-def stored_rows(job: PipelineJob) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """The node's stored records and its table, minus per-run columns, sorted by tag."""
+def stored_rows(
+    job: PipelineJob, *, independent_run: bool = False
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Sort comparable rows by tag, keeping entry metadata for same-store rereads."""
     records = job.nodes["doubled"].get_all_records(all_info=True)
     assert records is not None
+    if independent_run:
+        records = records.drop_columns(ENTRY_RECORDING_COLUMNS)
     records = records.drop_columns(
         [c for c in PER_RUN_COLUMNS if c in records.column_names]
     )
@@ -99,7 +108,9 @@ def test_run_inside_running_loop_stores_what_a_script_run_stores(
     notebook_job = make_job(STORES[store_kind](tmp_path / "notebook"))
     run_inside_running_loop(notebook_job)
 
-    assert stored_rows(notebook_job) == stored_rows(script_job)
+    assert stored_rows(notebook_job, independent_run=True) == stored_rows(
+        script_job, independent_run=True
+    )
     ys = sorted(notebook_job.nodes["doubled"].as_table().column("y").to_pylist())
     assert ys == [0, 2, 4, 6, 8]
 
@@ -178,7 +189,9 @@ def test_await_run_async_stores_what_a_script_run_stores(
 
     asyncio.run(async_code())
 
-    assert stored_rows(async_job) == stored_rows(script_job)
+    assert stored_rows(async_job, independent_run=True) == stored_rows(
+        script_job, independent_run=True
+    )
 
 
 def test_run_async_refuses_the_sync_orchestrator() -> None:

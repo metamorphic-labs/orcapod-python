@@ -28,6 +28,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from orcapod import contexts
+from orcapod.core.nodes.provenance_methods import ProvenanceMethods
 from orcapod.core.data_tags import (
     mark_data_tags,
     data_tag_names,
@@ -803,7 +804,7 @@ class OperatorNode(OperatorNodeBase):
 # ---------------------------------------------------------------------------
 
 
-class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
+class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
     """DB-backed execution node for operator pod invocations.
 
     Stream node representing an operator invocation with optional DB persistence.
@@ -2175,7 +2176,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         """Return a DerivedSource backed by the DB records of this node.
 
         Without ``tags_as_data`` and ``source_id``, its ``source_id`` is the
-        ``DerivedSource`` default, ``derived:<algorithm label>:<hex>`` of this
+        ``DerivedSource`` default, ``derived_v1:<algorithm label>:<hex>`` of this
         node's content hash.
 
         Args:
@@ -2198,7 +2199,7 @@ class OperatorJobNode(RunHoldingNode, OperatorNodeBase):
         from orcapod.core.sources.derived_source import DerivedSource
 
         # Without a source_id the plain form takes the DerivedSource default
-        # (``derived:<algorithm label>:<hex>`` of this node's content hash); the
+        # (``derived_v1:<algorithm label>:<hex>`` of this node's content hash); the
         # ``tags_as_data`` form refuses to be built without one (ITL-1313).
         return DerivedSource(
             origin=self,

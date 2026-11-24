@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 import pyarrow as pa
 
 from orcapod import contexts
+from orcapod.core.nodes.provenance_methods import ProvenanceMethods
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
 from orcapod.core.datagrams import Data, Tag
@@ -638,12 +639,13 @@ class SourceNodeBase(TraceableBase, ABC):
         ``from_slot``, ``as_node``, ...), so no copy drops a piece: the given Arrow
         schemas, the saved Arrow type texts of an unresolved slot (ITL-640) and the
         saved pipeline hash, which does not depend on the slot's name, are always
-        kept. The saved content hash covers the name too, so it is kept only when this
-        slot has *other*'s name.
+        kept. The label and saved content hash are kept when this slot has *other*'s
+        name.
         """
         self._saved_pipeline_hash = other._saved_pipeline_hash
         self._given_arrow_schemas = other._given_arrow_schemas
         if self._name == other._name:
+            self._label = other._label
             self._saved_content_hash = other._saved_content_hash
         self._saved_arrow_texts = other._saved_arrow_texts
 
@@ -1500,8 +1502,10 @@ class SourceNode(SourceNodeBase):
         name is resolved in priority order:
 
         1. *name* parameter (explicit override — highest priority).
-        2. ``stream.source_id`` when *stream* is a ``RootSource`` — the canonical
-           source identity, stable across pipeline serialisation / deserialisation.
+        2. ``stream.source_name`` when *stream* is a ``RootSource``: its source id
+           without the kind part (ITL-1425), so a slot keeps its name whichever kind
+           or implementation version reads the data, stable across pipeline
+           serialisation / deserialisation.
         3. ``"{stream.label}:{hash_prefix}"`` for any other concrete stream type,
            combining the cosmetic label with a short content-hash suffix to ensure
            uniqueness.
@@ -1525,7 +1529,7 @@ class SourceNode(SourceNodeBase):
             from orcapod.core.sources.base import RootSource
 
             if isinstance(stream, RootSource):
-                slot_name = stream.source_id
+                slot_name = stream.source_name
             else:
                 slot_name = f"{stream.label}:{stream.content_hash().to_hex()}"
         if not isinstance(stream, SourceNodeBase):
@@ -1547,7 +1551,7 @@ class SourceNode(SourceNodeBase):
         return node
 
 
-class SourceJobNode(SourceNodeBase):
+class SourceJobNode(ProvenanceMethods, SourceNodeBase):
     """Execution-ready source node wrapping an optional concrete stream.
 
     Used inside ``PipelineJob._persistent_node_map``.  The ``_concrete``
@@ -2121,8 +2125,8 @@ class SourceJobNode(SourceNodeBase):
             name: Optional explicit slot name. In all three cases, when *name*
                 is provided it takes precedence over the stream's own name.
                 For concrete streams (Case 3), when *name* is ``None`` the slot
-                name is resolved as: ``stream.source_id`` for ``RootSource``
-                instances, or ``"{stream.label}:{hash_prefix}"`` for any other
+                name is resolved as: ``stream.source_name`` (the source id
+                without its kind part) for ``RootSource`` instances, or ``"{stream.label}:{hash_prefix}"`` for any other
                 concrete stream type.
 
         Returns:
@@ -2157,7 +2161,7 @@ class SourceJobNode(SourceNodeBase):
                 # Case 3: concrete stream — bound SJN.
                 # Slot name priority:
                 #   1. explicit *name* parameter
-                #   2. stream.source_id for RootSource (canonical, stable identity)
+                #   2. stream.source_name for RootSource (its id without the kind part)
                 #   3. label + short hash prefix for any other concrete stream type
                 tag_schema, data_schema = stream.output_schema()
                 if name is not None:
@@ -2168,7 +2172,7 @@ class SourceJobNode(SourceNodeBase):
                     from orcapod.core.sources.base import RootSource
 
                     if isinstance(stream, RootSource):
-                        slot_name = stream.source_id
+                        slot_name = stream.source_name
                     else:
                         slot_name = f"{stream.label}:{stream.content_hash().to_hex()}"
                 _require_stream_arrow_types(stream, slot_name)

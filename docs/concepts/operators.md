@@ -874,7 +874,7 @@ polls and writes nothing, and runs no code of yours:
 ```python
 print(recorded.filter(col("t") >= 1.0, label="late").drop_nulls(["rate"]).explain())
 # DynamicPodStream[DropNulls] reads:
-#   source 'recorded' (ArrowTableSource)
+#   source 'arrow_table_v1:recorded' (ArrowTableSource)
 #     applied by the source: nothing (the whole table is read)
 #     applied after reading: t >= 1.0 (Filter[late]); no null in rate (DropNulls)
 ```

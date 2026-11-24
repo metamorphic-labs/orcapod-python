@@ -130,7 +130,7 @@ class TestSectionFiveCases:
         stream = _units().filter(col("t") >= 1.0, label="late")
         assert stream.explain().text() == (
             "DynamicPodStream[late] reads:\n"
-            "  source 'units' (ArrowTableSource)\n"
+            "  source 'arrow_table_v1:units' (ArrowTableSource)\n"
             "    applied by the source: nothing (the whole table is read)\n"
             "    applied after reading: t >= 1.0 (Filter[late])"
         )
@@ -148,7 +148,7 @@ class TestSectionFiveCases:
         text = stream.explain().text()
         assert calls == []  # no user code ran
         assert text.splitlines()[1:] == [
-            "  source 'units' (ArrowTableSource)",
+            "  source 'arrow_table_v1:units' (ArrowTableSource)",
             "    applied by the source: nothing (the whole table is read)",
             "    applied after reading: t >= 1.0 (Filter[late])",
         ]
@@ -156,13 +156,13 @@ class TestSectionFiveCases:
     def test_several_sources_through_a_join(self):
         stream = Join()(_units().filter(col("t") >= 1.0, label="late"), _probes())
         assert stream.explain().text().splitlines()[1:] == [
-            "  source 'probes' (ArrowTableSource)",
+            "  source 'arrow_table_v1:probes' (ArrowTableSource)",
             "    applied by the source: nothing (the whole table is read)",
-            "    applied after reading: rows without a match in 'units' are dropped (Join)",
-            "  source 'units' (ArrowTableSource)",
+            "    applied after reading: rows without a match in 'arrow_table_v1:units' are dropped (Join)",
+            "  source 'arrow_table_v1:units' (ArrowTableSource)",
             "    applied by the source: nothing (the whole table is read)",
             "    applied after reading: t >= 1.0 (Filter[late]); rows without a match "
-            "in 'probes' are dropped (Join)",
+            "in 'arrow_table_v1:probes' are dropped (Join)",
         ]
 
     def test_a_job_node_walks_its_slot_to_the_bound_source(self):
@@ -173,7 +173,7 @@ class TestSectionFiveCases:
             )
         text = job.nodes["clean"].explain().text()
         assert text.splitlines()[1:] == [
-            "  source 'units' (ArrowTableSource)",
+            "  source 'arrow_table_v1:units' (ArrowTableSource)",
             "    applied by the source: nothing (the whole table is read)",
             "    applied after reading: t >= 1.0 (Filter[late]); no null in rate, t "
             "(DropNulls[clean])",
@@ -225,17 +225,19 @@ class TestStepsThatDropRows:
     def test_semi_join_both_sides(self):
         stream = SemiJoin()(_units(), _probes())
         by_name = {r.name: r for r in stream.explain().sources}
-        assert [s.text for s in by_name["units"].steps] == [
-            "rows without a match in 'probes' are dropped"
+        assert [s.text for s in by_name["arrow_table_v1:units"].steps] == [
+            "rows without a match in 'arrow_table_v1:probes' are dropped"
         ]
-        assert [s.text for s in by_name["probes"].steps] == [
-            "its rows only choose rows of 'units' and do not flow on"
+        assert [s.text for s in by_name["arrow_table_v1:probes"].steps] == [
+            "its rows only choose rows of 'arrow_table_v1:units' and do not flow on"
         ]
 
     def test_merge_join(self):
         stream = MergeJoin()(_units(), _probes())
         texts = {r.name: [s.text for s in r.steps] for r in stream.explain().sources}
-        assert texts["units"] == ["rows without a match in 'probes' are dropped"]
+        assert texts["arrow_table_v1:units"] == [
+            "rows without a match in 'arrow_table_v1:probes' are dropped"
+        ]
 
     def test_batch_drops_rows_only_when_asked(self):
         assert _units().batch(2).explain().sources[0].steps == ()
@@ -435,7 +437,10 @@ class TestReviewOfPr503:
         def explained(stream: StreamProtocol) -> Explanation:
             return stream.explain()
 
-        assert explained(_units().filter(col("t") >= 1.0)).sources[0].name == "units"
+        assert (
+            explained(_units().filter(col("t") >= 1.0)).sources[0].name
+            == "arrow_table_v1:units"
+        )
 
 
 class _Loud(str):
@@ -617,14 +622,16 @@ class TestReviewOfPr498:
         [
             (
                 ["session"],
-                ["rows without a match in 'probes' are dropped"],
-                ["its rows only choose rows of 'units' and do not flow on"],
+                ["rows without a match in 'arrow_table_v1:probes' are dropped"],
+                [
+                    "its rows only choose rows of 'arrow_table_v1:units' and do not flow on"
+                ],
             ),
             (
                 [],
                 [],
                 [
-                    "no tag is shared with 'units': its rows choose nothing and do not flow on"
+                    "no tag is shared with 'arrow_table_v1:units': its rows choose nothing and do not flow on"
                 ],
             ),
         ],
@@ -646,8 +653,8 @@ class TestReviewOfPr498:
             source_id="probes",
         )
         by_name = {r.name: r for r in SemiJoin()(_units(), probes).explain().sources}
-        assert [s.text for s in by_name["units"].steps] == left
-        assert [s.text for s in by_name["probes"].steps] == right
+        assert [s.text for s in by_name["arrow_table_v1:units"].steps] == left
+        assert [s.text for s in by_name["arrow_table_v1:probes"].steps] == right
 
     def test_an_unbound_slot_keeps_its_steps_in_the_text(self):
         tag_schema, data_schema = _units().output_schema()

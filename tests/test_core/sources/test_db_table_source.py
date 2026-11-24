@@ -284,7 +284,7 @@ class TestConstruction:
         src = DBTableSource(
             connector, "measurements", source_id="my_meas", tag_only_columns=True
         )
-        assert src.source_id == "my_meas"
+        assert src.source_id == "db_table_v1:my_meas"
 
     def test_table_with_multiple_pk_columns(self, measurements_table):
         connector = MockDBConnector(
@@ -499,9 +499,11 @@ class TestConfig:
         assert "connector" in config
         assert config["connector"]["connector_type"] == "mock"
 
-    def test_to_config_has_source_id(self, source):
+    def test_to_config_has_source_name_and_version(self, source):
         config = source.to_config()
-        assert config["source_id"] == "lab.db"
+        assert config["source_name"] == "lab.db"
+        assert config["source_version"] == 1
+        assert "source_id" not in config
 
     def test_to_config_has_identity_fields(self, source):
         config = source.to_config()
@@ -519,7 +521,7 @@ class TestConfig:
             connector, "measurements", source_id="custom_id", tag_only_columns=True
         )
         config = src.to_config()
-        assert config["source_id"] == "custom_id"
+        assert config["source_name"] == "custom_id"
 
     def test_to_config_system_tag_columns_preserved(self, connector):
         src = DBTableSource(

@@ -453,7 +453,7 @@ def test_a_preview_before_a_full_read_shows_the_first_rows_and_computes_nothing(
     tokens = pairs_function_tokens(prepared) if prepared else None
     computed_before = len(GATE.completed)
 
-    origins = [o for o in sources.oracle.origins if o.source_id == "A"]
+    origins = [o for o in sources.oracle.origins if o.of("A")]
     tags, data = stream.keys()
     failures = []
     for name, config in COLUMN_CONFIGS.items():

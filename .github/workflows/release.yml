@@ -52,7 +52,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
-      fail-fast: true
+      # Every version runs to its own result: one version's failure never cancels the
+      # others (ITL-1429). The build still needs every version to pass.
+      fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
     steps:

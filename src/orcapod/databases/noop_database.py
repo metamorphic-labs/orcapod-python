@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, Any
 
@@ -105,6 +105,9 @@ class NoOpArrowDatabase:
     def fail_pending_result(self, record_path: tuple[str, ...]) -> None:
         """There are no buffered writes to withdraw."""
 
+    def refresh_table(self, record_path: tuple[str, ...]) -> None:
+        """Nothing to refresh: the no-op store holds no table (ITL-1408)."""
+
     def flush_result_batch(
         self, record_path: tuple[str, ...], *, publish_records: bool
     ) -> None:
@@ -122,6 +125,12 @@ class NoOpArrowDatabase:
         self, record_path: tuple[str, ...], record_id: bytes, dependency: PendingCommit
     ) -> AbstractContextManager[None]:
         """Accept the bookkeeping dependency without retaining the pipeline record."""
+        return nullcontext()
+
+    def guard_table_schema(
+        self, record_path: tuple[str, ...], check: Callable[[pa.Schema], None]
+    ) -> AbstractContextManager[None]:
+        """Discard records without committing a table."""
         return nullcontext()
 
     def list_table_paths(self, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
@@ -151,6 +160,10 @@ class NoOpArrowDatabase:
     def base_path(self) -> tuple[str, ...]:
         """The current relative root of this database view (always () for root instances)."""
         return self._path_prefix
+
+    def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
+        """Return no schema because this database stores no tables."""
+        return None
 
     def at(self, *path_components: str) -> "NoOpArrowDatabase":
         """Return a new NoOpArrowDatabase scoped to the given sub-path.

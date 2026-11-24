@@ -921,12 +921,14 @@ class TestPipelineJobSerialization:
         loaded = PipelineJob.load(str(path))
 
         # bind() must not raise "no matching source slot".
+        # A slot is named by its source's name, the id without the kind part.
         loaded.bind(
-            sources={src_a.source_id: src_a, src_b.source_id: src_b}, database=store
+            sources={src_a.source_name: src_a, src_b.source_name: src_b},
+            database=store,
         )
 
-        assert loaded._sources[src_a.source_id] is src_a
-        assert loaded._sources[src_b.source_id] is src_b
+        assert loaded._sources[src_a.source_name] is src_a
+        assert loaded._sources[src_b.source_name] is src_b
 
     def test_load_is_not_runnable_after_bind(self, store, tmp_path):
         """Binding every source leaves a loaded job read-only."""
@@ -947,7 +949,8 @@ class TestPipelineJobSerialization:
         assert loaded.is_runnable("adder") is False
 
         loaded.bind(
-            sources={src_a.source_id: src_a, src_b.source_id: src_b}, database=store
+            sources={src_a.source_name: src_a, src_b.source_name: src_b},
+            database=store,
         )
 
         # Binding sources permits reads, not execution of a loaded job.
