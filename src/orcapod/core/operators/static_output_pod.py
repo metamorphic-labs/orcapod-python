@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from abc import abstractmethod
 from collections.abc import (
@@ -16,6 +17,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, cast
 
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from orcapod.protocols.core_protocols.streams import (
     RecordBatchInput,
@@ -53,6 +55,7 @@ from orcapod.core.streams.base import (
 )
 from orcapod.core.streams.view import (
     STALE_NOTE,
+    default_note,
     ViewStatus,
     StreamView,
     head_of,
@@ -121,6 +124,15 @@ class StaticOutputOperatorPod(TraceableBase):
     Declared by an operator that only chooses which rows exist (``PolarsFilter``). Its
     zero-row table is then its input's (``zero_row_result``), got without evaluating a
     predicate, so no user code runs to learn the column types (ITL-912).
+    """
+
+    HEAD_FROM_INPUT_HEAD: ClassVar[bool] = False
+    """Whether ``head`` may show this operator over the rows its input's head shows.
+
+    Declared by an operator that keeps or drops each input row by that row alone, with
+    no user code and no effect (``Filter``, decision 13 of ITL-1374); its ``head_rows``
+    then chooses the rows. Any other operator's head shows no rows before it is computed,
+    and its input's head is never asked for.
     """
 
     PROVISIONAL: ClassVar[bool] = False
@@ -507,8 +519,6 @@ class StaticOutputOperatorPod(TraceableBase):
         Returns:
             The same arrays under the new field flags, with no schema metadata.
         """
-        from orcapod.system_constants import constants
-
         prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
         fields = [
             field.with_nullable(table.column(i).null_count > 0)
@@ -546,7 +556,6 @@ class StaticOutputOperatorPod(TraceableBase):
                 the rows (``_rows_to_table``), which raises the error a table built from
                 rows raises.
         """
-        from orcapod.system_constants import constants
         from orcapod.utils import arrow_utils
 
         columns = list(table.columns)
@@ -730,6 +739,49 @@ class StaticOutputOperatorPod(TraceableBase):
             stream_data_tags(upstream),
             upstream,
         )
+
+    def rows_dropped_text(
+        self,
+        position: int,
+        others: Sequence[str],
+        inputs: Sequence[StreamProtocol],
+    ) -> str | None:
+        """What this operator drops of the rows of its input at ``position``, in words,
+        for ``explain()``; ``None`` when it drops none (the default).
+
+        Read from the operator's own arguments only: nothing is computed or read.
+
+        Args:
+            position: The input's position among the operator's inputs.
+            others: The names of the operator's other inputs, sorted.
+            inputs: The operator's inputs, in order; only their schemas (``keys()``)
+                may be read.
+
+        Returns:
+            A phrase (``t >= 1.0``; ``rows without a match in 'probes' are dropped``),
+            or ``None``.
+        """
+        return None
+
+    def head_rows(self, stream: StreamProtocol, table: pa.Table) -> pa.Table | None:
+        """The rows ``head`` may show of this operator over ``stream``, from the rows
+        ``stream``'s own ``head`` shows (``table``), before the result is computed.
+
+        Asked only when ``HEAD_FROM_INPUT_HEAD`` is set. ``None`` (the default): nothing
+        is shown, because the head of an operator is
+        not, in general, the operator over the head of its input (a group over ten rows
+        has the wrong members). An operator whose result row by row is a choice among
+        its input's rows, decided by no user code and with no effect, may answer with
+        the rows of ``table`` it keeps (``Filter``, decision 13 of ITL-1374).
+
+        Args:
+            stream: The operator's one input.
+            table: The rows its ``head`` shows, with the columns it was asked for.
+
+        Returns:
+            The rows to show, with ``table``'s columns, or ``None``.
+        """
+        return None
 
     def zero_row_result(self, *inputs: StreamProtocol) -> StreamProtocol:
         """This operator's result over zero-row inputs, for its zero-row table (ITL-912).
@@ -1056,9 +1108,10 @@ class StaticOutputOperatorPod(TraceableBase):
         came from. A predicate that reads a ``null`` column's type or the column order
         follows that form (documented behaviour, e5).
 
-        The output is closed when the operator is done. If it fails or is cancelled,
-        the output fails instead, so no reader takes it for complete; every input is
-        closed in either case.
+        When the operator is done its inputs are closed, then its output
+        (``finish_operator``), so a failing close fails the output. If the operator
+        fails or is cancelled, the output fails instead, so no reader takes it for
+        complete; every input is closed in either case.
 
         Args:
             inputs: One input channel per input stream, in the operator's order.
@@ -1067,17 +1120,21 @@ class StaticOutputOperatorPod(TraceableBase):
         try:
             if self.ROW_BY_ROW:
                 (channel,) = inputs
+                # The input's token types across its batches: a batch whose tokens
+                # cannot make one table with the earlier ones is refused, as the sync
+                # path refuses the whole input, never processed alone.
+                settled: dict[str, pa.DataType] = {}
                 async for batch in channel:
+                    settled = settle_token_types(batch, settled)
                     await self._send_processed([batch], channel.stream, output)
             else:
                 streams = await _streams_of(inputs)
                 await self._send_result(self.static_process(*streams), output)
-            await output.close()
         except BaseException as error:
             output.fail(error)
             await close_inputs(inputs, error)
             raise
-        await close_inputs(inputs)
+        await finish_operator(inputs, output)
 
     async def _send_processed(
         self,
@@ -1115,6 +1172,32 @@ class StaticOutputOperatorPod(TraceableBase):
                 await output.send(batch)
 
 
+async def finish_operator(
+    inputs: Sequence[RecordBatchInput], output: RecordBatchOutput
+) -> None:
+    """End an operator that has sent its result: close its inputs, then its output.
+
+    The inputs are closed first, so a failing close fails the output instead of
+    completing it: readers see the normal end only when the operator ended cleanly.
+
+    Args:
+        inputs: The operator's input channels.
+        output: Its output channel.
+
+    Raises:
+        Exception: The first error of an input's close, or the output's close; the
+            output then fails with it.
+    """
+    try:
+        await close_inputs(inputs)
+        await output.close()
+    except BaseException as error:
+        # A failing close of an input, or of the output itself: no reader takes the
+        # output for complete.
+        output.fail(error)
+        raise
+
+
 async def close_inputs(
     inputs: Sequence[RecordBatchInput], error: BaseException | None = None
 ) -> None:
@@ -1129,18 +1212,34 @@ async def close_inputs(
         inputs: The operator's input channels.
         error: The error the operator is failing with, if any.
 
+    A cancellation that arrives during one close does not stop the others: every
+    input's close is attempted, then the cancellation is raised (before any ordinary
+    close error); when the operator already failed, its error keeps precedence and
+    the cancellation is added to it as a note.
+
     Raises:
+        asyncio.CancelledError: If a close was cancelled, when ``error`` is ``None``.
         Exception: The first error of a close, when ``error`` is ``None``.
     """
     first: Exception | None = None
+    cancelled: asyncio.CancelledError | None = None
     for channel in inputs:
         try:
             await channel.close()
+        except asyncio.CancelledError as cancellation:
+            if error is not None:
+                error.add_note(
+                    f"Closing an input channel was cancelled: {cancellation!r}"
+                )
+            elif cancelled is None:
+                cancelled = cancellation
         except Exception as failure:  # noqa: BLE001  # every input is closed first
             if error is not None:
                 error.add_note(f"Closing an input channel also failed: {failure!r}")
             elif first is None:
                 first = failure
+    if cancelled is not None:
+        raise cancelled
     if first is not None:
         raise first
 
@@ -1296,29 +1395,84 @@ def settle_token_types(
         if len(kinds) > 1:
             raise SourceInfoTypesDisagree(field.name)
         (kind,) = kinds
-        _ = _tokens_as(column, kind, field.name)  # representable, or refused
+        _ = _named_tokens_as(column, kind, field.name)  # representable, or refused
         settled[field.name] = kind
     return settled
 
 
-def _tokens_as(
-    column: pa.Array[Any],
-    kind: pa.DataType,
-    name: str,  # pyright: ignore[reportExplicitAny]  # any column
-) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny]  # any column
-    """``column``'s tokens as an array of ``kind``: the same array when it has that type.
+def tokens_as(column: pa.Array[Any], kind: pa.DataType) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny]  # any column
+    """``column``'s source-info tokens as an array of ``kind``, every value kept.
+
+    The same array when it has that type. A token type that one batch's values give
+    (``arrow_utils.source_info_arrow_type``) can be shallower than another's (a null
+    or an empty list fixes fewer list levels); converting keeps every token, and a
+    token that ``kind`` cannot hold is refused, never changed.
+
+    Args:
+        column: Source-info tokens.
+        kind: A token type (``large_string``, or ``large_list`` of a token type).
+
+    Returns:
+        The tokens as ``kind``.
+
+    Raises:
+        RowBuiltFormUnavailable: If a token cannot be represented as ``kind``.
+    """
+    return _tokens_into(column, kind)
+
+
+def _tokens_into(column: pa.Array[Any], kind: pa.DataType) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny]  # any column
+    """``tokens_as``, level by level, never reading a value as another shape.
+
+    A level whose values are all null (or that has none) takes ``kind`` as it is; two
+    list levels convert their values; any other difference is refused. A value is
+    never re-read in another type (pyarrow reads a string as a list of characters).
 
     Raises:
         RowBuiltFormUnavailable: If a token cannot be represented as ``kind``.
     """
     if column.type == kind:
         return column
+    if column.null_count == len(column):
+        return pa.nulls(len(column), kind)  # pyright: ignore[reportCallIssue, reportArgumentType]  # pyarrow takes any type; the stubs say an extension type
+    lists = (pa.ListType, pa.LargeListType)
+    if isinstance(column.type, lists) and isinstance(kind, lists):
+        # The slice's own lists: its values, and offsets from its lists' lengths (a
+        # null list holds none), so a sliced array converts as its rows say.
+        values = _tokens_into(pc.list_flatten(column), kind.value_type)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+        lengths = pc.fill_null(pc.list_value_length(column), 0)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportArgumentType]  # pyarrow takes a Python fill value
+        offset_type = pa.int64() if isinstance(kind, pa.LargeListType) else pa.int32()
+        offsets = pa.concat_arrays(
+            [
+                pa.array([0], offset_type),
+                pc.cumulative_sum(lengths).cast(offset_type),  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+            ]
+        )
+        build = (
+            pa.LargeListArray.from_arrays
+            if isinstance(kind, pa.LargeListType)
+            else pa.ListArray.from_arrays
+        )
+        return build(offsets, values, type=kind, mask=column.is_null())  # pyright: ignore[reportUnknownVariableType, reportCallIssue, reportArgumentType]  # the offsets' width follows ``kind``
+    raise RowBuiltFormUnavailable(
+        f"a token of type {column.type} cannot be represented as {kind}"
+    )
+
+
+def _named_tokens_as(
+    column: pa.Array[Any],  # pyright: ignore[reportExplicitAny]  # any column
+    kind: pa.DataType,
+    name: str,
+) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny]  # any column
+    """``tokens_as`` for the source-info column ``name``, whose name a refusal gives.
+
+    Raises:
+        RowBuiltFormUnavailable: If a token cannot be represented as ``kind``.
+    """
     try:
-        return pa.array(column.to_pylist(), type=kind)
-    except (pa.ArrowInvalid, pa.ArrowTypeError, TypeError, ValueError) as error:
-        raise RowBuiltFormUnavailable(
-            f"{name}: a token cannot be represented as {kind} ({error})"
-        ) from error
+        return tokens_as(column, kind)
+    except RowBuiltFormUnavailable as error:
+        raise RowBuiltFormUnavailable(f"{name}: {error}") from error
 
 
 def concatenate_batches(batches: Sequence[pa.RecordBatch]) -> pa.Table | None:
@@ -1356,7 +1510,7 @@ def concatenate_batches(batches: Sequence[pa.RecordBatch]) -> pa.Table | None:
         fields: list[pa.Field[Any]] = []  # pyright: ignore[reportExplicitAny]  # any field
         for field, column in zip(batch.schema, batch.columns, strict=True):
             if field.name in settled:
-                column = _tokens_as(column, settled[field.name], field.name)
+                column = _named_tokens_as(column, settled[field.name], field.name)
                 field = pa.field(field.name, settled[field.name])
             if field.name.startswith(prefixes):
                 field = field.with_nullable(True)
@@ -1934,13 +2088,63 @@ class DynamicPodStream(StreamBase):
         had_result = self._cached_stream is not None
         self._update_cache_status()
         if self._cached_stream is not None and self._cached_time is not None:
-            return head_of(
+            view = head_of(
                 self._cached_stream.head(n, columns=config), self, origin="computed"
             )
-        return self._head_without_rows(
-            config,
-            ViewStatus.NOT_COMPUTED,
-            note=STALE_NOTE if had_result else None,
+        else:
+            matching = self._matching_head(n, config)
+            # A view of no rows is falsy (``StreamView.__len__``): compared to None.
+            view = (
+                matching
+                if matching is not None
+                else self._head_without_rows(
+                    config,
+                    ViewStatus.NOT_COMPUTED,
+                    note=STALE_NOTE if had_result else None,
+                )
+            )
+        return _with_explain_line(view, self)
+
+    def _matching_head(self, n: int, config: ColumnConfig) -> StreamView | None:
+        """The head an operator shows from its input's head (``head_rows``), or ``None``.
+
+        Only for one input whose own ``head`` shows rows (or knows it has none), which
+        never computes, polls or delivers; the operator's ``head_rows`` decides. The
+        view says which rows were looked at: those its input's head shows.
+        """
+        if not self._pod.HEAD_FROM_INPUT_HEAD or len(self._upstreams) != 1:
+            return None
+        (upstream,) = self._upstreams
+        upstream_view = head_of(upstream.head(n, columns=config), upstream)
+        if upstream_view.status is not ViewStatus.ROWS:
+            return None
+        rows = self._pod.head_rows(upstream, upstream_view.table)
+        if rows is None:
+            return None
+        looked_at = upstream_view.table.num_rows
+        complete = (
+            upstream_view.total_rows == looked_at
+            and not upstream_view.total_is_estimate
+        )
+        shown = rows.num_rows
+        sorting = ", sorted by tags" if upstream_view.sorted_by_tags else ""
+        if complete:
+            description = (
+                f"all {shown:,} matching {'row' if shown == 1 else 'rows'} of its "
+                f"input's {looked_at:,}{sorting}"
+            )
+        else:
+            description = (
+                f"{shown:,} matching {'row' if shown == 1 else 'rows'} among the "
+                f"{looked_at:,} its input's head shows{sorting} (not computed; run() "
+                "computes every row)"
+            )
+        return StreamView.of_rows(
+            self,
+            rows,
+            tag_columns=upstream_view.tag_columns,
+            total_rows=shown if complete else None,
+            description=description,
         )
 
     def __repr__(self) -> str:
@@ -1952,6 +2156,23 @@ class DynamicPodStream(StreamBase):
             f"{self.__class__.__name__}(label={self.label!r}, kernel={self.producer}, "
             f"upstreams=({upstreams}))"
         )
+
+
+def _with_explain_line(view: StreamView, stream: StreamProtocol) -> StreamView:
+    """Return ``view`` with the one-line split of ``explain()`` added to its header, for
+    a ``Filter`` directly over a source (ITL-1402); any other view unchanged."""
+    from orcapod.core.streams.explain import preview_line
+
+    line = preview_line(stream)
+    if line is None:
+        return view
+    if view.description is not None:
+        return dataclasses.replace(view, description=f"{view.description}; {line}")
+    if view.status in (ViewStatus.ROWS, ViewStatus.LOADED_ONLY, ViewStatus.PARTIAL):
+        note = f"{view.note}; {line}" if view.note else line
+    else:
+        note = f"{view.note or default_note(view.status)}; {line}"
+    return dataclasses.replace(view, note=note)
 
 
 def _upstream_state(stream: StreamProtocol) -> tuple[str, object]:

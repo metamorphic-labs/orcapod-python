@@ -19,6 +19,7 @@ from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.operators.static_output_pod import (
     close_inputs,
     concatenate_batches,
+    finish_operator,
 )
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.streams import ArrowTableStream
@@ -319,12 +320,11 @@ class Batch(UnaryOperator):
             # whether they make a last one.
             if rows:
                 await self._send_processed(waiting, channel.stream, output)
-            await output.close()
         except BaseException as error:
             output.fail(error)
             await close_inputs(inputs, error)
             raise
-        await close_inputs(inputs)
+        await finish_operator(inputs, output)
 
     def to_config(self) -> dict[str, Any]:
         """Serialize this Batch operator to a config dict.
@@ -339,6 +339,15 @@ class Batch(UnaryOperator):
             "drop_partial_batch": self.drop_partial_batch,
         }
         return config
+
+    def rows_dropped_text(
+        self,
+        position: int,
+        others: Sequence[str],
+        inputs: Sequence[StreamProtocol],
+    ) -> str | None:
+        """What the step drops, for ``explain()``: a last partial batch, if asked."""
+        return "a last partial batch is dropped" if self.drop_partial_batch else None
 
     def identity_structure(self) -> Any:
         self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)

@@ -131,6 +131,13 @@ run and computes nothing on a second `run()`.
 A job created without a database can be recorded but not run. Give it one later with
 `job.bind(database=...)`; `run()` without a database raises `ValueError`.
 
+### Result commit ordering
+
+A function node publishes its pipeline records after the referenced results
+commit. Failed result batches withdraw their pending pipeline records.
+`NoOpArrowDatabase` explicitly discards results and still allows pipeline
+bookkeeping to be written.
+
 ### Connector databases
 
 A `ConnectorArrowDatabase` stores a column only when its connector can store it as written.
@@ -423,6 +430,14 @@ database that holds other rows than the file expects) are in
 [Saving and loading a job](function-pods.md#saving-and-loading-a-job).
 
 `Pipeline.save(path)` and `Pipeline.load(path)` save and load a blueprint.
+
+The file lists each operator's inputs in the order they were given, so a loaded
+`MergeJoin(left, right)` or `SemiJoin(left, right)` takes `left` first, as the live job did.
+A file saved by an Orcapod older than this rule (before ITL-1417) cannot say which input
+comes first, so loading it raises `ValueError` when it holds an operator over two or more
+inputs that is not known to be commutative (`MergeJoin`, `SemiJoin`, or an operator that
+cannot be rebuilt in this process); build the job from its code and save it again. A file
+whose multi-input operators are all commutative (`Join`, `Rejoin`) loads as before.
 
 ## How it connects to other concepts
 

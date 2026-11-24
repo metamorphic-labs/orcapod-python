@@ -1313,8 +1313,11 @@ data. The rules:
   channel when called and returns the conversion to await; it imports the builder inside its
   body, since the operators sit above the streams): it reads the channel to its end (one pass,
   every read error raised before an operator runs) and rebuilds a fixed snapshot through
-  stream_from_batches; only an unread channel opened on a stream _output_stream built
-  (ROW_BUILT_OUTPUT, set there only) gives that stream as it is. An operator's record-batch
+  stream_from_batches; only an unread channel opened on a stream marked ROW_BUILT_OUTPUT
+  gives that stream as it is. The flag is set where a complete node output in the row-built
+  form is made, and nowhere else: _as_upstream_stream (the rows' rebuild, F's output, a
+  stored-table output) and the typed zero-row input of _materialize_upstream; to_stream()
+  reads it. An operator's record-batch
   form (async_execute_batches, renamed async_execute when wired) applies its one
   static_process body: per record batch when the class declares ROW_BY_ROW = True (each output
   row comes from one input row), otherwise as a barrier over the whole input (to_stream());

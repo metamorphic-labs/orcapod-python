@@ -186,7 +186,7 @@ def test_repeats_of_an_origin_row_pair_one_to_one_in_arrival_order() -> None:
             _check(_kernel, Rejoin().static_process, inputs)
 
 
-def test_thousands_of_repeats_stay_linear() -> None:
+def test_alternating_repeats_keep_only_unmatched_rows() -> None:
     # 3,000 rows of one origin row on each side, in one-row batches: each arriving row
     # pairs with one remaining row (never with every repeat), and the remaining set
     # holds at most the rows not paired yet.
@@ -199,10 +199,12 @@ def test_thousands_of_repeats_stay_linear() -> None:
     rights = _sent(right).combine_chunks().to_batches(max_chunksize=1)
     for index in range(n):
         out += kernel.push(0, lefts[index])
+        largest = max(largest, kernel.held_rows)  # sampled after every push
         if index < len(rights):
             out += kernel.push(1, rights[index])
-        largest = max(largest, kernel.held_rows)
-    assert largest <= 8
+            largest = max(largest, kernel.held_rows)
+    # The peak: the seven left rows the right input never pairs, held as they wait.
+    assert largest == 7
     assert sum(batch.num_rows for batch in out) == n - 7
     assert kernel.held_rows == 7
     kernel.close(1)
@@ -534,8 +536,21 @@ def test_repeats_with_three_inputs_can_pair_by_arrival() -> None:
     whole, _ = _pushed(inputs, [(0, 0, 2), (1, 0, 2), (2, 0, 2)])
     one_by_one, _ = _pushed(inputs, [(0, 0, 2), (1, 0, 1), (1, 1, 1), (2, 0, 2)])
     assert _rows(whole) == want
-    assert _rows(one_by_one) != want
     assert whole.num_rows == one_by_one.num_rows == 2
+    # One row at a time, k=2 arrives first and pairs with the third branch's first
+    # value: the alternate pairing, every other value as it was.
+    (third,) = [stream for stream in inputs if not stream.keys()[0]]
+    value = third.keys()[1][0]
+
+    def pairs(table: pa.Table) -> set[tuple[Any, Any]]:
+        return set(zip(table.column("k").to_pylist(), table.column(value).to_pylist()))
+
+    assert pairs(whole) == {(1, 10), (2, 20)}
+    assert pairs(one_by_one) == {(2, 10), (1, 20)}
+    # Every other column with its key: a swap of the first two branches' values
+    # between k=1 and k=2 fails here.
+    others = [name for name in whole.column_names if name != value]
+    assert _rows(one_by_one.select(others)) == _rows(whole.select(others))
 
 
 def test_the_warning_for_repeats_of_two_inputs_can_depend_on_arrival() -> None:

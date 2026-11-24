@@ -14,9 +14,10 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 from orcapod.protocols.core_protocols.datagrams import DataProtocol, TagProtocol
 from orcapod.protocols.core_protocols.traceable import TraceableProtocol
 from orcapod.protocols.hashing_protocols import PipelineElementProtocol
-from orcapod.types import ColumnConfig, Schema
+from orcapod.types import ColumnConfig, Condition, Schema
 
 if TYPE_CHECKING:
+    from orcapod.types.explanation import Explanation
     import pandas as pd
     import polars as pl
     import pyarrow as pa
@@ -131,6 +132,13 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
         """
         ...
 
+    def explain(self) -> "Explanation":
+        """
+        Say what each source this stream reads applies itself (its restriction, or its
+        whole table) and which steps drop rows after reading; computes nothing.
+        """
+        ...
+
     def keys(
         self,
         *,
@@ -195,9 +203,11 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
     def arrow_types_declared(self) -> bool:
         """Whether ``arrow_schema()`` holds the rows' own Arrow types.
 
-        ``False`` when the stream cannot type itself without rows (an unbound slot, a
-        ``PollingSource`` never polled; ITL-1089), or its rows decide its types (a
-        narrower bind, an output held as its rows). Its schema is then the best
+        ``False`` when the stream cannot type itself without rows (an unbound slot
+        declared in Python types, a ``PollingSource`` never polled; ITL-1089), or its
+        rows decide its types (a narrower bind, an output held as its rows). An unbound
+        slot declared with explicit Arrow schemas answers ``True``: its rows will have
+        exactly those types, since a bind refuses a source of any other. Its schema is then the best
         description available without reading a row: a slot's or source's explicit
         Arrow declaration when it states one, otherwise its Python schema converted;
         a source whose schema is known only by polling, and which has not polled, has
@@ -480,6 +490,19 @@ class StreamWithOperationsProtocol(StreamProtocol, Protocol):
         label: str | None = None,
         **constraints: Any,
     ) -> "StreamProtocol": ...
+
+    def filter(
+        self,
+        *conditions: Condition | Mapping[str, object],
+        label: str | None = None,
+        **columns: object,
+    ) -> "StreamProtocol":
+        """
+        Keep the rows that satisfy every condition, as a step of the pipeline:
+        keywords and mappings are equalities, other conditions are built with
+        ``col``. The output has this stream's columns and types.
+        """
+        ...
 
     def drop_nulls(
         self,

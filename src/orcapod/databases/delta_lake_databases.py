@@ -5,6 +5,7 @@ import os
 import sys
 from collections import defaultdict
 from collections.abc import Callable, Collection, Mapping
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -13,25 +14,13 @@ import polars as pl
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from orcapod.databases._pending_commits import PendingCommit, PendingCommits
 from orcapod.databases._row_index import (
     KeyIndex,
     compact_tail,
     is_indexed_lookup,
     matching_rows,
     rows_at,
-)
-from orcapod.databases.utils import (
-    appended_field_change,
-    coerce_record_id,
-    in_held_column_order,
-    metadata_bytes,
-)
-from orcapod.errors import (
-    InputValidationError,
-    OrcapodDatabaseReadError,
-    TableListingNotSupportedError,
-    TypeIdentityError,
-    UnstorableColumnError,
 )
 from orcapod.databases.delta_arrow_types import (
     ARROW_TYPE_KEY,
@@ -49,6 +38,25 @@ from orcapod.databases.storage_utils import (
     delta_to_pyarrow_dataset,
     is_cloud_uri,
     parse_base_path,
+)
+from orcapod.databases.utils import (
+    LIST_ITEM,
+    MAP_ITEM,
+    MAP_KEY,
+    IdentityNode,
+    appended_field_change,
+    coerce_record_id,
+    identity_node,
+    identity_refusal,
+    in_held_column_order,
+    metadata_bytes,
+)
+from orcapod.errors import (
+    InputValidationError,
+    OrcapodDatabaseReadError,
+    TableListingNotSupportedError,
+    TypeIdentityError,
+    UnstorableColumnError,
 )
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
@@ -630,6 +638,142 @@ def _non_null_violation(
     return None
 
 
+def _delta_identity_node(
+    delta_type: Any, metadata: Any, recorded: "pa.Field[Any] | None"
+) -> IdentityNode:
+    """What the Delta log reliably says of a stored column's logical type
+    identifiers, at every depth (ITL-1371).
+
+    A place's identifier is known from, in this order: the physical field's own
+    annotation (the log keeps the field metadata written with the column and with
+    each struct child, byte for byte); else the place inside the column's recorded
+    Arrow type (``ARROW_TYPE_KEY``), when the column records one: its annotation
+    there, or no logical type when the recorded place is plain; else it is unknown
+    and the identity rule abstains. Missing physical metadata alone proves nothing:
+    a list item or map key or item keeps none in the log (ITL-1372), a dictionary
+    child is written as plain values, and a column written from a dictionary of
+    extension values records no type. A recorded place that the Arrow registry read
+    back as an extension type is unknown too: the registry may give other bytes than
+    the ones stored.
+
+    Args:
+        delta_type: A ``deltalake.schema`` type from the log.
+        metadata: Its field's metadata, as the log gives it.
+        recorded: The same place in the column's recorded Arrow type, or ``None``
+            when the column records none (or the record has no such place).
+
+    Returns:
+        The ``IdentityNode`` of the stored field.
+    """
+    from deltalake.schema import ArrayType, MapType, StructType
+
+    recorded_type = _recorded_storage(recorded)
+    children: tuple[tuple[str, IdentityNode], ...] = ()
+    if isinstance(delta_type, StructType):
+        by_name = (
+            {f.name: f for f in recorded_type}
+            if recorded_type is not None and pa.types.is_struct(recorded_type)
+            else {}
+        )
+        children = tuple(
+            (
+                f".{f.name}",
+                _delta_identity_node(f.type, f.metadata, by_name.get(f.name)),
+            )
+            for f in delta_type.fields
+        )
+    elif isinstance(delta_type, ArrayType):
+        item = (
+            recorded_type.value_field
+            if recorded_type is not None
+            and (
+                pa.types.is_list(recorded_type)
+                or pa.types.is_large_list(recorded_type)
+                or pa.types.is_fixed_size_list(recorded_type)
+            )
+            else None
+        )
+        children = (
+            (LIST_ITEM, _delta_identity_node(delta_type.element_type, None, item)),
+        )
+    elif isinstance(delta_type, MapType):
+        is_map = recorded_type is not None and pa.types.is_map(recorded_type)
+        children = (
+            (
+                MAP_KEY,
+                _delta_identity_node(
+                    delta_type.key_type,
+                    None,
+                    recorded_type.key_field if is_map else None,
+                ),
+            ),
+            (
+                MAP_ITEM,
+                _delta_identity_node(
+                    delta_type.value_type,
+                    None,
+                    recorded_type.item_field if is_map else None,
+                ),
+            ),
+        )
+    as_bytes = metadata_bytes(metadata)
+    name = as_bytes.get(_EXTENSION_KEYS[0])
+    if name is not None:
+        identifier = (name, as_bytes.get(_EXTENSION_KEYS[1], b""))
+        return IdentityNode(known=True, identifier=identifier, children=children)
+    if recorded is None or isinstance(recorded.type, pa.BaseExtensionType):
+        return IdentityNode(known=False, identifier=None, children=children)
+    recorded_metadata = metadata_bytes(recorded.metadata)
+    recorded_name = recorded_metadata.get(_EXTENSION_KEYS[0])
+    identifier = (
+        None
+        if recorded_name is None
+        else (recorded_name, recorded_metadata.get(_EXTENSION_KEYS[1], b""))
+    )
+    return IdentityNode(known=True, identifier=identifier, children=children)
+
+
+def _recorded_storage(recorded: "pa.Field[Any] | None") -> Any:
+    """The recorded place's type to walk into: a dictionary's values (an encoding),
+    or ``None`` when there is no record or the place is an extension type (whose
+    children the registry has built)."""
+    if recorded is None:
+        return None
+    arrow_type = recorded.type
+    if pa.types.is_dictionary(arrow_type):
+        arrow_type = arrow_type.value_type
+    if isinstance(arrow_type, pa.BaseExtensionType):
+        return None
+    return arrow_type
+
+
+def _recorded_field(name: str, metadata: Any) -> "pa.Field[Any] | None":
+    """The column's recorded Arrow type as a field, or ``None`` when it records none
+    or the record cannot be read (a registered reader that refuses its metadata):
+    then the record proves nothing."""
+    try:
+        record = recorded_type(metadata)
+    except Exception:  # noqa: BLE001  # an unreadable record proves nothing
+        return None
+    return None if record is None else pa.field(name, record)
+
+
+def _stored_identities(
+    delta_table: deltalake.DeltaTable,
+) -> list[tuple[str, IdentityNode]]:
+    """Each stored column's ``_delta_identity_node``, from the log and the column's
+    recorded Arrow type; no data is read."""
+    return [
+        (
+            f.name,
+            _delta_identity_node(
+                f.type, f.metadata, _recorded_field(f.name, f.metadata)
+            ),
+        )
+        for f in delta_table.schema().fields
+    ]
+
+
 def _append_refusal(
     delta_table: deltalake.DeltaTable, rows: pa.Table
 ) -> tuple[str, str] | None:
@@ -638,6 +782,8 @@ def _append_refusal(
     One rule for what an append is refused for, checked before the rows are buffered
     and again at flush against the version then loaded:
 
+    - a logical type identifier known, from the Delta log, to differ from the stored
+      one (``logical_identity_change``, ITL-1371);
     - a column change (``_column_change``): other field attributes, a struct that
       adds a non-nullable field or one inside a map, or omits a non-nullable one;
     - a column stored as non-nullable that the rows omit or hold a null in (Delta
@@ -653,6 +799,9 @@ def _append_refusal(
     Returns:
         ``(column, reason)``, or ``None`` when the rows can be appended.
     """
+    identity = identity_refusal(_stored_identities(delta_table), rows)
+    if identity is not None:
+        return identity
     held = _held_columns(delta_table)
     for field in rows.schema:
         if field.name in held:
@@ -888,8 +1037,14 @@ def _merge_source_in_stored_layout(
         # would be dropped from the table (ITL-1334).
         metadata = dict(field.metadata or {})
         if isinstance(field.type, pa.ExtensionType):
-            metadata[b"ARROW:extension:name"] = field.type.extension_name.encode()
-            metadata[b"ARROW:extension:metadata"] = field.type.__arrow_ext_serialize__()
+            # The bytes Arrow holds, the ones the identity rule compared (ITL-1371),
+            # not the serializer asked again, which may answer otherwise.
+            identifier = identity_node(field).identifier or (
+                field.type.extension_name.encode(),
+                field.type.__arrow_ext_serialize__(),
+            )
+            metadata[b"ARROW:extension:name"] = identifier[0]
+            metadata[b"ARROW:extension:metadata"] = identifier[1]
         batch = batch.set_column(
             index,
             pa.field(
@@ -1068,6 +1223,8 @@ class DeltaTableDatabase:
 
     # Class constants for internal column names
     ROW_INDEX_COLUMN = "__row_index"
+    stores_records = True
+
     RECORD_ID_COLUMN = "__record_id"
 
     def __init__(
@@ -1138,6 +1295,16 @@ class DeltaTableDatabase:
         self._pending_indexes: dict[str, KeyIndex] = (
             _shared_pending_indexes if _shared_pending_indexes is not None else {}
         )
+        self._pending_commits = (
+            _root._pending_commits
+            if _root is not None
+            else PendingCommits(
+                self.RECORD_ID_COLUMN,
+                self._pending_batches,
+                self._pending_record_ids,
+                on_empty=self._discard_pending_index,
+            )
+        )
         # Record keys whose table was found absent (ITL-1173), so lookups do not try
         # to open it again on every row. Family-wide like the loaded tables, and
         # forgotten on any flush of the family and on a flush of the key: a table
@@ -1147,11 +1314,9 @@ class DeltaTableDatabase:
             _shared_absent_tables if _shared_absent_tables is not None else set()
         )
 
-    def _clear_pending(self):
-        """Clear all pending state."""
-        self._pending_batches = {}
-        self._pending_record_ids = defaultdict(set)
-        # Note: next_row_index continues incrementing
+    def _discard_pending_index(self, key: str) -> None:
+        """Release a discarded batch's cached read index."""
+        self._pending_indexes.pop(key, None)
 
     def _get_record_key(self, record_path: tuple[str, ...]) -> str:
         """Generate cache key for source storage.
@@ -1729,6 +1894,82 @@ class DeltaTableDatabase:
                 "unchanged and nothing was written."
             )
 
+    def _identity_refusal(
+        self, record_path: tuple[str, ...], rows: pa.Table
+    ) -> str | None:
+        """Why ``rows`` cannot be appended for a logical type identifier known to
+        differ from the held one (``identity_refusal``, ITL-1371), or ``None``.
+
+        Held is the pending batch, as given, and the stored table as its Delta log
+        and its columns' recorded types give it (``_stored_identities``; a record
+        that cannot be decoded only makes its places unknown, it raises nothing),
+        so the comparison comes before the duplicate scan and the ordinary
+        held-column checks, and its error names the identifiers.
+
+        Args:
+            record_path: The table the rows are for.
+            rows: The rows to append, as given.
+
+        Returns:
+            The error message, or ``None``.
+        """
+        found = None
+        pending = self._pending_batches.get(self._get_record_key(record_path))
+        if pending is not None:
+            found = identity_refusal(
+                [(f.name, identity_node(f)) for f in pending.schema], rows
+            )
+        if found is None:
+            found = self._stored_identity_refusal(record_path, rows)
+        if found is None:
+            return None
+        return (
+            f"Cannot append to the stored table "
+            f"{self._get_table_uri(record_path)!r}: column {found[0]!r}: "
+            f"{found[1]}. The stored rows are unchanged and nothing was written."
+        )
+
+    def _stored_identity_refusal(
+        self, record_path: tuple[str, ...], rows: pa.Table
+    ) -> tuple[str, str] | None:
+        """``identity_refusal`` against the stored table, every refusal decided on
+        its freshly loaded version (ITL-1371).
+
+        The handle this instance holds is the one loaded at its last load or flush,
+        and accepting reads it as it is (no extra read per append: function nodes
+        append row by row). A refusal is never decided on it: when it shows a
+        difference, the table is loaded again and compared once more, so a held
+        handle never refuses what a reopened one accepts. An accept on a stale handle
+        is checked again at flush, against the version then loaded, before anything
+        is written; the one append it can leave different from a reopened handle
+        writes nothing either way (a duplicate-only append of the identifier the
+        stale version holds: a no-op here, refused there).
+
+        Args:
+            record_path: The table the rows are for.
+            rows: The rows to append, as given.
+
+        Returns:
+            The column and the reason, or ``None``.
+        """
+        try:
+            delta_table = self._get_delta_table(record_path)
+        except OrcapodDatabaseReadError:
+            return None
+        if delta_table is None:
+            return None
+        if identity_refusal(_stored_identities(delta_table), rows) is None:
+            return None
+        # Decide the refusal on the version stored now.
+        self._delta_table_cache.pop(self._get_record_key(record_path), None)
+        try:
+            delta_table = self._get_delta_table(record_path)
+        except OrcapodDatabaseReadError:
+            return None
+        if delta_table is None:
+            return None
+        return identity_refusal(_stored_identities(delta_table), rows)
+
     def _refuse_changed_attributes(
         self, record_path: tuple[str, ...], schema: pa.Schema
     ) -> None:
@@ -1740,7 +1981,8 @@ class DeltaTableDatabase:
         attributes: the rows would then be stored, and read back, with another
         column's attributes. So the field tree of each column (``_column_change``) is
         compared as given, against the pending batch and the stored table, in every
-        mode, as an append without schema handling is.
+        mode, as an append without schema handling is. (A logical type identifier is
+        compared before, by ``_identity_refusal``.)
 
         Args:
             record_path: The table the rows are for.
@@ -1749,15 +1991,25 @@ class DeltaTableDatabase:
         Raises:
             InputValidationError: For the first such column, naming it and the path.
         """
-        held: list[dict[str, pa.Field[Any]]] = []
         pending = self._pending_batches.get(self._get_record_key(record_path))
-        if pending is not None:
-            held.append({f.name: f for f in pending.schema})
         try:
             delta_table = self._get_delta_table(record_path)
         except OrcapodDatabaseReadError:
             delta_table = None
+        held: list[dict[str, pa.Field[Any]]] = []
+        if pending is not None:
+            held.append({f.name: f for f in pending.schema})
         if delta_table is not None:
+            # The identity rule on this very table, from its log, before its recorded
+            # types are decoded: the table loaded here may not be the one
+            # ``_identity_refusal`` saw (it could not load one), ITL-1371.
+            found = identity_refusal(_stored_identities(delta_table), schema)
+            if found is not None:
+                raise InputValidationError(
+                    f"Cannot append to the stored table "
+                    f"{self._get_table_uri(record_path)!r}: column {found[0]!r}: "
+                    f"{found[1]}. The stored rows are unchanged and nothing was written."
+                )
             held.append(_held_columns(delta_table))
         for given in held:
             for field in schema:
@@ -1874,12 +2126,22 @@ class DeltaTableDatabase:
         # A column Delta cannot hold is refused before anything is buffered (ITL-1334).
         self.require_storable(records.schema)
         self._refuse_untyped_null_columns(record_path, records.schema)
+        # A logical type identifier known to differ from the held one is refused
+        # first (ITL-1371), whatever skip_duplicates: found from the Delta log, before
+        # anything decodes a stored type (the duplicate scan below does), so no read
+        # failure can come before it. A whole-input condition, outside the row error
+        # policy.
+        identity = self._identity_refusal(record_path, records)
+        if identity is not None:
+            raise InputValidationError(identity)
 
         # Step 2: Deduplicate within input table (keep last occurrence)
         deduplicated_table = self._deduplicate_within_table(records)
 
         # Step 3: Handle conflicts based on skip_duplicates setting
         if skip_duplicates:
+            # A read failure here propagates as it is: it fails the run whatever
+            # the error policy.
             filtered_table = self._filter_existing_records(
                 record_path, deduplicated_table
             )
@@ -2555,6 +2817,38 @@ class DeltaTableDatabase:
                 f"Failed to flush {len(errors)} batch(es): {failed_keys}"
             ) from errors[0][1]
 
+    def pending_result(
+        self, record_path: tuple[str, ...], record_id: bytes
+    ) -> PendingCommit | None:
+        """Return a commit dependency for a buffered result, or verify it is stored."""
+        key = self._get_record_key(record_path)
+        if record_id in self._pending_record_ids.get(key, ()):
+            return self._pending_commits.attempt(key)
+        if record_id not in self._stored_ids(record_path):
+            raise ValueError("The referenced result is neither stored nor pending.")
+        return None
+
+    def fail_pending_result(self, record_path: tuple[str, ...]) -> None:
+        """Withdraw records depending on this table's current commit attempt."""
+        self._pending_commits.finish(self._get_record_key(record_path), committed=False)
+
+    def guard_record(
+        self,
+        record_path: tuple[str, ...],
+        record_id: bytes,
+        dependency: PendingCommit,
+    ) -> AbstractContextManager[None]:
+        """Prevent this record's publication until its result commits."""
+        return self._pending_commits.guard(
+            self._get_record_key(record_path), record_id, dependency
+        )
+
+    def flush_result_batch(
+        self, record_path: tuple[str, ...], *, publish_records: bool
+    ) -> None:
+        """Commit a durable result table even if no pipeline records are stored."""
+        self.flush_batch(record_path)
+
     def flush_batch(self, record_path: tuple[str, ...]) -> None:
         """
         Flush pending batch for a specific source path.
@@ -2575,15 +2869,10 @@ class DeltaTableDatabase:
         logger.debug("Flushing triggered!!")
         self._absent_tables.discard(record_key)
 
-        if (
-            record_key not in self._pending_batches
-            or not self._pending_batches[record_key]
-        ):
+        ready = self._pending_commits.take_ready(record_key)
+        if ready is None:
             return
-
-        # Get all pending records
-        pending_batch = self._pending_batches.pop(record_key)
-        pending_ids = self._pending_record_ids.pop(record_key, set())
+        pending_batch, pending_ids = ready
 
         # Derive the absolute table URI directly from the key (already includes prefix).
         abs_path_components = tuple(record_key.split("/"))
@@ -2719,16 +3008,19 @@ class DeltaTableDatabase:
                 f"{record_key!r} were not written and are no longer queued: correct "
                 "them and add them again."
             )
+            self._pending_commits.forget(record_key, pending_ids)
+            self._pending_commits.finish(record_key, committed=False)
             logger.error(f"Refused batch for {record_key}: {refused}")
             raise refused from e
-        except Exception as e:
-            logger.error(f"Error flushing batch for {record_key}: {e}")
-            # Put the tables back in the pending queue
-            self._pending_batches[record_key] = pending_batch
-            self._pending_record_ids[record_key] = pending_ids
+        except BaseException as exc:
+            logger.error(f"Error flushing batch for {record_key}: {exc}")
+            self._pending_commits.finish(record_key, committed=False)
+            self._pending_commits.restore(record_key, pending_batch, pending_ids)
             raise
 
         # The rows are committed: nothing below may put them back in the queue.
+        self._pending_commits.forget(record_key, pending_ids)
+        self._pending_commits.finish(record_key, committed=True)
         try:
             committed = (
                 delta_table
@@ -3091,6 +3383,11 @@ class DeltaTableDatabase:
                     continue
             return field.name, held, incoming
         return None
+
+    @property
+    def storage_location(self) -> str:
+        """The URI of this database's storage root."""
+        return self._root_uri
 
     @property
     def base_path(self) -> tuple[str, ...]:

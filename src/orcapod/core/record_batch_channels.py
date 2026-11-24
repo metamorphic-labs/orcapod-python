@@ -411,7 +411,8 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
     The batch must have the description's columns, compared by name (their order is
     not compared: the channel keeps one order of its own), each with exactly
     the description's type in its large variant (no other representation is taken and
-    converted: type strictness), the same nullability and the same field metadata. A
+    converted: type strictness), the same nullability (and no null where the
+    description's field is not nullable) and the same field metadata. A
     ``null`` type of the description (anywhere in a column's type) is carried as
     ``large_string``, as a row's datagram stores it, and only null values are taken
     there. Whether a system-tag or source-info field is nullable is not compared: it
@@ -457,6 +458,15 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
                 f"column {column.name!r} is {flags[column.nullable]}, the stream's is "
                 + flags[expected.nullable]
             )
+        if not expected.nullable and batch.column(index).null_count:
+            # The flag says nothing about the values: a field marked non-nullable
+            # may still hold nulls, which a reader of the stream never expects.
+            return f"column {column.name!r} holds nulls, the stream's is not nullable"
+        if inner := _null_under_non_nullable(batch.column(index), carried):
+            return (
+                f"column {column.name!r} holds a null in {inner}, which the stream's "
+                + "type declares not nullable"
+            )
         if (expected.metadata or None) != (column.metadata or None) or not (
             column.type.equals(carried, check_metadata=True)
         ):
@@ -465,6 +475,91 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
                 + f"its type {column.type}), the stream's is {expected.metadata}"
             )
     return None
+
+
+def _null_under_non_nullable(
+    array: pa.Array[Any],  # pyright: ignore[reportExplicitAny]  # any column
+    kind: pa.DataType,
+    path: str = "",
+) -> str | None:
+    """Where a nested field ``kind`` declares not nullable holds a null, or ``None``.
+
+    Judged on the values the array carries: a struct child under a null struct row,
+    and the items of a null list, are not values. Struct children, list items (of
+    every list kind), map keys and map items are followed to any depth.
+
+    Args:
+        array: A column as sent.
+        kind: Its declared type (the column's type, with its nested flags).
+        path: The path of ``array`` inside the column, for the answer.
+
+    Returns:
+        The path of the first such field (``.a``, ``[]``, ``{key}``, ``{}``), or
+        ``None``.
+    """
+    if isinstance(kind, pa.StructType):
+        children = cast("pa.StructArray", array).flatten()  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        valid = pc.is_valid(array)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        for position in range(kind.num_fields):
+            field = kind.field(position)
+            child = children[position]  # pyright: ignore[reportUnknownVariableType]
+            where = f"{path}.{field.name}"
+            if (
+                not field.nullable
+                and pc.any(  # pyright: ignore[reportUnknownMemberType]
+                    pc.and_(pc.is_null(child), valid)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                ).as_py()
+            ):
+                return where
+            # A child under a null row reads as null in ``flatten``: keep only the
+            # rows where the struct is valid before looking deeper.
+            if inner := _null_under_non_nullable(
+                child.filter(valid), field.type, where
+            ):  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+                return inner
+        return None
+    if isinstance(kind, pa.MapType):
+        item = kind.item_field
+        keys, values = _map_entries(cast("pa.MapArray[Any, Any]", array))  # pyright: ignore[reportExplicitAny]  # any map
+        # A key is never null; what it holds may be (a struct key's children).
+        if inner := _null_under_non_nullable(keys, kind.key_type, f"{path}{{key}}"):
+            return inner
+        where = f"{path}{{}}"
+        if not item.nullable and values.null_count:
+            return where
+        return _null_under_non_nullable(values, item.type, where)
+    if isinstance(kind, (pa.ListType, pa.LargeListType, pa.FixedSizeListType)):
+        item = kind.value_field
+        values = pc.list_flatten(array)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+        where = f"{path}[]"
+        if not item.nullable and values.null_count:  # pyright: ignore[reportUnknownMemberType]
+            return where
+        return _null_under_non_nullable(values, item.type, where)  # pyright: ignore[reportUnknownArgumentType]
+    return None
+
+
+def _map_entries(array: pa.MapArray) -> tuple[pa.Array[Any], pa.Array[Any]]:  # pyright: ignore[reportExplicitAny, reportMissingTypeArgument]  # any map
+    """The keys and the items of ``array``'s maps: of its valid rows, in its slice.
+
+    Read from the map's offsets, never by casting the entries (a cast refuses the
+    very nulls under a non-nullable field that are looked for).
+
+    Args:
+        array: A map column, possibly a slice.
+
+    Returns:
+        The keys and the items of the entries of the rows that are not null.
+    """
+    offsets = array.offsets.to_numpy(zero_copy_only=False)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    valid = array.is_valid().to_numpy(zero_copy_only=False)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
+    indices = [
+        position
+        for row, ok in enumerate(valid)  # pyright: ignore[reportUnknownArgumentType, reportUnknownVariableType]
+        if ok
+        for position in range(int(offsets[row]), int(offsets[row + 1]))  # pyright: ignore[reportUnknownArgumentType]
+    ]
+    taken = pa.array(indices, pa.int64())
+    return array.keys.take(taken), array.items.take(taken)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
 
 
 def _is_token_type(kind: pa.DataType) -> bool:
@@ -491,6 +586,12 @@ def _without_metadata(kind: pa.DataType) -> pa.DataType:
         return pa.struct(
             [_field_without_metadata(kind.field(i)) for i in range(kind.num_fields)]
         )  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+    if isinstance(kind, pa.MapType):
+        return pa.map_(  # pyright: ignore[reportCallIssue]  # pyarrow takes fields for the key and item; the stubs say types
+            _field_without_metadata(kind.key_field),  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+            _field_without_metadata(kind.item_field),  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+            keys_sorted=kind.keys_sorted,
+        )
     return kind
 
 

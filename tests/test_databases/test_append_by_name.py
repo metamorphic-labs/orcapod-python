@@ -37,7 +37,6 @@ from orcapod.databases import (
 from orcapod.databases.utils import in_held_column_order
 from orcapod.errors import (
     InputValidationError,
-    OrcapodDatabaseReadError,
     UnstorableColumnError,
 )
 from tests.test_databases.type_matrix import open_database
@@ -786,7 +785,9 @@ def test_two_logical_types_over_one_storage_type_are_not_reordered(
 ) -> None:
     """Through the extension-aware wrapper, a column of one logical type held and a
     permuted append of another logical type over the same storage type: not taken
-    for one, so refused as on main, never read back as the held logical type."""
+    for one, and refused before anything is buffered as another logical type
+    identifier, naming both (ITL-1371; on main it was refused later, or, committed
+    to Delta, taken by name and left the table unreadable)."""
     from tests.test_databases.test_extension_aware_database import (
         _make_converter_with_type,
     )
@@ -813,24 +814,10 @@ def test_two_logical_types_over_one_storage_type_are_not_reordered(
     )
     second = ExtensionAwareDatabase(inner, two[0])
     permuted = rows(2, two, ["text", "b", "rid", "a"])
-    # Main's verdict, measured on main 321284ae, the same here.
-    if backend == "in-memory" and not stored:
-        with pytest.raises(pa.ArrowInvalid):
-            second.add_records(PATH, permuted, record_id_column="rid")
-    elif backend == "in-memory":
+    with pytest.raises(InputValidationError) as refused:
         second.add_records(PATH, permuted, record_id_column="rid")
-        with pytest.raises(pa.ArrowInvalid):
-            second.flush()
-    elif not stored:
-        with pytest.raises(ValueError, match="Schema mismatch"):
-            second.add_records(PATH, permuted, record_id_column="rid")
-    else:
-        # Pre-existing on main and equal here (ITL-1371's family): Delta takes the
-        # rows by name and the stored table can no longer be read as one type.
-        second.add_records(PATH, permuted, record_id_column="rid", flush=True)
-        with pytest.raises(OrcapodDatabaseReadError):
-            inner.get_all_records(PATH, record_id_column="rid")
-        return
+    assert "'test.itl1367.other;'" in str(refused.value)
+    assert "'test.itl1367.held;'" in str(refused.value)
     inner.flush()
     stored_rows = inner.get_all_records(PATH, record_id_column="rid")
     assert stored_rows is not None

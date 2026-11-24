@@ -180,7 +180,12 @@ class MapData(UnaryOperator):
             return stream
 
         table = stream.as_table(
-            columns={"source": True, "system_tags": True, "sort_by_tags": False}
+            columns={
+                "source": True,
+                "system_tags": True,
+                "context": True,
+                "sort_by_tags": False,
+            }
         )
 
         # A data-tag column keeps its tag under its own name, now plain; the
@@ -453,7 +458,12 @@ class MapTags(UnaryOperator):
             return stream
 
         table = stream.as_table(
-            columns={"source": True, "system_tags": True, "sort_by_tags": False}
+            columns={
+                "source": True,
+                "system_tags": True,
+                "context": True,
+                "sort_by_tags": False,
+            }
         )
 
         name_map = {
@@ -790,7 +800,12 @@ class MapColumns(UnaryOperator):
             tag_columns, data_columns
         )
         table = stream.as_table(
-            columns={"source": True, "system_tags": True, "sort_by_tags": False}
+            columns={
+                "source": True,
+                "system_tags": True,
+                "context": True,
+                "sort_by_tags": False,
+            }
         )
         dropped = {
             *tags_dropped,

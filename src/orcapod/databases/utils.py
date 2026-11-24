@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import pyarrow as pa
 
@@ -12,6 +13,9 @@ from orcapod.utils import arrow_utils
 
 if TYPE_CHECKING:
     from orcapod.protocols.database_protocols import TableCommittingDatabaseProtocol
+
+H = TypeVar("H")
+G = TypeVar("G")
 
 
 def coerce_record_id(record_id: str | bytes) -> bytes:
@@ -197,6 +201,362 @@ def first_changed_column(
             reason = appended_field_change(given.field(index), field)
             if reason is not None:
                 return field.name, reason
+    return None
+
+
+_EXTENSION_NAME = b"ARROW:extension:name"
+_EXTENSION_METADATA = b"ARROW:extension:metadata"
+
+# A logical type identifier as stored: the extension name and metadata, as bytes.
+# Compared as bytes only; decoded only to word an error.
+RawIdentifier = tuple[bytes, bytes]
+
+
+@dataclass(frozen=True)
+class IdentityNode:
+    """What a database knows of the logical type identifier at one place in a column
+    (ITL-1371): the column itself, or a nested field.
+
+    Attributes:
+        known: Whether ``identifier`` is reliably known. A held column read back
+            through something that may rewrite or drop an identifier (a Delta list
+            item, map key or item; see ``_delta_identity_node``) is not known, and
+            the rule abstains there.
+        identifier: The raw identifier, or ``None`` for no logical type.
+        claims: ``False`` for a bare untyped null (``pa.null()`` with no
+            annotation): it holds no value and claims no type, so it is never
+            another identifier.
+        children: The nested places, in order, each with its label (``.name`` for a
+            struct child, ``[]`` for a list item, ``.key`` and ``.item`` for a map,
+            ``|name`` for a union member, ``<storage>`` for an extension type held
+            directly as another's storage, ``.name`` for the other children of a
+            nested type; every label but a struct child's starts with ``_ROLE``, so
+            places pair only within one role). Labels may repeat: Arrow allows two
+            struct children or union members of one name.
+    """
+
+    known: bool
+    identifier: RawIdentifier | None
+    claims: bool = True
+    children: "tuple[tuple[str, IdentityNode], ...]" = ()
+
+
+UNKNOWN = IdentityNode(known=False, identifier=None)
+
+# Child labels pair places of one role: a struct field is labelled ``.<name>``; a
+# place of any other role carries ``_ROLE`` first, so a map's key, say, never pairs
+# with a struct field named ``key``. Messages show labels without it.
+_ROLE = "\x00"
+MAP_KEY = f"{_ROLE}.key"
+MAP_ITEM = f"{_ROLE}.item"
+LIST_ITEM = f"{_ROLE}[]"
+
+
+def _annotation(metadata: Mapping[Any, Any] | None) -> RawIdentifier | None:
+    as_bytes = metadata_bytes(metadata)
+    name = as_bytes.get(_EXTENSION_NAME)
+    if name is None:
+        return None
+    return name, as_bytes.get(_EXTENSION_METADATA, b"")
+
+
+def _extension_identifier(arrow_type: Any) -> RawIdentifier | None:
+    """The raw identifier an Arrow extension type holds.
+
+    Read from the type's C data interface export (``__arrow_c_schema__``), where
+    Arrow writes the extension name and the serialized metadata it holds, as bytes
+    (``_exported_metadata``), never by calling ``__arrow_ext_serialize__`` again: a
+    Python extension type's serializer may give other bytes than the ones Arrow took
+    when the type was made, and the export is also the only way to read the bytes of
+    an extension type defined in Arrow's C++ library (``arrow.uuid``).
+
+    Returns:
+        The identifier, or ``None`` when Arrow cannot export the type (an extension
+        type whose storage is itself an extension type): the bytes Arrow holds are
+        then out of reach, and the serializer is not asked in their place.
+    """
+    try:
+        capsule = pa.field("x", arrow_type).__arrow_c_schema__()
+    except pa.ArrowNotImplementedError:
+        return None
+    identifier = _annotation(_exported_metadata(capsule))
+    assert identifier is not None  # an extension type exports its name
+    return identifier
+
+
+def _exported_metadata(capsule: Any) -> dict[bytes, bytes]:
+    """The metadata of an exported ``ArrowSchema``, as raw bytes.
+
+    Read as the Arrow C data interface lays it out (a stable ABI): the struct's
+    third member is the metadata, a 32-bit count, then for each pair a 32-bit
+    length and the key bytes, a 32-bit length and the value bytes, native byte
+    order. Keys and values are bytes: no text decoding, so metadata that is not
+    UTF-8 is read as it is. The capsule releases the schema when it is collected.
+    """
+    import ctypes
+    import struct
+
+    get_pointer = ctypes.pythonapi.PyCapsule_GetPointer
+    get_pointer.restype = ctypes.c_void_p
+    get_pointer.argtypes = [ctypes.py_object, ctypes.c_char_p]
+    schema = get_pointer(capsule, b"arrow_schema")
+    # struct ArrowSchema { const char* format; const char* name;
+    #                      const char* metadata; ... }
+    metadata_pointer = ctypes.c_void_p.from_address(
+        schema + 2 * ctypes.sizeof(ctypes.c_void_p)
+    ).value
+    if not metadata_pointer:
+        return {}
+
+    def read(offset: int, size: int) -> bytes:
+        return ctypes.string_at(metadata_pointer + offset, size)
+
+    count = struct.unpack("=i", read(0, 4))[0]
+    offset = 4
+    pairs: dict[bytes, bytes] = {}
+    for _ in range(count):
+        key_length = struct.unpack("=i", read(offset, 4))[0]
+        key = read(offset + 4, key_length)
+        offset += 4 + key_length
+        value_length = struct.unpack("=i", read(offset, 4))[0]
+        pairs[key] = read(offset + 4, value_length)
+        offset += 4 + value_length
+    return pairs
+
+
+def identity_node(arrow_field: "pa.Field[Any]") -> IdentityNode:
+    """The identifiers an Arrow field carries, at every depth, in either form.
+
+    A logical type reaches a database as an Arrow extension type, or as its storage
+    type annotated with ``ARROW:extension:name`` / ``ARROW:extension:metadata`` (the
+    form a stored column reads back in, and the one ``ExtensionAwareDatabase``
+    passes on). Each level is one identifier: an annotation names the field's own
+    type as storage; an extension type is unwrapped one level, and an extension
+    type found as storage is a level of its own. A dictionary is an encoding, not a
+    type: its values stand where it stands. The children of every nested Arrow type
+    are enumerated from the type itself, so no container is a leaf.
+
+    Args:
+        arrow_field: A column, or a nested field, as given (or as a database holds
+            it, when what it holds is the field itself).
+
+    Returns:
+        The field's ``IdentityNode``; every part known.
+    """
+    arrow_type = arrow_field.type
+    if pa.types.is_dictionary(arrow_type):
+        return identity_node(arrow_field.with_type(arrow_type.value_type))
+    identifier = _annotation(arrow_field.metadata)
+    if pa.types.is_null(arrow_type):
+        # A bare null claims nothing; an annotated one claims its annotation.
+        return IdentityNode(
+            known=True, identifier=identifier, claims=identifier is not None
+        )
+    if identifier is not None:
+        storage = arrow_type
+    elif isinstance(arrow_type, pa.BaseExtensionType):
+        identifier = _extension_identifier(arrow_type)
+        storage = arrow_type.storage_type
+        if identifier is None:
+            # Not exportable: this level's bytes are not known; its storage is.
+            return IdentityNode(
+                known=False, identifier=None, children=_children_of(storage)
+            )
+    else:
+        storage = arrow_type
+    return IdentityNode(
+        known=True, identifier=identifier, children=_children_of(storage)
+    )
+
+
+def _children_of(arrow_type: Any) -> "tuple[tuple[str, IdentityNode], ...]":
+    t = pa.types
+    if t.is_dictionary(arrow_type):
+        return _children_of(arrow_type.value_type)
+    if isinstance(arrow_type, pa.BaseExtensionType):
+        return ((f"{_ROLE}<storage>", identity_node(pa.field("storage", arrow_type))),)
+    if t.is_map(arrow_type):
+        return (
+            (MAP_KEY, identity_node(arrow_type.key_field)),
+            (MAP_ITEM, identity_node(arrow_type.item_field)),
+        )
+    if (
+        t.is_list(arrow_type)
+        or t.is_large_list(arrow_type)
+        or t.is_fixed_size_list(arrow_type)
+        or t.is_list_view(arrow_type)
+        or t.is_large_list_view(arrow_type)
+    ):
+        return ((LIST_ITEM, identity_node(arrow_type.value_field)),)
+    if t.is_struct(arrow_type):
+        return tuple((f".{child.name}", identity_node(child)) for child in arrow_type)
+    prefix = f"{_ROLE}|" if t.is_union(arrow_type) else f"{_ROLE}."
+    children = (arrow_type.field(i) for i in range(arrow_type.num_fields))
+    return tuple((f"{prefix}{child.name}", identity_node(child)) for child in children)
+
+
+def _identifier_text(identifier: RawIdentifier | None) -> str:
+    """An identifier as the error shows it: ``'<name>;<metadata hex>'`` (a quoted
+    text) when the name is text; a name that is not UTF-8 as a bytes literal,
+    ``b'\\xff';<metadata hex>``, which no text can be shown as, so two names never
+    read alike."""
+    if identifier is None:
+        return "no logical type"
+    name, metadata = identifier
+    try:
+        return repr(f"{name.decode()};{metadata.hex()}")
+    except UnicodeDecodeError:
+        return f"{name!r};{metadata.hex()}"
+
+
+def matched_pairs(
+    held: "Sequence[tuple[str, H]]", incoming: "Sequence[tuple[str, G]]"
+) -> "list[tuple[str, H, G]]":
+    """Pair the labelled places of two sides (ITL-1371).
+
+    A label that occurs once on each side pairs by label. Where a label repeats on
+    either side (Arrow allows two struct children, union members or columns of one
+    name), its places pair by occurrence: the k-th with the k-th. Never by label
+    alone, so a repeated place is never overwritten by another of its name. A place
+    without a partner is left out.
+
+    Args:
+        held: The held side's places, in order, with their labels.
+        incoming: The given side's places, in order, with their labels.
+
+    Returns:
+        ``(label, held place, given place)`` for every pair, in the given order.
+    """
+    by_label: dict[str, list[H]] = {}
+    for label, place in held:
+        by_label.setdefault(label, []).append(place)
+    seen: dict[str, int] = {}
+    pairs: list[tuple[str, H, G]] = []
+    for label, place in incoming:
+        k = seen.get(label, 0)
+        seen[label] = k + 1
+        candidates = by_label.get(label, [])
+        if k < len(candidates):
+            pairs.append((label, candidates[k], place))
+    return pairs
+
+
+def logical_identity_change(
+    held: IdentityNode, incoming: IdentityNode, path: str
+) -> str | None:
+    """Say why rows of ``incoming`` would be read back as another logical type than
+    they were written as, appended where a database holds ``held`` (ITL-1371).
+
+    A table holds one logical type per column and per nested field, so at every place
+    both sides have, the appended identifier must be the held one; no logical type is
+    an identifier too. The rule refuses only where it knows: wherever the held
+    identifier is not reliably known (``IdentityNode.known``), or a side is a bare
+    untyped null, it abstains at that place, and a place only one side has (struct evolution, another kind of
+    type) is left to the database's other append checks. It compares raw bytes,
+    never Arrow type equality: pyarrow's equality of two instances of one Python
+    extension class ignores their serialized metadata. Places pair as
+    ``matched_pairs`` says.
+
+    Args:
+        held: What the database holds (stored or pending).
+        incoming: The rows to append, as given (``identity_node``).
+        path: The column name, or the path of the nested place.
+
+    Returns:
+        The reason, naming the path and both identifiers' text, or ``None``.
+    """
+    if not (held.claims and incoming.claims):
+        return None
+    if held.known and incoming.known and held.identifier != incoming.identifier:
+        return (
+            f"{path} is of logical type {_identifier_text(incoming.identifier)}, the "
+            f"stored column's {_identifier_text(held.identifier)}"
+        )
+    for label, held_child, child in matched_pairs(held.children, incoming.children):
+        found = logical_identity_change(
+            held_child, child, f"{path}{label.replace(_ROLE, '')}"
+        )
+        if found is not None:
+            return found
+    return None
+
+
+def given_identities(
+    given: "pa.Table | pa.Schema",
+) -> "list[tuple[str, list[IdentityNode]]]":
+    """The identifiers the rows to append carry, column by column (ITL-1371).
+
+    A column's field, and, for a table, each of its chunks: pyarrow lets the chunks of
+    one column hold instances of one Python extension class with other serialized
+    metadata (it compares them by class), and nested fields with other field
+    metadata, an annotation included (it compares types without it), so every
+    chunk's own type is read too, in both forms, and every one of them must be the
+    held one.
+
+    Args:
+        given: The rows to append, or only their schema.
+
+    Returns:
+        ``(column name, identity nodes)`` in column order; the field's node first.
+    """
+    if isinstance(given, pa.Schema):
+        return [(f.name, [identity_node(f)]) for f in given]
+    out: list[tuple[str, list[IdentityNode]]] = []
+    for field, column in zip(given.schema, given.columns):
+        nodes = [identity_node(field)]
+        seen = set(nodes)
+        for chunk in column.chunks:
+            node = identity_node(field.with_type(chunk.type))
+            if node not in seen:
+                seen.add(node)
+                nodes.append(node)
+        out.append((field.name, nodes))
+    return out
+
+
+def identity_refusal(
+    held: "Sequence[tuple[str, IdentityNode]]", given: "pa.Table | pa.Schema"
+) -> tuple[str, str] | None:
+    """The first column of ``given`` known to carry another logical type identifier
+    than the one held in its place (``logical_identity_change``).
+
+    Columns pair as ``matched_pairs`` says: by name, or by occurrence where a name
+    repeats; the order of columns of distinct names plays no part.
+
+    Args:
+        held: The held columns, in order, with what is known of their identifiers.
+        given: The rows to append (``given_identities``), or their schema.
+
+    Returns:
+        The column's name and the reason, or ``None``.
+    """
+    for name, held_node, nodes in matched_pairs(held, given_identities(given)):
+        for node in nodes:
+            reason = logical_identity_change(held_node, node, name)
+            if reason is not None:
+                return name, reason
+    return None
+
+
+def first_logical_identity_change(
+    held: "Iterable[pa.Schema]", given: "pa.Table | pa.Schema"
+) -> tuple[str, str] | None:
+    """The first column of ``given`` that carries another logical type identifier
+    than the column the database holds in its place (``identity_refusal``), for a
+    database that holds what it was given (in-memory, a pending batch, a connector's
+    stored schema): every held identifier is known.
+
+    Args:
+        held: The schemas the database holds for the table (stored, pending).
+        given: The rows to append, or their schema.
+
+    Returns:
+        The column's name and the reason, or ``None``.
+    """
+    for schema in held:
+        found = identity_refusal([(f.name, identity_node(f)) for f in schema], given)
+        if found is not None:
+            return found
     return None
 
 

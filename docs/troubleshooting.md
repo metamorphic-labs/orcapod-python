@@ -144,9 +144,10 @@ are *list-valued tag columns*, the stream came from `batch`; group before batchi
 `map_batches`) or uses another expression Orcapod cannot identify. The message lists what it
 can. Ordinary comparisons such as `pl.col("x") > 1` work everywhere.
 
-**Fix.** Use keyword constraints (`polars_filter(column=value)`) for equality filters, or
-compute a boolean column in a function pod and filter on it. See
-[PolarsFilter](concepts/operators.md#polarsfilter).
+**Fix.** Use `filter` (`stream.filter(column=value)`, `stream.filter(col("x") > 1)`), which
+takes equalities, comparisons, `is_in`, `between` and null tests and needs no Polars
+expression, or compute a boolean column in a function pod and filter on it. See
+[Filter](concepts/operators.md#filter) and [PolarsFilter](concepts/operators.md#polarsfilter).
 
 ### `AttributeError: 'PipelineJob' has no attribute 'show_graph'. Available node labels: [...]`
 

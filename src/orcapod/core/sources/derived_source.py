@@ -195,6 +195,9 @@ class DerivedSource(RootSource):
     PROVISIONAL = True
     """Provisional in data context v1, both forms (ITL-1331, ``PROVISIONAL_SOURCES``)."""
 
+    REPORTS_WHAT_IT_READS = False
+    """It reads the rows stored for its origin (``explain()``, ITL-1402)."""
+
     @staticmethod
     def _missing_source_id() -> ValueError:
         """The error for a ``tags_as_data`` source built or loaded without a ``source_id``."""

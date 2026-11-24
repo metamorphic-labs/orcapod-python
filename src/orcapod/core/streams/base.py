@@ -17,7 +17,7 @@ from collections.abc import (
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pandas as pd
 import polars as pl
@@ -41,8 +41,11 @@ from orcapod.protocols.core_protocols import (
 )
 from orcapod.protocols.core_protocols.streams import RecordBatchInput
 from orcapod.system_constants import constants
-from orcapod.types import ColumnConfig, Schema
+from orcapod.types import ColumnConfig, Condition, Schema
 from orcapod.utils import arrow_utils
+
+if TYPE_CHECKING:
+    from orcapod.types.explanation import Explanation
 
 # TODO: consider using this instead of making copy of dicts
 # from types import MappingProxyType
@@ -531,6 +534,7 @@ class CompleteStreamFeed:
         """
         self._stream = stream
         self._batches: deque[pa.RecordBatch] | None = None
+        self._failure: BaseException | None = None
 
     async def next(self) -> pa.RecordBatch | None:
         """Return the stream's next record batch, or ``None`` at the end.
@@ -538,19 +542,47 @@ class CompleteStreamFeed:
         The stream's table is read on the first call, not when the channel is opened;
         batches with no rows are skipped.
         """
+        if self._failure is not None:
+            # The stream was read once and preparing its batches failed: the same
+            # error again, never a second read of the stream.
+            raise self._failure
         if self._batches is None:
-            # The table first: reading it is the stream's one read (an unpolled
-            # source polls here), and its keys are then known without another.
-            table = self._stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
-            # The rows' keys: a source whose keys() states its declared order has
-            # rows in its table's order (``keys_of_rows``).
-            table = row_built_columns(table, keys_of_rows(table, self._stream.keys()))
-            self._batches = deque(
-                batch
-                for batch in table.to_batches(max_chunksize=SOURCE_BATCH_ROWS)
-                if batch.num_rows
-            )
+            try:
+                self._batches = deque(
+                    batch
+                    for batch in self._row_built_table().to_batches(
+                        max_chunksize=SOURCE_BATCH_ROWS
+                    )
+                    if batch.num_rows
+                )
+            except BaseException as failure:
+                self._failure = failure
+                raise
         return self._batches.popleft() if self._batches else None
+
+    def _row_built_table(self) -> pa.Table:
+        """The stream's table in the row-built form: its one read.
+
+        The table first: reading it is the stream's one read (an unpolled source polls
+        here), and its keys are then known without another. Its system tags must be
+        what rows give (``system_tags_as_rows_give``: non-null text, no field
+        metadata); otherwise, as on the eager routes of a job, the table is the one
+        its rows build (``main``'s row path), so a narrow or nullable system tag is
+        retyped as a row retypes it. Only a stream that holds such a column (a raw
+        ``ArrowTableStream``) is read that way, and its reads have no effect.
+        """
+        table = self._stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+        if not system_tags_as_rows_give(table):
+            from orcapod.core.operators.static_output_pod import (
+                StaticOutputOperatorPod,
+            )
+
+            rows = list(self._stream.iter_data())
+            built = StaticOutputOperatorPod._materialize_upstream(rows, self._stream)  # pyright: ignore[reportPrivateUsage]  # main's row path
+            table = built.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+        # The rows' keys: a source whose keys() states its declared order has rows in
+        # its table's order (``keys_of_rows``).
+        return row_built_columns(table, keys_of_rows(table, self._stream.keys()))
 
     def close(self) -> None:
         """Stop reading: the batches not read are dropped."""
@@ -1016,6 +1048,61 @@ class StreamBase(TraceableBase):
         return PolarsFilter(predicates=predicates, constraints=total_constraints)(
             self, label=label
         )
+
+    def filter(
+        self,
+        *conditions: Condition | Mapping[str, object],
+        label: str | None = None,
+        **columns: object,
+    ) -> StreamBase:
+        """Keep the rows that satisfy every condition; a step of the pipeline.
+
+        ``s.filter(session="s1")``, ``s.filter({"session": "s1"})`` and
+        ``s.filter(col("t") >= 1.0, col("unit").is_in([3, 7]), session="s1")``:
+        keywords and mappings are equalities, every other condition is built with
+        ``col``; all of them must hold. Tag and data columns are named alike. The
+        output has this stream's columns and types; only the rows change. See
+        ``orcapod.core.operators.Filter``.
+
+        Args:
+            *conditions: Conditions (built with ``col`` or ``Condition.of``) and
+                mappings of column name to value.
+            label: Optional node label for the pipeline graph. A column named
+                ``label`` is written ``filter({"label": ...})`` or with ``col``.
+            **columns: Column name to the value it must equal.
+
+        Returns:
+            A stream over the kept rows, in input order.
+
+        Raises:
+            ValueError: If no condition is given.
+            TypeError: If an argument is neither a condition nor a mapping, or a
+                value is not exactly of a supported type.
+            InputValidationError: If a column is missing or a value does not fit
+                its column.
+        """
+        from orcapod.core.operators import Filter
+
+        return Filter(Condition.of(*conditions, **columns))(self, label=label)
+
+    def explain(self) -> Explanation:
+        """Say what each source applies itself, and what is applied after reading.
+
+        For every source this stream reads (through a job's input slot to its bound
+        source): its own restriction (``where``, ``limit``), or that it reads its whole
+        table; and the steps above it that drop rows after they are read (a ``Filter``, a
+        ``DropNulls``, a join's unmatched rows), nearest the source first. New in this
+        release (ITL-1402).
+
+        Nothing is computed, read, polled or written, and no user code runs: only what the
+        chain declares is read.
+
+        Returns:
+            An ``Explanation``: plain data, with ``text()`` (also its ``str``).
+        """
+        from orcapod.core.streams.explain import explain
+
+        return explain(self)
 
     def drop_nulls(
         self,

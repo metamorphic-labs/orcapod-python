@@ -10,7 +10,7 @@ nobody reads is never built.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pytest
@@ -346,9 +346,9 @@ def test_an_empty_output_is_derived_at_the_edge(
     )
     job = PipelineJob(name="empty_edge", database=InMemoryArrowDatabase())
     with job:
-        ArrowTableSource(table, tag_columns=["k"], source_id="s").select_data_columns(
-            ["x"], label="selected"
-        )
+        ArrowTableSource(
+            table, tag_columns=["k"], tag_only_columns=True, source_id="s"
+        ).select_data_columns(["x"], label="selected")
     slot = next(label for label in job.nodes if label != "selected")
     observer = _NodeEvents()
     original = StaticOutputOperatorPod._materialize_upstream  # pyright: ignore[reportPrivateUsage]  # the row path, watched
@@ -489,7 +489,7 @@ def test_a_filtering_subclass_delivers_only_its_rows() -> None:
 
     class AboveTen(ArrowTableSource):
         def iter_data(self) -> Any:
-            return (row for row in super().iter_data() if row[1]["x"] > 10)
+            return (row for row in super().iter_data() if cast(int, row[1]["x"]) > 10)
 
     table = pa.table({"k": pa.array([1, 2]), "x": pa.array([10, 20])})
     job = PipelineJob(name="filtering", database=InMemoryArrowDatabase())
@@ -1103,3 +1103,233 @@ def test_a_lazy_output_describes_itself_without_converting_python_types(
     job.bind(sources={"s": raw})
     out: Any = job.nodes["s"].execute()
     assert out.arrow_schema().field("x").type == kind
+
+
+# ── CodeRabbit on PR #510: the node's own reading ─────────────────────────────
+
+
+def test_a_source_job_node_subclass_hands_on_the_rows_it_reads() -> None:
+    """A ``SourceJobNode`` subclass whose ``iter_data`` filters hands on, from
+    ``execute``, the rows it reads, as ``main`` did by iterating them: the
+    whole-table route is only for an exact ``SourceJobNode`` (the one rule). The
+    async path reads ``async_iter_data``, as on ``main``."""
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.core.operators.static_output_pod import at_edge
+
+    class AboveTen(SourceJobNode):
+        def iter_data(self) -> Any:
+            return (row for row in super().iter_data() if cast(int, row[1]["x"]) > 10)
+
+    source = ArrowTableSource(
+        pa.table({"k": pa.array([1, 2]), "x": pa.array([10, 20])}),
+        tag_columns=["k"],
+        tag_only_columns=True,
+        source_id="s",
+    )
+    node: Any = AboveTen.from_stream(source)
+    assert type(node) is AboveTen
+    output = at_edge(node.execute())
+    assert output.as_table()["x"].to_pylist() == [20]
+
+
+def test_a_held_output_reads_its_node_s_upstreams_when_read() -> None:
+    """``RowsOnRead.upstreams`` is the node's, read when asked, and the built stream
+    takes the node's lineage when it is built: where ``main`` built a successor's
+    input from the node's rows, at the edge, from the node as it was then. A snapshot
+    taken when the output is made would differ from ``main`` for a node re-wired in
+    between (CodeRabbit on #510, declined; re-wiring a node during a run is
+    unsupported, ITL-1369)."""
+    from orcapod.core.operators.static_output_pod import RowsOnRead
+
+    job = PipelineJob(name="lineage", database=InMemoryArrowDatabase())
+    with job:
+        _plain().select_data_columns(["x"], label="selected")
+    node: Any = job.nodes["selected"]
+    output = RowsOnRead(list(_plain().iter_data()), node)
+    assert output.upstreams == node.upstreams
+    assert output.built().upstreams == node.upstreams
+    assert output.producer is node.producer
+
+
+# ── the system-tag check looks at values and field metadata (CodeRabbit / Codex
+# on the stage 3-4 review, carried to stages 1-2) ──────────────────────────────
+
+_SYSTEM_TAG_CASES = {
+    "null_in_non_null_field": (["a", None], None),
+    "field_metadata": (["a", "b"], {b"ARROW:extension:name": b"file"}),
+    "other_field_metadata": (["a", "b"], {b"k": b"v"}),
+}
+
+
+def _system_tag_outcome(case: str, asynchronous: bool) -> Any:
+    """A job whose operator returns an exact ``ArrowTableStream`` with one more system
+    tag (``case``): what it keeps, stores and hands on, or the error it raises."""
+    from orcapod.operators import SelectDataColumns
+    from orcapod.pipeline import AsyncPipelineOrchestrator
+    from orcapod.system_constants import constants
+
+    values, metadata = _SYSTEM_TAG_CASES[case]
+    name = f"{constants.SYSTEM_TAG_PREFIX}extra"
+
+    class AddSystemTag(SelectDataColumns):
+        def unary_static_process(self, stream: Any) -> Any:
+            out: Any = super().unary_static_process(stream)
+            table = out.as_table(columns={"source": True, "system_tags": True})
+            field = pa.field(name, pa.large_string(), nullable=False, metadata=metadata)
+            table = table.append_column(field, pa.array(values, pa.large_string()))
+            return ArrowTableStream(table, tag_columns=["k"])
+
+    database = InMemoryArrowDatabase()
+    job = PipelineJob(name="system_tag_kinds", database=database)
+    with job:
+        source = DictSource(
+            [{"k": 1, "x": 1, "y": 3}, {"k": 2, "x": 2, "y": 4}],
+            tag_columns=["k"],
+            tag_only_columns=True,
+            source_id="s",
+        )
+        Batch(batch_size=2)(AddSystemTag(["x"])(source, label="marked"), label="b")
+    node: Any = job.nodes["marked"]
+    node.attach_databases(
+        pipeline_database=database.at("log"), cache_mode=CacheMode.LOG
+    )
+    try:
+        if asynchronous:
+            job.run(orchestrator=AsyncPipelineOrchestrator())
+        else:
+            job.run()
+    except Exception as error:  # noqa: BLE001  # the outcome is compared
+        return (type(error).__name__, str(error).splitlines()[0])
+    kept = node.as_table(columns={"system_tags": True, "source": True})
+    stored = database.at("log").get_all_records(
+        node._stored_table_path,  # pyright: ignore[reportPrivateUsage]  # the raw LOG table
+        record_id_column="_record_hash",
+    )
+    successor = job.nodes["b"].as_table(columns={"system_tags": True, "source": True})
+    return (
+        str(kept.schema),
+        [
+            (field.name, field.metadata)
+            for field in kept.schema
+            if field.name.startswith(constants.SYSTEM_TAG_PREFIX)
+        ],
+        kept.to_pylist(),
+        None if stored is None else (str(stored.schema), stored.to_pylist()),
+        str(successor.schema),
+        successor.to_pylist(),
+    )
+
+
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("case", list(_SYSTEM_TAG_CASES))
+def test_a_result_whose_system_tags_rows_retype_is_main_s_row_build(
+    case: str, asynchronous: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An operator result over an exact ``ArrowTableStream`` with a system tag holding
+    a null under a non-null field, or carrying field metadata, is what ``main``'s row
+    path gives (types, flags, metadata, values, stored record hashes, the successor),
+    or raises its error: the whole-table route is refused for it."""
+    from orcapod.core.nodes import operator_node
+
+    got = _system_tag_outcome(case, asynchronous)
+    with monkeypatch.context() as patch:
+        # The oracle: the eager route off, every result through main's row path.
+        patch.setattr(operator_node, "reads_as_its_class", lambda obj, cls: False)
+        expected = _system_tag_outcome(case, asynchronous)
+    assert got == expected
+
+
+@pytest.mark.parametrize("case", list(_SYSTEM_TAG_CASES))
+def test_the_source_route_refuses_the_same_system_tags(case: str) -> None:
+    """The source route uses the same check (``system_tags_as_rows_give``): a table
+    whose system tag holds a null under a non-null field, or carries field metadata,
+    is not its rows' table. (A library source builds its own system tags, so no
+    bound source reaches the route with such a column; the check is shared.)"""
+    from orcapod.core.streams.base import system_tags_as_rows_give
+    from orcapod.system_constants import constants
+
+    values, metadata = _SYSTEM_TAG_CASES[case]
+    field = pa.field(
+        f"{constants.SYSTEM_TAG_PREFIX}extra",
+        pa.large_string(),
+        nullable=False,
+        metadata=metadata,
+    )
+    table = pa.Table.from_arrays(
+        [pa.array([1, 2]), pa.array(values, pa.large_string())],
+        schema=pa.schema([pa.field("k", pa.int64()), field]),
+    )
+    assert not system_tags_as_rows_give(table)
+
+
+# ── held rows that cannot make one table, without a store (they used to come from
+# a store written before ITL-928, which ITL-1412 now refuses to append to) ──────
+
+
+def _held_job() -> tuple[Any, Any, Any]:
+    """``selected`` (to be held) -> ``after``, and an independent source node."""
+    from orcapod import function_pod
+
+    @function_pod(output_keys="y")
+    def plus_one(x: int) -> int:
+        return x + 1
+
+    job = PipelineJob(name="held_unconvertible", database=InMemoryArrowDatabase())
+    with job:
+        selected = _plain().select_data_columns(["x"], label="selected")
+        plus_one.pod(selected, label="after")
+    other = PipelineJob(name="independent", database=InMemoryArrowDatabase())
+    with other:
+        _plain().select_data_columns(["x"], label="independent")
+    independent = next(
+        n for n in other.nodes.values() if type(n).__name__ == "SourceJobNode"
+    )
+    return job.nodes["selected"], job.nodes["after"], independent
+
+
+def test_held_rows_that_cannot_make_one_table_raise_at_the_successors_edge() -> None:
+    """Sync: a held node whose rows cannot make one table (source-info tokens of two
+    shapes) is built where its successor reads it, after an independent node has run,
+    and raises the rows' ``ArrowTypeError``, as ``main`` rebuilt the rows there."""
+    from orcapod.core.operators.static_output_pod import rows_on_read
+
+    held, after, independent = _held_job()
+    dag: OrcaDAG[Any] = OrcaDAG()
+    dag.add_node(held)
+    dag.add_node(independent)
+    dag.add_edge(held, after)
+    observer = _NodeEvents()
+    rows = list(_unconvertible().iter_data())
+    with pytest.raises(pa.ArrowTypeError, match="Expected bytes"):
+        SyncPipelineOrchestrator().run(
+            dag, observer=observer, held={held: rows_on_read(rows, held)}
+        )
+    starts = [label for event, label in observer.events if event == "start"]
+    assert starts == [independent.label]
+
+
+def test_held_rows_that_cannot_make_one_table_are_sent_on_async() -> None:
+    """Async: the held rows are sent on as the plan took them, never built into one
+    table first: the function node after the held node starts every row and ends,
+    and the run raises the rows' ``ArrowTypeError``. ``main`` ca1c35d6 gives the same
+    events and error."""
+    from orcapod.pipeline import AsyncPipelineOrchestrator
+
+    held, after, _ = _held_job()
+    dag: OrcaDAG[Any] = OrcaDAG()
+    dag.add_edge(held, after)
+    rows: list[Any] = list(_unconvertible().iter_data())
+
+    class DataStarts(_NodeEvents):
+        def on_data_start(self, node_label: str, tag: Any, data: Any) -> None:
+            self.events.append(("data", node_label))
+
+    observer = DataStarts()
+    with pytest.raises(pa.ArrowTypeError, match="Expected bytes"):
+        AsyncPipelineOrchestrator().run(dag, observer=observer, held_rows={held: rows})
+    assert observer.events == [
+        ("start", "after"),
+        ("data", "after"),
+        ("data", "after"),
+        ("end", "after"),
+    ]

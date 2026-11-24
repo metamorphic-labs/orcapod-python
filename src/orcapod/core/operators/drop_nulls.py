@@ -116,6 +116,17 @@ class DropNulls(UnaryOperator):
             self.columns = tuple(sorted(set(names)))
         super().__init__(**kwargs)
 
+    def rows_dropped_text(
+        self,
+        position: int,
+        others: Sequence[str],
+        inputs: Sequence[StreamProtocol],
+    ) -> str | None:
+        """What the step drops, for ``explain()``: rows with a null in its columns."""
+        if self.columns is None:
+            return "no null in any tag or data column"
+        return f"no null in {', '.join(self.columns)}"
+
     def identity_structure(self) -> Any:
         """Return the operator's identity: its class name and the set of column names.
 
@@ -306,7 +317,12 @@ class DropNulls(UnaryOperator):
             columns non-nullable. A result with no rows has the same schema.
         """
         table = stream.as_table(
-            columns={"source": True, "system_tags": True, "sort_by_tags": False}
+            columns={
+                "source": True,
+                "system_tags": True,
+                "context": True,
+                "sort_by_tags": False,
+            }
         )
         tag_columns, data_columns = stream.keys()
         return ArrowTableStream(

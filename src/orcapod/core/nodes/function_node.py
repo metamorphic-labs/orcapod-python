@@ -83,7 +83,6 @@ from orcapod.errors import (
     PipelineJobRequiredError,
     OrcapodDatabaseError,
     TypeIdentityError,
-    OrcapodDatabaseReadError,
     OrcapodDatabaseWriteError,
     UnstorableColumnError,
 )
@@ -100,6 +99,7 @@ from orcapod.contexts.stored import (
 )
 from orcapod.utils.database_errors import (
     commit_best_effort,
+    database_write_path,
     keep_database_error,
     database_error_of,
 )
@@ -112,7 +112,6 @@ from orcapod.protocols.core_protocols import (
     TagProtocol,
     TrackerManagerProtocol,
 )
-from orcapod.databases.utils import as_table_committing
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.protocols.observability_protocols import (
     DataExecutionLoggerProtocol,
@@ -310,7 +309,11 @@ def _concat_row_tables(tables: "list[pa.Table]") -> "pa.Table":
         for name, row_type in zip(table.schema.names, table.schema.types):
             expected = seen.setdefault(name, row_type)
             if arrow_utils.shared_arrow_type(expected, row_type) is None:
-                message = f"Rows disagree on the Arrow type of column {name!r}: {expected} and {row_type}"
+                message = (
+                    f"Rows disagree on the Arrow type of column {name!r}: "
+                    f"{arrow_utils.describe_arrow_type(expected)} and "
+                    f"{arrow_utils.describe_arrow_type(row_type)}"
+                )
                 raise InputValidationError(message)
     return arrow_utils.concat_tables_by_name(tables)
 
@@ -2687,66 +2690,86 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
             for pod in pods:
                 pod.set_auto_flush(True)
 
-    def _ephemeral_database_in_use(self) -> ArrowDatabaseProtocol | None:
-        """Return the ephemeral database this node writes results to, if it does."""
-        if self._node_config.is_result_ephemeral and self._ephemeral_cached_pod:
-            return self.ephemeral_result_database
-        return None
-
-    def _commit_result_table(self) -> None:
-        """Commit this node's pending result rows, before its pipeline records.
-
-        Every view of a database shares one set of pending writes, and a flush commits
-        them table by table in no guaranteed order. Committing the result table on
-        its own first means a crash between the two commits leaves results without
-        pipeline records (found in the result cache on the rerun, so nothing is
-        recomputed), never pipeline records pointing at results that were lost.
-        Only a database that commits table by table
-        (``TableCommittingDatabaseProtocol``, the Delta database) needs and offers this;
-        for another database the pipeline flush that follows commits everything.
-        """
-        pod = self._cached_function_pod
-        if not isinstance(pod, CachedFunctionPod):
-            return
-        result_database = as_table_committing(pod.result_database)
-        if result_database is not None:
-            result_database.flush_batch(pod.record_path)
+    def _flush_node_table(
+        self,
+        database: ArrowDatabaseProtocol,
+        path: tuple[str, ...],
+        *,
+        result: bool = False,
+        publish_records: bool = True,
+    ) -> None:
+        """Flush one batch and withdraw dependent records if a result write fails."""
+        try:
+            if result:
+                database.flush_result_batch(path, publish_records=publish_records)
+            else:
+                database.flush_batch(path)
+        except BaseException as exc:
+            if result:
+                database.fail_pending_result(path)
+            if not isinstance(exc, Exception) or isinstance(exc, OrcapodDatabaseError):
+                raise
+            raise OrcapodDatabaseWriteError(
+                database_write_path(database, path),
+                node_label=self.label,
+                flush=True,
+                table_flush=True,
+            ) from exc
 
     def _commit_pending_writes(self) -> None:
-        """Commit this node's pending writes, results first (see ``_batched_commits``).
-
-        Raises:
-            OrcapodDatabaseReadError: If a stored table could not be read; it names this node.
-            OrcapodDatabaseWriteError: If a commit failed, naming this node and the database
-                (``flush=True``, no row: the batch holds many rows). The failed
-                writes stay pending, and earlier commits are kept.
-        """
-        pipeline_database = self._require_pipeline_database()
-        ephemeral = self._ephemeral_database_in_use()
+        """Commit results before publishing any records that depend on them."""
         try:
-            if ephemeral is not None:
-                try:
-                    ephemeral.flush()
-                except OrcapodDatabaseReadError:
-                    raise
-                except Exception as exc:
-                    raise OrcapodDatabaseWriteError(
-                        ephemeral.base_path, node_label=self.label, flush=True
-                    ) from exc
+            pipeline_database = self._require_pipeline_database()
+            ephemeral = self._ephemeral_cached_pod
+            if self._node_config.is_result_ephemeral and ephemeral is not None:
+                self._flush_node_table(
+                    ephemeral.result_database, ephemeral.record_path, result=True
+                )
+            pod = self._cached_function_pod
+            if isinstance(pod, CachedFunctionPod):
+                self._flush_node_table(
+                    pod.result_database,
+                    pod.record_path,
+                    result=True,
+                    publish_records=pipeline_database.stores_records,
+                )
+            self._flush_node_table(pipeline_database, self._versioned_pipeline_path)
+        except BaseException as exc:
+            self._commit_failed = True
+            if isinstance(exc, OrcapodDatabaseError):
+                exc.add_context(node_label=self.label)
+            raise
+        self._rows_since_commit = 0
+
+    def _write_pipeline_record(
+        self,
+        record_id: bytes,
+        record: pa.Table,
+        result_id: bytes,
+        is_ephemeral: bool,
+    ) -> None:
+        """Queue a readable record with a dependency on its result's commit."""
+        database = self._require_pipeline_database()
+        path = self._versioned_pipeline_path
+        pod = self._ephemeral_cached_pod if is_ephemeral else self._cached_function_pod
+        if self._commit_every_rows is not None and isinstance(pod, CachedFunctionPod):
+            result_database = pod.result_database
             try:
-                self._commit_result_table()
-                pipeline_database.flush()
-            except OrcapodDatabaseReadError:
+                dependency = result_database.pending_result(pod.record_path, result_id)
+            except OrcapodDatabaseError:
                 raise
             except Exception as exc:
                 raise OrcapodDatabaseWriteError(
-                    pipeline_database.base_path, node_label=self.label, flush=True
+                    database_write_path(result_database, pod.record_path),
+                    node_label=self.label,
+                    flush=True,
+                    table_flush=True,
                 ) from exc
-        except OrcapodDatabaseError as exc:
-            self._commit_failed = True
-            exc.add_context(node_label=self.label)
-            raise
-        self._rows_since_commit = 0
+            if dependency is not None:
+                with database.guard_record(path, record_id, dependency):
+                    database.add_record(path, record_id, record, skip_duplicates=True)
+                return
+        database.add_record(path, record_id, record, skip_duplicates=True)
 
     def _row_processed(self) -> None:
         """Count a processed row; commit once a batch is full (only inside a job run)."""
@@ -2764,21 +2787,16 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
     def _commit_after_failure(self, run_error: BaseException) -> None:
         """Commit what succeeded before a failure, never replacing the run's error.
 
-        The job flushes its database after a failed run, but not a node's ephemeral
-        database, a separate database, and not table by table: so the node commits its
-        ephemeral results and then its result table here, best-effort (a failure
-        is noted on ``run_error``). Skipped when the failure was this node's own
-        commit: the job's flush is that commit's one retry.
+        A node that already tried its commit withdrew records whose results
+        failed. The job can still retry pending writes through its database.
+        A failure here is noted on the run's original error.
 
         Args:
             run_error: The error the node is failing with.
         """
         if self._commit_every_rows is None or self._commit_failed:
             return
-        ephemeral = self._ephemeral_database_in_use()
-        if ephemeral is not None:
-            commit_best_effort(run_error, ephemeral.flush)
-        commit_best_effort(run_error, self._commit_result_table)
+        commit_best_effort(run_error, self._commit_pending_writes)
 
     @staticmethod
     def _commit_or_end_node(
@@ -3785,13 +3803,10 @@ class FunctionJobNode(RunHoldingNode, FunctionNodeBase):
         )
 
         try:
-            pipeline_database.add_record(
-                self._versioned_pipeline_path,
-                versioned_entry_id,
-                combined_record,
-                skip_duplicates=True,
+            self._write_pipeline_record(
+                versioned_entry_id, combined_record, data_record_id.bytes, is_ephemeral
             )
-        except OrcapodDatabaseReadError:
+        except OrcapodDatabaseError:
             # The stored table could not be read: report the read failure itself.
             raise
         except Exception as exc:

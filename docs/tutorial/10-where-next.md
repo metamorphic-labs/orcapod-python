@@ -171,11 +171,13 @@ the job a new name, and run it twice. How many deliveries are there after each r
     # 4
     ```
 
-    You can make the decision in the function, or filter the stream before the sink with an
-    expression filter (Part 3), which works inside a job like any other operator. Filtering
-    keeps the sink itself unchanged:
+    You can make the decision in the function, or filter the stream before the sink with
+    `filter` (Part 3), which works inside a job like any other operator. Filtering keeps the
+    sink itself unchanged:
 
     ```python
+    from orcapod import col
+
     delivered_long = []
 
 
@@ -188,7 +190,7 @@ the job a new name, and run it twice. How many deliveries are there after each r
         job = PipelineJob(name="long_announcements", database=database)
         with job:
             announce_long(
-                durations.polars_filter(pl.col("duration_s") > 100), label="announce_long"
+                durations.filter(col("duration_s") > 100.0), label="announce_long"
             )
         job.run()
 
