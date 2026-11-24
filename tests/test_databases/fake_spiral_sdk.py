@@ -985,11 +985,12 @@ def migrate(
             tuple(table["keys"]),
             schema.serialize().to_pybytes(),
             st.FROM_SERVICE if given is None else st.FROM_RECORD,
+            max([0, *store.versions(table["id"])]),
         )
     rows = list(by_id.values())
     values = [row.stored() for row in rows]
     if complete:
-        values.append(st.marker_values(rows))
+        values.append(st.marker_values(st.Scope(project, dataset, "0" * 64), rows))
     written = [{"written_at": "", "written_by": "", **v} for v in values]
     handle.append(pa.Table.from_pylist(written, schema=st.ROW_SCHEMA))
 

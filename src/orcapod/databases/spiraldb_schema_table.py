@@ -57,6 +57,10 @@ ROW_SCHEMA = pa.schema(
         pa.field("schema", pa.large_binary()),
         pa.field("key_columns", pa.large_string()),
         pa.field("nullable_columns", pa.large_string()),
+        pa.field("captured_version", pa.int64()),
+        pa.field("project", pa.large_string()),
+        pa.field("dataset", pa.large_string()),
+        pa.field("plan_digest", pa.large_string()),
         pa.field("table_count", pa.int64()),
         pa.field("rows_digest", pa.large_string()),
         pa.field("written_at", pa.large_string()),
@@ -141,6 +145,8 @@ class SchemaRow:
             what is stored and digested, never bytes encoded again from ``schema``:
             which extension types a process has registered changes those.
         nullability: ``FROM_RECORD`` or ``FROM_SERVICE``.
+        captured_version: The table's version when its schema was recorded. Kept for
+            later; no read uses it.
     """
 
     table_id: str
@@ -148,6 +154,7 @@ class SchemaRow:
     key_columns: tuple[str, ...]
     schema_bytes: bytes
     nullability: str
+    captured_version: int
 
     @cached_property
     def schema(self) -> pa.Schema:
@@ -162,6 +169,7 @@ class SchemaRow:
             "format": FORMAT,
             "format_version": FORMAT_VERSION,
             "nullability": self.nullability,
+            "captured_version": self.captured_version,
             "schema": base64.b64encode(self.schema_bytes).decode(),
             "key_columns": list(self.key_columns),
             "nullable_columns": [list(p) for p in nullable_paths(self.schema)],
@@ -206,6 +214,9 @@ class SchemaRow:
         ):
             raise TableSchemaError(f"a row's key_columns are {row['key_columns']!r}")
         readable = canonical_json([list(p) for p in nullable_paths(schema)])
+        captured = row["captured_version"]
+        if not isinstance(captured, int) or captured < 0:
+            raise TableSchemaError(f"a row's captured_version is {captured!r}")
         if row["nullable_columns"] != readable:
             raise TableSchemaError(
                 f"a row's nullable_columns {row['nullable_columns']!r} disagree with its "
@@ -222,6 +233,7 @@ class SchemaRow:
             tuple(keys),
             schema_bytes,
             row["nullability"],
+            captured,
         )
 
 
@@ -230,28 +242,52 @@ def canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def rows_digest(rows: Iterable[SchemaRow]) -> str:
-    """Return the digest the completion marker holds for ``rows``: the SHA-256 (hex) of
-    their canonical content, in table id order."""
-    content = [r.content() for r in sorted(rows, key=lambda r: r.table_id)]
+@dataclass(frozen=True)
+class Scope:
+    """What a schema table is complete for, as its marker states it.
+
+    Attributes:
+        project: The project.
+        dataset: The dataset.
+        plan_digest: The digest of the migration plan it was written from.
+    """
+
+    project: str
+    dataset: str
+    plan_digest: str
+
+
+def rows_digest(scope: Scope, rows: Iterable[SchemaRow]) -> str:
+    """Return the digest the completion marker holds: the SHA-256 (hex) of the scope and
+    of the rows' canonical content, in table id order.
+
+    Args:
+        scope: The marker's scope.
+        rows: Every table's row.
+    """
+    content = {
+        "project": scope.project,
+        "dataset": scope.dataset,
+        "plan_digest": scope.plan_digest,
+        "rows": [r.content() for r in sorted(rows, key=lambda r: r.table_id)],
+    }
     return hashlib.sha256(canonical_json(content).encode()).hexdigest()
 
 
-def marker_values(rows: Iterable[SchemaRow]) -> dict[str, Any]:
+def marker_values(scope: Scope, rows: Iterable[SchemaRow]) -> dict[str, Any]:
     """Return the stored values of the completion marker of ``rows``, without when and
     by whom."""
     listed = list(rows)
     return {
+        **dict.fromkeys(f.name for f in ROW_SCHEMA),
         "table_id": MARKER_KEY,
-        "table_name": None,
         "format": FORMAT,
         "format_version": FORMAT_VERSION,
-        "nullability": None,
-        "schema": None,
-        "key_columns": None,
-        "nullable_columns": None,
+        "project": scope.project,
+        "dataset": scope.dataset,
+        "plan_digest": scope.plan_digest,
         "table_count": len(listed),
-        "rows_digest": rows_digest(listed),
+        "rows_digest": rows_digest(scope, listed),
     }
 
 
@@ -298,27 +334,42 @@ def read_rows(
 
 
 def require_complete(
-    rows: Mapping[str, SchemaRow], marker: Mapping[str, Any] | None
+    project: str,
+    dataset: str,
+    rows: Mapping[str, SchemaRow],
+    marker: Mapping[str, Any] | None,
 ) -> None:
     """Refuse rows whose completion marker is missing or does not fit them.
 
+    Args:
+        project: The project the schema table was read from.
+        dataset: Its dataset.
+        rows: The table rows, by table id.
+        marker: The marker's values, or ``None``.
+
     Raises:
-        TableSchemaError: If the migration that wrote them was interrupted, or the rows
-            were changed since.
+        TableSchemaError: If the migration that wrote them was interrupted or withdrawn,
+            or the rows were changed or copied from another dataset since.
     """
     if marker is None:
         raise TableSchemaError(
             f"the dataset's {SCHEMA_TABLE} has no completion marker: its migration was "
             "interrupted. Run the migration's write step again"
         )
+    if (marker["project"], marker["dataset"]) != (project, dataset):
+        raise TableSchemaError(
+            f"the dataset's {SCHEMA_TABLE} was written for dataset "
+            f"{marker['project']}/{marker['dataset']}"
+        )
+    scope = Scope(project, dataset, str(marker["plan_digest"]))
     if marker["table_count"] != len(rows) or marker["rows_digest"] != rows_digest(
-        rows.values()
+        scope, rows.values()
     ):
         raise TableSchemaError(
             f"the dataset's {SCHEMA_TABLE} does not fit its completion marker "
             f"({marker['table_count']} tables recorded, {len(rows)} found, or their "
-            "content differs): a migration was interrupted or rows were changed. Run the "
-            "migration's write step again"
+            "content differs): its migration was interrupted or withdrawn, or rows were "
+            "changed. Run the migration again"
         )
 
 
@@ -362,6 +413,8 @@ class SchemaTable:
     call to the service.
 
     Args:
+        project: The project.
+        dataset: The dataset.
         open_table: Opens the schema table's latest snapshot; ``None`` when the dataset
             has none. Any other failure is raised.
         service_call: A context that says what a failing service call was doing.
@@ -369,9 +422,13 @@ class SchemaTable:
 
     def __init__(
         self,
+        project: str,
+        dataset: str,
         open_table: Callable[[], Any | None],
         service_call: Callable[[str], AbstractContextManager[None]],
     ) -> None:
+        self._project = project
+        self._dataset = dataset
         self._open = open_table
         self._service_call = service_call
         self._lock = Lock()
@@ -405,7 +462,7 @@ class SchemaTable:
                 written = require_schema_table(table)
                 stored = table.scan().to_table().to_pylist() if written else []
             rows, marker = read_rows(stored)
-            require_complete(rows, marker)
+            require_complete(self._project, self._dataset, rows, marker)
             kept = (snapshot, rows)
             with self._lock:
                 # An older read that ends late does not replace a newer one.

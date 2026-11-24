@@ -196,10 +196,12 @@ def _warn_once(about: tuple[str, str], message: str) -> None:
     with _warned_lock:
         if about in _warned_unrecorded:
             return
-        _warned_unrecorded.add(about)
     warnings.warn(
         message, UnrecordedTableSchemaWarning, stacklevel=outside_orcapod_stacklevel()
     )
+    # Only once it was shown: a warning turned into an error is raised every time.
+    with _warned_lock:
+        _warned_unrecorded.add(about)
 
 
 # ---------------------------------------------------------------------------
@@ -609,6 +611,8 @@ class SpiralDBConnector:
         self._counts: dict[tuple[str, str], tuple[int, bool]] = {}
         client = self._client
         self._schemas = SchemaTable(
+            project_id,
+            dataset,
             lambda: _open_keyed_table(client, project_id, dataset, SCHEMA_TABLE),
             lambda doing: _service_call(f"{doing} of {project_id}/{dataset}"),
         )

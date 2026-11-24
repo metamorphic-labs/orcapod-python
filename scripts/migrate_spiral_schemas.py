@@ -37,6 +37,7 @@ PLAN_FORMAT = "orcapod.spiral_migration"
 PLAN_VERSION = 1
 ROW_FORMAT = "orcapod.table_schema"
 ROW_FORMAT_VERSION = 1
+FIRST_ROWS = 20
 
 
 class MigrationError(Exception):
@@ -157,6 +158,26 @@ def source_values(project: str, dataset: str, name: str) -> dict[str, Any]:
         }
 
 
+def first_rows_digest(connector: Any, name: str) -> str | None:
+    """Return Orcapod's hash of a table's first rows (``FIRST_ROWS``) as it reads them;
+    ``None`` for a table it cannot hash (a map column).
+
+    Args:
+        connector: The connector of the table's dataset.
+        name: The table.
+    """
+    import pyarrow as pa
+
+    from orcapod.contexts import get_default_context
+
+    handle = connector.lookup_table(name)
+    batches = list(handle.scan_batches(limit=FIRST_ROWS))
+    rows = pa.Table.from_batches(batches, schema=handle.arrow_schema())
+    if any(pa.types.is_map(field.type) for field in rows.schema):
+        return None
+    return get_default_context().arrow_hasher.hash_table(rows).to_string()
+
+
 def describe_table(
     connector: Any, project: str, dataset: str, name: str
 ) -> dict[str, Any]:
@@ -176,12 +197,13 @@ def describe_table(
             "nullability": "record"
             if recorded or "__arrow_metadata__" in metadata
             else "service",
+            "captured_version": handle.version(),
             "schema": base64.b64encode(schema.serialize().to_pybytes()).decode(),
             "key_columns": handle.key_columns,
             "nullable_columns": nullable_paths(schema),
         },
-        "version": handle.version(),
         "source": source_values(project, dataset, name),
+        "first_rows": first_rows_digest(connector, name),
     }
 
 
@@ -203,8 +225,11 @@ def dry_run(args: argparse.Namespace) -> None:
     )
     project = client.project(args.project)
     tables: dict[str, list[str]] = {}
+    schema_tables: dict[str, str] = {}
     for found in project.list_tables():
-        if found.table != SCHEMA_TABLE:
+        if found.table == SCHEMA_TABLE:
+            schema_tables[found.dataset] = found.id
+        else:
             tables.setdefault(found.dataset, []).append(found.table)
     if missing := [d for d in args.dataset if d not in tables]:
         raise MigrationError(
@@ -223,8 +248,13 @@ def dry_run(args: argparse.Namespace) -> None:
             described.append(describe_table(connector, args.project, dataset, name))
             print(".", end="", flush=True)
         print()
-        plan["datasets"][dataset] = described
+        present = schema_tables.get(dataset)
+        plan["datasets"][dataset] = {"schema_table": present, "tables": described}
         print(f"{dataset}: {len(described)} table rows and 1 completion marker")
+        print(
+            f"  {SCHEMA_TABLE}: "
+            + ("absent, as expected" if present is None else f"EXISTS ({present})")
+        )
         for table in described:
             row, source = table["row"], table["source"]
             note = f", no source: {source['refused']}" if "refused" in source else ""
@@ -285,6 +315,7 @@ def planned_rows(tables: list[dict[str, Any]]) -> list[Any]:
             tuple(planned["key_columns"]),
             base64.b64decode(planned["schema"]),
             planned["nullability"],
+            planned["captured_version"],
         )
         # Read as the stored row will be, and equal to the plan, byte for byte.
         if SchemaRow.from_stored(row.stored()) != row or row.content() != planned:
@@ -323,7 +354,7 @@ def require_unchanged(
         where = f"{dataset}/{row.table_name}"
         if handle.resource_id != row.table_id:
             raise MigrationError(f"{where} is another table than in the dry run")
-        if int(handle.version_id) != table["version"]:
+        if int(handle.version_id) != table["row"]["captured_version"]:
             raise MigrationError(
                 f"{where} was written since the dry run (version {handle.version_id}, "
                 f"planned {table['version']})"
@@ -338,6 +369,40 @@ def require_unchanged(
             raise MigrationError(
                 f"{where} differs from the plan: {describe_difference(found, row.schema)}"
             )
+
+
+def note_path(args: argparse.Namespace) -> Path:
+    """Return where the schema tables this plan's write created are noted."""
+    return Path(f"{args.plan}.created.json")
+
+
+def read_note(args: argparse.Namespace) -> dict[str, str]:
+    """Return the schema tables this plan's write created: dataset to table id."""
+    try:
+        note = json.loads(note_path(args).read_text())
+    except OSError:
+        return {}
+    return note["created"] if note["digest"] == args.digest else {}
+
+
+def require_own_schema_table(
+    client: Any, args: argparse.Namespace, dataset: str, planned: dict[str, Any]
+) -> Any | None:
+    """Return the dataset's schema table when this plan's write created it, ``None`` when
+    there is none yet; refuse any other."""
+    from orcapod.databases.spiraldb_connector import _open_keyed_table
+
+    if planned["schema_table"] is not None:
+        raise MigrationError(
+            f"{dataset}: {SCHEMA_TABLE} existed at the dry run ({planned['schema_table']})"
+        )
+    table = _open_keyed_table(client, args.project, dataset, SCHEMA_TABLE)
+    if table is not None and read_note(args).get(dataset) != table.resource_id:
+        raise MigrationError(
+            f"{dataset}: {SCHEMA_TABLE} ({table.resource_id}) was not created by this "
+            f"plan's write ({note_path(args)} does not name it)"
+        )
+    return table
 
 
 def open_rows(client: Any, project: str, dataset: str) -> tuple[dict[str, Any], Any]:
@@ -367,9 +432,11 @@ def write(args: argparse.Namespace) -> None:
     project = plan["project"]
     prepared = {}
     # Everything is checked before anything is written.
-    for dataset, tables in plan["datasets"].items():
+    for dataset, planned in plan["datasets"].items():
+        tables = planned["tables"]
         rows = planned_rows(tables)
         require_unchanged(client, project, dataset, tables, rows)
+        _ = require_own_schema_table(client, args, dataset, planned)
         stored, _ = open_rows(client, project, dataset)
         wanted = {row.table_id: row for row in rows}
         for table_id, row in stored.items():
@@ -387,9 +454,18 @@ def write(args: argparse.Namespace) -> None:
     by = f"migrate_spiral_schemas, plan {args.digest[:12]}"
 
     def put(dataset: str, values: dict[str, Any]) -> None:
-        handle = client.project(project).create_keyed_table(
-            dataset, SCHEMA_TABLE, st.KEY_SCHEMA, exist_ok=True
+        handle = require_own_schema_table(
+            client, args, dataset, plan["datasets"][dataset]
         )
+        if handle is None:
+            # Created once, exclusively, and noted before anything is in it.
+            handle = client.project(project).create_keyed_table(
+                dataset, SCHEMA_TABLE, st.KEY_SCHEMA, exist_ok=False
+            )
+            created = {**read_note(args), dataset: handle.resource_id}
+            note_path(args).write_text(
+                canonical({"digest": args.digest, "created": created})
+            )
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         values = {**values, "written_at": now, "written_by": by}
         handle.append(pa.Table.from_pylist([values], schema=st.ROW_SCHEMA))
@@ -414,11 +490,26 @@ def write(args: argparse.Namespace) -> None:
             print(f"{dataset}: wrote {row.table_name}", flush=True)
             if args.stop_after is not None and written >= args.stop_after:
                 raise MigrationError("stopped as asked (--stop-after)")
-        final = st.marker_values(rows)
+        # Again just before the marker, and after it.
+        require_unchanged(
+            client, project, dataset, plan["datasets"][dataset]["tables"], rows
+        )
+        final = st.marker_values(st.Scope(project, dataset, args.digest), rows)
         if marker is None or any(marker[k] != v for k, v in final.items()):
             put(dataset, final)
+        try:
+            require_unchanged(
+                client, project, dataset, plan["datasets"][dataset]["tables"], rows
+            )
+        except MigrationError as exc:
+            # No valid marker is left: every read of the dataset is refused.
+            put(dataset, {**final, "rows_digest": "withdrawn: the dataset changed"})
+            raise MigrationError(
+                f"{exc}. It changed while it was migrated, so its completion marker was "
+                "withdrawn: run the dry run again"
+            ) from exc
         present, marker = open_rows(client, project, dataset)
-        st.require_complete(present, marker)
+        st.require_complete(project, dataset, present, marker)
         if {i: r.content() for i, r in present.items()} != {
             r.table_id: r.content() for r in rows
         }:
@@ -433,34 +524,52 @@ def verify(args: argparse.Namespace) -> None:
 
     plan = read_plan(args.plan)
     require_scope(plan, args)
-    _ = sdk_client()
+    from orcapod.databases import spiraldb_schema_table as st
+
+    client = sdk_client()
     project = plan["project"]
     wrong: list[str] = []
     checked = refused = 0
-    for dataset, tables in plan["datasets"].items():
+    for dataset, planned in plan["datasets"].items():
+        tables = planned["tables"]
         connector = SpiralDBConnector(project, dataset)
-        for row in planned_rows(tables):
+        rows = planned_rows(tables)
+        require_unchanged(client, project, dataset, tables, rows)
+        present, marker = open_rows(client, project, dataset)
+        st.require_complete(project, dataset, present, marker)
+        if (
+            present != {row.table_id: row for row in rows}
+            or marker is None
+            or marker["plan_digest"] != plan_digest(plan)
+        ):
+            raise MigrationError(f"{dataset}: the schema table is not the plan's")
+        for row in rows:
             schema = connector.get_arrow_schema(row.table_name)
             if not schema.equals(row.schema, check_metadata=True):
                 wrong.append(f"{dataset}/{row.table_name}: schema")
         for table in tables:
-            name, planned = table["row"]["table_name"], table["source"]
+            name, expected = table["row"]["table_name"], table["source"]
             found = source_values(project, dataset, name)
-            for key in sorted(set(planned) | set(found)):
-                if planned.get(key) != found.get(key):
+            for key in sorted(set(expected) | set(found)):
+                if expected.get(key) != found.get(key):
                     wrong.append(
-                        f"{dataset}/{name}: {key}: planned {planned.get(key)!r}, found "
+                        f"{dataset}/{name}: {key}: planned {expected.get(key)!r}, found "
                         f"{found.get(key)!r}"
                     )
+            rows_found = first_rows_digest(connector, name)
+            if rows_found != table["first_rows"]:
+                wrong.append(f"{dataset}/{name}: its first {FIRST_ROWS} rows")
             checked += 1
-            refused += "refused" in planned
+            refused += "refused" in expected
         print(f"{dataset}: checked {len(tables)} tables", flush=True)
     if wrong:
         raise MigrationError("not equal:\n  " + "\n  ".join(wrong))
     print(
         f"verified: {checked} tables; schemas equal, and the source ids, content hashes and "
         f"pipeline hashes of {checked - refused} sources ({refused} tables have none, "
-        "before and after)"
+        "before and after). Table ids, versions and the completion marker are the plan's, "
+        f"and so are the first {FIRST_ROWS} rows of each table. Rows beyond them were not "
+        "read."
     )
 
 
