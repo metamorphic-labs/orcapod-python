@@ -603,6 +603,11 @@ many rows were computed, how many were read from the database, and how many fail
 of a notebook cell it is shown as a table; `print` shows the same as text. The job keeps it as
 `job.last_run`. The results themselves are read from `job.nodes`, as above.
 
+The computed and from-store counts describe the work each node actually did in that run.
+In an async run, equal inputs can arrive from different sources before a result is
+available. Several rows may compute it concurrently, while later arrivals can reuse it.
+Scheduling can change which nodes get credit for computing or reusing a result.
+
 Running the same job again computes nothing new, and the summary says so:
 
 ```python

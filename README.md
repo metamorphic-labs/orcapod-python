@@ -12,22 +12,21 @@ provenance token.
 ## Installation
 
 Orcapod supports Python 3.11, 3.12 and 3.13 and is published on PyPI as `orcapod`.
-No release after 0.1.4 is available there yet: 0.2.0 was never published, and 0.3.0 was
-withdrawn on 2026-11-17. Until 0.4.0 is released, install the development version from the
-repository.
+0.1.4 is the latest stable release there (0.3.0 was withdrawn); a plain `uv add orcapod`
+installs it. The workshop uses the latest 0.4.0 release
+candidate, which the commands below install.
 
 The recommended way to install it is [uv](https://docs.astral.sh/uv/): `uv add` adds
 Orcapod to a uv project (start one with `uv init` in a new directory), and `uv run` runs
 your code in that project's environment:
 
 ```bash
-uv add git+https://github.com/metamorphic-labs/orcapod-python
+uv add "orcapod>=0.4.0rc4"
 ```
 
-In an environment not managed by uv, use
-`pip install git+https://github.com/metamorphic-labs/orcapod-python` instead. Once 0.4.0 is
-out, `uv add orcapod` (or `pip install orcapod`) installs the latest stable release; to try a
-release candidate, name it, for example `uv add "orcapod==0.4.0rc1"`.
+In an environment not managed by uv, use `pip install "orcapod>=0.4.0rc4"` instead. For the
+development version, install from the repository:
+`uv add git+https://github.com/metamorphic-labs/orcapod-python`.
 
 Tables written by 0.2.0 or earlier are not read by this version: see
 [Upgrading from 0.2.0](https://github.com/metamorphic-labs/orcapod-python/blob/main/CHANGELOG.md#upgrading-from-020)

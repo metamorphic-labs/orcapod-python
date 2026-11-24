@@ -9,14 +9,17 @@ traceback. A clean run stays quiet.
 from __future__ import annotations
 
 import ast
+import asyncio
 import warnings
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Any
 
 import pytest
+from typing_extensions import override
 
 from orcapod import PipelineJob, function_pod
+from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import RowFailuresWarning
 from orcapod.pipeline import (
@@ -24,7 +27,20 @@ from orcapod.pipeline import (
     RunSummary,
     SyncPipelineOrchestrator,
 )
-from orcapod.sources import DictSource
+from orcapod.pipeline.observer import NoOpObserver
+from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
+from orcapod.sources import ArrowTableSource, DictSource
+from tests.test_core.operators.several_items import (
+    DATA_FIRST_REVERSED,
+    DATA_TAGS,
+    MIXED,
+    P,
+    PLAIN,
+    ROLES,
+    TAGS_FIRST,
+    Arrangement,
+    make_table,
+)
 
 # --- The public names this feature adds, in one place ---------------------------------
 
@@ -204,14 +220,117 @@ def test_notebook_representation_names_the_failing_node() -> None:
 
 def test_run_async_returns_the_same_summary(store: Any) -> None:
     """``run_async`` returns the summary, warns, and keeps it as ``last_run``."""
-    import asyncio
-
     job = make_job(store, even_only, "evens")
     with pytest.warns(RowFailuresWarning, match="2 of 4 rows failed in node 'evens'"):
         summary = asyncio.run(job.run_async())
 
     assert node_counts(summary, "evens") == (2, 0, 2)
     assert last_run(job) is summary
+
+
+@function_pod(output_keys="reading")
+def format_reading(p1: int, p2: str) -> str:
+    """Format a reading with both data columns."""
+    return f"{p2}:{p1}"
+
+
+@pytest.mark.parametrize("roles", ROLES)
+@pytest.mark.parametrize(
+    "reverse_layout", [False, True], ids=["tags-first", "data-first"]
+)
+@pytest.mark.parametrize("first_async_source", [None, "a", "b"], ids=["sync", "a", "b"])
+def test_equal_inputs_report_the_work_each_source_did(
+    first_async_source: str | None,
+    reverse_layout: bool,
+    roles: str,
+) -> None:
+    """Three sources share results, while async arrival determines who computes."""
+    source_ids = ("a", "b", "c")
+    first_finished = asyncio.Event()
+    first_rows = 0
+
+    class GatedSource(ArrowTableSource):
+        @override
+        async def async_iter_data(
+            self,
+        ) -> AsyncIterator[tuple[TagProtocol, DataProtocol]]:
+            if self.source_id != f"arrow_table_v1:{first_async_source}":
+                _ = await first_finished.wait()
+            async for row in super().async_iter_data():
+                yield row
+
+    class ReleaseLaterSources(NoOpObserver):
+        @override
+        def on_data_end(
+            self,
+            node_label: str,
+            tag: TagProtocol,
+            input_data: DataProtocol,
+            output_data: DataProtocol | None,
+            cached: bool,
+        ) -> None:
+            nonlocal first_rows
+            if node_label == f"reading_{first_async_source}":
+                first_rows += 1
+                if first_rows == 2:
+                    first_finished.set()
+
+    arrangement = Arrangement(
+        P.tags[::-1] if reverse_layout else P.tags,
+        DATA_FIRST_REVERSED if reverse_layout else TAGS_FIRST,
+        roles,
+    )
+    tag_only: dict[str, bool | list[str]] = {
+        PLAIN: True,
+        DATA_TAGS: [],
+        MIXED: [P.mixed_plain],
+    }
+    table = make_table(P, arrangement, rows=[0, 1])
+    job = PipelineJob(name="equal_inputs", database=InMemoryArrowDatabase())
+    with job:
+        for source_id in source_ids:
+            source = GatedSource(
+                table,
+                tag_columns=arrangement.tag_order,
+                tag_only_columns=tag_only[roles],
+                source_id=source_id,
+            )
+            _ = format_reading.pod(source, label=f"reading_{source_id}")
+
+    async def run_gated() -> RunSummary:
+        return await asyncio.wait_for(
+            job.run_async(observer=ReleaseLaterSources()), timeout=10
+        )
+
+    summary = job.run() if first_async_source is None else asyncio.run(run_gated())
+    computed_source = first_async_source or "a"
+    expected = [("a", 2, "m:7"), ("b", 1, "n:8")]
+    for source_id in source_ids:
+        label = f"reading_{source_id}"
+        node = job.nodes[label]
+        assert isinstance(node, FunctionJobNode)
+        computed = source_id == computed_source
+        assert node_counts(summary, label) == ((2, 0, 0) if computed else (0, 2, 0))
+        rows = [
+            (tag.as_dict()["t1"], tag.as_dict()["t2"], data.as_dict()["reading"])
+            for tag, data in node.iter_data()
+        ]
+        if first_async_source is None:
+            assert rows == expected
+        else:
+            assert len(rows) == len(expected)
+            assert set(rows) == set(expected)
+        for t1, t2, _ in expected:
+            ((trace_label, invocation),) = node.trace(
+                {"t1": t1, "t2": t2}, "reading"
+            ).function_runs()
+            assert trace_label == label
+            assert invocation.computed_here is computed
+
+    note = "Computed and from-store counts reflect this run"
+    assert (note in repr(summary)) == (first_async_source is not None)
+    html = summary._repr_html_()  # pyright: ignore[reportPrivateUsage]  # notebook display hook under test
+    assert (note in html) == (first_async_source is not None)
 
 
 @function_pod(output_keys="z")

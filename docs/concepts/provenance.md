@@ -42,7 +42,8 @@ def average(accuracy: list[float]) -> float:
     return sum(accuracy) / len(accuracy)
 
 
-job = PipelineJob(name="behaviour", database=InMemoryArrowDatabase())
+database = InMemoryArrowDatabase()
+job = PipelineJob(name="behaviour", database=database)
 with job:
     scores = score.pod(trials, label="scores")
     average.pod(
@@ -67,6 +68,9 @@ print(trace)
 #       dict_v1:trials {"animal":"a2","trial":2} misses = 7
 ```
 
+(The grouping prints a `ProvisionalHashWarning`: see
+[Provisional operators](operators.md#provisional-operators).)
+
 ## What a trace reads
 
 The `row` argument selects the held rows to trace, by column values (usually tags): every
@@ -86,7 +90,10 @@ three records the job keeps.
   of the input with the same system tags.
 - **A function node's stored records.** For each input row a function node received, its
   pipeline record names that row (by its tags and system tags), the result it was served,
-  and whether this row computed the result or reused one. The stored result says which
+  and whether this row computed the result or reused one. The entry's `__computed`
+  field records what happened when that entry was written. When equal inputs arrive
+  concurrently in an async run, their arrival and cache lookup timing can change
+  which entries record a computation. The stored result says which
   function ran: its name, version and body hash, the executor, the Python version and the
   time. The trace shows these as a `FunctionRun`, and checks that the input row's content
   hash is the one the record stored.
@@ -213,6 +220,30 @@ print(job.diagram(highlight=trace.highlight()))
 #  * GroupBy (operator) <- scores
 #  * SelectDataColumns (operator) <- GroupBy
 # >* per_animal (function pod · average) [computed] [traced from here] <- SelectDataColumns
+```
+
+**Marks are history, not the last run.** `computed here` in a trace and `[computed]` or
+`[reused]` on the diagram describe the stored entry, in the run that recorded it. What a run
+just computed or reused is in its run summary. The same job built again over the same
+database computes nothing, and its trace and marks are unchanged:
+
+```python
+again = PipelineJob(name="behaviour", database=database)
+with again:
+    scores = score.pod(trials, label="scores")
+    average.pod(
+        scores.group_by(["animal"]).select_data_columns(["accuracy"]),
+        label="per_animal",
+    )
+print(again.run())
+# Run of job 'behaviour': all rows succeeded.
+#   scores: 4 rows: 0 computed, 4 from store, 0 failed
+#   per_animal: 2 rows: 0 computed, 2 from store, 0 failed
+warm = again.nodes["per_animal"].trace({"animal": "a2"}, "mean_accuracy")
+print([run.computed_here for _, run in warm.function_runs()])
+# [True, False, True]
+print(warm.highlight().marks == trace.highlight().marks)
+# True
 ```
 
 In a notebook the diagram is drawn as a picture, the mark as a bold line on its node. Here

@@ -75,6 +75,9 @@ print(len(calls))
 # 0
 ```
 
+(`group_by` prints a `ProvisionalHashWarning`, once: see
+[Messages you can ignore](00-setup.md#messages-you-can-ignore).)
+
 Nothing has been computed. Inside the `with` block the job only **records** which operators
 and pods are applied to which streams. The one new thing in the code is `label=`: a name for
 the step, which you will use to find its results.
@@ -93,7 +96,9 @@ print(calls.count("firing_rate"), calls.count("mean_rate"))
 `mean_rate` ran 8 times, once per session. `firing_rate` ran 63 times for 64 units. That is
 not a mistake: two units happen to have the same spike count and the same session duration.
 Orcapod stores a result under the function and the *values* of its inputs, so the second of
-those two units found its answer already stored.
+those two units found its answer already stored. The count of 63 is that of `job.run()`, which
+runs one row after another; with `job.run_async()` two equal inputs can be computed at the same
+time, so a first run can make 64 calls, with the same results.
 
 ## Nodes: where the results are
 

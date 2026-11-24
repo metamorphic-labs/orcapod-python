@@ -56,7 +56,8 @@ with job:
 job.run()
 ```
 
-This is the full pipeline from Part 5.
+This is the full pipeline from Part 5. `group_by`, and `filter` further down, each print a
+`ProvisionalHashWarning` once (see [Messages you can ignore](00-setup.md#messages-you-can-ignore)).
 
 ## Which steps produced this?
 
@@ -102,7 +103,8 @@ Every stream carries hidden columns that record where its rows and values came f
 are left out by default. Ask for them with the `columns` argument of `as_table`.
 
 **Source-info columns.** For each data column there is a companion column named
-`_source_<column>`. On a source it holds the source's name, the row number and the column:
+`_source_<column>`. On the `units` source it holds the source id, the row's record id
+(its position, counted from zero) and the column:
 
 ```python
 table = job.nodes["units"].as_table(columns={"source": True})
@@ -136,8 +138,20 @@ Two system-tag columns, because two sources feed `rates`; every row depends on o
 `sessions` and one row of `units`. The column names end in a long hash that identifies the
 source's position in the pipeline, which is why the sample selects them by prefix.
 
-The companion `_tag_record_id::...` columns identify the individual source row, as text:
-`row_5` for the sixth row, or the values of the source's key columns when it has some.
+The companion `_tag_record_id::...` columns identify the individual source row within its
+source, as text. By default a record id is the row's position, counted from zero:
+
+```python
+units_table = job.nodes["units"].as_table(columns={"system_tags": True})
+record_id_column = next(
+    name for name in units_table.column_names if name.startswith("_tag_record_id::")
+)
+print(units_table.column(record_id_column)[5].as_py())
+# row_5
+```
+
+For a source with key columns (`record_id_columns`), the record id is instead a JSON object
+of the key columns and their values, in the order you declared them.
 
 !!! note "After `group_by`"
     A grouped row comes from many source rows. Its system tags are folded into a single
@@ -184,7 +198,7 @@ print(records["__pod_ts"].dtype)
 ```
 
 63 of 64: the count from Part 5 again, now visible in the records. One row reused the
-result of another row with the same inputs.
+result of another row with the same inputs. (Like there, it is the count of `job.run()`.)
 
 ### `as_table` versus `get_all_records`
 
@@ -326,6 +340,10 @@ print(len(both.source_cells()))
 A selector that matches no held row gives a trace that says so (`no held row matches`,
 status `no_match`); one that names a column the node does not have is an error.
 
+!!! note "The first diagram"
+    The first diagram in a Python session issues `InDevelopmentWarning`, once. It is
+    harmless: see the note in [Part 5](05-pipeline-job.md#nodes-where-the-results-are).
+
 **On the diagram.** `trace.highlight()` marks the trace's path on the job's diagram. The
 listing shows the provenance question only, with no run status. It marks the nodes on the
 path with `*`, the node the trace was asked at with `>` and `[traced from here]`, and each
@@ -375,6 +393,40 @@ colour: red is kept for failed). The node it was asked at has a second outline a
 bold line "traced from here"; the mark is the bold line "reused":
 
 ![The diagram of the workshop job, captioned "highlighted: trace of rate_hz at node rates, for subject_id='mouse_02', session='s1', probe='imec1', unit=2: 1 row matches": the sources sessions and units, their column selections, the Join and the function pod rates outlined in a dark line; rates has a second outline and the bold lines "reused" and "traced from here"; GroupBy, its selection and the function pod session_means dimmed](provenance-diagram-trace.svg)
+
+**Computed when?** `computed here`, `[computed]` and `[reused]` describe the **stored
+entry**, in the run that recorded it. They do not describe the run you just made. For that,
+read the run summary. Build the same job again over the same database, as a new Python session
+would, and run it:
+
+```python
+again = PipelineJob(name="workshop", database=database)
+with again:
+    rates = firing_rate.pod(
+        units.select_data_columns(["n_spikes"]),
+        sessions.select_data_columns(["duration_s"]),
+        label="rates",
+    )
+    mean_rate.pod(
+        rates.group_by(["subject_id", "session"]).select_data_columns(["rate_hz"]),
+        label="session_means",
+    )
+print(again.run())
+# Run of job 'workshop': all rows succeeded.
+#   rates: 64 rows: 0 computed, 64 from store, 0 failed
+#   session_means: 8 rows: 0 computed, 8 from store, 0 failed
+warm = again.nodes["session_means"].trace(
+    {"subject_id": "mouse_03", "session": "s2"}, "mean_rate_hz"
+)
+print([run.computed_here for label, run in warm.function_runs() if label == "session_means"])
+# [True]
+print(warm.highlight().marks == trace.highlight().marks)
+# True
+```
+
+This run computed nothing: the summary counts 0 computed and 72 from the store. The trace and
+its marks are those of the first job, because the entries are: they were recorded by the first run,
+whose id and time the trace shows. A loaded job (`PipelineJob.load`) shows the same.
 
 **Why is a row missing?** A second job keeps only the `imec0` probe and leaves out the
 sessions of `mouse_04`. Row 4 of `units.csv` is an `imec1` unit, and row 48 is a unit of
@@ -481,8 +533,11 @@ result of the node, including those of earlier runs over other inputs, like
 !!! warning "Not yet: a stored joined result as the source of a new job"
     The stage above runs in memory, so its own results are not stored. Recording it in a new
     `PipelineJob` does not work yet for `session_means`, or for any node downstream of a
-    join: its rows still carry the provenance of both joined sources, and a job refuses such
-    a source with `SourceSpecMismatchError` when it is bound. Support is planned (ITL-1127).
+    `Join` or `MergeJoin` of two sources. An input of a job must declare exactly one
+    source-id and one record-id system tag. The source `session_means` has the schema
+    of its node, which declares a pair for each joined source, so a job refuses it with
+    `SourceSpecMismatchError` when it is bound. (Its rows hold only the stored tag and data
+    columns: no system tags, and null source-info tokens.) Support is planned (ITL-1127).
     Until then, to store a later stage, add it to the first job.
 
 ## What to remember
