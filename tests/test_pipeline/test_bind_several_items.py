@@ -149,13 +149,17 @@ def _bind_in(
         order,
         layout,
     )
+    # A mixed-role source placed its data-tag twice: the slot's table and head
+    # repeated a column and lost another (ITL-1245, ITL-1420).
+    head = job.nodes["s"].head(5).as_table().column_names
+    assert len(set(head)) == len(head), (order, layout)
     job.run(orchestrator=orchestrator())
     return job
 
 
 @pytest.mark.parametrize("layout", LAYOUTS)
 @pytest.mark.parametrize("order", MAIN.tag_orders(), ids="-".join)
-@pytest.mark.parametrize("role", [PLAIN, DATA_TAGS])
+@pytest.mark.parametrize("role", [PLAIN, DATA_TAGS, MIXED])
 def test_a_source_in_another_arrangement_is_bound_as_the_slot_declares(
     role: str, order: tuple[str, ...], layout: str
 ) -> None:
@@ -167,20 +171,3 @@ def test_a_source_in_another_arrangement_is_bound_as_the_slot_declares(
     assert _total_rows(asynchronous) == _total_rows(sync)
     assert _total_values(sync) == _total_values(reference)
     assert len(_total_values(sync)) == 6
-
-
-BIND_MIXED_ISSUE = "ITL-1245"
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason=f"{BIND_MIXED_ISSUE}: a mixed-role source in another column order is "
-    + "accepted, then the source node's table repeats a column",
-    raises=KeyError,
-)
-def test_a_mixed_role_source_in_another_arrangement_is_bound_as_the_slot_declares() -> (
-    None
-):
-    for order in MAIN.tag_orders():
-        for layout in LAYOUTS:
-            _bind_in(MIXED, order, layout)

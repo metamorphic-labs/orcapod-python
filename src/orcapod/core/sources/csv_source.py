@@ -5,13 +5,14 @@ import math
 import os
 import re
 from collections.abc import Collection
-from typing import Any, ClassVar, TYPE_CHECKING
+from typing import Any, ClassVar
 
+import pyarrow as pa
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource, saved_tag_only_columns
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
-from orcapod.core.sources.source_ids import location_source_id
+from orcapod.core.sources.source_ids import location_source_name
 from orcapod.core.sources.reload import keep_nullable_columns, same_rows
 from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
@@ -20,13 +21,6 @@ from orcapod.core.sources.stream_builder import (
 )
 from orcapod.utils import arrow_utils
 from orcapod.utils.schema_utils import _normalize_column_list
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
-
 
 _INFINITY = re.compile(r"\s*[+-]?inf(inity)?\s*", re.IGNORECASE)
 """The texts pyarrow's CSV reader reads as an infinity: ``inf`` or ``infinity``, any
@@ -282,7 +276,10 @@ class CSVSource(RootSource):
     """
 
     SOURCE_KIND: ClassVar[str] = "csv"
-    """Config type key and default source-id kind of this source (one vocabulary)."""
+    """Config type key and the kind in the source id's kind part (one vocabulary)."""
+    SOURCE_VERSION: ClassVar[int] = 1
+    """The version of this kind's implementation, in the kind part (ITL-1425)."""
+    TABLE_IS_ROWS: ClassVar[bool] = True
     TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
     def __init__(
@@ -297,9 +294,11 @@ class CSVSource(RootSource):
         tag_only_columns: TagOnlyColumns = (),
         **kwargs: Any,
     ) -> None:
-        if source_id is None:
-            source_id = location_source_id(self.SOURCE_KIND, str(file_path))
         super().__init__(source_id=source_id, **kwargs)
+        if self._source_name is None:
+            # A default name is where the data lives, not a name the user gave: it is
+            # not checked for a start shaped like a source id (ITL-1425).
+            self._source_name = location_source_name(str(file_path))
 
         self._file_path = file_path
         # Every later read (a check, ITL-1102) opens the file found now, whatever the
@@ -325,8 +324,8 @@ class CSVSource(RootSource):
         self._stream = result.stream
         self._tag_columns = result.tag_columns
         self._system_tag_columns = result.system_tag_columns
-        if self._source_id is None:
-            self._source_id = result.source_id
+        if self._source_name is None:
+            self._source_name = result.source_name
 
     def _read_table(self) -> pa.Table:
         """Read the file into an Arrow table, typed as at construction.
@@ -364,7 +363,8 @@ class CSVSource(RootSource):
             table,
             tag_columns=self._tag_columns,
             data_tags=source_data_tags(self._tag_columns, self._tag_only_columns),
-            source_id=self._source_id,
+            source_name=self._source_name,
+            kind_part=self.kind_part(),
             record_id_columns=self._record_id_columns or (),
             system_tag_columns=self._system_tag_columns,
         )
@@ -445,7 +445,7 @@ class CSVSource(RootSource):
             "record_id_columns": None
             if self._record_id_columns is None
             else list(self._record_id_columns),
-            "source_id": self.source_id,
+            **self._source_id_config(),
             **schema_config,
             **self._identity_config(),
         }
@@ -499,12 +499,15 @@ class CSVSource(RootSource):
         Raises:
             ValueError: If a ``"schema"`` entry is present but malformed.
         """
-        return cls(
-            file_path=config["file_path"],
-            tag_columns=config.get("tag_columns", ()),
-            tag_only_columns=saved_tag_only_columns(config),
-            system_tag_columns=config.get("system_tag_columns", ()),
-            record_id_columns=config.get("record_id_columns"),
-            source_id=config.get("source_id"),
-            schema=cls.saved_schema(config),
+        return cls._from_saved_name(
+            config,
+            lambda name: cls(
+                file_path=config["file_path"],
+                tag_columns=config.get("tag_columns", ()),
+                tag_only_columns=saved_tag_only_columns(config),
+                system_tag_columns=config.get("system_tag_columns", ()),
+                record_id_columns=config.get("record_id_columns"),
+                source_id=name,
+                schema=cls.saved_schema(config),
+            ),
         )

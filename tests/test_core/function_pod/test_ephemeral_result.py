@@ -152,7 +152,7 @@ class TestAddPipelineRecord:
 
         stream = _make_stream([{"id": 0, "x": 10}])
         node, db = _make_node(stream)
-        results = node.execute(stream)
+        results = list(node.execute(stream).iter_data())
         assert len(results) == 1
 
         all_records = db.get_all_records(node._versioned_pipeline_path)
@@ -171,7 +171,7 @@ class TestAddPipelineRecord:
         node, _ = _make_node(stream, pipeline_db=pipeline_db, is_result_ephemeral=True)
         node.set_ephemeral_database(ephemeral_store)
 
-        results = node.execute(stream)
+        results = list(node.execute(stream).iter_data())
         assert len(results) == 1
 
         all_records = pipeline_db.get_all_records(node._versioned_pipeline_path)
@@ -191,7 +191,7 @@ class TestBulkResolution:
         """is_result_ephemeral=False: execute() behaves identically to current implementation."""
         stream = _make_stream([{"id": 0, "x": 10}, {"id": 1, "x": 20}])
         node, _ = _make_node(stream)
-        results = node.execute(stream)
+        results = list(node.execute(stream).iter_data())
         assert len(results) == 2
         vals = {tag.as_dict()["id"]: data.as_dict()["result"] for tag, data in results}
         assert vals == {0: 20, 1: 40}
@@ -211,7 +211,7 @@ class TestBulkResolution:
         )
         node.node_config = NodeConfig(is_result_ephemeral=True)
         node.set_ephemeral_database(ephemeral_store)
-        results = node.execute(stream)
+        results = list(node.execute(stream).iter_data())
 
         assert len(results) == 1
         assert results[0][1].as_dict()["result"] == 20
@@ -311,7 +311,7 @@ class TestBulkResolution:
         node.set_ephemeral_database(InMemoryArrowDatabase())
 
         # Run 1: writes to persistent DB (is_result_ephemeral=False)
-        results = node.execute(stream)
+        results = list(node.execute(stream).iter_data())
         assert len(results) == 1
         assert results[0][1].as_dict()["result"] == 20
         assert call_count["n"] == 1
@@ -320,7 +320,7 @@ class TestBulkResolution:
         node._cached_output_datas.clear()
 
         # Run 2: Phase 1 must find persistent result — no recompute
-        results2 = node.execute(stream)
+        results2 = list(node.execute(stream).iter_data())
         assert len(results2) == 1
         assert results2[0][1].as_dict()["result"] == 20
         assert call_count["n"] == 1  # NOT recomputed
@@ -374,7 +374,7 @@ class TestBulkResolution:
         node_both.set_ephemeral_database(ephemeral_store)
         node_both._cached_output_datas.clear()
 
-        results = node_both.execute(stream_both)
+        results = list(node_both.execute(stream_both).iter_data())
         assert len(results) == 2
         vals = {tag.as_dict()["id"]: data.as_dict()["result"] for tag, data in results}
         assert vals == {0: 20, 1: 40}
@@ -482,7 +482,7 @@ class TestBulkResolution:
 
         # The anti-join should exclude the ephemeral row (entry_id clash with persistent row),
         # returning only the persistent result. No recomputation.
-        results = node.execute(stream)
+        results = list(node.execute(stream).iter_data())
         assert len(results) == 1
         assert results[0][1].as_dict()["result"] == 20
         # call_count did not increase — persistent hit from anti-join merge, no recomputation
@@ -524,7 +524,7 @@ class TestEphemeralWritePath:
         )
         node.node_config = NodeConfig(is_result_ephemeral=True)
         node.set_ephemeral_database(ephemeral_store)
-        results = node.execute(stream)
+        results = list(node.execute(stream).iter_data())
         assert len(results) == 1
         assert results[0][1].as_dict()["result"] == 20
 
@@ -740,7 +740,7 @@ class TestPersistentMissWarning:
         with caplog.at_level(
             logging.WARNING, logger="orcapod.core.nodes.function_node"
         ):
-            results = node2.execute(stream)
+            results = list(node2.execute(stream).iter_data())
 
         assert len(results) == 1  # recomputed
         assert any(
@@ -818,7 +818,7 @@ class TestEphemeralOnlyNode:
         )
         node.node_config = NodeConfig(is_result_ephemeral=True)
         node.set_ephemeral_database(ephemeral_store)
-        results = node.execute(stream)
+        results = list(node.execute(stream).iter_data())
 
         assert len(results) == 2
         vals = {tag.as_dict()["id"]: data.as_dict()["result"] for tag, data in results}
@@ -1021,7 +1021,7 @@ class TestFetchJoinedRecordsGuards:
             pipeline_database=pipeline_db,
             result_database=result_db,
         )
-        results = node2.execute(stream)
+        results = list(node2.execute(stream).iter_data())
 
         # Result must be served (from result DB cache or recomputed)
         assert len(results) == 1
@@ -1082,7 +1082,7 @@ class TestConcurrentMissSerialization:
             result_database=result_db,
         )
         count_before_session2 = call_count["n"]
-        results = node2.execute(stream)
+        results = list(node2.execute(stream).iter_data())
         assert len(results) == 1
         assert results[0][1].as_dict()["result"] == 20
         assert call_count["n"] == count_before_session2  # NOT recomputed

@@ -53,6 +53,7 @@ from orcapod.databases import (
     SpiralDBConnector,
 )
 from orcapod.databases.delta_arrow_types import _is_recorded  # pyright: ignore[reportPrivateUsage]
+from orcapod.databases.utils import identity_node
 from orcapod.utils.arrow_utils import normalize_to_large_types
 
 KEPT = "KEPT"
@@ -812,9 +813,28 @@ def _nested_changed(arrow_type: Any) -> Any:
     return None
 
 
+def _other_identifier(field: "pa.Field[Any]", column: Any) -> tuple[Any, Any]:
+    """A logical column as the same storage annotated with another extension name
+    (the column's, suffixed) and the same metadata: another logical type identifier
+    (ITL-1371). Not the same name with other metadata: a registered type's
+    unreadable metadata is refused before the append is compared."""
+    ext = cast("pa.BaseExtensionType", field.type)
+    identifier = identity_node(field).identifier
+    assert identifier is not None
+    metadata = {
+        b"ARROW:extension:name": identifier[0] + b".other",
+        b"ARROW:extension:metadata": identifier[1],
+    }
+    chunked: Any = pa.chunked_array  # the stubs type ``type=`` as None
+    storage = chunked([chunk.storage for chunk in column.chunks], type=ext.storage_type)
+    return pa.field(field.name, ext.storage_type, field.nullable, metadata), storage
+
+
 def _attribute_changes(rows: pa.Table) -> list[tuple[str, pa.Table]]:
     """``rows`` (new ids) with other field attributes on ``x`` and ``y``: the columns'
-    own metadata, then, for a nested type, its first nested field's metadata."""
+    own metadata; for a logical type, another identifier (another extension name);
+    for a nested type, its first nested field's
+    metadata."""
     ids = pa.array([b"c1", b"c2", b"c3"], pa.large_binary())
     rows = rows.set_column(0, rows.schema.field("id"), ids)
     out = []
@@ -825,6 +845,15 @@ def _attribute_changes(rows: pa.Table) -> list[tuple[str, pa.Table]]:
             index, _with_changed_metadata(own.schema.field(name)), own.column(index)
         )
     out.append(("column metadata", own))
+    if isinstance(rows.schema.field("x").type, pa.BaseExtensionType):
+        other = rows
+        for name in ("x", "y"):
+            index = other.schema.get_field_index(name)
+            field, column = _other_identifier(
+                other.schema.field(name), other.column(index)
+            )
+            other = other.set_column(index, field, column)
+        out.append(("logical type identifier", other))
     nested = rows
     for name in ("x", "y"):
         index = nested.schema.get_field_index(name)
@@ -1014,8 +1043,10 @@ How it is measured: a table holding two columns of the type (the second nullable
 null row) is written with `add_records` and flushed. The same type is then appended as
 slices of a larger table (three rows over two chunks, then the null row alone), and the
 same columns with other field metadata (the column's own, and a nested field's) are
-appended, which every database must refuse, naming the column. Every batch written is read
-back with `get_all_records`.
+appended, which every database must refuse, naming the column; for a logical type, so are
+the same values under another logical type identifier (another extension name over the
+same storage), which would otherwise read back as the stored type. Every batch written is
+read back with `get_all_records`.
 The SpiralDB column is measured through the test suite's disk fake of SpiralDB, which
 models what SpiralDB does to a column (no SpiralDB is used). No database tells tag
 columns from data columns, so a type is kept or refused the same way in either role.
@@ -1041,6 +1072,13 @@ Some refusals depend on the values or names as well as the type:
   field, so a map with such metadata is refused there.
 - A fixed-size list or fixed-size binary read back by Delta with another length or width
   than its type is refused on read, never padded or cut.
+- Delta refuses a column whose name holds a backtick, or is one deltalake's MERGE reserves
+  for its own columns (`__delta_rs_source`, `__delta_rs_target`, `__delta_rs_operation`,
+  `__delta_rs_delete`, `__delta_rs_target_insert`, `__delta_rs_target_update`,
+  `__delta_rs_target_delete`, `__delta_rs_target_copy`), of any type: delta-rs cannot
+  MERGE such a table, and every commit to an existing Delta table is a MERGE. A table
+  that already holds such a column takes no further append. A nested field with such a
+  name is kept.
 
 A table holds one type per column. An append whose columns differ from the held ones
 (stored, or still pending) in field metadata (the column's own, or a nested field's: a
@@ -1054,10 +1092,44 @@ another order): every value keeps its field's name, and an omitted field reads a
 in the appended rows. An append is refused, naming the column and the field, when it
 would add a non-nullable struct field (the stored rows have no value for it) or add a
 struct field inside a map (Delta cannot). A nested field the append makes nullable reads
-as nullable afterwards, as Delta stores it.
+as nullable afterwards, as Delta stores it, when the appended rows hold no null in it. A
+null there, in a field stored non-nullable, is refused at the commit and those rows are
+not written: the table stays strict to the type it was first declared with (deltalake
+1.6; 1.0.2 stored the null and made the field nullable). Moving a stored table to a
+corrected type is not offered yet.
+
+On Delta, the commit is the point of truth. When rows are added, only what is certain is
+refused, before anything is queued: two names differing only in case (a name differing
+only in case from a stored column only when schema evolution is on, the only case in
+which it would enter the stored schema), a stored table deltalake cannot read because two
+of its names differ only in case, another logical type (another extension name or other
+extension metadata) over a stored logical column, and a struct evolution that would put
+two names differing only in case into one struct. Four kinds of refusal by deltalake at
+the commit are raised by the flush once, naming the table, Delta's reason and the rows
+not written, and those rows leave the queue (the other tables of the flush still commit):
+a changed field metadata (`SchemaMismatchError`), two names equal under Delta's case
+folding, a type DataFusion cannot insert or cast into the stored one, and a row Delta
+finds invalid (a null in a non-nullable column, a failed CHECK constraint). A CHECK
+constraint whose verdict changes by chance would accept such rows on a later try;
+Orcapod writes none. Any other failure keeps its rows queued, as before, and the next
+flush tries them again: it writes them if the cause has passed (storage recovered,
+another writer no longer committing first) and raises only if that try fails too: a
+storage error, a constraint whose evaluation itself fails, a stored table that cannot be
+loaded. So a column whose Arrow type Delta keeps
+through a recorded type (the "(recorded type)" cells below, every list and map included)
+cannot gain a field when schema evolution is on, nor have a nested nullability change:
+the record is the column's field metadata, which deltalake 1.5 and later does not let a
+commit change. A struct column without a record still gains fields, an append may still
+add a new column, and an untyped `null` column takes the stored type.
 
 An append matches columns by name, exactly as Arrow matches them (`a` and `A` are two
-columns), never by position. Rows whose columns are the held table's columns in another
+columns), never by position. Delta alone refuses two columns, or two fields of one
+struct, whose names differ only in case: Delta column names are case-insensitive, so
+such a table, or an append that would make one, is refused naming both, before anything
+is queued, when Python's `str.lower` finds the pair. Delta folds case as Rust's
+`to_lowercase` does, which differs for a few code points (U+1C89 and U+1C8A, for
+example): such a pair is found by Delta only, at the flush, which raises once naming the
+column (`UnstorableColumnError`), and those rows leave the queue. Rows whose columns are the held table's columns in another
 order, each field equal to the held one (the same type at every depth, the same logical
 type, the same field attributes), are put in the held order, whether the table was
 flushed in between or not. The in-memory database matches them to the rows still pending,

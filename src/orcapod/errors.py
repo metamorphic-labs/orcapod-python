@@ -695,6 +695,54 @@ class SourceCheckFailedWarning(UserWarning):
     """
 
 
+class SourceNameWarning(UserWarning):
+    """A given source name starts like the id of a source kind (ITL-1425).
+
+    Every source id is ``<kind>_v<N>:<name>``, and Orcapod always adds the kind part of
+    the source that reads the data. A given ``source_id`` is the name: one that starts
+    with ``<registered kind>_v<N>:`` (``delta_table_v1:units``) is accepted as it is,
+    nested after the reader's own kind part (``csv_v1:delta_table_v1:units``), and this
+    warning says so. Give the name alone.
+    """
+
+
+class SourceVersionWarning(UserWarning):
+    """A saved source was written by another version of its kind (ITL-1425).
+
+    A saved job records each source's kind, implementation version and name. Loaded
+    where the source class declares another version, the source is rebuilt as the
+    installed version, so its source id names that version (``delta_table_v2:units``
+    for a source saved as ``delta_table_v1:units``): a different source id, a different
+    source. The saved id is not rewritten.
+    """
+
+
+class CachedSourceIdMismatchError(ValueError):
+    """A ``CachedSource``'s table holds rows of another source id (ITL-1425).
+
+    A cache keeps the rows of one source, with that source's id in every source-info
+    token and source-id system tag. A table whose stored rows name another id (most
+    often the same source read by another version of its kind, after a saved job is
+    loaded where the class declares a newer ``SOURCE_VERSION``) is refused when the
+    cache is first read or checked, before the wrapped source is checked or its rows
+    are read: once a cache is found to hold another id, no row of the wrapped source
+    is read or returned and nothing is written. Building the wrapped source (loading
+    a saved cache config) may read it before that. The cache must be rebuilt for the
+    new id (a new ``cache_path``, or a new cache database), or the reader's version
+    pinned.
+    """
+
+
+class SourceSlotNameCollisionError(ValueError):
+    """Two different sources would take one slot name in a job (ITL-1425).
+
+    A job slot is named by its source's name, without the kind part, so two
+    different sources (another kind, another version or another id) whose names are
+    equal would share one slot and one would replace the other. The job refuses
+    them; give one of them its own name (``source_id=`` when it is built).
+    """
+
+
 class RestrictedAggregationWarning(UserWarning):
     """A restricted source feeds an aggregating step of a job run (ITL-1218).
 
@@ -780,6 +828,17 @@ class SemiJoinIgnoredColumnWarning(UserWarning):
     (``map_data``, ``drop_data_columns``, ``select_data_columns``, or ``map_tags``
     for a tag), or call ``warnings.filterwarnings("ignore",
     category=SemiJoinIgnoredColumnWarning)``.
+    """
+
+
+class UpstreamFailedError(Exception):
+    """An input channel's producer failed before it finished (ITL-1347).
+
+    Raised by an ``InputChannel``'s next read once the node that writes into it has
+    failed or been cancelled, so a reader never takes a producer's failure for a normal
+    end: a barrier operator never computes over part of its input, and no node stores a
+    result as if its input were complete. The producer's own error is the cause
+    (``__cause__``), and it is the error a run raises: this one only stops the readers.
     """
 
 
@@ -960,6 +1019,10 @@ class OrcapodDatabaseError(RuntimeError):
             self.tag = dict(tag)
 
 
+class StoredTableSchemaError(OrcapodDatabaseError):
+    """A table's layout does not permit committing the queued records."""
+
+
 class OrcapodDatabaseWriteError(OrcapodDatabaseError):
     """Raised when a node's results or records could not be written to the database.
 
@@ -988,6 +1051,7 @@ class OrcapodDatabaseWriteError(OrcapodDatabaseError):
         tag: Mapping[str, Any] | None = None,
         *,
         flush: bool = False,
+        table_flush: bool = False,
     ) -> None:
         """Create the error for one failed write.
 
@@ -997,9 +1061,11 @@ class OrcapodDatabaseWriteError(OrcapodDatabaseError):
             node_label: Label of the node whose write failed, if the write site knows it.
             tag: Tag values of the row being stored, if the write covered one row.
             flush: Whether committing pending writes failed.
+            table_flush: Whether the flush was scoped to the given table.
         """
         self.record_path: tuple[str, ...] = tuple(record_path)
         self.flush: bool = flush
+        self._table_flush = table_flush
         super().__init__(
             self.record_path, node_label, tag, node_label=node_label, tag=tag
         )
@@ -1034,6 +1100,11 @@ class OrcapodDatabaseWriteError(OrcapodDatabaseError):
         )
         if self.flush:
             node = f" for node {self.node_label!r}" if self.node_label else ""
+            if self._table_flush:
+                return (
+                    f"Could not commit pending writes to the database{node} "
+                    f"(table {'/'.join(self.record_path)!r}){reason}. " + retry
+                )
             return (
                 f"Could not commit pending writes to the database{node} "
                 f"(database {'/'.join(self.record_path)!r}){reason}. The failing write "
@@ -1165,3 +1236,14 @@ class SideEffectLogDataContextError(OrcapodDatabaseError):
             "completions, so on it the node performs every side effect again: use "
             "one only when a repeated delivery is acceptable."
         )
+
+
+class ProvenanceInconsistencyError(ValueError):
+    """What a job holds and what its databases store disagree about a row's provenance.
+
+    Raised by ``node.trace`` and ``node.why_missing`` (ITL-1432) when a link they follow
+    cannot be proven: a group's or batch's members whose system tags do not fold to the
+    group's folded values, a row with no stored pipeline entry while the node has a
+    database, or a stored entry whose input is not the row the node holds. The tools never
+    guess a link; the message names the node and what disagreed.
+    """

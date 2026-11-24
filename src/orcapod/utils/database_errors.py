@@ -97,6 +97,15 @@ def keep_database_error(
         note_callback_failure(database_error, during, failure)
 
 
+def database_write_path(
+    database: ArrowDatabaseProtocol, record_path: tuple[str, ...] = ()
+) -> tuple[str, ...]:
+    """Locate a database write, including the backend's root when it names one."""
+    location = getattr(database, "storage_location", None)
+    root = (location,) if isinstance(location, str) and location else ()
+    return root + database.base_path + record_path
+
+
 def commit_best_effort(run_error: BaseException, commit: Callable[[], None]) -> None:
     """Commit pending writes after a run failed, noting instead of raising a failure.
 

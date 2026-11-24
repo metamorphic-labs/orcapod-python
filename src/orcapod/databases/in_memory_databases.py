@@ -2,25 +2,29 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
+from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, cast
 
+import pyarrow as pa
+import pyarrow.compute as pc
+
+from orcapod.databases._pending_commits import PendingCommit, PendingCommits
 from orcapod.databases._row_index import KeyIndex, compact_tail, matching_rows
 from orcapod.databases.utils import (
     coerce_record_id,
     first_changed_column,
+    first_logical_identity_change,
     in_held_column_order,
 )
-from orcapod.errors import InputValidationError
-from orcapod.utils.lazy_module import LazyModule
+from orcapod.errors import (
+    InputValidationError,
+    OrcapodDatabaseError,
+    OrcapodDatabaseWriteError,
+)
 
 if TYPE_CHECKING:
-    import pyarrow as pa
-    import pyarrow.compute as pc
     from orcapod.pipeline.serialization import DatabaseRegistry
-else:
-    pa = LazyModule("pyarrow")
-    pc = LazyModule("pyarrow.compute")
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +44,8 @@ class InMemoryArrowDatabase:
     the committed rows, and each flush appends without copying the stored rows, so the
     cost of a per-row write, flush or lookup does not grow with the rows already stored.
     """
+
+    stores_records = True
 
     RECORD_ID_COLUMN = "__record_id"
 
@@ -71,6 +77,14 @@ class InMemoryArrowDatabase:
         )
         self._indexes: dict[str, KeyIndex] = (
             _shared_indexes if _shared_indexes is not None else {}
+        )
+
+        self._pending_commits = (
+            _root._pending_commits
+            if _root is not None
+            else PendingCommits(
+                self.RECORD_ID_COLUMN, self._pending_batches, self._pending_record_ids
+            )
         )
 
     # ------------------------------------------------------------------
@@ -258,6 +272,24 @@ class InMemoryArrowDatabase:
             )
 
         record_key = self._get_record_key(record_path)
+        held = [
+            table.schema
+            for table in (
+                self._tables.get(record_key),
+                self._pending_batches.get(record_key),
+            )
+            if table is not None
+        ]
+        # A column of another logical type would read back as the held one
+        # (ITL-1371): refused first, on the raw identifier bytes, before the
+        # reorder below compares types (which may call an extension's serializer),
+        # whatever skip_duplicates (as in every database).
+        identity = first_logical_identity_change(held, records)
+        if identity is not None:
+            raise InputValidationError(
+                f"Cannot append to the table at {record_path!r}: column "
+                f"{identity[0]!r}: {identity[1]}. Nothing was written."
+            )
         # Columns match by name: rows with the held columns in another order are
         # put in the held order, the pending batch's, else the stored table's
         # (ITL-1367).
@@ -270,14 +302,6 @@ class InMemoryArrowDatabase:
         )
         # The table holds one type per column: rows whose field metadata or nested
         # field attributes differ would read back with the held ones (ITL-1334).
-        held = [
-            table.schema
-            for table in (
-                self._tables.get(record_key),
-                self._pending_batches.get(record_key),
-            )
-            if table is not None
-        ]
         changed = first_changed_column(held, records.schema)
         if changed is not None:
             raise InputValidationError(
@@ -325,37 +349,120 @@ class InMemoryArrowDatabase:
         """Whether this database keeps Arrow field metadata: it does (ITL-1019)."""
         return True
 
+    def pending_result(
+        self, record_path: tuple[str, ...], record_id: bytes
+    ) -> PendingCommit | None:
+        """Return a commit dependency for a buffered result, or verify it is stored."""
+        key = self._get_record_key(record_path)
+        if record_id in self._pending_record_ids.get(key, ()):
+            return self._pending_commits.attempt(key)
+        if record_id not in self._committed_id_index(key):
+            raise ValueError("The referenced result is neither stored nor pending.")
+        return None
+
+    def fail_pending_result(self, record_path: tuple[str, ...]) -> None:
+        """Withdraw records depending on this table's current commit attempt."""
+        self._pending_commits.finish(self._get_record_key(record_path), committed=False)
+
+    def guard_record(
+        self,
+        record_path: tuple[str, ...],
+        record_id: bytes,
+        dependency: PendingCommit,
+    ) -> AbstractContextManager[None]:
+        """Prevent this record's publication until its result commits."""
+        return self._pending_commits.guard(
+            self._get_record_key(record_path), record_id, dependency
+        )
+
+    def guard_table_schema(
+        self, record_path: tuple[str, ...], check: Callable[[pa.Schema], None]
+    ) -> AbstractContextManager[None]:
+        """Check the table schema when a batch queued here is promoted."""
+        return self._pending_commits.guard_schema(
+            self._get_record_key(record_path), check
+        )
+
     def flush(self) -> None:
-        for record_key in list(self._pending_batches.keys()):
-            pending = self._pending_batches.pop(record_key)
-            self._pending_record_ids.pop(record_key, None)
+        """Promote the ready batches in the shared queue."""
+        for record_key in list(self._pending_batches):
+            self._flush_by_key(record_key)
 
-            committed = self._tables.get(record_key)
-            if committed is None:
-                self._tables[record_key] = pending.combine_chunks()
-                continue
+    def refresh_table(self, record_path: tuple[str, ...]) -> None:
+        """Nothing to refresh: every view reads the one shared store (ITL-1408).
 
-            # Insert-if-not-exists: keep committed rows not overwritten by new batch,
-            # then append the new batch on top.
-            new_ids = pending[self.RECORD_ID_COLUMN].to_pylist()
-            committed_ids = self._committed_id_index(record_key)
-            if any(record_id in committed_ids for record_id in new_ids):
-                mask = pc.invert(
-                    pc.is_in(committed[self.RECORD_ID_COLUMN], pa.array(list(new_ids)))
-                )
-                kept = committed.filter(mask)
-                self._tables[record_key] = pa.concat_tables(
-                    [kept, pending]
-                ).combine_chunks()
-                # Rows moved: the indexes are rebuilt on the next lookup.
-                self._indexes.pop(record_key, None)
-                continue
+        All views of an in-memory database share its tables, and two separate
+        in-memory databases never share data, so no handle can hold an older version.
+        """
 
-            appended = compact_tail(pa.concat_tables([committed, pending]))
-            self._tables[record_key] = appended
-            key_index = self._indexes.get(record_key)
-            if key_index is not None and key_index.table is committed:
-                key_index.append(pending, appended)
+    def flush_result_batch(
+        self, record_path: tuple[str, ...], *, publish_records: bool
+    ) -> None:
+        """Promote the result table when pipeline records will reference it."""
+        if publish_records:
+            self.flush_pending_table(record_path)
+
+    def flush_batch(self, record_path: tuple[str, ...]) -> None:
+        """Flush the in-memory queue while honoring all pending guards."""
+        try:
+            self.flush()
+        except OrcapodDatabaseError:
+            raise
+        except Exception as exc:
+            raise OrcapodDatabaseWriteError(self.base_path, flush=True) from exc
+
+    def flush_pending_table(self, record_path: tuple[str, ...]) -> None:
+        """Promote one in-memory result table before publishing its references."""
+        self._flush_by_key(self._get_record_key(record_path))
+
+    def _flush_by_key(self, record_key: str) -> None:
+        """Promote the ready records at one key shared by all views."""
+        ready = self._pending_commits.take_ready(record_key)
+        if ready is None:
+            return
+        pending, ids = ready
+        try:
+            self._promote(record_key, pending)
+        except BaseException:
+            # A refused in-memory batch leaves the queue, as it did before guards.
+            self._pending_commits.finish(record_key, committed=False)
+            raise
+        else:
+            self._pending_commits.finish(record_key, committed=True)
+        finally:
+            self._pending_commits.forget(record_key, ids)
+
+    def _promote(self, record_key: str, pending: "pa.Table") -> None:
+        """Append the ready rows and update the committed indexes."""
+        committed = self._tables.get(record_key)
+        check = self._pending_commits.schema_check(record_key)
+        if check is not None:
+            check((pending if committed is None else committed).schema)
+        if committed is None:
+            self._tables[record_key] = pending.combine_chunks()
+            return
+
+        # Insert-if-not-exists: keep committed rows not overwritten by new batch,
+        # then append the new batch on top.
+        new_ids = pending[self.RECORD_ID_COLUMN].to_pylist()
+        committed_ids = self._committed_id_index(record_key)
+        if any(record_id in committed_ids for record_id in new_ids):
+            mask = pc.invert(
+                pc.is_in(committed[self.RECORD_ID_COLUMN], pa.array(list(new_ids)))
+            )
+            kept = committed.filter(mask)
+            self._tables[record_key] = pa.concat_tables(
+                [kept, pending]
+            ).combine_chunks()
+            # Rows moved: the indexes are rebuilt on the next lookup.
+            self._indexes.pop(record_key, None)
+            return
+
+        appended = compact_tail(pa.concat_tables([committed, pending]))
+        self._tables[record_key] = appended
+        key_index = self._indexes.get(record_key)
+        if key_index is not None and key_index.table is committed:
+            key_index.append(pending, appended)
 
     # ------------------------------------------------------------------
     # Path scoping
@@ -458,6 +565,14 @@ class InMemoryArrowDatabase:
     # ------------------------------------------------------------------
     # Read helpers
     # ------------------------------------------------------------------
+
+    def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
+        """Return the committed schema or the schema of a new, queued table."""
+        key = self._get_record_key(record_path)
+        table = self._tables.get(key)
+        if table is None:
+            table = self._pending_batches.get(key)
+        return None if table is None else table.schema
 
     def _combined_table(self, record_key: str) -> "pa.Table | None":
         """Return pending + committed data for a key, or None if nothing exists."""

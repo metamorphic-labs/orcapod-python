@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
+
+import pyarrow as pa
 
 from orcapod.core.sources.base import RootSource
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
@@ -12,13 +14,7 @@ from orcapod.core.sources.stream_builder import (
 from orcapod.types import DataValue, SchemaLike
 from orcapod.utils import arrow_utils
 from orcapod.utils.schema_utils import _normalize_column_list
-from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.tensor_conversions import warn_source_tensor_conversions
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
 
 
 class DictSource(RootSource):
@@ -42,8 +38,11 @@ class DictSource(RootSource):
 
     TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
-    # The config type key; also the kind prefix of the default source id.
+    # The config type key; also the kind in the kind part of the source id.
     SOURCE_KIND: ClassVar[str] = "dict"
+    # The version of this kind's implementation, in the kind part (ITL-1425).
+    SOURCE_VERSION: ClassVar[int] = 1
+    TABLE_IS_ROWS: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -88,8 +87,8 @@ class DictSource(RootSource):
             arrow_table,
             tag_columns=tag_columns,
             data_tags=source_data_tags(tag_columns, tag_only_columns),
-            source_id=self._source_id,
-            source_kind=self.SOURCE_KIND,
+            source_name=self._source_name,
+            kind_part=self.kind_part(),
             record_id_columns=self._key_columns,
             hash_in_key_order=hash_in_key_order,
             system_tag_columns=system_tag_columns,
@@ -100,9 +99,9 @@ class DictSource(RootSource):
         self._tag_only_columns = tuple(
             c for c in result.tag_columns if c not in result.data_tags
         )
-        if self._source_id is None:
-            self._source_id = result.source_id
-        warn_source_tensor_conversions(self._source_id, rows)
+        if self._source_name is None:
+            self._source_name = result.source_name
+        warn_source_tensor_conversions(self.source_id, rows)
 
     def to_config(self, db_registry=None) -> dict[str, Any]:
         """Serialize metadata-only config (data is not serializable)."""
@@ -110,7 +109,7 @@ class DictSource(RootSource):
             "source_type": self.SOURCE_KIND,
             "tag_columns": list(self._tag_columns),
             **self._tag_only_config(),
-            "source_id": self.source_id,
+            **self._source_id_config(),
             **self._identity_config(),
         }
 

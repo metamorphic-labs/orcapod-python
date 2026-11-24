@@ -44,25 +44,29 @@ from tests.test_core.operators.several_items import (
 )
 from tests.test_core.test_order_invariance import OPERATOR_CASES, OperatorCase
 
-# Stored columns whose values differ between two runs of one pipeline: run times, each
-# stored row's random identifier (a uuid7, not a hash), and ``__computed``: which of two
-# nodes sharing one function's result table computes a row and which reads it follows
-# the run order of independent nodes, which is not specified (it varies with the hash
-# seed for one hand-written job alone).
-_RUN_DEPENDENT = {"__pod_ts", "__data_id", "__computed"}
+# Stored metadata that can vary across runs, including which async node computes a
+# row when multiple nodes share one function's result table.
+_RUN_DEPENDENT = {
+    "__pod_ts",
+    "__data_id",
+    "__computed",
+    "__recorded_at",
+    "__pipeline_run_id",
+}
 # A result's random record id inside a source-info token differs on every run.
 _RANDOM_ID = re.compile(r"::[0-9a-f]{32}::")
 
 Mode = str  # "sync" or "async"
 
 
-def _rows(table: pa.Table) -> list[str]:
-    """A table's rows as sorted text, without the run-dependent columns."""
+def _rows(table: pa.Table, mode: Mode) -> list[str] | set[str]:
+    """Compare stable row values in sync order or as a set for async runs."""
     keep = [name for name in table.column_names if name not in _RUN_DEPENDENT]
-    return sorted(
+    rows = [
         _RANDOM_ID.sub("::<id>::", repr(sorted(row.items())))
         for row in table.select(keep).to_pylist()
-    )
+    ]
+    return rows if mode == "sync" else set(rows)
 
 
 def _run(job: PipelineJob, mode: Mode) -> None:
@@ -76,12 +80,13 @@ def _saved(job: PipelineJob, tmp_path: Path, name: str) -> dict[str, Any]:
     path = tmp_path / f"{name}.json"
     job.save(path)
     saved = json.loads(path.read_text())
-    # Compared as written: the edge list is in a canonical order (each node's inputs
-    # in argument order), whatever order the steps were recorded in.
+    # Edges are sorted and operators save their own argument order.
     return {"pipeline": saved["pipeline"], "bindings": saved["bindings"]}
 
 
-def fingerprint(job: PipelineJob, db: Any, tmp_path: Path, name: str) -> dict[str, Any]:
+def fingerprint(
+    job: PipelineJob, db: Any, tmp_path: Path, name: str, mode: Mode
+) -> dict[str, Any]:
     """Everything the property compares, after the job has run."""
     nodes = {
         label: (
@@ -92,9 +97,9 @@ def fingerprint(job: PipelineJob, db: Any, tmp_path: Path, name: str) -> dict[st
         for label, node in job.nodes.items()
     }
     paths = sorted(db.list_table_paths(()))
-    tables = {"/".join(path): _rows(db.get_all_records(path)) for path in paths}
+    tables = {"/".join(path): _rows(db.get_all_records(path), mode) for path in paths}
     results = {
-        label: _rows(node.as_table(columns={"system_tags": True, "source": True}))
+        label: _rows(node.as_table(columns={"system_tags": True, "source": True}), mode)
         for label, node in job.nodes.items()
         if node.node_type != "source"
     }
@@ -155,7 +160,7 @@ def test_every_operator_by_register_and_block_equals_hand_written(
     with hand:
         _apply(case, _prepare(case.sources(role, 0, TAGS_FIRST)))
     _run(hand, mode)
-    expected = fingerprint(hand, hand_db, tmp_path, "hand")
+    expected = fingerprint(hand, hand_db, tmp_path, "hand", mode)
 
     def registered(order: Callable[[Any, list[Any]], list[Any]]) -> None:
         prepared = _prepare(case.sources(role, 0, TAGS_FIRST))
@@ -163,7 +168,7 @@ def test_every_operator_by_register_and_block_equals_hand_written(
         job, db = _new_job()
         job.register(*order(end, prepared))
         _run(job, mode)
-        _assert_same(expected, fingerprint(job, db, tmp_path, "reg"), "register")
+        _assert_same(expected, fingerprint(job, db, tmp_path, "reg", mode), "register")
 
     registered(lambda end, prepared: [end])
     registered(lambda end, prepared: [end, *prepared])
@@ -174,7 +179,7 @@ def test_every_operator_by_register_and_block_equals_hand_written(
     with job:
         _apply(case, prepared)
     _run(job, mode)
-    _assert_same(expected, fingerprint(job, db, tmp_path, "block"), "with block")
+    _assert_same(expected, fingerprint(job, db, tmp_path, "block", mode), "with block")
 
 
 # ── function pod forms, several streams, several orders ─────────────────────
@@ -271,7 +276,7 @@ def test_function_pod_forms_registered_in_every_order_equal_hand_written(
     with hand:
         _forms(_sources(), InMemoryArrowDatabase())
     _run(hand, mode)
-    expected = fingerprint(hand, hand_db, tmp_path, "hand")
+    expected = fingerprint(hand, hand_db, tmp_path, "hand", mode)
     labels = sorted(_forms(_sources(), InMemoryArrowDatabase()))
     orders = [
         tuple(labels),
@@ -284,7 +289,9 @@ def test_function_pod_forms_registered_in_every_order_equal_hand_written(
         job.register(*(streams[label] for label in order[:3]))
         job.register(*(streams[label] for label in order[3:]))
         _run(job, mode)
-        _assert_same(expected, fingerprint(job, db, tmp_path, "reg"), f"order {order}")
+        _assert_same(
+            expected, fingerprint(job, db, tmp_path, "reg", mode), f"order {order}"
+        )
 
 
 @pytest.mark.parametrize("mode", ["sync", "async"])
@@ -306,7 +313,7 @@ def test_function_pod_forms_in_a_block_over_prebuilt_streams_equal_hand_written(
         streams = _forms(_sources(), InMemoryArrowDatabase())
         build(streams)
     _run(hand, mode)
-    expected = fingerprint(hand, hand_db, tmp_path, "hand")
+    expected = fingerprint(hand, hand_db, tmp_path, "hand", mode)
 
     streams = _forms(_sources(), InMemoryArrowDatabase())
     job, db = _new_job()
@@ -317,7 +324,9 @@ def test_function_pod_forms_in_a_block_over_prebuilt_streams_equal_hand_written(
         pass
     job.register(fell=streams["fell"], cached=streams["cached"])
     _run(job, mode)
-    _assert_same(expected, fingerprint(job, db, tmp_path, "mixed"), "block + register")
+    _assert_same(
+        expected, fingerprint(job, db, tmp_path, "mixed", mode), "block + register"
+    )
 
 
 # ── another job's nodes ─────────────────────────────────────────────────────
@@ -345,7 +354,7 @@ def test_a_job_that_takes_in_another_jobs_nodes_equals_hand_written(
     with hand:
         last.pod(*_first_part(_sources()), label="last")
     _run(hand, mode)
-    expected = fingerprint(hand, hand_db, tmp_path, "hand")
+    expected = fingerprint(hand, hand_db, tmp_path, "hand", mode)
 
     other, _ = _new_job("other")
     with other:
@@ -361,7 +370,7 @@ def test_a_job_that_takes_in_another_jobs_nodes_equals_hand_written(
         with job:
             last.pod(other.renamed, scaled, label="last")
     _run(job, mode)
-    _assert_same(expected, fingerprint(job, db, tmp_path, "absorbed"), how)
+    _assert_same(expected, fingerprint(job, db, tmp_path, "absorbed", mode), how)
     assert other.renamed is not job.renamed
     assert sorted(other.nodes) == other_names
 
@@ -724,7 +733,7 @@ def test_a_job_keeps_its_bindings_when_the_job_it_took_nodes_from_is_rebound() -
     assert target.more.as_table()["x3"].to_pylist() == [1, 2]
     assert sorted(target.nodes) == ["absorbed", "more", "s"]
     kept: Any = target.sources["s"]
-    assert kept.source_id == "s"
+    assert kept.source_name == "s"
 
 
 @pytest.mark.xfail(
@@ -801,17 +810,29 @@ def test_registering_held_steps_again_changes_nothing(held_by: str) -> None:
     assert job.last_run is not None
 
 
-def test_one_step_built_twice_in_a_block_keeps_the_label_recorded_last() -> None:
-    """Finding 7: a block that builds one step twice under two labels compiles as
-    before (the label recorded last; ITL-1389), even when the first stream is used
-    later."""
+@pytest.mark.parametrize("labels", [("first", "second"), ("second", "first")])
+def test_one_step_built_twice_in_a_block_keeps_the_smallest_label(
+    labels: tuple[str, str],
+) -> None:
+    """The same step keeps the smallest explicit label in either order (ITL-1436)."""
     source = _two_rows("s", 1)
     job, _ = _new_job()
     with job:
-        first = source.select_data_columns(["x"], label="first")
-        source.select_data_columns(["x"], label="second")
+        first = source.select_data_columns(["x"], label=labels[0])
+        source.select_data_columns(["x"], label=labels[1])
         MapData({"x": "z"})(first)
-    assert sorted(job.nodes) == ["MapData", "s", "second"]
+    assert sorted(job.nodes) == ["MapData", "first", "s"]
+
+
+def test_an_exact_keyword_name_survives_a_smaller_label_in_the_block() -> None:
+    """A keyword name remains exact when the block records the same step again."""
+    source = _two_rows("s", 1)
+    step = source.select_data_columns(["x"])
+    job, _ = _new_job()
+    with job:
+        job.register(z=step)
+        source.select_data_columns(["x"], label="a")
+    assert list(job.nodes) == ["s", "z"]
 
 
 @pytest.mark.parametrize("assigned_first", [False, True])

@@ -84,7 +84,7 @@ def oracle_of(table: pa.Table, source: Any) -> Oracle:
     """The oracle of the written rows of ``source``, with their key-hash tokens."""
     oracle = Oracle()
     oracle.add_source(
-        SOURCE_ID,
+        source.source_id,
         table,
         tag_columns=["grp"],
         schema_hash=schema_hash_of(source),

@@ -1,9 +1,9 @@
-"""Every source's default source id names its kind; a given id is used as it is (ITL-1154).
+"""Every source id names its kind and version; a given name is kept (ITL-1154, ITL-1425).
 
-Developer, November 15, 2026: "every source ought to have some default naming convention
-for the source id that reflects the category, but we should make it totally overridable."
-A default is ``<kind>:<rest>``, the kind being the class's ``SOURCE_KIND`` (its config type
-key): ``<kind>:<label>:<hex>`` from a hash, ``<kind>:<location>`` from where the data lives.
+Every source id is ``<kind>_v<N>:<name>`` (developer, November 23, 2026, ITL-1425): the
+kind being the class's ``SOURCE_KIND`` (its config type key) and ``N`` its
+``SOURCE_VERSION``. The name is the given ``source_id``, used as it is, or the default:
+``<label>:<hex>`` from a hash, ``<location>`` from where the data lives.
 """
 
 from __future__ import annotations
@@ -31,12 +31,16 @@ from orcapod.core.sources import (
 )
 from orcapod.core.sources.db_table_source import DBTableSource
 from orcapod.core.sources.postgresql_table_source import PostgreSQLTableSource
-from orcapod.core.sources.source_ids import hash_source_id, location_source_id
+from orcapod.core.sources.source_ids import (
+    build_source_id,
+    hash_source_name,
+    location_source_name,
+)
 from orcapod.core.sources.spiraldb_table_source import SpiralDBTableSource
 from orcapod.pipeline.serialization import SOURCE_REGISTRY
 from tests.test_channels.test_polling_source import FakeDynamicSource
 
-GIVEN = "a given id: kept as it is, with : and spaces"
+GIVEN = "a given name: kept as it is, with : and spaces"
 
 
 # ---------------------------------------------------------------------------
@@ -44,28 +48,23 @@ GIVEN = "a given id: kept as it is, with : and spaces"
 # ---------------------------------------------------------------------------
 
 
-def test_location_source_id_is_kind_then_location() -> None:
-    """``location_source_id`` joins the kind and the location with one ``:``."""
-    assert location_source_id("csv", "data/x.csv") == "csv:data/x.csv"
-    # A ':' in the location is kept: only '::' is refused.
-    assert location_source_id("csv", "C:/x.csv") == "csv:C:/x.csv"
+def test_location_source_name_is_the_location() -> None:
+    """``location_source_name`` keeps the location; the kind part goes in front."""
+    assert location_source_name("data/x.csv") == "data/x.csv"
+    # A ':' in the location is kept: only '::' and a ':' at either end are refused.
+    assert location_source_name("C:/x.csv") == "C:/x.csv"
+    assert build_source_id("csv", 1, "C:/x.csv") == "csv_v1:C:/x.csv"
 
 
 @pytest.mark.parametrize(
-    ("kind", "location"),
-    [("csv", "a::b.csv"), ("csv", ":b.csv"), ("csv", ""), ("", "x"), ("c:sv", "x")],
-    ids=[
-        "double-colon",
-        "leading-colon",
-        "empty-location",
-        "empty-kind",
-        "colon-in-kind",
-    ],
+    "location",
+    ["a::b.csv", ":b.csv", "", "b.csv:"],
+    ids=["double-colon", "leading-colon", "empty-location", "trailing-colon"],
 )
-def test_location_source_id_refuses(kind: str, location: str) -> None:
-    """A location with ``::``, an empty location and a bad kind have no default."""
+def test_location_source_name_refuses(location: str) -> None:
+    """A location with ``::``, an empty location or a ``:`` at an end has no default."""
     with pytest.raises(ValueError):
-        location_source_id(kind, location)
+        location_source_name(location)
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +94,17 @@ def test_every_root_source_has_a_kind(cls: type[Any]) -> None:
     """Every root source class declares a ``SOURCE_KIND`` with no ``:``."""
     kind = cls.__dict__.get("SOURCE_KIND")
     assert isinstance(kind, str) and kind and ":" not in kind
+
+
+@pytest.mark.parametrize("cls", ROOT_SOURCES, ids=lambda c: c.__name__)
+def test_every_root_source_declares_its_own_version(cls: type[Any]) -> None:
+    """Every root source class declares its own ``SOURCE_VERSION``, starting at 1.
+
+    One place per class (ITL-1425): a subclass never inherits its parent's version
+    (``SQLiteTableSource`` declares its own beside ``DBTableSource``'s).
+    """
+    version = cls.__dict__.get("SOURCE_VERSION")
+    assert type(version) is int and version == 1
 
 
 def test_registry_keys_are_the_kinds() -> None:
@@ -132,16 +142,16 @@ def sqlite_path(tmp_path: Path) -> Path:
 
 
 def test_csv_default_and_given(csv_path: Path) -> None:
-    """``csv:<path as passed>``; a given id is used as it is."""
+    """``csv_v1:<path as passed>``; a given name is used as it is."""
     assert (
         CSVSource(str(csv_path), tag_columns="k", tag_only_columns=True).source_id
-        == f"csv:{csv_path}"
+        == f"csv_v1:{csv_path}"
     )
     assert (
         CSVSource(
             str(csv_path), tag_columns="k", source_id=GIVEN, tag_only_columns=True
         ).source_id
-        == GIVEN
+        == f"csv_v1:{GIVEN}"
     )
 
 
@@ -155,48 +165,50 @@ def test_csv_path_with_double_colon_needs_a_source_id(tmp_path: Path) -> None:
         CSVSource(
             str(path), tag_columns="k", source_id="ab", tag_only_columns=True
         ).source_id
-        == "ab"
+        == "csv_v1:ab"
     )
 
 
 def test_delta_default_and_given(delta_path: Path) -> None:
-    """``delta_table:<path as passed>``; a given id is used as it is."""
+    """``delta_table_v1:<path as passed>``; a given name is used as it is."""
     assert DeltaTableSource(
         delta_path, tag_columns="k", tag_only_columns=True
-    ).source_id == (f"delta_table:{delta_path}")
+    ).source_id == (f"delta_table_v1:{delta_path}")
     given = DeltaTableSource(
         delta_path, tag_columns="k", source_id=GIVEN, tag_only_columns=True
     )
-    assert given.source_id == GIVEN
+    assert given.source_id == f"delta_table_v1:{GIVEN}"
 
 
 def test_sqlite_default_and_given(sqlite_path: Path) -> None:
-    """``sqlite_table:<db path as passed>:main.<table>``; a given id is used as is."""
+    """``sqlite_table_v1:<db path as passed>:main.<table>``; a given name is kept."""
     assert SQLiteTableSource(
         sqlite_path, "trials", tag_only_columns=True
-    ).source_id == (f"sqlite_table:{sqlite_path}:main.trials")
+    ).source_id == (f"sqlite_table_v1:{sqlite_path}:main.trials")
     given = SQLiteTableSource(
         sqlite_path, "trials", source_id=GIVEN, tag_only_columns=True
     )
-    assert given.source_id == GIVEN
+    assert given.source_id == f"sqlite_table_v1:{GIVEN}"
 
 
 def test_polling_default_is_the_hash_of_the_impl_identity() -> None:
-    """``polling_source:<label>:<hex>`` of ``impl.identity()``, never its repr."""
+    """``polling_source_v1:<label>:<hex>`` of ``impl.identity()``, never its repr."""
     source = PollingSource(
         FakeDynamicSource(batches=[]), tag_columns="id", record_id_columns="id"
     )
     identity_hash = get_default_context().semantic_hasher.hash_object(
         "FakeDynamicSource"
     )
-    assert source.source_id == hash_source_id("polling_source", identity_hash)
+    assert source.source_id == f"polling_source_v1:{hash_source_name(identity_hash)}"
     given = PollingSource(
         FakeDynamicSource(batches=[]),
         tag_columns="id",
         record_id_columns="id",
         source_id=GIVEN,
     )
-    assert given.source_id == GIVEN
+    assert given.source_id == f"polling_source_v1:{GIVEN}"
+    # The source id is part of a polling source's identity (ITL-1425).
+    assert given.content_hash() != source.content_hash()
 
 
 @pytest.mark.parametrize(
@@ -218,9 +230,11 @@ def test_polling_default_is_the_hash_of_the_impl_identity() -> None:
     ],
     ids=["dict", "arrow_table", "list"],
 )
-def test_in_memory_sources_keep_a_given_id(make: Any) -> None:
-    """A given id is used as it is by the in-memory sources too."""
-    assert make().source_id == GIVEN
+def test_in_memory_sources_keep_a_given_name(make: Any) -> None:
+    """A given name is used as it is by the in-memory sources too, after the kind."""
+    source = make()
+    assert source.source_name == GIVEN
+    assert source.source_id == f"{type(source).SOURCE_KIND}_v1:{GIVEN}"
 
 
 def test_a_given_source_id_with_the_separator_is_refused() -> None:
@@ -388,7 +402,6 @@ def test_a_colon_at_a_token_boundary_is_refused() -> None:
     Either would make a source-info token read two ways: ``s::row_0:::x`` is column
     ``:x`` of record ``row_0`` and column ``x`` of record ``row_0:`` (ITL-1154).
     """
-    from orcapod.core.sources.source_ids import location_source_id
     from orcapod.errors import InputValidationError
 
     with pytest.raises(InputValidationError, match="starts with ':'"):
@@ -405,9 +418,9 @@ def test_a_colon_at_a_token_boundary_is_refused() -> None:
             source_id="s:",
             tag_only_columns=True,
         )
-    with pytest.raises(ValueError, match="end with ':'"):
-        location_source_id("csv", "data:")
-    assert location_source_id("csv", "a:b") == "csv:a:b"
+    with pytest.raises(ValueError, match="ends with ':'"):
+        location_source_name("data:")
+    assert location_source_name("a:b") == "a:b"
 
 
 def test_a_location_whose_parts_cannot_be_told_apart_has_no_default_id(
@@ -432,7 +445,7 @@ def test_a_location_whose_parts_cannot_be_told_apart_has_no_default_id(
     named = SQLiteTableSource(
         path, "extra:main.logs", source_id="logs", tag_only_columns=True
     )
-    assert named.source_id == "logs"
+    assert named.source_id == "sqlite_table_v1:logs"
 
 
 def test_a_rowid_key_beside_an_integer_primary_key_keeps_its_name(
@@ -462,4 +475,4 @@ def test_a_sqlite_path_may_hold_a_colon(tmp_path: Path) -> None:
         conn.execute("INSERT INTO trials VALUES ('a', 1)")
     conn.close()
     source = SQLiteTableSource(path, "trials", tag_only_columns=True)
-    assert source.source_id == f"sqlite_table:{path}:main.trials"
+    assert source.source_id == f"sqlite_table_v1:{path}:main.trials"

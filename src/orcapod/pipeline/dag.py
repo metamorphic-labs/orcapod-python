@@ -114,10 +114,9 @@ class OrcaDAG(Generic[NodeT]):
     def __init__(self) -> None:
         # node → mutable attribute dict
         self._attrs: dict[NodeT, dict[str, Any]] = {}
-        # node → set of immediate successors (outgoing edges)
-        self._successors: dict[NodeT, set[NodeT]] = {}
-        # node → set of immediate predecessors (incoming edges)
-        self._predecessors: dict[NodeT, set[NodeT]] = {}
+        # node → immediate neighbours in edge insertion order
+        self._successors: dict[NodeT, dict[NodeT, None]] = {}
+        self._predecessors: dict[NodeT, dict[NodeT, None]] = {}
         # node → number of incoming edges (kept in sync with _predecessors)
         self._in_degree: dict[NodeT, int] = {}
 
@@ -137,8 +136,8 @@ class OrcaDAG(Generic[NodeT]):
         """
         if node not in self._attrs:
             self._attrs[node] = {}
-            self._successors[node] = set()
-            self._predecessors[node] = set()
+            self._successors[node] = {}
+            self._predecessors[node] = {}
             self._in_degree[node] = 0
         if attrs:
             self._attrs[node].update(attrs)
@@ -156,8 +155,8 @@ class OrcaDAG(Generic[NodeT]):
         self.add_node(u)
         self.add_node(v)
         if v not in self._successors[u]:
-            self._successors[u].add(v)
-            self._predecessors[v].add(u)
+            self._successors[u][v] = None
+            self._predecessors[v][u] = None
             self._in_degree[v] += 1
 
     # ------------------------------------------------------------------
@@ -268,16 +267,13 @@ class OrcaDAG(Generic[NodeT]):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _build_predecessor_dict(self) -> dict[NodeT, set[NodeT]]:
+    def _build_predecessor_dict(self) -> dict[NodeT, tuple[NodeT, ...]]:
         """Build the predecessor mapping required by TopologicalSorter.
 
-        Returns a copy of the internal predecessor sets — safe for mutation
-        by `graphlib.TopologicalSorter`.
-
         Returns:
-            Mapping of each node to a fresh copy of its predecessor set.
+            Mapping of each node to its predecessors in edge insertion order.
         """
-        return {node: set(preds) for node, preds in self._predecessors.items()}
+        return {node: tuple(preds) for node, preds in self._predecessors.items()}
 
     # ------------------------------------------------------------------
     # Ordering
@@ -286,11 +282,9 @@ class OrcaDAG(Generic[NodeT]):
     def topological_sort(self) -> list[NodeT]:
         """Return nodes in a valid topological order.
 
-        Uses `graphlib.TopologicalSorter` (Python stdlib).  The order is
-        stable within a single run but is not guaranteed to be
-        deterministic across Python versions or between runs.  Use
-        `topological_sort_deterministic` when a stable, reproducible
-        order is required (e.g. for content hashing).
+        Uses `graphlib.TopologicalSorter` (Python stdlib), whose order follows
+        node and edge insertion. Use `topological_sort_deterministic` for an
+        order independent of how the graph was built.
 
         Returns:
             List of nodes in topological order (sources before dependents).
@@ -370,5 +364,5 @@ class OrcaDAG(Generic[NodeT]):
             n = queue.pop()
             if n not in visited:
                 visited.add(n)
-                queue.extend(self._predecessors.get(n, set()))
+                queue.extend(self._predecessors[n])
         return frozenset(visited)

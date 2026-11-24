@@ -268,16 +268,15 @@ call (CLAUDE.md, ITL-1271).
      that stream, so it never takes a suffix;
    - one stream under two names, or a name for a step the job already holds under another
      assigned label;
-   - a name for a root source: a source node's name is its source id, which is part of its
-     identity (`compile()` step 2a); rename the source with `source_id=` instead;
+   - a name for a root source: its default slot name is the source's `source_name`;
+     set the source name with `source_id=`;
    - a name starting with `_` (attribute access refuses it).
 4. Two steps with ONE assigned label (two different steps both `label="norm"`): accepted with
    today's suffixes (`norm_1`, `norm_2`, content-hash order), because the by-hand job does
    that. A warning is not added (it would differ from the `with` block).
 5. One step (one content hash) reached under two DIFFERENT assigned labels (1.4: built twice
-   as `label="x"` and `label="y"`): refused, naming both labels. Today's `with` block keeps the
-   last recorded, which is order-dependent; `register` must not inherit that. The `with` block
-   itself is ITL-1389.
+   as `label="x"` and `label="y"`): refused, naming both labels. A `with` block keeps the
+   lexicographically smallest explicit label (ITL-1436).
 
 The suffix renumbering of 1.2 (a node's suffix can change when the job grows) is inherited,
 not fixed here (ITL-1389). An explicit keyword name is the remedy a user has today: named nodes
@@ -699,10 +698,9 @@ Each finding has a test (the PR body has the table). Behaviour as built after th
   identity, so the walk meets it once; `register` checks the restriction rule over every
   stream it is given, also when all its steps are held. Refused on `register` (one call or
   two), in a block, by reopening and by taking in another job's nodes.
-- **An ordered operator keeps its argument order through save and load.** `Pipeline.save`
-  writes the edges in a canonical order, each node's inputs in argument order; the job
-  loader takes each node's inputs in that order (a graph's predecessors do not keep it). This
-  was wrong on `main` too for a hand-written job; the walk made it visible.
+- **An ordered operator keeps its argument order through save and load.** The blueprint
+  saves operators' argument order with their descriptors and sorts the edges independently
+  (ITL-1417).
 - **A refusal leaves the job exactly as it was** (D14): a refused block or `register`
   restores the recorded steps, the compiled nodes (the same objects) and the bindings, also
   when the refusal comes from compilation (a database that cannot store a result table).
@@ -714,7 +712,7 @@ Each finding has a test (the PR body has the table). Behaviour as built after th
   step labelled with a name given exactly is refused on every way in.
 - **Registering held steps is a no-op**: nothing is recorded or compiled, so held runs stay.
 - **Labels**: a step held by the job keeps its label (no refusal); a block that builds one
-  step twice keeps the label recorded last, as before (ITL-1389). Within one `register`
+  step twice keeps the lexicographically smallest explicit label (ITL-1436). Within one `register`
   call, an assigned label wins over none, in either order; two different assigned labels
   are refused.
 - **A loaded job is read-only**: `register` refuses. A `with` block on a loaded job still

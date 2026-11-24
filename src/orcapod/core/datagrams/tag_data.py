@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, Self
+
+import pyarrow as pa
 
 from orcapod import contexts
 from orcapod.core.datagrams.datagram import Datagram, context_key_field
@@ -35,14 +37,9 @@ from orcapod.types import (
     SourceInfoValue,
 )
 from orcapod.utils import arrow_utils
-from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
-    import pyarrow as pa
-
     from orcapod.protocols.core_protocols import DataProtocol
-else:
-    pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
 
@@ -136,14 +133,54 @@ class Tag(Datagram):
                 **kwargs,
             )
 
-        self._system_tags: dict[str, DataValue] = {
-            **extracted_sys_tags,
-            **(system_tags or {}),
-        }
+        self._set_system_tags({**extracted_sys_tags, **(system_tags or {})})
+
+    def _set_system_tags(self, system_tags: dict[str, DataValue]) -> None:
+        """Hold ``system_tags`` as this tag's system tags."""
+        self._system_tags: dict[str, DataValue] = system_tags
         self._system_tags_python_schema: Schema = infer_python_schema_from_pylist_data(
             [self._system_tags], default_type=str
         )
         self._system_tags_table: "pa.Table | None" = None
+
+    @classmethod
+    def rows_of(
+        cls,
+        table: "pa.Table",
+        data_context: "str | contexts.DataContext | None" = None,
+    ) -> Iterator[Self]:
+        """Yield the tag of each row of ``table``, in row order.
+
+        Row ``i`` gives the tag ``cls(table.slice(i, 1), data_context=data_context)``
+        gives: the same user tags, system tags, meta values, Arrow types and hashes.
+        What the constructor does to every row alike is done once for the whole table
+        (ITL-1348): the normalization to the large types of a datagram and the split
+        of the columns into groups. Building the tags of a table row by row through the
+        constructor normalizes every row again. The table may be chunked in any way.
+
+        Args:
+            table: The rows: user-tag and system-tag columns.
+            data_context: The data context of every tag; ``None`` reads each row's own
+                from the table's data-context column, or takes the default.
+
+        Yields:
+            One tag per row.
+
+        Raises:
+            ValueError: If the table has rows and no tag column.
+        """
+        rows = cls._rows_of_table(
+            table, data_context, apart_prefix=constants.SYSTEM_TAG_PREFIX
+        )
+        for tag, system_tag_row, _ in rows:
+            tag._set_system_tags(
+                tag._data_context.type_converter.arrow_table_to_python_dicts(
+                    system_tag_row
+                )[0]
+                if system_tag_row is not None
+                else {}
+            )
+            yield tag
 
     # ------------------------------------------------------------------
     # Internal helper
@@ -323,12 +360,7 @@ class Data(Datagram):
                     for k, v in source_info.items()
                 }
 
-            data_table, prefixed_tables = arrow_utils.prepare_prefixed_columns(
-                data,
-                {constants.SOURCE_PREFIX: source_info},
-                exclude_columns=[constants.CONTEXT_KEY],
-                exclude_prefixes=[constants.META_PREFIX],
-            )
+            data_table, si_table = self._data_and_source_info_tables(data, source_info)
             super().__init__(
                 data_table,
                 meta_info=meta_info,
@@ -336,14 +368,9 @@ class Data(Datagram):
                 record_uuid=record_uuid,
                 **kwargs,
             )
-            si_table = prefixed_tables[constants.SOURCE_PREFIX]
-            if si_table.num_columns > 0 and si_table.num_rows > 0:
-                self._source_info: dict[str, SourceInfoValue] = {
-                    k.removeprefix(constants.SOURCE_PREFIX): v
-                    for k, v in si_table.to_pylist()[0].items()
-                }
-            else:
-                self._source_info = {}
+            self._source_info: dict[str, SourceInfoValue] = self._source_info_of_row(
+                si_table
+            )
         else:
             # Dict path: extract source-info keys before calling super()
             data_only = {
@@ -367,6 +394,77 @@ class Data(Datagram):
             self._source_info = {**contained_source_info, **(source_info or {})}
 
         self._source_info_table: "pa.Table | None" = None
+
+    @staticmethod
+    def _data_and_source_info_tables(
+        table: "pa.Table", source_info: "Mapping[str, SourceInfoValue]"
+    ) -> "tuple[pa.Table, pa.Table]":
+        """Split ``table`` into its data columns and the source info of each.
+
+        Args:
+            table: Data, meta and source-info columns, of any number of rows.
+            source_info: Tokens to use instead of the table's, by data column name.
+
+        Returns:
+            The table without its source-info columns, and a table with one
+            source-info column per data column (null where there is no token).
+        """
+        data_table, prefixed_tables = arrow_utils.prepare_prefixed_columns(
+            table,
+            {constants.SOURCE_PREFIX: source_info},
+            exclude_columns=[constants.CONTEXT_KEY],
+            exclude_prefixes=[constants.META_PREFIX],
+        )
+        return data_table, prefixed_tables[constants.SOURCE_PREFIX]
+
+    @staticmethod
+    def _source_info_of_row(si_table: "pa.Table") -> "dict[str, SourceInfoValue]":
+        """Return the tokens of a one-row source-info table, by data column name."""
+        if si_table.num_columns > 0 and si_table.num_rows > 0:
+            return {
+                k.removeprefix(constants.SOURCE_PREFIX): v
+                for k, v in si_table.to_pylist()[0].items()
+            }
+        return {}
+
+    @classmethod
+    def rows_of(
+        cls,
+        table: "pa.Table",
+        data_context: "str | contexts.DataContext | None" = None,
+    ) -> Iterator[Self]:
+        """Yield the data of each row of ``table``, in row order.
+
+        Row ``i`` gives the data ``cls(table.slice(i, 1), data_context=data_context)``
+        gives: the same values, source info, meta values, Arrow types and hashes. What
+        the constructor does to every row alike is done once for the whole table
+        (ITL-1348): the split into data and source-info columns and the normalization
+        to the large types of a datagram. Building the data of a table row by row
+        through the constructor splits and normalizes every row again. The table may
+        be chunked in any way.
+
+        Args:
+            table: The rows: data, meta and source-info columns.
+            data_context: The data context of every row; ``None`` reads each row's own
+                from the table's data-context column, or takes the default.
+
+        Yields:
+            One ``Data`` per row.
+
+        Raises:
+            ValueError: If the table has rows and no data column.
+        """
+        if table.num_rows == 0:
+            return
+        data_table, si_table = cls._data_and_source_info_tables(table, {})
+        if data_table.num_columns == 0:
+            raise ValueError("Data table must contain at least one data column.")
+        rows = cls._rows_of_table(data_table, data_context, beside=si_table)
+        for data, _, source_info_row in rows:
+            assert source_info_row is not None
+            data._source_info = cls._source_info_of_row(source_info_row)
+            data._source_info_table = None
+            yield data
 
     # ------------------------------------------------------------------
     # Internal helper

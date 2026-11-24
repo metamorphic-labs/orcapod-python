@@ -63,7 +63,9 @@ Among `job.run()`'s optional arguments, the tutorial's
 [Part 9](../tutorial/09-when-things-go-wrong.md) demonstrates `orchestrator=` (for example
 `SyncPipelineOrchestrator(error_policy="fail_fast")` to stop at the first failing row; the
 default policy skips failed rows and continues) and `observer=` (`StatusObserver`,
-`LoggingObserver`) to record what happened during the run. `load_only=True` fills the nodes
+`LoggingObserver`) to record what happened during the run. An observer only watches: one
+that changes the job, its nodes or its bound sources during a run is unsupported, and what
+the run then does is undefined (ITL-1369). `load_only=True` fills the nodes
 from what is already stored and computes nothing; see
 [Loading without computing](function-pods.md#loading-without-computing-runload_onlytrue).
 
@@ -104,9 +106,9 @@ built on it begins there (see [Sources](sources.md)). A stream that is not a nod
 source only when you build one from it, for example an `ArrowTableSource` over its table with
 a `source_id` you choose.
 
-Where an absorbed step's results are stored is decided by the job that runs it: its own
-database and name. Two jobs that share steps see each other's stored results only when they
-use the same database and the same job name.
+The job that runs an absorbed step determines where its results are stored. By default,
+jobs share stored function results when they use the same database and job name. Jobs can
+also share function results by using the same `result_database`.
 
 ## Nodes
 
@@ -163,13 +165,99 @@ lists every type for every database.
 
 On disk the layout is `<directory>/<job name>/<function name>/...` for each function, plus
 `<directory>/<job name>/_result/...`. The job's `name` is the top level, so jobs with
-different names over one directory do not see each other's results. Deleting the directory,
+different names over one directory do not see each other's results, unless they are given
+one result database (below). Deleting the directory,
 or a job's subdirectory, is safe: the next run of a newly built job, for example in a new
 Python session, recomputes what is missing. A job object that has already run holds its
 run and computes nothing on a second `run()`.
 
 A job created without a database can be recorded but not run. Give it one later with
 `job.bind(database=...)`; `run()` without a database raises `ValueError`.
+
+### Sharing function results between jobs
+
+A function's results depend only on the function and its input values, not on the job
+that computed them. Give several jobs one **result database** and they share them:
+`PipelineJob(name=..., database=..., result_database=...)`. The function results are
+stored in the result database as it is given, at `<function name>/...`, with no job name, so
+a job computes only the inputs no job sharing it has stored. Pass a view, such as
+`results.at("shared")`, to put them under a folder of your choice.
+
+```python
+results = InMemoryArrowDatabase()
+shared_calls = []
+
+
+@function_pod(output_keys="bmi")
+def shared_bmi(weight: float, height: float) -> float:
+    shared_calls.append(weight)
+    return weight / height**2
+
+
+for study_name in ["study_1", "study_2"]:
+    study = PipelineJob(
+        name=study_name, database=InMemoryArrowDatabase(), result_database=results
+    )
+    with study:
+        shared_bmi.pod(mice(cohort_a), label="bmi")
+    study.run()
+    print(study_name, study.nodes["bmi"].as_table().num_rows, len(shared_calls))
+# study_1 2 2
+# study_2 2 2
+
+print(sorted({path[0] for path in results.list_table_paths(())}))
+# ['shared_bmi']
+```
+
+`study_2` computed nothing: both rows were in the result database. Without
+`result_database` (the default) the results are kept in the job's own database at
+`<job name>/_result/...`, as above. `job.bind(result_database=other)` changes it, and
+`job.bind(result_database=None)` puts the results back in the job's own database.
+
+Only function results are shared. What the job's nodes store stays the job's own, under
+its database and name, whatever `result_database` is: each function node's pipeline records
+(which rows the job read), an operator's cache and a side-effect pod's log. So a job still
+reads only its own rows: two jobs over different sources share one result table, and each
+job's nodes, their `as_source()` and a loaded job show the rows of that job's inputs only.
+A `CachedSource` is not a node of the job: its cache is kept in the cache database and at
+the path it was created with, whatever job reads it, so two jobs given one `CachedSource`
+(or one cache database and path) share its cache.
+
+Every run reads a function node's stored tables (its result table and its pipeline
+records) as they are when the node starts: results that another job, or another handle on
+the same database (a second `DeltaTableDatabase` over the same directory, another
+process), committed before then are reused, not computed again. A read of what is stored
+(`as_source()`, `get_all_records()`) likewise reads the tables as they are at that read.
+For a `DeltaTableDatabase` each costs one read of each of the node's tables' logs: once
+per node and run, or per read call, never per row. Each node looks at its own tables, so
+two nodes of one job that share a result table each read its log once in a run.
+
+Results committed **while** a node runs are another matter. The window opens when the node
+starts and reads its tables, and closes at its next run or stored read, or when it
+commits that table itself: a result another job commits in between is not seen by this
+run, which computes that input again. For an ordinary function this costs only time
+(both jobs store the same result). For a function that takes the invocation context, it
+means **each of two jobs that run at the same time over the same input can perform the
+action**: nothing reserves an input while it is being computed. Do not run two such jobs
+over the same inputs at once.
+
+A `DeltaTableDatabase` notices a newer version of a table, but not a table deleted and
+recreated at the same path that happens to have the same version number: a handle that
+had loaded the old table keeps reading it (ITL-1413). Open a new database object after
+replacing a table.
+
+A function that takes the invocation context (`ctx_arg`) performs an external action, and
+its result table records which inputs it was performed for. Jobs that share a result
+database share that record too: a job performs the action only for inputs no job sharing
+the database has performed it for.
+
+### Result commit ordering
+
+A function node publishes its pipeline records after the referenced results
+commit, also when the results are in a separate result database. Failed result batches
+withdraw their pending pipeline records.
+`NoOpArrowDatabase` explicitly discards results and still allows pipeline
+bookkeeping to be written.
 
 ### Connector databases
 
@@ -234,8 +322,8 @@ except UnstorableColumnError as exc:
 ## What a re-run computes
 
 A stored result is reused when the function's identity (its name, its output schema and its
-**major** version), the input values of the row, and the job's name and database are all
-unchanged. Which source, and which steps before the function, the values came through does
+**major** version), the input values of the row, and the job's name and database (or the
+result database it shares, see above) are all unchanged. Which source, and which steps before the function, the values came through does
 not matter.
 
 ```python
@@ -415,11 +503,12 @@ the **Nodes** table below the picture for each node's columns and status.
 
 ## Saving and loading
 
-`job.save(path)` writes the job to a JSON file: the graph, the database's location and how
-each source was configured. `PipelineJob.load(path)` reads it back, for example in a later
+`job.save(path)` writes the job to a JSON file: the graph, the database's location (and the
+result database's, when one was given) and how each source was configured. `PipelineJob.load(path)` reads it back, for example in a later
 Python session. An `InMemoryArrowDatabase` has no location to record, so here the database
 is passed again; `PipelineJob.load(path, database=...)` is also how you point a loaded job
-at a database that has moved. The file records each node's own Arrow types, so saving types
+at a database that has moved, and `PipelineJob.load(path, result_database=...)` at a result
+database. The file records each node's own Arrow types, so saving types
 every node from its inputs' types, as previewing an empty job does, and costs what that
 preview costs: a pipeline whose joins keep many system-tag columns saves as slowly as it
 previews.
@@ -463,6 +552,14 @@ database that holds other rows than the file expects) are in
 [Saving and loading a job](function-pods.md#saving-and-loading-a-job).
 
 `Pipeline.save(path)` and `Pipeline.load(path)` save and load a blueprint.
+
+The file lists each operator's inputs in the order they were given, so a loaded
+`MergeJoin(left, right)` or `SemiJoin(left, right)` takes `left` first, as the live job did.
+A file saved by an Orcapod older than this rule (before ITL-1417) cannot say which input
+comes first, so loading it raises `ValueError` when it holds an operator over two or more
+inputs that is not known to be commutative (`MergeJoin`, `SemiJoin`, or an operator that
+cannot be rebuilt in this process); build the job from its code and save it again. A file
+whose multi-input operators are all commutative (`Join`, `Rejoin`) loads as before.
 
 ## How it connects to other concepts
 

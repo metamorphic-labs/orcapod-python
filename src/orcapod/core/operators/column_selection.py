@@ -1,7 +1,7 @@
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Sequence
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
 
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
@@ -12,13 +12,7 @@ from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash, Schema
-from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.schema_utils import column_names
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +58,8 @@ class SelectTagColumns(UnaryOperator):
     """
 
     # Data-tags (ITL-1023): handled.
+    # Each output row comes from one input row (ITL-1347).
+    ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
@@ -201,6 +197,8 @@ class SelectDataColumns(UnaryOperator):
     """
 
     # Data-tags (ITL-1023): handled.
+    # Each output row comes from one input row (ITL-1347).
+    ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
@@ -355,6 +353,8 @@ class DropTagColumns(UnaryOperator):
     """
 
     # Data-tags (ITL-1023): handled.
+    # Each output row comes from one input row (ITL-1347).
+    ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
@@ -497,6 +497,8 @@ class DropDataColumns(UnaryOperator):
     """
 
     # Data-tags (ITL-1023): handled.
+    # Each output row comes from one input row (ITL-1347).
+    ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
@@ -675,6 +677,8 @@ class _TagAndDataColumnsOperator(UnaryOperator, ABC):
     """
 
     # Data-tags: handled (ITL-1022). A name acts on both roles alike.
+    # Each output row comes from one input row (ITL-1347).
+    ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     _verb: ClassVar[str] = ""

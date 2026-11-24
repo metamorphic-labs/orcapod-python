@@ -274,7 +274,8 @@ hashes:
 - the order of the names, mapping entries or keywords of an argument that names several:
   the columns of `select_columns`, `drop_columns`, `drop_nulls` and the other selections,
   the entries of `map_tags`, `map_data` and `map_columns`, the constraints of
-  `polars_filter`, `tag_only_columns`, `tags_as_data`;
+  `polars_filter`, the conditions and keywords of `filter` (and the operands of its `&` and
+  `|` and the values of its `is_in`), `tag_only_columns`, `tags_as_data`;
 - the order of the inputs of an operator that declares itself commutative (`Join`), and of
   the inputs of a function pod (for the ordered operators, see the table of orders that
   count below);

@@ -101,7 +101,7 @@ class TestFunctionNodeExecuteData:
 class TestFunctionNodeExecute:
     def test_returns_materialized_results(self, function_node_with_db):
         node, _, _ = function_node_with_db
-        results = node.execute(node._input_stream)
+        results = list(node.execute(node._input_stream).iter_data())
         assert isinstance(results, list)
         assert len(results) == 2
         values = sorted([pkt.as_dict()["result"] for _, pkt in results])
@@ -162,7 +162,7 @@ def operator_no_db():
 class TestOperatorNodeExecute:
     def test_returns_materialized_results(self, operator_no_db):
         node, src = operator_no_db
-        results = node.execute(src)
+        results = list(node.execute(src).iter_data())
         assert isinstance(results, list)
         assert len(results) == 2
 
@@ -181,6 +181,6 @@ class TestOperatorNodeExecute:
 
     def test_noop_db_in_off_mode(self, operator_no_db):
         node, src = operator_no_db
-        results = node.execute(src)
+        results = list(node.execute(src).iter_data())
         assert len(results) == 2
         assert node.get_all_records() is None

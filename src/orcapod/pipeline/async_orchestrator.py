@@ -24,7 +24,7 @@ from orcapod.errors import (
     OrcapodDatabaseWriteError,
     TypeIdentityError,
 )
-from orcapod.pipeline.result import OrchestratorResult
+from orcapod.pipeline.result import OrchestratorResult, StreamsOnRead
 from orcapod.utils.database_errors import keep_database_error
 from orcapod.protocols.node_protocols import (
     is_function_node,
@@ -39,7 +39,10 @@ if TYPE_CHECKING:
 
     from orcapod.channels import WritableChannel
     from orcapod.pipeline.dag import GraphProtocol
-    from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
+    from orcapod.protocols.core_protocols import (
+        DataProtocol,
+        TagProtocol,
+    )
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
 
 logger = logging.getLogger(__name__)
@@ -177,8 +180,9 @@ class AsyncPipelineOrchestrator:
             pipeline_uri: Opaque URI string identifying this pipeline run.
                 Forwarded verbatim to ``observer.on_run_start``.
             load_only: As for ``SyncPipelineOrchestrator.run``.
-            held_rows: As for ``SyncPipelineOrchestrator.run``: nodes not run, whose
-                rows feed their successors.
+            held_rows: Nodes not run, with the rows of their current run as the run's
+                plan took them (``RunPlan.held_rows``): those rows feed their
+                successors. The async path carries rows until ITL-1347 stage 5.
 
         Returns:
             OrchestratorResult with node outputs.
@@ -205,6 +209,9 @@ class AsyncPipelineOrchestrator:
         held_rows: Mapping[Any, list[tuple[TagProtocol, DataProtocol]]] | None = None,
     ) -> OrchestratorResult:
         """Core async logic: wire channels, launch tasks, collect results."""
+        from orcapod.core.operators.static_output_pod import (
+            rows_on_read,
+        )
         from orcapod.pipeline.observer import NoOpObserver
 
         run_id = run_id or str(uuid.uuid4())
@@ -271,7 +278,11 @@ class AsyncPipelineOrchestrator:
                         for upstream in in_edges.get(node, []):
                             tg.create_task(_drain(edge_readers[(upstream, node)]))
                         _start_node(
-                            tg, failed_nodes, node, _send_held(held_rows[node], writer)
+                            tg,
+                            failed_nodes,
+                            node,
+                            # The rows the plan took (ITL-1347, stage 5 changes it).
+                            _send_held(held_rows[node], writer),
                         )
                     elif is_source_node(node):
                         _start_node(
@@ -355,7 +366,11 @@ class AsyncPipelineOrchestrator:
                     tg.create_task(ch.reader.collect())
 
             return OrchestratorResult(
-                node_outputs=collectors if materialize_results else {}
+                node_outputs=(
+                    StreamsOnRead(collectors, rows_on_read)
+                    if materialize_results
+                    else {}
+                )
             )
         except ExceptionGroup as group:
             # A failed database read or write stops the run. Raise it on its own, as the

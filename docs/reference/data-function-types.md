@@ -14,6 +14,9 @@ A function stores each result in its result table, at
 <job>/_result/<function>/<output schema hash>/v<function major>/python.function.v1/rev1/rdb_v1
 ```
 
+For a job given a separate result database (`PipelineJob(..., result_database=...)`), the
+path starts at `<function>`, in that database, with no `<job>/_result`.
+
 The first four components after `_result` are the function's uri. The last three each
 have one owner:
 
@@ -144,6 +147,35 @@ print([name for name in stored.column_names if not name.startswith("__pf_")])
 print([name for name in stored.column_names if name.startswith("__pf_var_")])
 # ['__pf_var_function_name', '__pf_var_function_version', '__pf_var_function_module', '__pf_var_function_signature_hash', '__pf_var_function_content_hash', '__pf_var_git_hash']
 ```
+
+## The pipeline columns, `pdb_v1`
+
+A function node's pipeline table stores the input tags and source-info tokens,
+the input and output hashes, the referenced result record ID, and bookkeeping
+for the entry, including:
+
+| Column | Arrow type | Nullable | Meaning |
+|---|---|---|---|
+| `__pipeline_run_id` | `large_string` | yes | The ID of the job run that recorded the entry. A node run outside a job stores null. |
+| `__recorded_at` | `timestamp[us, tz=UTC]` | no | The UTC time the node recorded the entry. |
+
+The node writes a pipeline entry only when processing yields an output. The
+output can come from a new function call or from a result already in the result
+database. A null value in a declared nullable output still counts as an output.
+Reusing a pipeline entry preserves its original run ID and recording
+time. If the result is lost and the node recomputes it, the new entry has its
+own run ID and recording time.
+
+During a sync run, a repeated identical input without system tags reuses the
+first entry. During an async run, both copies can be scheduled before either
+entry is available, producing two entries with successive recomputation indices.
+A load-only run writes nothing. Neither recording column enters any hash.
+
+Read these columns on joined records with
+`node.get_all_records(columns={"meta": True})` or `node.get_all_records(all_info=True)`.
+Pipeline tables written by 0.4.0rc1 through 0.4.0rc3 lack these columns. Rebuild
+those tables before appending, even if their rows have been deleted. The layout
+name stays `pdb_v1`.
 
 ## Where it is declared, and how a released declaration is kept
 

@@ -1,5 +1,5 @@
 from collections.abc import Collection, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import Any, ClassVar
 
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
@@ -15,12 +15,6 @@ from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagPr
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash, Schema
 from orcapod.utils import schema_utils
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-else:
-    pa = LazyModule("pyarrow")
 
 
 def _with_other_group_note(
@@ -98,6 +92,8 @@ class MapData(UnaryOperator):
     """
 
     # Data-tags (ITL-1023): handled.
+    # Each output row comes from one input row (ITL-1347).
+    ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(
@@ -184,7 +180,12 @@ class MapData(UnaryOperator):
             return stream
 
         table = stream.as_table(
-            columns={"source": True, "system_tags": True, "sort_by_tags": False}
+            columns={
+                "source": True,
+                "system_tags": True,
+                "context": True,
+                "sort_by_tags": False,
+            }
         )
 
         # A data-tag column keeps its tag under its own name, now plain; the
@@ -368,6 +369,8 @@ class MapTags(UnaryOperator):
     PROVISIONAL: ClassVar[bool] = True
 
     # Data-tags (ITL-1023): handled.
+    # Each output row comes from one input row (ITL-1347).
+    ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(
@@ -455,7 +458,12 @@ class MapTags(UnaryOperator):
             return stream
 
         table = stream.as_table(
-            columns={"source": True, "system_tags": True, "sort_by_tags": False}
+            columns={
+                "source": True,
+                "system_tags": True,
+                "context": True,
+                "sort_by_tags": False,
+            }
         )
 
         name_map = {
@@ -657,6 +665,8 @@ class MapColumns(UnaryOperator):
     """
 
     # Provisional: its identity is not frozen with data context v1 (ITL-1279).
+    # Each output row comes from one input row (ITL-1347).
+    ROW_BY_ROW: ClassVar[bool] = True
     PROVISIONAL: ClassVar[bool] = True
 
     def __init__(
@@ -790,7 +800,12 @@ class MapColumns(UnaryOperator):
             tag_columns, data_columns
         )
         table = stream.as_table(
-            columns={"source": True, "system_tags": True, "sort_by_tags": False}
+            columns={
+                "source": True,
+                "system_tags": True,
+                "context": True,
+                "sort_by_tags": False,
+            }
         )
         dropped = {
             *tags_dropped,

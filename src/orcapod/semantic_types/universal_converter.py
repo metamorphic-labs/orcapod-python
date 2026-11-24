@@ -22,6 +22,8 @@ from datetime import date, datetime, timezone
 # Handle generic types
 from typing import TYPE_CHECKING, Any, TypedDict, get_args, get_origin
 
+import pyarrow as pa
+
 from orcapod.contexts import DataContext, resolve_context
 from orcapod.errors import (
     CanonicalOrderError,
@@ -49,17 +51,13 @@ from orcapod.semantic_types.nested_storage import (
 from orcapod.semantic_types.type_inference import infer_python_schema_from_pylist_data
 from orcapod.types import DataType, Schema, SchemaLike
 from orcapod.utils import arrow_utils
-from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
-    import pyarrow as pa
     from orcapod.logical_types.registry import LogicalTypeRegistry
     from orcapod.logical_types.protocols import (
         LogicalTypeFactoryProtocol,
         LogicalTypeProtocol,
     )
-else:
-    pa = LazyModule("pyarrow")
 
 logger = logging.getLogger(__name__)
 

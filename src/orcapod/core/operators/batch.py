@@ -1,25 +1,32 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, ClassVar, TYPE_CHECKING, cast
+from typing import Any, ClassVar, cast
+
+import numpy as np
+import pyarrow as pa
 
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
-from orcapod.channels import ReadableChannel, WritableChannel
+from orcapod.protocols.core_protocols.streams import (
+    RecordBatchInput,
+    RecordBatchOutput,
+)
+from orcapod.channels import (
+    ReadableChannel,
+    WritableChannel,
+)
 from orcapod.core.operators.base import UnaryOperator
+from orcapod.core.operators.static_output_pod import (
+    close_inputs,
+    concatenate_batches,
+    finish_operator,
+)
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.streams import ArrowTableStream
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash
 from orcapod.utils import arrow_utils
-from orcapod.utils.lazy_module import LazyModule
-
-if TYPE_CHECKING:
-    import numpy as np
-    import pyarrow as pa
-else:
-    np = LazyModule("numpy")
-    pa = LazyModule("pyarrow")
 
 from orcapod.types import Schema
 
@@ -93,6 +100,35 @@ class Batch(UnaryOperator):
         if rest and not self.drop_partial_batch:
             sizes.append(rest)
         return sizes
+
+    fold_label: ClassVar[str] = BATCH_FOLD_LABEL
+    """The label of this operator's folds of the system tags."""
+
+    def fold_members(
+        self, table: pa.Table, tag_columns: Sequence[str]
+    ) -> list[list[int]]:
+        """Return the members of each batch of ``table``, as row numbers in member order.
+
+        Reads only the given table, with the rule batching uses: consecutive rows,
+        ``batch_size`` each (``_batch_sizes``). The caller checks a batch by folding
+        its members' system tags (``fold_system_tag_values`` with ``fold_label``),
+        which must give the batch's folded values: the rows must be in the order the
+        batch read them.
+
+        Args:
+            table: The input rows, in the order the batch read them.
+            tag_columns: The input's user tag columns (unused: a batch has no key).
+
+        Returns:
+            One list of row numbers per batch.
+        """
+        del tag_columns  # a batch is decided by position alone
+        out: list[list[int]] = []
+        start = 0
+        for size in self._batch_sizes(table.num_rows):
+            out.append(list(range(start, start + size)))
+            start += size
+        return out
 
     def unary_static_process(self, stream: StreamProtocol) -> StreamProtocol:
         """Group rows into fixed-size batches, list-wrapping their values.
@@ -269,6 +305,56 @@ class Batch(UnaryOperator):
         finally:
             await output.close()
 
+    async def async_execute_batches(
+        self, inputs: Sequence[RecordBatchInput], output: RecordBatchOutput
+    ) -> None:
+        """Batch the rows of an input channel as they arrive.
+
+        The Arrow-record-batch form of ``async_execute`` (ITL-1347). With a
+        ``batch_size``, every ``batch_size`` rows that have arrived are batched and
+        sent at once, whatever record batches they came in, so a batch holds
+        consecutive arrivals, as on the row path; the rows left at the end make the
+        last, smaller batch unless ``drop_partial_batch``. With ``batch_size == 0``
+        (every row in one batch) all of the input is read first.
+
+        Args:
+            inputs: The one input channel.
+            output: The channel the batched rows are sent into.
+        """
+        if self.batch_size == 0:
+            await super().async_execute_batches(inputs, output)
+            return
+        (channel,) = inputs
+        try:
+            waiting: list[pa.RecordBatch] = []
+            rows = 0
+            async for batch in channel:
+                if not batch.num_rows:
+                    continue  # nothing to batch, nothing to hold
+                waiting.append(batch)
+                rows += batch.num_rows
+                full = rows - rows % self.batch_size
+                if not full:
+                    continue
+                # Arrived batches may differ in their provenance fields: put them
+                # under one another as a complete table settles them.
+                arrived = concatenate_batches(waiting)
+                assert arrived is not None  # they hold rows
+                await self._send_processed(
+                    arrived.slice(0, full).to_batches(), channel.stream, output
+                )
+                waiting = arrived.slice(full).to_batches()
+                rows -= full
+            # The rows left over are fewer than one batch: the sync rule decides
+            # whether they make a last one.
+            if rows:
+                await self._send_processed(waiting, channel.stream, output)
+        except BaseException as error:
+            output.fail(error)
+            await close_inputs(inputs, error)
+            raise
+        await finish_operator(inputs, output)
+
     def to_config(self) -> dict[str, Any]:
         """Serialize this Batch operator to a config dict.
 
@@ -282,6 +368,15 @@ class Batch(UnaryOperator):
             "drop_partial_batch": self.drop_partial_batch,
         }
         return config
+
+    def rows_dropped_text(
+        self,
+        position: int,
+        others: Sequence[str],
+        inputs: Sequence[StreamProtocol],
+    ) -> str | None:
+        """What the step drops, for ``explain()``: a last partial batch, if asked."""
+        return "a last partial batch is dropped" if self.drop_partial_batch else None
 
     def identity_structure(self) -> Any:
         self._note_provisional_identity_use()  # a direct read is a use (ITL-1279)

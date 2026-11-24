@@ -35,6 +35,7 @@ from orcapod.core.operators import (
     DropColumns,
     DropDataColumns,
     DropNulls,
+    Filter,
     DropTagColumns,
     GroupBy,
     Index,
@@ -62,6 +63,7 @@ from orcapod.protocols.core_protocols import (
     StreamProtocol,
     TagProtocol,
 )
+from orcapod.types import Condition, col
 from orcapod.utils import arrow_utils
 
 # The ``semijoin_shared_data_column`` case shares a data column name on purpose; SemiJoin
@@ -680,6 +682,30 @@ CASES = [
     Case("index", lambda: Index("l8", 0), lambda: (source_a(),)),
     Case("pick", lambda: Pick("d", "q"), lambda: (source_a(),)),
     Case("drop_nulls", lambda: DropNulls("nul"), lambda: (source_a(),)),
+    Case(
+        "filter",
+        lambda: Filter(Condition.of(col("nul").is_not_null(), col("k") >= 1)),
+        lambda: (source_a(),),
+    ),
+    Case(
+        "filter_many",
+        # A tag, a narrow integer, a string, a struct field, a null test and membership.
+        lambda: Filter(
+            Condition.of(
+                col("ta").is_in([5, 6]),
+                col("i8") < 3,
+                col("st").field("y") != "c",
+                col("p").is_not_null(),
+                s="a",
+            )
+        ),
+        lambda: (source_a(),),
+    ),
+    Case(
+        "filter_data_tags",
+        lambda: Filter(Condition.of(col("k") > 1)),
+        lambda: (source_a(with_data_tags=True),),
+    ),
     Case(
         "drop_nulls_many",
         # A nullable column with a null, one without, a tag, a non-nullable list.
@@ -1536,8 +1562,10 @@ PINNED_ROW_HASHES = {
         "arrow_v1:00000218de95b54e8987999a339fe1726957da66219b529c4699be853334833e71f60e",
     ),
 }
+# Moved once for ITL-1425 (source ids gained their kind part; the class name left the
+# source identity); the pipeline hash did not move.
 PINNED_STREAM_CONTENT_HASH = (
-    "semantic_v1:9c4e6769cdf7193685ebd44a2d223454f9537d532c4b1d2601c1fd93349c8cbf"
+    "semantic_v1:b4523fe14f07e020689bd56f149c34e8ad1184e47d67425d47880472c1336862"
 )
 PINNED_STREAM_PIPELINE_HASH = (
     "semantic_v1:6d8e7c5123d673755b71714a7159774d4c76bad30a6291dc8d3e6051a71dcd39"

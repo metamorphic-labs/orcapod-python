@@ -253,7 +253,9 @@ class TestPipelineIntegration:
         result = orch.run(exec_dag)
 
         fn_outputs = [
-            v for k, v in result.node_outputs.items() if k.node_type == "function"
+            list(v.iter_data())
+            for k, v in result.node_outputs.items()
+            if k.node_type == "function"
         ]
         assert len(fn_outputs) == 1
         assert len(fn_outputs[0]) == 3
@@ -322,7 +324,7 @@ def _source_id(dsn: str) -> str:
 
 def _expected(host: str, schema: str, port: str | None = None) -> str:
     return (
-        f"postgresql_table:{host}:{port or _SERVER['port']}/"
+        f"postgresql_table_v1:{host}:{port or _SERVER['port']}/"
         f"{_SERVER['dbname']}.{schema}.t"
     )
 
@@ -458,7 +460,8 @@ class TestDefaultSourceIdOnTheServer:
         given = PostgreSQLTableSource(
             dsn, "t", source_id="t_by_address", tag_only_columns=True
         )
-        assert given.source_id == "t_by_address"
+        assert given.source_name == "t_by_address"
+        assert given.source_id == "postgresql_table_v1:t_by_address"
 
     @pytest.mark.parametrize(
         ("dsn_params", "env"),
@@ -606,7 +609,8 @@ class TestDefaultSourceIdOnTheServer:
         given = PostgreSQLTableSource(
             dsn, "t", source_id="t_on_the_pool", tag_only_columns=True
         )
-        assert given.source_id == "t_on_the_pool"
+        assert given.source_name == "t_on_the_pool"
+        assert given.source_id == "postgresql_table_v1:t_on_the_pool"
 
     def test_several_hosts_from_pghost_have_no_default(
         self, server_table: str, no_server_env: None, monkeypatch: pytest.MonkeyPatch

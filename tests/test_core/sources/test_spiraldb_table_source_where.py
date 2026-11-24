@@ -31,7 +31,7 @@ from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.cached_source import CachedSource
 from orcapod.sources import SpiralDBTableSource
 from orcapod.core.operators import Join, MapData
-from orcapod.types import CacheMode, Condition
+from orcapod.types import CacheMode, Condition, col
 from tests.test_databases import fake_pyspiral
 
 _PROJECT = "workshop-sample"
@@ -817,7 +817,7 @@ class TestIdentity:
         """A source id the user gave is kept."""
         restricted = _source(source_id="events").where(subject_id="m2")
 
-        assert restricted.source_id == "events"
+        assert restricted.source_id == "spiraldb_table_v1:events"
 
     def test_rows_are_the_matching_rows_unchanged(self, project):
         """Every column of a matching row, system tags and source info included, is equal."""
@@ -1026,7 +1026,9 @@ class TestRunsAndSavedJobs:
         assert summary.conditions == {"events": Condition.of(subject_id="m1")}
         assert summary.limits == {"events": 3}
         assert summary.restricted_source_ids == {"events": source.source_id}
-        assert "events (events): where subject_id='m1', limit 3" in repr(summary)
+        assert "events (spiraldb_table_v1:events): where subject_id='m1', limit 3" in (
+            repr(summary)
+        )
         assert "subject_id=&#x27;m1&#x27;" in summary._repr_html_()
 
     @pytest.mark.parametrize("form", list(_FORMS_OF_ONE_RESTRICTION))
@@ -1041,7 +1043,7 @@ class TestRunsAndSavedJobs:
         assert summary.conditions == {
             "events": Condition.of(subject_id="m1", flag=True)
         }
-        assert summary.restricted_source_ids == {"events": "events"}
+        assert summary.restricted_source_ids == {"events": "spiraldb_table_v1:events"}
         rows = job.nodes["double"].as_table().column("timestamp").to_pylist()
         assert rows == [3]
 
@@ -1070,7 +1072,7 @@ class TestRunsAndSavedJobs:
         summary = job.run()
 
         assert summary.conditions == {"events": Condition.of(subject_id="m1")}
-        assert summary.restricted_source_ids == {"events": "events"}
+        assert summary.restricted_source_ids == {"events": "spiraldb_table_v1:events"}
 
     def test_two_unbound_sources_of_one_label_are_both_reported(self, project):
         """Sources read without a slot are keyed by label, numbered when they meet."""
@@ -1258,7 +1260,11 @@ class TestRunsAndSavedJobs:
         expected, summary = by_hand.run(), registered.run()
         assert summary.conditions == expected.conditions
         assert summary.conditions == {"events": Condition.of(subject_id="m1")}
-        assert summary.restricted_source_ids == expected.restricted_source_ids
+        assert (
+            summary.restricted_source_ids
+            == expected.restricted_source_ids
+            == {"events": "spiraldb_table_v1:events"}
+        )
         assert (
             registered.nodes["first"].as_table().to_pylist()
             == by_hand.nodes["first"].as_table().to_pylist()
@@ -1350,8 +1356,8 @@ class TestRunsAndSavedJobs:
 
         assert summary.conditions == {}
         assert summary.limits == {"events": 2}
-        assert summary.restricted_source_ids == {"events": "events"}
-        assert "events (events): limit 2" in repr(summary)
+        assert summary.restricted_source_ids == {"events": "spiraldb_table_v1:events"}
+        assert "events (spiraldb_table_v1:events): limit 2" in repr(summary)
 
     def test_one_table_with_two_limits_in_one_job_is_refused(self, project, tmp_path):
         """The same condition with different limits reads different rows: refused."""
@@ -1382,7 +1388,9 @@ class TestRunsAndSavedJobs:
 
         assert node.last_run is not None
         assert node.last_run.conditions == {"events": Condition.of(subject_id="m2")}
-        assert node.last_run.restricted_source_ids == {"events": "events"}
+        assert node.last_run.restricted_source_ids == {
+            "events": "spiraldb_table_v1:events"
+        }
 
     def test_bound_restricted_source_runs_only_matching_rows(self, project, tmp_path):
         """Binding a restricted source runs its rows; nothing stored is removed."""
@@ -2002,7 +2010,9 @@ class TestOperatorCacheEntryPoints:
             (("m2", 5), 5.5, 1),
         ]
 
-        logged = node.execute(_source(source_id="events", tag_only_columns=True))
+        logged = list(
+            node.execute(_source(source_id="events", tag_only_columns=True)).iter_data()
+        )
 
         assert self._keyed(logged) == expected
         stored = node.as_source().as_table().to_pylist()
@@ -2021,7 +2031,7 @@ class TestOperatorCacheEntryPoints:
             )
             scans = len(fake_pyspiral.scan_log)
 
-            replayed = node.execute(other)
+            replayed = list(node.execute(other).iter_data())
 
             assert self._keyed(replayed) == expected
             assert len(fake_pyspiral.scan_log) == scans
@@ -2103,7 +2113,11 @@ class TestRestrictionThroughWrappers:
         proxy = self._bound_proxy("several conditions")
         found = restrictions_in_force([proxy.select_data_columns(["amplitude"])])
         assert list(found.values()) == [
-            ("events", Condition.of(subject_id="m1", flag=True), None)
+            (
+                "spiraldb_table_v1:events",
+                Condition.of(subject_id="m1", flag=True),
+                None,
+            )
         ]
 
     @pytest.mark.parametrize("order", ["proxy first", "source first"])
@@ -2688,3 +2702,43 @@ class TestEqualStepsOverTwoRestrictions:
         assert sorted(job.nodes) == held
         rows = job.run()
         assert rows.conditions == {"events": Condition.of(subject_id=first)}
+
+
+class TestWhereTakesEqualitiesOnly:
+    """``where`` refuses every condition but equalities, pointing to ``filter`` (ITL-1374)."""
+
+    @pytest.mark.parametrize(
+        "build",
+        [
+            lambda: col("timestamp") >= 3,
+            lambda: col("subject_id").is_in(["m1", "m2"]),
+            lambda: col("note").is_null(),
+            lambda: (col("subject_id") == "m1") | (col("subject_id") == "m2"),
+            lambda: ~(col("subject_id") == "m1"),
+            lambda: col("subject_id") != "m1",
+            lambda: (col("subject_id") == "m1") & (col("subject_id") == "m2"),
+        ],
+        ids=[
+            "comparison",
+            "is_in",
+            "null test",
+            "or",
+            "not",
+            "not equal",
+            "two values",
+        ],
+    )
+    def test_a_condition_other_than_equality_is_refused(self, project, build):
+        with pytest.raises(TypeError, match=r"equality conditions only.*filter"):
+            _source().where(build())
+
+    def test_an_equality_built_with_col_is_taken(self, project):
+        """``col(c) == v`` is the equality ``where`` takes, with the keyword's rows."""
+        restricted = _source().where(col("subject_id") == "m2")
+
+        assert _timestamps(restricted) == [4, 5]
+        assert restricted.condition == Condition.of(subject_id="m2")
+
+    def test_the_constructor_refuses_it_too(self, project):
+        with pytest.raises(TypeError, match="equality conditions only"):
+            _source(where=col("timestamp") >= 3)

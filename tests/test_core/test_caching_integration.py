@@ -150,8 +150,8 @@ class TestSourcePodCaching:
         ls = DeltaTableSource(
             labs_path, tag_columns=["patient_id"], tag_only_columns=True
         )
-        assert ps.source_id == f"delta_table:{patients_path}"
-        assert ls.source_id == f"delta_table:{labs_path}"
+        assert ps.source_id == f"delta_table_v1:{patients_path}"
+        assert ls.source_id == f"delta_table_v1:{labs_path}"
 
     def test_different_sources_get_different_cache_paths(self, clinic_a, source_db):
         patients_path, labs_path = clinic_a

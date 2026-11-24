@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
     from orcapod.pipeline.dag import GraphProtocol
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
-    from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
+    from orcapod.protocols.core_protocols import StreamProtocol
 
 logger = logging.getLogger(__name__)
 
@@ -38,8 +38,9 @@ class SyncPipelineOrchestrator:
     to ``node.execute(observer=...)`` which owns all per-data logic,
     cache lookups, and observer hooks internally.
 
-    The orchestrator is responsible only for topological ordering,
-    buffer management, and stream materialization between nodes.
+    The orchestrator is responsible only for topological ordering and for handing
+    each node's output stream to its successors: a node's ``execute`` returns the
+    stream every successor reads (ITL-1347, stage 2).
     """
 
     def __init__(
@@ -57,16 +58,16 @@ class SyncPipelineOrchestrator:
         run_id: str | None = None,
         pipeline_uri: str = "",
         load_only: bool = False,
-        held_rows: Mapping[Any, list[tuple[TagProtocol, DataProtocol]]] | None = None,
+        held: Mapping[Any, StreamProtocol] | None = None,
     ) -> OrchestratorResult:
         """Execute the node graph synchronously.
 
         Args:
             graph: A ``GraphProtocol`` DAG with GraphNode objects as vertices.
             observer: Optional execution observer forwarded to nodes.
-            materialize_results: If True, keep all node outputs in memory
-                and return them. If False, discard buffers after downstream
-                consumption (only DB-persisted results survive).
+            materialize_results: If True, keep every node's output stream and return
+                them. If False, drop each one once its successors have run (only
+                DB-persisted results survive).
             run_id: Optional run identifier.  If not provided, a UUID is
                 generated automatically.
             pipeline_uri: Opaque URI string identifying this pipeline run
@@ -76,13 +77,13 @@ class SyncPipelineOrchestrator:
                 (ITL-1095): function nodes load their inputs' stored results and skip
                 the others, operators run without storing, and a side-effect node
                 passes its rows on and delivers nothing.
-            held_rows: Nodes of ``graph`` that are not run: each one's rows (the rows
-                of its current run, or of a stream outside the job) feed its
-                successors as if it had just run. Used by ``node.run()``, which runs
-                only the nodes it depends on that hold no current run (ITL-1095).
+            held: Nodes of ``graph`` that are not run: each one's output stream (of
+                its current run, or of a stream outside the job) feeds its successors
+                as if it had just run. Used by ``node.run()``, which runs only the
+                nodes it depends on that hold no current run (ITL-1095).
 
         Returns:
-            OrchestratorResult with node outputs.
+            OrchestratorResult with each node's output stream.
         """
         from orcapod.pipeline.observer import NoOpObserver
 
@@ -94,23 +95,29 @@ class SyncPipelineOrchestrator:
         current: Any = None
         try:
             topo_order = list(graph.topological_sort())
-            buffers: dict[Any, list[tuple[TagProtocol, DataProtocol]]] = {}
+            # Taken before any node runs: an observer may rebind a source, which
+            # changes how the graph finds that node afterwards.
+            neighbours = (
+                {
+                    id(n): (list(graph.predecessors(n)), list(graph.successors(n)))
+                    for n in topo_order
+                }
+                if materialize_results
+                else {}
+            )
+            outputs: dict[Any, StreamProtocol] = {}
             processed: set[Any] = set()
 
-            held = held_rows if held_rows is not None else {}
+            held_streams = held if held is not None else {}
             for node in topo_order:
                 current = node
-                if node in held:
-                    buffers[node] = list(held[node])
+                if node in held_streams:
+                    outputs[node] = held_streams[node]
                 elif is_source_node(node):
-                    buffers[node] = node.execute(observer=effective_observer)
+                    outputs[node] = node.execute(observer=effective_observer)
                 elif is_function_node(node) or is_side_effect_function_node(node):
-                    upstream_buf = self._gather_upstream(node, graph, buffers)
-                    upstream_node = list(graph.predecessors(node))[0]
-                    input_stream = self._materialize_as_stream(
-                        upstream_buf, upstream_node
-                    )
-                    buffers[node] = node.execute(
+                    input_stream = self._single_input(node, graph, outputs)
+                    outputs[node] = node.execute(
                         input_stream,
                         observer=effective_observer,
                         error_policy=self._error_policy,
@@ -118,22 +125,14 @@ class SyncPipelineOrchestrator:
                         load_only=load_only,
                     )
                 elif is_operator_node(node):
-                    upstream_buffers = self._gather_upstream_multi(node, graph, buffers)
-                    input_streams = [
-                        self._materialize_as_stream(buf, upstream_node)
-                        for buf, upstream_node in upstream_buffers
-                    ]
-                    buffers[node] = node.execute(
+                    input_streams = self._ordered_inputs(node, graph, outputs)
+                    outputs[node] = node.execute(
                         *input_streams, observer=effective_observer, load_only=load_only
                     )
                 elif is_side_effect_node(node):
-                    upstream_buf = self._gather_upstream(node, graph, buffers)
-                    upstream_node = list(graph.predecessors(node))[0]
-                    input_stream = self._materialize_as_stream(
-                        upstream_buf, upstream_node
-                    )
+                    input_stream = self._single_input(node, graph, outputs)
                     # In a load-only run the node passes its rows on and delivers nothing.
-                    buffers[node] = node.execute(
+                    outputs[node] = node.execute(
                         input_stream,
                         observer=effective_observer,
                         run_id=run_id,
@@ -147,12 +146,14 @@ class SyncPipelineOrchestrator:
                 processed.add(node)
 
                 if not materialize_results:
-                    self._gc_buffers(node, graph, buffers, processed)
+                    self._gc_outputs(node, graph, outputs, processed)
+                else:
+                    self._release_built_inputs(node, neighbours, outputs, processed)
 
             if not materialize_results:
-                buffers.clear()
+                outputs.clear()
 
-            return OrchestratorResult(node_outputs=buffers)
+            return OrchestratorResult(node_outputs=outputs)
         except OrcapodDatabaseError as exc:
             # Name the node the failure belongs to, if the raising site did not.
             if current is not None:
@@ -170,70 +171,80 @@ class SyncPipelineOrchestrator:
                 effective_observer.on_run_end(run_id)
 
     @staticmethod
-    def _gather_upstream(
+    def _single_input(
         node: Any,
         graph: "GraphProtocol[Any]",
-        buffers: dict[Any, list[tuple[Any, Any]]],
-    ) -> list[tuple[Any, Any]]:
-        """Gather a single upstream buffer (for function nodes)."""
+        outputs: dict[Any, StreamProtocol],
+    ) -> StreamProtocol:
+        """The output stream of a node's one predecessor (function and side-effect nodes)."""
         predecessors = list(graph.predecessors(node))
         if len(predecessors) != 1:
             raise ValueError(
                 f"FunctionNode expects exactly 1 upstream, got {len(predecessors)}"
             )
-        return buffers[predecessors[0]]
+        from orcapod.core.operators.static_output_pod import at_edge
+
+        return at_edge(outputs[predecessors[0]])
 
     @staticmethod
-    def _gather_upstream_multi(
+    def _ordered_inputs(
         node: Any,
         graph: "GraphProtocol[Any]",
-        buffers: dict[Any, list[tuple[Any, Any]]],
-    ) -> list[tuple[list[tuple[Any, Any]], Any]]:
-        """Gather multiple upstream buffers with their nodes (for operators).
-
-        Returns list of (buffer, upstream_node) tuples preserving the
-        order that matches the operator's input_streams order.
-        """
+        outputs: dict[Any, StreamProtocol],
+    ) -> list[StreamProtocol]:
+        """The output streams of an operator node's predecessors, in ``node.upstreams`` order."""
         predecessors = list(graph.predecessors(node))
         upstream_order = {id(upstream): i for i, upstream in enumerate(node.upstreams)}
         sorted_preds = sorted(
             predecessors,
             key=lambda p: upstream_order.get(id(p), 0),
         )
-        return [(buffers[p], p) for p in sorted_preds]
+        from orcapod.core.operators.static_output_pod import at_edge
+
+        return [at_edge(outputs[p]) for p in sorted_preds]
 
     @staticmethod
-    def _materialize_as_stream(buf: list[tuple[Any, Any]], upstream_node: Any) -> Any:
-        """Wrap a (tag, data) buffer as the upstream node's stream.
-
-        ``StaticOutputOperatorPod._materialize_upstream`` builds it, the one
-        definition an async operator node shares when it rebuilds its inputs
-        for a run that produced no row.
-
-        Args:
-            buf: List of (tag, data) tuples.
-            upstream_node: The node that produced this buffer.
-
-        Returns:
-            An ArrowTableStream.
-        """
-        from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
-
-        return StaticOutputOperatorPod._materialize_upstream(buf, upstream_node)
-
-    @staticmethod
-    def _gc_buffers(
+    def _release_built_inputs(
         current_node: Any,
-        graph: "GraphProtocol[Any]",
-        buffers: dict[Any, list[tuple[Any, Any]]],
+        neighbours: dict[int, tuple[list[Any], list[Any]]],
+        outputs: dict[Any, StreamProtocol],
         processed: set[Any],
     ) -> None:
-        """Discard buffers no longer needed by any unprocessed downstream."""
+        """Keep a retained output read by all its successors as its rows only.
+
+        A ``RowsOnRead`` output builds its table at each successor's edge; once every
+        successor has run, the retained output drops the built stream and keeps the
+        rows, which is all ``main`` retained (ITL-1347). A later read builds it again.
+
+        Args:
+            current_node: The node that just ran.
+            neighbours: Each node's predecessors and successors, by ``id``, taken
+                before the run.
+            outputs: The retained outputs.
+            processed: The nodes that ran.
+        """
+        from orcapod.core.operators.static_output_pod import RowsOnRead
+
+        for pred in neighbours[id(current_node)][0]:
+            output = outputs.get(pred)
+            if isinstance(output, RowsOnRead) and all(
+                succ in processed for succ in neighbours[id(pred)][1]
+            ):
+                output.release_built()
+
+    @staticmethod
+    def _gc_outputs(
+        current_node: Any,
+        graph: "GraphProtocol[Any]",
+        outputs: dict[Any, StreamProtocol],
+        processed: set[Any],
+    ) -> None:
+        """Drop output streams no unprocessed successor still needs."""
         for pred in graph.predecessors(current_node):
-            if pred not in buffers:
+            if pred not in outputs:
                 continue
             all_successors_done = all(
                 succ in processed for succ in graph.successors(pred)
             )
             if all_successors_done:
-                del buffers[pred]
+                del outputs[pred]

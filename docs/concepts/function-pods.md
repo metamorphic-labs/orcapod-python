@@ -860,6 +860,16 @@ object that has already loaded the table until its own next commit to that table
 a new `DeltaTableDatabase` object reads them at once. This was already the case before
 batching; only the re-reading per lookup is gone.
 
+**Several writers.** Two jobs, or two processes, may write to the same
+`DeltaTableDatabase` directory at once. Each record id is stored once. A commit to an
+existing table is a Delta MERGE that inserts only the ids the table does not hold, and it
+fails when another writer added rows after the table was loaded. The database then loads
+the table again and retries, so the later writer finds the id stored and leaves it. That
+MERGE reads the stored rows, so a commit takes longer as the table grows, and longer still
+when the rows hold large values (arrays, images). Commit in batches (the default
+`commit_every_rows=100` is fine). Avoid `commit_every_rows=1`, or a node run on its own,
+against large tables.
+
 [Pipelines and Jobs](pipeline-job.md) covers jobs in full: nodes, databases, pipeline
 blueprints, and saving and loading.
 
@@ -1109,6 +1119,17 @@ from that database, and no rows under that key is an empty result, not an error.
   `ArrowTableSource(stream.as_table(), tag_columns=[...])`.
 - The results are read from the database recorded in the file. Pass
   `PipelineJob.load(path, database=...)` if the database has moved.
+- A job given a separate result database
+  ([Sharing function results between jobs](pipeline-job.md#sharing-function-results-between-jobs))
+  records it in the file too, and loading rebuilds it the same way; pass
+  `PipelineJob.load(path, result_database=...)` if it has moved or cannot be rebuilt from
+  the file. An `InMemoryArrowDatabase` holds nothing after its process ends, so it is never
+  rebuilt (a new one would be empty), as a connector database is not. When the file names a
+  result database that is not available and none is given, the loaded job's function nodes
+  get no database (a warning says what to pass): they are never pointed at the job's own
+  `_result` location, which holds none of their results. `job.bind(result_database=...)`
+  gives it later, and saving the loaded job before that writes the saved result database
+  back as it was, so loading that file refuses it the same way.
 - The job file may also hold an optional, advisory section, `run.expected_rows`: for each
   node, how many rows the database held under its run's key when the job was saved (written
   only when that is certain: after a run that finished). Reading a loaded node's stored
