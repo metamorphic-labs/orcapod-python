@@ -1,6 +1,10 @@
 # ITL-1446: storing a pipeline in SpiralDB
 
 Status: **proposal, nothing implemented.** Section 8 lists the decisions the developer makes.
+Decided (developer, 2026-11-24): the first version runs one job at a time and **refuses** a second
+writer (section 6.3; several writers are a follow-up issue); every table kind goes to SpiralDB
+(function pipeline, function result, operator cache, cached source, side-effect log); the live
+probes may use the throwaway test project.
 Covers ITL-1176, ITL-1164, ITL-1100 (names, tables) and ITL-1190 (metadata races).
 
 How each statement below is known:
@@ -432,26 +436,76 @@ committed record stays (insert when not matched), so a record once read never ch
 3. **A failed write leaves no half-written table**: chunks, then header, then rows, and no
    rollback. *(holds under any race)*
 4. **An existing record is not overwritten by a later run.** `skip_existing` is decided by
-   `read_by_keys` at the latest version just before the write. *(holds except in the window
-   between that read and the commit)*
+   `read_by_keys` at the latest version just before the write. *(holds while one writer holds the
+   store, 6.3)*
+5. **A second writer is refused before it computes, delivers or writes anything.** *(holds under
+   the two conditions of 6.3; not unconditional)*
 
-5. **Not promised**: first-writer-wins inside that window, exactly-once side effects, one
-   recomputation index per recomputation.
+### 6.3 The lease: one writer, the second refused
 
-### 6.3 Options for what is not promised
+**What SpiralDB offers** (Read; behaviour to probe):
 
-| Option | Closes the window? | Costs |
-|---|---|---|
-| **A. One writer per table at a time, documented, and checked after each commit** (recommended first): after a commit, re-read the written ids' `ox_order`; another value means another writer overwrote them, and a warning names the table and the count | no; reports most cases (a later overwrite is missed) | one keyed read per commit (about 1 s) |
-| B. The key becomes (`__record_id`, `ox_writer`), one UUIDv7 a handle: every writer's row stays, reads keep one per id by (`ox_order`, `ox_writer`) | no record is ever lost, and `trace` could show every one. The kept one can still change when a writer with an earlier clock commits late | rows grow with races; every read groups by id; `key_table` needs the whole key, so lookups use `where`; the key schema **cannot be changed later** |
-| C. A lease in table metadata | no: no compare-and-set, so two can take it | - |
-| D. A lock outside SpiralDB | yes | a service to run and configure |
-| E. Wait for a conditional write (`spiral-sdk`, ITL-931) | yes | not available |
+| Primitive | Use for a lease |
+|---|---|
+| conditional write, compare-and-set on rows or metadata | does not exist |
+| `last_modified_at`, `asof`, the write-ahead log | shows afterwards that someone wrote: detection only, it stops nothing. (A transaction has a snapshot; nothing read says a commit fails because a key was written since) |
+| table metadata | races are documented, so it is not used for the lease |
+| `create_table(exist_ok=False)` | may be an atomic test-and-set, if the service makes names unique atomically. Unknown (P11) |
+| upsert and `delete_keys` of one row, then a fresh read | **enough**, if a read started after a commit sees it |
 
-A is recommended because one job writing one store at a time is the expected use, and because 1 to
-3 hold regardless. B is the only choice that is hard to make later: a store made under A is
-rebuilt to move to B. If several processes are expected to write one store soon (Ray workers do
-not: the driver writes), choose B now.
+**Claim, then check.** One table `op-lease` per dataset, key `token` (UUIDv7 of one acquisition),
+value columns: run id, job name, process id, start time, last renewal.
+
+1. Commit a row with my token. 2. Read every row, fresh. 3. If mine is the only one, I hold the
+store. 4. Otherwise delete my row and refuse, naming the other claim (job, run id, start,
+renewal). 5. The holder deletes its own row in a `finally`.
+
+*Why two cannot hold.* Suppose A and B both hold, with neither's claim removed. A read after its
+claim was committed and did not see B, so B's commit came after A's read, and so after A's commit.
+B read after its own commit, so B's read sees A, and B does not hold: a contradiction.
+[`lease_model.py`](itl-1446/lease_model.py) visits every interleaving of 2, 3 and 4 writers with
+crashes at any step: no two holders. It finds two holders in exactly the two variants below.
+
+**The guarantee is therefore conditional:**
+
+- **C1: a read started after a commit returned sees that commit, from any client.** P8 tests it.
+  A test can refute it, not prove it, so it needs SpiralDB's own statement too. With stale reads
+  the model reaches two holders. If C1 fails but P11 holds, the lease is the creation of one
+  named table instead; if both fail, what is left is detection (below), and must be called that.
+- **C2: nobody clears the claim of a live writer.** SpiralDB has no fencing: a writer that was
+  cleared and is still alive can commit. It looks its claim up before every commit and stops when
+  it is gone, but **a window remains** between that check and the commit, and commits already in
+  flight land. That check is detection, not a guarantee.
+
+It covers Orcapod versions that take the lease. Another program, or an SDK call by hand, is not
+stopped.
+
+| Case | Behaviour |
+|---|---|
+| Two starts at the same instant | at most one holds. **Both may be refused** (each sees the other); an acquisition therefore retries up to 3 times with a random wait of 1 to 5 s before refusing. The model shows the both-refused case |
+| The claim's commit fails or its reply is lost | nothing has run. The writer tries to delete its token and raises. A claim that lands later is a stale one: others are refused, two never hold |
+| A crashed job | its claim stays, and the next run is refused. A crash cannot be told from a pause, a lost network or a suspended laptop from outside, so **no claim ever expires by time**. The holder renews its row's time (about once a minute, at a commit or from a background thread); the refusal shows how old the renewal is, as information |
+| Clearing a stale claim | by a person: `database.clear_lease(token)`, with the token from the error. It deletes exactly that row, so clearing twice or late never removes a newer claim. The message says what to check: that the named process no longer runs. Never automatic, not even when the process id looks dead on this machine (containers share hostnames and reuse ids) |
+| Separate pipeline and result databases | a run takes the lease of **every** dataset it may write: both databases, a pod's own `result_database` and `pod_cache_database`, a cached operator's, a `CachedSource`'s, an observer's. One per dataset (views by `at()`, and two connectors to one dataset, count once per run), in sorted order. If one is refused, those taken are released |
+| Several jobs in one process | a claim belongs to a run, not to a process: one after the other works; a second run while the first one runs (threads, `run_async`, a function that runs a job) is refused if it shares a dataset |
+| One database object used by two threads | the second run's acquisition is refused. A bare `add_records` by another thread through the same object during a run uses that run's lease: one object has one queue |
+| A forked child | refused: the lease records the process id and a write checks it. Ray workers do not write |
+| `job.run()`, `run_async()` | after planning, before anything is computed or delivered, and only if a node is to run. (A source check that stores rows, a `CachedSource`'s, takes the lease for its own flush.) An unchanged rerun with nothing to run writes nothing and takes none |
+| `node.run()` | the same acquisition, for the nodes its plan runs |
+| Writes outside a run (`add_records` and `flush` by hand, a standalone side effect with a store) | the database itself enforces it: a flush without a lease takes one for that flush. So no write path can forget it |
+| **Readers** | never refused, and take nothing: `get_*`, `as_source()`, `head`, `trace`, `load`, `load_only=True`, reads of a held run, `SpiralDBTableSource` over a store table. A reader during a run sees committed batches: results first, then records (promise 2) |
+| Reading a `CachedSource` | it fetches live rows and **stores** them, so it is a writer. While another run holds the store it is refused, naming the holder (decision 11). `get_all_records()` on it, which reads the cache only, is a reader |
+
+**Cost**: one commit and one read to take it, one look-up per commit, one commit to release. About
+3 to 5 s a run at the times seen live (P9 measures). Permissions: none beyond writing.
+
+**Detection besides the lease** (also the fallback if C1 and P11 both fail, and then documented as
+best effort only): after a commit, the written ids' `ox_order` are read back and a difference
+raises a warning naming the table and count; a later overwrite is missed.
+
+Follow-up (several writers), not designed here: the key (`__record_id`, writer), which keeps every
+writer's row, or a conditional write in `spiral-sdk` (ITL-931). A store made now is rebuilt to
+change its key.
 
 ### 6.4 Failed writes
 
@@ -482,8 +536,10 @@ store by default (give them an in-memory or Delta store) until they batch.
 | P5 | `where` equality and `in_` on binary; time against a table of 10^3 to 10^6 rows | 4.3 |
 | P6 | parallel `set_metadata` of different keys, 50 pairs | 3.3 |
 | P7 | two clients write one key at once, 50 pairs: errors, winner; the same with a first write of new columns | 6 |
-| P8 | read after commit from a second client, both at once and after `create_table(exist_ok=True)` raced by two | 6.2 |
+| P8 | (C1, 1,000 times, two clients in two processes) read after commit from a second client, both at once and after `create_table(exist_ok=True)` raced by two | 6.2 |
 | P9 | time of list, look up, metadata, commit (1, 100, 10,000 rows), and of a rerun | 4 |
+| P11 | `create_table(exist_ok=False)` of one name by two clients, 50 times: exactly one succeeds? the name's reuse after `drop_table` | 6.3 |
+| P12 | the lease itself: two processes claim at once, 50 times; a process killed while holding; `delete_keys` of one token | 6.3 |
 | P10 | duplicate key in one write; a write killed midway | 6.4 |
 
 ## 8. First working version, in order
@@ -497,9 +553,9 @@ today until PR 5.
 | 2 | `spiral_store` codec: names, types, manifest, as pure functions with no pyspiral | property tests: names (adversarial alphabet, nested), schema round trip over the type matrix, chunk sizes, two manifests |
 | 3 | Connector: store tables use the codec; `ox_order`; registry and table names; null struct refused when added; `ConnectorArrowDatabase` asks the connector for a table's name | matrix on the fake; column and row order; foreign tables unchanged; a failed first write; two connectors with an injected failure (ITL-1190's interleaving); collisions of 5.2 |
 | 4 | Lookups (4.3): keyed and `where` reads, the run index, table handles; failed rows restored (6.4) | call counts per run asserted; equivalence with the whole-table path (`test_*_lookup_equivalence`); staleness by a second handle |
-| 5 | Job: refusals removed where covered; the post-commit check (option A); docs (names, other readers, cleanup, permissions, single writer) | the pipeline store suites parametrised over the fake: first run, rerun, added rows, changed version, `run()` and `run_async()`, save and load, `load_only`, `clear_cache`, separate result database, `trace`; equal to Delta: sync exactly, async as sets |
+| 5 | Job: the lease (6.3) in the database and in `job.run`, `run_async` and `node.run`; refusals removed where covered; the post-commit check; docs (names, other readers, cleanup, permissions, the lease and its two conditions) | the pipeline store suites parametrised over the fake: first run, rerun, added rows, changed version, `run()` and `run_async()`, save and load, `load_only`, `clear_cache`, separate result database, `trace`; equal to Delta: sync exactly, async as sets. Every table kind. The lease: each row of 6.3's table, on the fake, with two handles and an injected crash between any two steps |
 | 6 | Live suite (the existing `spiral-integration` job): PR 5's job, the type matrix, P7, P8, cost printed; every table dropped | live |
-| later | batched `_fetch_joined_records`; null structs; observers; maps if P3 refuses; option B or E | |
+| later | batched `_fetch_joined_records`; null structs; observers; maps if P3 refuses; several writers | |
 
 ITL-1391 (load a saved connector database) and ITL-1381 (read before flush) are needed for save
 and load in PR 5; both are in progress. A saved config has no credential today (`to_config`:
@@ -511,7 +567,7 @@ save an override that is not a known non-secret key (`server.url`).
 | # | Decision | Recommended |
 |---|---|---|
 | 1 | Where the mapping lives: (a) the store, (b) rename everywhere, (c) mixed | (a) |
-| 2 | Concurrent writers: A (one writer, checked) or B (key with a writer id), which cannot be changed later without rebuilding stores | A |
+| 2 | *Decided: one writer, a second refused.* To confirm: the lease's conditions C1 and C2 are acceptable, and what ships if P8 refutes C1 (named-table lease if P11 holds, else detection only) | lease; do not ship a "refusal" resting on neither |
 | 3 | Row order: store `ox_order` so reads follow the written order | yes; otherwise results differ from Delta |
 | 4 | Table names `op-<hint>-<digest>` with the registry table `op-tables` (ITL-1100's lookup table) | yes |
 | 5 | Two different manifests in one table stop the job, rather than one winning | stop |
@@ -520,6 +576,8 @@ save an override that is not a known non-secret key (`server.url`).
 | 8 | Observers not on a SpiralDB store at first | yes |
 | 9 | The 8 KiB failure of today's Arrow metadata entry on tables that are not store tables: fix now (chunks) or leave | fix in PR 2, same chunk code |
 | 10 | Stay on pyspiral 0.16.33 for this (ITL-931 and ITL-1186 later). The codec, manifest and registry do not depend on the client | yes |
+| 11 | A `CachedSource` read while another run holds the store: refuse, or serve live rows without storing | refuse |
+| 12 | A crashed job's claim is cleared by a person only, never by age | yes |
 
 ## 9. Not verified here
 
