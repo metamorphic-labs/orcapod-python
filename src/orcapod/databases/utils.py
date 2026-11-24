@@ -604,6 +604,8 @@ def _child_fields(data_type: "pa.DataType") -> "list[tuple[str, pa.Field[Any]]]"
         pa.types.is_list(data_type)
         or pa.types.is_large_list(data_type)
         or pa.types.is_fixed_size_list(data_type)
+        or pa.types.is_list_view(data_type)
+        or pa.types.is_large_list_view(data_type)
     ):
         return [("[]", data_type.value_field)]
     return []

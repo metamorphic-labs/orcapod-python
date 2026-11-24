@@ -1303,6 +1303,35 @@ def test_a_postgresql_database_checks_the_declaration_before_anything_is_sent(
         ]
 
 
+@pytest.mark.parametrize("kind", [*CONNECTOR_DATABASES, "PostgreSQL"])
+@pytest.mark.parametrize("id_type", [pa.binary(), pa.large_binary()])
+@pytest.mark.parametrize("null_in", ["v", "the id"])
+@pytest.mark.parametrize("queued", [True, False])
+def test_each_record_id_type_gets_the_declared_null_error(
+    tmp_path: Path, kind: str, id_type: Any, null_in: str, queued: bool
+) -> None:
+    """Review of PR 539: with a ``binary`` record id the rows are normalized, and the
+    normalization raised a plain ``ValueError`` first."""
+
+    def rows(n: int, *, null: bool) -> pa.Table:
+        table = _null_case("column", n, null=null and null_in == "v", not_null=null)
+        ids = pa.array([None if null and null_in == "the id" else b"r%d" % n], id_type)
+        field = pa.field(ID, id_type, nullable=not null)
+        return pa.Table.from_arrays(
+            [ids, *table.columns[1:]], schema=table.schema.set(0, field)
+        )
+
+    with _connector_database(kind, tmp_path) as db:
+        if queued:
+            _add(db, rows(2, null=False))
+        with pytest.raises(NullInNonNullableColumnError) as refused:
+            _add(db, rows(3, null=True))
+        assert refused.value.column == ("v" if null_in == "v" else "__record_id")
+        pending = db._pending_batches.get("/".join(PATH))
+        held = [] if pending is None else pending["__record_id"].to_pylist()
+        assert held == ([b"r2"] if queued else [])
+
+
 def test_the_declared_null_rule_reads_only_the_values_of_the_rows() -> None:
     """A value under a null struct, outside a slice, or at a nullable place never
     counts; a map's values do."""

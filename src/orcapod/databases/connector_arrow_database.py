@@ -476,15 +476,16 @@ class ConnectorArrowDatabase:
         self._require_table_name(
             self._path_to_table_name(self._path_prefix + record_path)
         )
-        records = normalize_table_to_large_types(records, keep_null=True)
-        self._connector.validate_records(records)
         # Against the schema these rows were given with: combined with queued rows
         # that declare the column nullable, the null would be stored (ITL-1381).
+        # Before the normalization, which refuses some such rows with another error.
         null_path = declared_null_path(records)
         if null_path is not None:
             raise NullInNonNullableColumnError(
                 null_path, table="/".join(self._path_prefix + record_path)
             )
+        records = normalize_table_to_large_types(records, keep_null=True)
+        self._connector.validate_records(records)
 
         record_key = self._get_record_key(record_path)
         # Columns match by name: rows with the held columns in another order are
