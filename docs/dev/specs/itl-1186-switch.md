@@ -76,7 +76,7 @@ panicked). `exist_ok` with another key gives a bare 409: the connector compares 
 
 ## 4. What does not change, and the exceptions
 
-Unchanged: `table_<id>` (resource_id equals it, measured on 46-plus tables), so default source
+Unchanged: `table_<id>` (resource_id equals it: reported by the earlier live study, rechecked by the conformance run), so default source
 ids; `SOURCE_VERSION` 1; record ids; hashes; schema; key order; `limit`, `where`, `asof`,
 streaming, pinning; saved jobs and configs. The SDK's schema of pyspiral tables equals
 pyspiral's, with zoned timestamps, times and timestamp/date keys (measured).
@@ -105,7 +105,7 @@ Exceptions, all user-visible:
 | count | a read of one key column. `row_count_estimate` is now exact but reads every key (1.3 s at 20,000 rows; grows). The `max_rows` check reads at most `max_rows + 1` keys (1 to 3 s) and remembers it per table version. `head()` counts at most as many; above that the total is unknown ("more than 100,000 rows") |
 | key types | refused at create, naming the column |
 | error bodies | status only; the connector adds operation and table as a note |
-| threads, first call | 8 threads on a fresh client: 8 of 8 (one trial); pyspiral failed 7. A test; a lock around client creation only if it is ever seen |
+| threads, first call | 8 threads opening on a fresh client: 8 of 8 (one trial; opens, whereas the 7 of 8 pyspiral failures were first writes, not yet tried). A test; a lock around client creation only if it is ever seen |
 | maps, null structs, zoned or extension columns, `__`, `.` | today's refusals kept, also where the SDK would store more |
 
 ## 6. Fake and tests
