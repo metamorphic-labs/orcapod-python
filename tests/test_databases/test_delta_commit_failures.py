@@ -148,8 +148,10 @@ def test_a_concurrent_commit_is_not_permanent(tmp_path: Path) -> None:
     root = str(tmp_path / "t")
     deltalake.write_deltalake(root, pa.table({"id": [1]}))
     stale = deltalake.DeltaTable(root)
+    # The same id: from deltalake 1.7 a commit whose id range, by file statistics, is
+    # apart from the other commit's is no conflict.
     _merge(deltalake.DeltaTable(root), pa.table({"id": [2]}))
-    error = _raised(lambda: _merge(stale, pa.table({"id": [3]})))
+    error = _raised(lambda: _merge(stale, pa.table({"id": [2]})))
     assert isinstance(error, CommitFailedError)
     assert not dld._permanent_commit_failure(error)  # pyright: ignore[reportPrivateUsage]
 

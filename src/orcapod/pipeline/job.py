@@ -1151,8 +1151,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         plan = prepared.plan
         counter = RunCountingObserver()
         effective_orchestrator = orchestrator or SyncPipelineOrchestrator()
+        is_sync = isinstance(effective_orchestrator, SyncPipelineOrchestrator)
         with self._executing(prepared, plan, commit_every_rows, load_only=load_only):
-            if isinstance(effective_orchestrator, SyncPipelineOrchestrator):
+            if is_sync:
                 # Held nodes give their output streams on the sync path (ITL-1347).
                 _ = effective_orchestrator.run(
                     plan.dag,
@@ -1180,6 +1181,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             plan,
             load_only=load_only,
             unchecked_sources=prepared.unchecked_sources,
+            asynchronous=not is_sync,
         )
         if not summary.ok:
             warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
@@ -1251,6 +1253,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             plan,
             load_only=load_only,
             unchecked_sources=prepared.unchecked_sources,
+            asynchronous=True,
         )
         if not summary.ok:
             warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
@@ -1553,6 +1556,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         *,
         load_only: bool = False,
         unchecked_sources: tuple[str, ...] = (),
+        asynchronous: bool,
     ) -> RunSummary:
         """Commit the run's last writes, mark the job as run and keep its summary.
 
@@ -1565,6 +1569,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             plan: The nodes the run ran and held (``plan_run``).
             load_only: Whether the run loaded stored results only.
             unchecked_sources: The sources the start-of-run check could not check.
+            asynchronous: Whether the async orchestrator executed the run.
 
         Returns:
             The run's summary, also kept as ``last_run``.
@@ -1628,6 +1633,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             unchecked_sources=unchecked_sources,
             ran_nothing=not plan.to_run,
             restricted_sources=restrictions_in_force(prepared.exec_dag.nodes()),
+            asynchronous=asynchronous,
         )
         return self._last_run
 

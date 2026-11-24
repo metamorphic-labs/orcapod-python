@@ -115,7 +115,7 @@ def delta_history(root: Path, kind: str) -> list[tuple[str, int]]:
     """
     (path,) = root.rglob(f"{kind}/_delta_log")
     table = deltalake.DeltaTable(str(path.parent))
-    history = list(reversed(table.history()))
+    history = list(reversed(list(table.history())))
     commits: list[tuple[str, int]] = []
     for item in history:
         version = int(item["version"])

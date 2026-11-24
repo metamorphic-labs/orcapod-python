@@ -1,6 +1,7 @@
 // @ts-check
 import { spawnSync } from 'node:child_process';
-import { watch } from 'node:fs';
+import { readdirSync, readFileSync, watch } from 'node:fs';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig, passthroughImageService } from 'astro/config';
 import starlight from '@astrojs/starlight';
@@ -68,6 +69,30 @@ function orcapodDocsContent() {
 	};
 }
 
+/**
+ * The site shows every line of a code block: Expressive Code must not lift a comment that looks
+ * like a file name (`# 1.58`, a printed value) out of the code as the block's title. The
+ * documentation titles no code block, so any titled one is a lost line.
+ */
+function everyCodeLineIsShown() {
+	return {
+		name: 'orcapod-every-code-line-is-shown',
+		hooks: {
+			'astro:build:done': ({ dir }) => {
+				const root = fileURLToPath(dir);
+				const pages = readdirSync(root, { recursive: true, encoding: 'utf-8' })
+					.filter((name) => name.endsWith('.html'));
+				const titled = pages.filter((name) =>
+					/<figure class="frame[^"]*\bhas-title\b/.test(readFileSync(join(root, name), 'utf-8')),
+				);
+				if (titled.length > 0) {
+					throw new Error(`a code block lost its first comment to a title: ${titled.join(', ')}`);
+				}
+			},
+		},
+	};
+}
+
 const page = (label, slug) => ({ label, slug });
 
 export default defineConfig({
@@ -79,6 +104,7 @@ export default defineConfig({
 	image: { service: passthroughImageService() },
 	integrations: [
 		orcapodDocsContent(),
+		everyCodeLineIsShown(),
 		starlight({
 			title: 'Orcapod',
 			description:
@@ -95,6 +121,8 @@ export default defineConfig({
 				'@fontsource/lexend-exa/700.css',
 				'./src/styles/orcapod.css',
 			],
+			// Show code as written: never turn a comment into the block's title.
+			expressiveCode: { frames: { extractFileNameFromCode: false } },
 			plugins: [starlightLinksValidator()],
 			// The banner on every page: the site documents main, not a release.
 			routeMiddleware: './src/routeData.ts',

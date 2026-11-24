@@ -1664,10 +1664,11 @@ def _created_with(delta_table: deltalake.DeltaTable, token: str) -> bool:
     if delta_table.version() != 0:
         return False
     try:
-        latest = delta_table.history(1)
+        # A list before deltalake 1.7, a lazy iterator (which may raise when read) from it.
+        latest = next(iter(delta_table.history(1)), None)
     except Exception:  # noqa: BLE001  # unknown: the ids are read again on first use
         return False
-    return bool(latest) and latest[0].get(_CREATE_TOKEN_KEY) == token
+    return latest is not None and latest.get(_CREATE_TOKEN_KEY) == token
 
 
 def _table_id(delta_table: deltalake.DeltaTable) -> str:

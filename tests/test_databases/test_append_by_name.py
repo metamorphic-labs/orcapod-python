@@ -797,7 +797,7 @@ def test_a_refused_reordered_append_leaves_the_next_batch_committed(
             db.add_records(PATH, _abc(2), flush=True, **kwargs)
     else:
         db.add_records(PATH, _abc(2), flush=True, **kwargs)
-    assert DeltaTable(tmp_path / "t").history()[0]["operation"] == "MERGE"
+    assert list(DeltaTable(tmp_path / "t").history())[0]["operation"] == "MERGE"
     table = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="rid")
     assert table is not None
     expected = [1, 2, 3] if race else [1, 2]

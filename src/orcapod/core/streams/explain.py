@@ -120,11 +120,12 @@ def _sort_key(key: _ReadingKey) -> tuple[str, str, bool, bool, str, int]:
     )
 
 
-# Per source a node reaches: the source's reading, the node's distance from it (the
-# shortest path), and the steps on the way, each by the node and text that made it,
-# with that node's distance from the source.
+# Per source a node reaches: the source's reading, the shortest path its rows take
+# to the node's output (None when they only choose rows), and the steps on the way,
+# each by the node and text that made it, with that node's distance from the source.
 _Reach = dict[
-    _ReadingKey, tuple[SourceReading, int, dict[tuple[int, str], tuple[int, Step]]]
+    _ReadingKey,
+    tuple[SourceReading, int | None, dict[tuple[int, str], tuple[int, Step]]],
 ]
 
 
@@ -136,6 +137,8 @@ def _reach(stream: StreamProtocol, memo: dict[int, _Reach]) -> _Reach:
     (and its text, as a ``SemiJoin`` drops differently on each input), so a step reached
     by several paths is listed once, at its shortest distance from the source.
     """
+    from orcapod.core.operators.semijoin import SemiJoin
+
     known = memo.get(id(stream))
     if known is not None:
         return known
@@ -150,20 +153,23 @@ def _reach(stream: StreamProtocol, memo: dict[int, _Reach]) -> _Reach:
     result = {}
     for position, reach in enumerate(reaches):
         step = _step_of(stream, producer, position, inputs, reaches)
+        chooses_only = isinstance(producer, SemiJoin) and position == 1
         for key, (reading, distance, steps) in reach.items():
-            here = distance + 1
-            _, kept, merged = result.get(key, (reading, here, {}))
+            here = None if distance is None else distance + 1
+            _, kept, merged = result.get(key, (reading, None, {}))
             merged = dict(merged)
             for step_key, (step_distance, kept_step) in steps.items():
                 previous = merged.get(step_key)
                 if previous is None or step_distance < previous[0]:
                     merged[step_key] = (step_distance, kept_step)
-            if step is not None:
+            if step is not None and here is not None:
                 step_key = (id(stream), step.text)
                 previous = merged.get(step_key)
                 if previous is None or here < previous[0]:
                     merged[step_key] = (here, step)
-            result[key] = (reading, min(kept, here), merged)
+            if not chooses_only and here is not None and (kept is None or here < kept):
+                kept = here
+            result[key] = (reading, kept, merged)
     memo[id(stream)] = result
     return result
 
