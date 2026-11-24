@@ -761,11 +761,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         node_map: dict[str, object] = {}
 
-        for node_hash in _nx.topological_sort(self._hash_graph):
-            if node_hash not in persistent:
-                continue
-            job_node = persistent[node_hash]
-
+        for node_hash, job_node in persistent.items():
             if isinstance(job_node, SourceJobNode):
                 node_map[node_hash] = job_node.as_node()
 
@@ -832,17 +828,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 dict(self._hash_graph.nodes[old_h]) if old_h in self._hash_graph else {}
             )
             bp_hash_graph.add_node(new_h, **old_attrs)
-        for up_h, down_h in self._hash_graph.edges():
-            new_up = old_to_new.get(up_h)
-            new_down = old_to_new.get(down_h)
-            if new_up is not None and new_down is not None:
-                bp_hash_graph.add_edge(new_up, new_down)
-
-        new_graph_edges = [
+        new_graph_edges = sorted(
             (old_to_new[u], old_to_new[v])
             for u, v in self._graph_edges
             if u in old_to_new and v in old_to_new
-        ]
+        )
+        bp_hash_graph.add_edges_from(new_graph_edges)
 
         pipeline = Pipeline(name=self._name, auto_compile=False)
         pipeline._hash_graph = bp_hash_graph
@@ -864,14 +855,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # Build _node_graph (OrcaDAG with node objects as vertices).
         # node_map here contains GraphNode objects (blueprint nodes).
         bp_dag: OrcaDAG = OrcaDAG()
-        for up_h, down_h in self._hash_graph.edges():
-            up_node = node_map.get(up_h)
-            down_node = node_map.get(down_h)
-            if up_node is not None and down_node is not None:
-                bp_dag.add_edge(up_node, down_node)
-        for node in node_map.values():
-            if node not in bp_dag:
-                bp_dag.add_node(node)
+        for node in pipeline._persistent_node_map.values():
+            bp_dag.add_node(node)
+        for up_h, down_h in new_graph_edges:
+            bp_dag.add_edge(new_node_map[up_h], new_node_map[down_h])
         pipeline._node_graph = bp_dag
 
         pipeline._compiled = True
@@ -1630,7 +1617,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         # Serialize source configs (best-effort — skip non-reconstructable sources)
         sources_block: dict[str, Any] = {}
-        for spec_name, source in self._sources.items():
+        for spec_name, source in sorted(self._sources.items()):
             if hasattr(source, "to_config"):
                 try:
                     # ``hasattr`` checked it: every source declares it.
@@ -1980,7 +1967,6 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         #   • _distribute_databases() wires their databases correctly
         #   • job.nodes["label"].get_all_records() works after loading a completed job
         #   • run() includes them in the execution DAG
-        import networkx as _nx
         from orcapod.core.nodes.function_node import FunctionNode as _FunctionNode
         from orcapod.core.nodes.operator_node import OperatorNode as _OperatorNode
         from orcapod.core.nodes.source_node import SourceNode as _SourceNode
@@ -2022,11 +2008,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # is the source of truth.
         expected_rows: dict[str, int] = run_block.get("expected_rows", {})
 
-        for node_hash in _nx.topological_sort(job._hash_graph):
-            bp_node = pipeline._persistent_node_map.get(node_hash)
-            if bp_node is None:
-                continue
-
+        for node_hash, bp_node in pipeline._persistent_node_map.items():
             if isinstance(bp_node, _SourceNode):
                 # Keeps the loaded slot's saved hashes and saved type texts (ITL-1138).
                 sjn = SourceJobNode._from_loaded_slot(  # pyright: ignore[reportPrivateUsage]  # the loader is the one caller

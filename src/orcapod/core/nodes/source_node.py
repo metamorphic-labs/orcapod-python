@@ -638,12 +638,13 @@ class SourceNodeBase(TraceableBase, ABC):
         ``from_slot``, ``as_node``, ...), so no copy drops a piece: the given Arrow
         schemas, the saved Arrow type texts of an unresolved slot (ITL-640) and the
         saved pipeline hash, which does not depend on the slot's name, are always
-        kept. The saved content hash covers the name too, so it is kept only when this
-        slot has *other*'s name.
+        kept. The label and saved content hash are kept when this slot has *other*'s
+        name.
         """
         self._saved_pipeline_hash = other._saved_pipeline_hash
         self._given_arrow_schemas = other._given_arrow_schemas
         if self._name == other._name:
+            self._label = other._label
             self._saved_content_hash = other._saved_content_hash
         self._saved_arrow_texts = other._saved_arrow_texts
 

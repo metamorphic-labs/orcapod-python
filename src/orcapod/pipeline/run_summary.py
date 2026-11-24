@@ -120,7 +120,8 @@ class RunSummary:
             ran_nothing: Whether the run ran no node (every node held a current run).
             restricted_sources: Slot name to the source id, the condition (empty
                 for none) and the limit of each restricted source of the run
-                (``restrictions.restrictions_in_force``).
+                (``restrictions.restrictions_in_force``). Displayed by slot name
+                or direct source label.
         """
         self.job_name: str = job_name
         self.nodes: Mapping[str, NodeRunSummary] = {node.label: node for node in nodes}
@@ -129,7 +130,7 @@ class RunSummary:
         self.unchecked_sources: tuple[str, ...] = tuple(unchecked_sources)
         self.ran_nothing: bool = ran_nothing
         # One mapping split three ways, so the keys cannot disagree.
-        restricted = dict(restricted_sources or {})
+        restricted = dict(sorted((restricted_sources or {}).items()))
         self.conditions: Mapping[str, Condition] = {
             slot: condition
             for slot, (_, condition, _) in restricted.items()
