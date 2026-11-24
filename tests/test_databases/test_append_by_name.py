@@ -37,6 +37,7 @@ from orcapod.databases import (
 from orcapod.databases.utils import in_held_column_order
 from orcapod.errors import (
     InputValidationError,
+    NullabilityRecordMismatchError,
     UnstorableColumnError,
 )
 from tests.test_databases.type_matrix import open_database
@@ -1126,6 +1127,45 @@ def test_queued_batches_of_differing_nullability_are_one_batch(
             [1, 2, 3],
         )
         _check_lookups(db, [1, 2, 3])
+
+
+@pytest.mark.parametrize("kind", ["SQLite", "SpiralDB"])
+@pytest.mark.parametrize("stored", [True, False])
+@pytest.mark.parametrize("first", [True, False])
+@pytest.mark.parametrize("skip", [True, False])
+def test_a_refused_batch_leaves_the_queued_rows_to_be_flushed(
+    tmp_path: Path, kind: str, stored: bool, first: bool, skip: bool
+) -> None:
+    """Queued batches of differing nullability are combined unless the stored column is
+    ``NOT NULL`` (CodeRabbit on PR 539): the second is then refused when it is queued,
+    in either order, so a flush never drops rows of a valid batch with it."""
+    order = [ID, "a", "c", "b"]
+    with _connector_database(kind, tmp_path) as db:
+        _add(db, _declared(order, [1], not_null=stored), flush=True)
+        _add(db, _declared(order, [2], not_null=first))
+        second = _declared(["c", ID, "b", "a"], [3], not_null=not first)
+        if stored:
+            with pytest.raises(InputValidationError, match="stored NOT NULL"):
+                db.add_records(PATH, second, record_id_column=ID, skip_duplicates=skip)
+            # The refused batch changed neither the rows nor the duplicate policy.
+            assert not any(db._pending_skip_existing.values())
+            # A batch whose rows are all queued already has nothing to combine.
+            again = _declared(order, [2], not_null=not first)
+            db.add_records(PATH, again, record_id_column=ID, skip_duplicates=True)
+            ns = [1, 2]
+        else:
+            db.add_records(PATH, second, record_id_column=ID, skip_duplicates=skip)
+            ns = [1, 2, 3]
+        given = _given_order(kind, order)
+        _check(db.get_all_records(PATH, record_id_column=ID), given, ns)
+        if stored and not first and kind == "SpiralDB":
+            # The queued rows themselves are what SpiralDB refuses (ITL-936).
+            with pytest.raises(NullabilityRecordMismatchError):
+                db.flush()
+            ns = [1]
+        else:
+            db.flush()
+        _check(db.get_all_records(PATH, record_id_column=ID), given, ns)
 
 
 # ── PostgreSQL (a live server: the PostgreSQL CI job) ──────────────────────────

@@ -508,8 +508,6 @@ class ConnectorArrowDatabase:
                 records = records.filter(mask)
             if records.num_rows == 0:
                 return
-            # Mark this pending slot so flush() uses skip_existing=True.
-            self._pending_skip_existing[record_key] = True
         else:
             conflicts = input_ids & self._pending_record_ids[record_key]
             if conflicts:
@@ -525,9 +523,13 @@ class ConnectorArrowDatabase:
         else:
             # Two queued batches may declare a column's nullability differently, as
             # stored and queued rows may (ITL-1381).
+            self._refuse_loosened_columns(record_path, existing_pending, records)
             self._pending_batches[record_key] = pa.concat_tables(
                 _alike([existing_pending, records])
             )
+        if skip_duplicates:
+            # Mark this pending slot so flush() uses skip_existing=True.
+            self._pending_skip_existing[record_key] = True
         self._pending_record_ids[record_key].update(
             cast(list[bytes], records[self.RECORD_ID_COLUMN].to_pylist())
         )
@@ -625,6 +627,36 @@ class ConnectorArrowDatabase:
                 f"Cannot append to the table at {record_path!r}: column "
                 f"{changed[0]!r}: {changed[1]}. Nothing was written."
             )
+
+    def _refuse_loosened_columns(
+        self, record_path: tuple[str, ...], pending: pa.Table, records: pa.Table
+    ) -> None:
+        """Refuse a batch that differs from the queued one in the nullability of a
+        column the stored table holds ``NOT NULL`` (ITL-1381).
+
+        Combined, the column would be nullable and a flush could refuse it, taking the
+        rows of the valid batch with it. The stored table is looked up only when the
+        two batches differ.
+
+        Raises:
+            InputValidationError: Naming the first such column and the path.
+        """
+        differing = {
+            field.name
+            for field, other in zip(pending.schema, records.schema)
+            if field.name == other.name and field.nullable != other.nullable
+        }
+        if not differing:
+            return
+        table_name = self._path_to_table_name(self._path_prefix + record_path)
+        for field in self._stored_columns(table_name) or []:
+            if field.name in differing and not field.nullable:
+                raise InputValidationError(
+                    f"Cannot append to the table at {record_path!r}: column "
+                    f"{field.name!r} is stored NOT NULL, and these rows and the rows "
+                    "queued before them declare its nullability differently. Declare "
+                    "it NOT NULL in both. Nothing was queued."
+                )
 
     def _read_stored_schema(self, table_name: str) -> pa.Schema | None:
         """The schema a read of the stored table gives, its field metadata included.
