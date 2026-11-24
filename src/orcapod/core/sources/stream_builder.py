@@ -16,7 +16,12 @@ from typing import TYPE_CHECKING, Any, cast
 
 import pyarrow as pa
 
-from orcapod.core.sources.source_ids import hash_source_id
+from orcapod.core.sources.source_ids import (
+    build_source_id,
+    hash_source_name,
+    parse_kind_part,
+    require_source_name,
+)
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import RowIdentifierError
 from orcapod.logical_types.identifier import LogicalTypeIdentifierError
@@ -259,19 +264,19 @@ def row_identifiers(table: pa.Table, record_id_columns: Sequence[str]) -> list[s
 
 
 def require_hash_in_key_order_usable(
-    hash_in_key_order: bool, *, source_id: str | None, key_columns: Sequence[str]
+    hash_in_key_order: bool, *, source_name: str | None, key_columns: Sequence[str]
 ) -> None:
     """Refuse ``hash_in_key_order=True`` where it would mean nothing (ITL-1272).
 
-    It orders the rows of the table a default source id is hashed from, so it needs
+    It orders the rows of the table a default source name is hashed from, so it needs
     key columns (there is no key order without them) and no given ``source_id``: the
-    table hash is still computed then, but it does not determine a given source id and
+    table hash is still computed then, but it does not determine a given name and
     enters no identity, so the argument would change nothing. Whole-argument checks,
     made before the table is read.
 
     Args:
         hash_in_key_order: The argument as given.
-        source_id: The given source id, or ``None``.
+        source_name: The given source name (the ``source_id`` argument), or ``None``.
         key_columns: The resolved key columns, in key order; empty for the position.
 
     Raises:
@@ -280,11 +285,11 @@ def require_hash_in_key_order_usable(
     """
     if not hash_in_key_order:
         return
-    if source_id is not None:
+    if source_name is not None:
         raise ValueError(
             "hash_in_key_order=True orders the rows hashed into a default source id, "
-            f"but a source_id ({source_id!r}) is given, which the table hash does not "
-            "determine; pass one or the other"
+            f"but a source_id ({source_name!r}) is given, which the table hash does "
+            "not determine; pass one or the other"
         )
     if not key_columns:
         raise ValueError(
@@ -359,6 +364,7 @@ class SourceStreamResult:
     schema_hash: str
     table_hash: ContentHash
     source_id: str
+    source_name: str
     tag_columns: tuple[str, ...]
     system_tag_columns: tuple[str, ...]
     data_tags: tuple[str, ...] = ()
@@ -380,10 +386,10 @@ class SourceStreamBuilder:
         self,
         table: pa.Table,
         tag_columns: Collection[str],
-        source_id: str | None = None,
+        source_name: str | None = None,
         record_id_columns: str | Collection[str] | None = (),
         system_tag_columns: Collection[str] = (),
-        source_kind: str | None = None,
+        kind_part: str | None = None,
         data_tags: Collection[str] = (),
         *,
         hash_in_key_order: bool = False,
@@ -400,20 +406,21 @@ class SourceStreamBuilder:
         Args:
             table: Arrow table with nullable flags already set correctly.
             tag_columns: Column names forming the tag for each row.
-            source_id: Canonical source name. When not given, the default is
-                ``<source_kind>:<algorithm label>:<hex>`` of the table hash
-                (``hash_source_id``), which changes when rows are reordered
-                unless ``hash_in_key_order`` is given; pass an explicit value when
-                record IDs must survive reordering.
+            source_name: The source's name, the part of its source id after the
+                kind part (ITL-1425). When not given, the default is
+                ``<algorithm label>:<hex>`` of the table hash (``hash_source_name``),
+                which changes when rows are reordered unless ``hash_in_key_order`` is
+                given; pass an explicit value when the source id must survive
+                reordering.
             record_id_columns: The key columns whose values identify a row, in key
                 order: the row identifier is their canonical JSON
                 (``key_row_identifier``), which follows the row regardless of its
                 position (given a stable ``source_id``). Empty: the row's position,
                 ``row_<n>``, stable only while row order is.
             system_tag_columns: Additional system-level tag columns.
-            source_kind: Kind prefix of the default source id, for example
-                ``dict``. Required when ``source_id`` is not given; not used
-                otherwise.
+            kind_part: The kind part of the source id, ``<kind>_v<N>``, for example
+                ``dict_v1`` (``source_ids.kind_part``). Required: the source id is
+                ``<kind part>:<name>`` (``source_ids.build_source_id``).
             data_tags: The tag columns that are data-tags: also data columns
                 of the same name, stored once (ITL-1023). Empty (the builder's
                 default) gives plain tags, exactly as in v0.3; sources pass their
@@ -432,17 +439,19 @@ class SourceStreamBuilder:
             ValueError: If the table has no columns ("Table is empty"), if
                 tag_columns or a key column are not in the table, a key column's
                 type is not allowed, a key value is null or repeated, or if
-                neither ``source_id`` nor ``source_kind`` is given, or if
-                ``hash_in_key_order`` is given with a ``source_id`` or without key
-                columns.
+                ``kind_part`` is not given or is not ``<kind>_v<N>``, or if the
+                source id it builds is not valid, or if ``hash_in_key_order`` is given with
+                a ``source_name`` or without key columns.
             InputValidationError: If a column's type is, or contains, a
                 dictionary: dictionary-encoded columns are not currently supported
                 (ITL-1264, ITL-1277).
         """
         # Whole-argument checks first, before the table is read.
         key_columns = normalize_record_id_columns(record_id_columns) or ()
+        if source_name is not None:
+            require_source_name(source_name)
         require_hash_in_key_order_usable(
-            hash_in_key_order, source_id=source_id, key_columns=key_columns
+            hash_in_key_order, source_name=source_name, key_columns=key_columns
         )
         tag_columns_tuple = tuple(tag_columns)
         system_tag_columns_tuple = tuple(system_tag_columns)
@@ -537,16 +546,17 @@ class SourceStreamBuilder:
                 raise
             raise error from exc
 
-        # 6. Default source_id: the source kind and the labelled table hash, at
-        # full length. A source id is the source's name, so a default built from a
-        # hash says what kind of source it is and which algorithm made the hash.
-        if source_id is None:
-            if source_kind is None:
-                raise ValueError(
-                    "build() needs a source_id or a source_kind to make a default "
-                    "source id from."
-                )
-            source_id = hash_source_id(source_kind, table_hash)
+        # 6. Default name: the labelled table hash, at full length, after the kind
+        # part (ITL-1425). A default built from a hash says which algorithm made it.
+        if kind_part is None:
+            raise ValueError(
+                "build() needs the kind part of the source id (kind_part, "
+                "'<kind>_v<N>'): every source id is '<kind part>:<name>'"
+            )
+        kind, version = parse_kind_part(kind_part)
+        if source_name is None:
+            source_name = hash_source_name(table_hash)
+        source_id = build_source_id(kind, version, source_name)
 
         # 7. Attach the source-info tokens and the system tags.
         stream = self.attach_provenance(
@@ -564,6 +574,7 @@ class SourceStreamBuilder:
             schema_hash=schema_hash,
             table_hash=table_hash,
             source_id=source_id,
+            source_name=source_name,
             tag_columns=tag_columns_tuple,
             system_tag_columns=system_tag_columns_tuple,
             data_tags=data_tags_tuple,

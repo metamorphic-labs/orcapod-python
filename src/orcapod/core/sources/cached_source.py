@@ -13,7 +13,12 @@ from orcapod import contexts
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.config import OrcapodConfig
 from orcapod.core.sources.base import RootSource
-from orcapod.errors import InputValidationError, UnstorableColumnError
+from orcapod.core.sources.source_ids import parse_source_id
+from orcapod.errors import (
+    CachedSourceIdMismatchError,
+    InputValidationError,
+    UnstorableColumnError,
+)
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     typed_arrow_schemas,
@@ -79,7 +84,9 @@ class CachedSource(RootSource):
     """
 
     SOURCE_KIND: ClassVar[str] = "cached"
-    """Config type key and default source-id kind of this source (one vocabulary)."""
+    """Config type key of this source. Not in its source id: it has its wrapped source's."""
+    SOURCE_VERSION: ClassVar[int] = 1
+    """The version of this kind's implementation (ITL-1425); not in its source id."""
     TABLE_IS_ROWS: ClassVar[bool] = True
 
     HASH_COLUMN_NAME = "_record_hash"
@@ -91,6 +98,8 @@ class CachedSource(RootSource):
     _skipped_rows_reported: bool = False
     # Set once a cache table found at the older layout has been accounted for.
     _stale_tables_checked: bool = False
+    # Whether the cache table was found to hold this source's rows only (ITL-1425).
+    _source_ids_checked: bool = False
 
     def __init__(
         self,
@@ -98,12 +107,15 @@ class CachedSource(RootSource):
         cache_database: ArrowDatabaseProtocol,
         cache_path_prefix: tuple[str, ...] = (),
         cache_path: tuple[str, ...] | None = None,
-        source_id: str | None = None,
         label: str | None = None,
         data_context: str | contexts.DataContext | None = None,
         config: OrcapodConfig | None = None,
     ) -> None:
         """Wrap ``source`` in a cache kept in ``cache_database``.
+
+        The cached source has its wrapped source's ``source_id`` (ITL-1425): its rows
+        are that source's rows, with that source's system tags and tokens; a cache is
+        not another implementation reading the data.
 
         Raises:
             ValueError: If ``source`` is restricted (a condition or a limit).
@@ -113,10 +125,7 @@ class CachedSource(RootSource):
         refuse_restricted_cache_input(source)
         if data_context is None:
             data_context = source.data_context_key
-        if source_id is None:
-            source_id = source.source_id
         super().__init__(
-            source_id=source_id,
             label=label,
             data_context=data_context,
             config=config,
@@ -178,8 +187,10 @@ class CachedSource(RootSource):
             "cache_path_prefix": list(self._cache_path_prefix),
             # The path without its layout component, as ``cache_path`` takes it.
             "cache_path": list(self._unversioned_cache_path),
-            "source_id": self.source_id,
-            # Note: identity fields (content_hash, pipeline_hash, etc.) intentionally omitted
+            # Note: identity fields (content_hash, pipeline_hash, etc.) intentionally
+            # omitted: a cache has its wrapped source's identity, which the inner
+            # source's config carries; a proxy for a cache config that cannot be
+            # rebuilt takes it from there (serialization._source_proxy_from_config).
         }
 
     @classmethod
@@ -237,7 +248,6 @@ class CachedSource(RootSource):
             cache_database=cache_db,
             cache_path_prefix=tuple(config.get("cache_path_prefix", ())),
             cache_path=tuple(config["cache_path"]) if "cache_path" in config else None,
-            source_id=config.get("source_id"),
         )
 
     # -------------------------------------------------------------------------
@@ -246,6 +256,16 @@ class CachedSource(RootSource):
 
     def identity_structure(self) -> Any:
         return self._source.identity_structure()
+
+    @property
+    def source_id(self) -> str:
+        """The wrapped source's source id: the cache presents that source's rows."""
+        return self._source.source_id
+
+    @property
+    def source_name(self) -> str:
+        """The name part of the wrapped source's source id."""
+        return parse_source_id(self._source.source_id).name
 
     def _compute_arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema]":
         """The wrapped source's Arrow schemas: the cache stores that source's rows."""
@@ -367,6 +387,9 @@ class CachedSource(RootSource):
         ``SourceProxy``).
         """
         seen = self._source_modified_time()
+        # Before the wrapped source's rows are read: a cache of another source id is
+        # refused without reading or writing any row (ITL-1425).
+        self._require_rows_of_this_source()
         live_with_hash = self._live_records()
         # Store in DB with hash as record ID (skip_duplicates deduplicates).
         # The data context column is appended after the record hashes are computed:
@@ -394,6 +417,7 @@ class CachedSource(RootSource):
         if records is None:
             return set()
         records = keep_rows_of_data_context(records, self.data_context_key)
+        self._require_source_ids(records)
         return {
             h
             for h in records.column(self.HASH_COLUMN_NAME).to_pylist()
@@ -430,9 +454,16 @@ class CachedSource(RootSource):
 
         Returns:
             ``True`` if this source will present new rows at the next read.
+
+        Raises:
+            CachedSourceIdMismatchError: If the cache holds rows of another source
+                id; raised before the wrapped source is checked (ITL-1425).
         """
         if not isinstance(self._source, RootSource):
             return False
+        # The cache first: a cache of another source id is refused before the
+        # wrapped source is checked or read (ITL-1425).
+        self._require_rows_of_this_source()
         _ = self._source.check_for_new_data()
         seen = self._source_modified_time()
         if seen == self._source_seen:
@@ -496,8 +527,66 @@ class CachedSource(RootSource):
                 self._cache_database.base_path + self.cache_path,
                 stored_rows - records.num_rows,
             )
+        self._require_source_ids(records)
         self._require_declared_types(records)
         return records
+
+    def _require_rows_of_this_source(self) -> None:
+        """Refuse a cache table holding rows of another source id (ITL-1425).
+
+        Called before the wrapped source is checked (``check_for_new_data``) or its rows
+        are read, so once a cache is found to hold another id no row of the wrapped
+        source is read or returned and nothing is written. Building the wrapped source
+        (``from_config``) may read it before the first check. The cache table is read once per
+        source object, until it is found to hold this source's rows; a table not yet
+        written holds no other id.
+
+        Raises:
+            CachedSourceIdMismatchError: If a stored row names another source id.
+        """
+        if self._source_ids_checked:
+            return
+        records = self._cache_database.get_all_records(
+            self.cache_path, record_id_column=self.HASH_COLUMN_NAME
+        )
+        if records is None:
+            return
+        self._require_source_ids(
+            keep_rows_of_data_context(records, self.data_context_key)
+        )
+
+    def _require_source_ids(self, records: pa.Table) -> None:
+        """Refuse cached rows written under another source id than this one (ITL-1425).
+
+        A cache keeps one source's rows. Rows stored under another full source id (the
+        same data read by another version of its kind, after a load where the class
+        declares a newer ``SOURCE_VERSION``) are not this source's rows: presenting
+        them, or adding this source's rows beside them, would mix two sources in one
+        table. Nothing is converted or moved.
+
+        Raises:
+            CachedSourceIdMismatchError: Naming both ids.
+        """
+        stored_ids: set[str] = set()
+        for name in records.column_names:
+            if name.startswith(constants.SYSTEM_TAG_SOURCE_ID_PREFIX):
+                stored_ids.update(
+                    value
+                    for value in records.column(name).unique().to_pylist()
+                    if value is not None
+                )
+        others = sorted(stored_ids - {self.source_id})
+        if others:
+            raise CachedSourceIdMismatchError(
+                f"CachedSource at {'/'.join(self.cache_path)!r} reads "
+                f"{self.source_id!r}, but its cache holds rows of "
+                f"{', '.join(repr(i) for i in others)}; no row of the source was read and nothing was written. "
+                "The cache must be rebuilt for the new id (another cache_path or "
+                "cache database), or the reader's version pinned to the one that "
+                "wrote it."
+            )
+        if stored_ids:
+            self._source_ids_checked = True
 
     def _build_merged_stream(self) -> ArrowTableStream:
         """Ingest live data (if available), then return all cached records.

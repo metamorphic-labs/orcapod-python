@@ -854,7 +854,6 @@ def test_a_source_in_another_data_context_hands_on_its_own_rows() -> None:
     source = CachedSource(
         inner,
         cache_database=InMemoryArrowDatabase(),
-        source_id="cached",
         data_context=custom,
     )
     slot = SourceJobNode.from_stream(source)

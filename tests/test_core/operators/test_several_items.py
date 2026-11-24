@@ -763,7 +763,10 @@ def test_merge_join_of_tied_values_keeps_argument_order(role: str) -> None:
             for column in MAIN.data:
                 tokens = data.source_info()[column]
                 assert isinstance(tokens, list)
-                assert [str(t).split("::")[0] for t in tokens] == [first, second]
+                assert [str(t).split("::")[0] for t in tokens] == [
+                    inputs[first].source_id,
+                    inputs[second].source_id,
+                ]
                 values = data[column]
                 assert isinstance(values, list)
                 assert values[0] == values[1]

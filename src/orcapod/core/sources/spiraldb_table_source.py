@@ -52,7 +52,7 @@ from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource, saved_tag_only_columns
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
-from orcapod.core.sources.source_ids import joined_location, location_source_id
+from orcapod.core.sources.source_ids import joined_location, location_source_name
 from orcapod.core.sources.derived_source import validate_tags_as_data
 from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
@@ -211,8 +211,8 @@ class SpiralDBTableSource(RootSource):
     not apply, and the header says how many rows the table has.
 
     Identity. The source is identified by where the table is, never by its rows. The
-    default ``source_id`` is ``spiraldb_table:<project_id>.<dataset>.<table_name>@<table
-    id>`` (``spiraldb_table_address``): Spiral's own table identifier, then the table id,
+    default ``source_id`` is ``spiraldb_table_v1:<project_id>.<dataset>.<table_name>@<table
+    id>`` (the name from ``spiraldb_table_address`` after the kind part, ITL-1425): Spiral's own table identifier, then the table id,
     SpiralDB's own, so a table dropped and created again under the same name is a
     different source, and a renamed table gets a new source id too. A row is
     identified by its primary key (or ``record_id_columns``) in the JSON key form.
@@ -257,8 +257,9 @@ class SpiralDBTableSource(RootSource):
             memory, about 5 KB per row and node.
         batch_rows: The most rows handed on at once while iterating (default 8,192).
             A SpiralDB batch larger than this is held while its slices are handed on.
-        source_id: Canonical source name for the registry and provenance tokens.
-            Defaults to ``"<project_id>/<dataset>.<table_name>@<table id>"``.
+        source_id: The source's name; its id is ``spiraldb_table_v1:<name>``
+            (ITL-1425). The name defaults to
+            ``<project_id>.<dataset>.<table_name>@<table id>``.
         label: Human-readable label for this source node.
         data_context: Data context governing type conversion and hashing.
         config: OrcaPod configuration.
@@ -283,7 +284,9 @@ class SpiralDBTableSource(RootSource):
     """
 
     SOURCE_KIND: ClassVar[str] = "spiraldb_table"
-    """Config type key and default source-id kind of this source (one vocabulary)."""
+    """Config type key and the kind in the source id's kind part (one vocabulary)."""
+    SOURCE_VERSION: ClassVar[int] = 1
+    """The version of this kind's implementation, in the kind part (ITL-1425)."""
     TABLE_IS_ROWS: ClassVar[bool] = True
     TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
@@ -395,12 +398,11 @@ class SpiralDBTableSource(RootSource):
                     "column must hold strings, integers, booleans, timestamps or dates."
                 )
             self._record_id_columns = given_key
-            if self._source_id is None:
-                self._source_id = location_source_id(
-                    self.SOURCE_KIND,
+            if self._source_name is None:
+                self._source_name = location_source_name(
                     spiraldb_table_address(
                         project_id, dataset, table_name, self._table_id
-                    ),
+                    )
                 )
             # Every declared tag is a data-tag unless kept tag-only (ITL-1023).
             self._data_tags = source_data_tags(resolved_tags, tag_only_columns)
@@ -411,7 +413,8 @@ class SpiralDBTableSource(RootSource):
                 template = self._builder.build(
                     schema.empty_table(),
                     tag_columns=resolved_tags,
-                    source_id=self._source_id,
+                    source_name=self._source_name,
+                    kind_part=self.kind_part(),
                     system_tag_columns=system_tag_columns,
                     data_tags=self._data_tags,
                 )
@@ -436,7 +439,8 @@ class SpiralDBTableSource(RootSource):
                 template = self._builder.build(
                     self._with_tag_copies(self._table_schema.empty_table()),
                     tag_columns=template.tag_columns,
-                    source_id=self._source_id,
+                    source_name=self._source_name,
+                    kind_part=self.kind_part(),
                     system_tag_columns=template.system_tag_columns,
                     data_tags=self._data_tags,
                 )
@@ -659,8 +663,9 @@ class SpiralDBTableSource(RootSource):
         return None
 
     def identity_structure(self) -> Any:
-        """Identity from the class, the schema, the source id (the table's locator) and
-        the key columns (the primary key, or ``record_id_columns``).
+        """Identity from the source id (``spiraldb_table_v1:`` and the table's locator),
+        the schema and the key columns (the primary key, or ``record_id_columns``), as
+        for every root source; no class name (ITL-1425).
 
         With ``tags_as_data`` given, its sorted items follow: two mappings can give
         the same schema (two key columns of one type copied to one name) while the
@@ -1123,7 +1128,7 @@ class SpiralDBTableSource(RootSource):
             "record_id_columns": None
             if self._record_id_columns is None
             else list(self._record_id_columns),
-            "source_id": self.source_id,
+            **self._source_id_config(),
             **self._identity_config(),
         }
 
@@ -1144,24 +1149,27 @@ class SpiralDBTableSource(RootSource):
                 SpiralDB table id than the one saved (the table was dropped and
                 created again, or another table took the name).
         """
-        source = cls(
-            project_id=config["project_id"],
-            table_name=config["table_name"],
-            dataset=config.get("dataset", "default"),
-            tag_columns=config.get("tag_columns"),
-            tag_only_columns=saved_tag_only_columns(config),
-            system_tag_columns=config.get("system_tag_columns", ()),
-            where=Condition.from_config(config.get("where") or {}),
-            limit=config.get("limit"),
-            asof=config.get("asof"),
-            max_rows=config.get("max_rows", DEFAULT_MAX_ROWS),
-            record_id_columns=config.get("record_id_columns"),
-            batch_rows=config.get("batch_rows", DEFAULT_BATCH_ROWS),
-            tags_as_data=config.get("tags_as_data"),
-            source_id=config.get("source_id"),
-            label=config.get("label"),
-            data_context=config.get("data_context"),
-            overrides=config.get("overrides"),
+        source = cls._from_saved_name(
+            config,
+            lambda name: cls(
+                project_id=config["project_id"],
+                table_name=config["table_name"],
+                dataset=config.get("dataset", "default"),
+                tag_columns=config.get("tag_columns"),
+                tag_only_columns=saved_tag_only_columns(config),
+                system_tag_columns=config.get("system_tag_columns", ()),
+                where=Condition.from_config(config.get("where") or {}),
+                limit=config.get("limit"),
+                asof=config.get("asof"),
+                max_rows=config.get("max_rows", DEFAULT_MAX_ROWS),
+                record_id_columns=config.get("record_id_columns"),
+                batch_rows=config.get("batch_rows", DEFAULT_BATCH_ROWS),
+                tags_as_data=config.get("tags_as_data"),
+                source_id=name,
+                label=config.get("label"),
+                data_context=config.get("data_context"),
+                overrides=config.get("overrides"),
+            ),
         )
         saved_id = config.get("table_id")
         if saved_id is not None and saved_id != source.table_id:

@@ -209,7 +209,7 @@ def test_a_source_column_warns_once_with_the_count() -> None:
             tag_only_columns=True,
         )
     (message,) = conversion_warnings(caught)
-    assert "Source 'weights' column 'x'" in message
+    assert "Source 'dict_v1:weights' column 'x'" in message
     assert "2 of 3" in message
     assert "autograd history" in message
     assert ".detach().cpu()" in message

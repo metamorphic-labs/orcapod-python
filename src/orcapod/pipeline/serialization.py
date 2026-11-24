@@ -589,6 +589,37 @@ def resolve_source_from_config(
         raise
 
 
+def saved_source_id(config: dict[str, Any]) -> str:
+    """Rebuild the source id a saved source config names (ITL-1425).
+
+    A config holds the kind (``source_type``), the implementation version
+    (``source_version``) and the name (``source_name``) apart; the id is rebuilt from
+    them by ``source_ids.build_source_id``, never parsed out of one string. A config
+    that does not name its source (a plain derived source, whose default name is
+    recomputed from its origin) gives the full id saved among its identity fields
+    (``full_source_id``, written by ``RootSource._identity_config``), checked by the
+    one parser; one without that either gives ``"unknown"``.
+
+    Args:
+        config: A saved source config.
+
+    Returns:
+        The source id, or ``"unknown"``.
+    """
+    from orcapod.core.sources.source_ids import build_source_id, parse_source_id
+
+    kind = config.get("source_type")
+    version = config.get("source_version")
+    name = config.get("source_name")
+    if kind is not None and version is not None and name is not None:
+        return build_source_id(kind, version, name)
+    full_id = config.get("full_source_id")
+    if isinstance(full_id, str):
+        _ = parse_source_id(full_id)
+        return full_id
+    return "unknown"
+
+
 def _source_proxy_from_config(
     config: dict[str, Any],
     node_descriptor: dict[str, Any] | None = None,
@@ -619,6 +650,19 @@ def _source_proxy_from_config(
     """
     from orcapod.core.sources.source_proxy import SourceProxy
     from orcapod.types import Schema
+
+    inner_config = config.get("inner_source")
+    if (
+        node_descriptor is None
+        and not config.get("content_hash")
+        and config.get("source_type") == "cached"
+        and isinstance(inner_config, dict)
+    ):
+        # A cache has its wrapped source's identity (id, hashes, schemas), and its own
+        # config holds none: the proxy stands in with the wrapped source's, so a cache
+        # nested in another cache that cannot be rebuilt keeps its source id and the
+        # outer cache still reads its rows (ITL-1425).
+        return _source_proxy_from_config(cast("dict[str, Any]", inner_config))
 
     if node_descriptor is not None:
         # New format: top-level node descriptor carries identity
@@ -665,7 +709,7 @@ def _source_proxy_from_config(
     )
 
     return SourceProxy(
-        source_id=config.get("source_id", "unknown"),
+        source_id=saved_source_id(config),
         content_hash_str=content_hash,
         pipeline_hash_str=pipeline_hash_val,
         tag_schema=tag_schema,
@@ -1964,7 +2008,9 @@ def check_saved_source_config(config: dict[str, Any]) -> None:
 
     Each source class that reads entries of its own from a saved config may declare
     ``check_saved_config(config)``, which raises ``ValueError`` on an entry it would
-    have to interpret (a ``CSVSource``'s ``schema``, ITL-1315). It is called here for
+    have to interpret (a ``CSVSource``'s ``schema``, ITL-1315), and every source
+    config saved before source ids named their kind (a ``source_id`` without a
+    ``source_name``, ITL-1425) is refused. It is called here for
     the config and for every source config nested in it, so ``PipelineJob.load``
     refuses such a file instead of loading it with the source unbound.
 
@@ -1980,6 +2026,10 @@ def check_saved_source_config(config: dict[str, Any]) -> None:
         if isinstance(nested, dict):
             check_saved_source_config(cast("dict[str, Any]", nested))
     cls = SOURCE_REGISTRY.get(config.get("source_type"))  # pyright: ignore[reportArgumentType]  # any saved value
+    from orcapod.core.sources.base import RootSource
+
+    if isinstance(cls, type) and issubclass(cls, RootSource):
+        cls.require_saved_name_fields(config)
     check = getattr(cls, "check_saved_config", None)
     if check is not None:
         check(config)
