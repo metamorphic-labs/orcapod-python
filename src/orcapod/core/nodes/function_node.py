@@ -4590,8 +4590,11 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                                 ctx_obs.on_data_end(
                                     node_label, tag, data, cached_data, cached=True
                                 )
-                                run_entry_ids.append(base_entry_id)
                                 await output.send((cached_tag, cached_data))
+                                # Recorded once the output took the row, so the held
+                                # order is the order downstream received (a parked
+                                # send can resume after a later one).
+                                run_entry_ids.append(base_entry_id)
                             else:
                                 self._preflight_pipeline_write_schema()
                                 correlation_key = uuid.uuid4().bytes
@@ -4666,8 +4669,9 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                         # Commits every commit_every_rows rows inside a job (ITL-919);
                         # no await in between, so no other row interleaves.
                         self._row_processed()
-                        run_entry_ids.append(base_entry_id)
                         await output.send((clean_tag, output_data))
+                        # Recorded once the output took the row (see route_inputs).
+                        run_entry_ids.append(base_entry_id)
 
                 # Capture outer self so _NodeLabelObserver methods can
                 # update FunctionJobNode state without shadowing with 'self'.

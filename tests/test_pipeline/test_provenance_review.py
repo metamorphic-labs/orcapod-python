@@ -3543,3 +3543,49 @@ def test_two_entries_for_one_input_and_result_are_refused(
     monkeypatch.setattr(provenance, "_entries_for", doubled)
     with pytest.raises(ProvenanceInconsistencyError, match="which one served"):
         job.nodes[label].trace(selector, column)
+
+
+@function_pod(output_keys="y")
+def keep_optional(x: int | None) -> int | None:
+    """Return x as it is, null included."""
+    return x
+
+
+def test_a_stored_token_naming_an_absent_column_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A function over a source: a stored input token naming a column the source
+    row does not have (same record, same input hash) is refused, never traced; a
+    present column holding null still traces, to its null cell."""
+    from orcapod.pipeline import provenance
+
+    source = DictSource(
+        [{"k": 0, "g": "a", "x": None}, {"k": 1, "g": "b", "x": 2}],
+        tag_columns=["k", "g"],
+        tag_only_columns=True,
+        source_id="s",
+    )
+    job = PipelineJob(name="ghost", database=InMemoryArrowDatabase())
+    with job:
+        keep_optional.pod(source, label="f")
+    job.run()
+    node = job.nodes["f"]
+    cells = node.trace({"k": 0}, "y").source_cells()
+    assert [(c.record_id, c.column, c.value) for c in cells] == [("row_0", "x", None)]
+    real = provenance._entries_for
+
+    def ghost(*args: Any, **kwargs: Any) -> Any:
+        return [
+            {
+                name: value.replace("::x", "::ghost")
+                if name.startswith(constants.SOURCE_PREFIX) and isinstance(value, str)
+                else value
+                for name, value in entry.items()
+            }
+            for entry in real(*args, **kwargs)
+        ]
+
+    monkeypatch.setattr(provenance, "_entries_for", ghost)
+    for k in (0, 1):
+        with pytest.raises(ProvenanceInconsistencyError, match="has no column"):
+            node.trace({"k": k}, "y")

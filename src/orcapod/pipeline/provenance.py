@@ -1222,15 +1222,21 @@ class _Tracer:
                     f"source {source_id!r} record {record_id!r} is not the input the "
                     "stored entry was computed from (its content hash differs)"
                 )
-            if source_column in rows[0]:
-                stored = _at(rows[0][source_column], within)
-                if not held:
-                    value = stored
-                elif not same_value(stored, value):
-                    raise ProvenanceInconsistencyError(
-                        f"source {source_id!r} record {record_id!r} holds "
-                        f"{source_column}={stored!r}; the run held {value!r}"
-                    )
+            if source_column not in rows[0]:
+                # A token naming a column the source does not have links nothing (a
+                # present column holding null is a value, compared below).
+                raise ProvenanceInconsistencyError(
+                    f"source {source_id!r} record {record_id!r} has no column "
+                    f"{source_column!r}, which a stored token names"
+                )
+            stored = _at(rows[0][source_column], within)
+            if not held:
+                value = stored
+            elif not same_value(stored, value):
+                raise ProvenanceInconsistencyError(
+                    f"source {source_id!r} record {record_id!r} holds "
+                    f"{source_column}={stored!r}; the run held {value!r}"
+                )
         elif not held:
             status = "unavailable"
             value = None
