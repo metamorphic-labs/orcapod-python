@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import pathlib
+from collections.abc import Callable
 from typing import Any
 
 import pyarrow as pa
@@ -24,6 +25,7 @@ from orcapod.errors import SideEffectLogDataContextError
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.sources import ArrowTableSource
+from tests.pipeline_stores import function_store_cases
 
 Orchestrator = SyncPipelineOrchestrator | AsyncPipelineOrchestrator
 
@@ -167,11 +169,15 @@ class TestPaths:
 
 class TestSharing:
     @pytest.mark.parametrize("names", [("a", "b"), ("b", "a")])
+    @function_store_cases
     def test_a_second_job_computes_nothing_the_first_stored(
-        self, names: tuple[str, str], orchestrator: Orchestrator
+        self,
+        names: tuple[str, str],
+        orchestrator: Orchestrator,
+        pipeline_store_factory: Callable[[str], ArrowDatabaseProtocol],
     ) -> None:
-        db = InMemoryArrowDatabase()
-        results = InMemoryArrowDatabase()
+        db = pipeline_store_factory("pipeline")
+        results = pipeline_store_factory("results")
         first = two_step_job(names[0], db, [1.0, 2.0, 3.0], result_database=results)
         _ = first.run(orchestrator=orchestrator)
         assert len(calls) == 6
@@ -184,16 +190,22 @@ class TestSharing:
         # Each job keeps its own pipeline records.
         assert {p.split("/")[0] for p in table_paths(db)} == {"a", "b"}
 
+    @function_store_cases
     def test_only_inputs_not_stored_are_computed(
-        self, orchestrator: Orchestrator
+        self,
+        orchestrator: Orchestrator,
+        pipeline_store_factory: Callable[[str], ArrowDatabaseProtocol],
     ) -> None:
-        results = InMemoryArrowDatabase()
+        results = pipeline_store_factory("results")
         _ = two_step_job(
-            "a", InMemoryArrowDatabase(), [1.0, 2.0], result_database=results
+            "a", pipeline_store_factory("first"), [1.0, 2.0], result_database=results
         ).run(orchestrator=orchestrator)
         calls.clear()
         second = two_step_job(
-            "b", InMemoryArrowDatabase(), [2.0, 1.0, 4.0], result_database=results
+            "b",
+            pipeline_store_factory("second"),
+            [2.0, 1.0, 4.0],
+            result_database=results,
         )
         _ = second.run(orchestrator=orchestrator)
         assert sorted(calls) == [("double", 4.0), ("shift", 8.0)]
@@ -368,23 +380,35 @@ class TestSideEffectingFunctions:
 
     @staticmethod
     def notify_job(
-        name: str, xs: list[float], results: ArrowDatabaseProtocol
+        name: str,
+        xs: list[float],
+        results: ArrowDatabaseProtocol,
+        database: ArrowDatabaseProtocol | None = None,
     ) -> PipelineJob:
         job = PipelineJob(
-            name=name, database=InMemoryArrowDatabase(), result_database=results
+            name=name,
+            database=database if database is not None else InMemoryArrowDatabase(),
+            result_database=results,
         )
         with job:
             notify.pod(make_source(xs), label="notify")
         return job
 
+    @function_store_cases
     def test_only_inputs_no_job_delivered_are_delivered(
-        self, orchestrator: Orchestrator
+        self,
+        orchestrator: Orchestrator,
+        pipeline_store_factory: Callable[[str], ArrowDatabaseProtocol],
     ) -> None:
-        results = InMemoryArrowDatabase()
-        _ = self.notify_job("a", [1.0, 2.0], results).run(orchestrator=orchestrator)
+        results = pipeline_store_factory("results")
+        _ = self.notify_job(
+            "a", [1.0, 2.0], results, pipeline_store_factory("pipeline")
+        ).run(orchestrator=orchestrator)
         assert sorted(delivered) == [1.0, 2.0]
         delivered.clear()
-        job = self.notify_job("b", [2.0, 3.0, 1.0], results)
+        job = self.notify_job(
+            "b", [2.0, 3.0, 1.0], results, pipeline_store_factory("pipeline")
+        )
         _ = job.run(orchestrator=orchestrator)
         assert delivered == [3.0]
         assert rows(job, "notify", "sent") == [1.0, 2.0, 3.0]

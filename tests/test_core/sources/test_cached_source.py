@@ -22,6 +22,7 @@ from orcapod.databases import InMemoryArrowDatabase
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.protocols.hashing_protocols import PipelineElementProtocol
 from orcapod.system_constants import constants
+from tests.pipeline_stores import cache_store_cases
 
 
 # ---------------------------------------------------------------------------
@@ -209,28 +210,29 @@ class TestCachedSourceSchema:
 # ---------------------------------------------------------------------------
 
 
+@cache_store_cases
 class TestCachedSourceStreaming:
-    def test_as_table_matches_source(self, simple_source, db):
-        ps = CachedSource(simple_source, cache_database=db)
+    def test_as_table_matches_source(self, simple_source, pipeline_store):
+        ps = CachedSource(simple_source, cache_database=pipeline_store)
         ps_table = ps.as_table()
         src_table = simple_source.as_table()
         assert ps_table.num_rows == src_table.num_rows
         assert set(ps_table.column_names) == set(src_table.column_names)
 
-    def test_iter_data_count(self, simple_source, db):
-        ps = CachedSource(simple_source, cache_database=db)
+    def test_iter_data_count(self, simple_source, pipeline_store):
+        ps = CachedSource(simple_source, cache_database=pipeline_store)
         data = list(ps.iter_data())
         assert len(data) == 3
 
-    def test_iter_data_tags_and_data(self, simple_source, db):
-        ps = CachedSource(simple_source, cache_database=db)
+    def test_iter_data_tags_and_data(self, simple_source, pipeline_store):
+        ps = CachedSource(simple_source, cache_database=pipeline_store)
         for tag, data in ps.iter_data():
             assert "name" in tag.keys()
             assert "age" in data.keys()
 
-    def test_system_tags_preserved(self, simple_source, db):
+    def test_system_tags_preserved(self, simple_source, pipeline_store):
         """System tags flow through the cache correctly."""
-        ps = CachedSource(simple_source, cache_database=db)
+        ps = CachedSource(simple_source, cache_database=pipeline_store)
         table = ps.as_table(columns={"system_tags": True})
         sys_tag_cols = [
             c for c in table.column_names if c.startswith(constants.SYSTEM_TAG_PREFIX)
@@ -249,9 +251,9 @@ class TestCachedSourceStreaming:
         assert len(source_id_cols) == 1
         assert len(record_id_cols) == 1
 
-    def test_source_info_preserved(self, simple_source, db):
+    def test_source_info_preserved(self, simple_source, pipeline_store):
         """Source info columns flow through the cache correctly."""
-        ps = CachedSource(simple_source, cache_database=db)
+        ps = CachedSource(simple_source, cache_database=pipeline_store)
         table = ps.as_table(columns={"source": True})
         source_cols = [
             c for c in table.column_names if c.startswith(constants.SOURCE_PREFIX)
@@ -264,6 +266,7 @@ class TestCachedSourceStreaming:
 # ---------------------------------------------------------------------------
 
 
+@cache_store_cases
 class TestCachedSourceKeyPolicy:
     """Two sources that differ only in key policy never share a cache (ITL-1154)."""
 
@@ -277,7 +280,7 @@ class TestCachedSourceKeyPolicy:
         ]
         return sorted(str(value) for value in table.column(column).to_pylist())
 
-    def test_one_source_id_two_key_policies_get_separate_caches(self, db):
+    def test_one_source_id_two_key_policies_get_separate_caches(self, pipeline_store):
         table = pa.table({"k": ["a", "b"], "v": [1, 2]})
         by_position = ArrowTableSource(
             table, tag_columns=["k"], source_id="s", tag_only_columns=True
@@ -292,40 +295,41 @@ class TestCachedSourceKeyPolicy:
         assert by_position.pipeline_hash() == by_key.pipeline_hash()
         assert by_position.content_hash() != by_key.content_hash()
 
-        cached_by_position = CachedSource(by_position, cache_database=db)
-        cached_by_key = CachedSource(by_key, cache_database=db)
+        cached_by_position = CachedSource(by_position, cache_database=pipeline_store)
+        cached_by_key = CachedSource(by_key, cache_database=pipeline_store)
         assert cached_by_position.cache_path != cached_by_key.cache_path
         cached_by_position.flow()
         cached_by_key.flow()
 
         # A later read of either source sees only its own rows.
-        again_by_position = CachedSource(by_position, cache_database=db)
-        again_by_key = CachedSource(by_key, cache_database=db)
+        again_by_position = CachedSource(by_position, cache_database=pipeline_store)
+        again_by_key = CachedSource(by_key, cache_database=pipeline_store)
         assert self._record_ids(again_by_position) == ["row_0", "row_1"]
         assert self._record_ids(again_by_key) == ['{"k":"a"}', '{"k":"b"}']
 
 
+@cache_store_cases
 class TestCachedSourceCumulative:
-    def test_dedup_on_same_data(self, simple_source, db):
+    def test_dedup_on_same_data(self, simple_source, pipeline_store):
         """Running twice with the same data produces no duplicates."""
-        ps1 = CachedSource(simple_source, cache_database=db)
+        ps1 = CachedSource(simple_source, cache_database=pipeline_store)
         ps1.flow()
-        ps2 = CachedSource(simple_source, cache_database=db)
+        ps2 = CachedSource(simple_source, cache_database=pipeline_store)
         ps2.flow()
         table = ps2.as_table()
         assert table.num_rows == 3  # no duplicates
 
-    def test_clear_cache_rebuilds(self, simple_source, db):
+    def test_clear_cache_rebuilds(self, simple_source, pipeline_store):
         """clear_cache forces a fresh merge from DB on next access."""
-        ps = CachedSource(simple_source, cache_database=db)
+        ps = CachedSource(simple_source, cache_database=pipeline_store)
         t1 = ps.as_table()
         ps.clear_cache()
         t2 = ps.as_table()
         assert t1.num_rows == t2.num_rows
 
-    def test_source_modified_time_triggers_rebuild(self, simple_source, db):
+    def test_source_modified_time_triggers_rebuild(self, simple_source, pipeline_store):
         """Updating the wrapped source's modified time triggers a cache rebuild."""
-        ps = CachedSource(simple_source, cache_database=db)
+        ps = CachedSource(simple_source, cache_database=pipeline_store)
         # First access: build and cache
         t1 = ps.as_table()
         assert t1.num_rows == 3
@@ -339,7 +343,7 @@ class TestCachedSourceCumulative:
         # Verify CachedSource's own modified time was updated past the source's
         assert not ps.is_stale
 
-    def test_cumulative_across_runs(self, db):
+    def test_cumulative_across_runs(self, pipeline_store):
         """Data from different runs accumulates in the cache."""
         # Use a single source_id to make them share the same canonical identity
         # but with different data (different content_hash → different cache_path)
@@ -362,7 +366,7 @@ class TestCachedSourceCumulative:
 
         # Different data → different content_hash → different cache_paths
         # So cumulative within the SAME cache_path requires same content_hash
-        ps1 = CachedSource(s1, cache_database=db)
+        ps1 = CachedSource(s1, cache_database=pipeline_store)
         ps1.flow()
         assert ps1.as_table().num_rows == 2
 
@@ -374,12 +378,12 @@ class TestCachedSourceCumulative:
             infer_nullable=True,
             tag_only_columns=True,
         )
-        ps1_again = CachedSource(s1_again, cache_database=db)
+        ps1_again = CachedSource(s1_again, cache_database=pipeline_store)
         ps1_again.flow()
         assert ps1_again.as_table().num_rows == 2
 
         # Different source (s2) has different cache_path
-        ps2 = CachedSource(s2, cache_database=db)
+        ps2 = CachedSource(s2, cache_database=pipeline_store)
         ps2.flow()
         assert ps2.as_table().num_rows == 3
 
@@ -394,8 +398,9 @@ class TestCachedSourceCumulative:
 # ---------------------------------------------------------------------------
 
 
+@cache_store_cases
 class TestCachedSourceIntegration:
-    def test_join_with_cached_source(self, db):
+    def test_join_with_cached_source(self, pipeline_store):
         """CachedSource can be joined with another stream."""
         from orcapod.core.operators import Join
 
@@ -416,8 +421,8 @@ class TestCachedSourceIntegration:
             tag_only_columns=True,
         )
 
-        ps1 = CachedSource(s1, cache_database=db)
-        ps2 = CachedSource(s2, cache_database=db)
+        ps1 = CachedSource(s1, cache_database=pipeline_store)
+        ps2 = CachedSource(s2, cache_database=pipeline_store)
 
         joined = Join()(ps1, ps2)
         table = joined.as_table()
@@ -425,7 +430,7 @@ class TestCachedSourceIntegration:
         assert "val_a" in table.column_names
         assert "val_b" in table.column_names
 
-    def test_function_pod_with_cached_source(self, db):
+    def test_function_pod_with_cached_source(self, pipeline_store):
         """CachedSource works as input to a FunctionPod."""
         from orcapod.core.function_pod import FunctionPod
         from orcapod.core.data_function import PythonDataFunction
@@ -444,7 +449,7 @@ class TestCachedSourceIntegration:
             infer_nullable=True,
             tag_only_columns=True,
         )
-        ps = CachedSource(source, cache_database=db)
+        ps = CachedSource(source, cache_database=pipeline_store)
 
         result = pod(ps)
         data = list(result.iter_data())
@@ -458,6 +463,7 @@ class TestCachedSourceIntegration:
 # ---------------------------------------------------------------------------
 
 
+@cache_store_cases
 class TestCachedSourceWithSourceProxy:
     """CachedSource loaded from config where the inner source is not
     reconstructable should still serve data from the cache database."""
@@ -477,7 +483,7 @@ class TestCachedSourceWithSourceProxy:
             expected_class_name=source.__class__.__name__,
         )
 
-    def test_serves_cached_data_when_inner_source_unrecoverable(self, db):
+    def test_serves_cached_data_when_inner_source_unrecoverable(self, pipeline_store):
         """Populate cache → replace inner source with SourceProxy →
         data still available from cache."""
         table = pa.table(
@@ -493,7 +499,7 @@ class TestCachedSourceWithSourceProxy:
             infer_nullable=True,
             tag_only_columns=True,
         )
-        cached = CachedSource(source, cache_database=db)
+        cached = CachedSource(source, cache_database=pipeline_store)
 
         # Force data into the cache
         _ = cached.as_table()
@@ -502,7 +508,7 @@ class TestCachedSourceWithSourceProxy:
         proxy = self._make_proxy(source)
         loaded = CachedSource(
             source=proxy,
-            cache_database=db,
+            cache_database=pipeline_store,
             # An explicit cache_path excludes the layout component (sdb_v1).
             cache_path=cached.cache_path[:-1],
         )
@@ -514,7 +520,7 @@ class TestCachedSourceWithSourceProxy:
         assert "name" in result.column_names
         assert "age" in result.column_names
 
-    def test_inner_source_is_source_proxy(self, db):
+    def test_inner_source_is_source_proxy(self, pipeline_store):
         """Verify the CachedSource wraps a SourceProxy."""
         from orcapod.core.sources.source_proxy import SourceProxy
 
@@ -532,12 +538,12 @@ class TestCachedSourceWithSourceProxy:
             tag_only_columns=True,
         )
         proxy = self._make_proxy(source)
-        loaded = CachedSource(source=proxy, cache_database=db)
+        loaded = CachedSource(source=proxy, cache_database=pipeline_store)
 
         assert isinstance(loaded._source, SourceProxy)
         assert loaded._source.expected_class_name == "ArrowTableSource"
 
-    def test_identity_preserved_with_proxy(self, db):
+    def test_identity_preserved_with_proxy(self, pipeline_store):
         """CachedSource wrapping SourceProxy has same content_hash and
         pipeline_hash as the original CachedSource."""
         table = pa.table(
@@ -553,7 +559,7 @@ class TestCachedSourceWithSourceProxy:
             infer_nullable=True,
             tag_only_columns=True,
         )
-        cached = CachedSource(source, cache_database=db)
+        cached = CachedSource(source, cache_database=pipeline_store)
 
         original_content = cached.content_hash()
         original_pipeline = cached.pipeline_hash()
@@ -561,7 +567,7 @@ class TestCachedSourceWithSourceProxy:
         proxy = self._make_proxy(source)
         loaded = CachedSource(
             source=proxy,
-            cache_database=db,
+            cache_database=pipeline_store,
             # An explicit cache_path excludes the layout component (sdb_v1).
             cache_path=cached.cache_path[:-1],
         )
@@ -569,7 +575,7 @@ class TestCachedSourceWithSourceProxy:
         assert loaded.content_hash() == original_content
         assert loaded.pipeline_hash() == original_pipeline
 
-    def test_empty_cache_returns_empty_stream(self, db):
+    def test_empty_cache_returns_empty_stream(self, pipeline_store):
         """CachedSource with unrecoverable source and empty cache returns
         an empty stream rather than raising."""
         table = pa.table(
@@ -589,7 +595,7 @@ class TestCachedSourceWithSourceProxy:
 
         loaded = CachedSource(
             source=proxy,
-            cache_database=db,
+            cache_database=pipeline_store,
             cache_path=("test", "empty"),
         )
 
@@ -597,22 +603,23 @@ class TestCachedSourceWithSourceProxy:
         assert result.num_rows == 0
 
 
+@cache_store_cases
 class TestCachedConvenienceMethod:
     """Test the ``RootSource.cached()`` convenience method."""
 
-    def test_cached_returns_cached_source(self, simple_source, db):
-        cached = simple_source.cached(cache_database=db)
+    def test_cached_returns_cached_source(self, simple_source, pipeline_store):
+        cached = simple_source.cached(cache_database=pipeline_store)
         assert isinstance(cached, CachedSource)
 
-    def test_cached_with_path_prefix(self, simple_source, db):
+    def test_cached_with_path_prefix(self, simple_source, pipeline_store):
         cached = simple_source.cached(
-            cache_database=db,
+            cache_database=pipeline_store,
             cache_path_prefix=("my", "prefix"),
         )
         assert cached.cache_path[:2] == ("my", "prefix")
 
-    def test_cached_data_matches_source(self, simple_source, db):
-        cached = simple_source.cached(cache_database=db)
+    def test_cached_data_matches_source(self, simple_source, pipeline_store):
+        cached = simple_source.cached(cache_database=pipeline_store)
         original_table = simple_source.as_table()
         cached_table = cached.as_table()
 

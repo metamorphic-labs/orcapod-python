@@ -46,15 +46,12 @@ import orcapod
 from orcapod.contexts import get_default_context
 from orcapod.databases import (
     ConnectorArrowDatabase,
-    DeltaTableDatabase,
-    InMemoryArrowDatabase,
     PostgreSQLConnector,
-    SQLiteConnector,
-    SpiralDBConnector,
 )
 from orcapod.databases.delta_arrow_types import _is_recorded  # pyright: ignore[reportPrivateUsage]
 from orcapod.databases.utils import identity_node
 from orcapod.utils.arrow_utils import normalize_to_large_types
+from tests.pipeline_stores import open_stores
 
 KEPT = "KEPT"
 RECORDED = "KEPT VIA RECORDED TYPE"
@@ -630,26 +627,22 @@ def build_table(row: Row, root: Path) -> pa.Table:
 @contextlib.contextmanager
 def open_database(name: str, root: Path) -> Iterator[Any]:
     """The database ``name`` (one of ``DATABASES``), its files under ``root``."""
-    if name == "in-memory":
-        yield InMemoryArrowDatabase()
-    elif name == "Delta":
-        yield DeltaTableDatabase(root / "delta")
-    elif name == "SQLite":
-        yield ConnectorArrowDatabase(SQLiteConnector(str(root / "store.db")))
-    elif name == "SpiralDB":
-        from tests.test_databases import fake_pyspiral
-
-        with fake_pyspiral.install(root / "spiral"):
-            fake_pyspiral.FakeSpiral().project("p")
-            yield ConnectorArrowDatabase(SpiralDBConnector("p"))
-    elif name == "PostgreSQL":
+    if name == "PostgreSQL":
         with patch("psycopg.connect") as connect:
             connect.return_value = MagicMock()
             yield ConnectorArrowDatabase(
                 PostgreSQLConnector("postgresql://localhost/m")
             )
     else:
-        raise AssertionError(name)
+        stores = {
+            "in-memory": ("in_memory", "store"),
+            "Delta": ("delta", "delta"),
+            "SQLite": ("sqlite", "store"),
+            "SpiralDB": ("spiral", "default"),
+        }
+        kind, namespace = stores[name]
+        with open_stores(kind, root) as open_store:
+            yield open_store(namespace)
 
 
 def _names_a_column(error: BaseException) -> bool:

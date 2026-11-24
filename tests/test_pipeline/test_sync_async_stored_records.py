@@ -8,6 +8,7 @@ did not: the stored table's schema depended on the orchestrator.
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -21,14 +22,10 @@ from orcapod.core.nodes.function_node import (
     PIPELINE_RUN_ID_COL,
 )
 from orcapod.core.operators import DropDataColumns, SelectDataColumns
-from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.sources import ArrowTableSource
-
-STORES: dict[str, Callable[[Path], Any]] = {
-    "in_memory": lambda _: InMemoryArrowDatabase(),
-    "delta": lambda path: DeltaTableDatabase(path),
-}
+from tests.pipeline_stores import STORE_KINDS, function_store_cases, open_stores
 
 # Columns that differ between two runs by design: the output datagram's uuid, the token
 # that carries it, the result's timestamp, and the entry's recording run and time.
@@ -47,17 +44,19 @@ def times_ten(x: int) -> int:
     return 10 * x
 
 
-def source() -> ArrowTableSource:
-    """Tag ``k``; data ``x`` (the pod's input) and ``s``, ``m`` (not its input)."""
+def source(reordered: bool = False) -> ArrowTableSource:
+    """Tags ``k`` and ``session``; data ``x`` (the pod's input) and ``s``, ``m`` (not its input)."""
     table = pa.table(
         {
             "k": ["a", "b", "c"],
+            "session": [2, 1, 2],
             "x": [1, 2, 3],
             "s": ["p", "q", "r"],
             "m": [0.5, 1.5, 2.5],
         },
         schema=pa.schema(
             [
+                pa.field("session", pa.int64(), nullable=False),
                 pa.field("k", pa.large_string(), nullable=False),
                 pa.field("x", pa.int64(), nullable=False),
                 pa.field("s", pa.large_string(), nullable=False),
@@ -65,8 +64,13 @@ def source() -> ArrowTableSource:
             ]
         ),
     )
+    if reordered:
+        table = table.select(["m", "s", "k", "x", "session"])
     return ArrowTableSource(
-        table, tag_columns=["k"], source_id="src", tag_only_columns=True
+        table,
+        tag_columns=["session", "k"] if reordered else ["k", "session"],
+        source_id="src",
+        tag_only_columns=True,
     )
 
 
@@ -93,12 +97,12 @@ PIPELINES = {
 
 
 def stored_records(
-    pipeline: str, orchestrator: str, store_kind: str, directory: Path
+    pipeline: str, orchestrator: str, store: ArrowDatabaseProtocol, reordered: bool
 ) -> pa.Table:
-    """The function node's stored records after a run, rows in tag order."""
-    job = PipelineJob(name="itl1040", database=STORES[store_kind](directory))
+    """Return the function node's stored records after a run."""
+    job = PipelineJob(name="itl1040", database=store)
     with job:
-        PIPELINES[pipeline](source())
+        PIPELINES[pipeline](source(reordered))
     job.run(
         orchestrator=SyncPipelineOrchestrator()
         if orchestrator == "sync"
@@ -106,33 +110,53 @@ def stored_records(
     )
     records = job.nodes["node"].get_all_records(all_info=True)
     assert records is not None
-    return records.sort_by("k")
+    return records
 
 
-@pytest.mark.parametrize("store_kind", list(STORES))
+def row_set(table: pa.Table) -> set[str]:
+    """Compare stored row values, including nested values, in any read order."""
+    return {json.dumps(row, sort_keys=True, default=repr) for row in table.to_pylist()}
+
+
+@pytest.mark.parametrize("reordered", [False, True], ids=["mixed", "reordered"])
 @pytest.mark.parametrize("pipeline", list(PIPELINES))
+@function_store_cases
 def test_async_stores_the_records_a_sync_run_stores(
-    pipeline: str, store_kind: str, tmp_path: Path
+    pipeline: str,
+    pipeline_store_factory: Callable[[str], ArrowDatabaseProtocol],
+    reordered: bool,
+    tmp_path: Path,
 ) -> None:
-    sync = stored_records(pipeline, "sync", store_kind, tmp_path / "sync")
-    async_ = stored_records(pipeline, "async", store_kind, tmp_path / "async")
+    sync = stored_records(pipeline, "sync", pipeline_store_factory("sync"), reordered)
+    async_ = stored_records(
+        pipeline, "async", pipeline_store_factory("async"), reordered
+    )
 
     assert async_.schema == sync.schema
     assert "_source_s" not in async_.column_names
     assert "_source_m" not in async_.column_names
-    assert async_.drop_columns(list(PER_RUN_COLUMNS)).equals(
-        sync.drop_columns(list(PER_RUN_COLUMNS))
-    )
+    stable_sync = sync.drop_columns(list(PER_RUN_COLUMNS))
+    stable_async = async_.drop_columns(list(PER_RUN_COLUMNS))
+    assert row_set(stable_async) == row_set(stable_sync)
+
+    with open_stores("delta", tmp_path / "reference") as reference:
+        delta_sync = stored_records(pipeline, "sync", reference("sync"), reordered)
+    stable_delta = delta_sync.drop_columns(list(PER_RUN_COLUMNS))
+    assert stable_sync.schema == stable_delta.schema
+    assert row_set(stable_sync) == row_set(stable_delta)
 
 
+@pytest.mark.parametrize("pipeline_store_factory", STORE_KINDS, indirect=True)
 @pytest.mark.parametrize("pipeline", ["explicit_select", "explicit_drop"])
 def test_the_operator_node_table_is_the_same_on_both_orchestrators(
-    pipeline: str,
+    pipeline: str, pipeline_store_factory: Callable[[str], ArrowDatabaseProtocol]
 ) -> None:
     """The select or drop node itself shows the same columns after either run."""
     tables = []
     for orchestrator in (SyncPipelineOrchestrator, AsyncPipelineOrchestrator):
-        job = PipelineJob(name="itl1040", database=InMemoryArrowDatabase())
+        job = PipelineJob(
+            name="itl1040", database=pipeline_store_factory(orchestrator.__name__)
+        )
         with job:
             src = source()
             if pipeline == "explicit_select":
@@ -140,6 +164,6 @@ def test_the_operator_node_table_is_the_same_on_both_orchestrators(
             else:
                 DropDataColumns(["s", "m"])(src, label="op")
         job.run(orchestrator=orchestrator())
-        tables.append(job.nodes["op"].as_table(all_info=True).sort_by("k"))
+        tables.append(job.nodes["op"].as_table(all_info=True))
     assert tables[1].schema == tables[0].schema
-    assert tables[1].equals(tables[0])
+    assert row_set(tables[1]) == row_set(tables[0])

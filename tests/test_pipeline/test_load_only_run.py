@@ -18,9 +18,11 @@ import pytest
 from orcapod import PipelineJob, function_pod
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.side_effects import SideEffectPod, tap_pod
 from orcapod.sources import DictSource
 from orcapod.types import CacheMode
+from tests.pipeline_stores import function_store_cases
 
 CALLS: list[str] = []
 DELIVERED: list[int] = []
@@ -82,7 +84,7 @@ def _build(
     return job
 
 
-def _snapshot(db: InMemoryArrowDatabase) -> dict[tuple[str, ...], int]:
+def _snapshot(db: ArrowDatabaseProtocol) -> dict[tuple[str, ...], int]:
     """Every table of the database with its row count."""
     db.flush()
     counts: dict[tuple[str, ...], int] = {}
@@ -103,10 +105,11 @@ def _totals(job: PipelineJob) -> list[tuple[int, int]]:
 
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+@function_store_cases
 def test_a_load_only_run_over_a_full_store_equals_a_run_and_computes_nothing(
-    orchestrator: str,
+    orchestrator: str, pipeline_store: ArrowDatabaseProtocol
 ) -> None:
-    db = InMemoryArrowDatabase()
+    db = pipeline_store
     _run(_build(ROWS, db), orchestrator)
     expected = _build(ROWS, InMemoryArrowDatabase())
     _run(expected, orchestrator)
@@ -128,11 +131,12 @@ def test_a_load_only_run_over_a_full_store_equals_a_run_and_computes_nothing(
 
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+@function_store_cases
 def test_inputs_without_a_stored_result_are_skipped_and_counted(
-    orchestrator: str,
+    orchestrator: str, pipeline_store: ArrowDatabaseProtocol
 ) -> None:
     """The database holds a 3-row run; the source now has 6 rows."""
-    db = InMemoryArrowDatabase()
+    db = pipeline_store
     _run(_build(ROWS[:3], db), orchestrator)
     CALLS.clear()
     before = _snapshot(db)
@@ -161,10 +165,11 @@ def test_inputs_without_a_stored_result_are_skipped_and_counted(
 
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+@function_store_cases
 def test_a_load_only_run_over_an_empty_store_fills_nothing_and_writes_nothing(
-    orchestrator: str,
+    orchestrator: str, pipeline_store: ArrowDatabaseProtocol
 ) -> None:
-    db = InMemoryArrowDatabase()
+    db = pipeline_store
     job = _build(ROWS, db)
     summary = _run(job, orchestrator, load_only=True)
     assert CALLS == []
@@ -176,10 +181,11 @@ def test_a_load_only_run_over_an_empty_store_fills_nothing_and_writes_nothing(
 
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+@function_store_cases
 def test_a_load_only_run_delivers_no_side_effect_and_passes_the_rows_on(
-    orchestrator: str,
+    orchestrator: str, pipeline_store: ArrowDatabaseProtocol
 ) -> None:
-    db = InMemoryArrowDatabase()
+    db = pipeline_store
     _run(_build(ROWS, db, with_tap=True), orchestrator)
     assert len(DELIVERED) == 6
     DELIVERED.clear()
@@ -196,8 +202,11 @@ def test_a_load_only_run_delivers_no_side_effect_and_passes_the_rows_on(
 
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
-def test_a_log_operator_writes_nothing_in_a_load_only_run(orchestrator: str) -> None:
-    db = InMemoryArrowDatabase()
+@function_store_cases
+def test_a_log_operator_writes_nothing_in_a_load_only_run(
+    orchestrator: str, pipeline_store: ArrowDatabaseProtocol
+) -> None:
+    db = pipeline_store
     _run(_build(ROWS[:3], db, cache_mode=CacheMode.LOG), orchestrator)
     before = _snapshot(db)
 
@@ -208,8 +217,9 @@ def test_a_log_operator_writes_nothing_in_a_load_only_run(orchestrator: str) -> 
     assert job.nodes["grouped"].as_table().num_rows == 2
 
 
-def test_run_async_takes_load_only() -> None:
-    db = InMemoryArrowDatabase()
+@function_store_cases
+def test_run_async_takes_load_only(pipeline_store: ArrowDatabaseProtocol) -> None:
+    db = pipeline_store
     _run(_build(ROWS, db), "sync")
     CALLS.clear()
     job = _build(ROWS, db)

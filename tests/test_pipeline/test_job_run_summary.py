@@ -41,6 +41,7 @@ from tests.test_core.operators.several_items import (
     Arrangement,
     make_table,
 )
+from tests.pipeline_stores import function_store_cases
 
 # --- The public names this feature adds, in one place ---------------------------------
 
@@ -103,11 +104,11 @@ def double(x: int) -> int:
 
 def make_job(store: Any, pod: Any, label: str, n_rows: int = 4) -> PipelineJob:
     """A source of ``n_rows`` rows (x = 0..n-1) feeding ``pod`` under ``label``."""
-    rows = [{"k": f"r{i}", "x": i} for i in range(n_rows)]
+    rows = [{"k": f"r{i}", "g": i % 2, "x": i, "note": f"n{i}"} for i in range(n_rows)]
     job = PipelineJob(name="summary_demo", database=store)
     with job:
         source = DictSource(
-            data=rows, tag_columns=["k"], tag_only_columns=True, source_id="rows"
+            data=rows, tag_columns=["k", "g"], tag_only_columns=True, source_id="rows"
         )
         pod.pod(source, label=label)
     return job
@@ -125,9 +126,10 @@ def store(request: pytest.FixtureRequest, tmp_path: Path) -> Any:
     return STORES[request.param](tmp_path / "store")
 
 
-def test_some_rows_fail(store: Any, orchestrator: Any) -> None:
+@function_store_cases
+def test_some_rows_fail(pipeline_store: Any, orchestrator: Any) -> None:
     """Rows that fail are counted and reported once; the others are computed and stored."""
-    job = make_job(store, even_only, "evens")
+    job = make_job(pipeline_store, even_only, "evens")
     with pytest.warns(RowFailuresWarning) as caught:
         summary = run(job, orchestrator)
 
@@ -135,8 +137,8 @@ def test_some_rows_fail(store: Any, orchestrator: Any) -> None:
     error = first_error(summary, "evens")
     assert isinstance(error, ValueError)
     assert str(error).startswith("odd x=")
-    assert len(caught) == 1
-    message = str(caught[0].message)
+    (warning,) = [w for w in caught if issubclass(w.category, RowFailuresWarning)]
+    message = str(warning.message)
     assert "2 of 4 rows failed in node 'evens'" in message
     assert "ValueError: odd x=" in message
     assert 'job.last_run.print_traceback("evens")' in message
@@ -146,9 +148,10 @@ def test_some_rows_fail(store: Any, orchestrator: Any) -> None:
     assert ys == [0, 2]
 
 
-def test_every_row_fails(store: Any, orchestrator: Any) -> None:
+@function_store_cases
+def test_every_row_fails(pipeline_store: Any, orchestrator: Any) -> None:
     """A function failing on every row is reported with its error, not as an empty success."""
-    job = make_job(store, always_fails, "broken")
+    job = make_job(pipeline_store, always_fails, "broken")
     with pytest.warns(RowFailuresWarning, match="4 of 4 rows failed in node 'broken'"):
         summary = run(job, orchestrator)
 
@@ -162,9 +165,10 @@ def test_every_row_fails(store: Any, orchestrator: Any) -> None:
     assert 'job.last_run.print_traceback("broken")' in text
 
 
-def test_clean_run_is_quiet(store: Any, orchestrator: Any) -> None:
+@function_store_cases
+def test_clean_run_is_quiet(pipeline_store: Any, orchestrator: Any) -> None:
     """A run without failed rows issues no warning and counts every row as computed."""
-    job = make_job(store, double, "doubled")
+    job = make_job(pipeline_store, double, "doubled")
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         summary = run(job, orchestrator)
@@ -175,17 +179,45 @@ def test_clean_run_is_quiet(store: Any, orchestrator: Any) -> None:
     assert first_error(summary, "doubled") is None
 
 
-def test_rerun_counts_rows_from_the_store(store: Any, orchestrator: Any) -> None:
+@function_store_cases
+def test_rerun_counts_rows_from_the_store(
+    pipeline_store: Any, orchestrator: Any
+) -> None:
     """Running again counts the stored rows as from the database and computes only the new row."""
-    run(make_job(store, double, "doubled"), orchestrator)
-    summary = run(make_job(store, double, "doubled", n_rows=5), orchestrator)
+    run(make_job(pipeline_store, double, "doubled"), orchestrator)
+    warm = run(make_job(pipeline_store, double, "doubled"), orchestrator)
+    assert node_counts(warm, "doubled") == (0, 4, 0)
+    summary = run(make_job(pipeline_store, double, "doubled", n_rows=5), orchestrator)
 
     assert node_counts(summary, "doubled") == (1, 4, 0)
 
 
-def test_fail_fast_still_raises(store: Any) -> None:
+@function_pod(output_keys="y", function_name="double", version="v1.0")
+def double_v1(x: int) -> int:
+    """Return a changed value at a new version of the function."""
+    return 2 * x + 1
+
+
+@function_store_cases
+def test_a_new_function_version_computes_again(
+    pipeline_store: Any, orchestrator: Any
+) -> None:
+    first = make_job(pipeline_store, double, "doubled")
+    assert node_counts(run(first, orchestrator), "doubled") == (4, 0, 0)
+
+    changed = make_job(pipeline_store, double_v1, "doubled")
+    assert node_counts(run(changed, orchestrator), "doubled") == (4, 0, 0)
+    values = changed.nodes["doubled"].as_table()["y"].to_pylist()
+    if isinstance(orchestrator, AsyncPipelineOrchestrator):
+        assert set(values) == {1, 3, 5, 7}
+    else:
+        assert values == [1, 3, 5, 7]
+
+
+@function_store_cases
+def test_fail_fast_still_raises(pipeline_store: Any) -> None:
     """``error_policy='fail_fast'`` raises the row's error as before."""
-    job = make_job(store, even_only, "evens")
+    job = make_job(pipeline_store, even_only, "evens")
     with pytest.raises(ValueError, match="odd x="):
         job.run(orchestrator=SyncPipelineOrchestrator(error_policy="fail_fast"))
 
@@ -218,9 +250,10 @@ def test_notebook_representation_names_the_failing_node() -> None:
     assert "odd x=" in html
 
 
-def test_run_async_returns_the_same_summary(store: Any) -> None:
+@function_store_cases
+def test_run_async_returns_the_same_summary(pipeline_store: Any) -> None:
     """``run_async`` returns the summary, warns, and keeps it as ``last_run``."""
-    job = make_job(store, even_only, "evens")
+    job = make_job(pipeline_store, even_only, "evens")
     with pytest.warns(RowFailuresWarning, match="2 of 4 rows failed in node 'evens'"):
         summary = asyncio.run(job.run_async())
 
