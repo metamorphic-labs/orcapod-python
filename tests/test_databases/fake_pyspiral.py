@@ -665,10 +665,14 @@ class FakeTable:
                     )
                 col = _zero_struct_field_nulls(col, f.type)
             sf = _stored_field(f, b, nullable=b.server_nullability or None)
-            if pa.types.is_struct(sf.type) and f.name in values:
+            stored_type = sf.type
+            if pa.types.is_struct(stored_type) and f.name in values:
                 # ITL-1446 observed sorted fields on a top-level struct column.
+                children = [
+                    stored_type.field(index) for index in range(stored_type.num_fields)
+                ]
                 sf = sf.with_type(
-                    pa.struct(sorted(sf.type, key=lambda field: field.name))
+                    pa.struct(sorted(children, key=lambda field: field.name))
                 )
             if isinstance(f.type, pa.ExtensionType):
                 col = pa.chunked_array(
