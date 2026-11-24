@@ -59,8 +59,38 @@ def test_the_reports_hold_which_result_each_input_received(
         _run(script, monkeypatch, tmp_path / "store", mode, report)
         reports.append(json.loads(report.read_text()))
     written, loaded = reports
-    for label, case in written.items():
-        assert len({tag for tag, _ in case["received"]}) == len(case["received"]) == 2
-        assert loaded[label]["received"] == case["received"]
-        assert loaded[label]["ids"] == case["ids"]
+    for label, (pod, stream) in script.cases().items():
+        expected = [
+            [
+                repr(tag.as_dict(columns={"system_tags": True})),
+                repr(data.as_dict()),
+                repr({"y": pod(**data.as_dict())}),
+            ]
+            for tag, data in stream.iter_data()
+        ]
+        assert len(expected) == 2
+        assert written[label]["received"] == expected
+        assert loaded[label]["received"] == expected
+        assert loaded[label]["ids"] == written[label]["ids"]
         assert loaded[label]["calls"] == 0
+
+
+def test_a_result_of_another_input_shows_in_the_load_report(
+    script: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Every input given one same stored entry: the report keeps the inputs' own tags."""
+    from orcapod.core.nodes.function_node import FunctionJobNode
+
+    report = tmp_path / "write.json"
+    _run(script, monkeypatch, tmp_path / "store", "write", report)
+    written = json.loads(report.read_text())
+    monkeypatch.setattr(
+        FunctionJobNode,
+        "_stored_entry",
+        lambda self, entry_id: next(iter(self._cached_output_datas.values())),
+    )
+    _run(script, monkeypatch, tmp_path / "store", "load", report)
+    for label, case in json.loads(report.read_text()).items():
+        inputs = [row[:2] for row in case["received"]]
+        assert inputs == [row[:2] for row in written[label]["received"]]
+        assert case["received"] != written[label]["received"]

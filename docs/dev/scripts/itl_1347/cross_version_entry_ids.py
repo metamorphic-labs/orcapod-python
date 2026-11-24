@@ -71,12 +71,23 @@ def untyped(x: Any) -> int:
 class Cached(NoOpObserver):
     def __init__(self) -> None:
         self.cached: list[bool] = []
+        # Each input (its own tag and data) with the result it received, in order.
+        self.received: list[list[str]] = []
 
     def contextualize(self, *identity_path: str) -> Cached:
         return self
 
-    def on_data_end(self, *args: Any, **kwargs: Any) -> None:
-        self.cached.append(bool(kwargs["cached"] if "cached" in kwargs else args[-1]))
+    def on_data_end(
+        self, node_label: str, tag: Any, input_data: Any, output_data: Any, cached: bool
+    ) -> None:
+        self.cached.append(bool(cached))
+        self.received.append(
+            [
+                repr(tag.as_dict(columns={"system_tags": True})),
+                repr(input_data.as_dict()),
+                repr(None if output_data is None else output_data.as_dict()),
+            ]
+        )
 
 
 def forms(stream: Any) -> dict[str, Any]:
@@ -230,12 +241,9 @@ def main() -> None:
                 "ids": ids,
                 "cached": observer.cached,
                 "calls": len(CALLS),
-                # Which result each input received, in order: the write and load
-                # reports of one case must hold the same.
-                "received": [
-                    [repr(tag.as_dict()), repr(data.as_dict())]
-                    for tag, data in node.iter_data()
-                ],
+                # The inputs as the node was given them, each with its result (not the
+                # stored entry's own tag): the write and load reports must be the same.
+                "received": observer.received,
             }
         except Exception as error:  # noqa: BLE001  # the outcome is compared across versions
             results[label] = {"error": f"{type(error).__name__}: {error}"}
