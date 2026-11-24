@@ -14,7 +14,7 @@ new directory, and `uv add` adds Orcapod to it):
 ```bash
 mkdir orcapod-workshop && cd orcapod-workshop
 uv init
-uv add "orcapod==0.4.0rc4"
+uv add "orcapod>=0.4.0rc4"
 ```
 
 Without uv, with `pip` in a virtual environment:
@@ -26,7 +26,8 @@ source .venv/bin/activate        # on Windows: .venv\Scripts\activate
 pip install "orcapod>=0.4.0rc4"
 ```
 
-The workshop uses 0.4.0rc4, a release candidate, so the commands name it. The latest stable
+The workshop uses the latest 0.4.0 release candidate, which these commands install (naming
+a candidate version allows pre-releases). The latest stable
 release on PyPI is 0.1.4 (0.3.0 was withdrawn), which a plain `uv add orcapod` installs and
 this tutorial does not cover. For the development version, install from the repository:
 `uv add git+https://github.com/metamorphic-labs/orcapod-python`.

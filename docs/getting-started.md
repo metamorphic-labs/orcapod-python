@@ -11,13 +11,13 @@ with `uv init` (in a new directory) and add Orcapod to it:
 
 ```bash
 uv init
-uv add "orcapod==0.4.0rc4"
+uv add "orcapod>=0.4.0rc4"
 ```
 
 In an environment not managed by uv, `pip install "orcapod>=0.4.0rc4"` installs it instead.
 
-0.4.0rc4 is the release candidate the workshop uses. The latest stable release on PyPI is
-0.1.4 (0.3.0 was withdrawn), which a plain `uv add orcapod` installs and this guide does not
+The workshop uses the latest 0.4.0 release candidate, which these commands install. The
+latest stable release on PyPI is 0.1.4 (0.3.0 was withdrawn), which a plain `uv add orcapod` installs and this guide does not
 cover. For the development version, install from the repository:
 `uv add git+https://github.com/metamorphic-labs/orcapod-python`.
 

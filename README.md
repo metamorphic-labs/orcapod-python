@@ -13,14 +13,15 @@ provenance token.
 
 Orcapod supports Python 3.11, 3.12 and 3.13 and is published on PyPI as `orcapod`.
 0.1.4 is the latest stable release there (0.3.0 was withdrawn); a plain `uv add orcapod`
-installs it. The workshop uses the release candidate 0.4.0rc4.
+installs it. The workshop uses the latest 0.4.0 release
+candidate, which the commands below install.
 
 The recommended way to install it is [uv](https://docs.astral.sh/uv/): `uv add` adds
 Orcapod to a uv project (start one with `uv init` in a new directory), and `uv run` runs
 your code in that project's environment:
 
 ```bash
-uv add "orcapod==0.4.0rc4"
+uv add "orcapod>=0.4.0rc4"
 ```
 
 In an environment not managed by uv, use `pip install "orcapod>=0.4.0rc4"` instead. For the
