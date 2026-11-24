@@ -453,6 +453,28 @@ with a conflict, and one commit may change several tables of a project. With tha
 (ITL-931) the lease could be a conditional publish, and results and records one commit. It states
 no read-after-commit guarantee, so C1 is not documented.
 
+### 5.6 Every connector, or SpiralDB only
+
+`_path_to_table_name` is shared by all three connectors, so the collisions of 5.2 exist on SQLite
+and PostgreSQL too, and PostgreSQL refuses names over 63 bytes (ITL-1162, CA3): a join's operator
+cache, 2 hashes in its path, cannot have a name there.
+
+| | SpiralDB connector only | `ConnectorArrowDatabase`, every connector |
+|---|---|---|
+| Fixes collisions | SpiralDB | all three |
+| PostgreSQL table names | no | yes: 63 bytes hold `op-<hint of 27>-<first 32 hex digits>`. 128 bits, and the catalog refuses a collision |
+| PostgreSQL operator caches | no | **not by this alone**: its column names are over 63 bytes too (a join's system tags, 148), which is ITL-1166 |
+| Needs | a name hook on one connector | the hook, a length limit per connector (SpiralDB 128, PostgreSQL 63 bytes, SQLite none known), a catalog per dataset / schema / file, all in the database layer |
+| Catalog write | the order of 5.4 | the same, or one transaction with `CREATE TABLE` on SQL connectors |
+| Tests | SpiralDB fake | also SQLite, PostgreSQL (its CI job), every existing name and listing test of the three |
+| Existing tables | none: no store table could be written | SQLite and PostgreSQL tables of `ConnectorArrowDatabase` would no longer be found: they have no catalog row. Nobody has any (greenfield, before 0.4.0), so no migration: rebuild. Tables read by a SQL **source** are not affected |
+
+**Recommended:** the code goes in `ConnectorArrowDatabase`, switched on per connector, and the
+first version switches on SpiralDB only. The path digest, the catalog's columns and the crash
+order are connector-neutral as designed, so switching on SQLite and PostgreSQL is a later PR that
+renames no SpiralDB table. That PR should land before 0.4.0, while nobody has such a store. The
+first version does not wait for it.
+
 ## 6. Concurrent writers and failed writes
 
 SpiralDB upserts by key. The client retries a transaction "after conflicts" (3 times by default)
@@ -632,7 +654,7 @@ save an override that is not a known non-secret key (`server.url`).
 | 3 | Row order: store `ox_order` so reads follow the written order | yes; otherwise results differ from Delta |
 | 4 | *Decided: digest names, and one catalog per dataset.* To note: permissions are per project (5.5) | - |
 | 5 | Two different manifests in one table stop the job, rather than one winning | stop |
-| 6 | Use the collision-free path mapping for SQLite and PostgreSQL too (their existing tables would no longer be found) | yes, in its own PR before 0.4.0, while nobody has such a store |
+| 6 | Digest names and the catalog for SQLite and PostgreSQL too (5.6): existing tables there are rebuilt, nobody has any | yes, a later PR before 0.4.0; the first version does not wait |
 | 7 | Null structs refused in the first version (a `T \| None` user-class output holding a null) | yes |
 | 8 | Observers not on a SpiralDB store at first | yes |
 | 9 | The 8 KiB failure of today's Arrow metadata entry on tables that are not store tables: fix now (chunks) or leave | fix in PR 2, same chunk code |
