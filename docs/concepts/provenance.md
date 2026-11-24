@@ -177,36 +177,44 @@ and one removed by a join.
 ## On the diagram
 
 `trace.highlight()` and `answer.highlight()` give a `Highlight`: the nodes and streams on
-the path, with a note. `job.diagram(highlight=...)` draws them in an accent colour and dims
-the other nodes. Its text listing marks the highlighted nodes with `*`:
+the path, with a note. `job.diagram(highlight=...)` outlines them in the text colour (which
+no node status uses: red means failed), dims the rest, and shows the note as a caption.
+A trace's highlight also marks each function node on the path with how its rows on the
+path got their results (`Highlight.marks`): `computed`, `reused` (a result stored for equal
+inputs) or `computed + reused` (some rows each). Its text listing marks the highlighted
+nodes with `*` and a function node's mark in brackets. Here `scores` computed the score of
+trial 2 of `a2` and reused the one stored for trial 1 (above):
 
 ```python
 print(job.diagram(highlight=trace.highlight()))
 # Job 'behaviour': 5 nodes
-#   highlight (*): trace of per_animal.mean_accuracy
+#   highlight (*): trace of per_animal.mean_accuracy animal='a2'
 # * trials (source · DictSource · bound)
-# * scores (function pod · score · current) <- trials
+# * scores (function pod · score · current) [computed + reused] <- trials
 # * GroupBy (operator · current) <- scores
 # * SelectDataColumns (operator · current) <- GroupBy
-# * per_animal (function pod · average · current) <- SelectDataColumns
+# * per_animal (function pod · average · current) [computed] <- SelectDataColumns
 ```
 
-In a notebook the diagram is drawn as a picture. Here is the job of tutorial
-[Part 8](../tutorial/08-inspecting-and-tracing.md), first plain, then with the trace of one
-session's mean rate highlighted:
+In a notebook the diagram is drawn as a picture, the mark as a bold line on its node. Here
+is the job of tutorial [Part 8](../tutorial/08-inspecting-and-tracing.md), first plain,
+then with the trace of one firing rate highlighted. Its path stops at `rates`: the grouping
+after it is dimmed. That rate reused the result an equal input had computed, so `rates` is
+marked `reused`:
 
 ![The diagram of the tutorial's workshop job: the sources sessions and units on the left, through column selections and a Join into the function pod rates, then GroupBy, a selection and the function pod session_means on the right](../tutorial/provenance-diagram-plain.svg)
 
-![The same diagram with the trace of session_means.mean_rate_hz highlighted: every node and every edge outlined in orange, because the mean was made from both sources through every step](../tutorial/provenance-diagram-trace.svg)
+![The same diagram captioned "highlighted: trace of rates.rate_hz subject_id='mouse_02', session='s1', probe='imec1', unit=2": the sources, their column selections, the Join and rates outlined in a dark line, rates with the bold line "reused"; GroupBy, its selection and session_means dimmed](../tutorial/provenance-diagram-trace.svg)
 
 A missing row's highlight ends at the step that removed it, and dims the rest. In the
 tutorial's second job, a unit of `mouse_04` passes the filter on `probe` and is removed by
 the Join, which has no session of `mouse_04` to match it with:
 
-![The diagram of the tutorial's imec0 job with the path of units row_48 highlighted: the source units, Filter_1, SelectDataColumns_1 and the Join outlined in orange; the sessions branch and the function pod imec0_rates dimmed](../tutorial/provenance-diagram-missing-join.svg)
+![The diagram of the tutorial's imec0 job with the path of units row_48 highlighted: the source units, Filter_1, SelectDataColumns_1 and the Join outlined in a dark line; the sessions branch and the function pod imec0_rates dimmed](../tutorial/provenance-diagram-missing-join.svg)
 
-A `Highlight` can also be made by hand, from node labels and `(upstream, downstream)` label
-pairs. A label the job does not have is refused with `ValueError`.
+A `Highlight` can also be made by hand, from node labels, `(upstream, downstream)` label
+pairs and `(label, mark)` pairs. A label the job does not have is refused with
+`ValueError`.
 
 ## Known limits
 

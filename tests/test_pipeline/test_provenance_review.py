@@ -2120,3 +2120,151 @@ def test_an_untied_witness_must_match_the_stored_input_hash(same_input: bool) ->
         assert answer.reached_function is True and answer.entry_recorded is True
     else:
         assert answer.reached_function is None
+
+
+# ---------------------------------------------------------------------------
+# Developer feedback on the trace picture: computed or reused on the diagram
+# ---------------------------------------------------------------------------
+
+
+@function_pod(output_keys="score")
+def hit_rate(hits: int, misses: int) -> float:
+    """The fraction of hits; a1 trial 1 and a2 trial 1 are equal inputs (one run)."""
+    return hits / (hits + misses)
+
+
+@function_pod(output_keys="mean")
+def mean_score(score: list[float]) -> float:
+    """The mean of an animal's scores."""
+    return sum(score) / len(score)
+
+
+TRIALS = [
+    {"animal": "a1", "trial": 1, "hits": 8, "misses": 2},
+    {"animal": "a1", "trial": 2, "hits": 6, "misses": 4},
+    {"animal": "a2", "trial": 1, "hits": 8, "misses": 2},
+    {"animal": "a2", "trial": 2, "hits": 3, "misses": 7},
+]
+
+
+def _trials_job(database: Any, rows: list[dict[str, Any]] = TRIALS) -> PipelineJob:
+    trials = DictSource(
+        rows,
+        tag_columns=["animal", "trial"],
+        tag_only_columns=True,
+        source_id="trials",
+    )
+    job = PipelineJob(name="marks", database=database)
+    with job:
+        scores = hit_rate.pod(trials, label="scores")
+        mean_score.pod(
+            SelectDataColumns(["score"])(GroupBy(["animal"])(scores)), label="means"
+        )
+    return job
+
+
+def _marks(job: PipelineJob) -> dict[str, dict[str, str]]:
+    scores, means = job.nodes["scores"], job.nodes["means"]
+    which = {
+        "a1 trial 1": scores.trace({"animal": "a1", "trial": 1}, "score"),
+        "a2 trial 1": scores.trace({"animal": "a2", "trial": 1}, "score"),
+        "a2": means.trace({"animal": "a2"}, "mean"),
+    }
+    return {name: dict(t.highlight().marks) for name, t in which.items()}
+
+
+EXPECTED_MARKS = {
+    "a1 trial 1": {"scores": "computed"},
+    "a2 trial 1": {"scores": "reused"},
+    "a2": {"scores": "computed + reused", "means": "computed"},
+}
+
+
+def _run_after_a1(database: Any, mode: str) -> PipelineJob:
+    """A first run stores a1's scores; the job over every trial then runs in ``mode``,
+    so a2 trial 1 (a1 trial 1's input) reuses a stored result on either orchestrator
+    (the async one runs equal inputs of one run concurrently: both compute)."""
+    _ = _trials_job(database, TRIALS[:2]).run()
+    job = _trials_job(database)
+    run(job, mode)
+    return job
+
+
+@pytest.mark.parametrize("mode", ["sync", "async"])
+def test_a_trace_highlight_marks_each_function_node(mode: str) -> None:
+    assert _marks(_run_after_a1(InMemoryArrowDatabase(), mode)) == EXPECTED_MARKS
+
+
+def test_equal_inputs_computed_at_once_are_both_marked_computed() -> None:
+    """In one async run equal inputs are computed concurrently, and the mark says so."""
+    job = _trials_job(InMemoryArrowDatabase())
+    run(job, "async")
+    assert _marks(job)["a2 trial 1"] == {"scores": "computed"}
+
+
+def test_a_trace_highlight_marks_on_a_loaded_job(tmp_path: Path) -> None:
+    job = _run_after_a1(DeltaTableDatabase(tmp_path / "store"), "sync")
+    job.save(tmp_path / "job.json")
+    loaded = PipelineJob.load(
+        tmp_path / "job.json", database=DeltaTableDatabase(tmp_path / "store")
+    )
+    loaded.bind(
+        sources={
+            "trials": DictSource(
+                TRIALS,
+                tag_columns=["animal", "trial"],
+                tag_only_columns=True,
+                source_id="trials",
+            )
+        }
+    )
+    loaded.run(load_only=True)
+    assert _marks(loaded) == EXPECTED_MARKS
+
+
+def test_the_diagram_shows_the_marks_and_the_caption() -> None:
+    job = _trials_job(InMemoryArrowDatabase())
+    job.run()
+    trace = job.nodes["means"].trace({"animal": "a2"}, "mean")
+    diagram = job.diagram(highlight=trace.highlight())
+    listing = str(diagram)
+    assert "* scores (function pod · hit_rate · current) [computed + reused]" in listing
+    assert "* means (function pod · mean_score · current) [computed]" in listing
+    svg = diagram.to_svg()
+    assert '<text class="op-dag-caption"' in svg
+    assert "highlighted: trace of means.mean animal=&#x27;a2&#x27;" in svg
+    assert 'class="op-dag-mark">computed + reused</text>' in svg
+    assert 'class="op-dag-mark">computed</text>' in svg
+    model = diagram.to_dict()
+    assert {n["label"]: n.get("mark") for n in model["nodes"]}["scores"] == (
+        "computed + reused"
+    )
+
+
+def test_a_mark_on_an_unknown_node_is_refused() -> None:
+    from orcapod.types import Highlight
+
+    job = _trials_job(InMemoryArrowDatabase())
+    with pytest.raises(ValueError, match="nowhere"):
+        job.diagram(highlight=Highlight(marks=frozenset({("nowhere", "computed")})))
+
+
+def test_the_highlight_colour_is_no_status_or_kind_colour() -> None:
+    """Highlighted must not read as failed or stale: the highlight is drawn in the text
+    colour, which no status and no kind uses."""
+    from orcapod.pipeline import diagram
+
+    colour = diagram._HIGHLIGHT_COLOUR
+    assert colour == "currentColor"
+    assert colour not in diagram._STATUS_COLOUR.values()
+    assert colour not in diagram._KIND_COLOUR.values()
+    job = _trials_job(InMemoryArrowDatabase())
+    job.run()
+    svg = job.diagram(
+        highlight=job.nodes["scores"]
+        .trace({"animal": "a1", "trial": 1}, "score")
+        .highlight()
+    ).to_svg()
+    for status_colour in {"#d63c3c", "#d08a16"}:
+        assert f'stroke="{status_colour}" stroke-width="3.2"' not in svg
+    assert 'class="op-dag-highlight" stroke="currentColor"' in svg

@@ -106,8 +106,11 @@ def render() -> dict[str, str]:
                 label="session_means",
             )
         _ = job.run()
-        trace = job.nodes["session_means"].trace(
-            {"subject_id": "mouse_03", "session": "s2"}, "mean_rate_hz"
+        # One firing rate: its path covers the sources, the Join and rates, not the
+        # grouping after them; its result was reused (an equal input computed it).
+        trace = job.nodes["rates"].trace(
+            {"subject_id": "mouse_02", "session": "s1", "probe": "imec1", "unit": 2},
+            "rate_hz",
         )
 
         imec0 = PipelineJob(name="imec0", database=database)

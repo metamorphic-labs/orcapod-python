@@ -301,29 +301,53 @@ for step in shared.root.walk():
 `imec1` unit 2 reused the result that `imec0` unit 0 computed: one stored result, two
 rows, both traced to their own row of `units.csv`.
 
-**On the diagram.** `trace.highlight()` marks the trace's path on the job's diagram (in a
-notebook, the path is drawn in colour and the other nodes are dimmed):
+**On the diagram.** `trace.highlight()` marks the trace's path on the job's diagram. The
+listing marks the nodes on the path with `*`, and each function node on it with how its
+rows on the path got their results: `[computed]`, `[reused]` (a result stored for equal
+inputs), or `[computed + reused]` (some rows each):
 
 ```python
 print(job.diagram(highlight=trace.highlight()))
 # Job 'workshop': 9 nodes
-#   highlight (*): trace of session_means.mean_rate_hz
+#   highlight (*): trace of session_means.mean_rate_hz subject_id='mouse_03', session='s2'
 # * sessions (source · CSVSource · bound)
 # * SelectDataColumns_1 (operator · current) <- sessions
 # * units (source · CSVSource · bound)
 # * SelectDataColumns_3 (operator · current) <- units
 # * Join (operator · current) <- SelectDataColumns_1, SelectDataColumns_3
-# * rates (function pod · firing_rate · current) <- Join
+# * rates (function pod · firing_rate · current) [computed] <- Join
 # * GroupBy (operator · current) <- rates
 # * SelectDataColumns_2 (operator · current) <- GroupBy
-# * session_means (function pod · mean_rate · current) <- SelectDataColumns_2
+# * session_means (function pod · mean_rate · current) [computed] <- SelectDataColumns_2
 ```
 
-In a notebook the same call draws the picture. Every node and stream on the path is drawn
-in the accent colour; here that is all of them, since the mean was made from both sources
-through every step:
+A mean is made through every step of the job, so its path covers the whole diagram. The
+trace of one firing rate covers only part of it: the two sources, their column selections,
+the join and `rates`. Take the unit that reused a stored result:
 
-![The diagram of the workshop job with the trace of session_means.mean_rate_hz highlighted: the sources sessions and units, their column selections, the Join, the function pod rates, GroupBy, a selection and the function pod session_means, every node and every edge outlined in orange](provenance-diagram-trace.svg)
+```python
+rate = job.nodes["rates"].trace(
+    {"subject_id": "mouse_02", "session": "s1", "probe": "imec1", "unit": 2}, "rate_hz"
+)
+print(job.diagram(highlight=rate.highlight()))
+# Job 'workshop': 9 nodes
+#   highlight (*): trace of rates.rate_hz subject_id='mouse_02', session='s1', probe='imec1', unit=2
+# * sessions (source · CSVSource · bound)
+# * SelectDataColumns_1 (operator · current) <- sessions
+# * units (source · CSVSource · bound)
+# * SelectDataColumns_3 (operator · current) <- units
+# * Join (operator · current) <- SelectDataColumns_1, SelectDataColumns_3
+# * rates (function pod · firing_rate · current) [reused] <- Join
+#   GroupBy (operator · current) <- rates
+#   SelectDataColumns_2 (operator · current) <- GroupBy
+#   session_means (function pod · mean_rate · current) <- SelectDataColumns_2
+```
+
+In a notebook the same call draws the picture. The caption says what is highlighted; the
+path is outlined in the text colour and the rest is dimmed (no status of a node is shown
+in that colour: red is kept for failed). The mark is the bold line on `rates`:
+
+![The diagram of the workshop job, captioned "highlighted: trace of rates.rate_hz subject_id='mouse_02', session='s1', probe='imec1', unit=2": the sources sessions and units, their column selections, the Join and the function pod rates outlined in a dark line, rates with the bold line "reused"; GroupBy, its selection and the function pod session_means dimmed](provenance-diagram-trace.svg)
 
 **Why is a row missing?** A second job keeps only the `imec0` probe and leaves out the
 sessions of `mouse_04`. Row 4 of `units.csv` is an `imec1` unit, and row 48 is a unit of
@@ -370,12 +394,12 @@ stores no result for it); the first line says why it did not.
 `why_missing(...).highlight()` marks the path up to the step that removed the row; the
 other nodes are dimmed. For `units row_4`, the path ends at the filter on `probe`:
 
-![The diagram of the imec0 job with the path of units row_4 highlighted: the source units and the node Filter_1 outlined in orange; the sessions branch, the Join and the function pod imec0_rates dimmed](provenance-diagram-missing-filter.svg)
+![The diagram of the imec0 job with the path of units row_4 highlighted: the source units and the node Filter_1 outlined in a dark line; the sessions branch, the Join and the function pod imec0_rates dimmed](provenance-diagram-missing-filter.svg)
 
 For `units row_48`, the row passes the filter and its column selection and ends at the
 Join, which has no session `s1` of `mouse_04` to match it with:
 
-![The diagram of the imec0 job with the path of units row_48 highlighted: the source units, Filter_1, SelectDataColumns_1 and the Join outlined in orange; the sessions branch and the function pod imec0_rates dimmed](provenance-diagram-missing-join.svg)
+![The diagram of the imec0 job with the path of units row_48 highlighted: the source units, Filter_1, SelectDataColumns_1 and the Join outlined in a dark line; the sessions branch and the function pod imec0_rates dimmed](provenance-diagram-missing-join.svg)
 
 The pictures are drawn by `job.diagram(...)` itself, from the job above.
 

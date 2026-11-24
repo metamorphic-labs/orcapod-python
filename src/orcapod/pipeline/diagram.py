@@ -84,6 +84,7 @@ class _Node:
     status: str
     facts: tuple[tuple[str, str], ...]
     highlighted: bool = False
+    mark: str = ""
 
     @property
     def kind_line(self) -> str:
@@ -382,6 +383,7 @@ def _build_model(
                 status=statuses.get(label, ""),
                 facts=facts,
                 highlighted=highlight is not None and label in highlight.nodes,
+                mark="" if highlight is None else highlight.mark(label),
             )
         )
 
@@ -465,7 +467,7 @@ class _Layout:
 def _text_room(node: _Node) -> float:
     """The width of a node's text: its label or the widest part of its kind line (the
     kind, the detail, the status), within the node width limits (ITL-1232)."""
-    parts = node.kind_line.split(" · ")
+    parts = [*node.kind_line.split(" · "), node.mark]
     text = max(
         len(node.label) * _CHAR_W, max(len(part) for part in parts) * _SMALL_CHAR_W
     )
@@ -487,6 +489,9 @@ def _kind_lines(node: _Node) -> tuple[str, ...]:
             lines[-1] = joined
         else:
             lines.append(part)
+    if node.mark:
+        # A highlight's mark (a trace's computed / reused) on a line of its own.
+        lines.append(node.mark)
     return tuple(lines)
 
 
@@ -711,8 +716,12 @@ def _layout(
 
 # A solid stroke and a 14 % fill of each kind's colour read on light and dark notebook
 # themes alike; text and edges use ``currentColor``, the notebook's own text colour.
-_HIGHLIGHT_COLOUR = "#d9480f"
-"""The colour of a highlight's nodes and edges (``diagram(highlight=...)``)."""
+_HIGHLIGHT_COLOUR = "currentColor"
+"""The colour of a highlight's nodes and edges (``diagram(highlight=...)``): the text
+colour, which no kind or status uses (red and amber mean failed and stale), dark on a
+light page and light on a dark one."""
+_CAPTION_H = 24.0
+"""The height of the caption line a highlight with a note adds above the picture."""
 
 
 def _layout_edges(layout: _Layout) -> list[_Edge]:
@@ -821,6 +830,7 @@ def _svg(
     layout: _Layout,
     across: bool,
     standalone: bool,
+    caption: str = "",
 ) -> str:
     """The SVG picture; complete without any style sheet or script.
 
@@ -834,11 +844,13 @@ def _svg(
             text colour, since an image does not take the page's colours. Otherwise
             the text and edges take the page's text colour and the background is
             transparent.
+        caption: A line drawn above the picture (a highlight's note), or ``""``.
 
     Returns:
         The ``<svg>`` element.
     """
-    width, height = _num(layout.width), _num(layout.height)
+    top = _CAPTION_H if caption else 0.0
+    width, height = _num(layout.width), _num(layout.height + top)
     colour = ' color="#1f1f1f"' if standalone else ' style="max-width:100%;height:auto"'
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" class="op-dag-svg" role="group" '
@@ -852,14 +864,21 @@ def _svg(
             f'<rect class="op-dag-bg" width="{width}" height="{height}" rx="6" '
             'fill="#ffffff"/>'
         )
-    parts.append(
-        '<g class="op-dag-edges" fill="none" stroke="currentColor" '
-        'stroke-opacity="0.5" stroke-width="1.4">'
-    )
+    if caption:
+        parts.append(
+            f'<text class="op-dag-caption" x="{_num(_MARGIN)}" y="{_num(top - 6)}" '
+            f'font-size="{_FONT_PX}" font-weight="600" fill="currentColor">'
+            f"{_escape(_clip(caption, layout.width - 2 * _MARGIN, _CHAR_W))}</text>"
+            f'<g transform="translate(0,{_num(top)})">'
+        )
     # A highlight (``diagram(highlight=...)``) draws its edges in its colour and dims
-    # the nodes outside it.
+    # the other edges and the nodes outside it.
     lit = any(node.highlighted for node in nodes) or any(
         edge.highlighted for edge in _layout_edges(layout)
+    )
+    parts.append(
+        '<g class="op-dag-edges" fill="none" stroke="currentColor" '
+        f'stroke-opacity="{"0.3" if lit else "0.5"}" stroke-width="1.4">'
     )
     for edge, points in layout.edges:
         tip = f"{nodes[edge.source].label} → {nodes[edge.target].label}"
@@ -895,10 +914,12 @@ def _svg(
         dash = ' stroke-dasharray="4 3"' if node.status in _DASHED_STATUSES else ""
         label = f"{node.label}, {node.kind_line}"
         emphasis = ""
+        stroke = colour
         if node.highlighted:
+            # The kind's fill is kept; the outline is the highlight's.
             emphasis = " op-dag-highlight"
             stroke_width = "3.2"
-            colour = _HIGHLIGHT_COLOUR
+            stroke = _HIGHLIGHT_COLOUR
         elif lit:
             emphasis = '" opacity="0.4'
         parts.append(
@@ -907,7 +928,7 @@ def _svg(
             f'transform="translate({_num(x)},{_num(y)})">'
             f"<title>{_escape(_tooltip(node, inputs.get(node.index, ())))}</title>"
             f'<rect width="{_num(w)}" height="{_num(h)}" rx="{_num(radius)}" '
-            f'fill="{colour}" fill-opacity="0.14" stroke="{colour}" '
+            f'fill="{colour}" fill-opacity="0.14" stroke="{stroke}" '
             f'stroke-width="{stroke_width}"{dash}/>'
         )
         if node.kind in ("side_effect", "side_effect_function"):
@@ -923,10 +944,17 @@ def _svg(
             )
         kind_lines = _kind_lines(node)
         for line_number, line in enumerate(kind_lines):
+            # A highlight's mark (the last line) is drawn in bold at full strength.
+            is_mark = bool(node.mark) and line_number == len(kind_lines) - 1
+            weight = (
+                ' font-weight="600" class="op-dag-mark"'
+                if is_mark
+                else ' fill-opacity="0.75"'
+            )
             parts.append(
                 f'<text x="{_num(w / 2)}" y="{_num(16 + _LINE_H * line_number)}" '
-                f'text-anchor="middle" font-size="{_SMALL_PX}" fill="currentColor" '
-                f'fill-opacity="0.75">{_escape(_clip(line, w, _SMALL_CHAR_W))}</text>'
+                f'text-anchor="middle" font-size="{_SMALL_PX}" fill="currentColor"'
+                f"{weight}>{_escape(_clip(line, w, _SMALL_CHAR_W))}</text>"
             )
         label_y = 34 + _LINE_H * (len(kind_lines) - 1)
         parts.append(
@@ -934,7 +962,7 @@ def _svg(
             f'font-size="{_FONT_PX}" font-weight="600" fill="currentColor">'
             f"{_escape(_clip(node.label, w, _CHAR_W))}</text></g>"
         )
-    parts.append("</g></svg>")
+    parts.append("</g></g></svg>" if caption else "</g></svg>")
     return "".join(parts)
 
 
@@ -1094,8 +1122,11 @@ class PipelineDiagram:
         max_nodes: Above this many nodes (after folding), the notebook shows the
             plain-text listing instead of the picture.
         highlight: Nodes and edges to emphasize, by label, with a note
-            (``Trace.highlight()``, ``Absence.highlight()``): drawn in an accent colour,
-            the other nodes dimmed; the listing marks them with ``*``.
+            (``Trace.highlight()``, ``Absence.highlight()``): outlined in the text
+            colour (no status uses it), the other nodes and edges dimmed, the note as
+            a caption above the picture, and a node's mark (a trace's ``computed`` /
+            ``reused``) on a line of its own; the listing marks them with ``*`` and
+            ``[mark]``.
 
     Raises:
         ValueError: If ``direction`` is not ``"LR"`` or ``"TB"``, ``max_nodes`` is not
@@ -1125,7 +1156,11 @@ class PipelineDiagram:
         if highlight is not None:
             labels = {node.label for node in pipeline.dag.nodes()}
             unknown = sorted(
-                {*highlight.nodes, *(end for edge in highlight.edges for end in edge)}
+                {
+                    *highlight.nodes,
+                    *(end for edge in highlight.edges for end in edge),
+                    *(label for label, _ in highlight.marks),
+                }
                 - labels
             )
             if unknown:
@@ -1191,6 +1226,8 @@ class PipelineDiagram:
             model["note"] = self._highlight.note
             for entry, node in zip(model["nodes"], nodes):
                 entry["highlighted"] = node.highlighted
+                if node.mark:
+                    entry["mark"] = node.mark
             for entry, edge in zip(model["edges"], edges):
                 entry["highlighted"] = edge.highlighted
         return model
@@ -1239,6 +1276,8 @@ class PipelineDiagram:
         for node in self._nodes:
             mark = "* " if node.highlighted else "  "
             line = f"{mark}{node.label} ({node.kind_line})"
+            if node.mark:
+                line += f" [{node.mark}]"
             if node.index in inputs:
                 line += " <- " + ", ".join(inputs[node.index])
             lines.append(line)
@@ -1268,8 +1307,20 @@ class PipelineDiagram:
         layout = _layout(nodes, edges, direction)
         inputs = _inputs(nodes, edges)
         return _svg(
-            self._picture_title(), nodes, inputs, layout, direction == "LR", standalone
+            self._picture_title(),
+            nodes,
+            inputs,
+            layout,
+            direction == "LR",
+            standalone,
+            self._caption(),
         )
+
+    def _caption(self) -> str:
+        """The line drawn above the picture: what the highlight shows, or ``""``."""
+        if self._highlight is not None and self._highlight.note:
+            return f"highlighted: {self._highlight.note}"
+        return ""
 
     def _picture_title(self) -> str:
         """The picture's title: the diagram's, with the highlight's note."""
@@ -1339,12 +1390,14 @@ class PipelineDiagram:
             layout,
             self._direction == "LR",
             standalone=True,
+            caption=self._caption(),
         )
         encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
         alt = f"Diagram of {self.title}: {len(self._nodes)} nodes"
         return (
             f'<img class="op-dag-picture" alt="{_escape(alt)}" '
-            f'width="{_num(layout.width)}" height="{_num(layout.height)}" '
+            f'width="{_num(layout.width)}" '
+            f'height="{_num(layout.height + (_CAPTION_H if self._caption() else 0))}" '
             f'style="width:100%;max-width:{_num(layout.width * _MAX_SCALE)}px;'
             'height:auto" '
             f'src="data:image/svg+xml;base64,{encoded}">'

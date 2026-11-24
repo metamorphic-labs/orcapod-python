@@ -78,12 +78,22 @@ class Highlight:
     Attributes:
         nodes: The labels of the nodes to emphasize.
         edges: The streams to emphasize, as ``(upstream label, downstream label)``.
-        note: A line shown with the diagram (its listing and its picture's title).
+        note: A line shown with the diagram (its listing, and its picture's caption and
+            title).
+        marks: A word shown on a node, as ``(label, mark)``: for a trace, each
+            function node on the path is marked ``"computed"`` (its rows on the path
+            computed their results), ``"reused"`` (they reused results stored for
+            equal inputs) or ``"computed + reused"`` (some did each).
     """
 
     nodes: frozenset[str] = frozenset()
     edges: frozenset[tuple[str, str]] = frozenset()
     note: str = ""
+    marks: frozenset[tuple[str, str]] = frozenset()
+
+    def mark(self, label: str) -> str:
+        """Return the mark of the node ``label``, or ``""`` when it has none."""
+        return next((mark for node, mark in self.marks if node == label), "")
 
 
 @dataclass(frozen=True)
@@ -331,11 +341,31 @@ class Trace:
         return tuple(sorted({step.node for step in self.root.walk()}))
 
     def highlight(self) -> Highlight:
-        """Return the trace's path, for ``job.diagram(highlight=...)``."""
+        """Return the trace's path, for ``job.diagram(highlight=...)``.
+
+        Each function node on the path is marked with how its rows on the path got
+        their results: ``"computed"``, ``"reused"`` or ``"computed + reused"``.
+        """
+        how: dict[str, set[bool]] = {}
+        for node, run in self.function_runs():
+            how.setdefault(node, set()).add(run.computed_here)
+        marks = frozenset(
+            (
+                node,
+                "computed + reused"
+                if len(seen) > 1
+                else "computed"
+                if True in seen
+                else "reused",
+            )
+            for node, seen in how.items()
+        )
+        row = f" {_tags_text(self.root.tags)}" if self.root.tags else ""
         return Highlight(
             nodes=frozenset(self.nodes()),
             edges=frozenset(self.edges),
-            note=f"trace of {self.root.node}.{self.root.column}",
+            note=f"trace of {self.root.node}.{self.root.column}{row}",
+            marks=marks,
         )
 
     def text(self) -> str:
