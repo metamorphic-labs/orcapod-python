@@ -29,14 +29,14 @@ from orcapod.databases import (
     SpiralDBConnector,
     SQLiteConnector,
 )
+from orcapod.pipeline.serialization import SOURCE_REGISTRY
 from orcapod.sources import ArrowTableSource
 from tests.test_databases import fake_pyspiral
 
 KINDS = ("sqlite", "postgresql", "spiraldb")
 # The kinds an operator-only job runs on.
 RUNNABLE = ("sqlite", "spiraldb")
-# Not a real credential.
-PASSWORD = "synthetic-pass-word"
+MARKER = "marker-in-dsn"
 
 
 class Databases:
@@ -52,7 +52,7 @@ class Databases:
             )
         if kind == "postgresql":
             return ConnectorArrowDatabase(
-                PostgreSQLConnector(f"postgresql://u:{PASSWORD}@h/{name}")
+                PostgreSQLConnector(f"postgresql://u:{MARKER}@h/{name}")
             )
         fake_pyspiral.FakeSpiral().project(name)
         return ConnectorArrowDatabase(SpiralDBConnector(name))
@@ -134,7 +134,7 @@ def test_load_without_the_database_names_the_slot_and_what_to_pass(
     assert "result_database" not in message
     assert "Unknown database type" not in message
     # The saved connection is never shown.
-    assert PASSWORD not in message
+    assert MARKER not in message
 
 
 @pytest.mark.parametrize("kind", KINDS)
@@ -158,7 +158,7 @@ def test_every_missing_slot_is_named(
             PipelineJob.load(path, **given)
         for slot, text in wanted.items():
             assert (text in str(refused.value)) is (slot not in given)
-        assert PASSWORD not in str(refused.value)
+        assert MARKER not in str(refused.value)
     loaded = PipelineJob.load(path, result_database=results, database=database)
     assert loaded.database is database
     assert loaded.result_database is results
@@ -248,18 +248,18 @@ def test_a_resave_writes_the_databases_actually_bound(
     assert bindings["result_database"] != recorded["result_database"]
 
 
-SECRET = "postgresql://u:synthetic-credential@h/d"
+TEXT = "marker-text://x"
 
 
-def _secret_files(recorded: dict[str, Any], slot: str) -> Iterator[dict[str, Any]]:
-    """The saved bindings with ``SECRET`` put in each field of ``slot`` in turn."""
+def _marked_files(recorded: dict[str, Any], slot: str) -> Iterator[dict[str, Any]]:
+    """The saved bindings with ``TEXT`` put in each field of ``slot`` in turn."""
     for field in recorded[slot]:
-        for value in (SECRET, [SECRET], {SECRET: SECRET}):
+        for value in (TEXT, [TEXT], {TEXT: TEXT}):
             changed = json.loads(json.dumps(recorded))
             changed[slot][field] = value
             yield changed
     for field in [*recorded[slot]["connector"], "another"]:
-        for value in (SECRET, [SECRET], {SECRET: SECRET}):
+        for value in (TEXT, [TEXT], {TEXT: TEXT}):
             changed = json.loads(json.dumps(recorded))
             changed[slot]["connector"][field] = value
             yield changed
@@ -276,7 +276,7 @@ def test_no_saved_text_is_shown_by_a_load(
     caplog: pytest.LogCaptureFixture,
     recwarn: pytest.WarningsRecorder,
 ) -> None:
-    """A credential in any field of a saved connector database reaches no exception (a
+    """Text in any field of a saved connector database reaches no exception (a
     chained one included), log or warning, whether or not the other slot is given."""
     path = tmp_path / "job.json"
     results = databases.make(kind, "b")
@@ -289,7 +289,7 @@ def test_no_saved_text_is_shown_by_a_load(
     del given[slot]
     caplog.set_level(logging.DEBUG)
     shown: list[str] = []
-    for bindings in _secret_files(data["bindings"], slot):
+    for bindings in _marked_files(data["bindings"], slot):
         path.write_text(json.dumps({**data, "bindings": bindings}))
         for databases_given in ({}, given):
             try:
@@ -300,27 +300,27 @@ def test_no_saved_text_is_shown_by_a_load(
                 shown.append(repr(exc))
     assert shown
     text = "\n".join([*shown, caplog.text, *(str(w.message) for w in recwarn)])
-    assert "synthetic-credential" not in text
-    assert SECRET not in text
+    assert "marker-text" not in text
+    assert TEXT not in text
 
 
 def _delta_changes(root: Path) -> dict[str, dict[str, Any]]:
-    """Delta configurations that fail to rebuild, with ``SECRET`` in what they hold."""
+    """Delta configurations that fail to rebuild, with ``TEXT`` in what they hold."""
     blocked = root / "a-file"
     blocked.write_text("not a directory")
     return {
-        "a path that cannot be made": {"root_uri": f"{blocked}/{SECRET}"},
-        "a URI that is not supported": {"root_uri": f"{SECRET}::x"},
-        "a URI that is not text": {"root_uri": {SECRET: SECRET}},
+        "a path that cannot be made": {"root_uri": f"{blocked}/{TEXT}"},
+        "a URI that is not supported": {"root_uri": f"{TEXT}::x"},
+        "a URI that is not text": {"root_uri": {TEXT: TEXT}},
         "options that are not a mapping": {
-            "root_uri": f"s3://bucket/{SECRET}",
-            "storage_options": SECRET,
+            "root_uri": f"s3://bucket/{TEXT}",
+            "storage_options": TEXT,
         },
-        "options with a credential": {
+        "options of a file": {
             "root_uri": f"{blocked}/x",
-            "storage_options": {"AWS_SECRET_ACCESS_KEY": SECRET, SECRET: SECRET},
+            "storage_options": {"AWS_REGION": TEXT, TEXT: TEXT},
         },
-        "an unknown kind": {"type": SECRET},
+        "an unknown kind": {"type": TEXT},
     }
 
 
@@ -333,7 +333,7 @@ def test_a_failed_delta_rebuild_logs_the_slot_kind_and_exception_type_only(
     caplog: pytest.LogCaptureFixture,
     recwarn: pytest.WarningsRecorder,
 ) -> None:
-    """Review of PR 540: the exception's text can hold a saved path, URI or option."""
+    """Review of PR 540: the warning no longer holds the exception text."""
     path = tmp_path / "job.json"
     _save(
         path,
@@ -365,7 +365,7 @@ def test_a_failed_delta_rebuild_logs_the_slot_kind_and_exception_type_only(
             except Exception as exc:
                 shown = "".join(traceback.format_exception(exc))
         text = "\n".join([shown, caplog.text, *(str(w.message) for w in recwarn)])
-        assert "synthetic-credential" not in text, name
+        assert "marker-text" not in text, name
         if fails == "with the whole config":
             assert f"bindings.{slot}" in caplog.text
             if name == "an unknown kind":
@@ -414,3 +414,78 @@ def test_saving_a_loaded_job_keeps_a_database_that_could_not_be_rebuilt(
     loaded.bind(database=given)
     loaded.save(again)
     assert json.loads(again.read_text())["bindings"]["database"] == given.to_config()
+
+
+SAVED_SOURCE_KINDS = (*sorted(SOURCE_REGISTRY), "db_table", "polling_source", TEXT)
+
+
+def _raise_chained(config: dict[str, Any], **_: Any) -> Any:
+    """A rebuild that fails with ``TEXT`` in the error, its cause and its context."""
+    try:
+        try:
+            raise KeyError(f"first {TEXT}")
+        except KeyError:
+            raise OSError(f"second {TEXT}")
+    except OSError as exc:
+        raise RuntimeError(f"third {TEXT} {config}") from exc
+
+
+@pytest.mark.parametrize("kind", SAVED_SOURCE_KINDS)
+@pytest.mark.parametrize("slots", [["left"], ["right", "left"]])
+def test_a_source_that_cannot_be_rebuilt_logs_the_slot_kind_and_error_type_only(
+    tmp_path: Path,
+    kind: str,
+    slots: list[str],
+    caplog: pytest.LogCaptureFixture,
+    recwarn: pytest.WarningsRecorder,
+) -> None:
+    """The warning no longer holds the exception text, for every source kind."""
+    path = tmp_path / "job.json"
+    _save(path, database=DeltaTableDatabase(tmp_path / "delta"))
+    data = json.loads(path.read_text())
+    for slot in slots:
+        data["bindings"]["sources"][slot].update(source_type=kind, entry=TEXT)
+    path.write_text(json.dumps(data))
+    caplog.set_level(logging.DEBUG)
+    with ExitStack() as stack:
+        if kind in SOURCE_REGISTRY:
+            stack.enter_context(
+                patch.object(SOURCE_REGISTRY[kind], "from_config", _raise_chained)
+            )
+        loaded = PipelineJob.load(path)
+    assert set(slots) <= set(loaded.unbound_sources)
+    for slot in slots:
+        shown = "unknown source kind" if kind == TEXT else kind
+        error = "RuntimeError" if kind in SOURCE_REGISTRY else "ValueError"
+        records = [
+            r
+            for r in caplog.records
+            if r.getMessage().startswith(
+                f"Could not reconstruct source {slot!r} ({shown}) from its saved "
+                f"config: {error}. "
+            )
+        ]
+        assert len(records) == 1
+        assert records[0].levelno == logging.WARNING
+        assert records[0].exc_info is None
+    text = "\n".join([caplog.text, *(str(w.message) for w in recwarn)])
+    assert "marker-text" not in text
+
+
+@pytest.mark.parametrize("value", [TEXT, [TEXT], {TEXT: TEXT}])
+def test_a_source_kind_of_a_file_is_never_shown(
+    tmp_path: Path, value: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = tmp_path / "job.json"
+    _save(path, database=DeltaTableDatabase(tmp_path / "delta"))
+    data = json.loads(path.read_text())
+    data["bindings"]["sources"]["left"]["source_type"] = value
+    path.write_text(json.dumps(data))
+    caplog.set_level(logging.DEBUG)
+    shown = ""
+    try:
+        PipelineJob.load(path)
+    except Exception as exc:
+        # A kind that is not text is refused by the file's own checks.
+        shown = "".join(traceback.format_exception(exc))
+    assert "marker-text" not in shown + caplog.text

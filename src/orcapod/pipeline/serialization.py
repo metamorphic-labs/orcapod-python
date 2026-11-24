@@ -452,15 +452,12 @@ def resolve_database_from_config(
     return cls.from_config(config)
 
 
-#: The kinds of connector a message may name: a saved kind outside this list is never
-#: shown, since an odd file can hold a credential there.
+#: The kinds of connector a message may name.
 _CONNECTOR_KINDS = ("sqlite", "postgresql", "spiraldb")
 
 
 def saved_database_kind(config: Any) -> str:
-    """The kind of a saved database configuration, for a message.
-
-    Nothing of the saved text is returned: it may hold a credential.
+    """The kind of a saved database configuration, for a message: never the saved text.
 
     Args:
         config: A saved database configuration.
@@ -476,12 +473,36 @@ def saved_database_kind(config: Any) -> str:
     return "unknown database kind"
 
 
+def saved_source_kind(config: Any) -> str:
+    """The kind of a saved source configuration, for a message: never the saved text.
+
+    Args:
+        config: A saved source configuration.
+
+    Returns:
+        The ``SOURCE_KIND`` of one of Orcapod's sources, or ``"unknown source kind"``.
+    """
+    from orcapod.core.sources.db_table_source import DBTableSource
+    from orcapod.core.sources.polling_source import PollingSource
+
+    if isinstance(config, dict):
+        kind = cast("dict[str, Any]", config).get("source_type")
+        for known in (
+            *SOURCE_REGISTRY,
+            # Written by a save, rebuilt by no load.
+            DBTableSource.SOURCE_KIND,
+            PollingSource.SOURCE_KIND,
+        ):
+            if kind == known:
+                return known
+    return "unknown source kind"
+
+
 def saved_connector_kind(config: Any) -> str | None:
     """The kind of connector a saved database configuration is over, or ``None``.
 
     A connector is not rebuilt from a saved file: the user supplies it at load
-    (developer, 2026-11-22, ITL-1391). Nothing of the saved text is returned: it may
-    hold a credential.
+    (developer, 2026-11-22, ITL-1391). Never the saved text.
 
     Args:
         config: A saved database configuration, or ``None``.

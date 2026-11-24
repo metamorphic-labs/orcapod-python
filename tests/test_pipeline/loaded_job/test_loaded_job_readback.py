@@ -930,7 +930,8 @@ def test_unreconstructable_file_source_is_a_warning_with_the_reason(
     assert warnings[0].startswith(
         "Could not reconstruct source 'csrc' (csv) from its saved config: "
     )
-    assert "gone.csv" in warnings[0]
+    # The type of the error, never its text (ITL-1391).
+    assert "gone.csv" not in warnings[0]
     assert warnings[0].endswith(
         "Stored function-node results are still readable from the database. To read "
         "source node 'csrc' itself, bind a source: job.bind(sources={'csrc': <source>})."

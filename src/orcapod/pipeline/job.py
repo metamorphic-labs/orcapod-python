@@ -1790,6 +1790,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             resolve_source_from_config,
             saved_connector_kind,
             saved_database_kind,
+            saved_source_kind,
         )
 
         path = _Path(path)
@@ -1807,7 +1808,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         # A connector is supplied by the user, never rebuilt from the file (ITL-1391):
         # refused before anything is rebuilt. Nothing of the saved configuration is
-        # shown: it may hold a credential.
+        # shown.
         missing: list[str] = []
         for slot_name, given in (
             ("database", database),
@@ -1850,7 +1851,6 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         for spec_name, src_config in (
             data.get("bindings", {}).get("sources", {}).items()
         ):
-            source_type = src_config.get("source_type")
             # Every source states its plain tags (ITL-1019): a refusal is the file's
             # error, not a source that could not be rebuilt.
             try:
@@ -1887,7 +1887,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     "results are still readable from the database. To read source node "
                     "%r itself, bind a source: job.bind(sources={%r: <source>}).",
                     spec_name,
-                    source_type,
+                    saved_source_kind(src_config),
                     spec_name,
                     spec_name,
                 )
@@ -1903,8 +1903,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     "To read source node %r itself, bind a source: "
                     "job.bind(sources={%r: <source>}).",
                     spec_name,
-                    source_type,
-                    exc,
+                    saved_source_kind(src_config),
+                    # Its type, never its text (ITL-1391).
+                    type(exc).__name__,
                     spec_name,
                     spec_name,
                 )
@@ -1934,8 +1935,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     effective_database = resolve_database_from_config(store_config)
                 except Exception as exc:
                     unresolved_database = store_config
-                    # The exception's text can hold a saved path, URI or option, and
-                    # with it a credential: only its type is logged (ITL-1391).
+                    # The exception's type, never its text (ITL-1391).
                     logger.warning(
                         "Could not reconstruct the database from its saved config: "
                         "bindings.database (%s): %s. "
