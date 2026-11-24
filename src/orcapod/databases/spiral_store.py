@@ -5,15 +5,15 @@ SpiralDB and how it is read back. Nothing calls them yet. The design is
 ``docs/dev/specs/itl-1446-spiral-columns.md`` (sections 3.1 to 3.3).
 
 * **Names.** ``encode_name`` gives a value column, or a struct field at any depth, a
-  name SpiralDB accepts; ``decode_name`` is its inverse. The key column ``__record_id``
-  keeps its name.
+  name SpiralDB accepts. The key column ``__record_id`` keeps its name. Nothing decodes
+  a name: a read looks for exactly the stored names the manifest lists.
 * **Types.** Rows are written in a *physical* form (``physical_schema``, ``encode_rows``)
   and restored to the *logical* one (``decode_rows``). A type either comes back exactly
-  or is refused before anything is written. What only a live probe can decide is
-  refused, and listed in ``AWAITING_LIVE_PROBE``.
-* **The manifest.** The logical schema of the table, kept in the table's key-value
-  metadata (``manifest_entries``, ``read_manifest``): entries are only ever added, never
-  replaced or removed, and two manifests that disagree are refused.
+  or is refused. Every refusal of a type, a name or a value that may be lifted is an
+  entry of one table, ``REFUSALS``.
+* **The manifest.** One a table, in its key-value metadata, written at creation and
+  never changed (``manifest_entries``, ``read_manifest``): the record path, the kind,
+  the logical schema, and the stored names at every depth.
 
 Logical types are handled by their identifier (extension name and metadata) alone, as
 ``ARROW:extension:*`` field metadata over the storage type: neither writing nor reading
@@ -32,14 +32,13 @@ import binascii
 import hashlib
 import json
 import re
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, cast
 
 import numpy as np
 import pyarrow as pa
-import pyarrow.compute as pc
 
 from orcapod.databases.utils import identity_node
 from orcapod.logical_types.canonical_form import (
@@ -85,11 +84,8 @@ class StoredRowsError(SpiralStoreError):
 
 
 class ManifestError(SpiralStoreError):
-    """A manifest cannot be read in full, or cannot be written within the limits."""
-
-
-class ManifestConflictError(ManifestError):
-    """One table holds two manifests that disagree."""
+    """A manifest cannot be read in full, is not the one table's only one, is not the one
+    asked for, or does not fit in a table's metadata."""
 
 
 @contextmanager
@@ -108,7 +104,6 @@ _MARK = "ox_"
 _CONTROL = "\x00-\x1f\x7f"
 _NOT_PLAIN = re.compile(f"[.$*{_CONTROL}]")
 _ESCAPED = re.compile(f"[.$*;{_CONTROL}]")
-_CODE = re.compile(";([0-9A-F]{2})")
 
 
 def encode_name(name: str) -> str:
@@ -117,7 +112,7 @@ def encode_name(name: str) -> str:
     A plain name is stored as it is. Any other one (empty, starting with ``__`` or
     ``ox_``, or holding ``.``, ``$``, ``*`` or a control character) is ``ox_`` followed
     by the name with each of those characters, and ``;``, as ``;`` and two upper-case
-    hex digits. Injective: ``decode_name`` is its inverse.
+    hex digits. Injective.
 
     Args:
         name: The Orcapod name.
@@ -129,58 +124,95 @@ def encode_name(name: str) -> str:
     Raises:
         UnstorableInSpiralError: If the name is not UTF-8 text (a lone surrogate).
     """
-    try:
-        _ = name.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        raise UnstorableInSpiralError(f"the name {name!r} is not UTF-8 text") from exc
+    _require_utf8(name)
     if name and not name.startswith(("__", _MARK)) and not _NOT_PLAIN.search(name):
         return name
     return _MARK + _ESCAPED.sub(lambda m: f";{ord(m[0]):02X}", name)
 
 
-def decode_name(stored: str) -> str:
-    """Return the Orcapod name of a stored value column or struct field.
-
-    Args:
-        stored: A name ``encode_name`` gives.
-
-    Returns:
-        The Orcapod name.
-
-    Raises:
-        StoredRowsError: If ``encode_name`` never gives this name.
-    """
-    name = stored
-    if stored.startswith(_MARK):
-        name = _CODE.sub(lambda m: chr(int(m[1], 16)), stored[len(_MARK) :])
+def _require_utf8(text: str) -> None:
+    """Refuse text with no UTF-8 form: a lone surrogate."""
     try:
-        written = encode_name(name)
-    except UnstorableInSpiralError:
-        written = None
-    if written != stored:
-        raise StoredRowsError(f"{stored!r} is not a name Orcapod writes")
-    return name
+        _ = text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise UnstorableInSpiralError(f"{text!r} is not UTF-8 text") from exc
+
+
+# ------------------------------------------------------------- what is refused, and why
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """Something the store does not keep.
+
+    Attributes:
+        what: What it is.
+        why: The evidence: what the service or its client was measured to do, or that
+            it is not measured.
+        matches: Whether an Arrow type is it; ``None`` when it is not about a type.
+    """
+
+    what: str
+    why: str
+    matches: Callable[[pa.DataType], bool] | None = None
+
+    def error(self) -> UnstorableInSpiralError:
+        """The refusal as an error."""
+        return UnstorableInSpiralError(
+            f"a SpiralDB store refuses {self.what} ({self.why})"
+        )
+
+
+_types = pa.types
+_NOT_MEASURED = "not measured"
+_REFUSED_LIVE = "the service or its client refuses it"
+NULL_STRUCT = Refusal("a null struct", _REFUSED_LIVE)
+EMPTY_STRUCT = Refusal("a struct with no fields", _REFUSED_LIVE)
+NO_ROWS = Refusal("a write of no rows", "the client panics")
+NULL_LIST_OF_STRUCTS = Refusal(
+    "a null fixed-size list of structs", _NOT_MEASURED + "; it holds null structs"
+)
+RENAMED_MAP = Refusal(
+    "a map whose fields are not named key and value", "Arrow IPC renames them"
+)
+MAP_METADATA = Refusal("field metadata inside a map", "decided in the design")
+VIEW = Refusal(
+    "a string view or binary view", "Orcapod's tables hold the large variants"
+)
+REFUSALS: tuple[Refusal, ...] = (
+    NULL_STRUCT,
+    EMPTY_STRUCT,
+    NO_ROWS,
+    NULL_LIST_OF_STRUCTS,
+    RENAMED_MAP,
+    MAP_METADATA,
+    VIEW,
+    # Substitutes that held live, not used yet: large_binary, int64.
+    Refusal("a fixed-size binary", _REFUSED_LIVE, _types.is_fixed_size_binary),
+    Refusal("a duration", _REFUSED_LIVE, _types.is_duration),
+    Refusal("an interval", _REFUSED_LIVE, _types.is_interval),
+)
+"""Every refusal that new evidence or a decision may lift. A type that is in neither this
+table nor ``_NATIVE``, and that ``_physical_type`` does not map, is refused too."""
+
+_NATIVE: tuple[Callable[[pa.DataType], bool], ...] = (
+    _types.is_boolean,
+    _types.is_integer,
+    _types.is_float16,
+    _types.is_float32,
+    _types.is_float64,
+    _types.is_decimal128,
+    _types.is_decimal256,
+    _types.is_date32,
+    _types.is_date64,
+    _types.is_null,
+    _types.is_large_string,
+    _types.is_large_binary,
+)
+"""Types written as they are (measured live, bit for bit)."""
 
 
 # -------------------------------------------------------------- types, as declared
-
-AWAITING_LIVE_PROBE: Mapping[str, str] = {
-    "float16": "a float16",
-    "decimal256": "a decimal256",
-    "date64": "a date64",
-    "time": "a time of day",
-    "map": "a map",
-    "-0.0": "a negative zero",
-    "NaN bits": "a NaN other than the canonical quiet one (its bits)",
-}
-"""What the design leaves to the live type matrix (probe P3), and so is refused for now."""
-
-
-def _not_probed(what: str) -> UnstorableInSpiralError:
-    """The refusal of an entry of ``AWAITING_LIVE_PROBE``."""
-    return UnstorableInSpiralError(
-        f"it is not known yet whether SpiralDB keeps {AWAITING_LIVE_PROBE[what]} exactly"
-    )
 
 
 def _without_identifier(field: pa.Field[Any]) -> dict[bytes, bytes]:
@@ -205,6 +237,10 @@ def _logical_field(field: pa.Field[Any]) -> pa.Field[Any]:
     if node.identifier is not None and EXTENSION_NAME_KEY not in (field.metadata or {}):
         arrow_type = cast(Any, arrow_type).storage_type
     _refuse_nested_identifier(arrow_type)
+    if _holds(arrow_type, _types.is_string_view) or _holds(
+        arrow_type, _types.is_binary_view
+    ):
+        raise VIEW.error()
     metadata = _without_identifier(field)
     if node.identifier is not None:
         metadata[EXTENSION_NAME_KEY], metadata[EXTENSION_METADATA_KEY] = node.identifier
@@ -233,21 +269,41 @@ def _children(arrow_type: Any) -> list[pa.Field[Any]]:
     return [arrow_type.field(i) for i in range(arrow_type.num_fields)]
 
 
-def _service_form(stored: str) -> str:
-    """The form in which SpiralDB tells stored sibling names apart.
+def _holds(arrow_type: Any, matches: Callable[[pa.DataType], bool]) -> bool:
+    """Whether ``arrow_type`` is, or holds at any depth, a type that matches."""
+    return matches(arrow_type) or any(
+        _holds(child.type, matches) for child in _children(arrow_type)
+    )
 
-    The hook for probe P1: whether the service folds case or normalises Unicode is
-    unknown, so no rule is guessed and every name is its own form.
+
+def _holds_metadata(arrow_type: Any) -> bool:
+    """Whether a field below ``arrow_type``, at any depth, has metadata."""
+    return any(f.metadata or _holds_metadata(f.type) for f in _children(arrow_type))
+
+
+def _stored_names(names: list[str]) -> list[str]:
+    """Return the stored names of siblings: columns, or the fields of one struct.
+
+    SpiralDB folds neither case nor Unicode normal forms (measured live), so names that
+    differ are different.
     """
+    stored: list[str] = []
+    for name in names:
+        with _at(name):
+            stored.append(encode_name(name))
+    if len(set(stored)) != len(stored):
+        repeated = sorted({n for n in names if names.count(n) > 1})
+        raise UnstorableInSpiralError(f"names used more than once: {repeated}")
     return stored
 
 
-def _unique(stored: list[str]) -> None:
-    """Refuse sibling names (columns, or fields of one struct) that are one to SpiralDB."""
-    forms = [_service_form(name) for name in stored]
-    if len(set(forms)) != len(forms):
-        repeated = sorted({n for n, f in zip(stored, forms) if forms.count(f) > 1})
-        raise UnstorableInSpiralError(f"names used more than once: {repeated}")
+def _stored_columns(names: list[str]) -> list[str]:
+    """The stored names of a table's columns: the key column keeps its own.
+
+    No encoded name starts with ``__``, so none is the key column's.
+    """
+    stored = iter(_stored_names([n for n in names if n != KEY_COLUMN]))
+    return [n if n == KEY_COLUMN else next(stored) for n in names]
 
 
 def logical_schema(schema: pa.Schema) -> pa.Schema:
@@ -263,8 +319,8 @@ def logical_schema(schema: pa.Schema) -> pa.Schema:
 
     Raises:
         UnstorableInSpiralError: If a column cannot be stored exactly, naming it, or if
-            the table has no key column, no value column, a repeated name or a name that
-            is not UTF-8.
+            the table has no single key column, no value column, a repeated name or a
+            name that is not UTF-8.
     """
     try:
         return _logical_schema(schema)
@@ -286,9 +342,9 @@ def _logical_schema(schema: pa.Schema) -> pa.Schema:
             ):
                 raise UnstorableInSpiralError("the key column must be binary")
             fields.append(logical)
-    _unique([_stored_column_name(name) for name in schema.names])
-    if KEY_COLUMN not in schema.names:
-        raise UnstorableInSpiralError(f"no key column {KEY_COLUMN!r}")
+    _ = _stored_columns(schema.names)
+    if schema.names.count(KEY_COLUMN) != 1:
+        raise UnstorableInSpiralError(f"not exactly one key column {KEY_COLUMN!r}")
     if len(fields) < 2:
         raise UnstorableInSpiralError("no column beside the key column")
     return pa.schema(fields, metadata=cast(Any, schema.metadata))
@@ -308,53 +364,46 @@ def _physical_type(arrow_type: pa.DataType) -> pa.DataType:
     """
     t = pa.types
     logical: Any = arrow_type
-    if t.is_timestamp(arrow_type):
-        return pa.timestamp(logical.unit)
-    if t.is_fixed_size_binary(arrow_type):
-        return pa.large_binary()
-    if t.is_duration(arrow_type):
+    if t.is_timestamp(arrow_type) or t.is_time64(arrow_type):
+        # As integers: the service refuses a timestamp after 9999-12-30 22:00 UTC (so
+        # ``datetime.max``) and a time of day outside one day, as a whole write.
         return pa.int64()
-    if t.is_null(arrow_type):
-        return pa.int8()
+    if t.is_time32(arrow_type):
+        return pa.int32()
+    if t.is_decimal32(arrow_type) or t.is_decimal64(arrow_type):
+        # What the service stores them as.
+        return pa.decimal128(logical.precision, logical.scale)
     if t.is_struct(arrow_type):
         fields = _children(arrow_type)
         if not fields:
-            raise UnstorableInSpiralError("a struct with no fields")
-        _unique([encode_name(f.name) for f in fields])
+            raise EMPTY_STRUCT.error()
         physical: list[pa.Field[Any]] = []
-        for field in fields:
+        for field, stored in zip(fields, _stored_names([f.name for f in fields])):
             with _at(field.name):
-                physical.append(
-                    pa.field(encode_name(field.name), _physical_type(field.type))
-                )
+                physical.append(pa.field(stored, _physical_type(field.type)))
         return pa.struct(physical)
-    if _is_list(arrow_type) or t.is_fixed_size_list(arrow_type):
+    if _is_list(arrow_type):
+        with _at("[]"):
+            return pa.large_list(pa.field("item", _physical_type(logical.value_type)))
+    if t.is_fixed_size_list(arrow_type):
         with _at("[]"):
             item = pa.field("item", _physical_type(logical.value_type))
-        if t.is_fixed_size_list(arrow_type):
-            return pa.list_(item, logical.list_size)
-        return pa.large_list(item)
-    if (
-        t.is_boolean(arrow_type)
-        or t.is_integer(arrow_type)
-        or t.is_float32(arrow_type)
-        or t.is_float64(arrow_type)
-        or t.is_decimal128(arrow_type)
-        or t.is_date32(arrow_type)
-        or t.is_large_string(arrow_type)
-        or t.is_large_binary(arrow_type)
-    ):
+        return pa.list_(item, logical.list_size)
+    if t.is_map(arrow_type):
+        key, item = logical.key_field, logical.item_field
+        if (key.name, item.name) != ("key", "value"):
+            raise RENAMED_MAP.error()
+        if _holds_metadata(arrow_type):
+            raise MAP_METADATA.error()
+        with _at("[]"):
+            # Raw pyspiral drops ``keys_sorted``: the manifest restores it.
+            return pa.map_(_physical_type(key.type), _physical_type(item.type))
+    for refusal in REFUSALS:
+        if refusal.matches is not None and refusal.matches(arrow_type):
+            raise refusal.error()
+    if any(matches(arrow_type) for matches in _NATIVE):
         return arrow_type
-    for what, matches in (
-        ("float16", t.is_float16),
-        ("decimal256", t.is_decimal256),
-        ("date64", t.is_date64),
-        ("time", t.is_time),
-        ("map", t.is_map),
-    ):
-        if matches(arrow_type):
-            raise _not_probed(what)
-    raise UnstorableInSpiralError(f"SpiralDB stores no column of type {arrow_type}")
+    raise UnstorableInSpiralError(f"a SpiralDB store keeps no type {arrow_type}")
 
 
 def physical_schema(schema: pa.Schema) -> pa.Schema:
@@ -370,17 +419,13 @@ def physical_schema(schema: pa.Schema) -> pa.Schema:
     Raises:
         UnstorableInSpiralError: As ``logical_schema``.
     """
+    logical = logical_schema(schema)
     return pa.schema(
         [
-            pa.field(_stored_column_name(f.name), _physical_type(f.type))
-            for f in logical_schema(schema)
+            pa.field(stored, _physical_type(f.type))
+            for f, stored in zip(logical, _stored_columns(logical.names))
         ]
     )
-
-
-def _stored_column_name(name: str) -> str:
-    """The stored name of a top-level column: the key column keeps its own."""
-    return name if name == KEY_COLUMN else encode_name(name)
 
 
 # ------------------------------------------------------------------ rows, to write
@@ -397,14 +442,19 @@ def encode_rows(rows: pa.Table) -> pa.Table:
 
     Raises:
         UnstorableInSpiralError: If the schema is refused (``logical_schema``), or a
-            column holds a null under a non-null field, a null struct, or a value
-            whose bits are awaiting a live probe. The column is named.
+            column holds a null under a non-null field, a null struct, a refused value,
+            or a null key, or there are no rows. The column is named. This is per batch: rows of earlier
+            batches stay stored.
     """
     schema = logical_schema(rows.schema)
     physical = physical_schema(rows.schema)
+    if not rows.num_rows:
+        raise NO_ROWS.error()
     columns: list[Any] = []
     for field, stored, column in zip(schema, physical, rows.columns):
         with _at(field.name):
+            if field.name == KEY_COLUMN and column.null_count:
+                raise UnstorableInSpiralError("a null key")
             chunks = [_encode(_storage(c), field) for c in column.chunks]
         columns.append(cast(Any, pa.chunked_array)(chunks, type=stored.type))
     return pa.Table.from_arrays(columns, schema=physical)
@@ -432,57 +482,39 @@ def _encode(array: Any, field: pa.Field[Any]) -> Any:
     t = pa.types
     if t.is_struct(logical):
         if array.null_count:
-            raise UnstorableInSpiralError("SpiralDB cannot store a null struct")
+            raise NULL_STRUCT.error()
         children: list[Any] = []
         for i, child in enumerate(logical):
             with _at(child.name):
                 children.append(_encode(array.field(i), child))
-        return pa.StructArray.from_arrays(children, fields=list(_struct_of(logical)))
+        fields = _children(_physical_type(logical))
+        return pa.StructArray.from_arrays(children, fields=fields)
     if _is_list(logical):
         with _at("[]"):
             items = _encode(array.flatten(), logical.value_field)
         return _large_list(array, items, _physical_type(logical))
     if t.is_fixed_size_list(logical):
-        if array.null_count and _expands_to_null_struct(logical.value_type):
-            raise UnstorableInSpiralError(
-                "a null fixed-size list of structs, which holds null structs"
-            )
+        if array.null_count and _holds_struct_slots(logical.value_type):
+            raise NULL_LIST_OF_STRUCTS.error()
         with _at("[]"):
             items = _encode(array.flatten(), logical.value_field)
         return _fixed_size_list(array, items, _physical_type(logical))
-    if t.is_floating(logical):
-        _refuse_unprobed_floats(array)
-    if t.is_null(logical):
-        return pa.nulls(len(array), pa.int8())
-    if t.is_timestamp(logical) or t.is_duration(logical):
+    if t.is_map(logical):
+        with _at("[]"):
+            rows = _map_rows(array)
+            keys = _encode(array.keys.take(rows), logical.key_field)
+            items = _encode(array.items.take(rows), logical.item_field)
+        return _map(array, keys, items, _physical_type(logical))
+    if t.is_timestamp(logical) or t.is_time(logical):
         return array.view(_physical_type(logical))  # the same integers
     return array.cast(_physical_type(logical))
 
 
-def _struct_of(logical: pa.DataType) -> list[pa.Field[Any]]:
-    """The physical fields of a logical struct type."""
-    return _children(_physical_type(logical))
-
-
-def _expands_to_null_struct(item_type: Any) -> bool:
-    """Whether a null fixed-size list of these items would need a null struct in it."""
+def _holds_struct_slots(item_type: Any) -> bool:
+    """Whether a null fixed-size list of these items has null structs in its slots."""
     if pa.types.is_fixed_size_list(item_type):
-        return _expands_to_null_struct(item_type.value_type)
+        return _holds_struct_slots(item_type.value_type)
     return pa.types.is_struct(item_type)
-
-
-def _refuse_unprobed_floats(array: Any) -> None:
-    """Refuse a negative zero, and a NaN that is not the canonical quiet one."""
-    values = array.drop_null()
-    if pa.types.is_float32(array.type):
-        bits, zero, nan = values.view(pa.uint32()), 0x80000000, 0x7FC00000
-    else:
-        bits, zero, nan = values.view(pa.uint64()), 1 << 63, 0x7FF8000000000000
-    raw = bits.to_numpy(zero_copy_only=False)
-    if np.any(raw == zero):
-        raise _not_probed("-0.0")
-    if np.any(raw[np.isnan(values.to_numpy(zero_copy_only=False))] != nan):
-        raise _not_probed("NaN bits")
 
 
 # ------------------------------------------------------------- nested array builders
@@ -493,12 +525,29 @@ def _valid(array: Any) -> Any:
     return array.is_valid().to_numpy(zero_copy_only=False)
 
 
-def _large_list(array: Any, items: Any, target: Any) -> Any:
-    """Rebuild a list array around new items, one per item of its non-null rows."""
-    lengths = np.diff(array.offsets.to_numpy(zero_copy_only=False)) * _valid(array)
-    offsets = np.concatenate([[0], np.cumsum(lengths)]).astype(np.int64)
-    return pa.LargeListArray.from_arrays(
-        pa.array(offsets, pa.int64()),
+def _lengths(array: Any) -> Any:
+    """The number of items of each row of a list or map array; 0 of a null row."""
+    return np.diff(array.offsets.to_numpy(zero_copy_only=False)) * _valid(array)
+
+
+def _offsets(array: Any) -> Any:
+    """Offsets from zero for the items of the non-null rows of a list or map array."""
+    return np.concatenate([[0], np.cumsum(_lengths(array))])
+
+
+def _map_rows(array: Any) -> Any:
+    """Where the items of a map array's non-null rows are, in row order."""
+    starts = array.offsets.to_numpy(zero_copy_only=False)[:-1]
+    lengths, offsets = _lengths(array), _offsets(array)
+    first = np.repeat(starts - offsets[:-1], lengths)
+    return pa.array((first + np.arange(offsets[-1])).astype(np.int64))
+
+
+def _map(array: Any, keys: Any, items: Any, target: Any) -> Any:
+    """Rebuild a map array around new keys and items, of its non-null rows."""
+    return pa.MapArray.from_arrays(
+        pa.array(_offsets(array).astype(np.int32)),
+        keys,
         items,
         type=target,
         mask=array.is_null() if array.null_count else None,
@@ -524,46 +573,42 @@ def _fixed_size_list(array: Any, items: Any, target: Any) -> Any:
     )
 
 
+def _large_list(array: Any, items: Any, target: Any) -> Any:
+    """Rebuild a list array around new items, one per item of its non-null rows."""
+    offsets = _offsets(array).astype(np.int64)
+    return pa.LargeListArray.from_arrays(
+        pa.array(offsets, pa.int64()),
+        items,
+        type=target,
+        mask=array.is_null() if array.null_count else None,
+    )
+
+
 # ------------------------------------------------------------------- rows, as read
 
 
-def decode_rows(rows: pa.Table, schema: pa.Schema) -> pa.Table:
-    """Return rows read from SpiralDB as the logical rows they were written from.
+def require_stored_schema(found: pa.Schema, manifest: StoreManifest) -> None:
+    """Refuse a table whose stored columns are not exactly the ones the manifest lists.
+
+    For rows as read, and for the first commit of a table read back.
 
     Args:
-        rows: Rows as read: stored names, columns and struct fields in any order.
-        schema: The logical schema to give them: a manifest's, or the same schema with
-            some of its logical types live.
-
-    Returns:
-        The rows under ``schema``, columns and struct fields in its order.
+        found: The stored schema; columns and struct fields in any order, in small or
+            large variants.
+        manifest: The table's manifest.
 
     Raises:
-        StoredRowsError: If a column or struct field is missing, extra or of another
-            type, or a value is not one that was written; the column is named.
+        StoredRowsError: If a column or a struct field, at any depth, is missing, extra,
+            repeated or of another type.
     """
-    recorded = logical_schema(schema)
-    stored = [_stored_column_name(f.name) for f in recorded]
-    _require_names(rows.schema.names, stored)
-    columns: list[Any] = []
-    for target, field, name in zip(schema, recorded, stored):
-        with _at(target.name):
-            chunks = [_decode(c, field) for c in rows.column(name).chunks]
-            live = isinstance(target.type, pa.BaseExtensionType)
-            storage: Any = target.type.storage_type if live else target.type
-            if storage != field.type:
-                chunks = [c.cast(storage) for c in chunks]
-            if live:
-                chunks = [
-                    pa.ExtensionArray.from_storage(cast(Any, target.type), c)
-                    for c in chunks
-                ]
-            columns.append(cast(Any, pa.chunked_array)(chunks, type=target.type))
-    return pa.Table.from_arrays(columns, schema=schema)
+    _require_names(found.names, manifest.physical.names)
+    for field, physical in zip(manifest.schema, manifest.physical):
+        with _at(field.name):
+            _require_type(found.field(physical.name).type, field.type, physical.type)
 
 
 def _require_names(found: list[str], expected: list[str]) -> None:
-    """Refuse a set of stored names other than the expected one."""
+    """Refuse stored sibling names other than the expected ones."""
     if sorted(found) != sorted(expected):
         missing = sorted(set(expected) - set(found))
         extra = sorted(set(found) - set(expected))
@@ -573,86 +618,146 @@ def _require_names(found: list[str], expected: list[str]) -> None:
         )
 
 
-def _decode(array: Any, field: pa.Field[Any]) -> Any:
-    """Return stored values as the logical values of ``field``."""
+def _require_type(found: Any, logical: Any, stored: Any) -> None:
+    """Refuse a stored type other than ``stored``, under which ``logical`` is kept."""
+    if pa.types.is_struct(stored) and pa.types.is_struct(found):
+        _require_names(
+            [f.name for f in _children(found)], [f.name for f in _children(stored)]
+        )
+        for field, kept in zip(_children(logical), _children(stored)):
+            with _at(field.name):
+                _require_type(found.field(kept.name).type, field.type, kept.type)
+    elif _is_list(stored) and _is_list(found):
+        with _at("[]"):
+            _require_type(*(cast(Any, x).value_type for x in (found, logical, stored)))
+    elif pa.types.is_fixed_size_list(stored) and pa.types.is_fixed_size_list(found):
+        sizes = [cast(Any, x).list_size for x in (found, stored)]
+        if sizes[0] != sizes[1]:
+            raise StoredRowsError(f"stored as {found}, not as {stored} ({logical})")
+        with _at("[]"):
+            _require_type(*(cast(Any, x).value_type for x in (found, logical, stored)))
+    elif pa.types.is_map(stored) and pa.types.is_map(found):
+        with _at("[]"):
+            for part in ("key_type", "item_type"):
+                _require_type(*(getattr(x, part) for x in (found, logical, stored)))
+    elif arrow_utils.normalize_to_large_types(found, keep_null=True) != stored:
+        raise StoredRowsError(f"stored as {found}, not as {stored} ({logical})")
+
+
+def decode_rows(
+    rows: pa.Table, manifest: StoreManifest, schema: pa.Schema | None = None
+) -> pa.Table:
+    """Return rows read from SpiralDB as the logical rows they were written from.
+
+    Args:
+        rows: Rows as read: stored names, columns and struct fields in any order.
+        manifest: The table's manifest. Columns are found by the stored names it lists.
+        schema: The manifest's schema with some of its logical types live, to give the
+            rows; the manifest's own when ``None``.
+
+    Returns:
+        The rows under the schema, columns and struct fields in its order.
+
+    Raises:
+        StoredRowsError: If the stored columns are not the manifest's
+            (``require_stored_schema``), or a value is not one that was written; the
+            column is named.
+        ManifestError: If ``schema`` is not the manifest's.
+    """
+    target = manifest.schema if schema is None else schema
+    difference = schema_difference(manifest.schema, target)
+    if difference is not None or target.names != manifest.schema.names:
+        raise ManifestError(f"not the recorded schema: {difference or 'column order'}")
+    require_stored_schema(rows.schema, manifest)
+    columns: list[Any] = []
+    for out, field, physical in zip(target, manifest.schema, manifest.physical):
+        with _at(field.name):
+            column = rows.column(physical.name)
+            if field.name == KEY_COLUMN and column.null_count:
+                raise StoredRowsError("a null key")
+            chunks = [_decode(c, field, physical) for c in column.chunks]
+            live = isinstance(out.type, pa.BaseExtensionType)
+            storage: Any = out.type.storage_type if live else out.type
+            if storage != field.type:
+                chunks = [c.cast(storage) for c in chunks]
+            if live:
+                chunks = [
+                    pa.ExtensionArray.from_storage(cast(Any, out.type), c)
+                    for c in chunks
+                ]
+            columns.append(cast(Any, pa.chunked_array)(chunks, type=out.type))
+    return pa.Table.from_arrays(columns, schema=target)
+
+
+def empty_rows(manifest: StoreManifest) -> pa.Table:
+    """Return zero rows of the recorded schema.
+
+    What a table with a manifest and no value columns reads as (a crash before its first
+    rows). Such a table is never scanned: the service refuses a key-only scan.
+
+    Args:
+        manifest: The table's manifest.
+
+    Returns:
+        A table with no rows.
+    """
+    return manifest.schema.empty_table()
+
+
+def _decode(array: Any, field: pa.Field[Any], physical: pa.Field[Any]) -> Any:
+    """Return stored values of ``physical`` as the logical values of ``field``."""
     logical: Any = field.type
+    stored: Any = physical.type
     t = pa.types
     restored: Any
     if t.is_struct(logical):
-        if not t.is_struct(array.type):
-            raise _retyped(array, logical)
         if array.null_count:
             raise StoredRowsError("a null struct, which Orcapod never writes")
         names = [f.name for f in _children(array.type)]
-        children_of = list(logical)
-        _require_names(names, [encode_name(c.name) for c in children_of])
         children: list[Any] = []
-        for child in children_of:
+        for child, child_stored in zip(_children(logical), _children(stored)):
             with _at(child.name):
-                stored = array.field(names.index(encode_name(child.name)))
-                children.append(_decode(stored, child))
-        restored = pa.StructArray.from_arrays(children, fields=children_of)
+                values = array.field(names.index(child_stored.name))
+                children.append(_decode(values, child, child_stored))
+        restored = pa.StructArray.from_arrays(children, fields=_children(logical))
     elif _is_list(logical):
-        if not _is_list(array.type):
-            raise _retyped(array, logical)
         with _at("[]"):
-            items = _decode(array.flatten(), logical.value_field)
+            items = _decode(array.flatten(), logical.value_field, stored.value_field)
         restored = _large_list(array, items, logical)
     elif t.is_fixed_size_list(logical):
-        if (
-            not t.is_fixed_size_list(array.type)
-            or array.type.list_size != logical.list_size
-        ):
-            raise _retyped(array, logical)
         with _at("[]"):
-            items = _decode(array.flatten(), logical.value_field)
+            items = _decode(array.flatten(), logical.value_field, stored.value_field)
         restored = _fixed_size_list(array, items, logical)
+    elif t.is_map(logical):
+        with _at("[]"):
+            rows = _map_rows(array)
+            keys = array.keys.take(rows)
+            keys = _decode(keys, logical.key_field, stored.key_field)
+            items = array.items.take(rows)
+            items = _decode(items, logical.item_field, stored.item_field)
+        restored = _map(array, keys, items, logical)
     else:
-        restored = _decode_leaf(array, logical)
+        restored = array.cast(stored)
+        if t.is_timestamp(logical) or t.is_time(logical):
+            restored = restored.view(logical)  # the same integers
+        elif restored.type != logical:
+            restored = restored.cast(logical)  # a decimal32 or decimal64
     if not field.nullable and restored.null_count:
         raise StoredRowsError("a null in a non-nullable field")
     return restored
 
 
-def _decode_leaf(array: Any, logical: Any) -> Any:
-    """Return stored values of a type with no children as ``logical`` values."""
-    t = pa.types
-    physical = _physical_type(logical)
-    found = arrow_utils.normalize_to_large_types(array.type, keep_null=True)
-    if found != physical:
-        raise _retyped(array, logical)
-    array = array.cast(physical)
-    if t.is_null(logical):
-        if array.null_count != len(array):
-            raise StoredRowsError("a value in a column of nulls")
-        return pa.nulls(len(array))
-    if t.is_timestamp(logical) or t.is_duration(logical):
-        return array.view(logical)  # the same integers
-    if t.is_fixed_size_binary(logical):
-        widths: Any = pc.binary_length(array.drop_null())
-        if np.any(widths.to_numpy(zero_copy_only=False) != logical.byte_width):
-            raise StoredRowsError(f"a value that is not {logical.byte_width} bytes")
-        # Through Python bytes: pyarrow's cast checks the slots of null rows too.
-        return pa.array(array.to_pylist(), logical)
-    return array
-
-
-def _retyped(array: Any, logical: pa.DataType) -> StoredRowsError:
-    """The error of a column whose stored type is not the one written."""
-    return StoredRowsError(
-        f"stored as {array.type}, not as {_physical_type(logical)} ({logical})"
-    )
-
-
 # ---------------------------------------------------------------------- the manifest
 
 MANIFEST_PREFIX = "__orcapod_store__/"
-_FORMAT = "orcapod.spiral_store"
-_VERSION = 1
+# A draft: no table may be written with it outside tests. The persisted format, with its
+# tag, is fixed with the creation and recovery rules (PR 6 of the design), as version 1.
+_FORMAT = "orcapod.spiral_store.draft"
+_VERSION = 0
 # SpiralDB: 1,024 entries a table, 8 KiB a key and value together.
 _MAX_ENTRIES = 1024
 _MAX_PAIR_BYTES = 8192
-# Part of format 1: two writers must cut one payload at the same places.
+# Part of the format: two writers must cut one payload at the same places.
 _CHUNK_BYTES = _MAX_PAIR_BYTES - 128
 _KEY = re.compile(re.escape(MANIFEST_PREFIX) + "([0-9a-f]{64})(?:/(0|[1-9][0-9]*))?")
 # In the recorded Arrow schema an ``ARROW:extension:*`` key is written behind this
@@ -664,15 +769,47 @@ _EXTENSION_KEYS = b"ARROW:extension:"
 
 @dataclass(frozen=True)
 class StoreManifest:
-    """What a store table's manifest says.
+    """What a store table's manifest says. Make one with ``new_manifest``.
 
     Attributes:
         record_path: The table's full record path, each component exact.
+        kind: What the table is, as text; the codec does not interpret it.
         schema: The table's logical schema (``logical_schema``).
+        physical: The stored schema (``physical_schema``), field for field in the order
+            of ``schema`` at every depth: it lists the stored names.
     """
 
     record_path: tuple[str, ...]
+    kind: str
     schema: pa.Schema
+    physical: pa.Schema
+
+
+def new_manifest(
+    record_path: tuple[str, ...], kind: str, schema: pa.Schema
+) -> StoreManifest:
+    """Return the manifest of a table to be created.
+
+    Args:
+        record_path: The table's full record path.
+        kind: What the table is.
+        schema: The schema of its rows.
+
+    Returns:
+        The manifest.
+
+    Raises:
+        UnstorableInSpiralError: If the schema cannot be stored, or a path component is
+            not UTF-8 or holds ``/`` or NUL.
+    """
+    for part in record_path:
+        _require_utf8(part)
+        if "/" in part or "\0" in part:
+            raise UnstorableInSpiralError(f"the path component {part!r}")
+    _require_utf8(kind)
+    return StoreManifest(
+        record_path, kind, logical_schema(schema), physical_schema(schema)
+    )
 
 
 def manifest_entries(
@@ -682,26 +819,23 @@ def manifest_entries(
 
     The two dictionaries are written in this order, one call each, so that a reader
     never sees a header whose chunks are missing. Chunks without a header are no
-    manifest. A payload's keys are named by its digest, so writing never replaces
-    another manifest's entry.
+    manifest.
 
     Args:
-        manifest: The manifest. Its schema may be in any form ``logical_schema`` takes.
+        manifest: The manifest.
 
     Returns:
         The chunk entries, and the header entry.
 
     Raises:
-        UnstorableInSpiralError: If the schema cannot be stored.
         ManifestError: If the manifest does not fit in a table's metadata.
     """
-    schema = logical_schema(manifest.schema)
     payload = json.dumps(
         {
+            "kind": manifest.kind,
+            "physical": _schema_text(manifest.physical),
             "record_path": list(manifest.record_path),
-            "schema": base64.b64encode(
-                _map_metadata(schema, _mark).serialize().to_pybytes()
-            ).decode("ascii"),
+            "schema": _schema_text(_map_metadata(manifest.schema, _mark)),
             "version": _VERSION,
         },
         separators=(",", ":"),
@@ -732,23 +866,42 @@ def manifest_entries(
     )
 
 
-def read_manifest(metadata: Mapping[str, bytes]) -> StoreManifest | None:
+def _schema_text(schema: pa.Schema) -> str:
+    """An Arrow schema as base64 of its IPC form."""
+    return base64.b64encode(schema.serialize().to_pybytes()).decode("ascii")
+
+
+def _schema_of(text: object) -> pa.Schema:
+    """The inverse of ``_schema_text``."""
+    if not isinstance(text, str):
+        raise ManifestError("a schema is not text")
+    try:
+        raw = base64.b64decode(text, validate=True)
+        return pa.ipc.read_schema(pa.py_buffer(raw))
+    except (binascii.Error, ValueError, pa.ArrowException, OSError) as exc:
+        raise ManifestError(f"a schema cannot be read ({exc})") from exc
+
+
+def read_manifest(
+    metadata: Mapping[str, bytes], record_path: tuple[str, ...]
+) -> StoreManifest | None:
     """Return the manifest in a table's key-value metadata.
 
     Args:
         metadata: All of the table's key-value metadata.
+        record_path: The record path the table was looked up for.
 
     Returns:
-        The manifest, or ``None`` when the table holds none (it is not a store table).
-        When it holds several that agree (``manifest_difference``), the one of the
-        smallest digest, so every reader takes the same one.
+        The manifest, or ``None`` when the table holds none: no header, whether or not
+        there are chunks of an interrupted creation.
 
     Raises:
-        ManifestConflictError: If two manifests disagree.
-        ManifestError: If a manifest cannot be read in full, is of an unknown format or
-            version, or an entry under ``__orcapod_store__/`` is not one of a manifest.
+        ManifestError: If there are two headers; the manifest cannot be read in full, is
+            of an unknown format or version, or is another path's; or an entry under
+            ``__orcapod_store__/`` is not one of a manifest.
     """
-    digests: list[str] = []
+    headers: list[str] = []
+    chunks: dict[str, list[int]] = {}
     for key in metadata:
         if not key.startswith(MANIFEST_PREFIX):
             continue
@@ -756,17 +909,22 @@ def read_manifest(metadata: Mapping[str, bytes]) -> StoreManifest | None:
         if match is None:
             raise ManifestError(f"unknown manifest entry {key!r}")
         if match[2] is None:
-            digests.append(match[1])
-    digests.sort()
-    manifests = [_read_one(metadata, digest) for digest in digests]
-    for digest, other in zip(digests[1:], manifests[1:]):
-        difference = manifest_difference(manifests[0], other)
-        if difference is not None:
-            raise ManifestConflictError(
-                f"the table holds two manifests, {digests[0]} and {digest}, that "
-                f"disagree: {difference}"
-            )
-    return manifests[0] if manifests else None
+            headers.append(match[1])
+        else:
+            chunks.setdefault(match[1], []).append(int(match[2]))
+    if not headers:
+        return None
+    if len(headers) > 1:
+        raise ManifestError(
+            f"the table holds more than one manifest: {sorted(headers)}"
+        )
+    manifest = _read_one(metadata, headers[0], sorted(chunks.get(headers[0], [])))
+    if manifest.record_path != record_path:
+        raise ManifestError(
+            f"the table is recorded as {list(manifest.record_path)}, not as "
+            f"{list(record_path)}"
+        )
+    return manifest
 
 
 def _digest(payload: bytes) -> str:
@@ -793,8 +951,10 @@ def _require_version(value: object) -> None:
         )
 
 
-def _read_one(metadata: Mapping[str, bytes], digest: str) -> StoreManifest:
-    """Read the manifest named by ``digest``."""
+def _read_one(
+    metadata: Mapping[str, bytes], digest: str, found: list[int]
+) -> StoreManifest:
+    """Read the manifest named by ``digest``, whose chunks ``found`` are there."""
     header = _json_object(metadata[MANIFEST_PREFIX + digest])
     if header.get("format") != _FORMAT:
         raise ManifestError(f"unknown manifest format {header.get('format')!r}")
@@ -804,36 +964,59 @@ def _read_one(metadata: Mapping[str, bytes], digest: str) -> StoreManifest:
         raise ManifestError(f"invalid chunk count {count!r}")
     if header.get("sha256") != digest:
         raise ManifestError(f"the header of {digest} names another digest")
-    pieces: list[bytes] = []
-    for i in range(count):
-        piece = metadata.get(f"{MANIFEST_PREFIX}{digest}/{i}")
-        if piece is None:
-            raise ManifestError(f"chunk {i} of {count} of {digest} is missing")
-        pieces.append(piece)
-    payload = b"".join(pieces)
+    if found != list(range(count)):
+        raise ManifestError(f"chunks {found} of {digest}, not 0 to {count - 1}")
+    payload = b"".join(metadata[f"{MANIFEST_PREFIX}{digest}/{i}"] for i in range(count))
     if _digest(payload) != digest:
         raise ManifestError(f"the chunks of {digest} do not match it")
     body = _json_object(payload)
     _require_version(body.get("version"))
-    path, text = body.get("record_path"), body.get("schema")
+    path, kind = body.get("record_path"), body.get("kind")
     if not isinstance(path, list) or not all(
         isinstance(part, str) for part in cast("list[object]", path)
     ):
         raise ManifestError("the record path is not a list of strings")
-    if not isinstance(text, str):
-        raise ManifestError("the schema is not text")
+    if not isinstance(kind, str):
+        raise ManifestError("the kind is not text")
+    schema = _map_metadata(_schema_of(body.get("schema")), _unmark)
+    physical = _schema_of(body.get("physical"))
     try:
-        schema = pa.ipc.read_schema(pa.py_buffer(base64.b64decode(text, validate=True)))
-    except (binascii.Error, ValueError, pa.ArrowException, OSError) as exc:
-        raise ManifestError(f"the schema cannot be read ({exc})") from exc
-    recorded = _map_metadata(schema, _unmark)
-    try:
-        usable = logical_schema(recorded)
+        usable = logical_schema(schema)
+        expected = physical_schema(schema)
     except UnstorableInSpiralError as exc:
         raise ManifestError(
             f"the recorded schema is not a store schema: {exc}"
         ) from exc
-    return StoreManifest(tuple(cast("list[str]", path)), usable)
+    # The stored names are read from the manifest, never recomputed; its shape and types
+    # must be the ones the logical schema is kept in.
+    if _without_names(physical) != _without_names(expected) or (
+        usable.names.index(KEY_COLUMN) != physical.get_field_index(KEY_COLUMN)
+    ):
+        raise ManifestError("the recorded stored schema is not the logical one's")
+    _require_distinct(physical)
+    return StoreManifest(tuple(cast("list[str]", path)), kind, usable, physical)
+
+
+def _without_names(fields: Any) -> list[object]:
+    """The types of fields at every depth, without names."""
+    shape: list[object] = []
+    for field in fields:
+        arrow_type = field.type
+        inner = _children(arrow_type)
+        size = getattr(arrow_type, "list_size", None)
+        shape.append(
+            (arrow_type.id, size, _without_names(inner)) if inner else arrow_type
+        )
+    return shape
+
+
+def _require_distinct(fields: Any) -> None:
+    """Refuse a recorded stored schema with two siblings of one name."""
+    names = [field.name for field in fields]
+    if len(set(names)) != len(names):
+        raise ManifestError("the recorded stored schema repeats a name")
+    for field in fields:
+        _require_distinct(_children(field.type))
 
 
 def _mark(key: bytes) -> bytes:
@@ -855,7 +1038,7 @@ def _map_metadata(schema: pa.Schema, change: Any) -> pa.Schema:
 
 
 def _map_field(field: pa.Field[Any], change: Any) -> pa.Field[Any]:
-    """``_map_metadata`` for one field. Store types have struct and list children only."""
+    """``_map_metadata`` for one field. A map has no metadata inside."""
     arrow_type: Any = field.type
     if pa.types.is_struct(arrow_type):
         arrow_type = pa.struct([_map_field(f, change) for f in _children(arrow_type)])
@@ -869,27 +1052,28 @@ def _map_field(field: pa.Field[Any], change: Any) -> pa.Field[Any]:
     return pa.field(field.name, arrow_type, field.nullable, cast(Any, metadata or None))
 
 
-# ----------------------------------------------------------- comparing two manifests
+# ------------------------------------------------- comparing a schema with a manifest's
 
 
-def manifest_difference(a: StoreManifest, b: StoreManifest) -> str | None:
-    """Return how two manifests disagree, or ``None`` when they agree.
+def schema_difference(recorded: pa.Schema, other: pa.Schema) -> str | None:
+    """Return how a schema differs from a recorded one, or ``None`` when it is the same.
 
-    Compared as decoded, never as bytes: the record path, the schema metadata, and
-    each column by name, with its type, nullability and metadata, field by field at
-    every depth. The order of columns and of metadata entries does not count: one
-    pipeline's table may be written with its columns in another order.
+    Compared as decoded, never as bytes: the schema metadata, and each column by name,
+    with its type, nullability and metadata, field by field at every depth. The order of
+    columns and of metadata entries does not count: one pipeline's table may be written
+    with its columns in another order.
 
     Args:
-        a: A manifest.
-        b: Another one. Either schema may be in any form ``logical_schema`` takes.
+        recorded: A manifest's schema.
+        other: Another one, in any form ``logical_schema`` takes.
 
     Returns:
         The first difference, in words.
+
+    Raises:
+        UnstorableInSpiralError: If a schema cannot be stored.
     """
-    if a.record_path != b.record_path:
-        return f"record path {list(a.record_path)} and {list(b.record_path)}"
-    left, right = logical_schema(a.schema), logical_schema(b.schema)
+    left, right = logical_schema(recorded), logical_schema(other)
     if dict(left.metadata or {}) != dict(right.metadata or {}):
         return "the schema metadata differs"
     if set(left.names) != set(right.names):
@@ -915,10 +1099,10 @@ def _field_difference(a: pa.Field[Any], b: pa.Field[Any], where: str) -> str | N
             return f"{where}: {what} {shown[0]} and {shown[1]}"
     if not a.type.num_fields:
         return None if a.type == b.type else f"{where}: type {a.type} and {b.type}"
-    if pa.types.is_fixed_size_list(a.type):
-        sizes = (cast(Any, a.type).list_size, cast(Any, b.type).list_size)
-        if sizes[0] != sizes[1]:
-            return f"{where}: list size {sizes[0]} and {sizes[1]}"
+    for what in ("list_size", "keys_sorted"):
+        x, y = (getattr(f.type, what, None) for f in (a, b))
+        if x != y:
+            return f"{where}: {what} {x} and {y}"
     struct = pa.types.is_struct(a.type)
     for x, y in zip(_children(a.type), _children(b.type)):
         inner = f"{where}.{x.name}" if struct else f"{where}[]"

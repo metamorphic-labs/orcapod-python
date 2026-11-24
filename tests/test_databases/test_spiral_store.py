@@ -13,10 +13,9 @@ import decimal
 import json
 import math
 import random
+import re
 import subprocess
 import sys
-import unicodedata
-import uuid
 from pathlib import Path
 from typing import Any, cast
 
@@ -121,17 +120,29 @@ def by_id(rows: pa.Table) -> pa.Table:
     )
 
 
-def entries(
-    schema: pa.Schema, path: tuple[str, ...] = ("a", "b"), **extra: bytes
-) -> dict[str, bytes]:
-    chunks, header = store.manifest_entries(store.StoreManifest(path, schema))
-    return {**extra, **chunks, **header}
+PATH = ("run", "fn", "pdb_v1")
 
 
-def read(metadata: dict[str, bytes]) -> store.StoreManifest:
-    manifest = store.read_manifest(metadata)
+def new(schema: pa.Schema, path: tuple[str, ...] = PATH) -> store.StoreManifest:
+    return store.new_manifest(path, "function_pipeline", schema)
+
+
+def entries(schema: pa.Schema, path: tuple[str, ...] = PATH) -> dict[str, bytes]:
+    chunks, header = store.manifest_entries(new(schema, path))
+    return {**chunks, **header}
+
+
+def read(
+    metadata: dict[str, bytes], path: tuple[str, ...] = PATH
+) -> store.StoreManifest:
+    manifest = store.read_manifest(metadata, path)
     assert manifest is not None
     return manifest
+
+
+def decode(rows: pa.Table, schema: pa.Schema) -> pa.Table:
+    """Decode through a manifest read back, giving ``schema`` (live types kept)."""
+    return store.decode_rows(rows, read(entries(schema)), large(schema))
 
 
 def large_type(arrow_type: Any) -> Any:
@@ -162,22 +173,28 @@ def round_trip(rows: pa.Table, *, live: bool = False) -> pa.Table:
     """Write, return as SpiralDB does, and restore through the manifest: every slice,
     both variants."""
     expected_schema = large(rows.schema)
-    schema = read(entries(rows.schema)).schema
+    manifest = read(entries(rows.schema))
+    schema = manifest.schema
     if live:
         converter = get_default_context().type_converter
         schema = declaration_form_schema(schema, converter)
     else:
         expected_schema = store.logical_schema(rows.schema)
     result = None
-    for piece in (rows, rows.slice(1), rows.slice(rows.num_rows), rows.slice(0, 1)):
+    assert rows.num_rows
+    for piece in (rows, rows.slice(1), rows.slice(0, 1)):
+        if not piece.num_rows:
+            continue
         encoded = store.encode_rows(piece)
         assert encoded.schema.equals(
             store.physical_schema(rows.schema), check_metadata=True
         )
         _assert_physical(encoded.schema)
-        encoded.validate(full=True)
+        encoded.validate()  # full: pyarrow refuses a date64 off midnight
         for seed, small in ((1, False), (2, True)):
-            got = store.decode_rows(as_spiral_returns(encoded, seed, small), schema)
+            got = store.decode_rows(
+                as_spiral_returns(encoded, seed, small), manifest, schema
+            )
             want = pa.Table.from_arrays(
                 [
                     chunked([_as_target(c, f) for c in col.chunks], type=f.type)
@@ -203,19 +220,22 @@ def _as_target(chunk: Any, field: Any) -> Any:
 def _assert_physical(schema: pa.Schema) -> None:
     """SpiralDB's known rules on names and types, at every depth."""
 
-    def walk(field: Any, named: bool) -> None:
-        assert field.nullable and not field.metadata
+    def walk(field: Any, named: bool, in_map: bool = False) -> None:
+        assert (field.nullable or in_map) and not field.metadata
         if named and field.name != KEY:
             assert field.name and not field.name.startswith(("__", "$"))
-            assert not set(field.name) & set(".$*")
+            assert not set(field.name) & set(".$*\0")
         t = field.type
         assert not (
             pa.types.is_fixed_size_binary(t)
             or pa.types.is_duration(t)
-            or pa.types.is_null(t)
             or isinstance(t, pa.BaseExtensionType)
             or (pa.types.is_timestamp(t) and t.tz is not None)
         )
+        if pa.types.is_map(t):
+            walk(t.key_field, False, in_map=True)
+            walk(t.item_field, False)
+            return
         for i in range(t.num_fields):
             walk(t.field(i), pa.types.is_struct(t))
 
@@ -254,7 +274,14 @@ def refused(rows: pa.Table, *words: str) -> store.UnstorableInSpiralError:
 )
 def test_the_names_of_the_design(name: str, stored: str) -> None:
     assert store.encode_name(name) == stored
-    assert store.decode_name(stored) == name
+    assert decoded(stored) == name
+
+
+def decoded(stored: str) -> str:
+    """The inverse of ``encode_name``, which only the tests need."""
+    if not stored.startswith("ox_"):
+        return stored
+    return re.sub(";([0-9A-F]{2})", lambda m: chr(int(m[1], 16)), stored[3:])
 
 
 def adversarial_names(count: int) -> set[str]:
@@ -277,7 +304,7 @@ def test_names_round_trip_and_are_injective() -> None:
     encoded = {name: store.encode_name(name) for name in names}
     assert len(set(encoded.values())) == len(names)
     for name, stored in encoded.items():
-        assert store.decode_name(stored) == name
+        assert decoded(stored) == name
         assert stored and not stored.startswith("__")
         assert not any(c in ".$*\x7f" or ord(c) < 32 for c in stored)
 
@@ -287,27 +314,7 @@ def test_an_already_stored_name_is_itself_encoded_injectively() -> None:
     once = [store.encode_name(n) for n in names]
     twice = [store.encode_name(n) for n in once]
     assert len(set(twice)) == len(names)
-    assert [store.decode_name(store.decode_name(t)) for t in twice] == names
-
-
-@pytest.mark.parametrize(
-    "stored",
-    [
-        "",
-        "__x",
-        "a.b",
-        "a\n",
-        "ox_a",
-        "ox_a;2eb",
-        "ox_a;zz.",
-        "ox_;",
-        "ox_a;61",
-        "ox_order",
-    ],
-)
-def test_a_name_the_codec_never_writes_is_not_decoded(stored: str) -> None:
-    with pytest.raises(store.StoredRowsError):
-        store.decode_name(stored)
+    assert [decoded(decoded(t)) for t in twice] == names
 
 
 @pytest.mark.parametrize(
@@ -357,16 +364,15 @@ def test_the_key_is_not_a_value_column_of_the_same_name() -> None:
         ["ox_" + KEY if n == KEY else n for n in encoded.column_names]
     )
     with pytest.raises(store.StoredRowsError, match="missing"):
-        store.decode_rows(renamed, table.schema)
+        decode(renamed, table.schema)
 
 
 @pytest.mark.parametrize("name", ["\ud800", "a\udfff", "__\ud800.b"])
 def test_a_lone_surrogate_is_refused(name: str) -> None:
     with pytest.raises(store.UnstorableInSpiralError, match="UTF-8"):
         store.encode_name(name)
-    for stored in (name, f"ox_{name}"):
-        with pytest.raises(store.StoredRowsError):
-            store.decode_name(stored)
+    with pytest.raises(store.UnstorableInSpiralError, match="UTF-8"):
+        new(schema_of([("a", pa.int8()), (KEY, pa.large_binary())]), (name,))
 
 
 def test_a_name_that_is_not_utf8_is_refused_at_every_depth() -> None:
@@ -386,7 +392,6 @@ def wrappings(inner: Any) -> list[Any]:
     return [
         inner,
         pa.list_(inner),
-        pa.list_(inner, 2),
         pa.struct([("s", pa.large_list(inner))]),
         Labelled(inner, "test.storage", b""),
         Labelled(pa.large_list(inner), "test.storage", b""),
@@ -404,28 +409,16 @@ def test_duplicate_sibling_names_are_refused_at_every_depth() -> None:
     )
 
 
-def test_names_the_service_would_merge_have_a_hook_and_no_guessed_rule(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    pairs = [("A", "a"), ("e\u0301", "\u00e9")]
-    schemas = [
-        schema_of([(x, pa.int8()), (y, pa.int8()), (KEY, pa.large_binary())])
-        for x, y in pairs
-    ] + [
-        schema_of([("s", ty), (KEY, pa.large_binary())])
-        for x, y in pairs
-        for ty in wrappings(pa.struct([(x, pa.int8()), (y, pa.int8())]))
-    ]
-    for schema in schemas:
-        _ = store.logical_schema(schema)
-    monkeypatch.setattr(
-        store,
-        "_service_form",
-        lambda s: unicodedata.normalize("NFC", s).casefold(),
-    )
-    for schema in schemas:
-        with pytest.raises(store.UnstorableInSpiralError, match="more than once"):
-            store.logical_schema(schema)
+def test_names_that_differ_only_in_case_or_normal_form_are_kept_apart() -> None:
+    """The service folds neither (measured live)."""
+    names = ["A", "a", "a.B", "a.b", "__A", "__a", "\u00e9", "e\u0301", "a.\u00e9"]
+    for order in (names, list(reversed(names))):
+        inner = pa.array(
+            [{n: i for i, n in enumerate(order)}],
+            pa.struct([(n, pa.int8()) for n in order]),
+        )
+        columns = {n: pa.array([i]) for i, n in enumerate(order)}
+        _ = round_trip(keyed({**columns, "s": inner}))
 
 
 @pytest.mark.parametrize("as_storage", [False, True])
@@ -444,26 +437,15 @@ def test_a_struct_parent_must_be_valid_also_in_a_logical_types_storage(
 # --------------------------------------------------------------------------- types
 
 REFUSED_ROWS = {
-    "halffloat (float16)": "float16",
-    "float (float32)": "negative zero",
-    "double (float64)": "negative zero",
-    "decimal256(40, 2)": "decimal256",
-    "decimal256(76, 10)": "decimal256",
-    "date64": "date64",
-    "time32[s]": "time",
-    "time32[ms]": "time",
-    "time64[us]": "time",
-    "time64[ns]": "time",
-    "large_list<float16>": "float16",
     "struct<> (no fields)": "no fields",
-    "map<string, int64>": "map",
-    "map<string, int64>, keys sorted": "map",
-    "map<k: string, v: int64>, keys sorted": "map",
-    "map<string, int64 {unit: m}> (item metadata)": "map",
-    "map<string {unit: m}, int64> (key metadata)": "map",
-    "map<string, struct<a: int64 {unit: m}>> (metadata inside the item)": "map",
+    "fixed_size_binary[4]": "fixed-size binary",
+    "uuid (Arrow's canonical extension type)": "fixed-size binary",
+    "map<k: string, v: int64>, keys sorted": "named key and value",
+    "map<string, int64 {unit: m}> (item metadata)": "metadata inside a map",
+    "map<string {unit: m}, int64> (key metadata)": "metadata inside a map",
+    "map<string, struct<a: int64 {unit: m}>> (metadata inside the item)": "metadata inside a map",
+    **{r.label: "duration" for r in ROWS if r.label.startswith("duration")},
 }
-REFUSED_BY_VALUE = {"float (float32)", "double (float64)"}
 # The matrix's second column holds a null row.
 NULL_STRUCT_ROWS = {
     "struct<a: int32, b: string not null>",
@@ -495,9 +477,7 @@ def test_every_row_of_the_type_matrix_is_kept_or_refused(
         refused(rows, "null struct", "'y'")
         rows = rows.drop_columns(["y"])
     _ = round_trip(rows)
-    if row.group != "struct and map" or not row.label.startswith("uuid"):
-        # Arrow's own uuid is no Orcapod logical type: it stays annotated.
-        _ = round_trip(rows, live=True)
+    _ = round_trip(rows, live=True)
 
 
 def scalar_cases() -> list[tuple[str, pa.DataType, list[Any]]]:
@@ -509,7 +489,21 @@ def scalar_cases() -> list[tuple[str, pa.DataType, list[Any]]]:
         ("bool", pa.bool_(), [True, False, True]),
         ("float32", pa.float32(), [1.5, 0.0, -3.25]),
         ("float64", pa.float64(), [0.1, math.inf, 5e-324]),
+        ("float16", pa.float16(), [0.5, -0.0, math.nan]),
         ("decimal128", pa.decimal128(38, 4), [D("1.2500"), D("-9.0001"), D("0")]),
+        ("decimal256", pa.decimal256(70, 4), [D("1.2500"), D("-9.0001"), D("0")]),
+        ("date64", pa.date64(), [-(2**63), 1, 2**63 - 1]),
+        ("decimal32", pa.decimal32(9, 2), [D("1.25"), D("-9999999.99"), D("0")]),
+        (
+            "decimal64",
+            pa.decimal64(18, 2),
+            [D("1.25"), D("-9999999999999999.99"), D("0")],
+        ),
+        ("null", pa.null(), [None, None, None]),
+        ("time32_s", pa.time32("s"), [0, 86_399, 1]),
+        ("time32_ms", pa.time32("ms"), [0, 86_399_999, 1]),
+        ("time64_us", pa.time64("us"), [0, 86_400 * 10**6 - 1, 1]),
+        ("time64_ns", pa.time64("ns"), [0, 86_400 * 10**9 - 1, 1]),
         (
             "date32",
             pa.date32(),
@@ -517,19 +511,11 @@ def scalar_cases() -> list[tuple[str, pa.DataType, list[Any]]]:
         ),
         ("large_string", pa.large_string(), ["", "é\x00", "x" * 100]),
         ("string", pa.string(), ["", "é\x00", "y"]),
-        ("string_view", pa.string_view(), ["", "é", "z" * 50]),
         ("binary", pa.binary(), [b"", b"\x00\xff", b"a"]),
-        ("fsb", pa.binary(3), [b"abc", b"\x00\x00\x00", b"\xff\xfe\xfd"]),
-        ("fsb0", pa.binary(0), [b"", b"", b""]),
-        ("null", pa.null(), [None, None, None]),
         *(
             (f"ts_{u}_{z}", timestamp(u, tz=z), [-1, 0, 2**40 + 1])
             for u in ("s", "ms", "us", "ns")
             for z in (None, "UTC", "Asia/Kathmandu", "-03:30")
-        ),
-        *(
-            (f"dur_{u}", duration(u), [-1, 0, 2**40 + 1])
-            for u in ("s", "ms", "us", "ns")
         ),
     ]
 
@@ -549,12 +535,49 @@ def test_every_type_at_every_nesting_depth(
         values = [*values, values[0]]
     leaf = pa.field("v.1", arrow_type, nullable, {"unit": "m"})
     item = leaf.with_name("odd item")
+    plain_item = item.remove_metadata()
     v, n = values, len(values)
     shapes: dict[str, tuple[pa.DataType, list[Any]]] = {
         "plain": (arrow_type, v),
         "list": (pa.list_(item), [v, [], None, v[:1]]),
         "large": (pa.large_list(item), [None, v[:2], v, []]),
         "fixed": (pa.list_(item, 2), [v[:2], None, v[2:], v[1:3]]),
+        "fixed_fixed": (
+            pa.list_(pa.list_(item, 1), 2),
+            [[v[:1], None], None, [v[1:2], v[2:3]], [v[:1], v[:1]]],
+        ),
+        "fixed0": (pa.list_(item, 0), [[], None, [], []]),
+        "list_fixed": (pa.list_(pa.list_(item, 1)), [[v[:1], None], [], None, [v[3:]]]),
+        "map": (
+            map_of(pa.string(), item.with_name("value").remove_metadata()),
+            [[("b", v[0]), ("a", v[1])], None, [], [("", x) for x in v]],
+        ),
+        "map_sorted_list": (
+            map_of(pa.binary(), pa.list_(plain_item), keys_sorted=True),
+            [None, [(b"a", v), (b"b", None)], [(b"", [])], []],
+        ),
+        "list_map": (
+            pa.list_(map_of(pa.int16(), plain_item.with_name("value"))),
+            [[[(1, v[0])], None, []], None, [], [[(2, x)] for x in v]],
+        ),
+        "map_struct": (
+            map_of(
+                pa.string(),
+                pa.struct(
+                    [pa.field("z", pa.int8()), pa.field("a.b", arrow_type, nullable)]
+                ),
+            ),
+            [
+                None,
+                [("k", {"z": 1, "a.b": v[0]})],
+                [],
+                [("", {"z": None, "a.b": v[1]})],
+            ],
+        ),
+        "fixed_struct": (
+            pa.list_(pa.struct([pa.field("z", pa.int8()), leaf]), 1),
+            [[{"z": 1, "v.1": x}] for x in v],
+        ),
         "struct": (
             pa.struct([leaf, pa.field("__b", pa.int8())]),
             [{"v.1": x, "__b": i} for i, x in enumerate(v)],
@@ -568,11 +591,6 @@ def test_every_type_at_every_nesting_depth(
             [[{"z": 1, "v.1": v[0]}], None, [], [{"z": None, "v.1": x} for x in v]],
         ),
         "list_list": (pa.list_(pa.list_(item)), [[v, [], None], [], None, [v[:1]]]),
-        "fixed_fixed": (
-            pa.list_(pa.list_(item, 1), 2),
-            [[v[:1], None], None, [v[1:2], v[2:3]], [v[:1], v[:1]]],
-        ),
-        "list_fixed": (pa.list_(pa.list_(item, 1)), [[v[:1], None], [], None, [v[3:]]]),
         "deep": (
             pa.list_(
                 pa.struct([pa.field("s", pa.struct([pa.field("l", pa.list_(item))]))])
@@ -582,8 +600,8 @@ def test_every_type_at_every_nesting_depth(
     }
     if not nullable or pa.types.is_null(arrow_type):
         # pyarrow cannot cast a null fixed-size list over non-null items, or a sliced
-        # list of structs with a null-typed field, so the test could not
-        # state what it expects of the small variants.
+        # list of structs with a null-typed field, so the test
+        # could not state what it expects of the small variants.
         shapes = {k: (large_type(t), rows) for k, (t, rows) in shapes.items()}
     columns = {k: pa.array(rows, t) for k, (t, rows) in shapes.items()}
     assert all(len(c) == n for c in columns.values())
@@ -598,7 +616,7 @@ def test_every_type_at_every_nesting_depth(
 
 @pytest.mark.parametrize("unit", ["s", "ms", "us", "ns"])
 @pytest.mark.parametrize(
-    "zone", ["UTC", "Europe/Berlin", "Asia/Kathmandu", "+05:45", "-03:30"]
+    "zone", [None, "UTC", "Europe/Berlin", "Asia/Kathmandu", "+05:45", "-03:30"]
 )
 def test_zone_aware_timestamps_are_exact(unit: str, zone: str) -> None:
     """Extremes of the integer, the far past and sub-second ticks."""
@@ -613,24 +631,13 @@ def test_zone_aware_timestamps_are_exact(unit: str, zone: str) -> None:
             pa.list_(ts)
         ),
         "s": pa.StructArray.from_arrays([plain], fields=[pa.field("t", ts)]),
-        "f": pa.array([[x] for x in values], pa.list_(pa.int64(), 1)).cast(
-            pa.list_(ts, 1)
-        ),
     }
     got = by_id(round_trip(keyed(columns)))
     assert got.column("t").cast(pa.int64()).to_pylist() == values
     assert got.schema.field("t").type == ts
     encoded = store.encode_rows(keyed(columns))
-    assert encoded.schema.field("t").type == timestamp(unit)
+    assert encoded.schema.field("t").type == pa.int64()
     assert encoded.column("t").cast(pa.int64()).to_pylist() == values
-
-
-@pytest.mark.parametrize("unit", ["s", "ms", "us", "ns"])
-def test_durations_are_exact(unit: str) -> None:
-    values = [-(2**63), 2**63 - 1, -1, 0, None]
-    column: Any = pa.array(values, pa.int64()).cast(duration(unit))
-    got = by_id(round_trip(keyed({"d": column})))
-    assert got.column("d").cast(pa.int64()).to_pylist() == values
 
 
 def _float(bits: int, width: int) -> Any:
@@ -639,54 +646,94 @@ def _float(bits: int, width: int) -> Any:
 
 
 FLOATS = {
-    32: {
-        "kept": [0, 1, 0x80000001, 0x7F800000, 0xFF800000, 0x7FC00000, 0x7F7FFFFF],
-        "-0.0": [0x80000000],
-        "NaN": [0x7FC00001, 0xFFC00000, 0x7F800001, 0xFF800001, 0x7FFFFFFF],
-    },
-    64: {
-        "kept": [0, 1, (1 << 63) + 1, 0x7FF << 52, 0xFFF << 52, 0x7FF8 << 48],
-        "-0.0": [1 << 63],
-        "NaN": [(0x7FF8 << 48) + 1, 0xFFF8 << 48, (0x7FF << 52) + 1, (1 << 63) - 1],
-    },
+    32: [0, 0x80000000, 1, 0x80000001, 0x7F800000, 0xFF800000, 0x7FC00000, 0x7F7FFFFF]
+    + [0x7FC00001, 0xFFC00000, 0x7F800001, 0xFF800001, 0x7FFFFFFF],
+    64: [0, 1 << 63, 1, (1 << 63) + 1, 0x7FF << 52, 0xFFF << 52, 0x7FF8 << 48]
+    + [(0x7FF8 << 48) + 1, 0xFFF8 << 48, (0x7FF << 52) + 1, (1 << 63) - 1],
 }
 
 
-@pytest.mark.parametrize("width", [32, 64])
+@pytest.mark.parametrize("width", [16, 32, 64])
 @pytest.mark.parametrize("nested", ["plain", "list", "fixed", "struct"])
-def test_float_bits_are_kept_or_refused(width: int, nested: str) -> None:
-    def column(array: Any) -> Any:
-        if nested == "list":
-            return pa.ListArray.from_arrays(
-                pa.array(range(len(array) + 1), pa.int32()), array
-            )
-        if nested == "fixed":
-            return pa.FixedSizeListArray.from_arrays(array, 1)
-        if nested == "struct":
-            return pa.StructArray.from_arrays([array], names=["f"])
-        return array
-
-    kept: Any = pa.concat_arrays([_float(b, width) for b in FLOATS[width]["kept"]])
-    _ = round_trip(keyed({"f": column(kept)}))
-    for bits in FLOATS[width]["-0.0"]:
-        refused(keyed({"f": column(_float(bits, width))}), "'f'", "negative zero")
-    for bits in FLOATS[width]["NaN"]:
-        refused(keyed({"f": column(_float(bits, width))}), "'f'", "NaN")
+def test_float_bits_are_kept(width: int, nested: str) -> None:
+    """Negative zero and every NaN payload, signalling ones included, bit for bit."""
+    if width == 16:  # every float16 there is
+        array: Any = pa.array(np.arange(2**16, dtype=np.uint16)).view(pa.float16())
+    else:
+        array = pa.concat_arrays([_float(b, width) for b in FLOATS[width]])
+    if nested == "list":
+        array = pa.ListArray.from_arrays(
+            pa.array(range(len(array) + 1), pa.int32()), array
+        )
+    elif nested == "fixed":
+        array = pa.FixedSizeListArray.from_arrays(array, 1)
+    elif nested == "struct":
+        array = pa.StructArray.from_arrays([array], names=["f"])
+    _ = round_trip(keyed({"f": array}))
 
 
-def test_a_hidden_negative_zero_is_not_refused_and_not_written() -> None:
-    """The value slot of a null row, and the items of a null list, are no values."""
-    raw: Any = pa.array(np.array([-0.0, 1.0]), mask=np.array([True, False]))
-    lists = pa.ListArray.from_arrays(
-        pa.array([0, 1, 2], pa.int32()),
-        pa.array(np.array([-0.0, 1.0])),
-        mask=pa.array([True, False]),
+def test_datetime_max_and_min_are_kept() -> None:
+    """The service refuses a timestamp after 9999-12-30: they are written as integers."""
+    utc = dt.timezone.utc
+    values = [
+        dt.datetime.max,
+        dt.datetime.min,
+        dt.datetime(9999, 12, 30, 22, 0, 1),
+        None,
+    ]
+    table = keyed(
+        {
+            "naive": pa.array(values, timestamp("us")),
+            "utc": pa.array(
+                [v and v.replace(tzinfo=utc) for v in values], timestamp("us", tz="UTC")
+            ),
+        }
     )
-    table = keyed({"f": raw, "l": lists})
+    got = by_id(round_trip(table))
+    assert got.column("naive").to_pylist() == values
+
+
+@pytest.mark.parametrize("arrow_type", [pa.time32("s"), pa.time32("ms")], ids=str)
+def test_every_time32_is_kept(arrow_type: Any) -> None:
+    """Also one outside a day, which the service refuses as a time."""
+    ticks = [0, 86_399, 86_400, 86_400_000, -1, -(2**31), 2**31 - 1, None]
+    array: Any = pa.array(ticks, pa.int32()).view(arrow_type)
+    got: Any = by_id(round_trip(keyed({"t": array})))
+    assert got.column("t").combine_chunks().view(pa.int32()).to_pylist() == ticks
+
+
+@pytest.mark.parametrize("arrow_type", [pa.time64("us"), pa.time64("ns")], ids=str)
+@pytest.mark.parametrize("nested", ["plain", "list", "fixed", "struct", "map"])
+def test_every_time64_is_kept(arrow_type: Any, nested: str) -> None:
+    ticks = [0, 86_400 * 10**6, 86_400 * 10**9, -1, -(2**63), 2**63 - 1]
+    array: Any = pa.array(ticks, pa.int64()).view(arrow_type)
+    offsets: Any = pa.array(range(len(ticks) + 1), pa.int32())
+    if nested == "list":
+        array = pa.ListArray.from_arrays(offsets, array)
+    elif nested == "fixed":
+        array = pa.FixedSizeListArray.from_arrays(array, 2)
+    elif nested == "struct":
+        array = pa.StructArray.from_arrays([array], names=["t"])
+    elif nested == "map":
+        array = pa.MapArray.from_arrays(offsets, pa.array(list("abcdef")), array)
+    _ = round_trip(keyed({"t": array}))
+
+
+def test_what_a_null_list_or_map_hides_is_not_written() -> None:
+    raw = pa.array([-1, 5], pa.int64()).view(pa.time64("us"))
+    offsets: Any = pa.array([0, 1, 2], pa.int32())
+    mask = pa.array([True, False])
+    lists = pa.ListArray.from_arrays(offsets, raw, mask=mask)
+    maps = pa.MapArray.from_arrays(offsets, pa.array(["hidden", "b"]), raw, mask=mask)
+    table = keyed({"l": lists, "m": maps})
     _ = round_trip(table)
-    chunk: Any = store.encode_rows(table).column("l").chunk(0)
-    items = chunk.values.to_pylist()
-    assert items == [1.0]
+    encoded: Any = store.encode_rows(table)
+    assert len(encoded.column("l").chunk(0).values) == 1
+    assert encoded.column("m").chunk(0).keys.to_pylist() == ["b"]
+
+
+def test_no_rows_are_never_written() -> None:
+    refused(keyed({"a": pa.array([1])}).slice(1), "no rows")
 
 
 @pytest.mark.parametrize(
@@ -699,9 +746,6 @@ def test_a_hidden_negative_zero_is_not_refused_and_not_written() -> None:
         lambda: pa.array(
             [{"s": None}, {"s": {"a": 1}}],
             pa.struct([("s", pa.struct([("a", pa.int8())]))]),
-        ),
-        lambda: pa.array(
-            [[{"a": 1}], None], pa.list_(pa.struct([("a", pa.int8())]), 1)
         ),
     ],
 )
@@ -721,7 +765,6 @@ def test_a_null_under_a_non_null_field_is_refused_at_any_depth() -> None:
     not_null: Any = pa.field("v", pa.int64(), nullable=False)
     for arrow_type, value in (
         (pa.list_(not_null), [[1, None]]),
-        (pa.list_(not_null, 2), [[1, None]]),
         (pa.struct([not_null]), [{"v": None}]),
         (pa.list_(pa.struct([not_null])), [[{"v": 1}, {"v": None}]]),
     ):
@@ -739,29 +782,26 @@ def test_a_null_under_a_non_null_field_is_refused_at_any_depth() -> None:
 
 def test_a_null_list_over_non_null_items_is_kept() -> None:
     item = pa.field("item", pa.int64(), nullable=False)
-    fixed = pa.array([[1, 2], None, [3, 4]], pa.list_(item, 2))
-    _ = round_trip(keyed({"a": fixed, "b": pa.array([[1], None, []], pa.list_(item))}))
+    _ = round_trip(keyed({"b": pa.array([[1], None, []], pa.list_(item))}))
 
 
 @pytest.mark.parametrize(
     "arrow_type",
     [
-        pa.float16(),
-        pa.decimal32(5, 2),
-        pa.decimal64(10, 2),
-        pa.decimal256(40, 2),
-        pa.date64(),
-        pa.time32("s"),
-        pa.time64("ns"),
+        pa.string_view(),
+        pa.binary_view(),
+        pa.binary(4),
+        pa.duration("us"),
         pa.month_day_nano_interval(),
         pa.dictionary(pa.int32(), pa.string()),
         pa.run_end_encoded(pa.int32(), pa.string()),
         pa.list_view(pa.int64()),
         pa.large_list_view(pa.int64()),
-        pa.map_(pa.string(), pa.int64()),
         map_of(pa.field("k", pa.string(), False), pa.field("v", pa.int8())),
         pa.sparse_union([pa.field("a", pa.int8())]),
         pa.struct([]),
+        map_of(pa.string(), pa.field("value", pa.int8(), metadata={"k": "v"})),
+        map_of(pa.string(), pa.list_(pa.field("i", pa.int8(), metadata={"k": "v"}))),
     ],
     ids=str,
 )
@@ -771,7 +811,6 @@ def test_a_type_the_store_does_not_keep_is_refused_at_every_depth(
     for wrapped in (
         arrow_type,
         pa.list_(arrow_type),
-        pa.list_(arrow_type, 2),
         pa.struct([("ok", pa.int8()), ("s", arrow_type)]),
         pa.list_(pa.struct([("s", pa.large_list(arrow_type))])),
     ):
@@ -783,20 +822,65 @@ def test_a_type_the_store_does_not_keep_is_refused_at_every_depth(
                 call(schema)
 
 
-def test_what_awaits_a_live_probe_is_listed() -> None:
-    assert set(store.AWAITING_LIVE_PROBE) == {
-        "float16", "decimal256", "date64", "time", "map", "-0.0", "NaN bits",
-    }  # fmt: skip
+def test_every_refusal_is_in_one_table() -> None:
+    assert [r.what for r in store.REFUSALS] == [
+        "a null struct",
+        "a struct with no fields",
+        "a write of no rows",
+        "a null fixed-size list of structs",
+        "a map whose fields are not named key and value",
+        "field metadata inside a map",
+        "a string view or binary view",
+        "a fixed-size binary",
+        "a duration",
+        "an interval",
+    ]
+    assert all(r.why for r in store.REFUSALS)
+
+
+def test_lifting_a_type_is_one_entry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A type shown to be kept natively moves from one table to the other."""
+    matches = pa.types.is_duration
+    table = keyed({"d": pa.array([1, None, -2], duration("us"))})
+    refused(table, "duration", "refuses")
+    monkeypatch.setattr(
+        store,
+        "REFUSALS",
+        tuple(r for r in store.REFUSALS if r.matches is not matches),
+    )
+    refused(table, "keeps no type duration")
+    monkeypatch.setattr(store, "_NATIVE", (*store._NATIVE, matches))  # pyright: ignore[reportPrivateUsage]
+    encoded = store.encode_rows(table)
+    assert_same(decode(as_spiral_returns(encoded), table.schema), table)
+
+
+def test_a_null_fixed_size_list_of_structs_is_refused() -> None:
+    struct = pa.struct([("a", pa.int8())])
+    for ty, value in (
+        (pa.list_(struct, 1), [[{"a": 1}], None]),
+        (pa.list_(pa.list_(struct, 1), 1), [[[{"a": 1}]], None]),
+    ):
+        refused(keyed({"f": pa.array(value, ty)}), "'f'", "null fixed-size list")
+
+
+@pytest.mark.parametrize("nullable", [True, False])
+def test_a_null_key_is_refused_whatever_the_schema_says(nullable: bool) -> None:
+    key = pa.array([b"a", None], pa.large_binary())
+    schema = schema_of([pa.field(KEY, pa.large_binary(), nullable), ("a", pa.int8())])
+    column = pa.array([1, 2], pa.int8())
+    refused(pa.Table.from_arrays([key, column], schema=schema), KEY)
+    with pytest.raises(store.StoredRowsError, match="null key"):
+        decode(pa.table({KEY: key, "a": column}), schema)
 
 
 @pytest.mark.parametrize(
     ("fields", "words"),
     [
-        ([("a", pa.int8())], "no key column"),
+        ([("a", pa.int8())], "key column"),
         ([(KEY, pa.large_binary())], "no column beside"),
         ([(KEY, pa.int64()), ("a", pa.int8())], "must be binary"),
         ([(KEY, pa.binary()), ("a", pa.int8()), ("a", pa.int8())], "more than once"),
-        ([(KEY, pa.binary()), (KEY, pa.binary()), ("a", pa.int8())], "more than once"),
+        ([(KEY, pa.binary()), (KEY, pa.binary()), ("a", pa.int8())], "key column"),
         (
             [
                 (KEY, pa.binary()),
@@ -841,7 +925,7 @@ def test_a_logical_type_is_kept_by_its_identifier(
 ) -> None:
     """Live and annotated give one schema; a registered type is never consulted."""
     storage = pa.struct(
-        [pa.field("z.1", timestamp("us", tz="UTC")), ("a", pa.binary(2))]
+        [pa.field("z.1", timestamp("us", tz="UTC")), ("a", pa.binary())]
     )
     name = f"test.itl1446.{metadata.hex()}"
     live = Labelled(storage, name, metadata)
@@ -868,7 +952,7 @@ def test_a_logical_type_is_kept_by_its_identifier(
         schema = read(entries(one.schema)).schema
         assert schema.field("c").metadata == annotated.metadata
         assert pa.types.is_struct(schema.field("c").type)
-        back = store.decode_rows(as_spiral_returns(store.encode_rows(one)), one.schema)
+        back = decode(as_spiral_returns(store.encode_rows(one)), one.schema)
         assert by_id(back).column("c").chunk(0).type == live
     finally:
         if registered:
@@ -876,16 +960,14 @@ def test_a_logical_type_is_kept_by_its_identifier(
 
 
 def test_another_identifier_is_another_schema() -> None:
-    def manifest(name: str, metadata: bytes) -> store.StoreManifest:
+    def schema(name: str, metadata: bytes) -> pa.Schema:
         live = Labelled(pa.large_string(), name, metadata)
-        return store.StoreManifest(
-            ("p",), schema_of([("c", live), (KEY, pa.large_binary())])
-        )
+        return schema_of([("c", live), (KEY, pa.large_binary())])
 
-    base = manifest("n", b"1")
-    assert store.manifest_difference(base, manifest("n", b"1")) is None
-    for other in (manifest("n", b"2"), manifest("m", b"1"), manifest("n", b"")):
-        difference = store.manifest_difference(base, other)
+    base = schema("n", b"1")
+    assert store.schema_difference(base, schema("n", b"1")) is None
+    for other in (schema("n", b"2"), schema("m", b"1"), schema("n", b"")):
+        difference = store.schema_difference(base, other)
         assert difference is not None and "'c'" in difference
 
 
@@ -896,7 +978,6 @@ def test_a_logical_type_below_a_plain_type_is_refused() -> None:
     for inner in inners:
         for arrow_type in (
             pa.list_(inner),
-            pa.list_(inner, 2),
             pa.struct([inner]),
             pa.list_(pa.struct([inner])),
             map_of(pa.string(), inner),
@@ -910,16 +991,6 @@ def test_a_logical_type_below_a_plain_type_is_refused() -> None:
         store.logical_schema(schema_of([both, (KEY, pa.large_binary())]))
 
 
-def test_arrows_own_uuid_is_kept_as_its_identifier_and_restored_live() -> None:
-    values = [uuid.UUID(int=i + 1).bytes for i in range(2)]
-    column = pa.array(values, pa.uuid())
-    table = keyed({"u": column, "v": column})
-    schema = read(entries(table.schema)).schema
-    assert schema.field("u").metadata == {NAME_KEY: b"arrow.uuid", METADATA_KEY: b""}
-    back = store.decode_rows(as_spiral_returns(store.encode_rows(table)), table.schema)
-    assert_same(back, table)
-
-
 # ------------------------------------------------------------------- rows, as read
 
 
@@ -927,85 +998,98 @@ def _stored(table: pa.Table) -> pa.Table:
     return as_spiral_returns(store.encode_rows(table))
 
 
-def test_rows_that_are_not_what_was_written_are_refused() -> None:
-    inner = pa.struct([pa.field("a.b", pa.int8(), False), pa.field("c", pa.int8())])
-    fields = [
-        pa.field("n", pa.int64(), False),
-        pa.field("f", pa.binary(2)),
-        pa.field("z", pa.null()),
-        pa.field("t", timestamp("us", tz="UTC")),
-        pa.field("s", inner),
-    ]
-    table = keyed(
-        {
-            "n": pa.array([1]),
-            "f": pa.array([b"ab"], pa.binary(2)),
-            "z": pa.nulls(1),
-            "t": pa.array([1], timestamp("us", tz="UTC")),
-            "s": pa.array([{"a.b": 1, "c": 2}], inner),
-        },
-        fields,
-    )
-    schema, good = table.schema, _stored(table)
-    assert_same(store.decode_rows(good, schema), large_table(table))
-
-    def bad(name: str, array: Any, *words: str) -> None:
-        rows = good.set_column(good.column_names.index(name), name, array)
-        with pytest.raises(store.StoredRowsError) as info:
-            store.decode_rows(rows, schema)
-        assert all(w in str(info.value) for w in (f"'{name}'", *words))
-
-    bad("n", pa.array([None], pa.int64()), "null")
-    bad("n", pa.array([1], pa.int32()), "int32")
-    bad("f", pa.array([b"abc"], pa.large_binary()), "2 bytes")
-    bad("z", pa.array([0], pa.int8()), "nulls")
-    bad("t", pa.array([1], timestamp("ms")), "timestamp[ms]")
-    bad("t", pa.array([1], pa.int64()), "int64")
-    bad("s", pa.array([{"c": 1}], pa.struct([("c", pa.int8())])), "missing")
-    bad(
-        "s",
-        pa.array(
-            [{"c": 1, "ox_a;2Eb": 1, "x": 1}],
-            pa.struct([("c", pa.int8()), ("ox_a;2Eb", pa.int8()), ("x", pa.int8())]),
-        ),
-        "not expected ['x']",
-    )
-    bad("s", pa.array([1]), "int64")
-    bad(
-        "s",
-        pa.array([None], pa.struct([("c", pa.int8()), ("ox_a;2Eb", pa.int8())])),
-        "null struct",
-    )
-    bad(
-        "s",
-        pa.array(
-            [{"c": 1, "ox_a;2Eb": None}],
-            pa.struct([("c", pa.int8()), ("ox_a;2Eb", pa.int8())]),
-        ),
-        "a.b",
-        "null",
-    )
-    for rows in (good.drop_columns(["n"]), good.append_column("m", pa.array([1]))):
-        with pytest.raises(store.StoredRowsError, match="'(n|m)'"):
-            store.decode_rows(rows, schema)
-    repeated = pa.Table.from_arrays(
-        [*good.columns, good.column("n")], names=[*good.column_names, "n"]
-    )
-    with pytest.raises(store.StoredRowsError, match="repeated"):
-        store.decode_rows(repeated, schema)
-
-
 def large_table(table: pa.Table) -> pa.Table:
     return table.cast(large(table.schema))
 
 
-@pytest.mark.parametrize("size", [0, 3])
-def test_a_fixed_size_list_of_another_size_is_refused(size: int) -> None:
-    table = keyed({"l": pa.array([[1, 2]], pa.list_(pa.int8(), 2))})
-    other = pa.array([[1] * size], pa.list_(pa.int8(), size))
-    rows = _stored(table).set_column(1, "l", other)
-    with pytest.raises(store.StoredRowsError, match="'l'"):
-        store.decode_rows(rows, table.schema)
+def test_rows_that_are_not_what_was_written_are_refused() -> None:
+    inner = pa.struct([pa.field("a.b", pa.int8(), False), pa.field("c", pa.int8())])
+    fields = [
+        pa.field("n", pa.int64(), False),
+        pa.field("t", timestamp("us", tz="UTC")),
+        pa.field("s", inner),
+        pa.field("l", pa.list_(inner)),
+        pa.field("f", pa.list_(pa.int8(), 2)),
+        pa.field("m", pa.map_(pa.string(), pa.int8())),
+    ]
+    table = keyed(
+        {
+            "n": pa.array([1]),
+            "t": pa.array([1], timestamp("us", tz="UTC")),
+            "s": pa.array([{"a.b": 1, "c": 2}], inner),
+            "l": pa.array([[{"a.b": 1, "c": 2}]], pa.list_(inner)),
+            "f": pa.array([[1, 2]], pa.list_(pa.int8(), 2)),
+            "m": pa.array([[("a", 1)]], pa.map_(pa.string(), pa.int8())),
+        },
+        fields,
+    )
+    schema, good = table.schema, _stored(table)
+    manifest = new(schema)
+    assert_same(decode(good, schema), large_table(table))
+    store.require_stored_schema(good.schema, manifest)
+
+    def bad(name: str, array: Any, *words: str, value: bool = False) -> None:
+        rows = good.set_column(good.column_names.index(name), name, array)
+        calls: list[Any] = [lambda: decode(rows, schema)]
+        if not value:
+            calls.append(lambda: store.require_stored_schema(rows.schema, manifest))
+        for call in calls:
+            with pytest.raises(store.StoredRowsError) as info:
+                call()
+            assert all(w in str(info.value) for w in (f"'{name}'", *words))
+
+    stored = pa.struct([("c", pa.int8()), ("ox_a;2Eb", pa.int8())])
+    more = pa.struct([*stored, pa.field("x", pa.int8())])
+    raw = pa.struct([("c", pa.int8()), ("a.b", pa.int8())])
+    bad("n", pa.array([None], pa.int64()), "null", value=True)
+    bad("n", pa.array([1], pa.int32()), "int32")
+    bad("t", pa.array([1], timestamp("us")), "timestamp[us]")
+    bad("t", pa.array([1], timestamp("us", tz="UTC")), "UTC")
+    bad("t", pa.array([1], pa.int32()), "int32")
+    bad("s", pa.array([{"c": 1}], pa.struct([("c", pa.int8())])), "missing")
+    bad("s", pa.array([{"c": 1}], more), "not expected ['x']")
+    bad("s", pa.array([{"c": 1}], raw), "not expected ['a.b']")
+    bad("s", pa.array([1]), "int64")
+    bad("s", pa.array([[]], pa.list_(pa.int8())), "list")
+    bad("s", pa.array([None], stored), "null struct", value=True)
+    bad("s", pa.array([{"c": 1}], stored), "a.b", "null", value=True)
+    bad("l", pa.array([[{"c": 1}]], pa.list_(stored)), "a.b", "null", value=True)
+    bad("l", pa.array([[{"c": 1}]], pa.list_(raw)), "not expected ['a.b']")
+    bad("l", pa.array([1]), "int64")
+    bad("f", pa.array([[1, 2, 3]], pa.list_(pa.int8(), 3)), "[3]")
+    bad("f", pa.array([[1, 2]], pa.list_(pa.int16(), 2)), "int16")
+    bad("f", pa.array([[1, 2]], pa.list_(pa.int8())), "list")
+    bad("m", pa.array([[("a", 1)]], pa.map_(pa.string(), pa.int16())), "int16")
+    bad("m", pa.array([[(b"a", 1)]], pa.map_(pa.binary(), pa.int8())), "binary")
+    bad("m", pa.array([1]), "int64")
+    for rows in (good.drop_columns(["n"]), good.append_column("m", pa.array([1]))):
+        with pytest.raises(store.StoredRowsError, match="'(n|m)'"):
+            decode(rows, schema)
+    repeated = pa.Table.from_arrays(
+        [*good.columns, good.column("n")], names=[*good.column_names, "n"]
+    )
+    with pytest.raises(store.StoredRowsError, match="repeated"):
+        decode(repeated, schema)
+
+
+def test_rows_are_given_the_recorded_schema_only() -> None:
+    table = keyed({"a": pa.array([1]), "b": pa.array(["x"])})
+    manifest, stored = new(table.schema), _stored(table)
+    for schema in (
+        table.schema.set(0, pa.field("a", pa.int32())),
+        table.schema.remove(0),
+        schema_of(list(reversed(list(table.schema)))),
+        table.schema.set(0, pa.field("a", pa.int64(), metadata={"k": "v"})),
+    ):
+        with pytest.raises(store.ManifestError, match="not the recorded schema"):
+            store.decode_rows(stored, manifest, schema)
+
+
+def test_a_table_with_a_manifest_and_no_rows_reads_as_no_rows() -> None:
+    schema = wide_schema(20)
+    rows = store.empty_rows(read(entries(schema)))
+    assert rows.num_rows == 0
+    assert rows.schema.equals(store.logical_schema(schema), check_metadata=True)
 
 
 # ------------------------------------------------------------------------ manifest
@@ -1019,7 +1103,7 @@ def wide_schema(columns: int = 200) -> pa.Schema:
             pa.int64(),
             timestamp("ns", tz="Asia/Kathmandu"),
             pa.struct([pa.field("__a.b", pa.string(), False, {"depth": "1"})]),
-            pa.list_(pa.field("odd", pa.binary(16), False, {"unit": "m" * 30})),
+            pa.list_(pa.field("odd", pa.binary(), False, {"unit": "m" * 30})),
             Labelled(pa.large_string(), f"test.wide.{i}", b'{"version":1}'),
         ][i % 5]
         metadata = {"orcapod:data_tag": "1", "note": f"{i:040d}", b"\xff": b"\x00\xfe"}
@@ -1032,31 +1116,32 @@ def wide_schema(columns: int = 200) -> pa.Schema:
 def test_a_manifest_of_200_columns_with_metadata() -> None:
     schema = wide_schema()
     assert len(schema) == 200
-    path = ("run", "a/b", "", "é", '"', "\ud800")
-    metadata = entries(schema, path, other=b"kept")
+    path = ("run", "a", "b", "", "é", '"', "\u2028")
+    metadata = {**entries(schema, path), "other": b"kept"}
     ours = {k: v for k, v in metadata.items() if k.startswith(store.MANIFEST_PREFIX)}
     assert 3 < len(ours) <= 1024
     for key, value in ours.items():
         assert len(key) <= 90 and key.isascii()
         assert len(key) + len(value) <= 8192
-    manifest = read(metadata)
+    manifest = read(metadata, path)
+    assert manifest == new(schema, path)
     assert manifest.record_path == path
+    assert manifest.kind == "function_pipeline"
     assert manifest.schema.equals(store.logical_schema(schema), check_metadata=True)
     for a, b in zip(store.logical_schema(schema), manifest.schema):
         assert field_difference(a, b, a.name) is None
 
 
 def test_a_manifest_does_not_depend_on_the_order_of_the_metadata() -> None:
-    metadata = entries(wide_schema(), other=b"x")
+    metadata = {**entries(wide_schema()), "other": b"x"}
     items = list(metadata.items())
     for seed in range(5):
         random.Random(seed).shuffle(items)
         assert read(dict(items)) == read(metadata)
 
 
-def test_a_payload_of_another_pyarrow_is_the_same_manifest(monkeypatch: Any) -> None:
-    """Other bytes (field metadata written in another order) decode to one schema: the
-    two manifests agree, and every reader takes the one of the smallest digest."""
+def test_a_payload_of_another_pyarrow_is_the_same_schema(monkeypatch: Any) -> None:
+    """Other bytes (field metadata written in another order) decode to one schema."""
     schema = wide_schema(20)
     first = entries(schema)
 
@@ -1078,22 +1163,17 @@ def test_a_payload_of_another_pyarrow_is_the_same_manifest(monkeypatch: Any) -> 
     second = entries(schema)
     monkeypatch.undo()
     assert not set(first) & set(second)
-    both = read({**second, **first})
-    assert store.manifest_difference(both, read(first)) is None
-    assert store.manifest_difference(read(first), read(second)) is None
-    smallest = min(
-        k for k in {**first, **second} if "/" not in k[len(store.MANIFEST_PREFIX) :]
-    )
-    expected = read(first if smallest in first else second)
-    assert list(both.schema.field(1).metadata or {}) == list(
-        expected.schema.field(1).metadata or {}
-    )
+    with pytest.raises(store.ManifestError, match="more than one"):
+        store.read_manifest({**second, **first}, PATH)
+    one, two = read(first).schema, read(second).schema
+    assert list(one.field(1).metadata or {}) != list(two.field(1).metadata or {})
+    assert store.schema_difference(one, two) is None
 
 
 def test_every_row_of_the_matrix_round_trips_in_one_manifest(tmp_path: Path) -> None:
     fields: list[Any] = [pa.field(KEY, pa.large_binary(), False)]
     for row in ROWS:
-        if row.label in REFUSED_ROWS.keys() - REFUSED_BY_VALUE:
+        if row.label in REFUSED_ROWS:
             continue
         if row.provisional:
             continue
@@ -1128,16 +1208,16 @@ def test_metadata_keys_that_look_like_the_marks_are_kept() -> None:
 BASE: list[Any] = [
     pa.field("a", pa.struct([pa.field("x", pa.int8()), pa.field("y", pa.int8())])),
     pa.field("l", pa.large_list(pa.field("item", timestamp("us", tz="UTC")))),
-    pa.field("f", pa.list_(pa.field("item", pa.int8()), 2)),
+    pa.field("f", pa.large_list(pa.field("item", pa.int8()))),
     pa.field(KEY, pa.large_binary(), False),
 ]
+MAPPED: list[Any] = [*BASE, pa.field("x", map_of(pa.string(), pa.int8()))]
 
 
 def test_the_order_of_columns_is_no_difference() -> None:
-    one = entries(schema_of(BASE))
     for order in ([3, 2, 1, 0], [1, 0, 3, 2]):
-        other = entries(schema_of([BASE[i] for i in order]))
-        assert read({**one, **other}) == read({**other, **one})
+        other = schema_of([BASE[i] for i in order])
+        assert store.schema_difference(schema_of(BASE), other) is None
 
 
 @pytest.mark.parametrize(
@@ -1160,61 +1240,84 @@ def test_the_order_of_columns_is_no_difference() -> None:
         BASE[1].with_type(pa.large_list(timestamp("us", tz="Etc/UTC"))),
         BASE[1].with_type(pa.large_list(timestamp("us"))),
         BASE[1].with_type(pa.large_list(timestamp("ms", tz="UTC"))),
-        BASE[2].with_type(pa.list_(pa.int8(), 3)),
-        BASE[2].with_type(pa.large_list(pa.int8())),
-        pa.field("a", pa.null()),
+        BASE[2].with_type(pa.large_list(pa.int16())),
+        BASE[2].with_type(pa.list_(pa.int8(), 2)),
+        pa.field("x", map_of(pa.string(), pa.int8(), keys_sorted=True)),
+        BASE[2].with_type(pa.large_list(pa.large_list(pa.int8()))),
     ],
     ids=str,
 )
-def test_two_manifests_that_disagree_are_refused(changed: Any) -> None:
-    index = next((i for i, f in enumerate(BASE) if f.name == changed.name), 0)
-    fields = list(BASE)
+def test_another_schema_is_a_difference(changed: Any) -> None:
+    index = next((i for i, f in enumerate(MAPPED) if f.name == changed.name), 0)
+    fields = list(MAPPED)
     fields[index] = changed
-    one, other = entries(schema_of(BASE)), entries(schema_of(fields))
-    assert store.manifest_difference(read(one), read(other)) is not None
-    for both in ({**one, **other}, {**other, **one}):
-        with pytest.raises(store.ManifestConflictError) as info:
-            store.read_manifest(both)
-        for digest in (k for k in both if k.count("/") == 1):
-            assert digest.split("/")[1] in str(info.value)
+    one, other = read(entries(schema_of(MAPPED))).schema, schema_of(fields)
+    for a, b in ((one, other), (other, one)):
+        assert store.schema_difference(a, b) is not None
 
 
-def test_the_record_path_and_schema_metadata_are_compared() -> None:
+def test_schema_metadata_and_more_columns_are_a_difference() -> None:
     schema = schema_of(BASE)
-    one = entries(schema, ("a", "b"))
     for other in (
-        entries(schema, ("a/b",)),
-        entries(schema, ("b", "a")),
-        entries(schema.with_metadata({"k": "v"}), ("a", "b")),
-        entries(schema_of([*BASE, ("more", pa.int8())]), ("a", "b")),
+        schema.with_metadata({"k": "v"}),
+        schema_of([*BASE, ("more", pa.int8())]),
     ):
-        with pytest.raises(store.ManifestConflictError):
-            store.read_manifest({**one, **other})
+        assert store.schema_difference(schema, other) is not None
 
 
-def test_three_manifests_one_of_which_disagrees_are_refused() -> None:
-    for seed in range(6):
-        parts = [
-            entries(schema_of(BASE)),
-            entries(schema_of(list(reversed(BASE)))),
-            entries(schema_of([*BASE[:3], pa.field(KEY, pa.large_binary())])),
-        ]
-        random.Random(seed).shuffle(parts)
-        with pytest.raises(store.ManifestConflictError):
-            store.read_manifest({k: v for part in parts for k, v in part.items()})
+@pytest.mark.parametrize("same", [True, False])
+def test_two_headers_are_refused_also_when_they_agree(same: bool) -> None:
+    fields = list(reversed(BASE)) if same else BASE[1:]
+    one, other = entries(schema_of(BASE)), entries(schema_of(fields))
+    for both in ({**one, **other}, {**other, **one}):
+        with pytest.raises(store.ManifestError, match="more than one") as info:
+            store.read_manifest(both, PATH)
+        for key in (k for k in both if k.count("/") == 1):
+            assert key.split("/")[1] in str(info.value)
+
+
+def test_a_manifest_of_another_path_is_refused() -> None:
+    metadata = entries(schema_of(BASE), ("a", "b"))
+    for path in (("a",), ("b", "a"), ("a", "b", ""), ("a_b",), ()):
+        with pytest.raises(store.ManifestError, match="recorded as"):
+            store.read_manifest(metadata, path)
+
+
+@pytest.mark.parametrize("part", ["a/b", "a\0", "\udc00"])
+def test_a_path_component_the_store_cannot_name_is_refused(part: str) -> None:
+    with pytest.raises(store.UnstorableInSpiralError):
+        new(schema_of(BASE), ("x", part))
+
+
+def test_stored_names_come_from_the_manifest_not_from_the_rule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A table written under an earlier naming rule is still read by its own names."""
+    table = keyed(
+        {
+            "a.b": pa.array([1]),
+            "ox_a;2Eb": pa.array([2]),
+            "s": pa.array([{"c.d": 3}], pa.struct([("c.d", pa.int64())])),
+        }
+    )
+    metadata, stored = entries(table.schema), _stored(table)
+    monkeypatch.setattr(store, "encode_name", lambda name: "new_" + name.encode().hex())
+    manifest = read(metadata)
+    assert "ox_a;2Eb" in manifest.physical.names
+    got = store.decode_rows(stored, manifest)
+    assert [got.column(n)[0].as_py() for n in table.column_names if n != KEY] == [
+        1, 2, {"c.d": 3},
+    ]  # fmt: skip
 
 
 def test_a_table_without_a_manifest_has_none() -> None:
-    assert store.read_manifest({}) is None
-    assert store.read_manifest({"__arrow_metadata__": b"{}", "x": b""}) is None
-    chunks, header = store.manifest_entries(
-        store.StoreManifest(("a",), schema_of(BASE))
-    )
-    assert store.read_manifest(chunks) is None  # the header never came
-    assert read({**chunks, **header}) is not None
-    # A second writer's chunks without their header change nothing.
-    more, _ = store.manifest_entries(store.StoreManifest(("z",), schema_of(BASE)))
-    assert read({**chunks, **header, **more}).record_path == ("a",)
+    for other in ({}, {"__arrow_metadata__": b"{}", "x": b""}):
+        assert store.read_manifest(other, PATH) is None
+    chunks, header = store.manifest_entries(new(schema_of(BASE)))
+    assert store.read_manifest(chunks, PATH) is None  # the header never came
+    # Chunks of another creation that was interrupted change nothing.
+    more, _ = store.manifest_entries(new(schema_of(BASE), ("z",)))
+    assert read({**more, **chunks, **header}) == new(schema_of(BASE))
 
 
 def _rewritten(metadata: dict[str, bytes], **changes: Any) -> dict[str, bytes]:
@@ -1227,15 +1330,15 @@ def _rewritten(metadata: dict[str, bytes], **changes: Any) -> dict[str, bytes]:
 
 def _payload(**changes: Any) -> dict[str, bytes]:
     """A manifest whose payload is changed, under the digest it then has."""
-    chunks, _ = store.manifest_entries(store.StoreManifest(("a",), schema_of(BASE)))
+    chunks, _ = store.manifest_entries(new(schema_of(BASE)))
     body = {**json.loads(b"".join(chunks.values())), **changes}
     payload = json.dumps(body).encode()
     digest = store._digest(payload)  # pyright: ignore[reportPrivateUsage]
     header = {
         "chunks": 1,
-        "format": "orcapod.spiral_store",
+        "format": "orcapod.spiral_store.draft",
         "sha256": digest,
-        "version": 1,
+        "version": 0,
     }
     return {
         f"{store.MANIFEST_PREFIX}{digest}": json.dumps(header).encode(),
@@ -1247,8 +1350,32 @@ def _ipc(schema: pa.Schema) -> str:
     return base64.b64encode(schema.serialize().to_pybytes()).decode()
 
 
+def _header(metadata: dict[str, bytes]) -> str:
+    return next(k for k in metadata if k.count("/") == 1)
+
+
+_A = pa.struct([("x", pa.int8()), ("y", pa.int8())])
+_TWICE = pa.struct([("x", pa.int8()), ("x", pa.int8())])
+_B = pa.large_binary()
+_L = pa.large_list(timestamp("us"))
+
+
+def _physical(index: int, field: Any) -> Any:
+    """The stored schema of ``BASE`` with one column changed."""
+    return store.physical_schema(schema_of(BASE)).set(index, field)
+
+
+def test_chunks_in_another_order_are_refused() -> None:
+    metadata = entries(wide_schema())
+    header = _header(metadata)
+    swapped = {**metadata, f"{header}/0": metadata[f"{header}/1"]}
+    swapped[f"{header}/1"] = metadata[f"{header}/0"]
+    with pytest.raises(store.ManifestError, match="do not match"):
+        store.read_manifest(swapped, PATH)
+
+
 def test_the_changed_payload_helper_builds_a_readable_manifest() -> None:
-    assert read(_payload()).record_path == ("a",)
+    assert read(_payload()) == new(schema_of(BASE))
 
 
 @pytest.mark.parametrize(
@@ -1259,29 +1386,39 @@ def test_the_changed_payload_helper_builds_a_readable_manifest() -> None:
         lambda m: {k: (b"[]" if k.count("/") == 1 else v) for k, v in m.items()},
         lambda m: {k: (b"\xff" if k.count("/") == 1 else v) for k, v in m.items()},
         lambda m: _rewritten(m, format="other"),
-        lambda m: _rewritten(m, version=2),
-        lambda m: _rewritten(m, version=True),
+        lambda m: _rewritten(m, version=1),
+        lambda m: _rewritten(m, version=False),
         lambda m: _rewritten(m, chunks=0),
         lambda m: _rewritten(m, chunks="1"),
         lambda m: _rewritten(m, chunks=10**9),
         lambda m: _rewritten(m, chunks=2),
         lambda m: _rewritten(m, sha256="0" * 64),
         lambda m: {**m, store.MANIFEST_PREFIX + "other": b""},
+        lambda m: {**m, _header(m) + "/1": b""},
+        lambda m: {**m, _header(m) + "/7": b""},
+        lambda m: _payload(kind=1),
+        lambda m: _payload(record_path=["other"]),
+        lambda m: _payload(physical=_ipc(schema_of([("a", pa.int8())]))),
+        lambda m: _payload(physical=_ipc(_physical(0, pa.field("a", pa.int8())))),
+        lambda m: _payload(physical=_ipc(_physical(0, pa.field(KEY, _A)))),
+        lambda m: _payload(physical=_ipc(_physical(3, pa.field("k", _B)))),
+        lambda m: _payload(physical=_ipc(_physical(1, pa.field("f", _L)))),
+        lambda m: _payload(physical=_ipc(_physical(0, pa.field("a", _TWICE)))),
         lambda m: {**m, store.MANIFEST_PREFIX + "0" * 64 + "/01": b""},
-        lambda m: _payload(version=2),
+        lambda m: _payload(version=1),
         lambda m: _payload(record_path="a"),
         lambda m: _payload(record_path=[1]),
         lambda m: _payload(schema=1),
         lambda m: _payload(schema="!!"),
         lambda m: _payload(schema=base64.b64encode(b"junk").decode()),
         lambda m: _payload(schema=_ipc(schema_of([("a", pa.int8())]))),
-        lambda m: _payload(schema=_ipc(schema_of([*BASE, ("m", pa.float16())]))),
+        lambda m: _payload(schema=_ipc(schema_of([*BASE, ("m", pa.binary(2))]))),
     ],
 )
 def test_a_manifest_that_cannot_be_read_in_full_is_an_error(make: Any) -> None:
     metadata = make(entries(schema_of(BASE)))
     with pytest.raises(store.ManifestError):
-        store.read_manifest(metadata)
+        store.read_manifest(metadata, PATH)
 
 
 def test_a_manifest_over_the_limit_is_refused() -> None:
@@ -1296,7 +1433,8 @@ def test_a_manifest_over_the_limit_is_refused() -> None:
 def test_writing_the_same_manifest_twice_changes_nothing() -> None:
     one = entries(wide_schema())
     assert entries(wide_schema()) == one
-    assert entries(read(one).schema) == one
+    chunks, header = store.manifest_entries(read(one))
+    assert {**chunks, **header} == one
 
 
 def test_the_codec_needs_no_pyspiral() -> None:
