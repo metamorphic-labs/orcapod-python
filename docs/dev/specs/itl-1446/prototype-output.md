@@ -8,6 +8,18 @@ order (60 rows): pipeline table equal False, as_source() equal True
 cached source, in memory: k [0, 1, 2, 3, 4, 5], Batch(2) gives y [[0.0, 1.0], [2.0, 3.0], [4.0, 5.0]]
 cached source, Delta: k [0, 1, 2, 3, 4, 5], Batch(2) gives y [[0.0, 1.0], [2.0, 3.0], [4.0, 5.0]]
 cached source, SpiralDB: k [4, 5, 1, 2, 3, 0], Batch(2) gives y [[4.0, 5.0], [1.0, 2.0], [3.0, 0.0]]
+record ids, in memory, 4 rows, key None: ['row_0', 'row_1', 'row_2', 'row_3']
+record ids, in memory, 4 rows, key ['k']: ['{"k":0}', '{"k":1}', '{"k":2}', '{"k":3}']
+record ids, in memory, 8 rows, key None: ['row_0', 'row_1', 'row_2', 'row_3']
+record ids, in memory, 8 rows, key ['k']: ['{"k":0}', '{"k":1}', '{"k":2}', '{"k":3}']
+record ids, Delta, 4 rows, key None: ['row_0', 'row_1', 'row_2', 'row_3']
+record ids, Delta, 4 rows, key ['k']: ['{"k":0}', '{"k":1}', '{"k":2}', '{"k":3}']
+record ids, Delta, 8 rows, key None: ['row_4', 'row_5', 'row_6', 'row_7']
+record ids, Delta, 8 rows, key ['k']: ['{"k":0}', '{"k":1}', '{"k":2}', '{"k":3}']
+record ids, SpiralDB, 4 rows, key None: ['row_3', 'row_0', 'row_2', 'row_1']
+record ids, SpiralDB, 4 rows, key ['k']: ['{"k":0}', '{"k":1}', '{"k":2}', '{"k":3}']
+record ids, SpiralDB, 8 rows, key None: ['row_5', 'row_1', 'row_4', 'row_2']
+record ids, SpiralDB, 8 rows, key ['k']: ['{"k":0}', '{"k":1}', '{"k":2}', '{"k":3}']
 
 | Rows | Run | list tables | look up table | get metadata | set metadata | create table | write transaction | whole-table scan |
 |---|---|---|---|---|---|---|---|---|

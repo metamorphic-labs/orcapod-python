@@ -25,13 +25,13 @@ How each statement below is known:
   on the fake with rows, schemas, system tags and content hashes equal to the in-memory store's,
   and an unchanged rerun calls nothing (Measured, [`prototype.py`](itl-1446/prototype.py)).
 - Column names are the small part. Reading the code and running the prototype found five things
-  the issue does not list, each of which must be in the first version:
+  the issue does not list. F3 is accepted; the others must be in the first version:
 
 | # | Finding | How known | Section |
 |---|---|---|---|
 | F1 | **Table names are too long.** pyspiral types a table name as at most 128 characters of `[a-zA-Z0-9_-]`. A function pipeline table's name is 181 characters today. `unstorable_table_name_reason` says SpiralDB holds every name | Read, Measured | 5 |
 | F2 | **Table names collide, and a collision serves wrong results.** `function_name="my-fn"` and `"my_fn"` share one result table; the second function is given the first one's values | Measured | 5 |
-| F3 | **Row order is lost.** SpiralDB returns rows in key order, and the key is a hash. `Batch(2)` over a `CachedSource` gives other batches than on Delta and in memory | Measured | 3.6 |
+| F3 | **Row order is not kept.** SpiralDB returns rows in key order, and the key is a hash, so `Batch(2)` over a `CachedSource` gives other batches than on Delta. *Accepted (developer): a store is a set of rows* | Measured | 3.6 |
 | F4 | **Result record ids are not content derived.** A function result's id is a random UUIDv7; a pipeline record's id leaves out the result it names. "Same id, same content" holds only for operator caches and cached sources, and not bit for bit | Read | 6 |
 | F5 | **The fake accepts what the client refuses**: `fixed_size_binary` and `duration` (pyspiral's own `Schema.from_arrow` raises) and probably a `null` column (the native library has an error for it). The connector says it stores all three | Measured (client, offline) and Read | 3.4 |
 
@@ -64,7 +64,7 @@ A second point the list shows: the reason given is the first one found. `__recor
 | What changes | a SpiralDB store encodes on write and decodes on read | `SYSTEM_COLUMN_PREFIX` becomes a prefix SpiralDB accepts, for every store | (b) for Orcapod's own columns, (a) for user columns |
 | Hashes, paths, golden | **none** | `__input_data_hash` and `__pipeline_recomputation_index` are column names in hashed preimages (`_build_record_id_preimage`), and `__node_content_hash` is in the operator cache's hashed row: every pipeline entry id, base entry id, side-effect id and operator record id moves | as (b) |
 | Layouts | none | all five layout versions and the Python function type's revision | as (b) |
-| Time zones, logical types, dotted names, table names, row order | handled by the same mechanism | **not handled**; (a) is needed anyway | (a) is needed anyway |
+| Time zones, logical types, dotted names, table names | handled by the same mechanism | **not handled**; (a) is needed anyway | (a) is needed anyway |
 | Existing stores | untouched | Delta stores of 0.4.0rc1 are no longer read | as (b) |
 | What other SpiralDB readers see | `ox___data_context` for `__data_context` | a plain name | a plain name |
 
@@ -113,8 +113,6 @@ pyspiral's expressions (`Expr.__getitem__`).
 
 - **Key column.** `__record_id` is stored as it is: SpiralDB accepts `__` on a key column.
   `E` never yields a name that starts with `__`, so a value column cannot collide with it.
-- **Store-only columns.** A name that starts with `ox_` and is not any `E(c)` is free for the
-  store. `ox_order` (3.6) is such a name: `order` is plain, and `E("ox_order")` is `ox_ox_order`.
 - **Unicode.** Characters are kept as code points, with no normalisation. To probe: whether
   SpiralDB normalises (`é` as one or two code points) or folds case. If it does, two names that
   it merges are refused before writing; the rule is written from the probe, not guessed.
@@ -206,7 +204,7 @@ refuse these, so the suite fails where the service would.
   store refuses to write into a table without a manifest that has value columns.
 - **Another SpiralDB reader of a store table** (CLI, Polars, DuckDB, spiral-sdk) sees `ox___pod_ts`
   as a timestamp without a zone (UTC instants), a logical type as its storage, a `File` or user
-  class as its struct with sorted fields, and `ox_order`. Plain user columns, tags and
+  class as its struct with sorted fields. Plain user columns, tags and
   `_source_*` are readable under their own names. Documented, with the encoding version.
 - **A `SpiralDBTableSource` over a store table** must not silently show encoded names: it reads
   the manifest, so it shows Orcapod's names, and refuses a manifest version it does not know.
@@ -223,23 +221,40 @@ refuse these, so the suite fails where the service would.
 **Column order.** SpiralDB stores value columns sorted by name. A read puts them in the
 manifest's order, so a table reads back in the order of its first write, as on Delta.
 
-**Row order.** SpiralDB returns key order. The key is a hash, so stored rows come back shuffled
-(Measured):
+**Row order: none is kept, and none is promised** (decided, developer, 2026-11-24). A database is a
+**set of rows** unless one says otherwise. There is no order column and nothing hidden; stores are
+compared as sets of rows. A read of an unchanged table gives SpiralDB's key order, which is a hash
+order and says nothing about when a row was written.
 
-| Store | `CachedSource` over k = 0..5 reads | `Batch(2)` gives y |
+Within a run nothing depends on it: a node's rows are in the run's own order, stored rows
+included (ITL-1441), which the run takes from its inputs. So a job gives equal rows in the same
+order on SpiralDB and Delta, unless one of its **inputs** is read from a store. There, what can
+differ from Delta (Measured on the fake and on Delta):
+
+| Where | SpiralDB (prototype) | Delta |
 |---|---|---|
-| in memory, Delta | 0, 1, 2, 3, 4, 5 | [0, 1], [2, 3], [4, 5] |
-| SpiralDB (prototype) | 4, 5, 1, 2, 3, 0 | [4, 5], [1, 2], [3, 0] |
+| `CachedSource` over k = 0..5 | 4, 5, 1, 2, 3, 0 | 0, 1, 2, 3, 4, 5 |
+| `Batch(2)` over it: y | [4, 5], [1, 2], [3, 0] | [0, 1], [2, 3], [4, 5] |
+| `as_source(tags_as_data=...)` over a logged `Join`: **positional** record ids of k = 0..3 | 3, 0, 2, 1; after 4 rows are added 5, 1, 4, 2 | 0, 1, 2, 3; after 4 rows are added 4, 5, 6, 7 |
+| the same with `record_id_columns=["k"]` | `{"k":0}` ... in every case | the same |
 
-This is a difference in computed results, not presentation. The raw pipeline table also comes
-back in another order; `as_source()` of a function node happened to agree (6 and 60 rows), which
-is not a guarantee.
+All accepted. The consequences, to be documented:
 
-Design: a store-only column `ox_order` (`int64`). A handle gives a batch consecutive values from
-`max(last + 1, time.time_ns())`, in row order. A read sorts by (`ox_order`, `__record_id`) and
-drops the column. One writer: exactly the order written. Several writers: deterministic for a
-given store content; interleaved by their clocks, as concurrent Delta commits are by commit. It
-is in no hash, never leaves the store, and costs 8 bytes a row and a sort per read.
+- **An order-sensitive step over rows read from a store** (`Batch`; a `GroupBy` whose members tie
+  on every tag and record id) may group differently, so its values, folded record ids and what is
+  recomputed downstream differ. This covers a `CachedSource`, a `REPLAY` operator, and any
+  `as_source()`.
+- **Adding rows** puts them anywhere in key order, so such a step's earlier groups change. On
+  Delta too: the third row shows that Delta's order is not append order either.
+- **Positional record ids over a stored node** move when rows are added, and everything
+  downstream is computed again. Give `record_id_columns`.
+- `head()`, previews and `as_table()` of stored rows show key order; `sort_by_tags` for a stable
+  one.
+- Two results of one input with an equal `__pod_ts` (to the microsecond): which one a lookup
+  takes is unspecified, as it is today.
+
+Compare-as-sets is for what is read **from a store**. A run's own rows are still compared exactly
+for sync and as sets for async.
 
 ### 3.7 Does anything move?
 
@@ -312,7 +327,7 @@ That makes each lookup small, but still one round trip a row. At 0.7 to 1.7 s a 
 run**, as `DeltaTableDatabase` does with its `KeyIndex`:
 
 - On the first lookup in a table, read only the lookup columns of all rows with a pinned `asof`
-  (`__record_id`, `__input_data_hash`, `__data_context`, `__pod_ts`, `ox_order` for results;
+  (`__record_id`, `__input_data_hash`, `__data_context`, `__pod_ts` for results;
   `__record_id`, `__pipeline_base_entry_id`, `__pipeline_recomputation_index`,
   `__node_content_hash`, `__data_context` for the pipeline). A miss needs no call. Hits read their
   full rows by `read_by_keys`.
@@ -490,8 +505,8 @@ commit wins, and no error is raised.
 | Function pipeline | hash of system tags, input hash, recomputation index | `__data_id`, `__computed`, `__output_data_hash`, `__is_ephemeral`, `__pipeline_run_id`, `__recorded_at` | **no** (below) |
 | ... its recomputation index | read, then write | two writers both take index `n`; one recomputation disappears from the history | **no** |
 | Side-effect log | hash of the same preimage | `pipeline_run_id`, `executed_at` | the log is, the **delivery is not**: both delivered before either logged |
-| Operator cache | hash of the row and node content hash | `ox_order`; float bits (below) | yes, up to float bits |
-| Cached source | hash of the row with system tags | `ox_order`; float bits | yes, up to float bits |
+| Operator cache | hash of the row and node content hash | float bits (below) | yes, up to float bits |
+| Cached source | hash of the row with system tags | float bits | yes, up to float bits |
 
 Every row of a table has the same `__node_content_hash` for one id only where that hash enters
 the id: it does for the operator cache. For the pipeline table it is redundant with the path and
@@ -582,8 +597,12 @@ stopped.
 3 to 5 s a run at the times seen live (P9 measures). Permissions: none beyond writing.
 
 **Detection besides the lease** (also the fallback if C1 and P11 both fail, and then documented as
-best effort only): after a commit, the written ids' `ox_order` are read back and a difference
-raises a warning naming the table and count; a later overwrite is missed.
+best effort only): after a commit, the written ids are read back by key and compared with the rows
+written. No hidden column is needed: what a second writer changes in a pipeline record
+(`__data_id`, `__pipeline_run_id`, `__recorded_at`) and in a side-effect row (`pipeline_run_id`,
+`executed_at`) is stored data. A difference raises a warning naming the table and the count.
+A later overwrite is missed. **For the other tables there is no detection and none is needed**: a
+result's id is a random UUID, and a cache row written twice is the same row up to float bits.
 
 Follow-up (several writers), not designed here: the key (`__record_id`, writer), which keeps every
 writer's row, or a conditional write in `spiral-sdk` (ITL-931). A store made now is rebuilt to
@@ -634,9 +653,9 @@ today until PR 5.
 |---|---|---|
 | 1 | Fake as strict as the client (3.4); the connector refuses what it must (`fixed_size_binary`, `duration`, `null`, table names); `database-types.md` regenerated | each rule, with the native library's text; matrix |
 | 2 | `spiral_store` codec: names, types, manifest, as pure functions with no pyspiral | property tests: names (adversarial alphabet, nested), schema round trip over the type matrix, chunk sizes, two manifests |
-| 3 | Connector: store tables use the codec; `ox_order`; table names and the catalog; null struct refused when added; `ConnectorArrowDatabase` asks the connector for a table's name | matrix on the fake; column and row order; foreign tables unchanged; a failed first write; two connectors with an injected failure (ITL-1190's interleaving); collisions of 5.2; catalog: crash between each step, lost, partly lost, another version, `.at()` views, a forced digest collision |
+| 3 | Connector: store tables use the codec; table names and the catalog; null struct refused when added; `ConnectorArrowDatabase` asks the connector for a table's name | matrix on the fake; column order; rows as a set; foreign tables unchanged; a failed first write; two connectors with an injected failure (ITL-1190's interleaving); collisions of 5.2; catalog: crash between each step, lost, partly lost, another version, `.at()` views, a forced digest collision |
 | 4 | Lookups (4.3): keyed and `where` reads, the run index, table handles; failed rows restored (6.4) | call counts per run asserted; equivalence with the whole-table path (`test_*_lookup_equivalence`); staleness by a second handle |
-| 5 | Job: the lease (6.3) in the database and in `job.run`, `run_async` and `node.run`; refusals removed where covered; the post-commit check; docs (names, other readers, cleanup, permissions, the lease and its two conditions) | the pipeline store suites parametrised over the fake: first run, rerun, added rows, changed version, `run()` and `run_async()`, save and load, `load_only`, `clear_cache`, separate result database, `trace`; equal to Delta: sync exactly, async as sets. Every table kind. The lease: each row of 6.3's table, on the fake, with two handles and an injected crash between any two steps |
+| 5 | Job: the lease (6.3) in the database and in `job.run`, `run_async` and `node.run`; refusals removed where covered; the post-commit comparison (pipeline records and side-effect rows); docs (names, other readers, cleanup, permissions, the lease and its two conditions) | the pipeline store suites parametrised over the fake: first run, rerun, added rows, changed version, `run()` and `run_async()`, save and load, `load_only`, `clear_cache`, separate result database, `trace`; a run's rows equal Delta's: sync exactly, async as sets; stores compared as sets of rows; `Batch` over a stored source asserted only for what 3.6 promises. Every table kind. The lease: each row of 6.3's table, on the fake, with two handles and an injected crash between any two steps |
 | 6 | Live suite (the existing `spiral-integration` job): PR 5's job, the type matrix, P7, P8, cost printed; every table dropped | live |
 | later | batched `_fetch_joined_records`; null structs; observers; maps if P3 refuses; several writers | |
 
@@ -651,7 +670,7 @@ save an override that is not a known non-secret key (`server.url`).
 |---|---|---|
 | 1 | Where the mapping lives: (a) the store, (b) rename everywhere, (c) mixed | (a) |
 | 2 | *Decided: one writer, a second refused.* To confirm: the lease's conditions C1 and C2 are acceptable, and what ships if P8 refutes C1 (named-table lease if P11 holds, else detection only) | lease; do not ship a "refusal" resting on neither |
-| 3 | Row order: store `ox_order` so reads follow the written order | yes; otherwise results differ from Delta |
+| 3 | *Decided: no row order is kept or promised; a store is a set of rows (3.6).* | - |
 | 4 | *Decided: digest names, and one catalog per dataset.* To note: permissions are per project (5.5) | - |
 | 5 | Two different manifests in one table stop the job, rather than one winning | stop |
 | 6 | Digest names and the catalog for SQLite and PostgreSQL too (5.6): existing tables there are rebuilt, nobody has any | yes, a later PR before 0.4.0; the first version does not wait |
@@ -667,7 +686,7 @@ save an override that is not a known non-secret key (`server.url`).
 - Everything marked "to probe". The fake cannot answer timing, conflicts, visibility or server
   limits.
 - The prototype maps names and top-level types only, and its job has number and text columns and
-  UTC timestamps; it runs no logical type. It does not implement the manifest set, `ox_order`, the
+  UTC timestamps; it runs no logical type. It does not implement the manifest set, the
   catalog, the proposed table names or the lookups.
 - The async path, save and load, `load_only` and `trace` were not run through the prototype.
 - The fake's and the matrix's behaviour for logical types nested at depth was read, not run

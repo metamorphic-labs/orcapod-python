@@ -29,7 +29,7 @@ import pyarrow as pa
 
 from orcapod import PipelineJob, function_pod
 from orcapod.core.operators import Batch, GroupBy, Join, PolarsFilter
-from orcapod.core.sources import ArrowTableSource
+from orcapod.core.sources import ArrowTableSource, DerivedSource
 from orcapod.core.sources.cached_source import CachedSource
 from orcapod.databases import (
     ConnectorArrowDatabase,
@@ -38,7 +38,7 @@ from orcapod.databases import (
     SpiralDBConnector,
 )
 from orcapod.side_effects import SideEffectPod, SideEffectPodConfig
-from orcapod.types import ColumnInfo
+from orcapod.types import CacheMode, ColumnInfo
 from orcapod.utils.arrow_utils import normalize_table_to_large_types
 from tests.test_databases import fake_pyspiral
 
@@ -388,6 +388,48 @@ def check_cached_source_order() -> None:
             )
 
 
+def check_positional_ids() -> None:
+    """Positional record ids of a ``tags_as_data`` source over a logged operator."""
+    for name, build_database in (
+        ("in memory", lambda root: InMemoryArrowDatabase()),
+        ("Delta", lambda root: DeltaTableDatabase(Path(root) / "delta")),
+        ("SpiralDB", lambda root: ConnectorArrowDatabase(MappingConnector("p"))),
+    ):
+        with tempfile.TemporaryDirectory() as root, fake_pyspiral.install(root):
+            database = build_database(root)
+            for rows in (4, 8):
+                job = PipelineJob(name="positional", database=database)
+                with job:
+                    Join()(
+                        _source(rows, "left", ["y"]),
+                        _source(rows, "right", ["b"]),
+                        label="joined",
+                    )
+                node = job.nodes["joined"]
+                node.attach_databases(
+                    pipeline_database=database, cache_mode=CacheMode.LOG
+                )
+                job.run()
+                for keys in (None, ["k"]):
+                    origin = node.as_source(tags_as_data={"k": "kk"}, source_id="d")
+                    if keys is not None:
+                        origin = DerivedSource(
+                            node,
+                            source_id="d",
+                            tags_as_data={"k": "kk"},
+                            record_id_columns=keys,
+                        )
+                    table = origin.as_table(columns={"system_tags": True})
+                    column = next(
+                        c for c in table.column_names if c.startswith("_tag_record_id")
+                    )
+                    ids = dict(zip(table["k"].to_pylist(), table[column].to_pylist()))
+                    print(
+                        f"record ids, {name}, {rows} rows, key {keys}: "
+                        + f"{[ids[k] for k in range(4)]}"
+                    )
+
+
 def check_cost() -> None:
     """SpiralDB calls per run, today's lookups."""
     print(
@@ -521,6 +563,7 @@ if __name__ == "__main__":
     check_job()
     check_order()
     check_cached_source_order()
+    check_positional_ids()
     check_cost()
     check_names()
     check_wrong_result()
