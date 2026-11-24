@@ -91,14 +91,15 @@ class TestArrowTableSourceConstruction:
         assert len(source.source_id) > 0
 
     def test_source_id_explicit(self):
-        """Explicit source_id is preserved."""
+        """An explicit source_id is the name, kept exactly after the kind part (ITL-1425)."""
         source = ArrowTableSource(
             _simple_table(),
             tag_columns=["name"],
             source_id="my_source",
             infer_nullable=True,
         )
-        assert source.source_id == "my_source"
+        assert source.source_name == "my_source"
+        assert source.source_id == "arrow_table_v1:my_source"
 
     def test_producer_is_none(self):
         """Root sources have producer == None."""
@@ -432,16 +433,17 @@ class TestDerivedSource:
         assert "data_col" in table.column_names
 
     def test_source_id_derived_prefix(self):
-        """DerivedSource auto-generates a source_id with 'derived:' prefix."""
+        """DerivedSource auto-generates a source_id with the 'derived_v1:' kind part."""
         mock_origin = self._make_mock_origin(records=None)
         source = DerivedSource(origin=mock_origin)
-        assert source.source_id.startswith("derived:")
+        assert source.source_id.startswith("derived_v1:")
 
     def test_explicit_source_id(self):
-        """Explicit source_id overrides the auto-generated one."""
+        """An explicit source_id is the name, after the kind part (ITL-1425)."""
         mock_origin = self._make_mock_origin(records=None)
         source = DerivedSource(origin=mock_origin, source_id="custom_id")
-        assert source.source_id == "custom_id"
+        assert source.source_name == "custom_id"
+        assert source.source_id == "derived_v1:custom_id"
 
     def test_output_schema_delegates_to_origin(self):
         """output_schema delegates to origin node."""

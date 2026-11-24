@@ -162,7 +162,7 @@ computes nothing:
 ```python
 print(busy.explain())
 # DynamicPodStream[Filter] reads:
-#   source 'units' (CSVSource)
+#   source 'csv_v1:units' (CSVSource)
 #     applied by the source: nothing (the whole table is read)
 #     applied after reading: n_spikes > 1200 (Filter)
 ```

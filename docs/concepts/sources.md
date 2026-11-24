@@ -37,9 +37,9 @@ hashing) and produces the final immutable stream.
 `PostgreSQLTableSource`, `SpiralDBTableSource`) and `PollingSource` for data that arrives over
 time (provisional in this release, see [Provisional sources](#provisional-sources)); see the
 [API reference](../api/sources.md). Their default `source_id` names the table
-where it lives (`sqlite_table:<db path>:main.<table>`,
-`postgresql_table:<host>:<port>/<database>.<schema>.<table>`, with the server the connection
-reached; the
+where it lives (`sqlite_table_v1:<db path>:main.<table>`,
+`postgresql_table_v1:<host>:<port>/<database>.<schema>.<table>`, with the server the
+connection reached; the
 [hashing reference](../reference/hashing.md#default-source-ids-and-row-identifiers) has
 every form). A PostgreSQL DSN that names several servers (`host=a,b`), or gives a host
 beside a different `hostaddr` (`host=db.example.org hostaddr=192.0.2.1`; with
@@ -48,6 +48,40 @@ beside a different `hostaddr` (`host=db.example.org hostaddr=192.0.2.1`; with
 `source_id`. `DBTableSource`, the base they share, can also be used directly
 over any connector; a connector gives no address of its database, so it then has no default
 and needs a `source_id`.
+
+### Source ids name the kind that reads the data
+
+Every source id is `<kind>_v<N>:<name>`. The **kind part**, `<kind>_v<N>`, names the kind
+of source that read the data (`csv`, `delta_table`, `sqlite_table`, `arrow_table`, ...; the
+same word as the source's config type) and the version of that kind's implementation.
+Orcapod always adds it. The **name** is the `source_id` you give, kept exactly, or the
+source's default: where the data lives (a file path, a table) or a hash of an in-memory
+table.
+
+```python
+import pyarrow as pa
+from orcapod.sources import ArrowTableSource
+
+units_table = pa.table({"unit": ["u1", "u2"], "rate": [3.5, 7.25]})
+units = ArrowTableSource(
+    units_table, tag_columns=["unit"], tag_only_columns=True, source_id="units"
+)
+print(units.source_name)
+# units
+print(units.source_id)
+# arrow_table_v1:units
+```
+
+The source id, kind part included, is what the source's system tags and source-info tokens
+hold (`arrow_table_v1:units::row_0::rate`), and it is part of the source's identity, so the
+same rows read by another kind, or by another version of one kind, are another source. The
+record id names a row within its source and never holds the source id. A job names an input
+slot by the source's name (`job.bind(sources={"units": ...})`).
+
+A kind's version moves when a row read before a change of its implementation could read
+differently after it (other values, other Arrow types, another record id). Saved jobs keep
+each source's name and version apart; a job loaded where a kind's version moved rebuilds the
+source with the new version's id and warns (`SourceVersionWarning`).
 
 Two construction rules apply to every source and are the most common first errors:
 
@@ -312,9 +346,9 @@ Things to know about Spiral tables:
   timestamps without one) and Orcapod logical types such as `Path` (they come back as their
   storage type).
 - **Source identity.** A Spiral source is identified by where its table is, never by its
-  rows. The default `source_id` is `spiraldb_table:<project id>.<dataset>.<table>@<Spiral
+  rows. The default `source_id` is `spiraldb_table_v1:<project id>.<dataset>.<table>@<Spiral
   table id>`, for example
-  `spiraldb_table:edi-tutorial-v1-841226.default.session@table_Jo7J0lpkLcOM`. The table id is
+  `spiraldb_table_v1:edi-tutorial-v1-841226.default.session@table_Jo7J0lpkLcOM`. The table id is
   SpiralDB's own, so tables with the same name in different projects stay apart, and a table
   that is dropped and created again under the same name is a different source: nothing
   recorded for the old table is reused. A renamed table also gets a new `source_id`.
@@ -545,7 +579,8 @@ print(Condition.of(day=day, started=started, recorded=recorded))
 - **Recorded.** `RunSummary.conditions` maps the slot of each source read under a condition
   to its `Condition`, `RunSummary.limits` the slot of each source read with a `limit=` to the
   limit, and `RunSummary.restricted_source_ids` every such slot to its source id; the
-  summary shows them (`spikes (spikes): where unit_id=106, limit 3`). A saved job records them in
+  summary shows them in alphabetical order by slot name or direct source label
+  (`spikes (spikes): where unit_id=106, limit 3`). A saved job records them in
   the source's config, and a loaded job reads with them. A slot's new restriction need
   not match its previous one: a restricted source fits the slot of the unrestricted one, and
   `bind` does not compare the two. But a bind after which two slots would read one source
@@ -569,7 +604,8 @@ print(Condition.of(day=day, started=started, recorded=recorded))
 - **Under an aggregation.** A `GroupBy`, `Batch` or `MergeJoin` below a restricted source
   builds its groups from the rows the restriction lets through. That is allowed (each
   aggregated row lists its members), and a job run issues one
-  `RestrictedAggregationWarning` naming the source and the step.
+  `RestrictedAggregationWarning` listing each source and step in alphabetical order by slot
+  name or direct source label, then by step label.
 - **Stored rows stay.** A run over a restricted source deletes nothing: a job node shows the
   rows of its current run, and `node.as_source()` shows everything stored for it.
 
@@ -737,8 +773,9 @@ forms: its identity may change in a later release.
 and presents them as a new source. You get one by calling `as_source()` on the node, for
 example `job.nodes["bmi"].as_source()`. This is useful for chaining pipeline stages: run a
 job, then use one of its outputs as the input of a new pipeline. The `as_source()` of a node
-downstream of a join cannot yet be bound as a source of a new `PipelineJob`: its rows carry
-the system tags of every joined source, and binding refuses it with `SourceSpecMismatchError`
+downstream of a `Join` or `MergeJoin` of two sources cannot yet be bound as a source of a new
+`PipelineJob`: its schema is the node's, which declares a pair of system tags for each joined
+source, and binding accepts exactly one pair, so it is refused with `SourceSpecMismatchError`
 (support is planned, ITL-1127).
 
 **Using a tag value as an input to a computation.** Tags identify a row and data is what a
@@ -826,7 +863,7 @@ before. Things to know:
 print(with_start.upstreams)
 # ()
 print(with_start.source_id)
-# experiments_with_start
+# derived_v1:experiments_with_start
 ```
 
 Only a source can do this. An operator rearranges rows and columns, and every data value it
@@ -850,7 +887,7 @@ print(sorted(PROVISIONAL_SOURCES))
 
 | Source | What is still open |
 |---|---|
-| `PollingSource` | its default source id hashes the implementation's own identity, and its content hash leaves out the source id and the declared schema (ITL-1316) |
+| `PollingSource` | its default source id hashes the implementation's own identity, and its content hash leaves out the declared schema (ITL-1316); it holds the source id (ITL-1425) |
 | `DerivedSource`, both forms | the plain form (`node.as_source()`) hashes only its origin's content hash and accepts a `source_id` its identity does not use; the `tags_as_data` form changed just before this release (ITL-1317) |
 
 So everything built on a `DerivedSource`, whether it came from `node.as_source()` or from
@@ -963,8 +1000,8 @@ is reused rather than recomputed.
 Every source accepts `record_id_columns`, one or several key columns whose values name the
 row instead (`{"unit":"u1","time":1700000000}`), so the record ID follows the row. Both
 system tags must be stable: when you omit `source_id` an in-memory source is named after a
-hash of its table, as `<source kind>:<algorithm label>:<hex>` (for example
-`dict:arrow_v1:000002fe…`), which changes when any row changes or is reordered. Whenever row
+hash of its table, as `<kind part>:<algorithm label>:<hex>` (for example
+`dict_v1:arrow_v1:000002fe…`), which changes when any row changes or is reordered. Whenever row
 order or content can vary between runs, pass an explicit, stable `source_id` **and** name
 key columns that are unique per row; this avoids both the duplicate entries and the repeated
 deliveries.
@@ -1034,7 +1071,7 @@ table = source.as_table(columns={"source": True})
 print(table.column_names)
 # ['subject_id', 'age', 'weight', '_source_age', '_source_weight']
 print(table.column("_source_weight").to_pylist())
-# ['mice::row_0::weight']
+# ['dict_v1:mice::row_0::weight']
 
 # Show system tag columns
 tag_schema, data_schema = source.output_schema(columns={"system_tags": True})

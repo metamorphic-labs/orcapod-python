@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from contextlib import AbstractContextManager
 from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
 
@@ -38,6 +38,12 @@ class ArrowDatabaseProtocol(Protocol):
         """Bind a record to its result's token before enqueue can publish it."""
         ...
 
+    def guard_table_schema(
+        self, record_path: tuple[str, ...], check: Callable[[pa.Schema], None]
+    ) -> AbstractContextManager[None]:
+        """Keep the check with queued records and apply it to the schema at commit."""
+        ...
+
     def fail_pending_result(self, record_path: tuple[str, ...]) -> None:
         """Withdraw records dependent on a failed result attempt."""
         ...
@@ -57,6 +63,18 @@ class ArrowDatabaseProtocol(Protocol):
 
         Table-scoped stores commit only this table. In-memory stores may flush the
         shared queue while honoring every record's guard.
+        """
+        ...
+
+    def refresh_table(self, record_path: tuple[str, ...]) -> None:
+        """Read the table at ``record_path`` from the store's current version next time.
+
+        A function node calls it for each of its stored tables at the start of every
+        run and at every read of what it stored, so it sees rows another handle,
+        job or process committed since (ITL-1408). A database whose handle keeps
+        what it loaded of a table (``DeltaTableDatabase``) looks at the store again;
+        one that reads the store on every read (in memory, connector-backed, no-op)
+        has nothing to refresh and does nothing.
         """
         ...
 
@@ -162,6 +180,15 @@ class ArrowDatabaseProtocol(Protocol):
 
         Returns:
             ``True`` if a table exists at the given path, ``False`` otherwise.
+        """
+        ...
+
+    def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
+        """Read the current table schema, including for an empty table.
+
+        The path is relative to this database view. If the table has only queued
+        records, use their schema. Return ``None`` if the table has neither a
+        committed schema nor a queued batch. No rows are fetched.
         """
         ...
 

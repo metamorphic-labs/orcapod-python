@@ -1562,8 +1562,10 @@ PINNED_ROW_HASHES = {
         "arrow_v1:00000218de95b54e8987999a339fe1726957da66219b529c4699be853334833e71f60e",
     ),
 }
+# Moved once for ITL-1425 (source ids gained their kind part; the class name left the
+# source identity); the pipeline hash did not move.
 PINNED_STREAM_CONTENT_HASH = (
-    "semantic_v1:9c4e6769cdf7193685ebd44a2d223454f9537d532c4b1d2601c1fd93349c8cbf"
+    "semantic_v1:b4523fe14f07e020689bd56f149c34e8ad1184e47d67425d47880472c1336862"
 )
 PINNED_STREAM_PIPELINE_HASH = (
     "semantic_v1:6d8e7c5123d673755b71714a7159774d4c76bad30a6291dc8d3e6051a71dcd39"

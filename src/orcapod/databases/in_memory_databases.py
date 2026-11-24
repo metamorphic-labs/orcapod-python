@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping
 from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, cast
 
@@ -375,10 +375,25 @@ class InMemoryArrowDatabase:
             self._get_record_key(record_path), record_id, dependency
         )
 
+    def guard_table_schema(
+        self, record_path: tuple[str, ...], check: Callable[[pa.Schema], None]
+    ) -> AbstractContextManager[None]:
+        """Check the table schema when a batch queued here is promoted."""
+        return self._pending_commits.guard_schema(
+            self._get_record_key(record_path), check
+        )
+
     def flush(self) -> None:
         """Promote the ready batches in the shared queue."""
         for record_key in list(self._pending_batches):
             self._flush_by_key(record_key)
+
+    def refresh_table(self, record_path: tuple[str, ...]) -> None:
+        """Nothing to refresh: every view reads the one shared store (ITL-1408).
+
+        All views of an in-memory database share its tables, and two separate
+        in-memory databases never share data, so no handle can hold an older version.
+        """
 
     def flush_result_batch(
         self, record_path: tuple[str, ...], *, publish_records: bool
@@ -420,6 +435,9 @@ class InMemoryArrowDatabase:
     def _promote(self, record_key: str, pending: "pa.Table") -> None:
         """Append the ready rows and update the committed indexes."""
         committed = self._tables.get(record_key)
+        check = self._pending_commits.schema_check(record_key)
+        if check is not None:
+            check((pending if committed is None else committed).schema)
         if committed is None:
             self._tables[record_key] = pending.combine_chunks()
             return
@@ -547,6 +565,14 @@ class InMemoryArrowDatabase:
     # ------------------------------------------------------------------
     # Read helpers
     # ------------------------------------------------------------------
+
+    def get_table_schema(self, record_path: tuple[str, ...]) -> pa.Schema | None:
+        """Return the committed schema or the schema of a new, queued table."""
+        key = self._get_record_key(record_path)
+        table = self._tables.get(key)
+        if table is None:
+            table = self._pending_batches.get(key)
+        return None if table is None else table.schema
 
     def _combined_table(self, record_key: str) -> "pa.Table | None":
         """Return pending + committed data for a key, or None if nothing exists."""

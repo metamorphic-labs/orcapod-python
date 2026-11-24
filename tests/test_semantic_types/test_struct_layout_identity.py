@@ -52,7 +52,9 @@ def _tables() -> dict[str, pa.Table]:
 _FLAT_HASHES: dict[str, object] = {
     "stream_content": "e34f7e47f388b93db0403fe3e882ea4c2c7ce30cdcf7937eb928868e6aeaf93a",
     "stream_pipeline": "747ee6e5014ea0a4a4da0f444f4279aa2019e47e519885a40e04b96faff3d74e",
-    "source_content": "63c596013c190818f771def09771ab2dcf923fd7536be3812bfa7368a7a53e7b",
+    # Moved once for ITL-1425: the source id gained its kind part and the class name
+    # left the source identity. Nothing else here moved.
+    "source_content": "33bb61cc3649858f0c5597fb253b58fbbcfc794e8a3ab526c1d6d99aebbd88e9",
     "source_pipeline": "747ee6e5014ea0a4a4da0f444f4279aa2019e47e519885a40e04b96faff3d74e",
     "data_rows": [
         "000002a3b465dfc79ea3f32b39f55417f4c2372d7a3cc7ad63aef00aa9108b21b76b9c",
@@ -70,7 +72,7 @@ MAIN_HASHES: dict[str, dict[str, object]] = {
     "nested": {
         "stream_content": "413fa479269c7957fef99caca81336f0d94c0cb240160c831e4b7b719c0a3ff1",
         "stream_pipeline": "89426b05815ca2e3ec349814707b2651e9f7e1aa7157ce4775e8111323511f19",
-        "source_content": "ebf71afb9ea2a9525437d4c6a9a8355347dd0340c539c333786b2d6ae8ad1cb8",
+        "source_content": "9851cc289be4a79695c34e56eacc7076101f1398bea0a246fa4ff076d90f2a4d",
         "source_pipeline": "89426b05815ca2e3ec349814707b2651e9f7e1aa7157ce4775e8111323511f19",
         "data_rows": [
             "000002b734209953036fae7ee935c232f7949f4874dc22dca2af4ecfa2882e5ddaf457",
@@ -80,7 +82,7 @@ MAIN_HASHES: dict[str, dict[str, object]] = {
     "list_of_struct": {
         "stream_content": "145c0f2bdd30c6ded9e29067f7d6fa7649b18712ee75cb9a6c5eb6582500075e",
         "stream_pipeline": "9a7003a144808be6f9809ae7fe15411197bf88b634c14248ff5dee1bdce0134a",
-        "source_content": "19c822dd6e78260958ea025254e50d2090e5be7fc0156c401e201ea3f9051f42",
+        "source_content": "91ad02d3713495a846c48efcdb80b04dcc1796a9d3b68864d4665e0b9dd1e436",
         "source_pipeline": "9a7003a144808be6f9809ae7fe15411197bf88b634c14248ff5dee1bdce0134a",
         "data_rows": [
             "000002c262cfe3995378fe521abbc19b8cd14f10f626b5e5b1259a20f6d4277677fb87",

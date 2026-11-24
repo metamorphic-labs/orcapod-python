@@ -23,7 +23,7 @@ from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
-from orcapod.core.sources.source_ids import location_source_id
+from orcapod.core.sources.source_ids import location_source_name
 from orcapod.core.sources.reload import keep_nullable_columns, same_rows
 from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
@@ -80,7 +80,9 @@ class DBTableSource(RootSource):
     """
 
     SOURCE_KIND: ClassVar[str] = "db_table"
-    """Config type key and default source-id kind of this source (one vocabulary)."""
+    """Config type key and the kind in the source id's kind part (one vocabulary)."""
+    SOURCE_VERSION: ClassVar[int] = 1
+    """The version of this kind's implementation, in the kind part (ITL-1425)."""
     TABLE_IS_ROWS: ClassVar[bool] = True
     TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
@@ -99,6 +101,7 @@ class DBTableSource(RootSource):
         tag_only_columns: TagOnlyColumns = (),
         _query: str | None = None,
     ) -> None:
+        address: str | None = None
         if source_id is None:
             address = self._table_address(connector, table_name)
             if address is None:
@@ -111,13 +114,17 @@ class DBTableSource(RootSource):
                     "source of your database (SQLiteTableSource, "
                     "PostgreSQLTableSource), whose default id holds the address."
                 )
-            source_id = location_source_id(self.SOURCE_KIND, address)
         super().__init__(
             source_id=source_id,
             label=label,
             data_context=data_context,
             config=config,
         )
+        if self._source_name is None:
+            assert address is not None
+            # A default name is where the data lives, not a name the user gave: it is
+            # not checked for a start shaped like a source id (ITL-1425).
+            self._source_name = location_source_name(address)
 
         self._connector = connector
         self._table_name = table_name
@@ -176,8 +183,8 @@ class DBTableSource(RootSource):
         self._stream = result.stream
         self._tag_columns = result.tag_columns
         self._system_tag_columns = result.system_tag_columns
-        if self._source_id is None:
-            self._source_id = result.source_id
+        if self._source_name is None:
+            self._source_name = result.source_name
 
     def _table_address(
         self, connector: DBConnectorProtocol, table_name: str
@@ -248,7 +255,8 @@ class DBTableSource(RootSource):
             table,
             tag_columns=self._tag_columns,
             data_tags=source_data_tags(self._tag_columns, self._tag_only_columns),
-            source_id=self._source_id,
+            source_name=self._source_name,
+            kind_part=self.kind_part(),
             record_id_columns=self._key_columns,
             system_tag_columns=self._system_tag_columns,
         )
@@ -308,7 +316,7 @@ class DBTableSource(RootSource):
             "record_id_columns": None
             if self._record_id_columns is None
             else list(self._record_id_columns),
-            "source_id": self.source_id,
+            **self._source_id_config(),
             **self._identity_config(),
         }
 

@@ -101,6 +101,35 @@ class Batch(UnaryOperator):
             sizes.append(rest)
         return sizes
 
+    fold_label: ClassVar[str] = BATCH_FOLD_LABEL
+    """The label of this operator's folds of the system tags."""
+
+    def fold_members(
+        self, table: pa.Table, tag_columns: Sequence[str]
+    ) -> list[list[int]]:
+        """Return the members of each batch of ``table``, as row numbers in member order.
+
+        Reads only the given table, with the rule batching uses: consecutive rows,
+        ``batch_size`` each (``_batch_sizes``). The caller checks a batch by folding
+        its members' system tags (``fold_system_tag_values`` with ``fold_label``),
+        which must give the batch's folded values: the rows must be in the order the
+        batch read them.
+
+        Args:
+            table: The input rows, in the order the batch read them.
+            tag_columns: The input's user tag columns (unused: a batch has no key).
+
+        Returns:
+            One list of row numbers per batch.
+        """
+        del tag_columns  # a batch is decided by position alone
+        out: list[list[int]] = []
+        start = 0
+        for size in self._batch_sizes(table.num_rows):
+            out.append(list(range(start, start + size)))
+            start += size
+        return out
+
     def unary_static_process(self, stream: StreamProtocol) -> StreamProtocol:
         """Group rows into fixed-size batches, list-wrapping their values.
 

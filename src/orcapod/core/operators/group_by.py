@@ -500,6 +500,99 @@ class GroupBy(UnaryOperator):
         # names a row within its source only (ITL-1154), so the source-id columns
         # come last: two members with equal record ids from different sources still
         # have one order.
+        groups, order, offsets, bit_names = self._member_layout(
+            table, non_key_tags, system_tag_columns
+        )
+
+        def emitted(c: str) -> pa.Array[Any]:
+            """The scalar value of key ``c`` per group: the representative member's."""
+            # Every member of a group holds the same key value except a float's
+            # bits, so a non-float key is the first member's.
+            rows = groups[bit_names.get(c, "first")].to_arrow().cast(pa.int64())
+            return table.column(c).take(rows).combine_chunks()
+
+        def folded(c: str) -> pa.Array[Any]:
+            """The fold of system-tag column ``c`` per group, over the members in order."""
+            # The members' text values in member order, folded per group; text loses
+            # nothing in Python.
+            values = cast(list[Any], table.column(c).take(order).to_pylist())
+            bounds = cast(list[int], offsets.to_pylist())
+            return pa.array(
+                [
+                    arrow_utils.fold_system_tag_values(
+                        values[start:end], label=GROUP_BY_FOLD_LABEL
+                    )
+                    for start, end in zip(bounds[:-1], bounds[1:])
+                ],
+                table.schema.field(c).type,
+            )
+
+        # Every stream has a data context; StreamProtocol does not declare it.
+        type_converter = stream.data_context.type_converter  # pyright: ignore[reportAttributeAccessIssue]
+        fields: list[pa.Field[Any]] = []
+        arrays: list[pa.Array[Any]] = []
+        # The input's columns in its order, without the dropped tags: a key and a
+        # folded column keep their field, a member column becomes a list.
+        for field in table.drop_columns(list(dropped_columns)).schema:
+            c = field.name
+            if c in member_columns:
+                list_type = arrow_utils.aggregated_list_type(
+                    field.type, type_converter, column=c
+                )
+                fields.append(pa.field(c, list_type, nullable=False))
+                arrays.append(
+                    arrow_utils.aggregated_list_array(
+                        table.column(c).take(order), offsets, list_type
+                    )
+                )
+            else:
+                fields.append(field)
+                arrays.append(emitted(c) if c in self.by else folded(c))
+        grouped_table = pa.Table.from_arrays(arrays, schema=pa.schema(fields))
+
+        n_char = self.orcapod_config.hashing.system_tag_n_char
+        grouped_table = arrow_utils.append_to_system_tags(
+            grouped_table, stream.pipeline_hash().to_hex(n_char)
+        )
+
+        # The keys, in the input's tag order rather than the order of `by`.  A
+        # data-tag key stays a data-tag: scalar in both roles (specification
+        # section 8.1); a data-tag non-key is now a plain (list) data column.
+        # The keys lead the table, as in a table built from rows (ITL-1131): a
+        # data-tag non-key declared before them keeps its data column, which
+        # must not come first.
+        keys = [c for c in tag_columns if c in self.by]
+        grouped_table = grouped_table.select(
+            [*keys, *(c for c in grouped_table.column_names if c not in keys)]
+        )
+        return ArrowTableStream(
+            grouped_table,
+            tag_columns=keys,
+            data_context=stream.data_context,
+            data_tags=[c for c in data_tags if c in self.by],
+        )
+
+    def _member_layout(
+        self,
+        table: pa.Table,
+        non_key_tags: Sequence[str],
+        system_tag_columns: Sequence[str],
+    ) -> tuple[pl.DataFrame, pa.Array[Any], pa.Int64Array, dict[str, str]]:
+        """Decide the groups of ``table`` and the order of each group's members.
+
+        The one place the member order is decided: the grouping itself and
+        ``fold_members`` both use it.
+
+        Args:
+            table: The input table, with its system-tag columns.
+            non_key_tags: The input's user tags that are not keys.
+            system_tag_columns: The input's system-tag columns.
+
+        Returns:
+            The groups (Polars frame: ``size``, ``first`` and the float key bit
+            columns), the input row numbers in member order, group by group, the
+            offsets of each group in that order, and the bit column of each float key.
+        """
         named = self.member_order or ()
         sort_columns = named + tuple(sorted(c for c in non_key_tags if c not in named))
         for prefix in (
@@ -574,72 +667,38 @@ class GroupBy(UnaryOperator):
                 pa.int64(),
             ),
         )
+        return groups, order, offsets, bit_names
 
-        def emitted(c: str) -> pa.Array[Any]:
-            # Every member of a group holds the same key value except a float's
-            # bits, so a non-float key is the first member's.
-            rows = groups[bit_names.get(c, "first")].to_arrow().cast(pa.int64())
-            return table.column(c).take(rows).combine_chunks()
+    def fold_members(
+        self, table: pa.Table, tag_columns: Sequence[str]
+    ) -> list[list[int]]:
+        """Return the members of each group of ``table``, as row numbers in member order.
 
-        def folded(c: str) -> pa.Array[Any]:
-            # The members' text values in member order, folded per group; text loses
-            # nothing in Python.
-            values = cast(list[Any], table.column(c).take(order).to_pylist())
-            bounds = cast(list[int], offsets.to_pylist())
-            return pa.array(
-                [
-                    arrow_utils.fold_system_tag_values(
-                        values[start:end], label=GROUP_BY_FOLD_LABEL
-                    )
-                    for start, end in zip(bounds[:-1], bounds[1:])
-                ],
-                table.schema.field(c).type,
-            )
+        Reads only the given table, with the rule the grouping uses: the row numbers of
+        the members of each output row, groups in output order. The caller checks a
+        group by folding its members' system tags (``fold_system_tag_values`` with
+        ``fold_label``), which must give the group's folded values.
 
-        # Every stream has a data context; StreamProtocol does not declare it.
-        type_converter = stream.data_context.type_converter  # pyright: ignore[reportAttributeAccessIssue]
-        fields: list[pa.Field[Any]] = []
-        arrays: list[pa.Array[Any]] = []
-        # The input's columns in its order, without the dropped tags: a key and a
-        # folded column keep their field, a member column becomes a list.
-        for field in table.drop_columns(list(dropped_columns)).schema:
-            c = field.name
-            if c in member_columns:
-                list_type = arrow_utils.aggregated_list_type(
-                    field.type, type_converter, column=c
-                )
-                fields.append(pa.field(c, list_type, nullable=False))
-                arrays.append(
-                    arrow_utils.aggregated_list_array(
-                        table.column(c).take(order), offsets, list_type
-                    )
-                )
-            else:
-                fields.append(field)
-                arrays.append(emitted(c) if c in self.by else folded(c))
-        grouped_table = pa.Table.from_arrays(arrays, schema=pa.schema(fields))
+        Args:
+            table: The input rows, with their system-tag columns.
+            tag_columns: The input's user tag columns.
 
-        n_char = self.orcapod_config.hashing.system_tag_n_char
-        grouped_table = arrow_utils.append_to_system_tags(
-            grouped_table, stream.pipeline_hash().to_hex(n_char)
+        Returns:
+            One list of row numbers per group.
+        """
+        system_tag_columns = tuple(
+            c for c in table.column_names if c.startswith(constants.SYSTEM_TAG_PREFIX)
         )
+        non_key_tags = tuple(c for c in tag_columns if c not in self.by)
+        _, order, offsets, _ = self._member_layout(
+            table, non_key_tags, system_tag_columns
+        )
+        rows = cast(list[int], order.to_pylist())
+        bounds = cast(list[int], offsets.to_pylist())
+        return [rows[start:end] for start, end in zip(bounds[:-1], bounds[1:])]
 
-        # The keys, in the input's tag order rather than the order of `by`.  A
-        # data-tag key stays a data-tag: scalar in both roles (specification
-        # section 8.1); a data-tag non-key is now a plain (list) data column.
-        # The keys lead the table, as in a table built from rows (ITL-1131): a
-        # data-tag non-key declared before them keeps its data column, which
-        # must not come first.
-        keys = [c for c in tag_columns if c in self.by]
-        grouped_table = grouped_table.select(
-            [*keys, *(c for c in grouped_table.column_names if c not in keys)]
-        )
-        return ArrowTableStream(
-            grouped_table,
-            tag_columns=keys,
-            data_context=stream.data_context,
-            data_tags=[c for c in data_tags if c in self.by],
-        )
+    fold_label: ClassVar[str] = GROUP_BY_FOLD_LABEL
+    """The label of this operator's folds of the system tags."""
 
     # ------------------------------------------------------------------
     # Schema prediction

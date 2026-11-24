@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from typing_extensions import override
 
+from orcapod.types.provenance import Highlight
 from orcapod.utils.in_development import warn_in_development
 
 if TYPE_CHECKING:
@@ -82,6 +83,9 @@ class _Node:
     data_schema: tuple[tuple[str, str], ...]
     status: str
     facts: tuple[tuple[str, str], ...]
+    highlighted: bool = False
+    mark: str = ""
+    asked: str = ""
 
     @property
     def kind_line(self) -> str:
@@ -97,6 +101,7 @@ class _Edge:
     source: int
     target: int
     folded: tuple[str, ...] = ()
+    highlighted: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +280,11 @@ def _is_job(pipeline: _Drawable) -> bool:
 
 
 def _build_model(
-    pipeline: _Drawable, *, is_job: bool, collapse: bool
+    pipeline: _Drawable,
+    *,
+    is_job: bool,
+    collapse: bool,
+    highlight: Highlight | None = None,
 ) -> tuple[list[_Node], list[_Edge]]:
     """Read a compiled pipeline or job into the model's nodes and edges.
 
@@ -285,6 +294,8 @@ def _build_model(
             job's ``last_run`` gives row counts.
         collapse: Whether to fold the column-choosing, renaming and join operators that
             feed exactly one node into the edges they lie on.
+        highlight: The nodes and edges to emphasize, by label. A folded edge is
+            emphasized when its ends and every step folded into it are.
 
     Returns:
         The nodes in topological order (ties by label) and the edges, sorted.
@@ -313,6 +324,18 @@ def _build_model(
             for label, node in by_label.items()
             if _collapsible(node) and len(succs[label]) == 1
         }
+        if highlight is not None:
+            # The node the question was asked at is always shown, and so is a
+            # highlighted node no highlighted edge leaves (where a path ends, such as
+            # the step that removed a record): folded, its emphasis would be lost.
+            # The edge decides, not the successor: a highlighted successor reached by
+            # an edge that is not highlighted does not carry the path on.
+            folded.discard(highlight.asked)
+            folded -= {
+                label
+                for label in highlight.nodes
+                if not any((label, s) in highlight.edges for s in succs.get(label, ()))
+            }
 
     shown = [
         label for label in _topological_labels(preds, succs) if label not in folded
@@ -370,12 +393,47 @@ def _build_model(
                 detail=_node_detail(node),
                 tag_schema=_schema_pairs(tag_schema),
                 data_schema=_schema_pairs(data_schema),
-                status=statuses.get(label, ""),
+                # A highlight shows the provenance question only: no run status.
+                status="" if highlight is not None else statuses.get(label, ""),
                 facts=facts,
+                highlighted=highlight is not None and label in highlight.nodes,
+                mark="" if highlight is None else highlight.mark(label),
+                asked=highlight.asked_text or "asked here"
+                if highlight is not None and highlight.asked == label
+                else "",
             )
         )
+
+    def lit(source: int, target: int, via: tuple[str, ...]) -> bool:
+        """Whether a displayed edge is emphasized: some highlighted path leads from
+        its start to its end through the steps folded into it (several folded paths
+        merge into one displayed edge, so their labels are not one chain)."""
+        if highlight is None:
+            return False
+        start, end = shown[source], shown[target]
+        if not via:
+            return (start, end) in highlight.edges
+        inner = set(via)
+        frontier, seen = [start], {start}
+        while frontier:
+            current = frontier.pop()
+            for upstream, downstream in highlight.edges:
+                if upstream != current:
+                    continue
+                if downstream == end:
+                    return True
+                if downstream in inner and downstream not in seen:
+                    seen.add(downstream)
+                    frontier.append(downstream)
+        return False
+
     edge_list = [
-        _Edge(source=source, target=target, folded=via)
+        _Edge(
+            source=source,
+            target=target,
+            folded=via,
+            highlighted=lit(source, target, via),
+        )
         for (source, target), via in sorted(edges.items())
     ]
     return nodes, edge_list
@@ -426,7 +484,7 @@ class _Layout:
 def _text_room(node: _Node) -> float:
     """The width of a node's text: its label or the widest part of its kind line (the
     kind, the detail, the status), within the node width limits (ITL-1232)."""
-    parts = node.kind_line.split(" · ")
+    parts = [*node.kind_line.split(" · "), node.mark, node.asked]
     text = max(
         len(node.label) * _CHAR_W, max(len(part) for part in parts) * _SMALL_CHAR_W
     )
@@ -448,6 +506,12 @@ def _kind_lines(node: _Node) -> tuple[str, ...]:
             lines[-1] = joined
         else:
             lines.append(part)
+    if node.mark:
+        # A highlight's mark (a trace's computed / reused) on a line of its own.
+        lines.append(node.mark)
+    if node.asked:
+        # The node the question was asked at ("traced from here"), on its own line.
+        lines.append(node.asked)
     return tuple(lines)
 
 
@@ -672,6 +736,19 @@ def _layout(
 
 # A solid stroke and a 14 % fill of each kind's colour read on light and dark notebook
 # themes alike; text and edges use ``currentColor``, the notebook's own text colour.
+_HIGHLIGHT_COLOUR = "currentColor"
+"""The colour of a highlight's nodes and edges (``diagram(highlight=...)``): the text
+colour, which no kind or status uses (red and amber mean failed and stale), dark on a
+light page and light on a dark one."""
+_CAPTION_H = 24.0
+"""The height of the caption line a highlight with a note adds above the picture."""
+
+
+def _layout_edges(layout: _Layout) -> list[_Edge]:
+    """The edges a layout draws."""
+    return [edge for edge, _ in layout.edges]
+
+
 _KIND_COLOUR: dict[str, str] = {
     "source": "#2e9e5b",
     "operator": "#d08a16",
@@ -773,6 +850,7 @@ def _svg(
     layout: _Layout,
     across: bool,
     standalone: bool,
+    caption: str = "",
 ) -> str:
     """The SVG picture; complete without any style sheet or script.
 
@@ -786,11 +864,13 @@ def _svg(
             text colour, since an image does not take the page's colours. Otherwise
             the text and edges take the page's text colour and the background is
             transparent.
+        caption: A line drawn above the picture (a highlight's note), or ``""``.
 
     Returns:
         The ``<svg>`` element.
     """
-    width, height = _num(layout.width), _num(layout.height)
+    top = _CAPTION_H if caption else 0.0
+    width, height = _num(layout.width), _num(layout.height + top)
     colour = ' color="#1f1f1f"' if standalone else ' style="max-width:100%;height:auto"'
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" class="op-dag-svg" role="group" '
@@ -804,20 +884,39 @@ def _svg(
             f'<rect class="op-dag-bg" width="{width}" height="{height}" rx="6" '
             'fill="#ffffff"/>'
         )
+    if caption:
+        parts.append(
+            f'<text class="op-dag-caption" x="{_num(_MARGIN)}" y="{_num(top - 6)}" '
+            f'font-size="{_FONT_PX}" font-weight="600" fill="currentColor">'
+            f"{_escape(_clip(caption, layout.width - 2 * _MARGIN, _CHAR_W))}</text>"
+            f'<g transform="translate(0,{_num(top)})">'
+        )
+    # A highlight (``diagram(highlight=...)``) draws its edges in its colour and dims
+    # the other edges and the nodes outside it.
+    lit = any(node.highlighted for node in nodes) or any(
+        edge.highlighted for edge in _layout_edges(layout)
+    )
     parts.append(
         '<g class="op-dag-edges" fill="none" stroke="currentColor" '
-        'stroke-opacity="0.5" stroke-width="1.4">'
+        f'stroke-opacity="{"0.3" if lit else "0.5"}" stroke-width="1.4">'
     )
     for edge, points in layout.edges:
         tip = f"{nodes[edge.source].label} → {nodes[edge.target].label}"
         if edge.folded:
             tip += f" (through {', '.join(edge.folded)})"
         dash = ' stroke-dasharray="5 3"' if edge.folded else ""
+        accent = (
+            f' class="op-dag-highlight" stroke="{_HIGHLIGHT_COLOUR}" '
+            'stroke-opacity="1" stroke-width="2.6"'
+            if edge.highlighted
+            else ""
+        )
+        head_fill = _HIGHLIGHT_COLOUR if edge.highlighted else "currentColor"
         parts.append(
-            f'<g data-source="{edge.source}" data-target="{edge.target}">'
+            f'<g data-source="{edge.source}" data-target="{edge.target}"{accent}>'
             f"<title>{_escape(tip)}</title>"
             f'<path d="{_edge_path(points, across)}"{dash}/>'
-            f'<path d="{_arrow_head(points[-1], across)}" fill="currentColor" '
+            f'<path d="{_arrow_head(points[-1], across)}" fill="{head_fill}" '
             'stroke="none"/></g>'
         )
     parts.append('</g><g class="op-dag-nodes">')
@@ -834,15 +933,32 @@ def _svg(
         stroke_width = "1.4" if node.kind == "operator" else "2.2"
         dash = ' stroke-dasharray="4 3"' if node.status in _DASHED_STATUSES else ""
         label = f"{node.label}, {node.kind_line}"
+        emphasis = ""
+        stroke = colour
+        if node.highlighted:
+            # The kind's fill is kept; the outline is the highlight's.
+            emphasis = " op-dag-highlight"
+            stroke_width = "3.2"
+            stroke = _HIGHLIGHT_COLOUR
+        elif lit and not node.asked:
+            emphasis = '" opacity="0.4'
         parts.append(
-            f'<g class="op-dag-node" data-index="{node.index}" tabindex="0" '
+            f'<g class="op-dag-node{emphasis}" data-index="{node.index}" tabindex="0" '
             f'role="button" aria-label="{_escape(label)}" '
             f'transform="translate({_num(x)},{_num(y)})">'
             f"<title>{_escape(_tooltip(node, inputs.get(node.index, ())))}</title>"
             f'<rect width="{_num(w)}" height="{_num(h)}" rx="{_num(radius)}" '
-            f'fill="{colour}" fill-opacity="0.14" stroke="{colour}" '
+            f'fill="{colour}" fill-opacity="0.14" stroke="{stroke}" '
             f'stroke-width="{stroke_width}"{dash}/>'
         )
+        if node.asked:
+            # The node the question was asked at: a second outline around it, in the
+            # text colour (readable on a light and a dark page).
+            parts.append(
+                f'<rect class="op-dag-asked" x="-5" y="-5" width="{_num(w + 10)}" '
+                f'height="{_num(h + 10)}" rx="{_num(radius + 5)}" fill="none" '
+                'stroke="currentColor" stroke-width="1.6"/>'
+            )
         if node.kind in ("side_effect", "side_effect_function"):
             parts.append(
                 f'<rect x="3" y="3" width="{_num(w - 6)}" height="{_num(h - 6)}" '
@@ -856,10 +972,19 @@ def _svg(
             )
         kind_lines = _kind_lines(node)
         for line_number, line in enumerate(kind_lines):
+            # A highlight's mark and the asked-at line (the last lines) are drawn in
+            # bold at full strength.
+            emphasized = bool(node.mark) + bool(node.asked)
+            is_mark = line_number >= len(kind_lines) - emphasized
+            weight = (
+                ' font-weight="600" class="op-dag-mark"'
+                if is_mark
+                else ' fill-opacity="0.75"'
+            )
             parts.append(
                 f'<text x="{_num(w / 2)}" y="{_num(16 + _LINE_H * line_number)}" '
-                f'text-anchor="middle" font-size="{_SMALL_PX}" fill="currentColor" '
-                f'fill-opacity="0.75">{_escape(_clip(line, w, _SMALL_CHAR_W))}</text>'
+                f'text-anchor="middle" font-size="{_SMALL_PX}" fill="currentColor"'
+                f"{weight}>{_escape(_clip(line, w, _SMALL_CHAR_W))}</text>"
             )
         label_y = 34 + _LINE_H * (len(kind_lines) - 1)
         parts.append(
@@ -867,7 +992,7 @@ def _svg(
             f'font-size="{_FONT_PX}" font-weight="600" fill="currentColor">'
             f"{_escape(_clip(node.label, w, _CHAR_W))}</text></g>"
         )
-    parts.append("</g></svg>")
+    parts.append("</g></g></svg>" if caption else "</g></svg>")
     return "".join(parts)
 
 
@@ -1026,10 +1151,16 @@ class PipelineDiagram:
             details of the node it leads to.
         max_nodes: Above this many nodes (after folding), the notebook shows the
             plain-text listing instead of the picture.
+        highlight: Nodes and edges to emphasize, by label, with a note
+            (``Trace.highlight()``, ``Absence.highlight()``): outlined in the text
+            colour (no status uses it), the other nodes and edges dimmed, the note as
+            a caption above the picture, and a node's mark (a trace's ``computed`` /
+            ``reused``) on a line of its own; the listing marks them with ``*`` and
+            ``[mark]``.
 
     Raises:
-        ValueError: If ``direction`` is not ``"LR"`` or ``"TB"``, or ``max_nodes`` is not
-            positive.
+        ValueError: If ``direction`` is not ``"LR"`` or ``"TB"``, ``max_nodes`` is not
+            positive, or ``highlight`` names a node the pipeline does not have.
         RuntimeError: If the pipeline has not been compiled.
     """
 
@@ -1040,6 +1171,7 @@ class PipelineDiagram:
         direction: Direction = "LR",
         collapse: bool = False,
         max_nodes: int = 400,
+        highlight: Highlight | None = None,
     ) -> None:
         if direction not in ("LR", "TB"):
             raise ValueError(f"direction must be 'LR' or 'TB', not {direction!r}")
@@ -1051,19 +1183,38 @@ class PipelineDiagram:
             "PipelineDiagram and the notebook display of a pipeline or job) is in "
             "development: its interface and appearance may change in any release.",
         )
+        if highlight is not None:
+            labels = {node.label for node in pipeline.dag.nodes()}
+            unknown = sorted(
+                {
+                    *highlight.nodes,
+                    *(end for edge in highlight.edges for end in edge),
+                    *(label for label, _ in highlight.marks),
+                    *((highlight.asked,) if highlight.asked else ()),
+                }
+                - labels
+            )
+            if unknown:
+                raise ValueError(
+                    f"highlight names {unknown[0]!r}, which is not a node of this "
+                    "pipeline"
+                )
+        self._highlight: Highlight | None = highlight
         is_job = _is_job(pipeline)
         self._kind: str = "job" if is_job else "pipeline"
         self._name: str = ".".join(pipeline.name)
         self._direction: Direction = direction
         self._max_nodes: int = max_nodes
         self._collapse: bool = collapse
-        nodes, edges = _build_model(pipeline, is_job=is_job, collapse=collapse)
+        nodes, edges = _build_model(
+            pipeline, is_job=is_job, collapse=collapse, highlight=highlight
+        )
         self._nodes: list[_Node] = nodes
         self._edges: list[_Edge] = edges
         # The other layout, for the notebook's collapse checkbox: kept only when folding
         # changes something. Built from the same read of the graph, computing nothing.
         other_nodes, other_edges = _build_model(
-            pipeline, is_job=is_job, collapse=not collapse
+            pipeline, is_job=is_job, collapse=not collapse, highlight=highlight
         )
         self._other: tuple[list[_Node], list[_Edge]] | None = (
             None if len(other_nodes) == len(nodes) else (other_nodes, other_edges)
@@ -1094,12 +1245,28 @@ class PipelineDiagram:
             ``status`` (``""`` for a pipeline), ``tag_schema`` and ``data_schema``
             (lists of ``[column, type text]``) and ``facts`` (lists of ``[name, text]``);
             each edge has ``source`` and ``target`` (node indices) and ``folded``
-            (the labels of the steps folded into it).
+            (the labels of the steps folded into it). With a highlight, every node and
+            edge also has ``highlighted``, and the model has the highlight's ``note``.
         """
         return self._model(self._nodes, self._edges)
 
     def _model(self, nodes: list[_Node], edges: list[_Edge]) -> dict[str, Any]:
         """The model of one layout: the given nodes and edges."""
+        model = self._plain_model(nodes, edges)
+        if self._highlight is not None:
+            model["note"] = self._highlight.note
+            for entry, node in zip(model["nodes"], nodes):
+                entry["highlighted"] = node.highlighted
+                if node.mark:
+                    entry["mark"] = node.mark
+                if node.asked:
+                    entry["asked"] = node.asked
+            for entry, edge in zip(model["edges"], edges):
+                entry["highlighted"] = edge.highlighted
+        return model
+
+    def _plain_model(self, nodes: list[_Node], edges: list[_Edge]) -> dict[str, Any]:
+        """The model of one layout without a highlight."""
         return {
             "kind": self._kind,
             "name": self._name,
@@ -1131,12 +1298,28 @@ class PipelineDiagram:
 
         Returns:
             A title line, then ``  <label> (<kind> · <detail> · <status>) <- <inputs>``
-            per node, in topological order with ties broken by label.
+            per node, in topological order with ties broken by label. With a
+            highlight, a line with its note follows the title, no status is shown, each
+            highlighted node's line starts with ``*`` and the node the question was
+            asked at with ``>`` (and ends with ``[traced from here]`` or
+            ``[asked here]``); a node's mark follows in brackets.
         """
         inputs = self._inputs()
         lines = [f"{self.title}: {len(self._nodes)} nodes"]
+        if self._highlight is not None and self._highlight.note:
+            lines.append(f"  highlight (*): {self._highlight.note}")
         for node in self._nodes:
-            line = f"  {node.label} ({node.kind_line})"
+            if self._highlight is None:
+                mark = "  "
+            else:
+                mark = (">" if node.asked else " ") + (
+                    "* " if node.highlighted else "  "
+                )
+            line = f"{mark}{node.label} ({node.kind_line})"
+            if node.mark:
+                line += f" [{node.mark}]"
+            if node.asked:
+                line += f" [{node.asked}]"
             if node.index in inputs:
                 line += " <- " + ", ".join(inputs[node.index])
             lines.append(line)
@@ -1165,7 +1348,27 @@ class PipelineDiagram:
     ) -> str:
         layout = _layout(nodes, edges, direction)
         inputs = _inputs(nodes, edges)
-        return _svg(self.title, nodes, inputs, layout, direction == "LR", standalone)
+        return _svg(
+            self._picture_title(),
+            nodes,
+            inputs,
+            layout,
+            direction == "LR",
+            standalone,
+            self._caption(),
+        )
+
+    def _caption(self) -> str:
+        """The line drawn above the picture: what the highlight shows, or ``""``."""
+        if self._highlight is not None and self._highlight.note:
+            return f"highlighted: {self._highlight.note}"
+        return ""
+
+    def _picture_title(self) -> str:
+        """The picture's title: the diagram's, with the highlight's note."""
+        if self._highlight is not None and self._highlight.note:
+            return f"{self.title}: {self._highlight.note}"
+        return self.title
 
     def _views(self) -> dict[str, Any] | None:
         """The other layouts, for the view's direction and collapse controls.
@@ -1223,18 +1426,20 @@ class PipelineDiagram:
         """
         layout = _layout(self._nodes, self._edges, self._direction)
         svg = _svg(
-            self.title,
+            self._picture_title(),
             self._nodes,
             self._inputs(),
             layout,
             self._direction == "LR",
             standalone=True,
+            caption=self._caption(),
         )
         encoded = base64.b64encode(svg.encode("utf-8")).decode("ascii")
         alt = f"Diagram of {self.title}: {len(self._nodes)} nodes"
         return (
             f'<img class="op-dag-picture" alt="{_escape(alt)}" '
-            f'width="{_num(layout.width)}" height="{_num(layout.height)}" '
+            f'width="{_num(layout.width)}" '
+            f'height="{_num(layout.height + (_CAPTION_H if self._caption() else 0))}" '
             f'style="width:100%;max-width:{_num(layout.width * _MAX_SCALE)}px;'
             'height:auto" '
             f'src="data:image/svg+xml;base64,{encoded}">'
