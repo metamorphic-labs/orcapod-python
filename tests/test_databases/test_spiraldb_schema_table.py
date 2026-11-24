@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import base64
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pytest
@@ -108,7 +108,7 @@ def test_the_marker() -> None:
     ],
 )
 def test_the_digest_covers_every_part_of_a_row(change: dict[str, Any]) -> None:
-    values = {
+    values: dict[str, Any] = {
         "table_id": _ROW.table_id,
         "table_name": _ROW.table_name,
         "key_columns": _ROW.key_columns,
@@ -157,7 +157,7 @@ def test_the_digest_does_not_depend_on_registered_extension_types() -> None:
     stored = row.stored()
     marker = st.marker_values(_SCOPE, [row])
     before = st.SchemaRow.from_stored(stored)
-    pa.register_extension_type(Measured())
+    pa.register_extension_type(cast(Any, Measured()))
     try:
         after = st.SchemaRow.from_stored(stored)
         assert before == after == row

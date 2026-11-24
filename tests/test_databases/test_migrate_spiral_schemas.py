@@ -12,7 +12,7 @@ import json
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pytest
@@ -98,7 +98,8 @@ def args(
             handle = fake.FakeClient().keyed_table("p", dataset, name)
             found = handle.schema()
             schema = pa.schema(
-                [_WRITTEN.field(f.name) for f in found], metadata=_WRITTEN.metadata
+                [_WRITTEN.field(f.name) for f in found],
+                metadata=cast(Any, _WRITTEN.metadata),
             )
             row = st.SchemaRow(
                 handle.resource_id,

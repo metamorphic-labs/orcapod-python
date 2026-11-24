@@ -26,6 +26,7 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from orcapod.databases.spiraldb_schema_table import SCHEMA_TABLE
 
@@ -148,7 +149,8 @@ def _stored_type(t: pa.DataType, *, in_list: bool = False) -> pa.DataType:
         return pa.struct(fields if in_list else _order(fields))
     if pa.types.is_map(t):
         item = t.item_field
-        return pa.map_(  # pyright: ignore[reportCallIssue]  # the stubs list only types
+        make: Any = pa.map_  # pyarrow takes an item field; its stubs list only types
+        return make(
             _stored_type(t.key_type, in_list=True),
             pa.field("value", _stored_type(item.type, in_list=True), item.nullable),
         )
@@ -213,7 +215,7 @@ def _stored_array(array: pa.Array[Any], target: pa.DataType) -> pa.Array[Any]:
     if pa.types.is_dictionary(a.type):
         a = a.dictionary_decode()
     if pa.types.is_run_end_encoded(a.type):
-        a = pa.compute.run_end_decode(a)
+        a = cast(Any, pc).run_end_decode(a)
     if a.type == target:
         return a
     t: Any = target
@@ -226,7 +228,7 @@ def _stored_array(array: pa.Array[Any], target: pa.DataType) -> pa.Array[Any]:
             children, fields=list(t), mask=a.is_null() if a.null_count else None
         )
     if pa.types.is_map(t):
-        return pa.MapArray.from_arrays(
+        return cast(Any, pa.MapArray).from_arrays(
             a.offsets,
             _stored_array(a.keys, t.key_type),
             _stored_array(a.items, t.item_type),
@@ -247,7 +249,7 @@ def _stored_array(array: pa.Array[Any], target: pa.DataType) -> pa.Array[Any]:
         values = _stored_array(
             a.values.slice(a.offset * t.list_size, len(a) * t.list_size), t.value_type
         )
-        return pa.FixedSizeListArray.from_arrays(
+        return cast(Any, pa.FixedSizeListArray).from_arrays(
             values, type=t, mask=a.is_null() if a.null_count else None
         )
     return a.cast(target)
@@ -363,9 +365,8 @@ class _Store:
         existing = [v for v in self.versions(table_id) if v <= version]
         if not existing:
             return self.keys(table_id).empty_table()
-        with pa.ipc.open_file(
-            self.root / table_id / f"v{existing[-1]}.arrow"
-        ) as reader:
+        path = self.root / table_id / f"v{existing[-1]}.arrow"
+        with pa.ipc.open_file(pa.memory_map(str(path))) as reader:
             return reader.read_all()
 
     def write(self, table_id: str, rows: pa.Table) -> int:

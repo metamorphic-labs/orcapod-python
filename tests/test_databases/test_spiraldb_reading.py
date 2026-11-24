@@ -15,7 +15,7 @@ import threading
 import warnings
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import pyarrow as pa
@@ -439,7 +439,7 @@ def test_the_token_is_never_sent_on_a_redirect() -> None:
             self.send_header("Location", "/elsewhere")
             self.end_headers()
 
-        def log_message(self, *args: Any) -> None:
+        def log_message(self, format: str, *args: Any) -> None:
             """Print nothing."""
 
     server = http.server.HTTPServer(("127.0.0.1", 0), Redirecting)
@@ -524,7 +524,11 @@ def test_a_job_reads_a_source_and_stores_elsewhere(
     job.run()
     node = job.nodes["double"]
     assert isinstance(node, FunctionJobNode)
-    assert sorted(node.as_table()["w"].to_pylist()) == [2.0, 4.0, 6.0]
+    assert sorted(cast("list[float]", node.as_table()["w"].to_pylist())) == [
+        2.0,
+        4.0,
+        6.0,
+    ]
     job.save(tmp_path / "job.json")
     loaded = PipelineJob.load(tmp_path / "job.json")
     (source,) = [
@@ -574,7 +578,7 @@ def test_an_abandoned_read_closes_its_reader(project: Any) -> None:
     fake.migrate("p", {"units": _WRITTEN})
     source = SpiralDBTableSource("p", "units")
     fake.scan_log.clear()
-    rows = source.iter_data()
+    rows: Any = source.iter_data()
     next(rows)
     rows.close()
     assert [scan.closed for scan in fake.scan_log] == [True]

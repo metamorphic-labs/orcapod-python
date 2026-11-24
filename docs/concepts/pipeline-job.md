@@ -236,11 +236,9 @@ A non-null column is created `NOT NULL` and reads back non-null. SQLite refuses 
 other type (lists,
 structs, dates or timestamps on SQLite, narrower integers and floats, logical types) is
 refused. PostgreSQL also refuses a column name or a table name longer than
-63 bytes, which it would truncate (`UnstorableTableNameError` for a table). `SpiralDBConnector` stores other types as written, except a
-timestamp with a time zone (SpiralDB drops the zone), a logical (extension) type such as
-`File`, `Path`, `UUID`, a user class or `set[int]` (SpiralDB drops the field metadata that
-names it), and a null struct; SpiralDB reserves the `__` prefix on
-value columns (the `__record_id` key is allowed) and `.` in any column name. The full list,
+63 bytes, which it would truncate (`UnstorableTableNameError` for a table). A database on
+`SpiralDBConnector` refuses every write for now (`SpiralDBWriteNotSupportedError`): Orcapod
+reads SpiralDB only. The full list,
 type by type, is [Data types per database](../reference/database-types.md).
 
 Orcapod's own stored tables hold such columns. A function node's result table holds
@@ -248,9 +246,9 @@ list-valued executor columns and `__`-prefixed columns. A side-effect node's log
 timestamp and `__data_context`, and an operator cache and a cached source hold
 `__data_context` too. So a job refuses these nodes when it is built, before anything runs:
 
-- every function node, on all three connectors;
-- every side-effect node, on SQLite and SpiralDB;
-- every operator cache (an operator node with caching on) and cached source, on SpiralDB.
+- every function node, on SQLite and PostgreSQL;
+- every side-effect node, on SQLite;
+- every node that stores anything, on SpiralDB.
 
 An operator cache or cached source on a SQL connector is refused when it is written, before
 anything is stored, if one of its columns has a type or name the connector does not store. On
