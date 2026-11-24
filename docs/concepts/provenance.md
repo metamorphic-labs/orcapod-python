@@ -55,14 +55,14 @@ trace = job.nodes["per_animal"].trace({"animal": "a2"}, "mean_accuracy")
 print(trace)
 # trace of mean_accuracy at node per_animal, for animal='a2': 1 row matches
 # per_animal (animal='a2'): mean_accuracy = 0.55
-#   average v0.0 (body function_content_v1:...), computed here, computed ... on local
+#   average v0.0 (body function_content_v1:...), computed here, computed ... on local, run ..., recorded ...
 #   GroupBy (animal='a2'): accuracy = [0.8, 0.3]  (via SelectDataColumns)
 #     [0] scores (animal='a2', trial=1): accuracy = 0.8
-#       score v0.0 (body function_content_v1:...), reused a stored result, computed ... on local
+#       score v0.0 (body function_content_v1:...), reused a stored result, computed ... on local, run ..., recorded ...
 #       dict_v1:trials {"animal":"a2","trial":1} hits = 8
 #       dict_v1:trials {"animal":"a2","trial":1} misses = 2
 #     [1] scores (animal='a2', trial=2): accuracy = 0.3
-#       score v0.0 (body function_content_v1:...), computed here, computed ... on local
+#       score v0.0 (body function_content_v1:...), computed here, computed ... on local, run ..., recorded ...
 #       dict_v1:trials {"animal":"a2","trial":2} hits = 3
 #       dict_v1:trials {"animal":"a2","trial":2} misses = 7
 ```

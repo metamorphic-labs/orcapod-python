@@ -2183,11 +2183,40 @@ def test_a_trace_highlight_marks_each_function_node(mode: str) -> None:
     assert _marks(_run_after_a1(InMemoryArrowDatabase(), mode)) == EXPECTED_MARKS
 
 
-def test_equal_inputs_computed_at_once_are_both_marked_computed() -> None:
-    """In one async run equal inputs are computed concurrently, and the mark says so."""
+def test_marks_of_equal_inputs_in_one_async_run_follow_their_records() -> None:
+    """In one async run, a1 trial 1 and a2 trial 1 have equal inputs. Which of them
+    computes and which reuses follows arrival order (ITL-1437), so it is not asserted.
+    What is guaranteed: each row's mark is what its own stored record says
+    (FunctionRun.computed_here), at least one of them computed (both may: async
+    execution can record the two copies separately, ITL-1433), and a trace of several
+    rows merges their marks per node."""
     job = _trials_job(InMemoryArrowDatabase())
     run(job, "async")
-    assert _marks(job)["a2 trial 1"] == {"scores": "computed"}
+    scores = job.nodes["scores"]
+
+    def mark(computed: set[bool]) -> str:
+        return (
+            "computed + reused"
+            if len(computed) > 1
+            else "computed"
+            if True in computed
+            else "reused"
+        )
+
+    runs = {}
+    for animal in ("a1", "a2"):
+        trace = scores.trace({"animal": animal, "trial": 1}, "score")
+        ((node, run_),) = trace.function_runs()
+        assert node == "scores"
+        assert dict(trace.highlight().marks) == {"scores": mark({run_.computed_here})}
+        runs[animal] = run_
+    assert True in {runs["a1"].computed_here, runs["a2"].computed_here}
+    # The union over both rows merges their marks.
+    both = scores.trace({"trial": 1}, "score")
+    assert both.matched == 2
+    assert dict(both.highlight().marks) == {
+        "scores": mark({runs["a1"].computed_here, runs["a2"].computed_here})
+    }
 
 
 def test_a_trace_highlight_marks_on_a_loaded_job(tmp_path: Path) -> None:

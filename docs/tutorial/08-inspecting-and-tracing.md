@@ -211,38 +211,38 @@ trace = means.trace({"subject_id": "mouse_03", "session": "s2"}, "mean_rate_hz")
 print(trace)
 # trace of mean_rate_hz at node session_means, for subject_id='mouse_03', session='s2': 1 row matches
 # session_means (subject_id='mouse_03', session='s2'): mean_rate_hz = 5.059375
-#   mean_rate v0.0 (body function_content_v1:...), computed here, computed ... on local
+#   mean_rate v0.0 (body function_content_v1:...), computed here, computed ... on local, run ..., recorded ...
 #   GroupBy (subject_id='mouse_03', session='s2'): rate_hz = [4.791666666666667, 5.058333333333334, 7.366666666666666, 4.683333333333334, 5.0, 3.3333333333333335, 6.916666666666667, 3.325]  (via SelectDataColumns)
 #     [0] rates (subject_id='mouse_03', session='s2', probe='imec0', unit=0): rate_hz = 4.791666666666667
-#       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local
+#       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local, run ..., recorded ...
 #       csv_v1:sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
 #       csv_v1:units row_40 n_spikes = 575  (via Join, SelectDataColumns)
 #     [1] rates (subject_id='mouse_03', session='s2', probe='imec0', unit=1): rate_hz = 5.058333333333334
-#       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local
+#       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local, run ..., recorded ...
 #       csv_v1:sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
 #       csv_v1:units row_41 n_spikes = 607  (via Join, SelectDataColumns)
 #     [2] rates (subject_id='mouse_03', session='s2', probe='imec0', unit=2): rate_hz = 7.366666666666666
-#       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local
+#       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local, run ..., recorded ...
 #       csv_v1:sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
 #       csv_v1:units row_42 n_spikes = 884  (via Join, SelectDataColumns)
 #     [3] rates (subject_id='mouse_03', session='s2', probe='imec0', unit=3): rate_hz = 4.683333333333334
-#       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local
+#       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local, run ..., recorded ...
 #       csv_v1:sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
 #       csv_v1:units row_43 n_spikes = 562  (via Join, SelectDataColumns)
 #     [4] rates (subject_id='mouse_03', session='s2', probe='imec1', unit=0): rate_hz = 5.0
-#       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local
+#       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local, run ..., recorded ...
 #       csv_v1:sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
 #       csv_v1:units row_44 n_spikes = 600  (via Join, SelectDataColumns)
 #     [5] rates (subject_id='mouse_03', session='s2', probe='imec1', unit=1): rate_hz = 3.3333333333333335
-#       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local
+#       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local, run ..., recorded ...
 #       csv_v1:sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
 #       csv_v1:units row_45 n_spikes = 400  (via Join, SelectDataColumns)
 #     [6] rates (subject_id='mouse_03', session='s2', probe='imec1', unit=2): rate_hz = 6.916666666666667
-#       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local
+#       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local, run ..., recorded ...
 #       csv_v1:sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
 #       csv_v1:units row_46 n_spikes = 830  (via Join, SelectDataColumns)
 #     [7] rates (subject_id='mouse_03', session='s2', probe='imec1', unit=3): rate_hz = 3.325
-#       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local
+#       firing_rate v0.0 (body function_content_v1:...), computed here, computed ... on local, run ..., recorded ...
 #       csv_v1:sessions row_5 duration_s = 120.0  (via Join, SelectDataColumns)
 #       csv_v1:units row_47 n_spikes = 399  (via Join, SelectDataColumns)
 ```
@@ -250,7 +250,8 @@ print(trace)
 The first line repeats the question: the column traced, the node it was asked at and the
 row selector, and how many held rows match it. Read the rest from the top. The mean of
 `mouse_03`, session `s2`, was computed by `mean_rate`
-(its version, the hash of its body, when and where it ran). Its input was the grouped row
+(its version, the hash of its body, when and where it ran, and the job run that
+recorded the entry, with when). Its input was the grouped row
 of eight rates. Each rate was computed by `firing_rate` from one row of `units.csv` and the
 one row of `sessions.csv` for that session; the operators it passed through are listed
 after `via`.
