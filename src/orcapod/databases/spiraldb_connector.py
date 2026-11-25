@@ -878,7 +878,7 @@ class SpiralDBConnector:
         return row.schema
 
     def _reading(
-        self, table: Any, table_name: str, found: pa.Schema | None = None
+        self, table: Any, table_name: str, known: pa.Schema | None = None
     ) -> _Reading:
         """Return how an opened snapshot of ``table_name`` is read.
 
@@ -888,16 +888,17 @@ class SpiralDBConnector:
         Args:
             table: The SDK's handle.
             table_name: Plain table name.
-            found: The snapshot's schema, if it was fetched before; it never changes.
+            known: The snapshot's schema, if it was fetched before; it never changes.
 
         Raises:
             TableSchemaError: If the table's row cannot be read or disagrees with it.
         """
         self._require_open()
         qualified = self._qualified(table_name)
-        if found is None:
+        if known is None:
             with self._service_call("read the schema of", table_name):
-                found = table.schema()
+                known = table.schema()
+        found: pa.Schema = known
         with _about_table(qualified):
             recorded = self._recorded_schema(table, table_name, found)
         return _Reading(found, recorded, qualified)

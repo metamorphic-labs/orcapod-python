@@ -156,8 +156,8 @@ def _ks(source: SpiralDBTableSource) -> list[Any]:
 # ------------------------------------------------------------ the schema table's state
 
 
-def _damage(project: str = "p", dataset: str = "default", **change: Any) -> None:
-    table = fake.FakeClient().keyed_table(project, dataset, st.SCHEMA_TABLE)
+def _damage(**change: Any) -> None:
+    table = fake.FakeClient().keyed_table("p", "default", st.SCHEMA_TABLE)
     (marker,) = [
         r for r in table.scan().to_table().to_pylist() if r["table_id"] == st.MARKER_KEY
     ]
