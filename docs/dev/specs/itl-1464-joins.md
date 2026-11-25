@@ -104,7 +104,7 @@ is the form before this change. It is the operator alone, not a job.
 | `lookup` | 1,000,000 | keys | 1,000,000 | 259 MiB | 26 MiB | 2.4 s |
 | `lookup` | 8,000,000 | keys | 8,000,000 | 257 MiB | 26 MiB | 19.9 s |
 | `lookup_late` | 1,000,000 | keys | 1,000,000 | 756 MiB | 169 MiB | 5.4 s |
-| `lookup_late` | 8,000,000 | keys | 8,000,000 | 2733 MiB | 392 MiB | 61.7 s |
+| `lookup_late` | 8,000,000 | keys | 8,000,000 | 2,733 MiB | 392 MiB | 61.7 s |
 | `one_to_one` | 1,000,000 | keys | 1,000,000 | 317 MiB | 64 MiB | 4.7 s |
 | `one_to_one` | 8,000,000 | keys | 8,000,000 | 341 MiB | 64 MiB | 39.3 s |
 | `one_to_one_late` | 1,000,000 | barrier | 1,000,000 | 2,574 MiB | 1,854 MiB | 4.4 s |
@@ -113,9 +113,13 @@ is the form before this change. It is the operator alone, not a job.
 | `many` (5 per row) | 1,000,000 | barrier | 5,000,000 | 4,835 MiB | 4,111 MiB | 2.4 s |
 | `many` | 1,000,000 | keys | 5,000,000 | 445 MiB | 144 MiB | 3.2 s |
 | `many` | 8,000,000 | keys | 40,000,000 | 453 MiB | 146 MiB | 26.0 s |
+| `many_open` (5 per row) | 1,000,000 | barrier | 5,000,000 | 6,068 MiB | 5,002 MiB | 4.2 s |
+| `many_open` | 1,000,000 | keys | 5,000,000 | 992 MiB | 384 MiB | 5.6 s |
+| `many_open` | 4,000,000 | keys | 20,000,000 | 1,691 MiB | 633 MiB | 23.5 s |
+| `many_open` | 8,000,000 | keys | 40,000,000 | 2,629 MiB | 941 MiB | 57.3 s |
 | `semi` | 8,000,000 | keys | 8,000,000 | 252 MiB | 21 MiB | 19.6 s |
 
 `lookup`, `one_to_one` in step, `many` and `semi` do not grow with the rows. The late
-cases grow with the keys of the input that arrived first, as the bound says. In `many` the
-small side arrives first and ends, so it measures the bounded output and not the worst case
-of two open inputs, which is the sum of both sides' keys.
+cases grow with the keys of the input that arrived first, as the bound says. `many` ends its small
+side first, so it measures the bounded output; `many_open` is the worst case, two open inputs
+with no certificate, and grows with the keys of both.

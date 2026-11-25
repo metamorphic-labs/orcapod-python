@@ -11,6 +11,8 @@ call). Cases:
 - ``one_to_one_late``: the same, one input arriving entirely before the other;
 - ``many``: ``rows`` spikes against 1,000 events, neither unique on the session and
   shank they share: five output rows per spike.
+- ``many_open``: two inputs of ``rows`` rows in step, neither unique on the session and
+  burst they share: five output rows per row, and both sides' keys held to the end.
 - ``semi``: ``rows`` spikes kept by the units that exist (300).
 """
 
@@ -50,6 +52,7 @@ def spikes(start: int, n: int) -> pa.Table:
             "unit": _text(i % 300, "unit-%05d"),
             "spike": pa.array(i, pa.int64()),
             "shank": pa.array(i % 200, pa.int64()),
+            "burst": pa.array(i // 5, pa.int64()),
             "time": pa.array(i / 30_000.0),
             "amplitude": pa.array((i % 97) * 1.5),
         }
@@ -78,6 +81,20 @@ def units(start: int, n: int) -> pa.Table:
             "unit": _text(i, "unit-%05d"),
             "area": _text(i % 9, "area-%d"),
             "quality": pa.array(i * 1.0),
+        }
+    )
+
+
+def marks(start: int, n: int) -> pa.Table:
+    """Rows five of which share a burst, as five spikes do."""
+    i = np.arange(start, start + n)
+    return pa.table(
+        {
+            "session": pa.array([SESSION] * n, pa.large_string()),
+            "burst": pa.array(i // 5, pa.int64()),
+            "mark": pa.array(i, pa.int64()),
+            "level": pa.array(i * 0.1),
+            "kind": _text(i % 4, "kind-%d"),
         }
     )
 
@@ -129,14 +146,15 @@ class Input:
 
 
 async def run(case: str, rows: int, barrier: bool) -> tuple[int, float]:
+    tags = {"many": "shank", "many_open": "burst"}.get(case, "unit")
     big = Input(
         "spikes",
         spikes,
         rows,
-        ["session", "unit", "spike"]
-        if not case.startswith("many")
-        else ["session", "shank", "spike"],
-        ["session", "unit", "spike"] if case != "many" else ["session", "spike"],
+        ["session", tags, "spike"],
+        ["session", "spike"]
+        if case.startswith("many")
+        else ["session", "unit", "spike"],
     )
     if case.startswith("one_to_one"):
         other = Input(
@@ -145,6 +163,10 @@ async def run(case: str, rows: int, barrier: bool) -> tuple[int, float]:
             rows,
             ["spike", "unit", "session"],
             ["session", "unit", "spike"],
+        )
+    elif case == "many_open":
+        other = Input(
+            "marks", marks, rows, ["session", "burst", "mark"], ["session", "mark"]
         )
     elif case == "many":
         other = Input(
