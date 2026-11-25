@@ -276,6 +276,20 @@ class RowSpool:
         if self._closed:
             raise ValueError("the row spool is closed")
 
+    def spill(self) -> None:
+        """Write the rows in memory to a file, so that none stays in memory.
+
+        Raises:
+            ValueError: If the spool is closed.
+            RuntimeError: In a process other than the one that made the spool.
+            OSError: If they cannot be written; the rows then stay in memory.
+        """
+        self._require_owner()
+        with self._lock:
+            self._require_usable()
+            if self._in_memory:
+                self._spill()
+
     def _add(self, segment: _Segment) -> None:
         self._segments.append(segment)
         self._starts = None
