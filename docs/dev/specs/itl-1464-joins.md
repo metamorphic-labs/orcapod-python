@@ -55,6 +55,22 @@ operator runs its own sync call over its whole inputs. A stream must implement t
 `StreamProtocol` (`unique_keys` included): protocols are internal, and every stream class
 of the library and everything built on `StreamBase` does.
 
+## What changes for users
+
+Once job nodes run joins this way (async runs only; the sync path is unchanged):
+
+- **Memory**: an async join holds the join keys of its smaller input (of both inputs' rows not
+  matched yet, when both are certified unique on the shared tags) and no rows beyond 64 MiB
+  per input, whatever its inputs and output are.
+- **Latency**: a join that is not one to one gives its first row only once one input has
+  ended and, when that input has more than 65,536 rows, once the other has delivered as many
+  or ended. A semi-join gives its first row once its right input has ended. One-to-one joins
+  and two-input rejoins give rows as they match.
+- **Local disk**: at most both inputs' rows (a chain's middle results count as inputs), in
+  the system's temporary directory, removed when the join ends, however it ends. A full disk
+  fails the run with the operating system's error.
+- **Row order** of an async result still follows arrival and is not a result.
+
 ## The row spool
 
 Rows past the memory limit become a file each: an uncompressed Arrow IPC file of one record
@@ -151,3 +167,21 @@ in one and derived in another, however they arrive; rows fetched from both are t
 Text is built where values are needed: a source-info column both inputs of a `MergeJoin`
 have, a merged data-tag one side of which is text, and the tokens that read system tags whose
 values a join of one pipeline hash sorts. `Rejoin`'s kernel, not wired, builds all of it.
+
+## The bytes of a held key row
+
+Measured on 4,000,000 rows with the keys of the benchmark (two strings of 24 and 10
+characters and one integer), as the growth of the process's physical footprint:
+
+| Form held | Bytes per row | Probe of 65,536 rows |
+|---|---|---|
+| the prepared key frame (what a join holds) | 95 | 26 ms, and about 100 more bytes per row while it runs |
+| the same, strings as Polars categories | 38 | 15 ms, about 115 more |
+| a 64-bit hash of the prepared key and a row number | 23 | 5 ms, 4 more |
+
+Of the 95 bytes, 42 are the key's data, 9 the row number and the constant key; the rest is the string views and buffers Polars keeps. Not
+built: the hash form would keep one equality rule (candidates with equal hashes are matched
+by `join._matched_pairs` on the keys of the rows fetched for the output), but rests on equal
+keys having equal hashes under the join's equality, which was checked
+for floats (signed zero, every NaN), lists and structs. An index alone is not a full
+join: these are measurements of the frames, not of a whole join.
