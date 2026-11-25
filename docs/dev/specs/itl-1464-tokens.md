@@ -1,7 +1,7 @@
 # Source-info tokens carried as a recipe (ITL-1464, track TOKENS)
 
 Status: direction approved November 25, 2026. Step 1 (sources and row-wise operators)
-implemented with this document; step 2 (joins) is a separate pull request.
+implemented with this document; step 2 (joins) is stacked on it.
 
 ## The cost
 
@@ -65,9 +65,10 @@ the system tags gives text (the recipe would have nothing to read).
 | Column selections, `MapData`, `MapTags`, `MapColumns`, `TagBy`, `AddTags`, `DropNulls`, `Filter` | none of the values | derived in, derived out |
 | `PolarsFilter` | none, unless a predicate reads a token | the columns stay out of the Polars frame and are put back for the kept rows; a predicate that could read one (a selector, a regular expression, a non-expression, a name that is no column) gets text, as before |
 | `without_input_meta` | names only | derived |
-| `SemiJoin` (left input) | none | step 2 |
-| `Join`, `Rejoin`, `MergeJoin`: columns of one input | none | step 2 |
-| `Join`: a shared data-tag | both tokens, folded (`join_v1`) | step 2: a fold recipe; until then text |
+| `SemiJoin` (left input) | none | derived (step 2) |
+| `Join`, `Rejoin`, `MergeJoin`: columns of one input | none | derived (step 2) |
+| `Rejoin`: a shared data-tag | equality of the tokens | one recipe in every input: equal wherever the system tags are, so not compared; otherwise text (step 2) |
+| `Join`: a shared data-tag | both tokens, folded (`join_v1`) | a fold recipe (`FoldRecipe`), the same fold run when the text is made; text when a member is text (step 2) |
 | `MergeJoin`: a colliding column | both tokens, in a list | text of that column |
 | `GroupBy`, `Batch` | the members' tokens, in a list | text (below) |
 | `iter_data` (rows: function pods, side effects, async rows) | one string per column of each row | built for 8,192 rows at a time |
@@ -107,5 +108,5 @@ A synthetic time series table, about 2.2 million rows, 13 columns, about 250 MiB
 | `map_data` | 10.8 GiB | 2.0 GiB | 9.3 GiB | 0.75 GiB |
 | `drop_nulls` | 19.7 GiB | 2.4 GiB | 18.6 GiB | 1.7 GiB |
 | `polars_filter` | 16.6 GiB | 2.5 GiB | 9.3 GiB | 0.75 GiB |
-| `join` (8 and 14 columns) | above 24 GiB | above 24 GiB (step 2) | | |
+| `join` (8 and 14 columns) | above 24 GiB | 3.6 GiB (step 2) | | 2.6 GiB |
 | `group_by` | 20.9 GiB | 20.7 GiB (its lists are text) | 15.9 GiB | 15.9 GiB |
