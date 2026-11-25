@@ -266,3 +266,23 @@ def test_an_async_job_run_asks_the_orchestrator_to_keep_no_rows(
     _ = asyncio.run(again.run_async())
     assert asked == [False, False]
     assert again.nodes["out"].as_table().num_rows == _ROWS
+
+
+@pytest.mark.parametrize("chain", ["map", "group", "batch"])
+def test_a_jobs_nodes_read_the_same_whatever_materialize_results_says(
+    tmp_path: Path, chain: str
+) -> None:
+    """Decision T-1: the async orchestrator keeps no rows for a job, flag or not."""
+    tables = []
+    for flag in (True, False):
+        job = _job(tmp_path, f"flag_{flag}", chain, False)
+        _ = job.run(orchestrator=AsyncPipelineOrchestrator(), materialize_results=flag)
+        node = job.nodes["out"]
+        rows = [(t.as_dict(), d.as_dict()) for t, d in node.iter_data()]
+        tables.append((node.as_table(all_info=True), rows, node.content_hash()))
+    (kept, kept_rows, kept_hash), (unkept, unkept_rows, unkept_hash) = tables
+
+    assert kept.num_rows > 0
+    assert _sorted_rows(kept) == _sorted_rows(unkept)
+    assert sorted(kept_rows, key=repr) == sorted(unkept_rows, key=repr)
+    assert kept_hash == unkept_hash
