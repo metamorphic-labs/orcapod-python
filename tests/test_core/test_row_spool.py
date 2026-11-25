@@ -3,18 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import gc
 import os
+import signal
 import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pyarrow as pa
 import pytest
 
-from orcapod.core import row_spool
 from orcapod.core.row_spool import RowSpool
 
 
@@ -124,6 +126,66 @@ def test_rows_spilled_after_a_segment_between_them_was_freed(tmp_path: Path) -> 
     spool.close()
 
 
+@pytest.mark.parametrize("memory_bytes", [0, 3_000, 10**9])
+def test_the_whole_table_and_slices_of_it(tmp_path: Path, memory_bytes: int) -> None:
+    spool, rows = _filled(tmp_path, [1, 50, 7, 120, 3], memory_bytes)
+    assert spool.table().equals(rows, check_metadata=True)
+    for start, length in ((0, 1), (1, 50), (40, 100), (170, 50), (181, 1), (500, 2)):
+        part = spool.slice(start, length)
+        assert part.schema.equals(rows.schema, check_metadata=True)
+        assert part.equals(rows.slice(start, length))
+    with pytest.raises(ValueError, match="slice"):
+        _ = spool.slice(-1, 2)
+    with pytest.raises(ValueError, match="slice"):
+        _ = spool.slice(1, -2)
+    spool.discard(np.array([3]))
+    with pytest.raises(ValueError, match="discarded"):
+        _ = spool.table()
+    spool.close()
+    with pytest.raises(ValueError, match="closed"):
+        _ = spool.table()
+
+
+def test_a_spool_nothing_was_appended_to_has_no_table(tmp_path: Path) -> None:
+    spool = RowSpool(0, str(tmp_path))
+    with pytest.raises(ValueError, match="nothing was appended"):
+        _ = spool.table()
+    spool.append(_table(0, 2))
+    assert spool.slice(0, 0).equals(_table(0, 0))
+
+
+def test_the_table_is_mapped_and_not_copied(tmp_path: Path) -> None:
+    spool = RowSpool(0, str(tmp_path))
+    for start in range(0, 40_000, 10_000):
+        spool.append(_table(start, 10_000))
+    before = pa.total_allocated_bytes()
+    table = spool.table()
+    size = table.nbytes
+    assert size > 1_000_000
+    assert pa.total_allocated_bytes() - before < size / 100
+    spool.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="a mapped file cannot be deleted")
+@pytest.mark.parametrize("memory_bytes", [0, 3_000, 10**9])
+@pytest.mark.parametrize("end", ["close", "collect"])
+def test_a_table_outlives_its_spool(
+    tmp_path: Path, memory_bytes: int, end: str
+) -> None:
+    spool, rows = _filled(tmp_path, [40, 5_000, 40], memory_bytes)
+    table, part = spool.table(), spool.slice(30, 100)
+    if end == "close":
+        spool.close()
+    del spool
+    gc.collect()
+    assert _files(tmp_path) == []
+    assert table.equals(rows, check_metadata=True)
+    table.validate(full=True)
+    del table
+    gc.collect()
+    assert part.equals(rows.slice(30, 100))
+
+
 def test_nothing_is_written_below_the_limit(tmp_path: Path) -> None:
     spool, _ = _filled(tmp_path, [10, 10], 10**9)
     assert list(tmp_path.iterdir()) == []
@@ -219,6 +281,7 @@ def test_a_killed_process_is_swept_and_a_live_one_is_not(tmp_path: Path) -> None
         (held,) = tmp_path.glob("orcapod-spool-*")
         other = tmp_path / "orcapod-spool-not-ours"  # no lock file: left alone
         other.mkdir()
+        (other / "file").touch()
         spool, _ = _filled(tmp_path, [10], 0)
         assert held.exists() and _files(held)
         assert other.exists()
@@ -228,11 +291,213 @@ def test_a_killed_process_is_swept_and_a_live_one_is_not(tmp_path: Path) -> None
     assert not held.exists()
 
 
-def test_a_forked_child_never_removes_its_parents_files(tmp_path: Path) -> None:
-    # A child inherits its parent's finalizers; the owner check is what stops them.
-    directory = tmp_path / "spool"
-    directory.mkdir()
-    row_spool._remove_directory(str(directory), os.getpid() + 1)  # pyright: ignore[reportPrivateUsage]  # the owner check itself
-    assert directory.exists()
-    row_spool._remove_directory(str(directory), os.getpid())  # pyright: ignore[reportPrivateUsage]  # the owner check itself
-    assert not directory.exists()
+_FORK = """
+import os, sys, signal, threading
+import numpy as np, pyarrow as pa
+from orcapod.core import row_spool
+from orcapod.core.row_spool import RowSpool
+case, root = sys.argv[1:]
+table = pa.table({"x": [1, 2], "y": [3, 4]})
+
+def in_child(function):
+    child = os.fork()
+    if child == 0:
+        signal.alarm(10)
+        try:
+            function()
+        except BaseException as error:
+            print(repr(error), file=sys.stderr, flush=True)
+            os._exit(1)
+        os._exit(0)
+    assert os.waitstatus_to_exitcode(os.waitpid(child, 0)[1]) == 0
+
+if case == "guard_held":
+    # Another thread makes a directory while this one forks.
+    entered, release = threading.Event(), threading.Event()
+    def hold():
+        with row_spool._directories._guard:
+            entered.set()
+            release.wait()
+    thread = threading.Thread(target=hold, daemon=True)
+    thread.start()
+    assert entered.wait(10)
+    def spill():
+        with RowSpool(0, root) as spool:
+            spool.append(table)
+            assert spool.take(np.array([1])).equals(table.slice(1, 1))
+    try:
+        in_child(spill)
+    finally:
+        release.set()
+        thread.join()
+elif case == "inherited":
+    spool = RowSpool(0, root)
+    spool.append(table)
+    def use():
+        for call in (
+            lambda: spool.discard(np.array([0, 1])),
+            lambda: spool.take(np.array([0])),
+            lambda: spool.append(table),
+        ):
+            try:
+                call()
+            except RuntimeError as error:
+                assert "the process that made it" in str(error)
+            else:
+                raise AssertionError("a child used its parent's spool")
+        spool.close()
+        row_spool._directories.remove()
+        with RowSpool(0, root) as own:  # sweeps, and leaves the parent's
+            own.append(table)
+    in_child(use)
+    assert spool.take(np.array([1, 0])).equals(table.take(pa.array([1, 0])))
+    spool.close()
+elif case == "outlived":
+    # A child that outlives its parent does not keep the parent's directory locked.
+    spool = RowSpool(0, root)
+    spool.append(table)
+    ready, wait = os.pipe()
+    child = os.fork()
+    if child == 0:
+        os.close(0)
+        os.write(wait, b"x")
+        os.close(1)
+        os.close(2)
+        signal.alarm(120)  # never left behind
+        signal.pause()
+    os.read(ready, 1)
+    print(child, flush=True)
+    os.kill(os.getpid(), signal.SIGKILL)
+"""
+
+
+def _fork(case: str, root: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-c", _FORK, case, str(root)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs fork")
+@pytest.mark.parametrize("case", ["guard_held", "inherited"])
+def test_a_forked_child_neither_waits_for_nor_touches_its_parents_spools(
+    tmp_path: Path, case: str
+) -> None:
+    done = _fork(case, tmp_path)
+    assert done.returncode == 0, done.stderr
+    # The child ended without its exit handlers (``os._exit``): its own directory is
+    # left, with no owner, for the next process to sweep.
+    (left,) = tmp_path.glob("orcapod-spool-*")
+    spool, _ = _filled(tmp_path, [10], 0)
+    assert not left.exists()
+    spool.close()
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="needs fork")
+def test_a_child_that_outlives_its_killed_parent_does_not_stop_the_sweep(
+    tmp_path: Path,
+) -> None:
+    done = _fork("outlived", tmp_path)
+    (left,) = tmp_path.glob("orcapod-spool-*")
+    child = int(done.stdout)
+    try:
+        spool, _ = _filled(tmp_path, [10], 0)
+        assert not left.exists()
+        spool.close()
+    finally:
+        os.kill(child, signal.SIGKILL)
+
+
+@pytest.mark.parametrize("stage", ["write", "close"])
+def test_a_failed_spill_leaves_the_spool_as_it_was(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    spool, rows = _filled(tmp_path, [40, 10], 1 << 14)
+    held, size = spool.memory_bytes, spool.size
+    assert held and _files(tmp_path) == []
+
+    class Full:
+        """A file writer that writes some bytes, then finds the disk full."""
+
+        def __init__(self, sink: Any, schema: pa.Schema) -> None:
+            self.sink = sink
+
+        def __enter__(self) -> Full:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            if stage == "close":
+                raise OSError(errno.ENOSPC, "no space")
+
+        def write_table(self, table: pa.Table) -> None:
+            self.sink.write(b"part of a file")
+            if stage == "write":
+                raise OSError(errno.ENOSPC, "no space")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(pa.ipc, "new_file", Full)
+        for _ in range(2):
+            with pytest.raises(OSError, match="no space"):
+                spool.append(_table(50, 5_000))
+            assert (spool.memory_bytes, spool.size) == (held, size)
+            assert _files(tmp_path) == []
+    everything = np.arange(50)
+    assert spool.take(everything).equals(rows.combine_chunks())
+    spool.append(_table(50, 5_000))  # the retry: the rows once
+    assert spool.size == 5_050
+    assert spool.take(np.array([5_049, 0, 50])).equals(
+        _table(0, 5_050).take(pa.array([5_049, 0, 50], pa.int64()))
+    )
+    assert len(_files(tmp_path)) == 1
+    spool.close()
+
+
+def test_a_first_append_that_fails_decides_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def full(*args: object) -> None:
+        raise OSError(errno.ENOSPC, "no space")
+
+    spool = RowSpool(0, str(tmp_path))
+    with monkeypatch.context() as patched:
+        patched.setattr(pa.ipc, "new_file", full)
+        with pytest.raises(OSError, match="no space"):
+            spool.append(_table(0, 3))
+    other = pa.table({"a": [1, 2], "b": [3, 4]})  # another schema: nothing was held
+    spool.append(other)
+    assert spool.take(np.array([1, 0])).equals(other.take(pa.array([1, 0], pa.int64())))
+    spool.close()
+
+
+def test_a_closed_spool_refuses_every_use(tmp_path: Path) -> None:
+    spool, _ = _filled(tmp_path, [10], 0)
+    spool.close()
+    with pytest.raises(ValueError, match="closed"):
+        _ = spool.take(np.array([0]))
+    with pytest.raises(ValueError, match="closed"):
+        spool.discard(np.array([0]))
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="swept through fcntl locks")
+def test_a_process_killed_before_it_locked_its_directory_is_swept(
+    tmp_path: Path,
+) -> None:
+    left = tmp_path / "orcapod-spool-unlocked"
+    left.mkdir()
+    spool, _ = _filled(tmp_path, [10], 0)
+    assert not left.exists()
+    spool.close()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="swept through fcntl locks")
+def test_a_removal_that_stopped_part_way_is_finished(tmp_path: Path) -> None:
+    left = tmp_path / "orcapod-spool-partly"
+    (left / "some-spool").mkdir(parents=True)
+    (left / "some-spool" / "0.arrow").touch()
+    (left / "lock").touch()
+    spool, _ = _filled(tmp_path, [10], 0)
+    assert not left.exists()
+    spool.close()
