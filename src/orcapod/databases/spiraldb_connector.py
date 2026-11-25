@@ -634,9 +634,11 @@ class SpiralDBConnector:
     ) -> None:
         self._project_id = project_id
         self._dataset = dataset
-        self._overrides = overrides
+        # A copy, so that what is saved and checked stays the address the client was
+        # made with, whatever the caller does with theirs.
+        self._overrides = None if overrides is None else dict(overrides)
         self._closed = False
-        self._client = _new_client(overrides)
+        self._client = _new_client(self._overrides)
         self._pid = os.getpid()
         # Shared by every connector on this client (``share_client``).
         self._counts: dict[tuple[str, str], tuple[int, bool]] = {}
@@ -1084,7 +1086,7 @@ class SpiralDBConnector:
             "connector_type": "spiraldb",
             "project_id": self._project_id,
             "dataset": self._dataset,
-            "overrides": self._overrides,
+            "overrides": None if self._overrides is None else dict(self._overrides),
         }
 
     @classmethod

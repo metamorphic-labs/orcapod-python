@@ -629,6 +629,69 @@ def test_the_service_address_is_the_connectors(calls: _Calls) -> None:
         _source(connector=connector, overrides={})
 
 
+@pytest.mark.parametrize("changed", ["the given dictionary", "the returned config"])
+@pytest.mark.parametrize("how", ["changed", "key added", "cleared"])
+def test_the_address_that_is_read_is_the_one_checked_and_saved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, changed: str, how: str
+) -> None:
+    """Review of #555, finding 1: two services that hold the same table names."""
+    _LAYOUT[:] = ["k", "j", "x", "y"]
+    one, two = "https://one.example", "https://two.example"
+    roots = {one: tmp_path / "one", two: tmp_path / "two"}
+    for url, offset in ((one, 0), (two, 70)):
+        with fake.install(roots[url]):
+            made = fake.ExternalProject("p")
+            made.create_table(
+                "default.a", key_schema=[_FIELDS["k"], _FIELDS["j"]]
+            ).write(_rows(offset))
+            fake.migrate("p", {"a": _schema()})
+    init = fake.FakeClient.__init__
+
+    def routed(self: Any, *, api_url: str | None = None, **given: Any) -> None:
+        with monkeypatch.context() as at:
+            at.setenv(fake._ROOT_ENV, str(roots[api_url or two]))  # pyright: ignore[reportPrivateUsage]  # the fake's store
+            init(self, api_url=api_url, **given)
+
+    with fake.install(tmp_path / "default"):
+        monkeypatch.setattr(fake.FakeClient, "__init__", routed)
+        given = {"server.url": one}
+        connector = SpiralDBConnector("p", overrides=given)
+        theirs = (
+            given
+            if changed == "the given dictionary"
+            else connector.to_config()["overrides"]
+        )
+        if how == "cleared":
+            theirs.clear()
+        else:
+            theirs["server.url" if how == "changed" else "authn.token"] = two
+        assert connector.to_config()["overrides"] == {"server.url": one}
+        assert connector.share_client().to_config()["overrides"] == {"server.url": one}
+        again = SpiralDBConnector.from_config(connector.to_config())
+        assert again._client.api_url == one  # pyright: ignore[reportPrivateUsage]  # what it reads
+        with pytest.raises(ValueError, match="overrides"):
+            _source(connector=connector, overrides={"server.url": two})
+        for overrides in (None, {"server.url": one}):
+            source = _source(connector=connector, overrides=overrides)
+            for read in (source, source.where(j="j0")):
+                assert read.to_config()["overrides"] == {"server.url": one}
+                assert set(_ks(read)) <= {0, 1, 2, 3}
+                loaded = SpiralDBTableSource.from_config(read.to_config())
+                assert _ks(loaded) == _ks(read)
+        # A saved job finds its source again.
+        job = PipelineJob(name="saved", database=InMemoryArrowDatabase())
+        with job:
+            SelectColumns(["k", "j", "x"])(_source(connector=connector), label="n")
+        job.run()
+        path = tmp_path / "job.json"
+        job.save(path)
+        loaded_job = PipelineJob.load(path, database=InMemoryArrowDatabase())
+        assert len(loaded_job.unbound_sources) == 0
+        # And a source of the other service is its own.
+        own = _source(overrides={"server.url": two})
+        assert set(_ks(own)) == {70, 71, 72, 73}
+
+
 def test_a_dataset_and_its_connector(root: Path) -> None:
     sources = [
         SpiralDBTableSource(p, "a", dataset=d, connector=SpiralDBConnector(p, d))

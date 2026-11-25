@@ -352,9 +352,10 @@ with SpiralDBConnector("edi-sample-v1-855632") as spiral:
 experiments.as_table()  # works after the connector is closed
 ```
 
-Nothing else changes: the rows, ids and hashes are the same, every read still looks at the
-table and at the schema table's current version, and closing the connector or one source does
-not affect the others. The sources read as whoever the connector signed in as, also after the
+The rows, ids and hashes are the same, every read still looks at the table and at the schema
+table's current version, and closing the connector or one source does not affect the others.
+While that version is the same, its rows are not read and decoded again, so a source given the
+connector later does not notice that doing so would now fail. The sources read as whoever the connector signed in as, also after the
 environment or the saved login changed: make a new connector to sign in again. A connector
 cannot be used after a fork. The connector is not saved with a job: a loaded source makes its
 own.
