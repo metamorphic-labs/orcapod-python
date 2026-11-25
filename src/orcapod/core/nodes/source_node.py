@@ -1280,12 +1280,6 @@ class SourceNodeBase(TraceableBase, ABC):
             display_all_rows=False,
         )
 
-    def as_carried_table(
-        self, *, columns: ColumnConfig | dict[str, Any] | None = None
-    ) -> "pa.Table":
-        """The table of ``as_table(columns=columns)``; see ``StreamProtocol`` (ITL-1464)."""
-        return self.as_table(columns=columns)
-
     def open_channel(self) -> RecordBatchInput:
         """Open an input channel on this node's rows, for async computation (ITL-1347).
 

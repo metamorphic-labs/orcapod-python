@@ -159,6 +159,8 @@ class MergeJoin(BinaryOperator):
     merged into a list in argument order, as for plain inputs.
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     # Provisional: its identity is not frozen with data context v1 (ITL-1279).
     PROVISIONAL: ClassVar[bool] = True
 
@@ -410,12 +412,14 @@ class MergeJoin(BinaryOperator):
         # Tables with source info and system tags, each input's system-tag
         # column names extended with its pipeline hash and argument index.
         left_table = arrow_utils.append_to_system_tags(
-            left_stream.as_carried_table(columns={"source": True, "system_tags": True}),
+            self._input_table(
+                left_stream, columns={"source": True, "system_tags": True}
+            ),
             self._system_tag_suffix(left_stream, 0),
         )
         right_table = arrow_utils.append_to_system_tags(
-            right_stream.as_carried_table(
-                columns={"source": True, "system_tags": True}
+            self._input_table(
+                right_stream, columns={"source": True, "system_tags": True}
             ),
             self._system_tag_suffix(right_stream, 1),
         )

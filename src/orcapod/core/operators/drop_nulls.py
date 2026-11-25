@@ -91,6 +91,8 @@ class DropNulls(UnaryOperator):
         ValueError: If ``columns`` is an empty collection.
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     # Data-tags (ITL-1023): handled.
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
@@ -322,13 +324,14 @@ class DropNulls(UnaryOperator):
             A stream over the surviving rows, in input order, with the named
             columns non-nullable. A result with no rows has the same schema.
         """
-        table = stream.as_carried_table(
+        table = self._input_table(
+            stream,
             columns={
                 "source": True,
                 "system_tags": True,
                 "context": True,
                 "sort_by_tags": False,
-            }
+            },
         )
         tag_columns, data_columns = stream.keys()
         return ArrowTableStream(

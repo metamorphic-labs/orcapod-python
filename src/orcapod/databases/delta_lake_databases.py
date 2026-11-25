@@ -63,7 +63,7 @@ from orcapod.errors import (
     TypeIdentityError,
     UnstorableColumnError,
 )
-from orcapod.utils import arrow_utils
+from orcapod.utils import arrow_utils, source_tokens
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
@@ -2747,6 +2747,7 @@ class DeltaTableDatabase:
             ValueError: If any record IDs already exist and skip_duplicates=False
         """
         self._validate_record_path(record_path)
+        source_tokens.refuse_derived(records.schema)
 
         if records.num_rows == 0:
             return

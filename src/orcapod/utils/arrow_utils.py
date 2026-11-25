@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 from collections import defaultdict
-from collections.abc import Callable, Iterator, Mapping, Collection, Sequence
+from collections.abc import (
+    Callable,
+    Collection,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from typing import Any, TYPE_CHECKING, cast
 
 import pyarrow as pa
@@ -1471,7 +1479,11 @@ def append_to_system_tags(table: "pa.Table", value: str) -> "pa.Table":
     )
 
 
-def fold_system_tag_values(values: Sequence[Any], *, label: str) -> str:
+_FOLD_PART = 4096
+"""How many members ``fold_system_tag_values`` digests at once."""
+
+
+def fold_system_tag_values(values: Iterable[Any], *, label: str) -> str:
     """Fold a group's system-tag values into one scalar: ``"<label>:<hex>"``.
 
     The one fold helper (ITL-1154). Many->one operators must emit scalar system tags,
@@ -1499,13 +1511,20 @@ def fold_system_tag_values(values: Sequence[Any], *, label: str) -> str:
     Returns:
         ``"<label>:<64 hex digits>"``.
     """
-    members = json.dumps(
-        [None if v is None else str(v) for v in values],
-        separators=(",", ":"),
-        ensure_ascii=False,
-    )
+    # The canonical JSON array, digested a part at a time: a group's members can be
+    # millions, and their text together is not held (ITL-1464).
+    digest = hashlib.sha256(b"[")
+    rest = iter(values)
+    between = b""
+    while part := [
+        None if v is None else str(v) for v in itertools.islice(rest, _FOLD_PART)
+    ]:
+        text = json.dumps(part, separators=(",", ":"), ensure_ascii=False)
+        digest.update(between + text[1:-1].encode("utf-8"))
+        between = b","
+    digest.update(b"]")
     # A folded value is a hash stored as a value: it carries its label.
-    return f"{label}:{hashlib.sha256(members.encode('utf-8')).hexdigest()}"
+    return f"{label}:{digest.hexdigest()}"
 
 
 def aggregated_list_type(

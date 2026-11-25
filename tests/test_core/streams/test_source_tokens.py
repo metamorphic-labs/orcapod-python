@@ -7,8 +7,11 @@ derived column reaches a user, a user's operator, a stored table, a hash or a pi
 
 from __future__ import annotations
 
+import hashlib
+import json
 import pickle
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import polars as pl
@@ -23,13 +26,21 @@ from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.operators.join import JOIN_FOLD_LABEL
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.streams import ArrowTableStream
+from orcapod.core.streams.carried import carried_table
 from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS
-from orcapod.databases import InMemoryArrowDatabase
+from orcapod.databases import (
+    ConnectorArrowDatabase,
+    DeltaTableDatabase,
+    InMemoryArrowDatabase,
+    SQLiteConnector,
+)
 from orcapod.operators import (
     AddTags,
+    Batch,
     DropColumns,
     DropNulls,
     DropTagColumns,
+    GroupBy,
     Join,
     MapColumns,
     MapData,
@@ -40,7 +51,8 @@ from orcapod.operators import (
     SelectDataColumns,
     TagBy,
 )
-from orcapod.sources import ArrowTableSource, CachedSource
+from orcapod.protocols.core_protocols import StreamProtocol
+from orcapod.sources import ArrowTableSource, CachedSource, SpiralDBTableSource
 from orcapod.system_constants import constants
 from orcapod.utils import arrow_utils, source_tokens
 from tests.test_core.operators.test_async_sync_equivalence import (
@@ -49,6 +61,7 @@ from tests.test_core.operators.test_async_sync_equivalence import (
     Case,
 )
 from tests.test_core.operators.test_row_built_form import assert_same_values
+from tests.test_databases import fake_spiral_sdk as fake
 
 CARRIED = {"source": True, "system_tags": True, "context": True}
 
@@ -119,6 +132,9 @@ ROW_WISE: dict[str, Callable[[], Any]] = {
     "select_data": lambda: SelectDataColumns(["y"])(_source()),
     "drop_tags": lambda: DropTagColumns(["k"])(_source()),
     "drop_columns": lambda: DropColumns(["k", "x"])(_source()),
+    "select_columns": lambda: _source().select_columns(["k", "y"]),
+    "select_tags": lambda: _source().select_tag_columns(["k"]),
+    "drop_data": lambda: _source().drop_data_columns(["y"]),
     "add_tags": lambda: AddTags({"b": 1, "a": "q"})(_source()),
     "tag_by": lambda: TagBy(["x"])(DropNulls(["x"])(_plain_source())),
     "chain": lambda: (
@@ -136,7 +152,7 @@ def test_a_row_wise_operator_carries_the_tokens_and_gives_the_same_rows(
     name: str, text_sources: Callable[[], None]
 ) -> None:
     result = ROW_WISE[name]()
-    carried = result.as_carried_table(columns=CARRIED)
+    carried = carried_table(result, CARRIED)
     tokens = [c for c in carried.column_names if c.startswith(constants.SOURCE_PREFIX)]
     assert tokens and set(_derived(carried)) == set(tokens)
     table = result.as_table(all_info=True)
@@ -145,7 +161,7 @@ def test_a_row_wise_operator_carries_the_tokens_and_gives_the_same_rows(
     text_sources()
     oracle = ROW_WISE[name]()
     expected = oracle.as_table(all_info=True)
-    assert not _derived(oracle.as_carried_table(columns=CARRIED))
+    assert not _derived(carried_table(oracle, CARRIED))
     assert table.schema.equals(expected.schema, check_metadata=True)
     assert_same_values(table, expected)
     assert rows == [
@@ -164,7 +180,7 @@ def test_every_operator_gives_what_text_sources_give(
     F (the table a job node hands on) of the carried form."""
     result = case.make_op()(*case.make_sources())
     table = result.as_table(all_info=True)
-    carried = result.as_carried_table(columns=ZERO_ROW_INPUT_COLUMNS)
+    carried = carried_table(result, ZERO_ROW_INPUT_COLUMNS)
     plain = result.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
     built = source_tokens.materialize(carried)
     assert built.schema.equals(plain.schema, check_metadata=True)
@@ -267,7 +283,7 @@ def test_a_match_carries_the_tokens_and_gives_the_same_rows(
 ) -> None:
     make, text = MATCHES[name]
     result = make()
-    carried = result.as_carried_table(columns={"source": True, "system_tags": True})
+    carried = carried_table(result, {"source": True, "system_tags": True})
     tokens = {
         c.removeprefix("_source_")
         for c in carried.column_names
@@ -308,7 +324,7 @@ def test_inputs_of_one_pipeline_hash_keep_their_own_tokens(
         return streams[0].join(streams[1])
 
     result = make()
-    assert not _derived(result.as_carried_table(columns=CARRIED))
+    assert not _derived(carried_table(result, CARRIED))
     table = result.as_table(all_info=True)
     text_sources()
     expected = make().as_table(all_info=True)
@@ -346,6 +362,239 @@ def test_a_recipe_survives_its_json() -> None:
         assert again == kind and again.recipe == recipe
 
 
+def _keyed(rows: int, groups: int, **kwargs: Any) -> ArrowTableSource:
+    """Rows in a shuffled order, a key with null and NaN, two tags, two data columns."""
+    order = [(i * 7919) % rows for i in range(rows)]
+    table = pa.table(
+        {
+            "t": pa.array(order, pa.int64()),
+            "g": pa.array(
+                [None if i % groups == 1 else f"g{i % groups}" for i in order]
+            ),
+            "f": pa.array([float("nan") if i % 2 else -0.0 for i in order]),
+            "x": pa.array([float(i) for i in order]),
+            "y": pa.array([f"y{i}" for i in order]),
+        }
+    )
+    return ArrowTableSource(table, tag_columns=["t", "g", "f"], **kwargs)
+
+
+AGGREGATES: dict[str, tuple[Callable[[], Any], bool]] = {
+    # The operation, and whether every list of tokens is derived after it.
+    "group_by": (lambda: _keyed(50, 4).group_by(["g"]), True),
+    "group_by_float": (lambda: _keyed(50, 4).group_by(["f", "g"]), True),
+    "group_by_one_row_groups": (lambda: _keyed(9, 3).group_by(["t"]), True),
+    "group_by_plain": (
+        lambda: _keyed(50, 4, tag_only_columns=True).group_by(["g"]),
+        True,
+    ),
+    "group_by_order": (
+        lambda: GroupBy(by=["g"], member_order=["f", "t"])(_keyed(50, 4)),
+        True,
+    ),
+    "group_by_chain": (
+        lambda: (
+            _keyed(50, 4)
+            .polars_filter(pl.col("x") > 5)
+            .group_by(["g"])
+            .map_data({"x": "z", "t": "tt"})
+            .add_tags(a=1)
+            .polars_filter(pl.col("a") == 1)
+        ),
+        True,
+    ),
+    "group_by_then_filter": (
+        lambda: _keyed(50, 4).group_by(["g"]).polars_filter(pl.col("g") == "g2"),
+        True,
+    ),
+    "group_by_kept_by_drop_nulls": (
+        lambda: _keyed(50, 4).group_by(["g"]).drop_nulls(),
+        True,
+    ),
+    "regrouped": (lambda: _keyed(50, 4).group_by(["f", "g"]).group_by(["f"]), False),
+    "join_grouped": (lambda: _other("a").join(_other("b")).group_by(["j"]), True),
+    "merge_join_grouped": (
+        lambda: MergeJoin()(
+            _other("a").map_data({"a2": "same"}), _other("b").map_data({"b2": "same"})
+        ).group_by(["j"]),
+        False,
+    ),
+    "grouped_joined": (
+        lambda: Join()(
+            _other("a").group_by(["j"]),
+            _other("b").group_by(["j"]).map_data({"k": "k2"}),
+        ),
+        True,
+    ),
+    "grouped_semi_join": (
+        lambda: _other("a").group_by(["j"]).semi_join(_other("b")),
+        True,
+    ),
+    "grouped_rejoin": (
+        lambda: Rejoin()(
+            _keyed(50, 4).group_by(["g"]).select_data_columns(["x", "g"]),
+            _keyed(50, 4).group_by(["g"]).select_data_columns(["y", "g"]),
+        ),
+        True,
+    ),
+    "grouped_merge_join": (
+        lambda: MergeJoin()(
+            _other("a").group_by(["j"]).map_data({"a2": "same"}),
+            _other("b").group_by(["j"]).map_data({"b2": "same"}),
+        ),
+        False,
+    ),
+    "batch": (lambda: Batch(batch_size=3)(_keyed(10, 4)), True),
+    "batch_dropped": (
+        lambda: Batch(batch_size=3, drop_partial_batch=True)(_keyed(10, 4)),
+        True,
+    ),
+    "batch_all": (lambda: Batch()(_keyed(10, 4)), True),
+    "batch_of_groups": (
+        lambda: Batch(batch_size=2)(_keyed(50, 5).group_by(["g"])),
+        False,
+    ),
+    "several_chunks": (
+        lambda: ArrowTableSource(
+            pa.concat_tables([_table(), _table().slice(0, 4)]).append_column(
+                "t", pa.array(range(14))
+            ),
+            tag_columns=["j", "t"],
+        ).group_by(["j"]),
+        True,
+    ),
+}
+
+
+@pytest.mark.parametrize("name", AGGREGATES)
+@pytest.mark.parametrize("chunk", [3, source_tokens.ROWS_PER_CHUNK])
+def test_an_aggregation_carries_the_tokens_and_gives_the_same_rows(
+    name: str,
+    chunk: int,
+    text_sources: Callable[[], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(source_tokens, "ROWS_PER_CHUNK", chunk)
+    monkeypatch.setattr(arrow_utils, "_FOLD_PART", chunk)
+    make, derived = AGGREGATES[name]
+    result = make()
+    carried = carried_table(result, ZERO_ROW_INPUT_COLUMNS)
+    lists = [
+        f
+        for f in carried.schema
+        if f.name.startswith(constants.SOURCE_PREFIX)
+        and f.type != pa.large_string()
+        and source_tokens.derived_recipe(f.type) is None
+    ]
+    assert lists
+    assert all(source_tokens.is_derived(f.type) for f in lists) is derived
+    formed = StaticOutputOperatorPod._row_built_form(carried, result.keys())
+    plain = result.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+    from_text = StaticOutputOperatorPod._row_built_form(plain, result.keys())
+    formed = source_tokens.materialize(formed)
+    assert formed.schema.equals(from_text.schema, check_metadata=True)
+    assert_same_values(formed, from_text)
+    table = result.as_table(all_info=True)
+    rows = [(t.as_dict(columns=CARRIED), d.as_dict(columns=CARRIED)) for t, d in result]
+    assert not _derived(table)
+    text_sources()
+    oracle = make()
+    expected = oracle.as_table(all_info=True)
+    assert table.schema.equals(expected.schema, check_metadata=True)
+    assert_same_values(table, expected)
+    assert repr(rows) == repr(
+        [(t.as_dict(columns=CARRIED), d.as_dict(columns=CARRIED)) for t, d in oracle]
+    )
+
+
+def test_an_aggregation_of_no_rows_gives_text_types(
+    text_sources: Callable[[], None],
+) -> None:
+    def make() -> list[pa.Table]:
+        none = _keyed(10, 4).polars_filter(pl.col("x") > 100)
+        return [
+            s.as_table(all_info=True) for s in (none.group_by(["g"]), Batch()(none))
+        ]
+
+    tables = make()
+    text_sources()
+    for table, expected in zip(tables, make(), strict=True):
+        assert table.num_rows == 0
+        assert table.schema.equals(expected.schema, check_metadata=True)
+
+
+def test_a_grouped_stream_refuses_to_leak() -> None:
+    carried = carried_table(
+        _keyed(10, 4).group_by(["g"]), {"source": True, "system_tags": True}
+    )
+    tokens = carried.column("_source_x")
+    with pytest.raises(TypeError, match="no value"):
+        _ = tokens.to_pylist()
+    with pytest.raises(pa.ArrowNotImplementedError):
+        _ = tokens.cast(pa.large_list(pa.large_string()))
+    with pytest.raises(TypeError, match="not pickled"):
+        _ = pickle.dumps(carried)
+    with pytest.raises(pa.ArrowNotImplementedError):
+        pq.write_table(carried, pa.BufferOutputStream())
+    kind = tokens.type
+    assert (
+        source_tokens.MemberTokenType.__arrow_ext_deserialize__(
+            kind.storage_type, kind.__arrow_ext_serialize__()
+        )
+        == kind
+    )
+
+
+def test_the_lists_of_one_aggregation_share_the_members_ids() -> None:
+    """One array of ids for every token column; a spill writes it once per column, with
+    the ids' text once (a dictionary) per column too."""
+    carried: Any = carried_table(
+        _keyed(50, 4).group_by(["g"]), {"source": True, "system_tags": True}
+    )
+    addresses = {
+        tuple(
+            buffer.address
+            for buffer in carried.column(name)
+            .chunk(0)
+            .storage.values.field(0)
+            .buffers()
+            if buffer is not None
+        )
+        for name in ("_source_x", "_source_y", "_source_t")
+    }
+    assert len(addresses) == 1
+
+
+@pytest.mark.parametrize("members", [0, 1, 4095, 4096, 4097, 9000])
+def test_a_fold_is_the_digest_of_the_canonical_list(members: int) -> None:
+    values = [None if i % 5 == 0 else f'r"{i}\u00e9,' for i in range(members)]
+    text = json.dumps(values, separators=(",", ":"), ensure_ascii=False)
+    expected = "l_v1:" + hashlib.sha256(text.encode()).hexdigest()
+    assert arrow_utils.fold_system_tag_values(values, label="l_v1") == expected
+    assert arrow_utils.fold_system_tag_values(iter(values), label="l_v1") == expected
+
+
+def test_grouped_rows_are_built_a_bounded_part_at_a_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from orcapod.core.streams import arrow_table_stream
+
+    monkeypatch.setattr(arrow_table_stream, "ROWS_PER_PART", 2)
+    stream = _keyed(50, 5).group_by(["g"])
+    whole = stream.as_table(columns={"source": True})
+    sizes: list[int] = []
+    build = source_tokens.materialize
+
+    def record(table: pa.Table, names: Any = None) -> pa.Table:
+        sizes.append(table.num_rows)
+        return build(table, names)
+
+    monkeypatch.setattr(source_tokens, "materialize", record)
+    rows = list(stream)
+    assert sizes == [1] * 5  # 10 members a row: one row passes 16 with the next
+    assert [d.source_info()["x"] for _, d in rows] == whole["_source_x"].to_pylist()
+
+
 def _column_configs() -> list[dict[str, bool]]:
     groups = ("source", "system_tags", "context", "content_hash", "sort_by_tags")
     return [
@@ -379,7 +628,7 @@ def test_no_public_read_gives_a_derived_column(make: Callable[[], Any]) -> None:
 def test_a_table_without_its_system_tags_holds_text() -> None:
     """The recipe reads the system tags, so a table without them is never carried."""
     for config in ({"source": True}, {"source": True, "context": True}):
-        table = _source().as_carried_table(columns=config)
+        table = carried_table(_source(), config)
         assert not _derived(table)
         assert table.column("_source_x").type == pa.large_string()
 
@@ -488,7 +737,7 @@ def test_stored_rows_hold_text(text_sources: Callable[[], None]) -> None:
 
 
 def test_a_derived_column_that_leaks_is_an_error() -> None:
-    carried = _source().as_carried_table(columns=CARRIED)
+    carried = carried_table(_source(), CARRIED)
     tokens = carried.column("_source_x")
     with pytest.raises(TypeError, match="no value"):
         _ = tokens.to_pylist()
@@ -498,13 +747,54 @@ def test_a_derived_column_that_leaks_is_an_error() -> None:
         _ = pickle.dumps(carried)
     with pytest.raises(pa.ArrowNotImplementedError):
         pq.write_table(carried, pa.BufferOutputStream())
-    with pytest.raises(Exception, match="no value|derived"):
-        _ = contexts.get_default_context().arrow_hasher.hash_table(carried)
+    hasher = contexts.get_default_context().arrow_hasher
+    for hash_it in (
+        lambda: hasher.hash_table(carried),
+        lambda: hasher.hash_table(carried.slice(0, 0)),
+        lambda: hasher.hash_schema(carried.schema),
+        lambda: hasher.hash_table_strict(carried),
+        lambda: hasher.hash_table_ordered(carried),
+    ):
+        with pytest.raises(TypeError, match="derived"):
+            _ = hash_it()
 
 
-def test_a_spilled_table_keeps_its_recipes() -> None:
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("rows", [0, 3])
+@pytest.mark.parametrize("kind", ["memory", "delta", "connector"])
+def test_a_store_refuses_a_derived_column(
+    kind: str, rows: int, grouped: bool, tmp_path: Path
+) -> None:
+    stream: Any = _keyed(9, 3).group_by(["g"]) if grouped else _source()
+    carried = carried_table(stream, CARRIED).slice(0, rows)
+    records = carried.append_column(
+        "rid", pa.array([str(i).encode() for i in range(rows)], pa.large_binary())
+    )
+    databases: dict[str, Callable[[], Any]] = {
+        "memory": InMemoryArrowDatabase,
+        "delta": lambda: DeltaTableDatabase(str(tmp_path / "delta")),
+        "connector": lambda: ConnectorArrowDatabase(
+            SQLiteConnector(str(tmp_path / "store.db"))
+        ),
+    }
+    database = databases[kind]()
+    with pytest.raises(TypeError, match="derived"):
+        database.add_records(("t",), records, record_id_column="rid", flush=True)
+
+
+def test_the_carried_read_is_no_part_of_a_stream() -> None:
+    """Review of PR 563: no public name gives a derived column."""
+    for stream in (_source(), ROW_WISE["chain"]()):
+        assert not [n for n in dir(stream) if "carried" in n and not n.startswith("_")]
+    assert "carried" not in " ".join(dir(StreamProtocol))
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+def test_a_spilled_table_keeps_its_recipes(grouped: bool) -> None:
     """As the row spool writes it: an extension column's storage, wrapped when read."""
-    carried: Any = _source().as_carried_table(columns=CARRIED).combine_chunks()
+    stream = _keyed(50, 12)
+    made: Any = stream.group_by(["g"]) if grouped else stream
+    carried: Any = carried_table(made, CARRIED).combine_chunks()
     arrow: Any = pa
     batch: Any = carried.to_batches()[0]
     storage = arrow.RecordBatch.from_arrays(
@@ -525,13 +815,31 @@ def test_a_spilled_table_keeps_its_recipes() -> None:
     )
     order = pa.array([7, 2, 2, 9])
     assert _derived(wrapped) == _derived(carried)
-    assert source_tokens.materialize(wrapped.take(order)).equals(
-        source_tokens.materialize(carried).take(order)
+    assert_same_values(
+        source_tokens.materialize(wrapped.take(order)),
+        source_tokens.materialize(carried).take(order),
     )
 
 
+def test_grouped_tables_of_two_reads_are_put_together() -> None:
+    """Chunks whose ids have dictionaries of their own: concatenated, combined, taken."""
+    tables: list[Any] = [
+        carried_table(
+            _keyed(n, 4, source_id="s").group_by(["g"]),
+            {"source": True, "system_tags": True},
+        )
+        for n in (50, 23)
+    ]
+    texts = pa.concat_tables([source_tokens.materialize(t) for t in tables])
+    whole = pa.concat_tables(tables)
+    order = pa.array([6, 0, 7, 0])
+    assert_same_values(source_tokens.materialize(whole), texts)
+    assert_same_values(source_tokens.materialize(whole.combine_chunks()), texts)
+    assert_same_values(source_tokens.materialize(whole.take(order)), texts.take(order))
+
+
 def test_a_carried_column_has_no_bytes_and_is_not_null() -> None:
-    carried = _source().as_carried_table(columns=CARRIED)
+    carried = carried_table(_source(), CARRIED)
     taken = carried.take(pa.array([1, 5])).filter(pc.field("k") > 1)
     for table in (carried, taken, pa.concat_tables([carried, taken]).combine_chunks()):
         for name in _derived(table):
@@ -562,7 +870,7 @@ def test_extended_system_tag_names_are_followed_and_sorting_builds_the_text() ->
     )
     tables = [
         arrow_utils.append_to_system_tags(
-            s.as_carried_table(columns={"source": True, "system_tags": True}), f"h:{i}"
+            carried_table(s, {"source": True, "system_tags": True}), f"h:{i}"
         )
         for i, s in enumerate((left, right))
     ]
@@ -606,12 +914,153 @@ def test_no_rows_hold_text_types() -> None:
     assert table.schema.equals(_source().as_table(all_info=True).schema)
 
 
-def test_a_source_with_its_own_read_gives_its_own_table() -> None:
-    """A subclass, or an object, with its own ``as_table`` is read through it."""
+class _OwnSource(ArrowTableSource):
+    def as_table(self, **kwargs: Any) -> pa.Table:
+        return super().as_table(**kwargs).slice(0, 2)
 
-    class Own(ArrowTableSource):
-        def as_table(self, **kwargs: Any) -> pa.Table:
-            return super().as_table(**kwargs).slice(0, 2)
 
-    own = Own(_table(), tag_columns=["k"])
-    assert own.drop_columns(["x"]).as_table().num_rows == 2
+class _OwnStream(ArrowTableStream):
+    def as_table(self, **kwargs: Any) -> pa.Table:
+        return super().as_table(**kwargs).slice(0, 2)
+
+
+class _OwnSpiral(SpiralDBTableSource):
+    def as_table(self, **kwargs: Any) -> pa.Table:
+        return super().as_table(**kwargs).slice(0, 2)
+
+
+class _Forwarding:
+    """A stream of the read interface as it is, forwarding to another."""
+
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self.inner, name)
+
+
+def _raw(kind: type[ArrowTableStream]) -> ArrowTableStream:
+    return kind(
+        carried_table(_source(), {"source": True, "system_tags": True}),
+        tag_columns=["k", "j"],
+        data_tags=["k"],
+    )
+
+
+def _replaced() -> Any:
+    source = _source()
+    read = source.as_table
+    setattr(source, "as_table", lambda **kwargs: read(**kwargs).slice(0, 2))  # noqa: B010  # the point
+    return source
+
+
+@pytest.mark.parametrize("kind", ["source", "stream", "spiral", "replaced"])
+def test_a_stream_with_its_own_read_is_read_through_it(
+    kind: str, tmp_path: Path
+) -> None:
+    """Review of PRs 563 and 564: a subclass, or an object, with its own ``as_table``."""
+    with fake.install(tmp_path):
+        if kind == "spiral":
+            table = fake.ExternalProject("example").create_table(
+                "default.demo", key_schema=pa.schema([("k", pa.uint64())])
+            )
+            table.write(
+                pa.table({"k": pa.array([1, 2, 3], pa.uint64()), "x": [3.0, 4.0, 5.0]})
+            )
+        own: Any = {
+            "source": lambda: _OwnSource(_table(), tag_columns=["k"]),
+            "stream": lambda: _raw(_OwnStream),
+            "spiral": lambda: _OwnSpiral("example", "demo"),
+            "replaced": _replaced,
+        }[kind]()
+        assert not _derived(carried_table(own, CARRIED))
+        assert own.map_data({"x": "z"}).as_table().num_rows == 2
+        assert own.polars_filter(pl.col("k") > -1).as_table().num_rows == 2
+
+
+def test_a_stream_without_the_internal_read_is_read_as_before() -> None:
+    forwarding: Any = _Forwarding(_source())
+    assert not _derived(carried_table(forwarding, CARRIED))
+    result = DropNulls(["x"]).static_process(forwarding)
+    assert result.as_table(all_info=True).equals(
+        DropNulls(["x"]).static_process(_source()).as_table(all_info=True)
+    )
+
+
+class _OwnDropNulls(DropNulls):
+    """A user's operator over a library one."""
+
+    seen: list[pa.Table] = []
+
+    def unary_static_process(self, stream: Any) -> Any:
+        self.seen.append(self._input_table(stream, CARRIED))
+        return super().unary_static_process(stream)
+
+
+def test_a_subclass_of_a_library_operator_reads_text() -> None:
+    _OwnDropNulls.seen = []
+    result = _OwnDropNulls(["x"])(_source())
+    assert not _derived(carried_table(result, CARRIED))
+    (seen,) = _OwnDropNulls.seen
+    assert not _derived(seen)
+
+
+def test_every_library_source_is_read_without_text() -> None:
+    """Each kind declares the read itself; the ones with rows of their own do not."""
+    from orcapod import sources
+
+    declared = {
+        name
+        for name in dir(sources)
+        if isinstance(cls := getattr(sources, name), type)
+        and "_carried_table" in vars(cls)
+    }
+    kinds = {
+        name
+        for name in dir(sources)
+        if isinstance(cls := getattr(sources, name), type)
+        and vars(cls).get("TABLE_IS_ROWS") is True
+    }
+    assert kinds - declared == {"CachedSource"}
+    assert declared <= kinds
+
+
+@pytest.mark.parametrize("kind", ["join", "merge_join", "semi_join", "rejoin"])
+def test_a_match_reads_a_stream_with_its_own_read_through_it(kind: str) -> None:
+    """Review of PR 564: a subclass that shows fewer rows is matched on those."""
+
+    def matched(left: Any) -> Any:
+        return {
+            "join": lambda: left.join(_other("a")),
+            "merge_join": lambda: MergeJoin()(left, _other("a")),
+            "semi_join": lambda: left.semi_join(_other("a")),
+            "rejoin": lambda: Rejoin()(left, _source().select_data_columns(["k"])),
+        }[kind]()
+
+    # Of the stream's ten rows its own read shows k = 0 and 1; the matches of the others
+    # are left out. (``_other`` holds j of another k, so k = 1, 4 and 7 match it.)
+    own = matched(_raw(_OwnStream)).as_table()["k"].to_pylist()
+    whole = matched(_raw(ArrowTableStream)).as_table()["k"].to_pylist()
+    expected = list(range(10)) if kind == "rejoin" else [1, 4, 7]
+    assert sorted(whole) == expected
+    assert sorted(own) == [k for k in expected if k < 2]
+
+
+class _OwnJoin(Join):
+    """A user's operator over a library one."""
+
+    seen: list[pa.Table] = []
+
+    def static_process(self, *streams: Any) -> Any:
+        self.seen.extend(self._input_table(s, CARRIED) for s in streams)
+        return super().static_process(*streams)
+
+
+def test_a_subclass_of_a_join_reads_text() -> None:
+    _OwnJoin.seen = []
+    result = _OwnJoin()(_other("a"), _other("b"))
+    assert not _derived(carried_table(result, CARRIED))
+    assert [_derived(t) for t in _OwnJoin.seen] == [(), ()]
+    assert result.as_table().num_rows == 12

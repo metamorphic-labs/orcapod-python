@@ -48,6 +48,7 @@ from orcapod.core.operators.provisional import (
 from orcapod.utils import source_tokens
 from orcapod.utils.provisional import note_provisional_use, provisional_class_name
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+from orcapod.core.streams.carried import carried_table
 from orcapod.core.streams.base import (
     batch_streams_of,
     reads_in_batches,
@@ -134,6 +135,14 @@ class StaticOutputOperatorPod(TraceableBase):
     values (``Pick`` and ``Index`` build their result from rows, so theirs do). Read
     from the class itself, never inherited: a subclass that changes the operator
     declares it again. ``run()`` of a stream uses it (ITL-1464).
+    """
+
+    CARRIES_TOKENS: ClassVar[bool] = False
+    """Whether the operator passes derived token columns on (ITL-1464).
+
+    Declared by a library operator that never reads the values of a source-info column
+    it passes on, or builds their text itself. It holds for exactly the class that
+    declares it, never for a subclass (``_input_table``).
     """
 
     OUTPUT_SCHEMA_IS_INPUT_SCHEMA: ClassVar[bool] = False
@@ -238,6 +247,24 @@ class StaticOutputOperatorPod(TraceableBase):
             return
         if any(stream_data_tags(stream) for stream in streams):
             raise not_supported_yet(type(self).__name__, self.DATA_TAGS_ISSUE)
+
+    def _input_table(
+        self, stream: StreamProtocol, columns: dict[str, Any]
+    ) -> "pa.Table":
+        """The table of ``stream`` as this operator reads it.
+
+        Derived token columns as they are (``carried_table``) for an operator whose class
+        declares ``CARRIES_TOKENS`` itself and is used as that class; text for any other,
+        so a user's operator, also one that subclasses a library operator, reads text.
+
+        Args:
+            stream: An input stream.
+            columns: The column groups, as for ``as_table``.
+        """
+        kind = type(self)
+        if vars(kind).get("CARRIES_TOKENS") is True and reads_as_its_class(self, kind):
+            return carried_table(stream, columns)
+        return stream.as_table(columns=columns)
 
     def pipeline_identity_structure(self) -> Any:
         """Return the pipeline identity, which defaults to content identity for operators."""
@@ -603,8 +630,9 @@ class StaticOutputOperatorPod(TraceableBase):
                 continue
             if pa.types.is_large_string(field.type):
                 continue
-            if source_tokens.derived_recipe(field.type) is not None:
-                # Every token of a derived column is one string.
+            if source_tokens.is_derived(field.type):
+                # A token is one string, and a list of them is never empty: the type
+                # the column declares is the one its tokens give.
                 continue
             values = table.column(index).to_pylist()
             kinds = {arrow_utils.source_info_arrow_type(value) for value in values}
@@ -1205,7 +1233,7 @@ class StaticOutputOperatorPod(TraceableBase):
             output: The channel to send into; a result with no rows sends nothing.
         """
         table = row_built_columns(
-            result.as_carried_table(columns=ZERO_ROW_INPUT_COLUMNS), result.keys()
+            carried_table(result, ZERO_ROW_INPUT_COLUMNS), result.keys()
         )
         for batch in table.to_batches():
             if batch.num_rows:
@@ -2035,6 +2063,8 @@ class _RowsOfStream(ArrowTableStream):
         data_context: The rows' data context; ``None`` for the default.
     """
 
+    _carried_table = ArrowTableStream._carried_table  # pyright: ignore[reportPrivateUsage]  # read as its base is
+
     def __init__(
         self,
         table: pa.Table,
@@ -2432,15 +2462,13 @@ class DynamicPodStream(StreamBase):
         )
         return self._cached_stream.as_table(columns=columns, all_info=all_info)
 
-    def as_carried_table(
-        self, *, columns: ColumnConfig | dict[str, Any] | None = None
-    ) -> "pa.Table":
+    def _carried_table(self, config: ColumnConfig) -> "pa.Table":
         """The operator's result, derived token columns as they are (ITL-1464)."""
         self._refresh()
         assert self._cached_stream is not None, (
             "StreamProtocol has not been updated or is empty."
         )
-        return self._cached_stream.as_carried_table(columns=columns)
+        return carried_table(self._cached_stream, config)
 
     def iter_data(
         self,
@@ -2569,8 +2597,8 @@ def joined_batches(batches: Sequence[StreamProtocol]) -> StreamProtocol:
     return ArrowTableStream(
         pa.concat_tables(
             [
-                batch.as_carried_table(
-                    columns={"source": True, "system_tags": True, "context": True}
+                carried_table(
+                    batch, {"source": True, "system_tags": True, "context": True}
                 )
                 for batch in batches
             ]

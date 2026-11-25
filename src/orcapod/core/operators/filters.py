@@ -41,6 +41,8 @@ class PolarsFilter(UnaryOperator):
     Operator that applies Polars filtering to a stream
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     # Data-tags (ITL-1023): handled.
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
@@ -76,8 +78,8 @@ class PolarsFilter(UnaryOperator):
             return stream
 
         # TODO: improve efficiency here...
-        whole = stream.as_carried_table(
-            columns={"source": True, "system_tags": True, "sort_by_tags": False}
+        whole = self._input_table(
+            stream, columns={"source": True, "system_tags": True, "sort_by_tags": False}
         )
         # Polars reads no derived token column: one is left out, and put back for the
         # rows kept (its recipe reads the system tags kept with them, ITL-1464), unless
@@ -87,8 +89,17 @@ class PolarsFilter(UnaryOperator):
         if derived and not self._reads_only(others):
             whole, derived = source_tokens.materialize(whole), ()
         table = whole.drop_columns(list(derived))
+        recipes = source_tokens.recipe_columns(whole.schema)
+        # A list of tokens holds its members' ids, so its kept rows are taken by number.
+        lists = [name for name in derived if name not in recipes]
+        row = arrow_utils.unused_column_name(whole, "__row")
         df = pl.DataFrame(table)
+        if lists:
+            df = df.with_columns(pl.int_range(pl.len()).alias(row))
         filtered_table = df.filter(*self.predicates, **self.constraints).to_arrow()
+        kept = filtered_table.column(row) if lists else None
+        if lists:
+            filtered_table = filtered_table.drop_columns([row])
         # A filter passes every column through, so each one takes the
         # large-normalized form of its input Arrow type (string ->
         # large_string, list -> large_list, recursively; hash-identical).
@@ -111,11 +122,14 @@ class PolarsFilter(UnaryOperator):
         )
         for name in derived:
             field = whole.schema.field(name)
-            recipe = source_tokens.derived_recipe(field.type)
-            assert recipe is not None
-            filtered_table = filtered_table.append_column(
-                field, source_tokens.derived_array(recipe, filtered_table.num_rows)
-            )
+            if name in recipes:
+                column = source_tokens.derived_array(
+                    recipes[name], filtered_table.num_rows
+                )
+            else:
+                assert kept is not None
+                column = whole.column(name).take(kept)
+            filtered_table = filtered_table.append_column(field, column)
         filtered_table = filtered_table.select(whole.column_names)
 
         return ArrowTableStream(

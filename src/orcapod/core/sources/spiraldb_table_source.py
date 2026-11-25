@@ -64,6 +64,7 @@ from orcapod.core.sources.stream_builder import (
 )
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.exact_class import reads_as_its_class
+from orcapod.core.streams.carried import carried_table
 from orcapod.core.streams.base import StreamBase, check_head_size
 from orcapod.core.streams.view import ViewStatus, StreamView
 from orcapod.databases.spiraldb_connector import (
@@ -1003,13 +1004,9 @@ class SpiralDBTableSource(RootSource):
             with_source_info=with_source_info,
         ).as_table(columns=columns, all_info=all_info)
 
-    def as_carried_table(
-        self, *, columns: ColumnConfig | dict[str, Any] | None = None
-    ) -> "pa.Table":
+    def _carried_table(self, config: ColumnConfig) -> "pa.Table":
         """Scan the table as ``as_table`` does, building no source-info text (ITL-1464)."""
-        return self._whole_stream(self._batch_streams()).as_carried_table(
-            columns=columns
-        )
+        return carried_table(self._whole_stream(self._batch_streams()), config)
 
     def _whole_stream(
         self,
@@ -1022,7 +1019,7 @@ class SpiralDBTableSource(RootSource):
         # tags) applies across batches. The source-info tokens are carried only for
         # a result that shows or hashes them (ITL-1464).
         enriched = {"source": with_source_info, "system_tags": True}
-        tables = [stream.as_carried_table(columns=enriched) for stream in streams]
+        tables = [carried_table(stream, enriched) for stream in streams]
         if not tables:
             return self._stream
         return ArrowTableStream(
@@ -1181,9 +1178,7 @@ class SpiralDBTableSource(RootSource):
             for stream in streams:
                 read = True
                 yield ArrowTableStream(
-                    self._whole_stream(iter([stream])).as_carried_table(
-                        columns=columns
-                    ),
+                    carried_table(self._whole_stream(iter([stream])), columns),
                     tag_columns=self._tag_columns,
                     data_tags=self._data_tags,
                     data_context=self.data_context_key,
@@ -1192,7 +1187,7 @@ class SpiralDBTableSource(RootSource):
             # No row: the typed table of none that ``as_table()`` gives, without a
             # second scan.
             yield ArrowTableStream(
-                self._stream.as_carried_table(columns=columns),
+                carried_table(self._stream, columns),
                 tag_columns=self._tag_columns,
                 data_tags=self._data_tags,
                 data_context=self.data_context_key,
