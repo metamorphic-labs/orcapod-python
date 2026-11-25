@@ -358,6 +358,14 @@ def step_job_run(store: Path) -> tuple[int, int, Any]:
     return _raw(GAZE).nbytes, 0, job
 
 
+def step_job_run_async_unkept(store: Path) -> tuple[int, int, Any]:
+    from orcapod.pipeline import AsyncPipelineOrchestrator
+
+    job = _job(store)
+    job.run(orchestrator=AsyncPipelineOrchestrator(), materialize_results=False)
+    return _raw(GAZE).nbytes, 0, job
+
+
 def step_job_run_async(store: Path) -> tuple[int, int, Any]:
     from orcapod.pipeline import AsyncPipelineOrchestrator
 
@@ -393,6 +401,9 @@ def _operator_job(chain: str, orchestrator: str) -> Callable[[Path], Any]:
             _operator_chains()[chain]()
         if orchestrator == "async":
             job.run(orchestrator=AsyncPipelineOrchestrator())
+        elif orchestrator == "async_unkept":
+            # The orchestrator keeps no node's rows for its result.
+            job.run(orchestrator=AsyncPipelineOrchestrator(), materialize_results=False)
         else:
             job.run()
         name = SPIKES if chain == "join" else GAZE
@@ -405,7 +416,7 @@ STEPS: dict[str, Callable[..., tuple[int, int, Any]]] = {
     **{
         f"job_{chain}_{orchestrator}": _operator_job(chain, orchestrator)
         for chain in ("map_data", "drop_nulls", "polars_filter", "join", "group_by")
-        for orchestrator in ("sync", "async")
+        for orchestrator in ("sync", "async", "async_unkept")
     },
     "raw_copy": step_raw_copy,
     "as_table": step_as_table,
@@ -425,6 +436,7 @@ STEPS: dict[str, Callable[..., tuple[int, int, Any]]] = {
     "function_pod": step_function_pod,
     "job_run": step_job_run,
     "job_run_async": step_job_run_async,
+    "job_run_async_unkept": step_job_run_async_unkept,
 }
 
 

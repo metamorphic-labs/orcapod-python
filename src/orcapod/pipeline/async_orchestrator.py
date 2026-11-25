@@ -361,9 +361,12 @@ class AsyncPipelineOrchestrator:
                             f"Unknown node type: {getattr(node, 'node_type', None)!r}"
                         )
 
-                # Drain terminal channels concurrently
+                # Drain terminal channels concurrently. The rows are let go as they
+                # are read: nothing reads this task's result, and a list of every
+                # row a terminal node sent is the whole output held as objects
+                # (ITL-1464).
                 for ch in terminal_channels:
-                    tg.create_task(ch.reader.collect())
+                    tg.create_task(_drain(ch.reader))
 
             return OrchestratorResult(
                 node_outputs=(
@@ -809,6 +812,12 @@ def _leaves(group: BaseExceptionGroup) -> list[BaseException]:
         else:
             found.append(exc)
     return found
+
+
+async def _drain(reader: Any) -> None:
+    """Read a channel to its end, keeping no row."""
+    async for _ in reader:
+        pass
 
 
 class _CollectingWriter:

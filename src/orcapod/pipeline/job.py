@@ -1009,6 +1009,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 execution. When ``True`` (the default) the buffer is kept for
                 the duration of the run. When ``False`` each node's buffer is
                 released as soon as the node completes, reducing peak memory.
+                The async orchestrator never keeps that buffer for a job, which
+                does not read it (ITL-1464).
                 This setting does not affect database persistence or post-run
                 result access: DB records are written regardless, and
                 ``job.nodes["label"]`` returns the same rows from
@@ -1099,7 +1101,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     observer=_with_counter(observer, counter),
                     run_id=prepared.run_id,
                     pipeline_uri=prepared.pipeline_uri,
-                    materialize_results=materialize_results,
+                    # The job reads nothing from the orchestrator's result (every
+                    # node keeps its own run), so the async orchestrator is never
+                    # asked to collect every row of every node for it (ITL-1464).
+                    materialize_results=False,
                     load_only=load_only,
                     held_rows=plan.held_rows,
                 )
@@ -1171,7 +1176,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 observer=_with_counter(observer, counter),
                 run_id=prepared.run_id,
                 pipeline_uri=prepared.pipeline_uri,
-                materialize_results=materialize_results,
+                # As in ``run``: the job reads nothing from the result (ITL-1464).
+                materialize_results=False,
                 load_only=load_only,
                 held_rows=plan.held_rows,
             )

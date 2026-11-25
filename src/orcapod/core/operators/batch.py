@@ -18,8 +18,10 @@ from orcapod.channels import (
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.operators.static_output_pod import (
     close_inputs,
+    collect_row_chunks,
     concatenate_batches,
     finish_operator,
+    rows_once,
 )
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.streams import ArrowTableStream
@@ -278,11 +280,11 @@ class Batch(UnaryOperator):
             pipeline_hash = input_pipeline_hashes[0]
             if self.batch_size == 0:
                 # Must collect all rows — barrier fallback
-                rows = await inputs[0].collect()
-                if rows:
-                    stream = self._materialize_input_stream(rows, pipeline_hash)
+                rows = await collect_row_chunks(inputs[0])
+                if rows.num_rows:
+                    stream = rows.input_stream(pipeline_hash)
                     result = self.unary_static_process(stream)
-                    for tag, data in result.iter_data():
+                    for tag, data in rows_once(result):
                         await output.send((tag, data))
                 return
 
