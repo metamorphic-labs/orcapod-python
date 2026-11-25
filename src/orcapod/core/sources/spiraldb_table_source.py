@@ -1191,7 +1191,7 @@ class SpiralDBTableSource(RootSource):
         """Read every row the source reads and return a ``StreamView`` of them.
 
         One scan (``where``, ``limit``, ``max_rows`` and the pinned version applied),
-        read in batches: a table of more than ``RUN_VIEW_COMPLETE_ROWS`` rows gives a
+        read in batches: a large table (``RunSize``) gives a
         bounded view (``BoundedStreamView``) and is not held. The
         source holds no rows, so every call scans again. ``head(n)`` and the notebook
         preview are the bounded read: they read only the first ``n`` rows.

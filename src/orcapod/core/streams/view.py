@@ -115,10 +115,13 @@ _ORIGIN_NOUNS = {
 # this many rows: the first and the last half, with Polars' ellipsis row between.
 _DISPLAY_ROWS = 10
 # A ``run()`` that reads its rows batch by batch keeps every row of a result of at most
-# ``RUN_VIEW_COMPLETE_ROWS`` rows; of a larger one, the view has the first and the last
-# ``RUN_VIEW_WINDOW_ROWS`` rows (ITL-1464). Counted in rows, so equal data is always
-# treated alike, however its batches were cut.
+# ``RUN_VIEW_COMPLETE_ROWS`` rows and ``RUN_VIEW_COMPLETE_BYTES`` of values
+# (``value_bytes``); of a larger one, the view has the first and the last
+# ``RUN_VIEW_WINDOW_ROWS`` rows (ITL-1464). A result that fits in the two windows is
+# always kept. Neither measure depends on the layout, so equal data is always treated
+# alike, however its batches were cut (``RunSize``, the one place that decides it).
 RUN_VIEW_COMPLETE_ROWS = 50_000
+RUN_VIEW_COMPLETE_BYTES = 64 * 1024 * 1024
 RUN_VIEW_WINDOW_ROWS = 1_000
 _MAX_TEXT = 80
 _TEXT_START = 56
@@ -756,7 +759,8 @@ class BoundedStreamView(StreamView):
         return BoundedViewError(
             f"{what} needs every row, and this view of {self._total():,} rows holds only "
             f"the first and the last {self.window_rows:,}: run() does not keep a result "
-            f"of more than {RUN_VIEW_COMPLETE_ROWS:,} rows read in batches. Ask the "
+            f"of more than {RUN_VIEW_COMPLETE_ROWS:,} rows, or "
+            f"{_size(RUN_VIEW_COMPLETE_BYTES)} of values, read in batches. Ask the "
             "stream for its rows: stream.as_table(), stream.as_polars_df() or iteration "
             "(stream.as_table(columns={'sort_by_tags': True}) sorts them)."
         )
@@ -861,14 +865,74 @@ class BoundedStreamView(StreamView):
         )
 
 
+def value_bytes(column: Any) -> int:
+    """Return the bytes of the values of ``column``, whatever its layout.
+
+    A fixed-width value counts its width (a null too), a string or binary value its
+    bytes, a list the values in it and 8 bytes, a struct its fields. Offsets, validity,
+    chunks and the buffers behind a slice are not counted, so equal values always count
+    the same, in one chunk or many.
+
+    Args:
+        column: An Arrow array or chunked array.
+    """
+    if isinstance(column, pa.ChunkedArray):
+        return sum(value_bytes(chunk) for chunk in column.chunks)
+    kind = column.type
+    if isinstance(kind, pa.BaseExtensionType):
+        return value_bytes(column.storage)
+    if pa.types.is_map(kind):
+        entry = pa.struct([("key", kind.key_type), ("value", kind.item_type)])
+        return value_bytes(column.cast(pa.list_(entry)))
+    if (
+        pa.types.is_list(kind)
+        or pa.types.is_large_list(kind)
+        or pa.types.is_fixed_size_list(kind)
+    ):
+        return 8 * len(column) + value_bytes(column.flatten())
+    if pa.types.is_struct(kind):
+        # ``flatten`` gives each field with the struct's own nulls, so a value under a
+        # null struct, which is no value, is not counted.
+        return sum(value_bytes(field) for field in column.flatten())
+    if pa.types.is_null(kind):
+        return 0
+    try:
+        return len(column) * ((kind.bit_width + 7) // 8)
+    except ValueError:  # a variable-width type: string or binary
+        return int(pc.sum(pc.binary_length(column)).as_py() or 0)
+
+
+class RunSize:
+    """The size of a result, and whether ``run()`` keeps every row of it."""
+
+    def __init__(self) -> None:
+        self.rows: int = 0
+        self.bytes: int = 0
+
+    def add(self, table: pa.Table) -> None:
+        """Count the next rows (with the default columns)."""
+        self.rows += table.num_rows
+        # Once the rows alone decide, the values need not be measured.
+        if self.rows <= RUN_VIEW_COMPLETE_ROWS:
+            self.bytes += sum(value_bytes(column) for column in table.columns)
+
+    @property
+    def is_kept(self) -> bool:
+        """Whether a result of this size is kept."""
+        return self.rows <= 2 * RUN_VIEW_WINDOW_ROWS or (
+            self.rows <= RUN_VIEW_COMPLETE_ROWS
+            and self.bytes <= RUN_VIEW_COMPLETE_BYTES
+        )
+
+
 class WindowOfRows:
-    """Collects the tables of a stream's rows, batch by batch: all rows of a result of
-    at most ``RUN_VIEW_COMPLETE_ROWS`` rows, else the first and the last
+    """Collects the tables of a stream's rows, batch by batch: all rows of a result
+    ``RunSize`` says is kept, else the first and the last
     ``RUN_VIEW_WINDOW_ROWS``. The window is copied, so no batch stays alive behind it.
     """
 
     def __init__(self) -> None:
-        self.total: int = 0
+        self._size: RunSize = RunSize()
         self._all: list[pa.Table] | None = []
         self._first: list[pa.Table] = []
         self._last: deque[pa.Table] = deque()
@@ -888,11 +952,16 @@ class WindowOfRows:
             held = sum(part.num_rows for part in self._last)
             while held - self._last[0].num_rows >= RUN_VIEW_WINDOW_ROWS:
                 held -= self._last.popleft().num_rows
-        self.total += table.num_rows
+        self._size.add(table)
         if self._all is not None:
             self._all.append(table)
-            if self.total > RUN_VIEW_COMPLETE_ROWS:
+            if not self._size.is_kept:
                 self._all = None
+
+    @property
+    def total(self) -> int:
+        """The rows taken so far."""
+        return self._size.rows
 
     @property
     def complete(self) -> pa.Table | None:

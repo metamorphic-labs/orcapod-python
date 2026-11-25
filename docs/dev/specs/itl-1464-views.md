@@ -32,8 +32,9 @@ end the chain: they compute as today.
 1. The source's batches are read in order (one scan, its checks unchanged: `max_rows`,
    schema, repeated keys). Each batch, shaped as `as_table()` shapes the whole, goes
    through each operator's own `static_process`: the one sync body, no second kernel.
-2. Result batches are kept whole up to **50,000 rows** (all column groups; counted in rows,
-   not bytes, so equal data is treated alike however its batches are cut). A result that ends
+2. Result batches are kept whole up to **50,000 rows and 64 MiB of values** (default columns; offsets,
+   validity and chunks not counted, so equal data is treated alike however its batches are
+   cut). A result that ends
    within it is complete: the view holds it, and an operator stream keeps it, exactly as
    today.
 3. A larger result drops the kept batches to a **window**: the first and last 1,000 rows
@@ -103,7 +104,7 @@ never computes.
 | V1 | Bounded window now, disk-backed later, or wait for the local cache (N2) | window now: no file is written, and paging later only lifts refusals |
 | V2 | `as_table()` / `table` / `as_polars_df()` of a bounded view: kept rows, recompute, or refuse | refuse, pointing to the stream (a part must never read as the whole; a view never recomputes) |
 | V3 | `head`/`tail` beyond the window, `sort_by_tags` | refuse |
-| V4 | Threshold and window | approved at 64 MiB; implemented as 50,000 rows (bytes differ with the batches and with what is already held), first and last 1,000 rows; constants, no config yet |
+| V4 | Threshold and window | 50,000 rows and 64 MiB of values, both layout-independent (`RunSize`, `value_bytes`: Arrow's own `nbytes` differs with the batches); a result that fits in the two windows is always kept; first and last 1,000 rows; constants, no config yet |
 | V5 | `as_table()` after a large run of a batched chain reads and applies operators again | yes (no user function runs again) |
 | V6 | Streams in the middle of a chain keep nothing after a run of the last one (today each keeps its result) | yes, above the threshold (below it each keeps its result, as today): keeping one table per step is the cost being removed; each `run()`s by itself |
 | V7 | `PolarsFilter` in a batched chain | not until B1 decides expressions that read other rows |
@@ -152,3 +153,6 @@ its generation, its operator's modified time and the state of its own input, dow
 source (`_chain_state`): a change anywhere beneath is seen by every kept result and window
 above it, whichever streams of the chain hold rows. A source with no row gives one batch of
 none, so its run scans once.
+
+One outermost question (`_upstream_states`) asks each stream once, so the walk is linear in
+the graph: settling a stream asks for the states beneath it, and so does its own state.
