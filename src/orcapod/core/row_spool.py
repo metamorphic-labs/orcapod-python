@@ -5,21 +5,23 @@ here (ITL-1464). ``RowSpool.append`` numbers rows in the order they come; ``take
 rows by those numbers; ``discard`` says that rows are never fetched again.
 
 Format: rows wait in memory until they exceed a byte limit, then become one segment: an
-Arrow IPC file of one record batch, uncompressed, read memory-mapped (a mapped page is
-the operating system's to drop, not memory this process holds). An extension column is
-written as its storage and wrapped again when read, so reading needs no registered type.
+Arrow IPC file of one record batch, uncompressed, read memory-mapped. A mapped page is the
+operating system's to drop: it counts in a process's resident size while it is there, but
+it is no memory of Arrow's or of this process's own. An extension column is written as its
+storage and wrapped again when read, so reading needs no registered type.
 
 Lifetime: a segment is deleted once every row of it is discarded; a spool's files are
 removed by ``close`` (a spool is a context manager: normal end, exception and
 cancellation alike) and when it is collected. A process keeps its spools in one directory
 of its own, removed at interpreter exit. A killed process leaves its directory behind; the
 next process to spill there removes it: every directory holds a lock file its process
-keeps locked, so a directory whose lock is free has no owner. (Without ``fcntl``, as on
-Windows, nothing is swept.)
+keeps locked (a POSIX record lock, which a forked child does not inherit), so a directory
+whose lock is free has no owner. (Without ``fcntl``, as on Windows, nothing is swept.)
 
-Ownership: a spool belongs to one thread (or one event loop) of the process that made it:
-it has no lock of its own, and a forked child's copy refuses every use, so a child never
-touches its parent's files. Different spools may be used from different threads.
+Ownership: a spool belongs to the process that made it, and any of its threads may use it:
+one call at a time, a call after ``close`` refused. What ``table`` and ``slice`` returned
+stays readable whatever happens to the spool. A forked child's copy refuses every read and
+write, and its ``close`` does nothing, so a child never touches its parent's files.
 
 Rows: tables of one schema with at least one column, in Orcapod's normalized types (large
 variants, no views). The byte limit bounds what the spool keeps; a ``take`` holds the rows
@@ -38,6 +40,7 @@ import shutil
 import tempfile
 import threading
 import weakref
+from collections.abc import Collection
 from typing import IO, Any, Self
 
 import numpy as np
@@ -61,15 +64,16 @@ class _ProcessDirectories:
 
     def __init__(self) -> None:
         self._guard = threading.Lock()
+        # Each root's directory, and its open lock file: never opened again, because
+        # closing any handle of a file gives up the process's record lock on it.
         self._held: dict[str, tuple[str, IO[str]]] = {}
-        self.root_lock: IO[str] | None = None
-        """The root's lock file while a directory is made."""
 
     def get(self, root: str) -> str:
         """This process's directory under ``root``."""
         with self._guard:
             if root not in self._held or not os.path.isdir(self._held[root][0]):
-                self._held[root] = _make_process_directory(root)
+                own = {os.path.basename(held) for held, _ in self._held.values()}
+                self._held[root] = _make_process_directory(root, own)
             return self._held[root][0]
 
     def remove(self) -> None:
@@ -80,26 +84,24 @@ class _ProcessDirectories:
         self._held = {}
 
     def after_fork_in_child(self) -> None:
-        """Start empty: the directories are the parent's, and so are the locks.
+        """Start empty: the directories are the parent's, and so are their locks.
 
-        The guard may be held by a thread that does not exist in the child. The lock
-        files are closed, never unlocked: the parent's open files keep them locked, and
-        the child keeps none of them locked after the parent is gone.
+        The guard may be held by a thread that does not exist in the child.
         """
         self._guard = threading.Lock()
-        inherited = [lock for _, lock in self._held.values()]
-        if self.root_lock is not None:
-            inherited.append(self.root_lock)
-        self._held, self.root_lock = {}, None
-        for lock in inherited:
-            lock.close()
+        self._held = {}
 
 
-def _make_process_directory(root: str) -> tuple[str, IO[str]]:
+def _make_process_directory(root: str, own: Collection[str]) -> tuple[str, IO[str]]:
     """Make this process's directory under ``root``, locked, and sweep abandoned ones.
 
     Both happen under one lock of the root, so a sweep never sees a directory that is
-    made but not yet locked.
+    made but not yet locked. The locks are record locks: a child forked at any point
+    holds none of them.
+
+    Args:
+        root: The directory to make it under.
+        own: The names of the directories this process holds already.
     """
     os.makedirs(root, exist_ok=True)
     if fcntl is None:
@@ -108,15 +110,11 @@ def _make_process_directory(root: str) -> tuple[str, IO[str]]:
     name = os.path.join(root, f".{_PREFIX}{os.getuid()}.lock")
     flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
     with os.fdopen(os.open(name, flags, 0o600), "w") as root_lock:
-        _directories.root_lock = root_lock
-        try:
-            fcntl.flock(root_lock, fcntl.LOCK_EX)
-            _sweep(root)
-            directory = tempfile.mkdtemp(prefix=_PREFIX, dir=root)
-            lock = open(os.path.join(directory, _LOCK_NAME), "w")
-            fcntl.flock(lock, fcntl.LOCK_EX)
-        finally:
-            _directories.root_lock = None
+        fcntl.lockf(root_lock, fcntl.LOCK_EX)
+        _sweep(root, own)
+        directory = tempfile.mkdtemp(prefix=_PREFIX, dir=root)
+        lock = open(os.path.join(directory, _LOCK_NAME), "w")
+        fcntl.lockf(lock, fcntl.LOCK_EX)
     return directory, lock
 
 
@@ -133,14 +131,22 @@ def _remove_process_directory(directory: str) -> None:
         os.rmdir(directory)
 
 
-def _sweep(root: str) -> None:
-    """Remove this user's spool directories under ``root`` that no process holds."""
+def _sweep(root: str, own: Collection[str]) -> None:
+    """Remove this user's spool directories under ``root`` that no process holds.
+
+    Args:
+        root: The directory to look in.
+        own: The names of the directories this process holds: its own record locks do
+            not stop it, so they are left out by name.
+    """
     assert fcntl is not None
     with os.scandir(root) as entries:
         candidates = [
             entry.path
             for entry in entries
-            if entry.name.startswith(_PREFIX) and entry.is_dir(follow_symlinks=False)
+            if entry.name.startswith(_PREFIX)
+            and entry.name not in own
+            and entry.is_dir(follow_symlinks=False)
         ]
     for directory in candidates:
         # A directory held by a live process, being removed, or not a spool's is left.
@@ -148,8 +154,8 @@ def _sweep(root: str) -> None:
             if os.stat(directory).st_uid != os.getuid():
                 continue
             try:
-                with open(os.path.join(directory, _LOCK_NAME)) as lock:
-                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with open(os.path.join(directory, _LOCK_NAME), "r+") as lock:
+                    fcntl.lockf(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     _remove_process_directory(directory)
             except FileNotFoundError:
                 # Its process was killed before it made the lock file (the root's lock
@@ -204,6 +210,8 @@ class RowSpool:
         self._root: str | None = root
         self._closed: bool = False
         self._owner: int = os.getpid()
+        # One call at a time; a call waits for the one before it, ``close`` included.
+        self._lock = threading.RLock()
         self._schema: pa.Schema | None = None
         self._segments: list[_Segment] = []
         self._starts: npt.NDArray[np.int64] | None = None
@@ -231,35 +239,40 @@ class RowSpool:
             OSError: If the rows in memory cannot be written to the local disk. The
                 spool is then as before the call, with no partial file.
         """
-        self._require_usable()
-        if not table.num_rows:
-            return
-        schema, size = self._schema, self.size
-        if self._schema is None:
-            self._schema = table.schema
-        # One chunk that owns its rows: a slice would keep its whole parent alive.
-        added = _Segment(self.size, _owned(table))
-        self._add(added)
-        self.size += table.num_rows
-        if self._in_memory > self._memory_bytes:
-            try:
-                self._spill()
-            except BaseException:
-                # The new rows are in the last run, so they were not written.
-                self._segments.remove(added)
-                self._starts = None
-                if added.table is not None:
-                    self._in_memory -= added.table.nbytes
-                self._schema, self.size = schema, size
-                raise
+        self._require_owner()
+        with self._lock:
+            self._require_usable()
+            if not table.num_rows:
+                return
+            schema, size = self._schema, self.size
+            if self._schema is None:
+                self._schema = table.schema
+            # One chunk that owns its rows: a slice would keep its whole parent alive.
+            added = _Segment(self.size, _owned(table))
+            self._add(added)
+            self.size += table.num_rows
+            if self._in_memory > self._memory_bytes:
+                try:
+                    self._spill()
+                except BaseException:
+                    # The new rows are in the last run, so they were not written.
+                    self._segments.remove(added)
+                    self._starts = None
+                    if added.table is not None:
+                        self._in_memory -= added.table.nbytes
+                    self._schema, self.size = schema, size
+                    raise
 
-    def _require_usable(self) -> None:
-        """Refuse a closed spool, and a forked child's copy of its parent's."""
+    def _require_owner(self) -> None:
+        """Refuse a forked child's copy of its parent's spool, before its lock is touched."""
         if self._owner != os.getpid():
             raise RuntimeError(
                 "a row spool is used only in the process that made it: this is a "
                 + "forked child's copy"
             )
+
+    def _require_usable(self) -> None:
+        """Refuse a closed spool."""
         if self._closed:
             raise ValueError("the row spool is closed")
 
@@ -281,27 +294,29 @@ class RowSpool:
             ValueError: If the spool is closed.
             RuntimeError: In a process other than the one that made the spool.
         """
-        self._require_usable()
-        if self._starts is None:
-            self._starts = np.fromiter(
-                (s.start for s in self._segments), np.int64, len(self._segments)
-            )
-        held_in = np.searchsorted(self._starts, rows, side="right") - 1
-        order = np.argsort(held_in, kind="stable")
-        sorted_rows, sorted_in = rows[order], held_in[order]
-        edges = np.flatnonzero(np.diff(sorted_in)) + 1
-        parts: list[pa.Table] = []
-        for group in np.split(np.arange(len(rows)), edges):
-            segment = self._segments[int(sorted_in[group[0]])]
-            local = pa.array(sorted_rows[group] - segment.start, pa.int64())
-            parts.append(self._take_from(segment, local))
-        if len(parts) == 1:
-            # One segment: the stable sort changed nothing.
-            return parts[0].combine_chunks()
-        taken = pa.concat_tables(parts).combine_chunks()
-        back = np.empty(len(order), np.int64)
-        back[order] = np.arange(len(order))
-        return taken.take(pa.array(back, pa.int64())).combine_chunks()
+        self._require_owner()
+        with self._lock:
+            self._require_usable()
+            if self._starts is None:
+                self._starts = np.fromiter(
+                    (s.start for s in self._segments), np.int64, len(self._segments)
+                )
+            held_in = np.searchsorted(self._starts, rows, side="right") - 1
+            order = np.argsort(held_in, kind="stable")
+            sorted_rows, sorted_in = rows[order], held_in[order]
+            edges = np.flatnonzero(np.diff(sorted_in)) + 1
+            parts: list[pa.Table] = []
+            for group in np.split(np.arange(len(rows)), edges):
+                segment = self._segments[int(sorted_in[group[0]])]
+                local = pa.array(sorted_rows[group] - segment.start, pa.int64())
+                parts.append(self._take_from(segment, local))
+            if len(parts) == 1:
+                # One segment: the stable sort changed nothing.
+                return parts[0].combine_chunks()
+            taken = pa.concat_tables(parts).combine_chunks()
+            back = np.empty(len(order), np.int64)
+            back[order] = np.arange(len(order))
+            return taken.take(pa.array(back, pa.int64())).combine_chunks()
 
     def _take_from(self, segment: _Segment, local: pa.Array[Any]) -> pa.Table:  # pyright: ignore[reportExplicitAny]  # row numbers
         """Rows of one segment, by their numbers in it."""
@@ -349,26 +364,30 @@ class RowSpool:
             ValueError: As ``table``; also for a negative ``start`` or ``length``.
             RuntimeError: In a process other than the one that made the spool.
         """
-        self._require_usable()
-        if start < 0 or length < 0:
-            raise ValueError(f"a slice of rows from {start}, {length} long")
-        if self._schema is None:
-            raise ValueError("nothing was appended to the row spool: no columns yet")
-        if self._discarded:
-            raise ValueError("rows of the row spool were discarded: no whole table")
-        end = min(start + length, self.size)
-        parts: list[pa.Table] = []
-        for segment in self._segments:
-            first = max(start, segment.start)
-            last = min(end, segment.start + segment.rows)
-            if first >= last:
-                continue
-            if segment.table is not None:
-                part = segment.table
-            else:
-                part = _wrapped(self._stored(segment), self._schema)
-            parts.append(part.slice(first - segment.start, last - first))
-        return pa.concat_tables(parts) if parts else self._schema.empty_table()
+        self._require_owner()
+        with self._lock:
+            self._require_usable()
+            if start < 0 or length < 0:
+                raise ValueError(f"a slice of rows from {start}, {length} long")
+            if self._schema is None:
+                raise ValueError(
+                    "nothing was appended to the row spool: no columns yet"
+                )
+            if self._discarded:
+                raise ValueError("rows of the row spool were discarded: no whole table")
+            end = min(start + length, self.size)
+            parts: list[pa.Table] = []
+            for segment in self._segments:
+                first = max(start, segment.start)
+                last = min(end, segment.start + segment.rows)
+                if first >= last:
+                    continue
+                if segment.table is not None:
+                    part = segment.table
+                else:
+                    part = _wrapped(self._stored(segment), self._schema)
+                parts.append(part.slice(first - segment.start, last - first))
+            return pa.concat_tables(parts) if parts else self._schema.empty_table()
 
     def discard(self, rows: npt.NDArray[np.int64]) -> None:
         """Say that these rows are never fetched again.
@@ -382,27 +401,29 @@ class RowSpool:
             ValueError: If the spool is closed.
             RuntimeError: In a process other than the one that made the spool.
         """
-        self._require_usable()
-        if not len(rows):
-            return
-        starts = np.fromiter(
-            (s.start for s in self._segments), np.int64, len(self._segments)
-        )
-        held_in = np.searchsorted(starts, rows, side="right") - 1
-        counts = np.bincount(held_in, minlength=len(self._segments))
-        self._discarded = True
-        emptied = False
-        for index in np.flatnonzero(counts):
-            segment = self._segments[int(index)]
-            segment.live -= int(counts[index])
-            if not segment.live:
-                if segment.table is not None:
-                    self._in_memory -= segment.table.nbytes
-                segment.drop()
-                emptied = True
-        if emptied:
-            self._segments = [s for s in self._segments if s.live]
-            self._starts = None
+        self._require_owner()
+        with self._lock:
+            self._require_usable()
+            if not len(rows):
+                return
+            starts = np.fromiter(
+                (s.start for s in self._segments), np.int64, len(self._segments)
+            )
+            held_in = np.searchsorted(starts, rows, side="right") - 1
+            counts = np.bincount(held_in, minlength=len(self._segments))
+            self._discarded = True
+            emptied = False
+            for index in np.flatnonzero(counts):
+                segment = self._segments[int(index)]
+                segment.live -= int(counts[index])
+                if not segment.live:
+                    if segment.table is not None:
+                        self._in_memory -= segment.table.nbytes
+                    segment.drop()
+                    emptied = True
+            if emptied:
+                self._segments = [s for s in self._segments if s.live]
+                self._starts = None
 
     def _spill(self) -> None:
         """Write the segments in memory to one file, as one segment."""
@@ -453,14 +474,20 @@ class RowSpool:
         return path
 
     def close(self) -> None:
-        """Let every row go and remove the files. Calling it again does nothing."""
-        self._closed = True
-        self._segments = []
-        self._starts = None
-        self._in_memory = 0
-        if self._cleanup is not None:
-            _ = self._cleanup()
-        self._directory = self._cleanup = None
+        """Let every row go and remove the files. Calling it again does nothing.
+
+        It waits for a call of another thread to end. In a forked child it does nothing.
+        """
+        if self._owner != os.getpid():
+            return
+        with self._lock:
+            self._closed = True
+            self._segments = []
+            self._starts = None
+            self._in_memory = 0
+            if self._cleanup is not None:
+                _ = self._cleanup()
+            self._directory = self._cleanup = None
 
     def __enter__(self) -> Self:
         return self
