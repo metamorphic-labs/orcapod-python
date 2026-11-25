@@ -349,10 +349,10 @@ class MemberTokens:
         column = self._table.column(name)
         if name.startswith(constants.SYSTEM_TAG_SOURCE_ID_PREFIX):
             # A few values repeated over every row.
-            encoded: Any = column.combine_chunks().dictionary_encode()
+            encoded: Any = one_chunk(column).dictionary_encode()
             return encoded.take(self._order)
         return pa.DictionaryArray.from_arrays(
-            self._order.cast(pa.int64()), column.combine_chunks()
+            self._order.cast(pa.int64()), one_chunk(column)
         )
 
 
@@ -360,6 +360,16 @@ def derived_array(recipe: Recipe, rows: int) -> pa.Array[Any]:  # pyright: ignor
     """A derived token column of ``rows`` rows: no row has a byte."""
     storage = _empty_lists(rows)
     return pa.ExtensionArray.from_storage(DerivedTokenType(recipe), storage)
+
+
+def one_chunk(column: pa.ChunkedArray[Any]) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny]  # an Arrow column
+    """``column`` as one array, copied only when it has several chunks.
+
+    ``combine_chunks`` copies a column of one chunk too.
+    """
+    if column.num_chunks == 1:
+        return cast(Any, column).chunk(0)
+    return cast(Any, column).combine_chunks()
 
 
 def is_derived(kind: pa.DataType) -> bool:

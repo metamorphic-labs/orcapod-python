@@ -477,8 +477,13 @@ class GroupBy(UnaryOperator):
         for name in (*self.by, *system_tag_columns):
             index = table.schema.get_field_index(name)
             table = table.set_column(
-                index, table.schema.field(index), table.column(index).combine_chunks()
+                index,
+                table.schema.field(index),
+                source_tokens.one_chunk(table.column(index)),
             )
+            # The chunks let go are several GiB at millions of rows, and the pool would
+            # keep them beside what follows.
+            pa.default_memory_pool().release_unused()
         # The source info of a data-tag key: the key's value is the merge of its
         # members' equal values, so its source info is one token, the fold of the
         # members' tokens in member order, as the system tags fold (ITL-1017).
@@ -650,9 +655,11 @@ class GroupBy(UnaryOperator):
             [*self.by, *sort_columns[:tags]],
             strict=True,
         ):
-            frame_columns[name] = polars_ready(table.column(c).combine_chunks())
+            frame_columns[name] = polars_ready(source_tokens.one_chunk(table.column(c)))
         # The bits of each float key, to emit the member value with the smallest.
-        key_storage = {c: values_of(table.column(c).combine_chunks()) for c in self.by}
+        key_storage = {
+            c: values_of(source_tokens.one_chunk(table.column(c))) for c in self.by
+        }
         bit_names: dict[str, str] = {}
         for i, c in enumerate(self.by):
             bits = _float_bits(key_storage[c])
@@ -692,7 +699,9 @@ class GroupBy(UnaryOperator):
         )
         if tied:
             for name, c in zip(order_names[tags:], sort_columns[tags:], strict=True):
-                frame_columns[name] = polars_ready(table.column(c).combine_chunks())
+                frame_columns[name] = polars_ready(
+                    source_tokens.one_chunk(table.column(c))
+                )
             frame = in_order([*key_names, *order_names])
         # Group boundaries by Polars' own equality: every NaN equals every NaN and
         # 0.0 equals -0.0, as the joins match keys (ITL-1234, ITL-1251).

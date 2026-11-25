@@ -612,3 +612,52 @@ class TestAggregationLogicalTypes:
             f"expected a list extension type, got {field.type}"
         )
         assert field.type.storage_type == pa.large_list(pa.large_string())
+
+
+@pytest.mark.parametrize("ties", [False, True])
+@pytest.mark.parametrize("kind", ["float", "null", "list"])
+def test_members_that_tie_on_every_tag_are_ordered_by_record_id(
+    kind: str, ties: bool
+) -> None:
+    """The record id decides where the tags tie, as Polars orders them: 0.0 with -0.0,
+    every NaN with every NaN, null with null. Without a tie it decides nothing, whether
+    or not it is sorted by (ITL-1464)."""
+    rows = 40
+    nan = float("nan")
+    values: dict[str, list[Any]] = {
+        "float": [(0.0, -0.0, nan, -nan)[i % 4] for i in range(rows)],
+        "null": [(None, "a")[i % 2] for i in range(rows)],
+        "list": [([1, None], [1, 2])[i % 2] for i in range(rows)],
+    }
+    table = pa.table(
+        {
+            "g": pa.array([f"g{i // 20}" for i in range(rows)]),
+            "t": pa.array(values[kind]),
+            "n": pa.array([0 if ties else (i * 7) % rows for i in range(rows)]),
+            # The record ids, in another order than the rows.
+            "id": pa.array([f"r{(i * 11) % rows:02}" for i in range(rows)]),
+            "v": pa.array(range(rows)),
+        }
+    )
+    source = ArrowTableSource(
+        table,
+        tag_columns=["g", "t", "n"],
+        tag_only_columns=True,
+        record_id_columns=["id"],
+    )
+
+    def rank(value: Any) -> tuple[int, Any]:
+        if value is None:
+            return (3, "")
+        if isinstance(value, list):
+            return (0, [(v is None, v or 0) for v in value])
+        if value != value:
+            return (2, "")
+        return (1, value)
+
+    got = source.group_by(["g"]).as_table()
+    # Other tags in name order ("n", then "t"), then the record id.
+    for group, members in zip(got["g"].to_pylist(), got["v"].to_pylist(), strict=True):
+        wanted = [r for r in table.to_pylist() if r["g"] == group]
+        wanted.sort(key=lambda r: (r["n"], rank(r["t"]), r["id"]))
+        assert members == [r["v"] for r in wanted]
