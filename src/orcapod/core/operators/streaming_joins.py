@@ -1959,7 +1959,7 @@ class _ReadAhead:
             async for batch in channel.carried():
                 if not batch.num_rows:
                     continue
-                self._batches.append(batch)
+                self._batches.append(_without_token_lists(batch))
                 self._rows += batch.num_rows
                 self._changed.set()
                 while self._rows >= PUSH_ROWS:
@@ -1974,6 +1974,19 @@ class _ReadAhead:
         batches, self._batches, self._rows = self._batches, [], 0
         self._room.set()
         return batches, self._ended
+
+
+def _without_token_lists(batch: pa.RecordBatch) -> pa.RecordBatch:
+    """``batch`` with derived token lists as text, which a kernel takes and can spool."""
+    lists = [
+        field.name
+        for field in batch.schema
+        if isinstance(field.type, source_tokens.MemberTokenType)
+    ]
+    if not lists:
+        return batch
+    table = source_tokens.materialize(pa.Table.from_batches([batch]), lists)
+    return table.combine_chunks().to_batches()[0]
 
 
 def _push_sizes(batches: Sequence[pa.RecordBatch]) -> Iterator[pa.RecordBatch]:
