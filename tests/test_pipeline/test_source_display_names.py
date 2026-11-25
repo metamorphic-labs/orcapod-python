@@ -150,6 +150,25 @@ def test_only_the_shown_text_changes(swap: bool) -> None:
     assert _texts(labelled)["left"] == "renamed"
 
 
+@pytest.mark.parametrize("order", [("left", "right"), ("right", "left")])
+def test_binding_two_sources_in_either_order_changes_the_texts_only(
+    order: tuple[str, str],
+) -> None:
+    job = _job(_left(), _right())
+    before = {
+        name: (node.label, node.content_hash(), node.pipeline_hash())
+        for name, node in job.nodes.items()
+    }
+    sources = {"left": _left("new"), "right": _right("new")}
+    job.bind(sources={name: sources[name] for name in order})
+    texts = _texts(job)
+    assert (texts["left"], texts["right"]) == ("new (left)", "new (right)")
+    assert before == {
+        name: (node.label, node.content_hash(), node.pipeline_hash())
+        for name, node in job.nodes.items()
+    }
+
+
 def test_without_a_label_the_texts_are_unchanged() -> None:
     job = _job(_left(None), _right(None))
     job.run()

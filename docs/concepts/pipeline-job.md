@@ -435,7 +435,7 @@ label="units")`) is shown in a job's diagram, in its node's preview, and in
 warning give its full source id. `explain()` and `trace()` name it by its id. Two sources with one
 label, or a label that is another node's name, are shown as `label (part)`: a SpiralDB
 table's dataset, else its project, else the source's name. This is display only: the slot
-keeps its name, the one `job.nodes[...]` and `bind` take. A source without a label is shown
+keeps its name, the one `job.nodes[...]` and `bind` take. In a diagram, a source without a label is shown
 by its slot's name, as is every source of a `Pipeline` (which binds none) and of a loaded
 job (a source's label is not saved).
 
