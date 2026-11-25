@@ -341,6 +341,24 @@ print(sessions.output_schema())
 sessions.as_df()  # also as_polars_df(), as_pandas_df(), as_lazy_frame(), as_table()
 ```
 
+Each source signs in and reads the dataset's schema table by itself. Give several sources of
+one project and dataset one connector and they do both once:
+
+<!-- docs-test: skip -->
+```python
+with SpiralDBConnector("edi-sample-v1-855632") as spiral:
+    sessions = SpiralDBTableSource("edi-sample-v1-855632", "session", connector=spiral)
+    experiments = SpiralDBTableSource("edi-sample-v1-855632", "experiment", connector=spiral)
+experiments.as_table()  # works after the connector is closed
+```
+
+Nothing else changes: the rows, ids and hashes are the same, every read still looks at the
+table and at the schema table's current version, and closing the connector or one source does
+not affect the others. The sources read as whoever the connector signed in as, also after the
+environment or the saved login changed: make a new connector to sign in again. A connector
+cannot be used after a fork. The connector is not saved with a job: a loaded source makes its
+own.
+
 Things to know about Spiral tables:
 
 - **The schema is recorded beside the tables.** See

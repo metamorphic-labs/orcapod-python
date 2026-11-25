@@ -30,6 +30,11 @@ Example::
         "my-project-123456", "spike_event", tags_as_data={"timestamp": "spike_time_us"}
     )
 
+    # Several sources that use one client, and so one sign-in
+    with SpiralDBConnector("my-project-123456") as connector:
+        units = SpiralDBTableSource("my-project-123456", "unit", connector=connector)
+        trials = SpiralDBTableSource("my-project-123456", "trial", connector=connector)
+
     # Explicit dataset, tag columns overridden
     source = SpiralDBTableSource(
         "my-project-123456", "spike_event", dataset="prod", tag_columns=["unit_id"]
@@ -157,6 +162,44 @@ def _checked_conditions(
     return check_equality_conditions(conditions, schema)
 
 
+def _overrides_of(
+    connector: SpiralDBConnector,
+    project_id: str,
+    dataset: str,
+    overrides: dict[str, str] | None,
+) -> dict[str, str] | None:
+    """Return the overrides of a given connector, which must be of the source's place.
+
+    Args:
+        connector: The given connector.
+        project_id: The source's project.
+        dataset: Its dataset.
+        overrides: Its overrides, if any were given.
+
+    Raises:
+        TypeError: If ``connector`` is not a ``SpiralDBConnector``.
+        ValueError: If it is of another project, dataset or service address.
+        RuntimeError: If it is closed, or was made in another process.
+    """
+    if not isinstance(connector, SpiralDBConnector):
+        raise TypeError(
+            f"connector must be a SpiralDBConnector, got {type(connector).__name__}"
+        )
+    place = connector.to_config()
+    if (place["project_id"], place["dataset"]) != (project_id, dataset):
+        raise ValueError(
+            f"the connector given is of SpiralDB project {place['project_id']!r}, dataset "
+            f"{place['dataset']!r}; the source is of project {project_id!r}, dataset "
+            f"{dataset!r}"
+        )
+    if overrides is not None and dict(overrides) != (place["overrides"] or {}):
+        raise ValueError(
+            f"overrides {overrides!r} differ from those of the connector given, "
+            f"{place['overrides']!r}: leave overrides out"
+        )
+    return place["overrides"]
+
+
 SPIRALDB_SOURCE_ID_HAS_TABLE_ID = True
 """Whether a SpiralDB default source id ends in ``@<table id>`` (ITL-1154).
 
@@ -275,13 +318,22 @@ class SpiralDBTableSource(RootSource):
         tags_as_data: Maps a key column that is a tag column of this source to the
             name of a data column that receives a copy of it, as in
             ``DerivedSource``. ``None`` (default) or an empty mapping copies nothing.
+        connector: A ``SpiralDBConnector`` of this project and dataset whose SDK client
+            the source uses, so that sources given one connector sign in once and read
+            the dataset's schema table once per version of it (ITL-1457), as the copies
+            ``where()`` makes do. Whose sign-in it is was decided when the connector was
+            made. The source holds its own reference: closing the connector, the source
+            or another source given it affects no other. It is part of no identity and is
+            not saved. ``None`` (default): the source makes its own. Keyword-only.
 
     Raises:
         ValueError: If the table is not found, has no key schema, a tag column or a
             ``where`` column is not in the table, a ``where`` value is ``None``, or
             ``limit``, ``max_rows`` or ``batch_rows`` is not a positive integer.
+            Or if ``connector`` is of another project, dataset or service address.
+        RuntimeError: If ``connector`` is closed, or was made before a fork.
         TypeError: If a ``where`` value is not exactly of its column's Python type or
-            does not fit its Arrow type.
+            does not fit its Arrow type, or ``connector`` is not a ``SpiralDBConnector``.
         InputValidationError: If ``tags_as_data`` names a column that is not a tag
             column or not a key column, or a new name that is already a column, is
             given twice, or is reserved for system columns.
@@ -322,6 +374,7 @@ class SpiralDBTableSource(RootSource):
         *,
         tag_only_columns: TagOnlyColumns = (),
         record_id_columns: str | Collection[str] | None = None,
+        connector: SpiralDBConnector | None = None,
     ) -> None:
         given_key = normalize_record_id_columns(record_id_columns)
         if given_key == ():
@@ -341,6 +394,9 @@ class SpiralDBTableSource(RootSource):
             raise ValueError(
                 f"batch_rows must be a positive integer, got {batch_rows!r}"
             )
+
+        if connector is not None:
+            overrides = _overrides_of(connector, project_id, dataset, overrides)
 
         super().__init__(
             source_id=source_id, label=label, data_context=data_context, config=config
@@ -362,6 +418,8 @@ class SpiralDBTableSource(RootSource):
         location = f"SpiralDB project {project_id!r}, dataset {dataset!r}"
 
         try:
+            if connector is not None:
+                self._connection = connector._for_source()  # pyright: ignore[reportPrivateUsage]  # for sources
             try:
                 table = self._connector().lookup_table(table_name)
             except SpiralDBTableNotFoundError as exc:

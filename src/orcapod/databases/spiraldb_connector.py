@@ -659,6 +659,13 @@ class SpiralDBConnector:
         self._require_open()
         return copy(self)
 
+    def _for_source(self) -> SpiralDBConnector:
+        """Return ``share_client()`` for a source that is given this connector: what one
+        source counted is not taken as counted by another (ITL-1457)."""
+        shared = self.share_client()
+        shared._counts = {}
+        return shared
+
     def _qualified(self, table_name: str) -> str:
         """Return ``"<project>/<dataset>/<table>"``, the table as errors name it."""
         return f"{self._project_id}/{self._dataset}/{table_name}"
