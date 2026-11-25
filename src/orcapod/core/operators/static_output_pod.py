@@ -2045,6 +2045,16 @@ class DynamicPodStream(StreamBase):
         )
         return self._cached_stream.as_table(columns=columns, all_info=all_info)
 
+    def as_carried_table(
+        self, *, columns: ColumnConfig | dict[str, Any] | None = None
+    ) -> "pa.Table":
+        """The operator's result, derived token columns as they are (ITL-1464)."""
+        self._refresh()
+        assert self._cached_stream is not None, (
+            "StreamProtocol has not been updated or is empty."
+        )
+        return self._cached_stream.as_carried_table(columns=columns)
+
     def iter_data(
         self,
     ) -> Iterator[tuple[TagProtocol, DataProtocol]]:

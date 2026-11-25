@@ -812,3 +812,9 @@ class DerivedSource(RootSource):
         all_info: bool = False,
     ) -> "pa.Table":
         return self._get_stream().as_table(columns=columns, all_info=all_info)
+
+    def as_carried_table(
+        self, *, columns: ColumnConfig | dict[str, Any] | None = None
+    ) -> "pa.Table":
+        """The source's table, derived token columns as they are (ITL-1464)."""
+        return self._get_stream().as_carried_table(columns=columns)

@@ -90,7 +90,7 @@ class SelectTagColumns(UnaryOperator):
             logger.info("All tag columns are selected. Returning stream unaltered.")
             return stream
 
-        table = stream.as_table(
+        table = stream.as_carried_table(
             columns={
                 "source": True,
                 "system_tags": True,
@@ -229,7 +229,7 @@ class SelectDataColumns(UnaryOperator):
             logger.info("All data columns are selected. Returning stream unaltered.")
             return stream
 
-        table = stream.as_table(
+        table = stream.as_carried_table(
             columns={
                 "source": True,
                 "system_tags": True,
@@ -388,7 +388,7 @@ class DropTagColumns(UnaryOperator):
             logger.info("No tag columns to drop. Returning stream unaltered.")
             return stream
 
-        table = stream.as_table(
+        table = stream.as_carried_table(
             columns={
                 "source": True,
                 "system_tags": True,
@@ -534,7 +534,7 @@ class DropDataColumns(UnaryOperator):
         associated_source_columns = [
             f"{constants.SOURCE_PREFIX}{c}" for c in columns_to_drop
         ]
-        table = stream.as_table(
+        table = stream.as_carried_table(
             columns={
                 "source": True,
                 "system_tags": True,
@@ -774,7 +774,7 @@ class _TagAndDataColumnsOperator(UnaryOperator, ABC):
     def unary_static_process(self, stream: StreamProtocol) -> StreamProtocol:
         tag_columns, data_columns = self._user_columns(stream)
         tags_removed, data_removed = self._removals(tag_columns, data_columns)
-        table = stream.as_table(
+        table = stream.as_carried_table(
             columns={
                 "source": True,
                 "system_tags": True,
