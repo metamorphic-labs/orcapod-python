@@ -1332,6 +1332,10 @@ class SourceNodeBase(TraceableBase, ABC):
         """Yield ``(tag, data)`` pairs, or raise if data is unavailable."""
         ...
 
+    def _reads_while_sending(self) -> bool:
+        """Whether making a record batch waits on a read (``_record_batches``)."""
+        return False
+
     def _record_batches(self) -> Generator[pa.RecordBatch, None, None] | None:
         """This node's rows as Arrow record batches in the row-built form, or ``None``.
 
@@ -1445,8 +1449,11 @@ class SourceNodeBase(TraceableBase, ABC):
             if batches is None:
                 async for tag, data in self.async_iter_data():
                     await output.send((tag, data))
-            else:
+            elif self._reads_while_sending():
                 async for batch in off_the_loop(batches):
+                    await send_batch(output, batch, self)
+            else:
+                for batch in batches:
                     await send_batch(output, batch, self)
             if observer is not None:
                 observer.on_node_end(node_label, node_hash)
@@ -1960,6 +1967,10 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
             # nullable field): the rows decide, as on main.
             return None
         return table, keys_of_rows(table, self._bound_source.keys())
+
+    def _reads_while_sending(self) -> bool:
+        """Whether the bound source reads its table batch by batch."""
+        return reads_in_batches(self._bound_source)
 
     def _record_batches(self) -> Generator[pa.RecordBatch, None, None] | None:
         """The bound source's rows as record batches (ITL-1464), or ``None``.

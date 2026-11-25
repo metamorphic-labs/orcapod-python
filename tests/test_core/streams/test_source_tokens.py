@@ -814,6 +814,42 @@ def test_a_store_refuses_a_derived_column(
         database.add_records(("t",), records, record_id_column="rid", flush=True)
 
 
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("nested", ["struct", "list", "deep", "dictionary"])
+def test_a_nested_derived_column_is_refused(nested: str, grouped: bool) -> None:
+    """Review of PR 563, round 2: a recipe put inside another value is refused too."""
+    stream: Any = _keyed(9, 3).group_by(["g"]) if grouped else _source()
+    tokens: Any = carried_table(stream, CARRIED).column("_source_x").combine_chunks()
+    count = len(tokens)
+    struct = pa.StructArray.from_arrays([tokens, pa.array(range(count))], ["a", "b"])
+    arrow: Any = pa
+    made: dict[str, Callable[[], Any]] = {
+        "struct": lambda: struct,
+        "list": lambda: arrow.LargeListArray.from_arrays([0, count], tokens),
+        "deep": lambda: arrow.ListArray.from_arrays(
+            [0, count], pa.StructArray.from_arrays([struct], ["s"])
+        ),
+        "dictionary": lambda: arrow.DictionaryArray.from_arrays(
+            pa.array([0] * count), struct
+        ),
+    }
+    column = made[nested]()
+    table = arrow.table({"v": column})
+    hasher = contexts.get_default_context().arrow_hasher
+    records = table.append_column(
+        "rid", pa.array([str(i).encode() for i in range(len(table))], pa.large_binary())
+    )
+    for use in (
+        lambda: hasher.hash_table(table),
+        lambda: hasher.hash_schema(table.schema),
+        lambda: InMemoryArrowDatabase().add_records(
+            ("t",), records, record_id_column="rid", flush=True
+        ),
+    ):
+        with pytest.raises(TypeError, match="derived"):
+            _ = use()
+
+
 def test_the_carried_read_is_no_part_of_a_stream() -> None:
     """Review of PR 563: no public name gives a derived column."""
     for stream in (_source(), ROW_WISE["chain"]()):

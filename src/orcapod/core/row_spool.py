@@ -187,7 +187,7 @@ class _Segment:
         self.rows: int = table.num_rows
         self.live: int = table.num_rows
         self.table: pa.Table | None = table
-        self.bytes: int = _held_bytes(table)
+        self.bytes: int = held_bytes(table)
         self.path: str | None = None
         self.shelf: source_tokens.Shelf = source_tokens.Shelf(())
 
@@ -506,7 +506,7 @@ class RowSpool:
         self.close()
 
 
-def _held_bytes(table: pa.Table) -> int:
+def held_bytes(table: pa.Table) -> int:
     """The bytes ``table`` holds, what its derived lists share counted once."""
     lists = [
         name

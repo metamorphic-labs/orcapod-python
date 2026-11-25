@@ -20,10 +20,8 @@ import pyarrow as pa
 
 from orcapod.channels import ChannelClosed
 from orcapod.core.data_tags import data_tag_names
+from orcapod.core.operators import static_output_pod
 from orcapod.core.operators.static_output_pod import (
-    KEPT_ROWS_MEMORY_BYTES,
-    ROW_CHUNK_ROWS,
-    SPILL_SLICE_ROWS,
     StaticOutputOperatorPod,
     keys_in_delivered_order,
     open_provenance,
@@ -96,9 +94,9 @@ class EdgeWriter:
 
     async def send_batch(self, batch: pa.RecordBatch, stream: StreamProtocol) -> None:
         """Send a record batch of ``stream``'s rows, cut to ``ROW_CHUNK_ROWS`` rows each."""
-        for start in range(0, batch.num_rows, ROW_CHUNK_ROWS):
+        for start in range(0, batch.num_rows, static_output_pod.ROW_CHUNK_ROWS):
             await self._writer.send(
-                RowBatch(batch.slice(start, ROW_CHUNK_ROWS), stream)
+                RowBatch(batch.slice(start, static_output_pod.ROW_CHUNK_ROWS), stream)
             )
 
     async def close(self) -> None:
@@ -121,8 +119,10 @@ async def send_batch(
     if isinstance(output, BatchWriter):
         await output.send_batch(batch, stream)
         return
-    for start in range(0, batch.num_rows, ROW_CHUNK_ROWS):
-        for row in RowBatch(batch.slice(start, ROW_CHUNK_ROWS), stream).rows():
+    for start in range(0, batch.num_rows, static_output_pod.ROW_CHUNK_ROWS):
+        for row in RowBatch(
+            batch.slice(start, static_output_pod.ROW_CHUNK_ROWS), stream
+        ).rows():
             await output.send(row)
 
 
@@ -203,7 +203,7 @@ class EdgeFeed:
         if self._ended:
             return None
         rows: list[tuple[TagProtocol, DataProtocol]] = []
-        while len(rows) < ROW_CHUNK_ROWS:
+        while len(rows) < static_output_pod.ROW_CHUNK_ROWS:
             try:
                 item = await (self._soon() if rows else self._source.receive())
             except ChannelClosed:
@@ -261,7 +261,11 @@ class KeptBatches:
 
     def __init__(self, node: StreamProtocol) -> None:
         self._node: StreamProtocol = node
-        self._spool: RowSpool = RowSpool(memory_bytes=KEPT_ROWS_MEMORY_BYTES)
+        # The node's keys, in the order its rows have them; asked once.
+        self._keys: tuple[list[str], list[str]] | None = None
+        self._spool: RowSpool = RowSpool(
+            memory_bytes=static_output_pod.KEPT_ROWS_MEMORY_BYTES
+        )
         self._schema: pa.Schema | None = None
         self._token_types: dict[str, pa.DataType] = {}
 
@@ -269,6 +273,10 @@ class KeptBatches:
     def num_rows(self) -> int:
         """How many rows were kept."""
         return self._spool.size
+
+    def close(self) -> None:
+        """Let the kept rows go; an output stream already given stays valid."""
+        self._spool.close()
 
     def add(self, batch: pa.RecordBatch) -> None:
         """Keep a batch's rows after every row kept before them."""
@@ -278,9 +286,9 @@ class KeptBatches:
         table = open_provenance(batch, self._token_types)
         # The columns in the order of a table built from rows; a join lists its data
         # before its system tags.
-        table = row_built_columns(
-            table, keys_in_delivered_order(self._node.keys(), table.column_names)
-        )
+        if self._keys is None:
+            self._keys = keys_in_delivered_order(self._node.keys(), table.column_names)
+        table = row_built_columns(table, self._keys)
         if self._schema is None:
             self._schema = table.schema
         elif not table.schema.equals(self._schema, check_metadata=True):
@@ -302,12 +310,16 @@ class KeptBatches:
             }
             if names & {*source_tokens.derived_columns(kept.schema)}:
                 self._spool.close()
-                self._spool = RowSpool(memory_bytes=KEPT_ROWS_MEMORY_BYTES)
+                self._spool = RowSpool(
+                    memory_bytes=static_output_pod.KEPT_ROWS_MEMORY_BYTES
+                )
                 self._schema = source_tokens.materialize(
                     kept.schema.empty_table(), names
                 ).schema
-                for start in range(0, kept.num_rows, SPILL_SLICE_ROWS):
-                    part = kept.slice(start, SPILL_SLICE_ROWS)
+                for start in range(
+                    0, kept.num_rows, static_output_pod.SPILL_SLICE_ROWS
+                ):
+                    part = kept.slice(start, static_output_pod.SPILL_SLICE_ROWS)
                     self._spool.append(source_tokens.materialize(part, names))
             table = source_tokens.materialize(table, names)
         # The spool holds one schema: a difference left is an error here, as it is
@@ -323,9 +335,8 @@ class KeptBatches:
         if not self.num_rows:
             raise ValueError("Cannot make an output stream of no rows")
         table = StaticOutputOperatorPod._flag_by_values(self._spool.table())  # pyright: ignore[reportPrivateUsage]  # F's last step
-        tag_keys, data_keys = keys_in_delivered_order(
-            self._node.keys(), table.column_names
-        )
+        assert self._keys is not None  # a row was kept
+        tag_keys, data_keys = self._keys
         return ArrowTableStream(
             table,
             tag_columns=tag_keys,

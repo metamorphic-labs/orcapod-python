@@ -90,7 +90,7 @@ import polars as pl
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from orcapod.core.data_tags import stream_data_tags
+from orcapod.core.data_tags import data_tag_names, stream_data_tags
 from orcapod.core.operators.arrow_keys import polars_key_frame
 from orcapod.core.operators.join import (
     _COMMON_JOIN_KEY,  # pyright: ignore[reportPrivateUsage]  # Join's one rule
@@ -185,12 +185,13 @@ def _row_built_zero_rows(stream: StreamProtocol) -> tuple[StreamProtocol, bool]:
     pod = StaticOutputOperatorPod
     zero = pod._materialize_upstream([], stream)  # pyright: ignore[reportPrivateUsage]  # the operators' one form of an input
     table = zero.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
-    row_built = pod._flag_by_values(row_built_columns(table, stream.keys()))  # pyright: ignore[reportPrivateUsage]  # F's last step
+    tag_keys, data_keys = stream.keys()
+    row_built = pod._flag_by_values(row_built_columns(table, (tag_keys, data_keys)))  # pyright: ignore[reportPrivateUsage]  # F's last step
     differs = any(
         field.type != table.schema.field(field.name).type for field in row_built.schema
     )
     built = pod._as_upstream_stream(  # pyright: ignore[reportPrivateUsage]  # the operators' one form of an input
-        row_built, stream.keys()[0], stream_data_tags(stream), stream
+        row_built, tag_keys, data_tag_names(tag_keys, data_keys), stream
     )
     return built, differs
 
@@ -885,8 +886,8 @@ class StreamingJoin(StreamingJoinKernel):
         data_tags = set(stream_data_tags(first))
         for position, index in enumerate(order[1:], start=1):
             stream = inputs[index]
-            next_tags = set(stream.keys()[0])
-            next_data_tags = set(stream_data_tags(stream))
+            keys = stream.keys()
+            next_tags, next_data_tags = set(keys[0]), set(data_tag_names(*keys))
             merged = Join._merged_data_tags(  # pyright: ignore[reportPrivateUsage]  # Join's one rule
                 tag_keys, data_tags, next_tags, next_data_tags
             )

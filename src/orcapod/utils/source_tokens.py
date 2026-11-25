@@ -462,13 +462,26 @@ def with_recipe(table: pa.Table, name: str, recipe: Recipe) -> pa.Table:
     return table.set_column(table.schema.get_field_index(name), field, tokens)
 
 
+def _holds_derived(kind: pa.DataType) -> bool:
+    """Whether ``kind`` is a derived type or has one inside it, at any depth."""
+    if is_derived(kind):
+        return True
+    if isinstance(kind, pa.BaseExtensionType):
+        return _holds_derived(kind.storage_type)
+    if pa.types.is_dictionary(kind):
+        return _holds_derived(kind.value_type)
+    return any(
+        _holds_derived(kind.field(index).type) for index in range(kind.num_fields)
+    )
+
+
 def refuse_derived(schema: pa.Schema) -> None:
-    """Raise if a column of ``schema`` is derived: hashes and stores take text only.
+    """Raise if a column of ``schema`` is, or contains, a derived one: hashes and stores take text only.
 
     Raises:
         TypeError: Naming the derived columns.
     """
-    if derived := derived_columns(schema):
+    if derived := [f.name for f in schema if _holds_derived(f.type)]:
         raise TypeError(
             f"columns {list(derived)} are derived source-info tokens: their text must "
             + "be built first (source_tokens.materialize)"

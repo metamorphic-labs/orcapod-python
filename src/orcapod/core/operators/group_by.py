@@ -472,6 +472,13 @@ class GroupBy(UnaryOperator):
         system_tag_columns = tuple(
             c for c in table.column_names if c.startswith(constants.SYSTEM_TAG_PREFIX)
         )
+        # The folds, the sort and the members' ids read these again and again, by row
+        # number: each in one chunk (a ``take`` from many puts them together every time).
+        for name in (*self.by, *system_tag_columns):
+            index = table.schema.get_field_index(name)
+            table = table.set_column(
+                index, table.schema.field(index), table.column(index).combine_chunks()
+            )
         # The source info of a data-tag key: the key's value is the merge of its
         # members' equal values, so its source info is one token, the fold of the
         # members' tokens in member order, as the system tags fold (ITL-1017).
@@ -619,6 +626,7 @@ class GroupBy(UnaryOperator):
         """
         named = self.member_order or ()
         sort_columns = named + tuple(sorted(c for c in non_key_tags if c not in named))
+        tags = len(sort_columns)
         for prefix in (
             constants.SYSTEM_TAG_RECORD_ID_PREFIX,
             constants.SYSTEM_TAG_SOURCE_ID_PREFIX,
@@ -638,7 +646,9 @@ class GroupBy(UnaryOperator):
         key_names = [f"key{i}" for i in range(len(self.by))]
         order_names = [f"order{i}" for i in range(len(sort_columns))]
         for name, c in zip(
-            [*key_names, *order_names], [*self.by, *sort_columns], strict=True
+            [*key_names, *order_names[:tags]],
+            [*self.by, *sort_columns[:tags]],
+            strict=True,
         ):
             frame_columns[name] = polars_ready(table.column(c).combine_chunks())
         # The bits of each float key, to emit the member value with the smallest.
@@ -650,22 +660,40 @@ class GroupBy(UnaryOperator):
                 bit_names[c] = f"bits{i}"
                 frame_columns[f"bits{i}"] = bits
 
-        frame = cast(
-            "pl.DataFrame",
-            pl.from_arrow(
-                pa.Table.from_arrays(
-                    list(frame_columns.values()), names=list(frame_columns)
-                )
-            ),
+        def in_order(names: Sequence[str]) -> pl.DataFrame:
+            """The frame sorted by the keys and the columns that order the members."""
+            frame = cast(
+                "pl.DataFrame",
+                pl.from_arrow(
+                    pa.Table.from_arrays(
+                        list(frame_columns.values()), names=list(frame_columns)
+                    )
+                ),
+            )
+            # Keys first, so the groups come out in key order: a NaN key after every
+            # number and before null, null last (``nulls_last``); rows that tie on every
+            # column keep the input's order.
+            return frame.sort(
+                [_sort_key(name, frame.schema[name]) for name in names],
+                nulls_last=True,
+                maintain_order=True,
+            )
+
+        # The system tags are the last tiebreakers, and their texts are by far the
+        # largest columns: they are sorted only when rows tie on everything before them
+        # (ITL-1464). Nested values order by other expressions than they compare by, so
+        # with one of them they always are.
+        names = [*key_names, *order_names[:tags]]
+        frame = in_order(names)
+        tied = any(frame.schema[name].is_nested() for name in names) or (
+            frame.height > 1
+            and cast(int, frame.select(pl.struct(names).rle_id().max()).item()) + 1
+            < frame.height
         )
-        # Keys first, so the groups come out in key order: a NaN key after every
-        # number and before null, null last (``nulls_last``); rows that tie on every
-        # column keep the input's order.
-        frame = frame.sort(
-            [_sort_key(name, frame.schema[name]) for name in key_names + order_names],
-            nulls_last=True,
-            maintain_order=True,
-        )
+        if tied:
+            for name, c in zip(order_names[tags:], sort_columns[tags:], strict=True):
+                frame_columns[name] = polars_ready(table.column(c).combine_chunks())
+            frame = in_order([*key_names, *order_names])
         # Group boundaries by Polars' own equality: every NaN equals every NaN and
         # 0.0 equals -0.0, as the joins match keys (ITL-1234, ITL-1251).
         frame = frame.with_columns(pl.struct(key_names).rle_id().alias("group"))

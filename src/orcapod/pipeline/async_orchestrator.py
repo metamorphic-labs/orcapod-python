@@ -15,11 +15,13 @@ import threading
 import uuid
 import warnings
 from collections import defaultdict
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from orcapod.channels import BroadcastChannel, Channel
 from orcapod.core.job_edges import EDGE_BATCHES, EdgeReader, EdgeWriter
+from orcapod.core.streams.base import zero_rows_of_one_run
+from orcapod.core.unique_keys import unique_keys_of_one_run
 from orcapod.errors import (
     OrcapodDatabaseError,
     OrcapodDatabaseWriteError,
@@ -269,7 +271,7 @@ class AsyncPipelineOrchestrator:
                     collectors[node] = []
 
             # Launch all nodes concurrently
-            async with asyncio.TaskGroup() as tg:
+            async with _task_group() as tg:
                 for node in topo_order:
                     writer = node_output_channels[node].writer
 
@@ -667,6 +669,14 @@ class _RowsInFlight:
         from orcapod.pipeline.observer import NoOpLogger
 
         return NoOpLogger()
+
+
+@contextlib.asynccontextmanager
+async def _task_group() -> AsyncGenerator[asyncio.TaskGroup, None]:
+    """The run's task group, whose nodes share the descriptions they derive."""
+    with zero_rows_of_one_run(), unique_keys_of_one_run():
+        async with asyncio.TaskGroup() as group:
+            yield group
 
 
 async def _drain(reader: Any) -> None:

@@ -140,6 +140,11 @@ _ZERO_ROW_MEMO: ContextVar[dict[int, tuple[object, pa.Table | None]] | None] = (
 )
 """The zero-row tables derived during one outermost ``typed_zero_row_table`` call."""
 
+_RUN_ZERO_ROWS: ContextVar[dict[int, tuple[object, pa.Table | None]] | None] = (
+    ContextVar("_RUN_ZERO_ROWS", default=None)
+)
+"""The zero-row tables derived during one async run (``zero_rows_of_one_run``)."""
+
 
 @contextmanager
 def shared_zero_row_memo() -> Iterator[None]:
@@ -197,13 +202,32 @@ def typed_zero_row_table(stream: object) -> pa.Table | None:
             return typed_zero_row_table(stream)
         finally:
             _ZERO_ROW_MEMO.reset(token)
-    known = memo.get(id(stream))
-    if known is not None and known[0] is stream:
-        return known[1]
+    for tables in (memo, _RUN_ZERO_ROWS.get()):
+        known = None if tables is None else tables.get(id(stream))
+        if known is not None and known[0] is stream:
+            return known[1]
     table = _derive_zero_row_table(stream)
     # The stream is held with its table, so its id is not reused during the call.
     memo[id(stream)] = (stream, table)
+    run = _RUN_ZERO_ROWS.get()
+    if run is not None and table is not None:
+        run[id(stream)] = (stream, table)
     return table
+
+
+@contextmanager
+def zero_rows_of_one_run() -> Generator[None, None, None]:
+    """Derive each stream's zero-row table at most once inside this block (ITL-1464).
+
+    For an async run, whose nodes each describe their inputs: without it every node
+    derives everything above it. Bindings and operators do not change during a run. A
+    stream that cannot type itself yet (a source not polled) is asked again.
+    """
+    token = _RUN_ZERO_ROWS.set({})
+    try:
+        yield
+    finally:
+        _RUN_ZERO_ROWS.reset(token)
 
 
 def typed_zero_row_input(stream: object) -> pa.Table | None:

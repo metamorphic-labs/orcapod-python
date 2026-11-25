@@ -18,7 +18,8 @@ declaring ``DERIVES_UNIQUE_KEYS`` itself.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Generator, Iterable, Mapping, Sequence
+from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Protocol
 
@@ -149,3 +150,17 @@ def derived_keys(
     finally:
         if token is not None:
             _MEMO.reset(token)
+
+
+@contextmanager
+def unique_keys_of_one_run() -> Generator[None, None, None]:
+    """Derive each stream's certificate at most once inside this block.
+
+    For an async run, whose joins each ask their inputs'. Bindings, operators and cache
+    modes do not change during a run.
+    """
+    token = _MEMO.set({})
+    try:
+        yield
+    finally:
+        _MEMO.reset(token)
