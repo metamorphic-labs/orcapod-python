@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pytest
@@ -286,3 +286,90 @@ def test_a_jobs_nodes_read_the_same_whatever_materialize_results_says(
     assert _sorted_rows(kept) == _sorted_rows(unkept)
     assert sorted(kept_rows, key=repr) == sorted(unkept_rows, key=repr)
     assert kept_hash == unkept_hash
+
+
+def _other_rows() -> list[tuple[Any, Any]]:
+    """Rows whose data columns are not those of ``_rows``: no table holds both."""
+    source = ArrowTableSource(
+        pa.table({"subject": ["x", "y"], "trial": [100, 101], "other": [1.0, 2.0]}),
+        tag_columns=["subject", "trial"],
+        source_id="other",
+    )
+    return list(source.iter_data())
+
+
+def test_rows_that_cannot_make_one_table_raise_when_it_is_read_not_when_added(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of PR 562: receiving a row never raised before the table was built."""
+    import pyarrow.lib
+
+    monkeypatch.setattr(static_output_pod, "ROW_CHUNK_ROWS", 3)
+    rows = _rows(False)[:4] + _other_rows() + _rows(False)[4:]
+
+    chunks = _chunks(rows)
+
+    assert chunks.num_rows == len(rows)
+    with pytest.raises(pyarrow.lib.ArrowInvalid):
+        chunks.row_table()
+    with pytest.raises(pyarrow.lib.ArrowInvalid):
+        StaticOutputOperatorPod._rows_to_table(rows)  # pyright: ignore[reportPrivateUsage]  # the rule RowChunks must equal
+
+
+async def _closed(rows: list[tuple[Any, Any]]) -> Any:
+    channel: Channel[tuple[Any, Any]] = Channel(buffer_size=len(rows) + 1)
+    for row in rows:
+        await channel.writer.send(row)
+    await channel.writer.close()
+    return channel.reader
+
+
+def test_a_barrier_with_an_empty_input_never_reads_the_other_as_a_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of PR 562: rows no table can hold, beside an empty input, give no rows
+    and no error, and no reader task is left behind."""
+    from orcapod.operators import MergeJoin
+
+    monkeypatch.setattr(static_output_pod, "ROW_CHUNK_ROWS", 3)
+    rows = _rows(False)[:4] + _other_rows() + _rows(False)[4:]
+    pipeline_hash = _source(False).pipeline_hash()
+
+    async def run() -> tuple[list[Any], int]:
+        output: Channel[tuple[Any, Any]] = Channel(buffer_size=4)
+        before = len(asyncio.all_tasks())
+        await MergeJoin().async_execute(
+            [await _closed(rows), await _closed([])],
+            output.writer,
+            input_pipeline_hashes=[pipeline_hash, pipeline_hash],
+        )
+        sent = await output.reader.collect()
+        return sent, len(asyncio.all_tasks()) - before
+
+    sent, left_behind = asyncio.run(run())
+
+    assert sent == []
+    assert left_behind == 0
+
+
+def test_a_result_streams_own_iterator_is_never_bypassed() -> None:
+    """Review of PR 562: a subclass's, or an instance's, ``iter_data`` yields the rows."""
+    table = _source(False).as_table(columns={"system_tags": True, "source": True})
+
+    class Odd(ArrowTableStream):
+        def iter_data(self):  # pyright: ignore[reportIncompatibleMethodOverride]  # a narrower iterator on purpose
+            for tag, data in super().iter_data():
+                if cast("int", tag.as_dict()["trial"]) % 2:
+                    yield tag, data
+
+    keys: dict[str, Any] = {
+        "tag_columns": ["subject", "trial"],
+        "data_tags": ["subject", "trial"],
+    }
+    subclassed = Odd(table, **keys)
+    assert [t.as_dict()["trial"] for t, _ in rows_once(subclassed)] == [1, 3, 5, 7, 9]
+
+    shadowed = ArrowTableStream(table, **keys)
+    first = next(iter(shadowed.iter_data()))
+    shadowed.iter_data = lambda: iter([first])  # pyright: ignore[reportAttributeAccessIssue]  # an instance's own iterator
+    assert [t.as_dict()["trial"] for t, _ in rows_once(shadowed)] == [0]

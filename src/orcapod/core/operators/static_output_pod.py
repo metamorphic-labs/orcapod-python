@@ -1309,8 +1309,9 @@ class RowChunks:
     differs), because that table is a concatenation of one table per row, matched by
     name to the first row's column order, and concatenation chunk by chunk gives the
     same table. Rows whose columns disagree raise ``pyarrow.ArrowInvalid`` as there,
-    when their chunk is built or the chunks are joined; the message's table index is
-    then the row's place in its chunk, or the chunk's place.
+    and as there only when the table is asked for (``row_table``), never when a row
+    is added; the message's table index is then the row's place in its chunk, or the
+    chunk's place.
 
     A chunk is the record batch an ITL-1347 channel carries, before the last step of
     its row-built form (the source-info field flags, which need every row); a node
@@ -1326,6 +1327,7 @@ class RowChunks:
         self._data_tags: tuple[str, ...] = ()
         self._first_context_key: str | None = None
         self.num_rows: int = 0
+        self._unsealable: bool = False
 
     def add(self, tag: TagProtocol, data: DataProtocol) -> None:
         """Keep one row, after every row added before it."""
@@ -1335,8 +1337,15 @@ class RowChunks:
             self._first_context_key = data.data_context_key
         self._pending.append((tag, data))
         self.num_rows += 1
-        if len(self._pending) >= ROW_CHUNK_ROWS:
-            self._seal()
+        if len(self._pending) >= ROW_CHUNK_ROWS and not self._unsealable:
+            try:
+                self._seal()
+            except Exception:
+                # Rows that cannot make one table (columns that disagree). Receiving
+                # a row never raised: the error belongs to the read of the table
+                # (``row_table``), which a barrier whose other input is empty never
+                # makes. The rows wait as they came, and nothing more is sealed.
+                self._unsealable = True
 
     def _seal(self) -> None:
         """Build the pending rows into Arrow tables and let the pairs go."""
@@ -1431,7 +1440,9 @@ def rows_once(
     Returns:
         The rows of ``result.iter_data()``, in its order.
     """
-    if isinstance(result, ArrowTableStream):
+    # Exactly an ``ArrowTableStream`` with its own iterator: a subclass's ``iter_data``,
+    # or one set on the instance, is what yields its rows, and is never bypassed.
+    if type(result) is ArrowTableStream and "iter_data" not in vars(result):
         return result.iter_data_unkept()
     return result.iter_data()
 
