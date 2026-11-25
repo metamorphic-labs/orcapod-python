@@ -11,6 +11,7 @@ through ``as_table`` and gives text.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any
 
 import pyarrow as pa
@@ -40,3 +41,24 @@ def carried_table(
     if read is None or not reads_as_its_class(stream, kind):
         return stream.as_table(columns=columns)
     return read(stream, columns)
+
+
+CARRIED_BATCHES = "_carried_batches"
+"""The method of the library's channel class whose batches may hold derived columns."""
+
+
+def carried_batches(channel: Any) -> AsyncIterator[pa.RecordBatch]:  # pyright: ignore[reportExplicitAny]  # a channel (its protocol would make an import cycle)
+    """The remaining record batches of a channel, derived token columns as they are.
+
+    For library code that passes them on, as ``carried_table`` is for tables, and by the
+    same rule: only the library's own channel class, read as that class, is read this
+    way; any other channel is iterated and gives what it gives.
+
+    Args:
+        channel: An input channel (``RecordBatchInput``).
+    """
+    kind = type(channel)
+    read: Any = vars(kind).get(CARRIED_BATCHES)  # pyright: ignore[reportExplicitAny]  # a method
+    if read is None or not reads_as_its_class(channel, kind):
+        return aiter(channel)
+    return read(channel)

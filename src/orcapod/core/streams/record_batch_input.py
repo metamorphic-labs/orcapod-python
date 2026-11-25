@@ -247,21 +247,6 @@ class InputChannel:
         table = source_tokens.materialize(pa.Table.from_batches([batch]))
         return table.combine_chunks().to_batches()[0]
 
-    async def carried(self) -> AsyncIterator[pa.RecordBatch]:
-        """Iterate over the remaining record batches as they travel, for an operator.
-
-        Their source-info columns may be derived; the end and the errors are those of
-        iterating the channel.
-        """
-        while True:
-            try:
-                batch = await self._receive_carried()
-            except ChannelClosed:
-                if self._ended and not self._closed:
-                    return
-                raise
-            yield batch
-
     async def _receive_carried(self) -> pa.RecordBatch:
         """Return the next Arrow record batch, as it travels.
 
@@ -394,8 +379,19 @@ class InputChannel:
             await self.close()
             return opened_on
         return stream_from_batches(
-            self._stream, [batch async for batch in self.carried()]
+            self._stream, [batch async for batch in self._carried_batches()]
         )
+
+    async def _carried_batches(self) -> AsyncIterator[pa.RecordBatch]:
+        """The remaining record batches as they travel (``carried_batches``)."""
+        while True:
+            try:
+                batch = await self._receive_carried()
+            except ChannelClosed:
+                if self._ended and not self._closed:
+                    return
+                raise
+            yield batch
 
     async def collect(self) -> list[pa.RecordBatch]:
         """Read to the end and return every remaining record batch, in arrival order.

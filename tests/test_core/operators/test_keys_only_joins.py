@@ -16,10 +16,12 @@ import warnings
 from collections import Counter
 from collections.abc import Callable, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pytest
+
+import orcapod.contexts as contexts
 
 from orcapod.core.operators import Join, MergeJoin, Rejoin, SemiJoin
 from orcapod.core.operators import streaming_joins
@@ -30,13 +32,18 @@ from orcapod.core.operators.streaming_joins import (
     StreamingRejoin,
     StreamingSemiJoin,
 )
+from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.record_batch_channels import OutputChannel
 from orcapod.core.row_spool import RowSpool
 from orcapod.core.sources import ArrowTableSource, DictSource
 from orcapod.core.streams import ArrowTableStream
+from orcapod.core.streams.carried import carried_batches
+from orcapod.core.streams.record_batch_input import InputChannel
 from orcapod.errors import UpstreamFailedError
 from orcapod.protocols.core_protocols import StreamProtocol
+from orcapod.system_constants import constants
 from orcapod.utils import source_tokens
+from tests.test_core.operators.test_rejoin import other_context  # noqa: F401  # the fixture
 
 from .test_streaming_joins import _arrivals, _check, _rows, _run, _sent, _transport  # pyright: ignore[reportPrivateUsage]  # the kernels' one oracle
 
@@ -622,7 +629,7 @@ def _carried(stream: StreamProtocol) -> pa.Table:
     feed = stream.open_channel()
 
     async def read() -> list[pa.RecordBatch]:
-        return [batch async for batch in feed.carried()]
+        return [batch async for batch in carried_batches(feed)]
 
     return pa.Table.from_batches(asyncio.run(read()))
 
@@ -1118,3 +1125,140 @@ def test_rows_with_logical_types_are_replayed(spooled: Path) -> None:
         _check(_join, Join().static_process, inputs, range(4))
         _check(_semi, SemiJoin().static_process, inputs, range(4))
         _check(_merge, MergeJoin().static_process, inputs, range(4))
+
+
+@pytest.mark.parametrize("first", [0, 1])
+def test_alternating_token_forms_keep_one_memory_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, first: int
+) -> None:
+    """Review of #567: a spool per change of form kept every one of them in memory."""
+    spools: list[RowSpool] = []
+
+    def make() -> RowSpool:
+        spools.append(RowSpool(20_000, str(tmp_path)))
+        return spools[-1]
+
+    monkeypatch.setattr(streaming_joins, "RowSpool", make)
+    left = ArrowTableSource(
+        pa.table(
+            {
+                "k": [i % 2 for i in range(64)],
+                "n": list(range(64)),
+                "x": [f"{i}" + "x" * 1_000 for i in range(64)],
+                "y": list(range(64)),
+            }
+        ),
+        tag_columns=["n", "k"],
+        tag_only_columns=True,
+        source_id="left",
+    )
+    right = _source("b", {"k": [0, 1], "m": [1, 2]})
+    derived = _carried(left).combine_chunks()
+    forms = [derived, source_tokens.materialize(derived)]
+    kernel = _join([left, right])
+    for i in range(64):
+        (batch,) = forms[(i + first) % 2].slice(i, 1).combine_chunks().to_batches()
+        assert kernel.push(0, batch) == []
+        assert sum(spool.memory_bytes for spool in spools) <= 20_000
+        # One spool per side to start with, and at most one more.
+        assert len([spool for spool in spools if spool.size]) <= 2
+    assert len(_files(tmp_path)) < 10
+    for batch in _carried(right).to_batches():
+        kernel.push(1, batch)
+    rows: Any = Counter()
+    for out in [*kernel.close(1), *kernel.close(0)]:
+        rows += _rows(source_tokens.materialize(pa.Table.from_batches([out])))
+    assert rows == _rows(_transport(left.join(right)))
+    assert _files(tmp_path) == []
+
+
+def test_no_read_of_a_channel_gives_a_recipe() -> None:
+    """Review of #567: the channel's own protocol offered the internal form."""
+    channel = _data_tagged("a", 3).open_channel()
+    assert [n for n in dir(channel) if "carried" in n and not n.startswith("_")] == []
+
+
+def test_a_channel_of_a_users_class_is_read_through_its_own_reads() -> None:
+    source = _source("a", {"k": [1, 2, 3], "n": [1, 2, 3]})
+    inner = source.open_channel()
+
+    class OneRow(InputChannel):
+        async def receive(self) -> pa.RecordBatch:
+            return (await super().receive()).slice(0, 1)
+
+    channel = OneRow(source, cast(InputChannel, inner)._feed)  # pyright: ignore[reportPrivateUsage]  # a user's channel over a feed
+
+    async def read() -> int:
+        return sum([b.num_rows async for b in carried_batches(channel)])
+
+    assert _bounded(read()) == 1
+
+
+@pytest.mark.parametrize("op", [Join(), SemiJoin(), MergeJoin()], ids=lambda o: repr(o))
+def test_a_replay_whose_sends_never_wait_can_be_cancelled(
+    spooled: Path, op: Any
+) -> None:
+    """Review of #567: the whole replay ran before any other task had a turn."""
+    left = _source("a", {"k": [1, 2] * 100, "n": list(range(200))})
+    right = _source("b", {"k": [1, 2], "m": [1, 2]})
+    sent = 0
+    began = asyncio.Event()
+
+    class Sink(OutputChannel):
+        async def send(self, batch: pa.RecordBatch) -> None:
+            nonlocal sent
+            sent += batch.num_rows
+            began.set()
+            await super().send(batch)
+
+    async def go() -> None:
+        sink = Sink(op(left, right), retain=False)  # no reader: a send never waits
+        run = asyncio.create_task(
+            op.async_execute_batches([left.open_channel(), right.open_channel()], sink)
+        )
+        await began.wait()
+        run.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await run
+
+    _bounded(go())
+    assert 0 < sent < 100
+    assert _files(spooled) == []
+
+
+def test_rejoin_over_channels_equals_its_barrier_for_rows_of_several_contexts(
+    spooled: Path,
+    other_context: contexts.DataContext,  # noqa: F811  # the fixture, by name
+) -> None:
+    """Channels carry no per-row data context, so the two forms see one (ITL-1359)."""
+    default = contexts.get_default_context()
+
+    def branch(name: str, second: str) -> ArrowTableStream:
+        table = pa.table(
+            {
+                "k": [1, 2],
+                "_tag_source_id::t": pa.array(["s", "s"], pa.large_string()),
+                "_tag_record_id::t": pa.array(["r1", "r2"], pa.large_string()),
+                name: [10, 20],
+                constants.CONTEXT_KEY: pa.array(
+                    [default.context_key, second], pa.large_string()
+                ),
+            }
+        )
+        return ArrowTableStream(table, tag_columns=["k"], data_context=default)
+
+    inputs = [branch("a", other_context.context_key), branch("b", default.context_key)]
+    op = Rejoin()
+
+    async def go(*, barrier: bool) -> StreamProtocol:
+        output = OutputChannel(op(*inputs))
+        channels = [s.open_channel() for s in inputs]
+        if barrier:
+            await StaticOutputOperatorPod.async_execute_batches(op, channels, output)
+        else:
+            await op.async_execute_batches(channels, output)
+        return output.result()
+
+    assert _rows(_transport(_bounded(go(barrier=False)))) == _rows(
+        _transport(_bounded(go(barrier=True)))
+    )

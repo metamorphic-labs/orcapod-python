@@ -159,10 +159,16 @@ work on the machine.
 A channel and the kernels take a batch whose source-info columns are derived
 (`utils/source_tokens.py`): such a column has no bytes, so it costs a held or spooled row
 nothing. Derived columns travel between the library's operators only
-(`RecordBatchInput.carried`): every public read of a channel (`receive`, iteration,
+(`streams/carried.py`; a channel's protocol has no such read): every public read of a channel (`receive`, iteration,
 `collect`) gives text, and a stream is read through its own `as_table` unless its class is a
 library class that declares the carried read. Batches of one input may hold a column as text
-in one and derived in another, however they arrive; rows fetched from both are text.
+in one and derived in another, however they arrive: from the first change on, rows are held
+as text, the rows before it go to disk, and rows fetched from both are text.
+
+Channels carry no per-row data context, as before (ITL-1347): every row of an input has its
+stream's. A two-input `Rejoin` of raw streams that hold rows of several contexts therefore
+matches on the streams' contexts over channels, where the sync path over the raw streams
+matches on each row's. This is unchanged: the barrier did the same (ITL-1359).
 
 Text is built where values are needed: a source-info column both inputs of a `MergeJoin`
 have, a merged data-tag one side of which is text, and the tokens that read system tags whose

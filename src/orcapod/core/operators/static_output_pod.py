@@ -45,7 +45,7 @@ from orcapod.core.operators.provisional import (
 from orcapod.utils import source_tokens
 from orcapod.utils.provisional import note_provisional_use, provisional_class_name
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
-from orcapod.core.streams.carried import carried_table
+from orcapod.core.streams.carried import carried_batches, carried_table
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
     StreamBase,
@@ -1169,7 +1169,7 @@ class StaticOutputOperatorPod(TraceableBase):
                 # cannot make one table with the earlier ones is refused, as the sync
                 # path refuses the whole input, never processed alone.
                 settled: dict[str, pa.DataType] = {}
-                async for batch in channel.carried():
+                async for batch in carried_batches(channel):
                     settled = settle_token_types(batch, settled)
                     await self._send_processed([batch], channel.stream, output)
             else:

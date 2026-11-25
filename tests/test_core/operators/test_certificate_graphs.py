@@ -36,6 +36,7 @@ from orcapod.core.operators.static_output_pod import DynamicPodStream
 from orcapod.core.record_batch_channels import OutputChannel
 from orcapod.core.row_spool import RowSpool
 from orcapod.core.sources import ArrowTableSource
+from orcapod.core.streams.carried import carried_batches
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import StreamProtocol
 
@@ -212,7 +213,7 @@ async def _run(stream: Any, rng: random.Random) -> StreamProtocol:
 
     async def give(source: Any) -> None:
         output = channels[id(source)]
-        async for batch in source.open_channel().carried():
+        async for batch in carried_batches(source.open_channel()):
             start = 0
             while start < batch.num_rows:
                 size = rng.randint(1, 5)
