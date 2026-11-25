@@ -12,11 +12,13 @@ import json
 import pickle
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
+import numpy as np
 import polars as pl
 import pyarrow as pa
 import pyarrow.compute as pc
+import pyarrow.feather as feather
 import pyarrow.parquet as pq
 import pytest
 
@@ -25,6 +27,7 @@ from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.operators.join import JOIN_FOLD_LABEL
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+from orcapod.core.row_spool import RowSpool
 from orcapod.core.streams import ArrowTableStream
 from orcapod.core.streams.carried import carried_table
 from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS
@@ -357,7 +360,7 @@ def test_a_recipe_survives_its_json() -> None:
     for recipe in (leaf, fold):
         kind = source_tokens.DerivedTokenType(recipe)
         again = source_tokens.DerivedTokenType.__arrow_ext_deserialize__(
-            pa.struct([]), kind.__arrow_ext_serialize__()
+            kind.storage_type, kind.__arrow_ext_serialize__()
         )
         assert again == kind and again.recipe == recipe
 
@@ -521,6 +524,35 @@ def test_an_aggregation_of_no_rows_gives_text_types(
     for table, expected in zip(tables, make(), strict=True):
         assert table.num_rows == 0
         assert table.schema.equals(expected.schema, check_metadata=True)
+
+
+def _ipc_writes(table: pa.Table) -> dict[str, Callable[[], Any]]:
+    def new(make: Any) -> None:
+        with make(pa.BufferOutputStream(), table.schema) as writer:
+            writer.write_table(table)
+
+    return {
+        "file": lambda: new(pa.ipc.new_file),
+        "stream": lambda: new(pa.ipc.new_stream),
+        "batch": lambda: table.combine_chunks().to_batches()[0].serialize(),
+        "feather": lambda: feather.write_feather(
+            table, cast(Any, pa.BufferOutputStream())
+        ),
+        "c_stream": lambda: pa.RecordBatchReader.from_stream(cast(Any, table)),
+    }
+
+
+@pytest.mark.parametrize("write", ["file", "stream", "batch", "feather", "c_stream"])
+@pytest.mark.parametrize("grouped", [False, True])
+def test_arrow_ipc_refuses_a_derived_column(write: str, grouped: bool) -> None:
+    """No path out of the process, or into another library, gives a recipe's storage."""
+    stream: Any = _keyed(20, 3).group_by(["g"]) if grouped else _keyed(20, 3)
+    carried = carried_table(stream, {"source": True, "system_tags": True})
+    with pytest.raises(pa.ArrowInvalid, match="[Rr]ecursion"):
+        _ipc_writes(carried)[write]()
+    with pytest.raises(TypeError, match="no pandas form"):
+        _ = carried.to_pandas()
+    _ipc_writes(source_tokens.materialize(carried))[write]()
 
 
 def test_a_grouped_stream_refuses_to_leak() -> None:
@@ -782,6 +814,42 @@ def test_a_store_refuses_a_derived_column(
         database.add_records(("t",), records, record_id_column="rid", flush=True)
 
 
+@pytest.mark.parametrize("grouped", [False, True])
+@pytest.mark.parametrize("nested", ["struct", "list", "deep", "dictionary"])
+def test_a_nested_derived_column_is_refused(nested: str, grouped: bool) -> None:
+    """Review of PR 563, round 2: a recipe put inside another value is refused too."""
+    stream: Any = _keyed(9, 3).group_by(["g"]) if grouped else _source()
+    tokens: Any = carried_table(stream, CARRIED).column("_source_x").combine_chunks()
+    count = len(tokens)
+    struct = pa.StructArray.from_arrays([tokens, pa.array(range(count))], ["a", "b"])
+    arrow: Any = pa
+    made: dict[str, Callable[[], Any]] = {
+        "struct": lambda: struct,
+        "list": lambda: arrow.LargeListArray.from_arrays([0, count], tokens),
+        "deep": lambda: arrow.ListArray.from_arrays(
+            [0, count], pa.StructArray.from_arrays([struct], ["s"])
+        ),
+        "dictionary": lambda: arrow.DictionaryArray.from_arrays(
+            pa.array([0] * count), struct
+        ),
+    }
+    column = made[nested]()
+    table = arrow.table({"v": column})
+    hasher = contexts.get_default_context().arrow_hasher
+    records = table.append_column(
+        "rid", pa.array([str(i).encode() for i in range(len(table))], pa.large_binary())
+    )
+    for use in (
+        lambda: hasher.hash_table(table),
+        lambda: hasher.hash_schema(table.schema),
+        lambda: InMemoryArrowDatabase().add_records(
+            ("t",), records, record_id_column="rid", flush=True
+        ),
+    ):
+        with pytest.raises(TypeError, match="derived"):
+            _ = use()
+
+
 def test_the_carried_read_is_no_part_of_a_stream() -> None:
     """Review of PR 563: no public name gives a derived column."""
     for stream in (_source(), ROW_WISE["chain"]()):
@@ -789,36 +857,124 @@ def test_the_carried_read_is_no_part_of_a_stream() -> None:
     assert "carried" not in " ".join(dir(StreamProtocol))
 
 
-@pytest.mark.parametrize("grouped", [False, True])
-def test_a_spilled_table_keeps_its_recipes(grouped: bool) -> None:
-    """As the row spool writes it: an extension column's storage, wrapped when read."""
-    stream = _keyed(50, 12)
-    made: Any = stream.group_by(["g"]) if grouped else stream
-    carried: Any = carried_table(made, CARRIED).combine_chunks()
-    arrow: Any = pa
-    batch: Any = carried.to_batches()[0]
-    storage = arrow.RecordBatch.from_arrays(
-        [getattr(c, "storage", c) for c in batch.columns], names=batch.schema.names
+SPILLED: dict[str, Callable[[], Any]] = {
+    "source": lambda: _keyed(500, 12),
+    "grouped": lambda: _keyed(500, 12).group_by(["g"]),
+    "one_row_groups": lambda: _keyed(50, 3).group_by(["t"]),
+    "batch": lambda: Batch(batch_size=7)(_keyed(500, 12)),
+    # Two inputs, so two kinds of ids; and lists beside tokens of one a row.
+    "joined": lambda: Join()(
+        _other("a").group_by(["j"]), _other("b").group_by(["j"]).map_data({"k": "k2"})
+    ),
+    # Lists of one source read by two groupings: equal names, other members.
+    "two_groupings": lambda: Join()(
+        _keyed(60, 4).group_by(["g"]).select_data_columns(["x", "g"]),
+        _keyed(60, 4)
+        .polars_filter(pl.col("x") > 30)
+        .group_by(["g"])
+        .select_data_columns(["y", "g"]),
+    ),
+}
+
+
+def _own_chunks(table: pa.Table, sizes: list[int]) -> list[pa.Table]:
+    """``table`` cut into slices of ``sizes`` rows, in turn."""
+    parts: list[pa.Table] = []
+    start = 0
+    while start < table.num_rows:
+        size = sizes[len(parts) % len(sizes)]
+        parts.append(table.slice(start, size))
+        start += size
+    return parts
+
+
+@pytest.mark.parametrize("limit", [0, 4096, 1 << 30])
+@pytest.mark.parametrize("sizes", [[1], [5, 2, 9], [1000]])
+@pytest.mark.parametrize("name", SPILLED)
+def test_a_spooled_table_keeps_its_recipes(
+    name: str, sizes: list[int], limit: int, tmp_path: Path
+) -> None:
+    """The row spool: every row back, by number and whole, lists and tokens derived."""
+    carried = carried_table(SPILLED[name](), CARRIED)
+    text = source_tokens.materialize(carried)
+    assert _derived(carried)
+    with RowSpool(memory_bytes=limit, root=str(tmp_path)) as spool:
+        for part in _own_chunks(carried, sizes):
+            spool.append(part)
+        whole = spool.table()
+        rows = np.arange(carried.num_rows, dtype=np.int64)
+        for order in (rows, rows[::-1], rows[::3], rows[-1:]):
+            taken = spool.take(order)
+            assert taken.schema.equals(carried.schema, check_metadata=True)
+            assert_same_values(
+                source_tokens.materialize(taken), text.take(cast(Any, pa.array(order)))
+            )
+        part = spool.slice(1, 3)
+        assert_same_values(source_tokens.materialize(part), text.slice(1, 3))
+    # Also once the files are gone.
+    assert whole.schema.equals(carried.schema, check_metadata=True)
+    assert_same_values(source_tokens.materialize(whole), text)
+
+
+def test_a_table_of_derived_columns_only_is_spooled(tmp_path: Path) -> None:
+    carried = carried_table(_keyed(20, 4), CARRIED)
+    tokens = carried.select(list(_derived(carried)))
+    with RowSpool(memory_bytes=0, root=str(tmp_path)) as spool:
+        spool.append(tokens)
+        taken = spool.take(np.array([3, 1], np.int64))
+    assert taken.num_rows == 2 and taken.schema.equals(tokens.schema)
+
+
+def test_a_spool_writes_a_groups_own_ids_once(tmp_path: Path) -> None:
+    """Two of many groups write their members' ids, not every group's, and once for all
+    the token columns."""
+    wide = pa.table(
+        {
+            "t": pa.array(range(6000)),
+            "g": pa.array([f"g{i % 100}" for i in range(6000)]),
+            **{f"v{n}": pa.array([1.0] * 6000) for n in range(12)},
+        }
     )
-    sink = pa.BufferOutputStream()
-    with pa.ipc.new_file(sink, storage.schema) as writer:
-        writer.write_batch(storage)
-    read = pa.ipc.open_file(sink.getvalue()).get_batch(0)
-    wrapped = arrow.Table.from_arrays(
-        [
-            arrow.ExtensionArray.from_storage(f.type, c)
-            if isinstance(f.type, pa.BaseExtensionType)
-            else c
-            for f, c in zip(carried.schema, read.columns, strict=True)
-        ],
-        schema=carried.schema,
+    stream = ArrowTableSource(
+        wide, tag_columns=["t", "g"], record_id_columns=["t"], source_id="s" * 40
+    ).group_by(["g"])
+    carried = carried_table(stream, {"source": True, "system_tags": True})
+    lists = [n for n in _derived(carried) if n != "_source_g"]
+    assert len(lists) == 13
+    ids = 120 * (len('{"t":1234}') + 8 + 8)  # 120 members: text, two numbers
+    with RowSpool(memory_bytes=0, root=str(tmp_path)) as spool:
+        spool.append(carried.select(lists).slice(0, 2))
+        (written,) = tmp_path.rglob("*.arrow")
+        assert written.stat().st_size < 4 * ids
+    with RowSpool(root=str(tmp_path)) as held:
+        held.append(carried.select(lists).slice(0, 2))
+        assert held.memory_bytes < 8 * ids
+
+
+def test_discarded_lists_are_counted_as_they_were_held() -> None:
+    """What a spool says it holds comes back to nothing."""
+    carried = carried_table(
+        _keyed(500, 20).group_by(["g"]), {"source": True, "system_tags": True}
     )
-    order = pa.array([7, 2, 2, 9])
-    assert _derived(wrapped) == _derived(carried)
-    assert_same_values(
-        source_tokens.materialize(wrapped.take(order)),
-        source_tokens.materialize(carried).take(order),
+    with RowSpool() as spool:
+        for part in _own_chunks(carried, [3, 5]):
+            spool.append(part)
+        assert spool.memory_bytes > 0
+        for start in range(0, spool.size, 4):
+            spool.discard(np.arange(start, min(start + 4, spool.size), dtype=np.int64))
+        assert spool.memory_bytes == 0
+
+
+def test_a_spilled_list_pins_nothing_of_the_tables_ids() -> None:
+    """Rows kept in memory hold their own ids, not the dictionary of every row."""
+    carried = carried_table(
+        _keyed(5000, 100).group_by(["g"]), {"source": True, "system_tags": True}
     )
+    with RowSpool() as spool:
+        spool.append(carried.slice(0, 1))
+        chunk: Any = spool.table().column("_source_x").chunk(0)
+        members = chunk.storage.flatten()
+        assert len(members.field(0).dictionary) == len(members) < 200
 
 
 def test_grouped_tables_of_two_reads_are_put_together() -> None:
@@ -843,7 +999,8 @@ def test_a_carried_column_has_no_bytes_and_is_not_null() -> None:
     taken = carried.take(pa.array([1, 5])).filter(pc.field("k") > 1)
     for table in (carried, taken, pa.concat_tables([carried, taken]).combine_chunks()):
         for name in _derived(table):
-            assert table.column(name).nbytes == 0
+            # At most a validity bitmap.
+            assert table.column(name).nbytes <= table.num_rows // 8 + 1
             assert table.column(name).null_count == 0
             assert not table.schema.field(name).nullable
 

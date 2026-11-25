@@ -117,13 +117,46 @@ tags shares one array of ids, so a further column costs nothing.
   text. Matching operators carry a list column of one input; a shared one becomes text.
 - `iter_data` builds at most 8,192 rows and, beyond one row, 65,536 members at once.
 
-Sharing on a spill: Arrow IPC writes a dictionary per column, so the sharing between
-columns is lost, and a segment holds the whole dictionary of every column whatever rows it
-holds. Measured with 200,000 members in 300 groups and 9 token columns: 70 MiB held in
-memory (the whole table, its ids included), 112 MiB written for the token columns whole
-(125 MiB as text), and 96 MiB for a segment of 2 groups (0.8 MiB as text). A spool that
-splits a grouped table into segments should therefore write its token lists as text, or
-take each segment's ids out of the dictionaries first.
+On a spill (`RowSpool`, `source_tokens.Shelf`): a column of one token a row is not written
+(its type says it all), and lists whose members' ids are equal share one ids column in a
+file, whose dictionaries hold only the ids that file's rows read. Rows a spool keeps in
+memory are trimmed the same way, so a slice never pins the ids of the whole table. Read
+back, the columns share the mapped ids again. `kept_table` cuts by bytes, what is shared
+counted once. Measured with 200,000 members in 300 groups and 9 token columns: 16.1 MiB in
+one file and 16.4 MiB in 150 files of 2 groups (0.11 MiB a file; it was 96 MiB), against
+125.5 MiB as text.
+
+Refusing to leave the process: the storage of a recipe column is a list of no element of
+structs nested deeper than Arrow IPC and the C data interface write (the depth costs
+nothing per row, since no element exists), and a list's storage holds the same as a guard.
+IPC files, streams and messages, Feather, the C stream and pandas refuse a table with rows.
+A table with no rows can be written: it has no value. The hash and store guards look inside
+structs, lists, dictionaries and extension storages (`refuse_derived`).
+
+## Grouping millions of rows
+
+`GroupBy` reads its keys and system tags in one chunk each (a `take` from many chunks puts
+them together every time), and sorts by the record ids, the largest columns, only when rows
+tie on every tag before them. Text with few distinct values is sorted by its rank (four bytes
+a row). Measured outside a job with a synthetic event table of about
+8 million rows, 8 columns, 100 groups of about 80,000 members (footprint: the memory the
+system charges the process; the source's own read is 3.5 GiB of every line):
+
+| Step | Seconds before | after | Peak footprint before | after |
+|---|---|---|---|---|
+| read, recipes carried | | 64 | | 3.5 GiB |
+| `group_by` | 411 | 143 | 10.5 GiB | 4.9 GiB |
+| `group_by`, a function per group | | 155 | | 5.3 GiB |
+
+The values of the grouped table are 0.09 GiB: they do not dominate. What it holds is 1.7
+GiB, the members' record ids (about 190 bytes each, the canonical JSON of the key). Of the
+143 seconds, about 70 are the folds of the eight system-tag and key columns, whose digests
+read every member's text, as they always did.
+
+In a job, on the integration branch's head with this: 4.4 GiB on sync and 5.8 GiB on async
+for `group_by` (3.0 GiB on async at half the rows); with a function per group 10.9 GiB on sync and 6.1 GiB on async. The
+difference on sync is the function node, which holds every input row as objects before it
+computes: 100 rows of 80,000 members, values and token text.
 
 ## Measured
 

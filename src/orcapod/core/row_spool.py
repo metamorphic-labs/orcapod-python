@@ -8,7 +8,9 @@ Format: rows wait in memory until they exceed a byte limit, then become one segm
 Arrow IPC file of one record batch, uncompressed, read memory-mapped. A mapped page is the
 operating system's to drop: it counts in a process's resident size while it is there, but
 it is no memory of Arrow's or of this process's own. An extension column is written as its
-storage and wrapped again when read, so reading needs no registered type.
+storage and wrapped again when read, so reading needs no registered type. Derived
+source-info tokens (``utils/source_tokens.py``) are written as ``source_tokens.Shelf``
+says: the ids of a list's members once a file, and only those the file's rows read.
 
 Lifetime: a segment is deleted once every row of it is discarded; a spool's files are
 removed by ``close`` (a spool is a context manager: normal end, exception and
@@ -46,6 +48,8 @@ from typing import IO, Any, Self
 import numpy as np
 import numpy.typing as npt
 import pyarrow as pa
+
+from orcapod.utils import source_tokens
 
 try:
     import fcntl
@@ -183,7 +187,9 @@ class _Segment:
         self.rows: int = table.num_rows
         self.live: int = table.num_rows
         self.table: pa.Table | None = table
+        self.bytes: int = held_bytes(table)
         self.path: str | None = None
+        self.shelf: source_tokens.Shelf = source_tokens.Shelf(())
 
     def drop(self) -> None:
         """Let the rows go, and delete their file."""
@@ -259,7 +265,7 @@ class RowSpool:
                     self._segments.remove(added)
                     self._starts = None
                     if added.table is not None:
-                        self._in_memory -= added.table.nbytes
+                        self._in_memory -= added.bytes
                     self._schema, self.size = schema, size
                     raise
 
@@ -294,7 +300,7 @@ class RowSpool:
         self._segments.append(segment)
         self._starts = None
         if segment.table is not None:
-            self._in_memory += segment.table.nbytes
+            self._in_memory += segment.bytes
 
     def take(self, rows: npt.NDArray[np.int64]) -> pa.Table:
         """The rows with these numbers, in this order, as one chunk per column.
@@ -337,7 +343,7 @@ class RowSpool:
         if segment.table is not None:
             return segment.table.take(local)
         assert segment.path is not None and self._schema is not None
-        return _wrapped(self._stored(segment).take(local), self._schema)
+        return _wrapped(self._stored(segment).take(local), segment.shelf, self._schema)
 
     @staticmethod
     def _stored(segment: _Segment) -> pa.Table:
@@ -399,7 +405,7 @@ class RowSpool:
                 if segment.table is not None:
                     part = segment.table
                 else:
-                    part = _wrapped(self._stored(segment), self._schema)
+                    part = _wrapped(self._stored(segment), segment.shelf, self._schema)
                 parts.append(part.slice(first - segment.start, last - first))
             return pa.concat_tables(parts) if parts else self._schema.empty_table()
 
@@ -432,7 +438,7 @@ class RowSpool:
                 segment.live -= int(counts[index])
                 if not segment.live:
                     if segment.table is not None:
-                        self._in_memory -= segment.table.nbytes
+                        self._in_memory -= segment.bytes
                     segment.drop()
                     emptied = True
             if emptied:
@@ -452,8 +458,12 @@ class RowSpool:
                 runs.append([segment])
         for run in runs:
             tables = [s.table for s in run if s.table is not None]
-            table = pa.concat_tables(tables).combine_chunks()
-            merged = _Segment(run[0].start, table)
+            # The derived columns first: put together, every one of them would have
+            # the ids of all the members of its own (ITL-1464).
+            shelf = source_tokens.Shelf.of(tables)
+            table = pa.concat_tables([_as_storage(t, shelf) for t in tables])
+            merged = _Segment(run[0].start, table.combine_chunks())
+            merged.shelf = shelf
             merged.live = sum(s.live for s in run)
             merged.path = self._write(merged)
             merged.table = None
@@ -461,7 +471,7 @@ class RowSpool:
             position = self._segments.index(run[0])
             self._segments = [s for s in self._segments if id(s) not in replaced]
             self._segments.insert(position, merged)
-            self._in_memory -= sum(t.nbytes for t in tables)
+            self._in_memory -= sum(s.bytes for s in run)
         self._starts = None
 
     def _write(self, segment: _Segment) -> str:
@@ -474,7 +484,7 @@ class RowSpool:
                 self, _remove_directory, self._directory, os.getpid()
             )
         path = os.path.join(self._directory, f"{segment.start}.arrow")
-        table = _as_storage(segment.table)
+        table = segment.table
         try:
             with (
                 pa.OSFile(path, "wb") as sink,
@@ -510,34 +520,66 @@ class RowSpool:
         self.close()
 
 
+def held_bytes(table: pa.Table) -> int:
+    """The bytes ``table`` holds, what its derived lists share counted once."""
+    lists = [
+        name
+        for name in source_tokens.derived_columns(table.schema)
+        if isinstance(table.schema.field(name).type, source_tokens.MemberTokenType)
+    ]
+    shared = table.select(lists).get_total_buffer_size() if lists else 0
+    return table.drop_columns(lists).nbytes + shared
+
+
 def _owned(table: pa.Table) -> pa.Table:
-    """``table`` as one chunk over buffers of its own size, copied only if needed."""
+    """``table`` as one chunk over buffers of its own size, copied only if needed.
+
+    Derived lists of tokens keep only the ids their rows read, shared by the lists that
+    have the same.
+    """
     table = table.combine_chunks()
-    if table.get_total_buffer_size() > 2 * table.nbytes:
-        table = table.take(pa.array(np.arange(table.num_rows), pa.int64()))
-    return table
+    derived = source_tokens.derived_columns(table.schema)
+    plain = table.drop_columns(list(derived))
+    if plain.get_total_buffer_size() > 2 * plain.nbytes:
+        plain = plain.take(pa.array(np.arange(table.num_rows), pa.int64()))
+    if not derived:
+        return plain
+    shelf = source_tokens.Shelf.of([table])
+    shelved = shelf.shelve(table)
+    for index, name in enumerate(plain.column_names):
+        position = shelved.schema.get_field_index(name)
+        shelved = shelved.set_column(position, plain.field(index), plain.column(index))
+    return shelf.restore(shelved.combine_chunks(), table.schema)
 
 
-def _as_storage(table: pa.Table) -> pa.Table:
+def _as_storage(table: pa.Table, shelf: source_tokens.Shelf) -> pa.Table:
     """``table`` with each extension column as its storage, no field metadata.
 
-    Flags are dropped too: a field declared non-nullable may hold a null (a column not
-    settled yet), and ``_wrapped`` puts the schema back.
+    Derived token columns are written as ``shelf`` says. Flags are dropped too: a field
+    declared non-nullable may hold a null (a column not settled yet), and ``_wrapped``
+    puts the schema back.
     """
     columns: list[Any] = []  # pyright: ignore[reportExplicitAny]  # any column
-    for column in table.combine_chunks().columns:
+    table = shelf.shelve(table.combine_chunks()).combine_chunks()
+    for column in table.columns:
         array: Any = column.chunk(0)  # pyright: ignore[reportExplicitAny]  # any column
         is_extension = isinstance(column.type, pa.BaseExtensionType)
         columns.append(array.storage if is_extension else array)
     return pa.Table.from_arrays(columns, names=table.column_names)
 
 
-def _wrapped(table: pa.Table, schema: pa.Schema) -> pa.Table:
+def _wrapped(
+    table: pa.Table, shelf: source_tokens.Shelf, schema: pa.Schema
+) -> pa.Table:
     """Undo ``_as_storage``: the columns of ``table``, one chunk each, under ``schema``."""
     columns: list[Any] = []  # pyright: ignore[reportExplicitAny]  # any column
-    for column, field in zip(table.combine_chunks().columns, schema):
+    table = table.combine_chunks()
+    for name, column in zip(table.column_names, table.columns, strict=True):
         array = column.chunk(0)
-        if isinstance(field.type, pa.BaseExtensionType):
-            array = pa.ExtensionArray.from_storage(field.type, array)
+        index = schema.get_field_index(name)
+        kind = schema.field(index).type if index >= 0 else column.type
+        if isinstance(kind, pa.BaseExtensionType):
+            array = pa.ExtensionArray.from_storage(kind, array)
         columns.append(array)
-    return pa.Table.from_arrays(columns, schema=schema)
+    wrapped = pa.Table.from_arrays(columns, names=table.column_names)
+    return shelf.restore(wrapped, schema)
