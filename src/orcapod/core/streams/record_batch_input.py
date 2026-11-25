@@ -357,7 +357,7 @@ class InputChannel:
         # imported by core/streams/base.py (a module-level import would be circular).
         from orcapod.core.operators.static_output_pod import (
             ROW_BUILT_OUTPUT,
-            stream_from_batches,
+            stream_of_channel,
         )
 
         self.reserve(claim)
@@ -365,7 +365,7 @@ class InputChannel:
         if opened_on is not None and getattr(opened_on, ROW_BUILT_OUTPUT, False):
             await self.close()
             return opened_on
-        return stream_from_batches(self._stream, await self.collect())
+        return await stream_of_channel(self)
 
     async def collect(self) -> list[pa.RecordBatch]:
         """Read to the end and return every remaining record batch, in arrival order.

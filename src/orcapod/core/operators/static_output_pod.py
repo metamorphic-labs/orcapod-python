@@ -1699,14 +1699,134 @@ def stream_from_batches(
     Returns:
         A complete, re-readable stream over the rows.
     """
-    if not batches:
-        return StaticOutputOperatorPod._materialize_upstream([], stream)  # pyright: ignore[reportPrivateUsage]  # the zero-row input of an operator
-    table = concatenate_batches(batches)
+    return _stream_of_rows(stream, concatenate_batches(batches) if batches else None)
+
+
+def _stream_of_rows(stream: StreamProtocol, table: pa.Table | None) -> StreamProtocol:
+    """``table`` as ``stream``'s rows (``stream_from_batches``); ``None`` for no row."""
     if table is None:
         return StaticOutputOperatorPod._materialize_upstream([], stream)  # pyright: ignore[reportPrivateUsage]  # the zero-row input of an operator
     return StaticOutputOperatorPod._output_stream(  # pyright: ignore[reportPrivateUsage]  # F and the identity, stage 2's
         table, keys_in_delivered_order(stream.keys(), table.column_names), stream
     )
+
+
+class BatchSpool:
+    """Record batches of one stream's rows, put under one another off process memory.
+
+    What ``concatenate_batches`` gives, held in a ``RowSpool``: in memory up to
+    ``KEPT_ROWS_MEMORY_BYTES``, beyond that in a private temporary file read back
+    memory-mapped. As there, batches that cannot make one table raise when the table is
+    asked for, never when they are added.
+    """
+
+    def __init__(self) -> None:
+        self._spool: RowSpool = RowSpool(memory_bytes=KEPT_ROWS_MEMORY_BYTES)
+        # Rows with derived token lists, which share the ids of all their members: each
+        # file of a spool would hold them once per column (``itl-1464-tokens.md``).
+        self._in_memory: list[pa.Table] = []
+        self._schema: pa.Schema | None = None
+        self._token_types: dict[str, pa.DataType] = {}
+        self._error: Exception | None = None
+        self.num_rows: int = 0
+
+    def add(self, batch: pa.RecordBatch) -> None:
+        """Hold a batch's rows after every row added before them."""
+        if not batch.num_rows:
+            return
+        self.num_rows += batch.num_rows
+        if self._error is None:
+            try:
+                self._add(batch)
+            except Exception as error:  # noqa: BLE001  # raised when the table is asked for
+                self._error = error
+
+    def _add(self, batch: pa.RecordBatch) -> None:
+        self._token_types = settle_token_types(batch, self._token_types)
+        table = open_provenance(batch, self._token_types)
+        if self._schema is None:
+            self._schema = table.schema
+        elif not table.schema.equals(self._schema, check_metadata=True):
+            table = self._in_one_form(table)
+        self._keep(table)
+
+    def _keep(self, table: pa.Table) -> None:
+        """Hold ``table``, whose schema is the one of the rows held."""
+        lists = any(
+            isinstance(f.type, source_tokens.MemberTokenType) for f in table.schema
+        )
+        if lists or self._in_memory:
+            self._in_memory.append(table)
+        else:
+            self._spool.append(table)
+
+    def _in_one_form(self, table: pa.Table) -> pa.Table:
+        """``table`` under the held rows' schema; where only one of the two derives a
+        source-info column, or they derive it otherwise, both become text."""
+        assert self._schema is not None
+        if table.column_names != self._schema.names:
+            # As a concatenation of them refuses them.
+            return pa.concat_tables([self._schema.empty_table(), table])
+        derived = {
+            *source_tokens.derived_columns(self._schema),
+            *source_tokens.derived_columns(table.schema),
+        }
+        names = {
+            f.name
+            for f in table.schema
+            if f.name in derived and f.type != self._schema.field(f.name).type
+        }
+        if names & {*source_tokens.derived_columns(self._schema)}:
+            held = self._held()
+            self._schema = source_tokens.materialize(
+                self._schema.empty_table(), names
+            ).schema
+            self._spool.close()
+            self._spool = RowSpool(memory_bytes=KEPT_ROWS_MEMORY_BYTES)
+            self._in_memory = []
+            for start in range(0, held.num_rows, SPILL_SLICE_ROWS):
+                part = held.slice(start, SPILL_SLICE_ROWS)
+                self._keep(source_tokens.materialize(part, names))
+        table = source_tokens.materialize(table, names)
+        return pa.concat_tables([self._schema.empty_table(), table])
+
+    def _held(self) -> pa.Table:
+        """Every row held, in order."""
+        if not self._in_memory:
+            return self._spool.table()
+        return pa.concat_tables(self._in_memory)
+
+    def table(self) -> pa.Table | None:
+        """Every row added, in order; ``None`` for no row. It stays valid after ``close``.
+
+        Raises:
+            Exception: If the batches cannot make one table.
+        """
+        if self._error is not None:
+            raise self._error
+        return self._held() if self.num_rows else None
+
+    def close(self) -> None:
+        """Let the rows go and delete their files."""
+        self._spool.close()
+        self._in_memory = []
+
+
+async def stream_of_channel(channel: RecordBatchInput) -> StreamProtocol:
+    """Read a reserved input channel to its end and give its rows as its stream.
+
+    ``stream_from_batches`` of everything it delivers, held in a ``BatchSpool``.
+
+    Args:
+        channel: The channel, taken over by the calling task.
+    """
+    spool = BatchSpool()
+    try:
+        async for batch in channel:
+            spool.add(batch)
+        return _stream_of_rows(channel.stream, spool.table())
+    finally:
+        spool.close()
 
 
 def keys_in_delivered_order(

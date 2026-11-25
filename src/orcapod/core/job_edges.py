@@ -22,14 +22,12 @@ from orcapod.channels import ChannelClosed
 from orcapod.core.data_tags import data_tag_names
 from orcapod.core.operators import static_output_pod
 from orcapod.core.operators.static_output_pod import (
+    BatchSpool,
     StaticOutputOperatorPod,
     keys_in_delivered_order,
-    open_provenance,
     rows_once,
-    settle_token_types,
     stream_from_batches,
 )
-from orcapod.core.row_spool import RowSpool
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import row_built_columns
 from orcapod.system_constants import constants
@@ -251,7 +249,7 @@ class EdgeFeed:
 class KeptBatches:
     """An operator job node's output, received as record batches (ITL-1464).
 
-    Holds them in a ``RowSpool`` and gives, at the end, the table a run that handed on
+    Holds them in a ``BatchSpool`` and gives, at the end, the table a run that handed on
     rows keeps (``StaticOutputOperatorPod._row_built_form``: the steps decided over every
     row). Every batch must have passed the node's output channel.
 
@@ -263,89 +261,24 @@ class KeptBatches:
         self._node: StreamProtocol = node
         # The node's keys, in the order its rows have them; asked once.
         self._keys: tuple[list[str], list[str]] | None = None
-        self._spool: RowSpool = RowSpool(
-            memory_bytes=static_output_pod.KEPT_ROWS_MEMORY_BYTES
-        )
-        self._schema: pa.Schema | None = None
-        self._token_types: dict[str, pa.DataType] = {}
-        # Rows with derived token lists, which share the ids of all their members: each
-        # file of a spool would hold them once per column (``itl-1464-tokens.md``).
-        self._in_memory: list[pa.Table] = []
+        self._spool: BatchSpool = BatchSpool()
 
     @property
     def num_rows(self) -> int:
         """How many rows were kept."""
-        return self._spool.size + sum(t.num_rows for t in self._in_memory)
+        return self._spool.num_rows
 
     def close(self) -> None:
         """Let the kept rows go; an output stream already given stays valid."""
         self._spool.close()
-        self._in_memory = []
-
-    def _table(self) -> pa.Table:
-        """Every row kept, in order."""
-        if not self._in_memory:
-            return self._spool.table()
-        return pa.concat_tables(self._in_memory)
 
     def add(self, batch: pa.RecordBatch) -> None:
         """Keep a batch's rows after every row kept before them."""
         if not batch.num_rows:
             return
-        self._token_types = settle_token_types(batch, self._token_types)
-        table = open_provenance(batch, self._token_types)
-        # The columns in the order of a table built from rows; a join lists its data
-        # before its system tags.
         if self._keys is None:
-            self._keys = keys_in_delivered_order(self._node.keys(), table.column_names)
-        table = row_built_columns(table, self._keys)
-        if self._schema is None:
-            self._schema = table.schema
-        elif not table.schema.equals(self._schema, check_metadata=True):
-            table = self._in_one_form(table.select(self._schema.names))
-        self._keep(table)
-
-    def _keep(self, table: pa.Table) -> None:
-        """Hold ``table``, whose schema is the kept rows'."""
-        lists = any(
-            isinstance(f.type, source_tokens.MemberTokenType) for f in table.schema
-        )
-        if lists or self._in_memory:
-            self._in_memory.append(table)
-        else:
-            self._spool.append(table)
-
-    def _in_one_form(self, table: pa.Table) -> pa.Table:
-        """``table`` under the kept rows' schema; where only one of the two derives a
-        source-info column, or they derive it otherwise, both become text."""
-        assert self._schema is not None
-        if not table.schema.equals(self._schema, check_metadata=True):
-            kept = self._table()
-            differing = {
-                f.name for f in table.schema if f.type != kept.schema.field(f.name).type
-            }
-            names = differing & {
-                *source_tokens.derived_columns(kept.schema),
-                *source_tokens.derived_columns(table.schema),
-            }
-            if names & {*source_tokens.derived_columns(kept.schema)}:
-                self._spool.close()
-                self._spool = RowSpool(
-                    memory_bytes=static_output_pod.KEPT_ROWS_MEMORY_BYTES
-                )
-                self._in_memory = []
-                self._schema = source_tokens.materialize(
-                    kept.schema.empty_table(), names
-                ).schema
-                for start in range(
-                    0, kept.num_rows, static_output_pod.SPILL_SLICE_ROWS
-                ):
-                    part = kept.slice(start, static_output_pod.SPILL_SLICE_ROWS)
-                    self._keep(source_tokens.materialize(part, names))
-            table = source_tokens.materialize(table, names)
-        # The spool holds one schema: a difference left is an error here, as it is
-        # where rows of differing columns are put into one table.
-        return pa.concat_tables([self._schema.empty_table(), table])
+            self._keys = keys_in_delivered_order(self._node.keys(), batch.schema.names)
+        self._spool.add(batch)
 
     def output_stream(self) -> StreamProtocol:
         """The stream over the rows that the node keeps and stores.
@@ -353,10 +286,15 @@ class KeptBatches:
         Raises:
             ValueError: If no row was kept.
         """
-        if not self.num_rows:
+        if self._keys is None:
             raise ValueError("Cannot make an output stream of no rows")
-        table = StaticOutputOperatorPod._flag_by_values(self._table())  # pyright: ignore[reportPrivateUsage]  # F's last step
-        assert self._keys is not None  # a row was kept
+        # The columns in the order of a table built from rows (a join lists its data
+        # before its system tags), and F's last step.
+        rows = self._spool.table()
+        assert rows is not None  # a row was kept
+        table = StaticOutputOperatorPod._flag_by_values(  # pyright: ignore[reportPrivateUsage]  # F's last step
+            row_built_columns(rows, self._keys)
+        )
         tag_keys, data_keys = self._keys
         return ArrowTableStream(
             table,
