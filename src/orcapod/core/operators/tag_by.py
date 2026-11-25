@@ -214,7 +214,7 @@ class TagBy(UnaryOperator):
         """
         tag_columns, _ = stream.keys()
         # The context column too, so each row keeps its own data context key.
-        table = stream.as_table(
+        table = stream.as_carried_table(
             columns={
                 "source": True,
                 "system_tags": True,

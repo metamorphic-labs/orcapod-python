@@ -49,7 +49,7 @@ from orcapod.protocols.core_protocols import (
 )
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash, Schema
-from orcapod.utils import arrow_utils, schema_utils
+from orcapod.utils import arrow_utils, schema_utils, source_tokens
 from orcapod.utils.warning_utils import outside_orcapod_stacklevel
 
 # Row-number columns of the frames Polars matches, and the column of a row's occurrence
@@ -65,6 +65,38 @@ def _system_tag_names(stream: StreamProtocol) -> list[str]:
     return sorted(
         name for name in tag_schema if name.startswith(constants.SYSTEM_TAG_PREFIX)
     )
+
+
+def _with_comparable_tokens(tables: Sequence["pa.Table"]) -> "list[pa.Table]":
+    """Give each shared source-info column one form: one recipe, or text (ITL-1464).
+
+    Rejoin compares a shared column's values. When every input that has a token column
+    derives it by one recipe, it is equal wherever the system tags are, which the rows
+    already match on, so it stays derived and is not compared (``_agrees_by_recipe``).
+    Otherwise its text is built in every input.
+
+    Args:
+        tables: The inputs' rows.
+
+    Returns:
+        The same tables; a derived column several of them have has one recipe.
+    """
+    types: dict[str, list[pa.DataType]] = {}
+    for table in tables:
+        for field in table.schema:
+            types.setdefault(field.name, []).append(field.type)
+    differing = {
+        name
+        for name, kinds in types.items()
+        if any(source_tokens.derived_recipe(kind) is not None for kind in kinds)
+        and any(kind != kinds[0] for kind in kinds)
+    }
+    return [source_tokens.materialize(table, differing) for table in tables]
+
+
+def _agrees_by_recipe(table: "pa.Table", name: str) -> bool:
+    """Whether column ``name`` is derived, so rows with equal system tags agree on it."""
+    return source_tokens.derived_recipe(table.schema.field(name).type) is not None
 
 
 def _agreeing(
@@ -208,7 +240,7 @@ def _differing_columns(tables: Sequence["pa.Table"], keys: Sequence[str]) -> lis
     holders: dict[str, list[int]] = {}
     for index, table in enumerate(tables):
         for name in table.column_names:
-            if name not in keys:
+            if name not in keys and not _agrees_by_recipe(table, name):
                 holders.setdefault(name, []).append(index)
     # The columns several inputs have, by the inputs that have them.
     shared: dict[tuple[int, ...], list[str]] = {}
@@ -426,12 +458,13 @@ class Rejoin(Join):
             tag_keys, _ = stream.keys()
             tables.append(
                 without_meta_columns(
-                    stream.as_table(
+                    stream.as_carried_table(
                         columns={"source": True, "system_tags": True, "context": True}
                     ),
                     tag_keys,
                 )
             )
+        tables = _with_comparable_tokens(tables)
         # The rule on the tables themselves, in call order: an input whose schema
         # states no system tag (``_require_rejoinable``) is checked here.
         by_call = {id(stream): table for stream, table in zip(ordered_streams, tables)}
@@ -577,7 +610,9 @@ class Rejoin(Join):
         others = [
             name
             for name in right.column_names
-            if name in left.column_names and name not in keys
+            if name in left.column_names
+            and name not in keys
+            and not _agrees_by_recipe(left, name)
         ]
         for name in sorted(others):
             shared_type = require_shared_arrow_type(

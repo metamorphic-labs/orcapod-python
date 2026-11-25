@@ -112,7 +112,7 @@ def without_input_meta(
     """
     if not _carries_meta(stream, inputs):
         return stream
-    table = stream.as_table(
+    table = stream.as_carried_table(
         columns={"source": True, "system_tags": True, "context": True}
     )
     tag_columns = stream.keys()[0]

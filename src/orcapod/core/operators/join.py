@@ -47,7 +47,7 @@ from orcapod.protocols.core_protocols import (
 )
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash, DataValue, Schema
-from orcapod.utils import arrow_utils, schema_utils
+from orcapod.utils import arrow_utils, schema_utils, source_tokens
 
 # The row-number columns of the frames Polars joins (``_inner_join``); a tag, so a
 # key, never starts with the meta prefix ``__``.
@@ -179,6 +179,20 @@ def _fold_members(tokens: Sequence[str | None]) -> str:
     """Fold the members' tokens of one merged value into its one token (``join_v1``)."""
     ordered = sorted(tokens, key=lambda token: (token is None, token or ""))
     return arrow_utils.fold_system_tag_values(ordered, label=JOIN_FOLD_LABEL)
+
+
+# The two steps of the merge, for tokens carried as recipes (``source_tokens``, ITL-1464):
+# the members met so far, and the fold the join ends with.
+_PENDING_FOLD = "join pending"
+source_tokens.register_fold(_PENDING_FOLD, _pending)
+source_tokens.register_fold(JOIN_FOLD_LABEL, _fold_members)
+
+
+def _pending_members(recipe: source_tokens.Recipe) -> tuple[source_tokens.Recipe, ...]:
+    """The member recipes a merged column holds so far (itself, if not pending)."""
+    if isinstance(recipe, source_tokens.FoldRecipe) and recipe.fold == _PENDING_FOLD:
+        return recipe.members
+    return (recipe,)
 
 
 def _fold_pending(value: Any) -> Any:
@@ -476,7 +490,8 @@ class Join(NonZeroInputOperator):
         # Source-info columns of merged data-tag columns, folded once at the end.
         merged_source: set[str] = set()
         table = without_meta_columns(
-            stream.as_table(columns={"source": True, "system_tags": True}), tag_keys
+            stream.as_carried_table(columns={"source": True, "system_tags": True}),
+            tag_keys,
         )
         # trick to get cartesian product; use int8 explicitly so that zero-row
         # tables don't produce a null-typed column that Polars rejects on join
@@ -489,7 +504,9 @@ class Join(NonZeroInputOperator):
         for idx, next_stream in enumerate(ordered_streams[1:], start=1):
             next_tag_keys, _ = next_stream.keys()
             next_table = without_meta_columns(
-                next_stream.as_table(columns={"source": True, "system_tags": True}),
+                next_stream.as_carried_table(
+                    columns={"source": True, "system_tags": True}
+                ),
                 next_tag_keys,
             )
             next_table = arrow_utils.append_to_system_tags(
@@ -592,6 +609,17 @@ class Join(NonZeroInputOperator):
             The table with ``left_name`` holding both sides' members, pending until
             the join folds them (``_fold_source_column``).
         """
+        left_recipe, right_recipe = (
+            source_tokens.derived_recipe(table.schema.field(name).type)
+            for name in (left_name, right_name)
+        )
+        if left_recipe is not None and right_recipe is not None:
+            members = (*_pending_members(left_recipe), *_pending_members(right_recipe))
+            recipe = source_tokens.FoldRecipe(_PENDING_FOLD, members)
+            return source_tokens.with_recipe(table, left_name, recipe).drop_columns(
+                [right_name]
+            )
+        table = source_tokens.materialize(table, (left_name, right_name))
         field = table.schema.field(left_name)
         merged = pa.array(
             [
@@ -618,6 +646,10 @@ class Join(NonZeroInputOperator):
         Returns:
             The table with one merged token at every token position of ``name``.
         """
+        recipe = source_tokens.derived_recipe(table.schema.field(name).type)
+        if recipe is not None:
+            fold = source_tokens.FoldRecipe(JOIN_FOLD_LABEL, _pending_members(recipe))
+            return source_tokens.with_recipe(table, name, fold)
         field = table.schema.field(name)
         folded = pa.array(
             [_fold_pending(value) for value in table.column(name).to_pylist()],

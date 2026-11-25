@@ -248,7 +248,7 @@ class Filter(UnaryOperator):
         """
         # Every system column passes through: source info, system tags and each row's
         # data context (a raw stream may hold several).
-        table = stream.as_table(
+        table = stream.as_carried_table(
             columns={
                 "source": True,
                 "system_tags": True,

@@ -184,7 +184,7 @@ class MapData(UnaryOperator):
             # nothing to rename in the data, return stream as is
             return stream
 
-        table = stream.as_table(
+        table = stream.as_carried_table(
             columns={
                 "source": True,
                 "system_tags": True,
@@ -469,7 +469,7 @@ class MapTags(UnaryOperator):
             # nothing to rename or drop in the tags, return stream as is
             return stream
 
-        table = stream.as_table(
+        table = stream.as_carried_table(
             columns={
                 "source": True,
                 "system_tags": True,
@@ -816,7 +816,7 @@ class MapColumns(UnaryOperator):
         tag_renames, data_renames, tags_dropped, data_dropped = self._plan(
             tag_columns, data_columns
         )
-        table = stream.as_table(
+        table = stream.as_carried_table(
             columns={
                 "source": True,
                 "system_tags": True,

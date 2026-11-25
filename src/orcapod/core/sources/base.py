@@ -560,6 +560,19 @@ class RootSource(StreamBase):
         """Delegate to the underlying stream's as_table."""
         return self._stream.as_table(columns=columns, all_info=all_info)
 
+    def as_carried_table(
+        self, *, columns: ColumnConfig | dict[str, Any] | None = None
+    ) -> "pa.Table":
+        """The underlying stream's table, derived token columns as they are (ITL-1464).
+
+        A source that reads its rows its own way (a subclass, or an object, with its own
+        ``as_table``) gives that table.
+        """
+        if type(self).as_table is RootSource.as_table and "as_table" not in vars(self):
+            stream: StreamBase = getattr(self, "_stream")  # noqa: B009  # set by each subclass
+            return stream.as_carried_table(columns=columns)
+        return super().as_carried_table(columns=columns)
+
     # -------------------------------------------------------------------------
     # The start-of-run check (ITL-1102)
     # -------------------------------------------------------------------------

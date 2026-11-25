@@ -13,7 +13,6 @@ import pytest
 
 from orcapod.system_constants import constants
 from orcapod.utils.arrow_utils import (
-    add_source_info,
     add_system_tag_columns,
     append_to_system_tags,
     drop_columns_with_prefix,
@@ -142,29 +141,6 @@ class TestSortSystemTagValues:
         )
         result = sort_system_tag_values(table_with_tags)
         assert result.num_rows == table_with_tags.num_rows
-
-
-# ---------------------------------------------------------------------------
-# add_source_info
-# ---------------------------------------------------------------------------
-
-
-class TestAddSourceInfo:
-    """Per design, source info columns are prefixed with _source_ and track
-    provenance tokens per data column."""
-
-    def test_adds_source_info_columns(self):
-        table = pa.table({"id": [1, 2], "value": [10, 20]})
-        result = add_source_info(table, source_info="src_token")
-        source_cols = [
-            c for c in result.column_names if c.startswith(constants.SOURCE_PREFIX)
-        ]
-        assert len(source_cols) > 0
-
-    def test_source_info_length_mismatch_raises(self):
-        table = pa.table({"id": [1, 2], "value": [10, 20]})
-        with pytest.raises(ValueError):
-            add_source_info(table, source_info=["a", "b", "c"])  # Wrong count
 
 
 # ---------------------------------------------------------------------------

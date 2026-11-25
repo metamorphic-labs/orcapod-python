@@ -327,7 +327,7 @@ class AddTags(UnaryOperator):
         """
         tag_keys, _ = stream.keys()
         data_context = stream.data_context  # pyright: ignore[reportAttributeAccessIssue]  # StreamProtocol omits data_context, which every concrete stream provides (ITL-844)
-        table = stream.as_table(
+        table = stream.as_carried_table(
             columns={
                 "source": True,
                 "system_tags": True,

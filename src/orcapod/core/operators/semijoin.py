@@ -233,7 +233,7 @@ class SemiJoin(BinaryOperator):
         if not common_keys:
             return left_stream
 
-        left_table = left_stream.as_table(
+        left_table = left_stream.as_carried_table(
             columns={"source": True, "system_tags": True, "context": True}
         )
         # Only the right side's keys are read, never its data columns.
