@@ -54,7 +54,7 @@ the window.
 
 | Member | Bounded view |
 |---|---|
-| `total_rows`, schema, `status`, `header()` | as the complete view: `all 2,177,155 rows` |
+| `total_rows`, schema, `status`, `header()` | as the complete view: `all 1,234,567 rows` |
 | `head(n)`, `tail(n)`, `n` within the window | the same rows and header as the complete view; the result is an ordinary view |
 | `head(n)`, `tail(n)`, larger `n` | raise `BoundedViewError`, naming the window and `stream.as_table()` |
 | `sort_by_tags()` | raise `BoundedViewError`: sorting needs every row |
@@ -123,13 +123,13 @@ never computes.
   same rows, narrow and wide, with large cells, at sizes 11, 12, 1,000 and more; a small
   stream's display is unchanged.
 - The refusals; `head` after `run`; staleness after the source moves.
-- Memory, 2,177,155 rows of the gaze shape, before and after, for the source, a rename, a
+- Memory, about 2.2 million rows of a time series, before and after, for the source, a rename, a
   `drop_nulls` and a `filter`.
 
 ## Measured
 
-`run()` of a synthetic SpiralDB table shaped as one session of gaze (2,177,155 rows, 13
-columns, 248 MiB of Arrow data; the diagnosis's table), peak resident memory, one process
+`run()` of a synthetic SpiralDB table, a time series (about 2.2 million rows, 13
+columns, about 250 MiB of Arrow data), peak resident memory, one process
 per row:
 
 | Stream | Before | After | Arrow pool peak before | after | Time before | after |
