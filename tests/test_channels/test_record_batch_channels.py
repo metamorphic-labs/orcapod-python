@@ -106,7 +106,9 @@ def R(stream: Any) -> pa.Table:
 
 
 def same(table: pa.Table, expected: pa.Table) -> bool:
-    """Whether two tables have one schema (metadata included) and the same rows."""
+    """Whether two tables have one schema (metadata included) and the same rows, the
+    text of a channel's derived tokens built."""
+    table = source_tokens.materialize(table)
     return table.schema.equals(expected.schema, check_metadata=True) and bool(
         table.combine_chunks().equals(expected.combine_chunks())
     )

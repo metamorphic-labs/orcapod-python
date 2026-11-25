@@ -20,10 +20,8 @@ import pyarrow as pa
 
 from orcapod.channels import ChannelClosed
 from orcapod.core.data_tags import data_tag_names
+from orcapod.core.operators import static_output_pod
 from orcapod.core.operators.static_output_pod import (
-    KEPT_ROWS_MEMORY_BYTES,
-    ROW_CHUNK_ROWS,
-    SPILL_SLICE_ROWS,
     StaticOutputOperatorPod,
     keys_in_delivered_order,
     open_provenance,
@@ -96,9 +94,9 @@ class EdgeWriter:
 
     async def send_batch(self, batch: pa.RecordBatch, stream: StreamProtocol) -> None:
         """Send a record batch of ``stream``'s rows, cut to ``ROW_CHUNK_ROWS`` rows each."""
-        for start in range(0, batch.num_rows, ROW_CHUNK_ROWS):
+        for start in range(0, batch.num_rows, static_output_pod.ROW_CHUNK_ROWS):
             await self._writer.send(
-                RowBatch(batch.slice(start, ROW_CHUNK_ROWS), stream)
+                RowBatch(batch.slice(start, static_output_pod.ROW_CHUNK_ROWS), stream)
             )
 
     async def close(self) -> None:
@@ -121,8 +119,10 @@ async def send_batch(
     if isinstance(output, BatchWriter):
         await output.send_batch(batch, stream)
         return
-    for start in range(0, batch.num_rows, ROW_CHUNK_ROWS):
-        for row in RowBatch(batch.slice(start, ROW_CHUNK_ROWS), stream).rows():
+    for start in range(0, batch.num_rows, static_output_pod.ROW_CHUNK_ROWS):
+        for row in RowBatch(
+            batch.slice(start, static_output_pod.ROW_CHUNK_ROWS), stream
+        ).rows():
             await output.send(row)
 
 
@@ -203,7 +203,7 @@ class EdgeFeed:
         if self._ended:
             return None
         rows: list[tuple[TagProtocol, DataProtocol]] = []
-        while len(rows) < ROW_CHUNK_ROWS:
+        while len(rows) < static_output_pod.ROW_CHUNK_ROWS:
             try:
                 item = await (self._soon() if rows else self._source.receive())
             except ChannelClosed:
@@ -263,7 +263,9 @@ class KeptBatches:
         self._node: StreamProtocol = node
         # The node's keys, in the order its rows have them; asked once.
         self._keys: tuple[list[str], list[str]] | None = None
-        self._spool: RowSpool = RowSpool(memory_bytes=KEPT_ROWS_MEMORY_BYTES)
+        self._spool: RowSpool = RowSpool(
+            memory_bytes=static_output_pod.KEPT_ROWS_MEMORY_BYTES
+        )
         self._schema: pa.Schema | None = None
         self._token_types: dict[str, pa.DataType] = {}
         # Rows with derived token lists, which share the ids of all their members: each
@@ -328,13 +330,17 @@ class KeptBatches:
             }
             if names & {*source_tokens.derived_columns(kept.schema)}:
                 self._spool.close()
-                self._spool = RowSpool(memory_bytes=KEPT_ROWS_MEMORY_BYTES)
+                self._spool = RowSpool(
+                    memory_bytes=static_output_pod.KEPT_ROWS_MEMORY_BYTES
+                )
                 self._in_memory = []
                 self._schema = source_tokens.materialize(
                     kept.schema.empty_table(), names
                 ).schema
-                for start in range(0, kept.num_rows, SPILL_SLICE_ROWS):
-                    part = kept.slice(start, SPILL_SLICE_ROWS)
+                for start in range(
+                    0, kept.num_rows, static_output_pod.SPILL_SLICE_ROWS
+                ):
+                    part = kept.slice(start, static_output_pod.SPILL_SLICE_ROWS)
                     self._keep(source_tokens.materialize(part, names))
             table = source_tokens.materialize(table, names)
         # The spool holds one schema: a difference left is an error here, as it is

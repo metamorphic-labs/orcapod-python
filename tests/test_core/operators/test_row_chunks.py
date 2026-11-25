@@ -660,6 +660,8 @@ def test_a_job_never_succeeds_with_rows_twice_after_a_failed_allocation(
     step: str, size: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Review of PR 562, round 2: the job succeeded with ``[3, 4, 3, 4]``."""
+    # The node's row form, which keeps rows in ``RowChunks``.
+    monkeypatch.setattr(OperatorJobNode, "_runs_over_batches", lambda *_: False)
     monkeypatch.setattr(static_output_pod, "ROW_CHUNK_ROWS", size)
     with PipelineJob(name="one_failure", database=InMemoryArrowDatabase()) as job:
         _ = ArrowTableSource(
