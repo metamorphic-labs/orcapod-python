@@ -55,6 +55,7 @@ from orcapod.core.sources.base import RootSource, saved_tag_only_columns
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.source_ids import joined_location, location_source_name
 from orcapod.core.sources.derived_source import validate_tags_as_data
+from orcapod.core.sources.seen_keys import SeenKeys
 from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
     key_column_type_allowed,
@@ -912,7 +913,7 @@ class SpiralDBTableSource(RootSource):
                 )
         seen = 0
         # Keys must be unique across the whole read, not only within a slice.
-        identifiers: set[str] = set()
+        identifiers = SeenKeys()
         for batch in table.scan_batches(
             where=dict(self._condition.equalities) or None,
             limit=limit,
@@ -937,14 +938,13 @@ class SpiralDBTableSource(RootSource):
                 # Tokens first: they refuse a null key before it is copied into
                 # a non-nullable column.
                 tokens = self._key_tokens(rows)
-                repeated = identifiers.intersection(tokens)
+                repeated = identifiers.add(tokens)
                 if repeated:
                     raise RowIdentifierError(
                         f"SpiralDB table {self._qualified!r}: key "
-                        f"{sorted(repeated)[0]} appears in two rows; key values "
+                        f"{repeated[0]} appears in two rows; key values "
                         "must be unique, so each row has its own identifier"
                     )
-                identifiers.update(tokens)
                 yield self._builder.attach_provenance(
                     self._with_tag_copies(rows),
                     tag_columns=self._tag_columns,
