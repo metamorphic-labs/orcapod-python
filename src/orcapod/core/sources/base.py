@@ -600,6 +600,8 @@ class RootSource(StreamBase):
         A source of the library that holds its table (``_stream``) reads nothing. Any
         other read of a whole source is refused unless ``compute_all`` was given.
         """
+        from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+
         if not isinstance(getattr(self, "_stream", None), ArrowTableStream):
             refuse_without_compute_all(self, request, "reads its rows whole")
         yield from slices_of(self, request)

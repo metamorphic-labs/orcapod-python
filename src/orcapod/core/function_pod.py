@@ -1862,16 +1862,22 @@ class FunctionPodStream(StreamBase):
     def _preview_batch(
         self, pairs: list[tuple[TagProtocol, DataProtocol]]
     ) -> StreamProtocol:
-        """``pairs`` as a stream, laid out as ``as_table`` lays out this stream's rows."""
+        """``pairs`` as a stream, laid out as ``as_table`` lays out this stream's rows.
+
+        Without the meta columns: a stored row of a cached pod has other ones than a row
+        computed here, and a preview shows none.
+        """
+        from orcapod.core.operators.meta_columns import without_meta_columns
         from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 
         tag_keys, data_keys = self.keys()
+        table = self._shape_table(
+            self._table_from_pairs(pairs),
+            ColumnConfig(**PREVIEW_COLUMNS),
+            _no_content_hashes,
+        )
         return ArrowTableStream(
-            self._shape_table(
-                self._table_from_pairs(pairs),
-                ColumnConfig(**PREVIEW_COLUMNS),
-                _no_content_hashes,
-            ),
+            without_meta_columns(table, tag_keys),
             tag_columns=tag_keys,
             data_tags=data_tag_names(tag_keys, data_keys),
             data_context=self.data_context_key,

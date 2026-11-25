@@ -42,7 +42,12 @@ from orcapod.contexts.stored import (
     report_rows_of_other_data_contexts,
     with_data_context,
 )
-from orcapod.protocols.core_protocols import DataProtocol, SourceProtocol, TagProtocol
+from orcapod.protocols.core_protocols import (
+    DataProtocol,
+    SourceProtocol,
+    StreamProtocol,
+    TagProtocol,
+)
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import SOURCE_DB_SCHEMA_VERSION, constants
 from orcapod.types import ColumnConfig, Schema

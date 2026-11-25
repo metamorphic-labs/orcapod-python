@@ -58,6 +58,7 @@ if TYPE_CHECKING:
     from polars._typing import FrameInitTypes
 
     from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+    from orcapod.protocols.core_protocols import StreamProtocol
     from orcapod.protocols.core_protocols.sources import DynamicSourceProtocol
     from orcapod.types import Schema
 

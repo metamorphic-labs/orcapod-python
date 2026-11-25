@@ -1672,7 +1672,7 @@ class StreamBase(TraceableBase):
         """Compute the first ``n`` rows, and only what they need; keep nothing (ITL-1464).
 
         ``head()`` never computes; ``preview()`` does. The rows are the first ``n`` of
-        ``as_table()``. A source reads no more than is needed (a limit, or batches until
+        ``as_table()``, without a cached pod's meta columns. A source reads no more than is needed (a limit, or batches until
         enough rows have passed), an operator applied batch by batch takes batches, and a
         function is called on one row after another until ``n`` rows have come out, so
         **your functions run**, once per row they are needed for. Nothing is kept on any

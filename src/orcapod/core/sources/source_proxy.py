@@ -37,7 +37,11 @@ if TYPE_CHECKING:
 
     import pyarrow as pa
 
-    from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
+    from orcapod.protocols.core_protocols import (
+        DataProtocol,
+        StreamProtocol,
+        TagProtocol,
+    )
 
 
 class SourceProxy(RootSource):

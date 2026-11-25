@@ -1,7 +1,7 @@
 # `run()`, its view and `preview(n)` without a full table (ITL-1464, track VIEWS)
 
 Status: V1 to V12 approved by the coordinator, November 25, 2026 (V2, V3 and V8 flagged for
-the developer); the bounded view is implemented, `preview(n)` is not. Written, against `origin/main` 0d1e017c. Companion of
+the developer); the bounded view and `preview(n)` are implemented. Written, against `origin/main` 0d1e017c. Companion of
 `itl-1464-streaming-design.md` (sections 1, 3 and 4 of it). Nothing here changes a hash,
 identity, stored layout, stored byte or golden value.
 
@@ -156,3 +156,20 @@ none, so its run scans once.
 
 One outermost question (`_upstream_states`) asks each stream once, so the walk is linear in
 the graph: settling a stream asks for the states beneath it, and so does its own state.
+
+## `preview(n)` as built
+
+- `StreamBase.preview` pulls `_preview_batches` (`core/streams/preview.py`) and stops at `n`. A
+  function pod gives one row per batch, computed when asked for, so no function is called past
+  the last row needed, also under a filter; an operator's batch upstream of a function may be
+  larger, since it calls nothing.
+- The limit is passed down through operators that drop no row (`rows_dropped_text`) and
+  through an active Python function; anything else takes batches and the scan is closed.
+- `Pick` and `Index` are refused with the whole-input steps, for the reason they are not
+  batched by `run()`.
+- `compute_all` memoizes each stream it reads in full for the one call, so a stream two
+  branches share is computed once. With it, functions beneath one input may have run when
+  another input is refused.
+- No meta column is shown: a stored row and a computed one have different ones.
+- A `DerivedSource` is a whole read (its origin may compute). A filter nothing passes reads the
+  whole table, in batches: `max_rows` does not stop it, as it does not stop `head`.
