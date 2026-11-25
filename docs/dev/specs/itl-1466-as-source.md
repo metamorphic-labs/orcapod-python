@@ -7,6 +7,7 @@ amended (section 3); section 4 gives the reasoning for system tags in a function
 **Round 4** (same day): a stream's or node's behaviour as a source follows its nature: side-effect
 modes (section 3), a derived source over a plain origin reads it as the origin reads (section
 5), and the trace boundary (section 7). Round 4 is design only: the prototype is not changed.
+**Round 5**: P3 is decided as recommended, the trace boundary; kept tokens stand.
 Evidence: **[ran]** a script in `itl-1466/` on `0d1e017c`; **[proto]** `probe_round2` or
 `probe_tokens` on the prototype (they fail on the library as it is); **[read]** the code;
 **[inferred]** none of these. Round 3's own script is `probe_entries` [proto]. Section 12: what is decided, what is open, and **what the
@@ -337,7 +338,7 @@ is the one that makes a token agree with the pair, and the developer's model say
 name why and from what, and tokens the ultimate source. Kept tokens need that check relaxed
 for a derived source: the pair leads to the `as_source` row, the token past it.
 
-**The trace boundary** (P3, recommended). A derived source is a **step** of the trace, as a
+**The trace boundary** (P3, decided in round 5; kept tokens, D11, stand). A derived source is a **step** of the trace, as a
 function or an operator is. `trace` reaches it through a row's pair and reports it: the source
 id, the record id, and the kind of its origin. It then **may continue into the origin's job
 through the record id**, which names one entry there: the base entry id for a function node or
@@ -460,12 +461,11 @@ limit), `reference/hashing.md` (rule 8, sites 4 and 5, inventory), `CLAUDE.md` a
 
 ## 12. Decisions
 
-**What the prototype sends back to the developer** (P2 decided in round 3, P4 in round 4)
+**What the prototype sends back to the developer** (P2 decided in round 3, P4 in round 4, P3 in round 5)
 
 | # | Question | Recommendation |
 |---|---|---|
-| P1 | A `LOG` cache holds one content several times (corrected input with an equal output; results recomputed), and D6 makes `as_source` raise [proto 4, 4b] | **With the developer.** (a) Keep both passages, told apart by the upstream function's result id (the result record the row's token names): both rows shown, but that id is random per store, so the ids then differ between two fresh stores. (b) Show the content once: ids stay equal across stores; which passage's tokens are kept must then be chosen (the cache records no order) |
-| P3 | Kept tokens make `trace` fail for every row computed from an `as_source` [proto, `probe_tokens`] | The trace boundary: a derived source is a step that reports its record id and may continue into the origin's job through it; the token check holds within a job (section 7) |
+| P1 | A `LOG` cache holds one content several times (corrected input with an equal output; results recomputed), and D6 makes `as_source` raise [proto 4, 4b] | **With the developer.** The coordinator recommends (b): collapse rows equal in tags, system tags and data to one, keeping the latest passage's tokens; distinct upstream entries are never collapsed, because their system tags differ. Note: an operator cache row records no time today (its columns are the row, its row hash, the node hash and the data context [read]), so "latest" needs a recorded time added to the operator cache layout, or a rule that does not need one. The other option, (a): keep both passages, told apart by the upstream function's result id; that id is random per store, so ids then differ between two fresh stores |
 | S1 | Side effects, the rest: the new caching mode; a failed row in it; load-only and before a run; own source id | Retry a failed row on the next iteration; after a load-only run, and before a run, the invocation log's delivered rows (refused without `track_completion`); own source id: yes (section 3) |
 | P5 | A `LOG` node loads as `OFF`, so `as_source` of a loaded operator is refused though its rows are stored [proto 7] | Save the cache mode with the node (its own issue); until then the refusal says to attach `LOG` again |
 | | Held plain-stream rows as "known content" (D10) | No; the fixed-content sources beneath a plain origin, yes (section 6) |
@@ -480,8 +480,9 @@ limit), `reference/hashing.md` (rule 8, sites 4 and 5, inventory), `CLAUDE.md` a
 | D7 | `OFF`: the current run's rows. Caching on: the content of the cache |
 | D8 | Plain streams stream their content, computed when read; a derived source follows its origin's mode, held or read through (round 4). Side effects: allowed for all; the rows that passed through; a node fires once ever per row, a plain stream in its mode, caching (once per row, held; new) or non-caching (every iteration; today's); identity of a row unchanged (rounds 3, 4; P4 closed) |
 | D10 | ITL-1469's rule; no warning |
-| D11 | Single tokens kept, lists fresh, copies and nulls fresh; by the column's type (but P3) |
+| D11 | Single tokens kept, lists fresh, copies and nulls fresh; by the column's type; they stand with the trace boundary (P3) |
 | D13 | The "only multi-pair origins" condition is dropped |
+| P3 | `trace` stops at a derived source and reports its record id; it may continue into the origin's job through it. Kept tokens (D11) stand (round 5) |
 | D14 | No preflight refusal |
 
 **Open, each with its recommendation**
