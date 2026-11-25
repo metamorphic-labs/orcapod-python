@@ -134,6 +134,13 @@ class StaticOutputOperatorPod(TraceableBase):
     and its input's head is never asked for.
     """
 
+    CONSTRAINING_INPUTS: ClassVar[frozenset[int]] = frozenset()
+    """The input positions whose rows only decide which rows of the other inputs pass.
+
+    No row of such an input flows on (``SemiJoin``'s right input). Display only: the
+    pipeline diagram draws these inputs apart (ITL-1455); it enters no identity.
+    """
+
     PROVISIONAL: ClassVar[bool] = False
     """Whether the operator is provisional: its identity is not frozen (ITL-1266).
 
@@ -150,6 +157,19 @@ class StaticOutputOperatorPod(TraceableBase):
             warn_provisional_operator(provisional)
         self.tracker_manager = tracker_manager or DEFAULT_TRACKER_MANAGER
         super().__init__(**kwargs)
+
+    def constraint_fact(
+        self, tag_keys: Sequence[Collection[str]]
+    ) -> tuple[str, str] | None:
+        """What the constraining inputs do, as a name and a text, for display only.
+
+        Args:
+            tag_keys: The tag column names of each input, in argument order.
+
+        Returns:
+            The fact the pipeline diagram shows, or ``None`` when there is none.
+        """
+        return None
 
     def _note_provisional_identity_use(self) -> None:
         """Note a use of this operator when it is provisional; never warn.
