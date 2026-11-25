@@ -137,23 +137,24 @@ structs, lists, dictionaries and extension storages (`refuse_derived`).
 
 `GroupBy` reads its keys and system tags in one chunk each (a `take` from many chunks puts
 them together every time), and sorts by the record ids, the largest columns, only when rows
-tie on every tag before them. Measured outside a job with a synthetic event table of about
+tie on every tag before them. Text with few distinct values is sorted by its rank (four bytes
+a row). Measured outside a job with a synthetic event table of about
 8 million rows, 8 columns, 100 groups of about 80,000 members (footprint: the memory the
 system charges the process; the source's own read is 3.5 GiB of every line):
 
 | Step | Seconds before | after | Peak footprint before | after |
 |---|---|---|---|---|
 | read, recipes carried | | 64 | | 3.5 GiB |
-| `group_by` | 411 | 159 | 10.5 GiB | 4.9 GiB |
+| `group_by` | 411 | 143 | 10.5 GiB | 4.9 GiB |
 | `group_by`, a function per group | | 155 | | 5.3 GiB |
 
 The values of the grouped table are 0.09 GiB: they do not dominate. What it holds is 1.7
 GiB, the members' record ids (about 190 bytes each, the canonical JSON of the key). Of the
-159 seconds, about 70 are the folds of the eight system-tag and key columns, whose digests
+143 seconds, about 70 are the folds of the eight system-tag and key columns, whose digests
 read every member's text, as they always did.
 
-In a job, on the integration branch's head with this: 4.5 GiB on sync and 5.8 GiB on async
-for `group_by`; with a function per group 10.9 GiB on sync and 6.1 GiB on async. The
+In a job, on the integration branch's head with this: 4.4 GiB on sync and 5.8 GiB on async
+for `group_by` (3.0 GiB on async at half the rows); with a function per group 10.9 GiB on sync and 6.1 GiB on async. The
 difference on sync is the function node, which holds every input row as objects before it
 computes: 100 rows of 80,000 members, values and token text.
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, get_origin
 
@@ -16,6 +17,7 @@ from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.system_constants import constants
+from tests.test_core.operators.test_row_built_form import assert_same_values
 
 
 @pytest.fixture
@@ -661,3 +663,105 @@ def test_members_that_tie_on_every_tag_are_ordered_by_record_id(
         wanted = [r for r in table.to_pylist() if r["g"] == group]
         wanted.sort(key=lambda r: (r["n"], rank(r["t"]), r["id"]))
         assert members == [r["v"] for r in wanted]
+
+
+_TEXTS = [
+    "",
+    "a",
+    "B",
+    "b",
+    "a\u0301",
+    "\u00e1",
+    "z",
+    "\U0001f600",
+    "\ue000",
+    "aa",
+    "a\x00",
+]
+
+
+def _random_table(seed: int, rows: int) -> pa.Table:
+    """Keys and tags of several types, with ties, nulls, NaN, signed zeros and text."""
+    import random
+
+    pick = random.Random(seed)
+    few = pick.choice([1, 3, len(_TEXTS)])
+
+    def column(values: list[Any]) -> list[Any]:
+        return [pick.choice(values) for _ in range(rows)]
+
+    return pa.table(
+        {
+            "s": pa.array(column([*_TEXTS[-few:], None]), pa.string()),
+            "t": pa.array(column(_TEXTS)),
+            "f": pa.array(
+                column([0.0, -0.0, float("nan"), None, 1.5, float("-inf")]),
+                pa.float64(),
+            ),
+            "d": pa.array(
+                column([Decimal("1.5"), None, Decimal("-2")]), pa.decimal256(40, 2)
+            ),
+            "p": pa.array(column([1, None, 2]), pa.timestamp("us", tz="UTC")),
+            "l": pa.array(
+                column([["b"], ["b", None], [], None, ["a"]]), pa.list_(pa.string())
+            ),
+            "u": pa.array([f"u{pick.random()}" for _ in range(rows)]),
+            "v": pa.array(range(rows)),
+        }
+    )
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_groups_and_members_are_those_of_the_whole_sort(
+    seed: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ranks for text and leaving the system tags out change no group, member order,
+    fold or hash: the oracle sorts by every column as it is (ITL-1464)."""
+    import random
+
+    import orcapod.core.operators.group_by as group_by_module
+
+    pick = random.Random(seed)
+    table = _random_table(seed, pick.choice([1, 2, 30, 200]))
+    tags = ["s", "t", "f", "d", "p", "l", "u"]
+    names = pick.sample(tags, pick.randint(2, len(tags)))
+    by = [c for c in names if c != "l"][: pick.randint(1, 2)]
+    order = [c for c in names if c not in by][: pick.randint(0, 2)]
+    operator = GroupBy(by=by, member_order=order or "name")
+
+    def grouped() -> pa.Table:
+        source = ArrowTableSource(
+            table,
+            tag_columns=names,
+            tag_only_columns=bool(seed % 2),
+            record_id_columns=["v"] if seed % 3 else (),
+        )
+        return operator(source).as_table(all_info=True)
+
+    got = grouped()
+    monkeypatch.setattr(group_by_module, "_ranked", lambda array: array)
+    # The whole sort: as if rows always tied on the tags.
+    monkeypatch.setattr(group_by_module, "_all_distinct", lambda frame, names: False)
+    expected = grouped()
+    assert got.schema.equals(expected.schema, check_metadata=True)
+    assert_same_values(got, expected)
+
+
+@pytest.mark.parametrize("repeat", [1, 9])
+def test_ranks_order_text_as_its_bytes(repeat: int) -> None:
+    from orcapod.core.operators.group_by import (
+        _ranked,  # pyright: ignore[reportPrivateUsage]  # under test
+    )
+
+    values = [*_TEXTS, None] * repeat
+    array = pa.array(values, pa.large_string())
+    ranked = _ranked(array)
+    assert (ranked is array) == (repeat == 1)
+    ranks: list[Any] = ranked.to_pylist()
+    for one, left in zip(values, ranks, strict=True):
+        for two, right in zip(values, ranks, strict=True):
+            if one is None or two is None:
+                assert (left is None) == (one is None)
+                continue
+            assert (left < right) == (one.encode() < two.encode())
+            assert (left == right) == (one == two)

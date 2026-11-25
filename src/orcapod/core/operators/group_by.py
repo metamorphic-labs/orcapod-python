@@ -8,6 +8,7 @@ from typing import Any, ClassVar, cast, get_origin
 import numpy as np
 import polars as pl
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from orcapod.core.unique_keys import UniqueKeys, certificate
 from orcapod.core.operators.arrow_keys import (
@@ -202,6 +203,46 @@ def _member_order_names(
             + "in a group, so it cannot order the members"
         )
     return names
+
+
+def _all_distinct(frame: "pl.DataFrame", names: Sequence[str]) -> bool:
+    """Whether no two rows of a sorted frame tie on ``names``.
+
+    Nested values order by other expressions than they compare by, so with one of them
+    the answer is always no.
+    """
+    if any(frame.schema[name].is_nested() for name in names):
+        return False
+    if frame.height < 2:
+        return True
+    runs = cast(int, frame.select(pl.struct(names).rle_id().max()).item()) + 1
+    return runs == frame.height
+
+
+_RANK_SAMPLE = 65_536
+"""How many values of a text column decide whether it is worth ranking (``_ranked``)."""
+
+
+def _ranked(array: "pa.Array[Any]") -> "pa.Array[Any]":
+    """``array``, or the ranks of its values when it is text with few distinct values.
+
+    The sort frame then holds four bytes a row in place of the text (ITL-1464). Ranks
+    order and compare as the text does: the rank is the value's place among the distinct
+    values in byte order, which is Polars' order of text, and a null stays null.
+
+    Args:
+        array: A prepared key column (``polars_ready``).
+    """
+    if not (pa.types.is_large_string(array.type) or pa.types.is_string(array.type)):
+        return array
+    sample = array.slice(0, _RANK_SAMPLE)
+    if pc.count_distinct(sample).as_py() * 2 > len(sample):
+        return array  # a text of its own in most rows: ranking would cost a copy of it
+    encoded: Any = array.dictionary_encode()
+    by_bytes = pc.sort_indices(encoded.dictionary.cast(pa.large_binary())).to_numpy()
+    ranks = np.empty(len(by_bytes), dtype=np.uint32)
+    ranks[by_bytes] = np.arange(len(by_bytes), dtype=np.uint32)
+    return pa.array(ranks).take(encoded.indices)
 
 
 class GroupBy(UnaryOperator):
@@ -655,7 +696,9 @@ class GroupBy(UnaryOperator):
             [*self.by, *sort_columns[:tags]],
             strict=True,
         ):
-            frame_columns[name] = polars_ready(source_tokens.one_chunk(table.column(c)))
+            frame_columns[name] = _ranked(
+                polars_ready(source_tokens.one_chunk(table.column(c)))
+            )
         # The bits of each float key, to emit the member value with the smallest.
         key_storage = {
             c: values_of(source_tokens.one_chunk(table.column(c))) for c in self.by
@@ -692,12 +735,7 @@ class GroupBy(UnaryOperator):
         # with one of them they always are.
         names = [*key_names, *order_names[:tags]]
         frame = in_order(names)
-        tied = any(frame.schema[name].is_nested() for name in names) or (
-            frame.height > 1
-            and cast(int, frame.select(pl.struct(names).rle_id().max()).item()) + 1
-            < frame.height
-        )
-        if tied:
+        if not _all_distinct(frame, names):
             for name, c in zip(order_names[tags:], sort_columns[tags:], strict=True):
                 frame_columns[name] = polars_ready(
                     source_tokens.one_chunk(table.column(c))
