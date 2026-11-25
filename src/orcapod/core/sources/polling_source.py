@@ -14,7 +14,7 @@ import dataclasses
 import functools
 import logging
 import threading
-from collections.abc import Collection
+from collections.abc import Generator, Collection
 from math import floor
 from typing import Any, ClassVar, Generic, TYPE_CHECKING, TypeVar, cast
 
@@ -29,6 +29,7 @@ from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
     normalize_record_id_columns,
 )
+from orcapod.core.streams.preview import PreviewRequest, refused
 from orcapod.core.streams.view import (
     ViewStatus,
     StreamView,
@@ -57,6 +58,7 @@ if TYPE_CHECKING:
     from polars._typing import FrameInitTypes
 
     from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+    from orcapod.protocols.core_protocols import StreamProtocol
     from orcapod.protocols.core_protocols.sources import DynamicSourceProtocol
     from orcapod.types import Schema
 
@@ -651,6 +653,12 @@ class PollingSource(RootSource, Generic[T]):
         """Iterate over (tag, data) pairs from the current snapshot."""
         _ = self._sync_poll_and_commit()
         return self._get_combined_stream().iter_data()
+
+    def _preview_batches(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """Refused: reading the source polls."""
+        raise refused(self, "polls when it is read")
 
     def as_table(
         self,

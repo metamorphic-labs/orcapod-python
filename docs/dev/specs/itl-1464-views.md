@@ -1,7 +1,7 @@
 # `run()`, its view and `preview(n)` without a full table (ITL-1464, track VIEWS)
 
 Status: V1 to V12 approved by the coordinator, November 25, 2026 (V2, V3 and V8 flagged for
-the developer); the bounded view is implemented, `preview(n)` is not. Written, against `origin/main` 0d1e017c. Companion of
+the developer); the bounded view and `preview(n)` are implemented. Written, against `origin/main` 0d1e017c. Companion of
 `itl-1464-streaming-design.md` (sections 1, 3 and 4 of it). Nothing here changes a hash,
 identity, stored layout, stored byte or golden value.
 
@@ -32,8 +32,9 @@ end the chain: they compute as today.
 1. The source's batches are read in order (one scan, its checks unchanged: `max_rows`,
    schema, repeated keys). Each batch, shaped as `as_table()` shapes the whole, goes
    through each operator's own `static_process`: the one sync body, no second kernel.
-2. Result batches are kept whole up to **50,000 rows** (all column groups; counted in rows,
-   not bytes, so equal data is treated alike however its batches are cut). A result that ends
+2. Result batches are kept whole up to **50,000 rows and 64 MiB of values** (default columns; offsets,
+   validity and chunks not counted, so equal data is treated alike however its batches are
+   cut). A result that ends
    within it is complete: the view holds it, and an operator stream keeps it, exactly as
    today.
 3. A larger result drops the kept batches to a **window**: the first and last 1,000 rows
@@ -103,7 +104,7 @@ never computes.
 | V1 | Bounded window now, disk-backed later, or wait for the local cache (N2) | window now: no file is written, and paging later only lifts refusals |
 | V2 | `as_table()` / `table` / `as_polars_df()` of a bounded view: kept rows, recompute, or refuse | refuse, pointing to the stream (a part must never read as the whole; a view never recomputes) |
 | V3 | `head`/`tail` beyond the window, `sort_by_tags` | refuse |
-| V4 | Threshold and window | approved at 64 MiB; implemented as 50,000 rows (bytes differ with the batches and with what is already held), first and last 1,000 rows; constants, no config yet |
+| V4 | Threshold and window | 50,000 rows and 64 MiB of values, both layout-independent (`RunSize`, `value_bytes`: Arrow's own `nbytes` differs with the batches); a result that fits in the two windows is always kept; first and last 1,000 rows; constants, no config yet |
 | V5 | `as_table()` after a large run of a batched chain reads and applies operators again | yes (no user function runs again) |
 | V6 | Streams in the middle of a chain keep nothing after a run of the last one (today each keeps its result) | yes, above the threshold (below it each keeps its result, as today): keeping one table per step is the cost being removed; each `run()`s by itself |
 | V7 | `PolarsFilter` in a batched chain | not until B1 decides expressions that read other rows |
@@ -152,3 +153,23 @@ its generation, its operator's modified time and the state of its own input, dow
 source (`_chain_state`): a change anywhere beneath is seen by every kept result and window
 above it, whichever streams of the chain hold rows. A source with no row gives one batch of
 none, so its run scans once.
+
+One outermost question (`_upstream_states`) asks each stream once, so the walk is linear in
+the graph: settling a stream asks for the states beneath it, and so does its own state.
+
+## `preview(n)` as built
+
+- `StreamBase.preview` pulls `_preview_batches` (`core/streams/preview.py`) and stops at `n`. A
+  function pod gives one row per batch, computed when asked for, so no function is called past
+  the last row needed, also under a filter; an operator's batch upstream of a function may be
+  larger, since it calls nothing.
+- The limit is passed down through operators that drop no row (`rows_dropped_text`) and
+  through an active Python function; anything else takes batches and the scan is closed.
+- `Pick` and `Index` are refused with the whole-input steps, for the reason they are not
+  batched by `run()`.
+- `compute_all` memoizes each stream it reads in full for the one call, so a stream two
+  branches share is computed once. With it, functions beneath one input may have run when
+  another input is refused.
+- No meta column is shown: a stored row and a computed one have different ones.
+- A `DerivedSource` is a whole read (its origin may compute). A filter nothing passes reads the
+  whole table, in batches: `max_rows` does not stop it, as it does not stop `head`.

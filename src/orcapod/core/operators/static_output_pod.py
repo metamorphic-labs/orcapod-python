@@ -15,6 +15,7 @@ from collections.abc import (
     Sequence,
 )
 from contextlib import closing
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, cast
 
@@ -61,9 +62,15 @@ from orcapod.core.streams.base import (
     typed_zero_row_table,
     row_built_columns,
 )
+from orcapod.core.streams.preview import (
+    PREVIEW_COLUMNS,
+    PreviewRequest,
+    preview_batches,
+    refuse_without_compute_all,
+)
 from orcapod.core.streams.view import (
-    RUN_VIEW_COMPLETE_ROWS,
     BoundedStreamView,
+    RunSize,
     STALE_NOTE,
     default_note,
     ViewStatus,
@@ -2603,8 +2610,8 @@ class DynamicPodStream(StreamBase):
         """This stream's rows, in order, as one stream per batch (``run()``, ITL-1464).
 
         Each batch of the input goes through ``static_process``, the one sync body. A
-        result of at most ``RUN_VIEW_COMPLETE_ROWS`` rows is kept, as a read keeps it;
-        a larger one is not. A current kept result is given as it is.
+        result ``RunSize`` says is kept is kept, as a read keeps it; a larger one is
+        not. A current kept result is given as it is.
         """
         self._pod._note_provisional_identity_use()
         self._update_cache_status()
@@ -2617,7 +2624,7 @@ class DynamicPodStream(StreamBase):
             return
         kept_states = _upstream_states(self._upstreams)
         kept: list[StreamProtocol] | None = []
-        rows = 0
+        size = RunSize()
         handed_on = True
         with closing(batch_streams_of(self._upstreams[0])) as batches:
             for batch in batches:
@@ -2630,10 +2637,10 @@ class DynamicPodStream(StreamBase):
                         pass
                     raise
                 handed_on = handed_on and result is batch
-                rows += result.as_table().num_rows
+                size.add(result.as_table())
                 if kept is not None:
                     kept.append(result)
-                    if rows > RUN_VIEW_COMPLETE_ROWS:
+                    if not size.is_kept:
                         kept = None
                 yield result
         if kept:
@@ -2645,11 +2652,59 @@ class DynamicPodStream(StreamBase):
             self._kept_states = kept_states
             self._run_window = None
 
+    def _preview_batches(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """The operator over its input's batches, or over its whole inputs.
+
+        A kept current result is read as it is; nothing is computed, and nothing is
+        kept of what is computed here.
+        """
+        self._pod._note_provisional_identity_use()
+        self._update_cache_status()
+        if self._cached_stream is not None and self._cached_time is not None:
+            yield from preview_batches(self._cached_stream, request)
+            return
+        pod = cast(StaticOutputOperatorPod, self._pod)
+        if (
+            len(self._upstreams) == 1
+            and type(pod).__dict__.get("BATCHES_GIVE_THE_WHOLE") is True
+        ):
+            keeps_every_row = pod.rows_dropped_text(0, (), self._upstreams) is None
+            wanted = request if keeps_every_row else request.without_limit()
+            with closing(preview_batches(self._upstreams[0], wanted)) as batches:
+                for batch in batches:
+                    yield pod.static_process(batch)
+            return
+        refuse_without_compute_all(self, request, "needs every row of its input")
+        result = pod.static_process(
+            *(
+                self._whole_input(upstream, request.of_every_row())
+                for upstream in self._upstreams
+            )
+        )
+        yield from preview_batches(result, request)
+
+    @staticmethod
+    def _whole_input(
+        upstream: StreamProtocol, request: PreviewRequest
+    ) -> StreamProtocol:
+        """Every row of ``upstream``, computed for a preview, with its pipeline hash."""
+        rows = joined_batches(list(preview_batches(upstream, request)))
+        return _RowsOfStream(
+            rows.as_table(columns=PREVIEW_COLUMNS),
+            tag_columns=rows.keys()[0],
+            pipeline_hash=upstream.pipeline_hash(),
+            data_tags=stream_data_tags(rows),
+            upstreams=upstream.upstreams,
+            data_context=StaticOutputOperatorPod._upstream_context(upstream),  # pyright: ignore[reportPrivateUsage]  # the one place that resolves an upstream's context
+        )
+
     def run(self) -> StreamView:
         """Compute every row and return a ``StreamView`` (``StreamBase.run``).
 
         Over a source that reads its rows on demand, through operators applied batch by
-        batch, a result of more than ``RUN_VIEW_COMPLETE_ROWS`` rows is not held: the
+        batch, a large result (``RunSize``) is not held: the
         view is bounded (``BoundedStreamView``), ``head`` then shows its first rows,
         and ``as_table()`` reads and applies the operators again.
         """
@@ -2899,8 +2954,34 @@ def _chain_state(stream: DynamicPodStream) -> object:
     return (stream._reset_generation, pod_time, inputs)  # pyright: ignore[reportPrivateUsage]  # same class
 
 
+_STATE_MEMO: ContextVar[dict[int, tuple[StreamProtocol, tuple[str, object]]] | None] = (
+    ContextVar("_STATE_MEMO", default=None)
+)
+"""The stream states found during one outermost ``_upstream_states`` call."""
+
+
 def _upstream_states(
     upstreams: tuple[StreamProtocol, ...],
 ) -> tuple[tuple[str, object], ...]:
-    """The state of each upstream (``_upstream_state``), in order."""
-    return tuple(_upstream_state(stream) for stream in upstreams)
+    """The state of each upstream (``_upstream_state``), in order.
+
+    Asking a stream for its state settles it, which asks for the states of its own
+    upstreams. Within one outermost call each stream is asked once, however many ways
+    lead to it, so the walk is linear in the graph (PR 560 review, round 2). The memo is
+    discarded when that call returns and is never shared between threads or tasks.
+    """
+    memo = _STATE_MEMO.get()
+    if memo is None:
+        token = _STATE_MEMO.set({})
+        try:
+            return _upstream_states(upstreams)
+        finally:
+            _STATE_MEMO.reset(token)
+    states: list[tuple[str, object]] = []
+    for stream in upstreams:
+        found = memo.get(id(stream))
+        if found is None:
+            # The stream is held with its state, so its id is not reused meanwhile.
+            found = memo[id(stream)] = (stream, _upstream_state(stream))
+        states.append(found[1])
+    return tuple(states)

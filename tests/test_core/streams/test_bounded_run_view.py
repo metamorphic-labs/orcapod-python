@@ -74,12 +74,9 @@ def source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture()
 def small_limits(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A result of more than 20 rows is bounded, with a window of 12 rows."""
+    """A result of more than 20 rows is bounded, with a window of 10 rows."""
     monkeypatch.setattr(view_module, "RUN_VIEW_COMPLETE_ROWS", 20)
-    monkeypatch.setattr(view_module, "RUN_VIEW_WINDOW_ROWS", 12)
-    import orcapod.core.operators.static_output_pod as pods
-
-    monkeypatch.setattr(pods, "RUN_VIEW_COMPLETE_ROWS", 20)
+    monkeypatch.setattr(view_module, "RUN_VIEW_WINDOW_ROWS", 10)
 
 
 CHAINS: dict[str, Callable[[Any], Any]] = {
@@ -226,7 +223,7 @@ def test_a_bounded_view_is_displayed_as_the_complete_one(
 def test_head_and_tail_within_the_window_are_the_complete_views(source: Any) -> None:
     """Rows and header; and the cuts and sorts of those."""
     view, complete = _bounded_and_complete(source().map_data({"note": "text"}))
-    for n in (0, 1, 5, 12):
+    for n in (0, 1, 5, 10):
         for cut in ("head", "tail"):
             mine, theirs = getattr(view, cut)(n), getattr(complete, cut)(n)
             assert type(mine) is StreamView
@@ -246,8 +243,8 @@ def test_head_and_tail_within_the_window_are_the_complete_views(source: Any) -> 
         lambda v: v.as_polars_df(),
         lambda v: v.table,
         lambda v: v.sort_by_tags(),
-        lambda v: v.head(13),
-        lambda v: v.tail(13),
+        lambda v: v.head(11),
+        lambda v: v.tail(11),
     ],
     ids=["as_table", "as_polars_df", "table", "sort_by_tags", "head", "tail"],
 )
@@ -300,7 +297,7 @@ def test_head_after_a_large_run_shows_the_window(source: Any) -> None:
     assert stream.head(3).header() == view.head(3).header()
     assert "first 10 of 34 computed rows, then sorted by tags" in stream._repr_html_()
     assert stream.head(3, columns={"source": True}).status is ViewStatus.NOT_COMPUTED
-    assert stream.head(13).status is ViewStatus.NOT_COMPUTED
+    assert stream.head(11).status is ViewStatus.NOT_COMPUTED
     assert fake_spiral_sdk.scan_log == []
     stream.clear_cache()
     assert stream.head(3).status is ViewStatus.NOT_COMPUTED
@@ -614,3 +611,110 @@ def test_the_window_is_the_first_and_last_rows(
     assert window.complete is None
     _same(window.first, table.slice(0, 8))
     _same(window.last, table.slice(42))
+
+
+# ---------------------------------------------------------------------------
+# Review of PR 560, round 2
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("kept", [True, False], ids=["kept", "window"])
+@pytest.mark.parametrize("diamond", [False, True])
+def test_a_cached_preview_asks_each_stream_once(
+    source: Any, monkeypatch: pytest.MonkeyPatch, kept: bool, diamond: bool
+) -> None:
+    """Blocker: the walk of upstream states was exponential in the depth of a chain."""
+    import orcapod.core.operators.static_output_pod as pods
+
+    if not kept:
+        monkeypatch.setattr(view_module, "RUN_VIEW_COMPLETE_ROWS", 20)
+        monkeypatch.setattr(view_module, "RUN_VIEW_WINDOW_ROWS", 10)
+    asked: list[int] = []
+    original = pods._upstream_state  # pyright: ignore[reportPrivateUsage]  # counted
+
+    def counted(stream: Any) -> Any:
+        asked.append(id(stream))
+        return original(stream)
+
+    def visits(depth: int) -> int:
+        stream: Any = source(40, tag_only_columns=True)
+        for i in range(depth):
+            stream = stream.map_data({f"note_{i}" if i else "note": f"note_{i + 1}"})
+            if diamond and i % 4 == 3:
+                # Two branches over one stream, put together again by a join.
+                left = stream.select_data_columns([f"note_{i + 1}"])
+                right = stream.drop_data_columns([f"note_{i + 1}"])
+                stream = left.join(right)
+        _ = stream.run()
+        assert stream.head(1).status is ViewStatus.ROWS
+        asked.clear()
+        _ = stream.head(1)
+        return len(asked)
+
+    monkeypatch.setattr(pods, "_upstream_state", counted)
+    # Each stream is asked at most once per outermost question, and head() asks twice
+    # at most: no growth beyond the number of streams.
+    assert visits(4) <= 2 * (4 + 3)
+    assert visits(12) <= 2 * (12 + 9)
+    assert visits(40) <= 2 * (40 + 30)
+
+
+def test_value_bytes_do_not_depend_on_the_layout() -> None:
+    """Equal values count the same in any chunks, slices, or null slots' content."""
+    from orcapod.core.streams.view import value_bytes
+
+    cases: dict[str, tuple[pa.Array[Any], int]] = {
+        "int64": (pa.array([1, None, 3]), 24),
+        "bool": (pa.array([True, None, False]), 3),
+        "decimal": (pa.array([1, 2], pa.decimal128(5, 0)), 32),
+        "fixed_binary": (pa.array([b"ab", None], pa.binary(2)), 4),
+        "string": (pa.array(["a", None, "bcd"]), 4),
+        "large_string": (pa.array(["a", None, "bcd"], pa.large_string()), 4),
+        "binary": (pa.array([b"1234", None]), 4),
+        "null": (pa.nulls(4), 0),
+        "list": (pa.array([[1, 2], None, []]), 3 * 8 + 16),
+        "large_list": (pa.array([["ab"], None], pa.large_list(pa.string())), 18),
+        "fixed_list": (pa.array([[1, 2], [3, 4]], pa.list_(pa.int32(), 2)), 32),
+        "struct": (pa.array([{"a": 1, "b": "xy"}, {"a": 2, "b": None}]), 18),
+        "map": (pa.array([[("k", 1)], []], pa.map_(pa.string(), pa.int64())), 25),
+        "uuid": (_column(pa.uuid(), 3), 48),
+    }
+    for name, (array, expected) in cases.items():
+        assert value_bytes(array) == expected, name
+        whole = pa.chunked_array([array])
+        pieces = pa.chunked_array([array.slice(i, 1) for i in range(len(array))])
+        assert value_bytes(whole) == value_bytes(pieces) == expected, name
+    # A value under a null struct or list slot is no value.
+    hidden = pa.StructArray.from_arrays(
+        [pa.array(["long hidden text", "x"])], ["a"], mask=pa.array([True, False])
+    )
+    assert value_bytes(hidden) == 1
+
+
+@pytest.mark.parametrize("batch_rows", [1, 7, 8192])
+@pytest.mark.parametrize("over", [False, True])
+def test_a_wide_result_is_bounded_by_its_values(
+    source: Any, monkeypatch: pytest.MonkeyPatch, batch_rows: int, over: bool
+) -> None:
+    """Major: 50,000 wide rows were held. The limit is the same however data is cut."""
+    from orcapod.core.streams.view import value_bytes
+
+    monkeypatch.setattr(view_module, "RUN_VIEW_WINDOW_ROWS", 10)
+    chain = CHAINS["map_data"]
+    size = sum(value_bytes(c) for c in chain(source(40)).as_table().columns)
+    monkeypatch.setattr(view_module, "RUN_VIEW_COMPLETE_BYTES", size - int(over))
+    stream = chain(source(40, batch_rows=batch_rows))
+    for _ in range(2):
+        assert isinstance(stream.run(), BoundedStreamView) is over
+    _ = stream.as_table()
+    assert isinstance(stream.run(), BoundedStreamView) is over
+
+
+def test_a_result_that_fits_in_the_windows_is_kept_however_wide(
+    source: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing would be saved, and a bounded view has rows the display leaves out."""
+    monkeypatch.setattr(view_module, "RUN_VIEW_COMPLETE_BYTES", 0)
+    monkeypatch.setattr(view_module, "RUN_VIEW_WINDOW_ROWS", 20)
+    assert type(source(40).run()) is StreamView
+    assert isinstance(source(41).run(), BoundedStreamView)

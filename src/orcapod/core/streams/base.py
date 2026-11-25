@@ -25,6 +25,7 @@ import pyarrow as pa
 from orcapod.core.unique_keys import NO_UNIQUE_KEYS, UniqueKeys
 from orcapod.core.base import TraceableBase
 from orcapod.core.data_tags import data_tag_names
+from orcapod.core.streams.preview import PreviewRequest, preview_batches, refused
 from orcapod.core.streams.record_batch_input import SOURCE_BATCH_ROWS, InputChannel
 from orcapod.core.streams.view import (
     SCHEMA_NEEDS_POLL_NOTE,
@@ -1636,8 +1637,8 @@ class StreamBase(TraceableBase):
         its ``head``, ``tail`` and ``sort_by_tags`` choose what is shown. The view holds
         every row, except over a source that reads its rows on demand
         (``reads_in_batches``): its rows, and those of operators applied batch by batch
-        over it, are read in batches, and a result of more than
-        ``RUN_VIEW_COMPLETE_ROWS`` rows gives a ``BoundedStreamView``. For other
+        over it, are read in batches, and a large result (``RunSize``) gives a
+        ``BoundedStreamView``. For other
         column groups, use ``as_table(columns=...)`` or ``head(columns=...)`` after
         ``run()``. On a stream that keeps its rows (a pod's or operator's output stream,
         a job node, a job's side-effect node included, an in-memory source) they read the
@@ -1683,6 +1684,80 @@ class StreamBase(TraceableBase):
             origin=origin,
             display_all_rows=False,
         )
+
+    def preview(self, n: int = 10, *, compute_all: bool = False) -> StreamView:
+        """Compute the first ``n`` rows, and only what they need; keep nothing (ITL-1464).
+
+        ``head()`` never computes; ``preview()`` does. The rows are the first ``n`` of
+        ``as_table()``, without a cached pod's meta columns. A source reads no more than is needed (a limit, or batches until
+        enough rows have passed), an operator applied batch by batch takes batches, and a
+        function is called on one row after another until ``n`` rows have come out, so
+        **your functions run**, once per row they are needed for. Nothing is kept on any
+        stream and nothing is written: a pod with stored results reads them and stores
+        none, no post-run hook fires, and a second ``preview()`` computes again. Results
+        a stream already holds are used.
+
+        A join, ``group_by``, ``batch``, ``polars_filter``, ``tag_by``, ``pick``,
+        ``index`` or an operator of your own needs its whole input. It is refused unless
+        ``compute_all`` is ``True``, which computes that step, and everything beneath it,
+        in full (and calls functions beneath it on every row), and keeps none of it.
+
+        Refused always: a side-effect pod or a function that takes the invocation
+        context (it would act), a source whose read polls or writes a cache, and a node
+        of a pipeline or job (``run()`` it, or ``head()`` it after a run).
+
+        Args:
+            n: The most rows to compute; at least 1.
+            compute_all: Allow steps that need their whole input.
+
+        Returns:
+            A ``StreamView``: ``ROWS`` when these are all the rows of the stream, else
+            ``PARTIAL``.
+
+        Raises:
+            TypeError: If ``n`` is not an ``int``.
+            ValueError: If ``n`` is less than 1.
+            PreviewRefusedError: If a step is refused, as said above; the message names
+                it. Without ``compute_all`` it is raised before any function is called.
+        """
+        if isinstance(n, bool) or not isinstance(n, int):
+            raise TypeError(
+                f"preview() takes an int number of rows, got {type(n).__name__}"
+            )
+        if n < 1:
+            raise ValueError(f"preview() takes at least 1 row, got {n}")
+        request = PreviewRequest(limit=n, compute_all=compute_all)
+        tables: list[pa.Table] = []
+        rows = 0
+        with closing(preview_batches(self, request)) as batches:
+            for batch in batches:
+                tables.append(batch.as_table())
+                rows += tables[-1].num_rows
+                if rows >= n:
+                    break
+        table = pa.concat_tables(tables).slice(0, n)
+        complete = rows < n
+        shown = table.num_rows
+        noun = "row" if shown == 1 else "rows"
+        return StreamView.of_rows(
+            self,
+            table,
+            tag_columns=self.keys()[0],
+            total_rows=shown if complete else None,
+            status=ViewStatus.ROWS if complete else ViewStatus.PARTIAL,
+            origin="computed",
+            description=(
+                f"preview: all {shown:,} {noun}"
+                if complete
+                else f"preview: first {shown:,} {noun} (run() computes every row)"
+            ),
+        )
+
+    def _preview_batches(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """This stream's rows for a preview (``preview_batches``): not given by default."""
+        raise refused(self, "has no preview")
 
     def head(
         self,
