@@ -546,7 +546,8 @@ class RootSource(StreamBase):
         ``as_table``) gives that table.
         """
         if type(self).as_table is RootSource.as_table and "as_table" not in vars(self):
-            return self._stream.as_carried_table(columns=columns)
+            stream: StreamBase = getattr(self, "_stream")  # noqa: B009  # set by each subclass
+            return stream.as_carried_table(columns=columns)
         return super().as_carried_table(columns=columns)
 
     # -------------------------------------------------------------------------

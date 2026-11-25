@@ -133,7 +133,10 @@ class PolarsFilter(UnaryOperator):
             isinstance(predicate, pl.Expr)
             and not predicate.meta.has_multiple_outputs()
             and set(predicate.meta.root_names()) <= set(columns)
-            for predicate in self.predicates
+            for predicate in (
+                *self.predicates,
+                *(v for v in self.constraints.values() if isinstance(v, pl.Expr)),
+            )
         )
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:

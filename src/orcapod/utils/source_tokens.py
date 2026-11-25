@@ -11,8 +11,8 @@ column as any other; nothing is computed until the text is needed (``materialize
 A derived column is an internal form of a table that operators pass on
 (``StreamProtocol.as_carried_table``). It never leaves the library: ``as_table``, rows,
 stored tables and everything hashed hold the text. A place that forgets fails loudly: no
-value of a derived column can be read, cast to text, hashed, or written to Parquet (its
-storage is a struct with no field, which Parquet refuses).
+value of a derived column can be read, cast to text, hashed, pickled, or written to
+Parquet (its storage is a struct with no field, which Parquet refuses).
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from collections.abc import Collection, Mapping
 from dataclasses import dataclass
-from typing import Any, NoReturn
+from typing import Any, NoReturn, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -71,11 +71,11 @@ class TokenRecipe:
 
     def text(self, batch: pa.RecordBatch) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny]  # an Arrow array
         """The tokens of ``batch``'s rows, as ``large_string``."""
-        return pc.binary_join_element_wise(
+        return pc.binary_join_element_wise(  # pyright: ignore[reportCallIssue, reportUnknownVariableType]  # the stubs leave out scalar arguments
             batch.column(self.source_id).cast(_TEXT),
             batch.column(self.record_id).cast(_TEXT),
-            pa.scalar(self.column, _TEXT),
-            pa.scalar(constants.BLOCK_SEPARATOR, _TEXT),
+            pa.scalar(self.column, _TEXT),  # pyright: ignore[reportArgumentType]  # as above
+            pa.scalar(constants.BLOCK_SEPARATOR, _TEXT),  # pyright: ignore[reportArgumentType]  # as above
         )
 
 
@@ -97,8 +97,9 @@ class _DerivedTokenScalar(pa.ExtensionScalar):
 class DerivedTokenType(pa.ExtensionType):
     """The Arrow type of a derived token column: no bytes, and the recipe.
 
-    Internal and never registered, so it is in no stored table and no schema Orcapod
-    presents or hashes. Two derived columns have one type only with one recipe.
+    Internal: in no stored table and no schema Orcapod presents or hashes. Not
+    registered with Arrow: a spilled table is written as its storage (no bytes) and
+    wrapped in its type again. Two derived columns have one type only with one recipe.
     """
 
     def __init__(self, recipe: TokenRecipe) -> None:
@@ -117,9 +118,20 @@ class DerivedTokenType(pa.ExtensionType):
     def __arrow_ext_scalar_class__(self) -> type[pa.ExtensionScalar]:
         return _DerivedTokenScalar
 
+    def __reduce__(self) -> NoReturn:
+        """Refuse to be pickled: a table another process reads holds the text.
+
+        Raises:
+            TypeError: Always.
+        """
+        raise TypeError("a derived source-info token column is not pickled")
+
     # pyarrow compares extension types by name and storage only; Arrow asks this.
     def __eq__(self, other: object) -> bool:
         return isinstance(other, DerivedTokenType) and self.recipe == other.recipe
+
+    def __ne__(self, other: object) -> bool:
+        return not self == other
 
     def __hash__(self) -> int:
         return hash(self.recipe)
@@ -127,7 +139,8 @@ class DerivedTokenType(pa.ExtensionType):
 
 def derived_array(recipe: TokenRecipe, rows: int) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny]  # an Arrow array
     """A derived token column of ``rows`` rows: no row has a byte."""
-    storage = pa.Array.from_buffers(pa.struct([]), rows, [None], 0, 0)
+    # No validity bitmap: no row is null. (The stubs do not allow the absent buffer.)
+    storage = pa.Array.from_buffers(pa.struct([]), rows, cast(Any, [None]), 0, 0)
     return pa.ExtensionArray.from_storage(DerivedTokenType(recipe), storage)
 
 
@@ -219,16 +232,3 @@ def rename_read_columns(table: pa.Table, names: Mapping[str, str]) -> pa.Table:
             derived_array(renamed, table.num_rows),
         )
     return table
-
-
-def text_schema(schema: pa.Schema) -> pa.Schema:
-    """``schema`` with each derived token column as the text it stands for."""
-    if not derived_columns(schema):
-        return schema
-    return pa.schema(
-        [
-            field.with_type(_TEXT) if derived_recipe(field.type) else field
-            for field in schema
-        ],
-        metadata=schema.metadata,
-    )
