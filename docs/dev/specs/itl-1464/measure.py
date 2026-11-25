@@ -434,6 +434,29 @@ def _peak_rss_bytes() -> int:
     return peak if sys.platform == "darwin" else peak * 1024
 
 
+def _peak_footprint_bytes() -> int | None:
+    """Peak physical footprint of this process (macOS), or ``None``.
+
+    Resident memory counts the pages of a memory-mapped file that happen to be in
+    memory, which the system drops when it needs them; the footprint counts only
+    memory the process itself holds (what the system charges it with).
+    """
+    if sys.platform != "darwin":
+        return None
+    import ctypes
+    import os
+
+    fields = (ctypes.c_uint64 * 64)()
+    libproc = ctypes.CDLL("/usr/lib/libproc.dylib")
+    # RUSAGE_INFO_V4: a 16-byte uuid, then 64-bit counters; the 29th is
+    # ``ri_lifetime_max_phys_footprint``.
+    buffer = (ctypes.c_uint8 * (16 + 8 * 64))()
+    if libproc.proc_pid_rusage(os.getpid(), 4, ctypes.byref(buffer)) != 0:
+        return None
+    ctypes.memmove(fields, ctypes.byref(buffer, 16), 8 * 64)
+    return int(fields[28])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("step", choices=["setup", *STEPS])
@@ -467,6 +490,7 @@ def main() -> None:
             "output_arrow_bytes": out_bytes,
             "rss_before_bytes": before,
             "peak_rss_bytes": _peak_rss_bytes(),
+            "peak_footprint_bytes": _peak_footprint_bytes(),
             "arrow_pool_peak_bytes": pool.max_memory(),
             "arrow_pool_held_bytes": pool.bytes_allocated(),
             "seconds": round(elapsed, 1),

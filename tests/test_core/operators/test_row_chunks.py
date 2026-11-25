@@ -153,7 +153,7 @@ def test_at_most_one_chunk_of_rows_is_held_as_objects(
 
     assert chunks.num_rows == _ROWS
     assert len(chunks._pending) == _ROWS % 4  # pyright: ignore[reportPrivateUsage]  # the bound this class exists for
-    assert [t.num_rows for t in chunks._tag_chunks] == [4, 4]  # pyright: ignore[reportPrivateUsage]  # the bound this class exists for
+    assert chunks._spool.size == 8  # pyright: ignore[reportPrivateUsage]  # the bound this class exists for
 
 
 def test_collecting_a_channel_keeps_its_rows_in_order(chunk_rows: int) -> None:
@@ -288,6 +288,115 @@ def test_a_jobs_nodes_read_the_same_whatever_materialize_results_says(
     assert kept_hash == unkept_hash
 
 
+@pytest.fixture()
+def spilled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Every sealed chunk goes to disk at once, three rows a chunk."""
+    monkeypatch.setattr(static_output_pod, "ROW_CHUNK_ROWS", 3)
+    monkeypatch.setattr(static_output_pod, "KEPT_ROWS_MEMORY_BYTES", 0)
+    monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+    return tmp_path
+
+
+def _spool_files(root: Path) -> list[Path]:
+    return [p for p in root.rglob("*") if p.is_file() and not p.name.endswith("lock")]
+
+
+@pytest.mark.parametrize("tag_only", [False, True], ids=["data_tags", "tag_only"])
+def test_rows_spilled_to_disk_build_the_same_table(
+    spilled: Path, tag_only: bool
+) -> None:
+    rows = _rows(tag_only)
+    expected = StaticOutputOperatorPod._rows_to_table(rows)[0]  # pyright: ignore[reportPrivateUsage]  # the rule RowChunks must equal
+
+    chunks = _chunks(rows)
+    table = chunks.row_table()[0]
+
+    assert _spool_files(spilled), "the chunks were not written to disk"
+    assert table.schema.equals(expected.schema, check_metadata=True)
+    assert table.equals(expected)
+
+
+def test_a_table_read_from_spilled_rows_outlives_what_wrote_it(spilled: Path) -> None:
+    import gc
+
+    rows = _rows(False)
+    expected = StaticOutputOperatorPod._rows_to_table(rows)[0]  # pyright: ignore[reportPrivateUsage]  # the rule RowChunks must equal
+    chunks = _chunks(rows)
+    stream = chunks.output_stream()
+    table = stream.as_table(columns={"system_tags": True, "source": True})
+    wanted = expected.select(table.column_names)
+
+    del chunks, stream
+    _ = gc.collect()
+
+    # The spool is gone and its files deleted; the table still reads every value.
+    assert not _spool_files(spilled)
+    assert table.equals(wanted)
+    assert table.to_pylist() == wanted.to_pylist()
+
+
+@pytest.mark.parametrize("chain", ["map", "group", "batch"])
+def test_a_job_node_over_spilled_rows_reads_as_one_in_memory(
+    spilled: Path, tmp_path: Path, chain: str
+) -> None:
+    import gc
+
+    job = _job(tmp_path, "spilled", chain, False)
+    _ = job.run(orchestrator=AsyncPipelineOrchestrator())
+    node = job.nodes["out"]
+    table = node.as_table(all_info=True)
+    rows = [(t.as_dict(), d.as_dict()) for t, d in node.iter_data()]
+    content_hash = node.content_hash()
+    values = table.to_pylist()
+
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(static_output_pod, "KEPT_ROWS_MEMORY_BYTES", 1 << 40)
+        in_memory = _job(tmp_path, "in_memory", chain, False)
+        _ = in_memory.run(orchestrator=AsyncPipelineOrchestrator())
+    expected = in_memory.nodes["out"]
+
+    assert _sorted_rows(table) == _sorted_rows(expected.as_table(all_info=True))
+    assert sorted(rows, key=repr) == sorted(
+        [(t.as_dict(), d.as_dict()) for t, d in expected.iter_data()], key=repr
+    )
+    assert content_hash == expected.content_hash()
+
+    # A table a user holds stays valid after the node lets its run go and the job
+    # is gone.
+    node.clear_cache()
+    del node, job
+    _ = gc.collect()
+    assert table.to_pylist() == values
+
+
+def test_a_table_of_spilled_rows_survives_interpreter_shutdown(tmp_path: Path) -> None:
+    """A table held at exit, when the spool directory is removed, raises nothing."""
+    import subprocess
+    import sys
+    import textwrap
+
+    script = textwrap.dedent(
+        """
+        import sys, tempfile
+        tempfile.tempdir = sys.argv[1]
+        import pyarrow as pa
+        from orcapod.core.row_spool import RowSpool
+        spool = RowSpool(memory_bytes=0)
+        spool.append(pa.table({"a": list(range(1000))}))
+        held = spool.table()
+        import atexit
+        atexit.register(lambda: print("sum", sum(held.column("a").to_pylist())))
+        """
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)], capture_output=True, text=True
+    )
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "sum 499500"
+    assert done.stderr == ""
+    assert not _spool_files(tmp_path)
+
+
 def _other_rows() -> list[tuple[Any, Any]]:
     """Rows whose data columns are not those of ``_rows``: no table holds both."""
     source = ArrowTableSource(
@@ -373,3 +482,58 @@ def test_a_result_streams_own_iterator_is_never_bypassed() -> None:
     first = next(iter(shadowed.iter_data()))
     shadowed.iter_data = lambda: iter([first])  # pyright: ignore[reportAttributeAccessIssue]  # an instance's own iterator
     assert [t.as_dict()["trial"] for t, _ in rows_once(shadowed)] == [0]
+
+
+def test_a_small_table_is_kept_as_it_is() -> None:
+    table = _table()
+    assert static_output_pod.kept_table(table) is table
+
+
+def test_a_large_table_is_kept_on_disk_with_the_same_schema_and_values(
+    spilled: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import gc
+
+    monkeypatch.setattr(static_output_pod, "SPILL_SLICE_ROWS", 4)
+    table = _source(False).as_table(all_info=True)
+
+    kept = static_output_pod.kept_table(table)
+
+    assert kept is not table
+    # Its spool is gone with the call and the file deleted: the mapping is the table's.
+    assert not _spool_files(spilled)
+    assert kept.schema.equals(table.schema, check_metadata=True)
+    assert kept.equals(table)
+    _ = gc.collect()
+    # The spool that wrote it is gone; the table still reads.
+    assert kept.to_pylist() == table.to_pylist()
+
+
+@pytest.mark.parametrize("tag_only", [False, True], ids=["data_tags", "tag_only"])
+@pytest.mark.parametrize("chain", ["map", "group", "batch"])
+def test_a_sync_job_node_over_spilled_rows_reads_exactly_as_one_in_memory(
+    spilled: Path, tmp_path: Path, chain: str, tag_only: bool
+) -> None:
+    job = _job(tmp_path, "spilled_sync", chain, tag_only)
+    _ = job.run()
+    node = job.nodes["out"]
+    table = node.as_table(all_info=True)
+
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(static_output_pod, "KEPT_ROWS_MEMORY_BYTES", 1 << 40)
+        in_memory = _job(tmp_path, "in_memory_sync", chain, tag_only)
+        _ = in_memory.run()
+    expected = in_memory.nodes["out"]
+
+    # Sync: the same rows in the same order, the same schema, the same hashes.
+    wanted = expected.as_table(all_info=True)
+    assert table.schema.equals(wanted.schema, check_metadata=True)
+    assert table.equals(wanted)
+    assert node.content_hash() == expected.content_hash()
+    assert [(t.as_dict(), d.as_dict()) for t, d in node.iter_data()] == [
+        (t.as_dict(), d.as_dict()) for t, d in expected.iter_data()
+    ]
+    assert node.head(3).table.equals(expected.head(3).table)
+
+    node.clear_cache()
+    assert table.to_pylist() == wanted.to_pylist()

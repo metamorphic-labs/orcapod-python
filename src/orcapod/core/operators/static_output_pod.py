@@ -36,6 +36,7 @@ from orcapod.core.data_tags import (
     stream_data_tags,
 )
 from orcapod.core.function_pod import FunctionPodStream
+from orcapod.core.row_spool import SPOOL_MEMORY_BYTES, RowSpool
 from orcapod.core.operators.provisional import (
     provisional_operator_name,
     warn_provisional_operator,
@@ -512,7 +513,12 @@ class StaticOutputOperatorPod(TraceableBase):
             A stream over the rows, in row order.
         """
         if rows:
-            return StaticOutputOperatorPod._materialize_to_stream(rows)
+            # Kept as Arrow chunks, on local disk when large (ITL-1464): the table
+            # ``_materialize_to_stream`` builds.
+            chunks = RowChunks()
+            for tag, data in rows:
+                chunks.add(tag, data)
+            return chunks.output_stream()
         return StaticOutputOperatorPod._zero_rows_in_row_order(result)
 
     @staticmethod
@@ -1294,6 +1300,11 @@ ROW_CHUNK_ROWS = 8_192
 until this many have arrived."""
 
 
+KEPT_ROWS_MEMORY_BYTES = SPOOL_MEMORY_BYTES
+"""Bytes of kept rows that stay in memory; beyond them the rows go to local disk and
+are read back memory-mapped (``RowSpool``)."""
+
+
 class RowChunks:
     """Rows received one at a time, kept as Arrow tables, not as ``(Tag, Data)`` pairs.
 
@@ -1313,14 +1324,23 @@ class RowChunks:
     is added; the message's table index is then the row's place in its chunk, or the
     chunk's place.
 
+    Sealed chunks are held by a ``RowSpool``: in memory up to
+    ``KEPT_ROWS_MEMORY_BYTES``, beyond that in a private temporary file read back
+    memory-mapped. The table and streams built here then refer to the mapping, which
+    lives as long as they do: also after this object, its node or its job are gone, and
+    after the file is deleted.
+
     A chunk is the record batch an ITL-1347 channel carries, before the last step of
     its row-built form (the source-info field flags, which need every row); a node
     wired to record-batch channels receives such batches and needs no ``RowChunks``.
     """
 
     def __init__(self) -> None:
-        self._tag_chunks: list[pa.Table] = []
-        self._data_chunks: list[pa.Table] = []
+        # Sealed chunks: in memory up to the spool's limit, then on local disk, read
+        # back memory-mapped (``kept_rows``), so a large output is not process memory.
+        self._spool = RowSpool(memory_bytes=KEPT_ROWS_MEMORY_BYTES)
+        self._names: list[str] | None = None
+        self._schema: pa.Schema | None = None
         self._context_chunks: list[pa.Array[Any]] = []  # pyright: ignore[reportExplicitAny]  # any array
         self._pending: list[tuple[TagProtocol, DataProtocol]] = []
         self._tag_keys: tuple[str, ...] = ()
@@ -1360,12 +1380,25 @@ class RowChunks:
             data_tables = [t.drop_columns(list(self._data_tags)) for t in data_tables]
         # One chunk per column instead of one per row: the per-row arrays are what
         # costs memory, the values are the same.
-        self._tag_chunks.append(
-            arrow_utils.concat_tables_by_name(tag_tables).combine_chunks()
+        chunk = arrow_utils.hstack_tables(
+            arrow_utils.concat_tables_by_name(tag_tables).combine_chunks(),
+            arrow_utils.concat_tables_by_name(data_tables).combine_chunks(),
         )
-        self._data_chunks.append(
-            arrow_utils.concat_tables_by_name(data_tables).combine_chunks()
-        )
+        if self._names is None:
+            self._names = chunk.column_names
+        elif chunk.column_names != self._names and set(chunk.column_names) == set(
+            self._names
+        ):
+            # Columns are matched by name, as ``concat_tables_by_name`` matches them.
+            chunk = chunk.select(self._names)
+        first = self._schema
+        if first is None:
+            self._schema = chunk.schema
+        elif not chunk.schema.equals(first, check_metadata=True):
+            # What joining it with the earlier chunks gives: their schema, or the
+            # error a table built from rows of differing columns raises.
+            chunk = pa.concat_tables([first.empty_table(), chunk]).combine_chunks()
+        self._spool.append(chunk)
         self._context_chunks.append(
             pa.array([data.data_context_key for _, data in rows], pa.large_string())
         )
@@ -1380,20 +1413,14 @@ class RowChunks:
         Raises:
             ValueError: If no row was added.
         """
-        from orcapod.utils import arrow_utils
-
         if self.num_rows == 0:
             raise ValueError("Cannot materialize an empty list of rows into a stream")
         self._seal()
-        combined_tags = arrow_utils.concat_tables_by_name(self._tag_chunks)
-        combined_data = StaticOutputOperatorPod._flag_source_info_nullability(  # pyright: ignore[reportPrivateUsage]  # the one rule for these flags
-            arrow_utils.concat_tables_by_name(self._data_chunks)
+        # Only the ``_source_*`` fields are flagged; the arrays are the spool's.
+        table = StaticOutputOperatorPod._flag_source_info_nullability(  # pyright: ignore[reportPrivateUsage]  # the one rule for these flags
+            self._spool.table()
         )
-        return (
-            arrow_utils.hstack_tables(combined_tags, combined_data),
-            self._tag_keys,
-            self._data_tags,
-        )
+        return table, self._tag_keys, self._data_tags
 
     def output_stream(self) -> StreamProtocol:
         """Return the stream ``_materialize_to_stream`` builds from the rows added."""
@@ -1445,6 +1472,33 @@ def rows_once(
     if type(result) is ArrowTableStream and "iter_data" not in vars(result):
         return result.iter_data_unkept()
     return result.iter_data()
+
+
+SPILL_SLICE_ROWS = 65_536
+"""Rows handed to the spool at a time by ``kept_table``: the copy the spool makes of
+what it is given is then one slice, not the table."""
+
+
+def kept_table(table: pa.Table) -> pa.Table:
+    """Return ``table`` as a node keeps it: on local disk when it is large (ITL-1464).
+
+    A table of at most ``KEPT_ROWS_MEMORY_BYTES`` is returned as it is. A larger one
+    is written to a ``RowSpool`` and returned read back memory-mapped: the same
+    schema and values (only the arrays' chunking differs), not process memory. The
+    mapping lives as long as a table that refers to it.
+
+    Args:
+        table: The rows a node is about to keep.
+
+    Returns:
+        The table to keep.
+    """
+    if table.nbytes <= KEPT_ROWS_MEMORY_BYTES or not table.num_rows:
+        return table
+    spool = RowSpool(memory_bytes=KEPT_ROWS_MEMORY_BYTES)
+    for start in range(0, table.num_rows, SPILL_SLICE_ROWS):
+        spool.append(table.slice(start, SPILL_SLICE_ROWS))
+    return spool.table()
 
 
 async def collect_row_chunks(
