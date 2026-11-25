@@ -275,6 +275,11 @@ class KeptBatches:
         """How many rows were kept."""
         return self._spool.size + sum(t.num_rows for t in self._in_memory)
 
+    def close(self) -> None:
+        """Let the kept rows go; an output stream already given stays valid."""
+        self._spool.close()
+        self._in_memory = []
+
     def _table(self) -> pa.Table:
         """Every row kept, in order."""
         if not self._in_memory:

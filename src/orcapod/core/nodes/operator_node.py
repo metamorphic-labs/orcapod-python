@@ -2403,9 +2403,11 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
             async with asyncio.TaskGroup() as tg:
                 _ = tg.create_task(execute(channels, result))
                 _ = tg.create_task(forward())
-        except ExceptionGroup as exc:
+        except BaseException as exc:
+            # A run that fails or is cancelled leaves no file on local disk.
+            batches.close()
             # Preserve direct operator errors; concurrent failures stay grouped.
-            if len(exc.exceptions) == 1:
+            if isinstance(exc, ExceptionGroup) and len(exc.exceptions) == 1:
                 raise exc.exceptions[0] from exc
             raise
 
@@ -2415,7 +2417,11 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
                 for feed, stream in zip(feeds, self._input_streams, strict=True)
             ]
 
-        return (batches.output_stream() if batches.num_rows else None), zero_inputs
+        try:
+            kept = batches.output_stream() if batches.num_rows else None
+        finally:
+            batches.close()
+        return kept, zero_inputs
 
     async def _run_over_rows(
         self,
@@ -2445,9 +2451,11 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
                     )
                 )
                 _ = tg.create_task(forward())
-        except ExceptionGroup as exc:
+        except BaseException as exc:
+            # A run that fails or is cancelled leaves no file on local disk.
+            collected.close()
             # Preserve direct operator errors; concurrent failures stay grouped.
-            if len(exc.exceptions) == 1:
+            if isinstance(exc, ExceptionGroup) and len(exc.exceptions) == 1:
                 raise exc.exceptions[0] from exc
             raise
 
@@ -2459,7 +2467,11 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
                 for tap, upstream in zip(taps, self._input_streams, strict=True)
             ]
 
-        return (collected.output_stream() if collected.num_rows else None), zero_inputs
+        try:
+            kept = collected.output_stream() if collected.num_rows else None
+        finally:
+            collected.close()
+        return kept, zero_inputs
 
     async def async_execute(
         self,
