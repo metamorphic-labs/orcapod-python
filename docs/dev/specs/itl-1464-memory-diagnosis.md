@@ -203,3 +203,23 @@ It removes the largest cost of the reported case (a) and nothing of case (b): an
 operator and a job still read the tokens. What remains of the 1.96 GiB is the system
 tags (0.5 GiB of Arrow), the set of keys seen (0.5 GiB of Python strings) and the copy
 made when the batches are joined.
+
+## The first transport step's effect
+
+Async rows kept as Arrow tables of at most 8,192 rows instead of one pair of objects per
+row (the orchestrator's collectors and drain, an operator job node's kept output, a
+barrier operator's gathered input and its result while sent). Async job, peak resident
+memory less the import, per row; before at 20,000 rows, after at 200,000:
+
+| Job | Before | After |
+|---|---|---|
+| `map_data` | 54 KiB | 7.7 KiB |
+| `drop_nulls` | 90 KiB | 8.6 KiB |
+| `polars_filter` | 109 KiB | 12.5 KiB |
+| `join` (large with small) | 68 KiB | 21 KiB |
+| `group_by` | 57 KiB | 15 KiB |
+| `drop_nulls`, `group_by`, `map_data`, function pod | 102 KiB (19.7 GiB at 200,000 rows) | 24 KiB (4.8 GiB) |
+
+The async path now costs about what the sync path does. What remains is cause 2 and
+cause 3: each node keeps its tokenized table (about 4.5 KiB per row per copy), and
+`Join` buffers both inputs in the row form.
