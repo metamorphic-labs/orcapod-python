@@ -60,6 +60,7 @@ from orcapod.core.streams.base import (
     typed_zero_row_table,
 )
 from orcapod.core.streams.record_batch_input import InputChannel
+from orcapod.core.streams.preview import refused
 from orcapod.core.streams.view import (
     ViewStatus,
     StreamView,
@@ -1297,6 +1298,14 @@ class SourceNodeBase(TraceableBase, ABC):
             total_rows=table.num_rows,
             display_all_rows=False,
         )
+
+    def preview(self, n: int = 10, *, compute_all: bool = False) -> StreamView:
+        """Refused: a node of a pipeline or job has no preview (``StreamBase.preview``).
+
+        Raises:
+            PreviewRefusedError: Always.
+        """
+        raise refused(self, "is a node of a pipeline or job")
 
     def open_channel(self) -> RecordBatchInput:
         """Open an input channel on this node's rows, for async computation (ITL-1347).

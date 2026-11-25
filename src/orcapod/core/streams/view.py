@@ -575,32 +575,30 @@ class StreamView:
         never changed."""
         columns_shown = self._display_columns()
         table = self.table.select([name for name, _ in columns_shown])
-        rows = table.num_rows
         half = _DISPLAY_ROWS // 2
-        # Only the rows the display shows are summarised; the others are left null,
-        # because Polars shows the first and last ``half`` of a long frame only.
-        shown = (
-            table
-            if self._displays_every_row()
-            else pa.concat_tables([table.slice(0, half), table.slice(rows - half)])
-        )
+        # Only the rows the display shows are read: of a long view the first and the last
+        # ``half``, and one more between them, where Polars renders its ellipsis. The
+        # view of a job node may be a memory-mapped file (ITL-1464).
+        ends: list[pa.Table] = []
+        if not self._displays_every_row():
+            ends = [
+                table.slice(0, half),
+                table.slice(half, 1),
+                table.slice(table.num_rows - half),
+            ]
+            table = pa.concat_tables(ends)
+        shown = pa.concat_tables([ends[0], ends[2]]) if ends else table
         columns = []
         for name in table.column_names:
             summary = _summarise(shown.column(name))
             if summary is None:
                 columns.append(table.column(name))
-            elif shown is table:
-                columns.append(pa.chunked_array([summary], type=pa.large_string()))
-            else:
-                columns.append(
-                    pa.chunked_array(
-                        [
-                            pa.array(summary[:half], type=pa.large_string()),
-                            pa.nulls(rows - 2 * half, type=pa.large_string()),
-                            pa.array(summary[half:], type=pa.large_string()),
-                        ]
-                    )
-                )
+                continue
+            if ends:
+                summary = [*summary[:half], None, *summary[half:]]
+            columns.append(
+                pa.chunked_array([pa.array(summary, type=pa.large_string())])
+            )
         names = list(table.column_names)
         if text:
             marked = [
@@ -616,8 +614,20 @@ class StreamView:
         return pl.DataFrame(pa.table(columns, names=names))
 
     def _with_row_count(self, rendered: str) -> str:
-        """Return Polars' rendering of the display frame, which names its row count."""
-        return rendered
+        """Return Polars' rendering of the display frame, naming the view's row count.
+
+        The frame of a long view has one row more than the display shows. Polars names
+        the frame's shape before anything else it renders.
+        """
+        if self._displays_every_row():
+            return rendered
+        return rendered.replace(
+            f"shape: ({_DISPLAY_ROWS + 1:_}, ", f"shape: ({self._row_count():_}, ", 1
+        )
+
+    def _row_count(self) -> int:
+        """The rows of the view, as its display names them."""
+        return self.table.num_rows
 
     def _displays_every_row(self) -> bool:
         """Whether the display shows every row: a view cut to ``n`` rows, or a short one."""
@@ -708,11 +718,8 @@ class _EndsView(StreamView):
     shown_total: int = 0
 
     @override
-    def _with_row_count(self, rendered: str) -> str:
-        # Polars names the frame's shape before anything else it renders.
-        return rendered.replace(
-            f"shape: ({self.table.num_rows:_}, ", f"shape: ({self.shown_total:_}, ", 1
-        )
+    def _row_count(self) -> int:
+        return self.shown_total
 
 
 class BoundedStreamView(StreamView):

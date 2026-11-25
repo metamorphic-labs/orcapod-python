@@ -237,6 +237,32 @@ a polling source polls again and a `SpiralDBTableSource` reads its whole table a
 an operator's stream whose `run()` gave a bounded view). A view never asks its stream for more columns, because for those
 streams asking again is not a read.
 
+### The first rows of a stream not computed yet: `preview(n)`
+
+`head()` never computes, so it has nothing to show of a derived stream nobody ran.
+`preview(n)` computes the first `n` rows of `as_table()`, and only what they need:
+
+```python
+first = months.preview(2)
+print(first.header())
+# FunctionPodStream[months] — preview: first 2 rows (run() computes every row)
+print(first.as_table().column("age_months").to_pylist())
+# [108, 120]
+```
+
+A source reads no more than is needed, an operator takes batches until enough rows have
+passed, and **your functions are called**, on one row after another until `n` rows have come
+out. Nothing is kept on a stream, nothing is stored (a pod with stored results reads them and
+adds none), and no hook fires; calling `preview` again computes again. Results a stream
+already holds are used. A view of fewer rows than asked for says it shows all of them.
+
+A join, `group_by`, `batch`, `polars_filter`, `tag_by`, `pick`, `index` or an operator of your
+own needs every row of its input, so `preview` refuses it (`PreviewRefusedError`, naming the
+step). `preview(n, compute_all=True)` computes that step and everything beneath it in full,
+functions included, and keeps none of it. A side-effect pod, a function that takes the
+invocation context, a `CachedSource`, a `PollingSource` and a node of a pipeline or job are
+refused always: a preview never acts.
+
 What `run()` does on each kind of object:
 
 | Object | `run()` |

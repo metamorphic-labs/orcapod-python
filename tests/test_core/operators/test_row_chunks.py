@@ -30,6 +30,7 @@ from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline import AsyncPipelineOrchestrator
 from orcapod.sources import ArrowTableSource
+from orcapod.streams import StreamView
 from orcapod.utils import arrow_utils
 
 _ROWS = 11
@@ -929,3 +930,47 @@ def test_a_finished_async_run_leaves_no_file_either(
     _ = job.run(orchestrator=AsyncPipelineOrchestrator())
     assert not _spool_files(spilled)
     assert job.nodes["out"].as_table().num_rows == 3
+
+
+@pytest.mark.parametrize("orchestrator", ["sync", "async", "node"])
+@pytest.mark.parametrize("on_disk", [False, True], ids=["in_memory", "on_disk"])
+def test_a_job_nodes_run_view_is_its_current_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, orchestrator: str, on_disk: bool
+) -> None:
+    """The view pages through the rows the node keeps; nothing is refused, whatever the
+    size, and it stays valid once the node lets its rows go (ITL-1464)."""
+    monkeypatch.setattr(static_output_pod, "ROW_CHUNK_ROWS", 3)
+    monkeypatch.setattr("orcapod.core.streams.view.RUN_VIEW_COMPLETE_ROWS", 1)
+    monkeypatch.setattr("orcapod.core.streams.view.RUN_VIEW_WINDOW_ROWS", 0)
+    if on_disk:
+        monkeypatch.setattr(static_output_pod, "KEPT_ROWS_MEMORY_BYTES", 0)
+        monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+    job = _job(tmp_path, "viewed", "map", False)
+    node = job.nodes["out"]
+    if orchestrator == "sync":
+        _ = job.run()
+    elif orchestrator == "async":
+        _ = job.run(orchestrator=AsyncPipelineOrchestrator())
+    view = node.run()
+
+    assert type(view) is StreamView
+    assert view.total_rows == len(view) == node.current_run_row_count() == _ROWS
+    whole = node.as_table()
+    page = node.read_current_run(0, _ROWS)
+    assert page is not None
+    assert view.as_table().equals(whole)
+    assert view.as_table().equals(page)
+    assert view.head(4).table.equals(node.read_current_run(0, 4))
+    assert view.tail(4).table.equals(node.read_current_run(_ROWS - 4, 4))
+    assert view.sort_by_tags().table.equals(
+        node.as_table(columns={"sort_by_tags": True})
+    )
+    assert node.head(3).header() == view.head(3).header()
+
+    shown, html = str(view), view._repr_html_()
+    expected = whole.to_pylist()
+    node.clear_cache()
+    assert view.as_table().to_pylist() == expected
+    assert (str(view), view._repr_html_()) == (shown, html)
+    # A cleared node pages no row; the view is a snapshot of the run it was given.
+    assert node.read_current_run(0, 4) is None

@@ -1267,6 +1267,13 @@ class SideEffectLogDataContextError(OrcapodDatabaseError):
         )
 
 
+class PreviewRefusedError(ValueError):
+    """A ``preview()`` would need more than the rows it shows, or would have an effect.
+
+    The message names the stream it stopped at (ITL-1464).
+    """
+
+
 class BoundedViewError(ValueError):
     """What was asked of a view needs rows the view does not hold (ITL-1464).
 

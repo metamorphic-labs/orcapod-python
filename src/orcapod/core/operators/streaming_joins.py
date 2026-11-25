@@ -378,17 +378,24 @@ class _Rows:
 
 
 def _one_form(tables: Sequence[pa.Table]) -> pa.Table:
-    """``tables`` under one another, a source-info column of several forms as text.
+    """``tables`` under one another, a token column of several forms as text.
+
+    Every derived column is looked at, whatever its name: a join holds the token column
+    of a data-tag both inputs have under a name of its own.
 
     Args:
         tables: Rows of one input, at least one table.
     """
-    kinds: dict[str, set[pa.DataType]] = {}
-    for table in tables:
-        for field in table.schema:
-            if field.name.startswith(constants.SOURCE_PREFIX):
-                kinds.setdefault(field.name, set()).add(field.type)
-    mixed = {name for name, types in kinds.items() if len(types) > 1}
+    derived = {
+        name: table.schema.field(name).type
+        for table in tables
+        for name in source_tokens.derived_columns(table.schema)
+    }
+    mixed = {
+        name
+        for name, kind in derived.items()
+        if any(table.schema.field(name).type != kind for table in tables)
+    }
     return pa.concat_tables([source_tokens.materialize(t, mixed) for t in tables])
 
 

@@ -62,6 +62,12 @@ from orcapod.core.streams.base import (
     typed_zero_row_table,
     row_built_columns,
 )
+from orcapod.core.streams.preview import (
+    PREVIEW_COLUMNS,
+    PreviewRequest,
+    preview_batches,
+    refuse_without_compute_all,
+)
 from orcapod.core.streams.view import (
     BoundedStreamView,
     RunSize,
@@ -2625,6 +2631,54 @@ class DynamicPodStream(StreamBase):
             self._cached_time = datetime.now(timezone.utc)
             self._kept_states = kept_states
             self._run_window = None
+
+    def _preview_batches(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """The operator over its input's batches, or over its whole inputs.
+
+        A kept current result is read as it is; nothing is computed, and nothing is
+        kept of what is computed here.
+        """
+        self._pod._note_provisional_identity_use()
+        self._update_cache_status()
+        if self._cached_stream is not None and self._cached_time is not None:
+            yield from preview_batches(self._cached_stream, request)
+            return
+        pod = cast(StaticOutputOperatorPod, self._pod)
+        if (
+            len(self._upstreams) == 1
+            and type(pod).__dict__.get("BATCHES_GIVE_THE_WHOLE") is True
+        ):
+            keeps_every_row = pod.rows_dropped_text(0, (), self._upstreams) is None
+            wanted = request if keeps_every_row else request.without_limit()
+            with closing(preview_batches(self._upstreams[0], wanted)) as batches:
+                for batch in batches:
+                    yield pod.static_process(batch)
+            return
+        refuse_without_compute_all(self, request, "needs every row of its input")
+        result = pod.static_process(
+            *(
+                self._whole_input(upstream, request.of_every_row())
+                for upstream in self._upstreams
+            )
+        )
+        yield from preview_batches(result, request)
+
+    @staticmethod
+    def _whole_input(
+        upstream: StreamProtocol, request: PreviewRequest
+    ) -> StreamProtocol:
+        """Every row of ``upstream``, computed for a preview, with its pipeline hash."""
+        rows = joined_batches(list(preview_batches(upstream, request)))
+        return _RowsOfStream(
+            rows.as_table(columns=PREVIEW_COLUMNS),
+            tag_columns=rows.keys()[0],
+            pipeline_hash=upstream.pipeline_hash(),
+            data_tags=stream_data_tags(rows),
+            upstreams=upstream.upstreams,
+            data_context=StaticOutputOperatorPod._upstream_context(upstream),  # pyright: ignore[reportPrivateUsage]  # the one place that resolves an upstream's context
+        )
 
     def run(self) -> StreamView:
         """Compute every row and return a ``StreamView`` (``StreamBase.run``).

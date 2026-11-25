@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from orcapod import contexts
@@ -15,6 +15,11 @@ from orcapod.core.streams.base import (
     typed_zero_row_table,
 )
 from orcapod.errors import SourceNameWarning, SourceVersionWarning
+from orcapod.core.streams.preview import (
+    PreviewRequest,
+    refuse_without_compute_all,
+    slices_of,
+)
 from orcapod.core.streams.view import StreamView
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.types import ColumnConfig, Condition, ContentHash, Schema
@@ -623,6 +628,20 @@ class RootSource(StreamBase):
             return self.label
         # The header names the class already; the name is the part that is the user's.
         return self.source_name
+
+    def _preview_batches(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """Slices of the rows a source holds (``preview_batches``).
+
+        A source of the library that holds its table (``_stream``) reads nothing. Any
+        other read of a whole source is refused unless ``compute_all`` was given.
+        """
+        from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+
+        if not isinstance(getattr(self, "_stream", None), ArrowTableStream):
+            refuse_without_compute_all(self, request, "reads its rows whole")
+        yield from slices_of(self, request)
 
     def head(
         self,

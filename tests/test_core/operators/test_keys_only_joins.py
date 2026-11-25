@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import itertools
 import random
 import warnings
 from collections import Counter
@@ -1262,3 +1263,135 @@ def test_rejoin_over_channels_equals_its_barrier_for_rows_of_several_contexts(
     assert _rows(_transport(_bounded(go(barrier=False)))) == _rows(
         _transport(_bounded(go(barrier=True)))
     )
+
+
+def _rejoin(inputs: Sequence[StreamProtocol]) -> StreamingJoinKernel:
+    return StreamingRejoin(Rejoin(), inputs)
+
+
+def _data_tagged_inputs(kernel: str) -> list[Any]:
+    """Inputs that share data-tags, with every token of them derived."""
+    if kernel == "rejoin":
+        source = _data_tagged("a", 7)
+        return [
+            source.select_data_columns(["a1", "k", "g"]),
+            source.select_data_columns(["a2", "k", "g"]),
+        ]
+    names = "abc" if kernel == "join3" else "ab"
+    return [_data_tagged(name, 5 + i) for i, name in enumerate(names)]
+
+
+DATA_TAG_KERNELS: dict[str, tuple[Any, Any]] = {
+    "join": (_join, Join()),
+    "join3": (_join, Join()),
+    "merge_join": (_merge, MergeJoin()),
+    "semi_join": (_semi, SemiJoin()),
+    "rejoin": (_rejoin, Rejoin()),
+}
+
+
+@pytest.mark.parametrize("blocks", [2, 64])
+@pytest.mark.parametrize("changes", ["one", "every"])
+@pytest.mark.parametrize("first", ["derived", "text"])
+@pytest.mark.parametrize("kernel", sorted(DATA_TAG_KERNELS))
+def test_shared_data_tags_when_a_tokens_form_changes(
+    spooled: Path,
+    kernel: str,
+    first: str,
+    changes: str,
+    blocks: int,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of #567: a merged data-tag's tokens are held under a name of the join's
+    own, and rows of both forms could not be put together. Every input changes its form
+    half way (or one does, each in turn), before and after the others arrive and end."""
+    # With blocks of 64 rows, rows of both forms are fetched together.
+    monkeypatch.setattr(streaming_joins, "PUSH_ROWS", blocks)
+    monkeypatch.setattr(streaming_joins, "PAIRS_PER_BATCH", blocks)
+    make, op = DATA_TAG_KERNELS[kernel]
+    inputs = _data_tagged_inputs(kernel)
+    expected = _rows(_transport(op.static_process(*inputs)))
+    assert expected
+    carried = [_carried(s).combine_chunks() for s in inputs]
+    assert all(source_tokens.derived_columns(t.schema) for t in carried)
+    changing = [{i} for i in range(len(inputs))]
+    if changes == "every":
+        changing = [set(range(len(inputs)))]
+    for changed in changing:
+        parts: list[list[pa.RecordBatch]] = []
+        for index, table in enumerate(carried):
+            half = table.num_rows // 2
+            pieces = [table.slice(0, half), table.slice(half)]
+            if index in changed:
+                as_text = 1 if first == "derived" else 0
+                pieces[as_text] = source_tokens.materialize(pieces[as_text])
+            parts.append([b for t in pieces for b in t.combine_chunks().to_batches()])
+        for order in itertools.permutations(range(len(inputs))):
+            # Each input whole in turn, its end now or only after the last one.
+            for ends_at_once in (True, False):
+                events: list[tuple[int, pa.RecordBatch | None]] = []
+                for index in order:
+                    events += [(index, batch) for batch in parts[index]]
+                    if ends_at_once:
+                        events.append((index, None))
+                if not ends_at_once:
+                    events += [(index, None) for index in order]
+                _check_events(make(inputs), events, expected)
+        # And the inputs' halves in turn.
+        events = [
+            (index, parts[index][half])
+            for half in (0, 1)
+            for index in range(len(inputs))
+        ]
+        events += [(index, None) for index in range(len(inputs))]
+        _check_events(make(inputs), events, expected)
+    assert _files(spooled) == []
+
+
+def _check_events(
+    kernel: StreamingJoinKernel,
+    events: Sequence[tuple[int, pa.RecordBatch | None]],
+    expected: Any,
+) -> None:
+    """Check the rows a kernel gives for these arrivals, their tokens as text."""
+    rows: Any = Counter()
+    for batch in _run(kernel, events):
+        rows += _rows(source_tokens.materialize(pa.Table.from_batches([batch])))
+    assert rows == expected
+    assert kernel.held_rows == 0
+
+
+@pytest.mark.parametrize("first", ["derived", "text"])
+@pytest.mark.parametrize("kernel", sorted(DATA_TAG_KERNELS))
+def test_shared_data_tags_whose_tokens_change_form_over_staged_channels(
+    spooled: Path, kernel: str, first: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The same over channels, the join taking each batch before the next is sent."""
+    monkeypatch.setattr(streaming_joins, "PUSH_ROWS", 64)
+    monkeypatch.setattr(streaming_joins, "PAIRS_PER_BATCH", 64)
+    _, op = DATA_TAG_KERNELS[kernel]
+    inputs = _data_tagged_inputs(kernel)
+    expected = _rows(_transport(op.static_process(*inputs)))
+    tables = [_carried(s).combine_chunks() for s in inputs]
+
+    async def go() -> StreamProtocol:
+        channels = [OutputChannel(s, retain=False, buffer_size=8) for s in inputs]
+        output = OutputChannel(op(*inputs))
+        readers = [channel.open_reader() for channel in channels]
+        run = asyncio.create_task(op.async_execute_batches(readers, output))
+        for half in (0, 1):
+            for channel, table in zip(channels, tables):
+                middle = table.num_rows // 2
+                part = table.slice(0, middle) if half == 0 else table.slice(middle)
+                if (half == 0) == (first == "text"):
+                    part = source_tokens.materialize(part)
+                for batch in part.combine_chunks().to_batches():
+                    await channel.send(batch)
+                await asyncio.sleep(0.01)
+        for channel in channels:
+            await channel.close()
+        await run
+        return output.result()
+
+    assert _rows(_transport(_bounded(go()))) == expected
+    assert _files(spooled) == []
