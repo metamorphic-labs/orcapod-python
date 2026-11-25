@@ -20,9 +20,11 @@ from typing_extensions import override
 
 from orcapod.core.unique_keys import UniqueKeys, derived_keys
 from orcapod.core.base import TraceableBase
+from orcapod.core.held_rows import HeldPairs
 from orcapod.core.nodes.staleness import RunHoldingNode
 from orcapod.core.nodes.function_node import (
     _build_record_id_preimage,
+    held_pairs,
     rows_as_output_stream,
     run_job_node,
 )
@@ -1122,7 +1124,7 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         self._current_log_checked = False
         # The rows the last completed run passed on, in the order it passed them;
         # ``None`` when no run in this process completed (ITL-1091).
-        self._held_rows: list[tuple[TagProtocol, DataProtocol]] | None = None
+        self._held_rows: HeldPairs | None = None
         # Whether those rows came from a load-only run, which delivers nothing.
         self._run_load_only = False
         # A node that has not run in this process holds nothing and is stale (ITL-1095).
@@ -1142,9 +1144,15 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         Its next ``run()`` (or job run) delivers again what its invocation log does not
         record (every row without ``track_completion``) (ITL-1095).
         """
-        self._held_rows = None
+        self._drop_held_rows()
         self._run_load_only = False
         self._set_modified_time(None)
+
+    def _drop_held_rows(self) -> None:
+        """Let the held rows go, and their files; a read begun goes on to its end."""
+        rows, self._held_rows = self._held_rows, None
+        if rows is not None:
+            rows.close()
 
     def _refuse_log_of_another_data_context(self) -> None:
         """Refuse an invocation log holding deliveries of another data context.
@@ -1273,7 +1281,7 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
             SideEffectLogDataContextError: If the invocation log holds deliveries
                 logged under another data context; nothing is delivered then.
         """
-        self._held_rows = None
+        self._drop_held_rows()
         if load_only:
             try:
                 rows = list(input_stream.iter_data())
@@ -1281,7 +1289,7 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
                 # A run that raised defines no rows, as on the async path (ITL-1121).
                 self.clear_cache()
                 raise
-            self._hold(rows, load_only=True)
+            self._hold_run(rows, load_only=True)
             return self._output_stream(rows)
         try:
             results = self._deliver_rows(input_stream, run_id=run_id)
@@ -1290,7 +1298,7 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
             # node below it (ITL-1095).
             self.clear_cache()
             raise
-        self._hold(results)
+        self._hold_run(results)
         return self._output_stream(results)
 
     def _output_stream(
@@ -1331,9 +1339,22 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
                 results.append(result)
         return results
 
-    def _hold(
+    def _hold_run(
         self, rows: list[tuple[TagProtocol, DataProtocol]], *, load_only: bool = False
     ) -> None:
+        """``_hold`` the rows of a sync run; a run whose rows cannot be held failed."""
+        pairs = held_pairs()
+        try:
+            for row in rows:
+                pairs.append(row)
+                pairs.spill()
+            self._hold(pairs, load_only=load_only)
+        except BaseException:
+            pairs.close()
+            self.clear_cache()
+            raise
+
+    def _hold(self, rows: HeldPairs, *, load_only: bool = False) -> None:
         """Keep the rows a completed run passed on and stamp the node as modified.
 
         Stamped after the upstream nodes, which stamp at the end of their own run, so the
@@ -1347,14 +1368,14 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         self._run_load_only = load_only
         self._update_modified_time()
 
-    def _current_rows(self) -> list[tuple[TagProtocol, DataProtocol]] | None:
+    def _current_rows(self) -> HeldPairs | None:
         """The rows the last run passed on, or ``None`` if there are none or they are stale.
 
         Held rows go stale, and are dropped, when an upstream changed after the run: the
         judgement ``FunctionJobNode`` uses for the rows it holds.
         """
         if self._held_rows is not None and self.is_stale:
-            self._held_rows = None
+            self._drop_held_rows()
         return self._held_rows
 
     # ------------------------------------------------------------------
@@ -1371,7 +1392,9 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         job has not run, the last run raised, or an upstream changed since), there are
         no rows. ``run()`` or ``job.run()`` delivers.
         """
-        yield from self._current_rows() or ()
+        for tag, data in self._current_rows() or ():
+            # A row passed on always has data.
+            yield tag, cast("DataProtocol", data)
 
     def held_row_count(self) -> int:
         """The number of rows the last run of this node passed on (``iter_data``'s count).
@@ -1537,17 +1560,20 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
                 f"SideEffectJobNode.async_execute expects exactly 1 input channel; "
                 f"got {len(inputs)}."
             )
-        self._held_rows = None
+        self._drop_held_rows()
         # A load-only run reads no pod configuration: it delivers nothing.
         if load_only:
+            # Full chunks on local disk (ITL-1464), closed if the run fails.
+            rows = held_pairs()
             try:
-                rows: list[tuple[TagProtocol, DataProtocol]] = []
                 async for item in inputs[0]:
                     rows.append(item)
+                    rows.spill()
                     await output.send(item)
                 # Held and stamped before the output closes (ITL-1042).
                 self._hold(rows, load_only=True)
             except BaseException:
+                rows.close()
                 self.clear_cache()
                 raise
             finally:
@@ -1558,7 +1584,8 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
             asyncio.Semaphore(max_concurrency) if max_concurrency is not None else None
         )
         # This run's rows, in the order they were sent downstream.
-        passed_on: list[tuple[TagProtocol, DataProtocol]] = []
+        # Full chunks on local disk (ITL-1464), closed if the run fails.
+        passed_on = held_pairs()
         # Makes recording a row and sending it one step: a send blocked by a full channel
         # can be overtaken by a later one, so without it the held order could differ from
         # the order downstream received. Never held across the delivery itself.
@@ -1585,6 +1612,7 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
                     if result is not None:
                         async with send_lock:
                             passed_on.append(result)
+                            passed_on.spill()
                             await output.send(result)
                 finally:
                     if sem is not None:
@@ -1600,6 +1628,7 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
             self._hold(passed_on)
         except BaseException:
             # A run that raised or was cancelled defines no rows (ITL-1095).
+            passed_on.close()
             self.clear_cache()
             raise
         finally:
