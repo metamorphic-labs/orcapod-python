@@ -8,10 +8,9 @@ primary-key (key-schema) columns are the tag columns by default.
 Requires the ``spiraldb`` optional extra: ``pip install orcapod[spiraldb]``.
 Authentication is spiral-sdk's: ``SPIRAL_*`` environment variables, or the credentials
 ``spiral login`` saved.
-The SDK client is used by every source of one service address and sign-in in a process
-(ITL-1457), and by its restricted copies. Use a new source after changing the SDK
-endpoint, credentials or options: it signs in again. Use the source as a context manager
-or call ``close()`` after its reads and jobs have finished; no other source is affected.
+The SDK client is reused for reads and freshness checks, including on restricted copies.
+Use a new source after changing the SDK endpoint, credentials or options. Use the source
+as a context manager or call ``close()`` after its reads and jobs have finished.
 
 Example::
 
@@ -43,15 +42,8 @@ import asyncio
 import copy
 import dataclasses
 import os
-from collections.abc import (
-    AsyncIterator,
-    Callable,
-    Collection,
-    Generator,
-    Iterator,
-    Mapping,
-)
-from concurrent.futures import Future, ThreadPoolExecutor
+from collections.abc import AsyncIterator, Collection, Generator, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 from types import TracebackType
 from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING
@@ -762,20 +754,16 @@ class SpiralDBTableSource(RootSource):
             if self._closed:
                 self._kept = None
 
-    def _lookup_table(self, asof: int | None) -> SpiralDBTable:
+    def _lookup_table(self) -> SpiralDBTable:
         """Resolve the name and check that it still identifies this source's table.
 
-        Args:
-            asof: The version that is to be read. Its kept snapshot is read again if the
-                table still has that version; every refusal is judged afresh (ITL-1457).
+        A kept snapshot is read again if the name still leads to it; every refusal is
+        judged afresh (ITL-1457).
         """
         kept = self._kept
-        if kept is not None and kept.id_and_version != (self._table_id, str(asof)):
-            kept = None
         table = self._connector().lookup_table(self._table_name, kept)
-        if kept is not None and table.version() != asof:
-            # Versions only move on: it cannot be read through again.
-            self._kept = None
+        if kept is not None and not table.reads(kept):
+            self._kept = None  # versions only move on: it is not read again
         table_id = table.table_id
         if table_id != self._table_id:
             raise ValueError(
@@ -795,7 +783,7 @@ class SpiralDBTableSource(RootSource):
         cost grows with the table.
         """
         asof = self._asof
-        table = self._lookup_table(asof)
+        table = self._lookup_table()
         count = table.row_count_estimate(asof=asof)
         self._keep(table)
         return count
@@ -821,39 +809,11 @@ class SpiralDBTableSource(RootSource):
             ValueError: If the table was dropped and created again (another table id)
                 or its columns changed: build the source again to read it.
         """
-        return self._given_asof is None and self._pin_newer(
-            self._lookup_table(self._asof)
-        )
-
-    @override
-    def _begin_check(self) -> Callable[[], Callable[[], bool]] | None:
-        """Return the service calls of the check (ITL-1457), unless a subclass or a
-        caller replaced ``check_for_new_data``: what that does is not known."""
-        if getattr(self.check_for_new_data, "__func__", None) is not _OWN_CHECK:
-            return None
-        return self._fetch_for_check
-
-    def _fetch_for_check(self) -> Callable[[], bool]:
-        """Make the service calls of ``check_for_new_data`` and return the rest of it."""
-        looked_up: Future[SpiralDBTable] = Future()
         if self._given_asof is not None:
-            return lambda: False
-        try:
-            table = self._lookup_table(self._asof)
-            table.fetch()
-            looked_up.set_result(table)
-        except BaseException as exc:
-            looked_up.set_exception(exc)
-        return lambda: self._pin_newer(looked_up.result())
-
-    def _pin_newer(self, table: SpiralDBTable) -> bool:
-        """Pin the version of ``table`` when it is newer (``check_for_new_data``).
-
-        Args:
-            table: This source's table, looked up by this check.
-        """
+            return False
         # One lookup per check (ITL-1350): a table dropped and created again since
         # is found by this lookup, and its schema and version come from it.
+        table = self._lookup_table()
         schema = arrow_utils.drop_system_columns(
             table.arrow_schema().empty_table()
         ).schema
@@ -910,7 +870,7 @@ class SpiralDBTableSource(RootSource):
                 key column holds a null.
         """
         asof = self._asof
-        table = self._lookup_table(asof)
+        table = self._lookup_table()
         try:
             yield from self._read_batches(
                 table, asof=asof, limit=self._limit, max_rows=self._max_rows
@@ -1088,7 +1048,7 @@ class SpiralDBTableSource(RootSource):
         limit = self._limit
         head_limit = n if limit is None else min(n, limit)
         asof = self._asof
-        table = self._lookup_table(asof)
+        table = self._lookup_table()
         rows = self._whole_table(
             self._read_batches(table, asof=asof, limit=head_limit, max_rows=None),
             columns=columns,
@@ -1120,9 +1080,8 @@ class SpiralDBTableSource(RootSource):
             return shown, None
         allowed = min(self._max_rows or DEFAULT_MAX_ROWS, DEFAULT_MAX_ROWS)
         bound = max(allowed, shown)
-        asof = self._asof
-        handle = self._lookup_table(asof) if table is None else table
-        total = handle.count_rows(asof=asof, at_most=bound + 1)
+        handle = self._lookup_table() if table is None else table
+        total = handle.count_rows(asof=self._asof, at_most=bound + 1)
         return bound, (None if total > bound else total)
 
     def _head_note(self, head: "_Head", sorted_by_tags: bool = False) -> str:
@@ -1298,6 +1257,3 @@ class SpiralDBTableSource(RootSource):
                 f"{source.table_id!r}: it is a different table."
             )
         return source
-
-
-_OWN_CHECK = SpiralDBTableSource.check_for_new_data

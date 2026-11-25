@@ -434,6 +434,16 @@ class SchemaTable:
         self._lock = Lock()
         self._kept: tuple[tuple[str, int], dict[str, SchemaRow]] | None = None
 
+    def row(self, table_id: str) -> SchemaRow | None:
+        """Return the row of ``table_id`` as stored now; ``None`` when the dataset has no
+        schema table, or a complete one without that table.
+
+        Raises:
+            TableSchemaError: If the table cannot be read in full or is not complete.
+        """
+        rows = self.rows()
+        return None if rows is None else rows.get(table_id)
+
     def rows(self) -> Mapping[str, SchemaRow] | None:
         """Return every row by table id, as stored now; ``None`` when the dataset has no
         schema table.

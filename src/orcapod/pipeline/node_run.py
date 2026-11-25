@@ -14,10 +14,8 @@ the commit ``job.run()`` makes.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from itertools import groupby
 from typing import TYPE_CHECKING, Any
 
 from orcapod.errors import OrcapodDatabaseError, OrcapodDatabaseWriteError
@@ -208,45 +206,6 @@ def run_sources(streams: Iterable[Any]) -> list[Any]:
     return found
 
 
-# The most sources whose checks fetch at the same time.
-_CHECK_THREADS = 8
-
-
-def _checks(sources: Sequence[Any]) -> Iterator[tuple[Any, Callable[[], bool]]]:
-    """Yield each source with its check, in order (ITL-1457).
-
-    Sources next to each other that offer the fetching part of their check
-    (``_begin_check``) do it at the same time; the rest of each check, which takes in
-    data, warns and raises, is the caller's to call, one after another. No such part is
-    moved before or after the check of a source that offers none: what that does is the
-    source's own.
-
-    Args:
-        sources: The sources, in the order they are checked.
-    """
-    for offers, group in groupby(
-        ((source, source._begin_check()) for source in sources),
-        key=lambda item: item[1] is not None,
-    ):
-        items = list(group)
-        if not offers or len(items) == 1:
-            for source, _ in items:
-                yield source, source.check_for_new_data
-            continue
-        with ThreadPoolExecutor(
-            min(_CHECK_THREADS, len(items)), thread_name_prefix="source-check"
-        ) as pool:
-            try:
-                fetched = [pool.submit(begin) for _, begin in items if begin]
-            except RuntimeError:  # no thread can be started (the interpreter is ending)
-                fetched = []
-        for index, (source, _) in enumerate(items):
-            yield (
-                source,
-                fetched[index].result() if fetched else source.check_for_new_data,
-            )
-
-
 def check_sources(streams: Iterable[Any]) -> tuple[str, ...]:
     """Ask each source feeding ``streams`` once whether its data changed (ITL-1102).
 
@@ -270,9 +229,9 @@ def check_sources(streams: Iterable[Any]) -> tuple[str, ...]:
     from orcapod.utils.warning_utils import outside_orcapod_stacklevel, warn_at_frame
 
     unchecked: list[str] = []
-    for source, check in _checks(run_sources(streams)):
+    for source in run_sources(streams):
         try:
-            _ = check()
+            source.check_for_new_data()
         except Exception as exc:
             name = source_name(source)
             unchecked.append(name)

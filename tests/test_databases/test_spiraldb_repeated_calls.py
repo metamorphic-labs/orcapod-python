@@ -1,15 +1,13 @@
-"""What SpiralDB sources share, and what they may never share (ITL-1457), on the fake.
+"""What a SpiralDB source reads again without fetching it again (ITL-1457), on the fake.
 
-One client per service address and sign-in, one state of a dataset's schema table per
-client, and the checks before a run made at the same time. The results, refusals and
-warnings are those of sources that share nothing.
+A source keeps the opened snapshot of its pinned version. The rows, refusals, warnings and
+what is looked at in which order are those of a source that keeps nothing.
 """
 
 from __future__ import annotations
 
 import asyncio
 import collections
-import gc
 import os
 import threading
 import types
@@ -31,12 +29,11 @@ from orcapod.errors import (
     NullInNonNullableColumnError,
     SourceCheckFailedWarning,
     TableSchemaError,
-    UnrecordedTableSchemaWarning,
 )
 from orcapod.operators import SelectColumns
 from orcapod.pipeline import node_run
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
-from orcapod.sources import DictSource, SpiralDBTableSource
+from orcapod.sources import SpiralDBTableSource
 from tests.test_databases import fake_spiral_sdk as fake
 
 _SCHEMA = pa.schema(
@@ -156,298 +153,6 @@ def _ks(source: SpiralDBTableSource) -> list[Any]:
     return source.as_table()["k"].to_pylist()
 
 
-# ---------------------------------------------------------------------- the one client
-
-
-def test_one_client_and_one_read_of_a_schema_table_serve_every_source(
-    calls: _Calls,
-) -> None:
-    sources = [
-        _source(n, p, d) for p in "pq" for d in ("default", "other") for n in "abc"
-    ]
-    assert calls.take() == {
-        "client": 1,
-        "open": 12,
-        "schema": 12,
-        "open schemas": 12,  # checked at each lookup
-        "read schemas": 4,  # read once per dataset
-    }
-    assert [_ks(s) for s in sources] == [
-        [10 * i + j for j in range(4)] for _ in range(4) for i in range(3)
-    ]
-
-
-def test_sharing_changes_no_result(root: Path) -> None:
-    """Sources that share everything and sources that share nothing are equal."""
-
-    def facts(source: SpiralDBTableSource) -> list[Any]:
-        return [
-            source.source_id,
-            source.content_hash().to_string(),
-            source.pipeline_hash().to_string(),
-            source.output_schema(),
-            source.as_table(all_info=True),
-            [t.as_dict() for t, _ in source.iter_data()],
-            source.head(2).table,
-            source.row_count_estimate,
-        ]
-
-    shared = [_source(n, d) for n, d in (("a", "p"), ("b", "p"), ("a", "q"))]
-    apart = []
-    for name, project in (("a", "p"), ("b", "p"), ("a", "q")):
-        connector_module._forget_clients()  # pyright: ignore[reportPrivateUsage]  # so nothing is shared
-        apart.append(_source(name, project))
-    assert [facts(s) for s in shared] == [facts(s) for s in apart]
-
-
-def test_closing_a_source_breaks_no_other_and_the_last_releases_the_client(
-    calls: _Calls,
-) -> None:
-    first, second = _source("a"), _source("b")
-    copy = first.where(j="j0")
-    first.close()
-    assert _ks(copy) == [0, 2] and _ks(second) == [10, 11, 12, 13]
-    with pytest.raises(RuntimeError, match="closed"):
-        first.as_table()
-    copy.close()
-    assert _ks(second) == [10, 11, 12, 13]
-    second.close()
-    gc.collect()
-    assert [c() for c in calls.clients] == [None]
-    assert _ks(_source("a")) == [0, 1, 2, 3]
-    assert len(calls.clients) == 2
-
-
-def test_a_scan_in_progress_survives_the_close_of_another_source(root: Path) -> None:
-    first, second = _source("a", batch_rows=1), _source("b")
-    rows = first.iter_data()
-    next(rows)
-    second.close()
-    assert len(list(rows)) == 3
-
-
-def test_a_failure_after_close_is_the_services_error(
-    root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A read may go on after ``close``, and its errors are still noted."""
-    source = _source("a")
-    batches = SpiralDBConnector("p").lookup_table("a")
-    connector = batches._connector  # pyright: ignore[reportPrivateUsage]  # closed below
-    started = threading.Event()
-
-    def fail(*_args: Any, **_given: Any) -> Any:
-        connector.close()
-        started.set()
-        raise fake.SpiralError("status 500")
-
-    monkeypatch.setattr(fake.FakeKeyedTable, "scan", fail)
-    with pytest.raises(fake.SpiralError, match="500") as raised:
-        list(batches.scan_batches())
-    assert started.is_set()
-    assert raised.value.__notes__ == ["SpiralDB: could not read p/default/a"]
-    source.close()
-
-
-@pytest.mark.parametrize(
-    "change",
-    [
-        {"SPIRAL_CLIENT_ID": "work_other"},
-        {"SPIRAL_PRIVATE_KEY": "other"},
-        {"SPIRAL_TOKEN": "t"},
-        {"SPIRAL_WORKLOAD_ID": "w"},
-        {"SPIRAL_AUTH_FILE": "elsewhere"},
-        {"HOME": "elsewhere"},
-        {"ACTIONS_ID_TOKEN_REQUEST_URL": "u"},
-        {"HTTPS_PROXY": "http://localhost:1"},
-    ],
-    ids=lambda c: next(iter(c)),
-)
-def test_a_changed_environment_is_another_client(
-    calls: _Calls, monkeypatch: pytest.MonkeyPatch, change: dict[str, str]
-) -> None:
-    first = _source("a")
-    for name, value in change.items():
-        monkeypatch.setenv(name, value)
-    second = _source("a")
-    assert calls.take()["client"] == 2
-    # The second read the schema table with its own sign-in.
-    assert _ks(first) == _ks(second)
-
-
-def test_a_changed_saved_login_is_another_client(calls: _Calls, root: Path) -> None:
-    kept = [_source("a")]
-    login = root / "auth.json"
-    for write in (
-        lambda: login.write_text("one"),
-        lambda: login.write_text("two"),  # another account, the same size
-        lambda: login.replace(root / "away"),
-    ):
-        write()
-        kept.append(_source("a"))
-        kept.append(_source("b"))
-    # No login, the first, the second; then none again, which is the first client's state.
-    assert calls.take()["client"] == 3
-    assert {tuple(_ks(s)) for s in kept} == {
-        (0, 1, 2, 3),
-        (10, 11, 12, 13),
-    }
-
-
-def test_another_address_is_another_client(calls: _Calls) -> None:
-    kept = [
-        _source("a", overrides=overrides)
-        for overrides in (
-            None,
-            {"server.url": "https://one.example"},
-            {"server.url": "https://two.example"},
-            {"server.url": "https://one.example"},
-            None,
-        )
-    ]
-    assert calls.take()["client"] == 3
-    assert {tuple(_ks(s)) for s in kept} == {(0, 1, 2, 3)}
-
-
-def test_a_sign_in_that_changes_while_connecting_is_not_shared(
-    calls: _Calls, root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    init = fake.FakeClient.__init__
-    writes = iter("xy")
-
-    def renewing(self: Any, **given: Any) -> None:
-        init(self, **given)
-        if (text := next(writes, None)) is not None:
-            (root / "auth.json").write_text(text * len(calls.clients))
-
-    monkeypatch.setattr(fake.FakeClient, "__init__", renewing)
-    kept = [_source("a") for _ in range(4)]
-    assert calls.take()["client"] == 3  # two unknown, then one that is shared
-    assert {tuple(_ks(s)) for s in kept} == {(0, 1, 2, 3)}
-
-
-def test_an_unknown_sign_in_is_not_shared(
-    calls: _Calls, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def no_home(_environ: Any) -> Path:
-        raise RuntimeError("no home folder")
-
-    monkeypatch.setattr(connector_module, "saved_login_path", no_home)
-    kept = [_source("a"), _source("a")]
-    assert calls.take()["client"] == 2
-    assert {tuple(_ks(s)) for s in kept} == {(0, 1, 2, 3)}
-
-
-@pytest.mark.parametrize("failing", ["open", "scan"])
-def test_a_client_whose_call_failed_is_given_to_no_new_source(
-    calls: _Calls, monkeypatch: pytest.MonkeyPatch, failing: str
-) -> None:
-    """An expired or ended sign-in: a new source signs in again, as it always did."""
-    source = _source("a")
-    cls, name = {
-        "open": (fake.FakeClient, "keyed_table"),
-        "scan": (fake.FakeKeyedTable, "scan"),
-    }[failing]
-    with monkeypatch.context() as broken:
-
-        def denied(*_args: Any, **_given: Any) -> Any:
-            raise fake.SpiralError("status 401")
-
-        broken.setattr(cls, name, denied)
-        with pytest.raises(fake.SpiralError, match="401"):
-            source.as_table()
-    again = _source("b")
-    assert calls.take()["client"] == 2
-    _ = _source("c")
-    assert "client" not in calls.take()
-    # What was built keeps its own client, and recovers with it.
-    assert _ks(source) == [0, 1, 2, 3] and _ks(again) == [10, 11, 12, 13]
-
-
-def test_a_missing_table_is_no_failure_of_the_client(calls: _Calls) -> None:
-    kept = _source("a")
-    with pytest.raises(ValueError, match="not found"):
-        _source("absent")
-    _ = _source("b")
-    assert calls.take()["client"] == 1
-    kept.close()
-
-
-def test_a_failed_connection_is_raised_by_each_source(
-    calls: _Calls, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def refuse(self: Any, **_given: Any) -> None:
-        raise fake.SpiralError("sign-in refused")
-
-    with monkeypatch.context() as broken:
-        broken.setattr(fake.FakeClient, "__init__", refuse)
-        for _ in range(2):
-            with pytest.raises(fake.SpiralError, match="refused"):
-                _source("a")
-    assert _ks(_source("a")) == [0, 1, 2, 3]
-
-
-def test_many_threads_on_first_use_end_with_one_client(calls: _Calls) -> None:
-    ready = threading.Barrier(16)
-
-    def build(index: int) -> tuple[SpiralDBTableSource, list[Any]]:
-        ready.wait(30)
-        source = _source("abc"[index % 3])
-        return source, _ks(source)
-
-    with ThreadPoolExecutor(16) as pool:
-        built = list(pool.map(build, range(16)))
-    assert [ks for _, ks in built] == [
-        [10 * (i % 3) + j for j in range(4)] for i in range(16)
-    ]
-    used = {id(s._connection._client) for s, _ in built if s._connection}  # pyright: ignore[reportPrivateUsage]  # which client each holds
-    assert len(used) == 1
-    calls.take()
-    _ = _source("a")
-    assert "client" not in calls.take()
-
-
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="os.fork is POSIX")
-def test_a_forked_child_makes_its_own_client_and_never_waits(
-    root: Path,
-) -> None:
-    """The registry's lock may be held by a thread that the child does not have."""
-    parent = _source("a")
-    taken, release = threading.Event(), threading.Event()
-    lock = connector_module._clients_lock  # pyright: ignore[reportPrivateUsage]  # the inherited lock is the subject
-
-    def hold() -> None:
-        with lock:
-            taken.set()
-            release.wait(30)
-
-    holder = threading.Thread(target=hold)
-    holder.start()
-    assert taken.wait(10)
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")  # Python warns of a fork with threads
-            pid = os.fork()
-        if pid == 0:  # the child: never returns to pytest
-            code = 3
-            try:
-                import signal
-
-                signal.alarm(20)
-                with pytest.raises(RuntimeError, match="after a fork"):
-                    parent.as_table()
-                child = SpiralDBConnector("p")
-                same = child._client is parent._connection._client  # pyright: ignore[reportPrivateUsage, reportOptionalMemberAccess]  # must differ
-                code = int(same)
-            finally:
-                os._exit(code)
-        _, status = os.waitpid(pid, 0)
-        assert os.waitstatus_to_exitcode(status) == 0
-    finally:
-        release.set()
-        holder.join(10)
-    assert _ks(parent) == [0, 1, 2, 3]
-
-
 # ------------------------------------------------------------ the schema table's state
 
 
@@ -459,164 +164,14 @@ def _damage(project: str = "p", dataset: str = "default", **change: Any) -> None
     table.append(pa.Table.from_pylist([{**marker, **change}], schema=st.ROW_SCHEMA))
 
 
-def test_every_source_refuses_a_schema_table_withdrawn_since(root: Path) -> None:
-    """At every read that opens a table, as without sharing; another dataset is read."""
-    sources = [_source(n) for n in _TABLES]
-    other = [_source("a", "q"), _source("a", "p", "other")]
-    asof = _source("a", asof=sources[0]._asof)  # pyright: ignore[reportPrivateUsage]  # its version
-    copy = sources[0].where(j="j0")
-    marker = {"rows_digest": "withdrawn"}
-    kept = fake.FakeClient().keyed_table("p", "default", st.SCHEMA_TABLE)
-    kept = kept.scan().to_table()
-    _damage(**marker)
-    for source in (*sources, asof, copy):
-        for read in (
-            source.as_table,
-            lambda source=source: list(source.iter_data()),
-            source.head,
-            lambda source=source: source.row_count_estimate,
-        ):
-            with pytest.raises(TableSchemaError, match="withdrawn"):
-                read()
-    assert [_ks(s) for s in other] == [[0, 1, 2, 3]] * 2
-    with pytest.raises(TableSchemaError):
-        _source("a")
-    # Restored: every one of them reads again.
-    fake.FakeClient().keyed_table("p", "default", st.SCHEMA_TABLE).append(kept)
-    assert [_ks(s) for s in sources] == [
-        [0, 1, 2, 3],
-        [10, 11, 12, 13],
-        [20, 21, 22, 23],
-    ]
-    assert _ks(copy) == [0, 2]
-
-
-def test_a_changed_schema_table_is_read_again_once(calls: _Calls) -> None:
-    sources = [_source(n) for n in _TABLES]
-    calls.take()
-    made = fake.ExternalProject("p")
-    made.create_table("default.d", key_schema=[_SCHEMA.field("k")]).write(
-        _rows(0).drop_columns(["j"])
-    )
-    fake.migrate("p", {})
-    calls.take()
-    for _ in range(2):
-        for source in sources:
-            assert len(_ks(source)) == 4
-    counts = calls.take()
-    assert counts["read schemas"] == 1 and counts["open schemas"] == 6
-
-
 def _moved_on(source: SpiralDBTableSource) -> None:
     """Write the source's table, and read once: no kept snapshot is its current one."""
     _write("a", 60)
     _ = source.head()
 
 
-def test_the_schema_table_is_seen_after_the_open_and_before_any_scan(
-    calls: _Calls,
-) -> None:
-    source = _source("a", max_rows=None)
-    _moved_on(source)
-    for read in (source.as_table, source.head, lambda: source.row_count_estimate):
-        calls.take()
-        read()
-        log = calls.log
-        assert log[:2] == ["open", "open by id"]
-        first = log.index("scan") if "scan" in log else len(log)
-        assert set(log[2:first]) <= {"schema", "open schemas", "open by id"}
-        assert log.count("open schemas") == 1
-
-
-def test_the_schema_table_and_the_tables_schema_are_fetched_at_the_same_time(
-    root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    both = threading.Barrier(2)
-    opened, schema = fake.FakeClient.keyed_table, fake.FakeKeyedTable.schema
-
-    def new_opened(self: Any, project: str, dataset: str, name: str, **given: Any):
-        if name == st.SCHEMA_TABLE:
-            both.wait(10)
-        return opened(self, project, dataset, name, **given)
-
-    def new_schema(self: Any):
-        if self._table["name"] != st.SCHEMA_TABLE:
-            both.wait(10)
-        return schema(self)
-
-    monkeypatch.setattr(fake.FakeClient, "keyed_table", new_opened)
-    monkeypatch.setattr(fake.FakeKeyedTable, "schema", new_schema)
-    assert _source("a").table_id
-
-
-def test_the_tables_own_error_comes_before_the_schema_tables(
-    root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source = _source("a")
-    _moved_on(source)
-    _damage(table_count=9)
-    schema = fake.FakeKeyedTable.schema
-
-    def new_schema(self: Any):
-        if self._table["name"] != st.SCHEMA_TABLE:
-            raise fake.SpiralError("status 503")
-        return schema(self)
-
-    with monkeypatch.context() as broken:
-        broken.setattr(fake.FakeKeyedTable, "schema", new_schema)
-        with pytest.raises(fake.SpiralError, match="503") as raised:
-            source.as_table()
-    assert raised.value.__notes__ == [
-        "SpiralDB: could not read the schema of p/default/a"
-    ]
-    with pytest.raises(TableSchemaError, match="p/default/a"):
-        source.as_table()
-
-
-def test_two_sign_ins_never_share_what_one_may_read(
-    root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    allowed = _source("a")
-    assert _ks(allowed) == [0, 1, 2, 3]
-    original = fake.FakeClient.keyed_table
-    trusted = allowed._connection._client  # pyright: ignore[reportPrivateUsage, reportOptionalMemberAccess]  # the first sign-in's
-
-    def opened(self: Any, project: str, dataset: str, name: str, **given: Any):
-        if self is not trusted and name == st.SCHEMA_TABLE:
-            raise fake.SpiralError("status 403")
-        return original(self, project, dataset, name, **given)
-
-    monkeypatch.setattr(fake.FakeClient, "keyed_table", opened)
-    monkeypatch.setenv("SPIRAL_CLIENT_ID", "work_second")
-    with pytest.raises(fake.SpiralError, match="403"):
-        _source("a")
-    assert _ks(allowed) == [0, 1, 2, 3]
-
-
-def test_a_warning_is_issued_by_the_reading_thread(root: Path) -> None:
-    """So its filters and the line it names are the caller's."""
-    made = fake.ExternalProject("p")
-    made.create_table("default.raw", key_schema=[_SCHEMA.field("k")]).write(
-        _rows(0).drop_columns(["j"])
-    )
-    with pytest.warns(UnrecordedTableSchemaWarning, match="raw has no row") as seen:
-        _source("raw")
-    assert [w.filename for w in seen] == [__file__]
-
-
-def test_reads_work_where_no_thread_can_be_started(
-    root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def no_thread(*_args: Any, **_given: Any) -> None:
-        raise RuntimeError("can't start new thread")
-
-    monkeypatch.setattr(threading.Thread, "start", no_thread)
-    sources = [_source(n) for n in _TABLES]
-    assert _ks(sources[0]) == [0, 1, 2, 3]
-    assert node_run.check_sources(sources) == ()
-
-
-# --------------------------------------------------------------- the checks before a run
+def _write(name: str, k: int) -> None:
+    fake.ExternalProject("p").table(f"default.{name}").write(_rows(k).slice(0, 1))
 
 
 def _job(sources: list[Any]) -> PipelineJob:
@@ -627,108 +182,149 @@ def _job(sources: list[Any]) -> PipelineJob:
     return job
 
 
-def _write(name: str, k: int) -> None:
-    fake.ExternalProject("p").table(f"default.{name}").write(_rows(k).slice(0, 1))
+def _refuse_kinds() -> dict[str, Callable[[], None]]:
+    def incomplete() -> None:
+        fake.ExternalProject("p").drop_table(f"default.{st.SCHEMA_TABLE}")
+        fake.migrate("p", dict.fromkeys(_TABLES, _SCHEMA), complete=False)
+
+    return {
+        "withdrawn": lambda: _damage(rows_digest="withdrawn"),
+        "incomplete": incomplete,
+        "damaged": lambda: _damage(table_count=100),
+        "other scope": lambda: _damage(dataset="other"),
+    }
 
 
-def test_neighbouring_checks_are_made_at_the_same_time(
-    root: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("kind", sorted(_refuse_kinds()))
+@pytest.mark.parametrize("during", ["open", "schema"])
+def test_a_schema_table_changed_during_the_call_before_it_is_refused_by_that_read(
+    root: Path, monkeypatch: pytest.MonkeyPatch, kind: str, during: str
 ) -> None:
-    sources = [_source(n) for n in _TABLES]
-    job = _job(sources)
-    job.run()
-    _write("b", 77)
-    together = threading.Barrier(3)
-    opened = fake.FakeClient.keyed_table
+    """Review of #553, finding 1: the schema table is looked at last."""
+    source = _source("a")
+    if during == "schema":
+        _moved_on(source)
+    changed: list[bool] = []
+
+    def change() -> None:
+        if not changed:
+            changed.append(True)
+            _refuse_kinds()[kind]()
+
+    opened, schema = fake.FakeClient.keyed_table, fake.FakeKeyedTable.schema
 
     def new_opened(self: Any, project: str, dataset: str, name: str, **given: Any):
-        if name in _TABLES:
-            together.wait(10)
-        return opened(self, project, dataset, name, **given)
+        table = opened(self, project, dataset, name, **given)
+        if name == "a" and during == "open":
+            change()
+        return table
 
-    modified = [s.last_modified for s in sources]
-    with monkeypatch.context() as slow:
-        slow.setattr(fake.FakeClient, "keyed_table", new_opened)
-        assert node_run.check_sources(sources) == ()
-    moved = [s.last_modified != m for s, m in zip(sources, modified, strict=True)]
-    assert moved == [False, True, False]
-    job.run()
-    assert 77 in job.nodes["n1"].as_table()["k"].to_pylist()
+    def new_schema(self: Any):
+        found = schema(self)
+        if self._table["name"] == "a" and during == "schema":
+            change()
+        return found
+
+    monkeypatch.setattr(fake.FakeClient, "keyed_table", new_opened)
+    monkeypatch.setattr(fake.FakeKeyedTable, "schema", new_schema)
+    with pytest.raises(TableSchemaError):
+        source.as_table()
+    assert changed
+
+
+def test_each_source_has_its_own_sign_in(
+    calls: _Calls, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #553, finding 2: a client is never taken for another account's."""
+    init = fake.FakeClient.__init__
+
+    def bind(self: Any, **given: Any) -> None:
+        init(self, **given)
+        self.account = os.environ["SPIRAL_TOKEN"]
+        if (
+            len(calls.clients) == 1
+        ):  # another account while the first was made, and back
+            self.account = "b"
+
+    monkeypatch.setattr(fake.FakeClient, "__init__", bind)
+    monkeypatch.setenv("SPIRAL_TOKEN", "a")
+    made = [SpiralDBConnector("p") for _ in range(3)]
+    assert [c._client.account for c in made] == ["b", "a", "a"]  # pyright: ignore[reportPrivateUsage]  # which each signed in as
+
+
+def test_checks_look_at_one_source_after_another(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #553, finding 3: a row written during one check is in the next."""
+    a, b = _source("a"), _source("b")
+    _write("a", 60)  # so that a's check fetches its schema
+    schema = fake.FakeKeyedTable.schema
+    wrote: list[bool] = []
+
+    def new_schema(self: Any):
+        if self._table["name"] == "a" and not wrote:
+            wrote.append(True)
+            _write("b", 99)
+        return schema(self)
+
+    monkeypatch.setattr(fake.FakeKeyedTable, "schema", new_schema)
+    assert node_run.check_sources([a, b]) == ()
+    assert wrote and 99 in _ks(b)
+
+
+def test_a_failing_schema_is_raised_without_looking_at_the_schema_table(
+    calls: _Calls, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #553, finding 4."""
+    source = _source("a")
+    _moved_on(source)
+    calls.take()
+
+    def failing(self: Any):
+        raise fake.SpiralError("status 503")
+
+    monkeypatch.setattr(fake.FakeKeyedTable, "schema", failing)
+    with pytest.raises(fake.SpiralError, match="503"):
+        source.as_table()
+    assert "open schemas" not in calls.take()
+
+
+def test_a_failing_open_is_raised_without_looking_at_the_schema_table(
+    calls: _Calls,
+) -> None:
+    source = _source("a")
+    fake.ExternalProject("p").drop_table("default.a")
+    calls.take()
+    with pytest.raises(ValueError, match="not found"):
+        source.as_table()
+    assert calls.take() == {"open": 1}
+
+
+def test_a_subclass_looks_its_table_up_in_the_calling_thread(root: Path) -> None:
+    """Review of #553, finding 5."""
+    here = threading.get_ident()
+
+    class ThreadBound(SpiralDBTableSource):
+        """Its lookup works in one thread only."""
+
+        def _lookup_table(self) -> Any:
+            assert threading.get_ident() == here
+            return super()._lookup_table()
+
+    bound = ThreadBound("p", "a", tag_only_columns=True)
+    assert node_run.check_sources([bound, _source("b")]) == ()
+    assert _ks(bound) == [0, 1, 2, 3]
 
 
 def test_failing_checks_warn_in_the_sources_order(root: Path) -> None:
     sources = [_source(n) for n in _TABLES]
-    made = fake.ExternalProject("p")
     for name in ("a", "c"):
-        made.drop_table(f"default.{name}")
+        fake.ExternalProject("p").drop_table(f"default.{name}")
     _write("b", 77)
     with pytest.warns(SourceCheckFailedWarning) as seen:
-        unchecked = node_run.check_sources(sources)
-    assert [w.filename for w in seen] == [__file__] * 2
-    assert "default.a" in str(seen[0].message) and "not found" in str(seen[0].message)
-    assert "default.c" in str(seen[1].message)
-    assert len(unchecked) == 2
+        assert len(node_run.check_sources(sources)) == 2
+    assert ["default.a" in str(w.message) for w in seen] == [True, False]
     assert 77 in _ks(sources[1])
-
-
-def test_a_warning_made_an_error_leaves_the_later_sources_unchecked(
-    root: Path,
-) -> None:
-    sources = [_source(n) for n in _TABLES]
-    fake.ExternalProject("p").drop_table("default.b")
-    _write("a", 77)
-    _write("c", 78)
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", SourceCheckFailedWarning)
-        with pytest.raises(SourceCheckFailedWarning):
-            node_run.check_sources(sources)
-    assert 77 in _ks(sources[0]) and 78 not in _ks(sources[2])
-
-
-def test_another_sources_check_keeps_its_place(root: Path) -> None:
-    """What a check of another kind does is its own: no fetch moves across it."""
-
-    class Writes(DictSource):
-        """Writes to a SpiralDB table when it is checked."""
-
-        def check_for_new_data(self) -> bool:
-            """Write a row the next source must find."""
-            _write("c", 91)
-            return False
-
-    class Counts(SpiralDBTableSource):
-        """Replaces the check."""
-
-        checked = 0
-
-        def check_for_new_data(self) -> bool:
-            """Count, then check."""
-            type(self).checked += 1
-            return super().check_for_new_data()
-
-    writes = Writes([{"k": 1, "x": 1.0}], tag_columns=["k"], tag_only_columns=True)
-    counts = Counts("p", "b", tag_only_columns=True)
-    sources = [_source("a"), _source("b"), counts, writes, _source("c"), _source("a")]
-    assert node_run.check_sources(sources) == ()
-    assert Counts.checked == 1
-    last = sources[4]
-    assert isinstance(last, SpiralDBTableSource) and 91 in _ks(last)
-
-
-def test_a_source_with_a_given_version_makes_no_call(calls: _Calls) -> None:
-    sources = [_source("a"), _source("b", asof=1), _source("c")]
-    calls.take()
-    _write("b", 5)
-    calls.take()
-    assert node_run.check_sources(sources) == ()
-    assert calls.take() == {"open": 2, "open schemas": 2}
-
-
-def test_a_closed_source_is_reported_like_any_failing_check(root: Path) -> None:
-    sources = [_source("a"), _source("b")]
-    sources[0].close()
-    with pytest.warns(SourceCheckFailedWarning, match="is closed"):
-        assert len(node_run.check_sources(sources)) == 1
 
 
 # ------------------------------------------------------------------------------ budgets
@@ -739,11 +335,11 @@ def test_the_calls_each_action_makes(calls: _Calls) -> None:
     read = {"open": 1, "open schemas": 1, "scan": 1}
     sources = [_source(n) for n in _TABLES]
     assert calls.take() == {
-        "client": 1,
+        "client": 3,
         "open": 3,
         "schema": 3,
         "open schemas": 3,
-        "read schemas": 1,
+        "read schemas": 3,
     }
     first = sources[0]
     actions: dict[str, tuple[Callable[[], Any], dict[str, int]]] = {
@@ -861,37 +457,8 @@ def test_a_kept_snapshot_is_read_only_after_both_confirm(calls: _Calls) -> None:
     for read in _READS[:-1]:
         calls.take()
         _reads(source)[read]()
-        assert set(calls.log[:2]) == {"open", "open schemas"}
+        assert calls.log[:2] == ["open", "open schemas"]
         assert set(calls.log[2:]) == {"scan"}
-
-
-def test_the_open_and_the_schema_table_are_checked_at_the_same_time(
-    root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source = _source("a")
-    both = threading.Barrier(2)
-    opened = fake.FakeClient.keyed_table
-
-    def new_opened(self: Any, project: str, dataset: str, name: str, **given: Any):
-        both.wait(10)
-        return opened(self, project, dataset, name, **given)
-
-    monkeypatch.setattr(fake.FakeClient, "keyed_table", new_opened)
-    assert _ks(source) == [0, 1, 2, 3]
-
-
-def test_the_opens_error_comes_before_the_schema_tables(
-    root: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source = _source("a")
-
-    def denied(self: Any, project: str, dataset: str, name: str, **given: Any):
-        raise fake.SpiralError(f"status 403 {name}")
-
-    monkeypatch.setattr(fake.FakeClient, "keyed_table", denied)
-    with pytest.raises(fake.SpiralError, match="403 a\n") as raised:
-        source.as_table()
-    assert raised.value.__notes__ == ["SpiralDB: could not open table p/default/a"]
 
 
 @pytest.mark.parametrize("read", _READS)
