@@ -26,6 +26,7 @@ from typing import Any, ClassVar
 import polars as pl
 import pyarrow as pa
 
+from orcapod.core.unique_keys import UniqueKeys, certificate
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.data_tags import data_tag_names, data_tags_first
 from orcapod.core.operators.arrow_keys import polars_key_frame
@@ -361,6 +362,10 @@ class Rejoin(Join):
     """
 
     PROVISIONAL: ClassVar[bool] = True
+
+    def derive_unique_keys(self, *streams: StreamProtocol) -> UniqueKeys:
+        """Every input's unique keys: a row of an input is in at most one result row."""
+        return certificate(key for stream in streams for key in stream.unique_keys)
 
     def validate_nonzero_inputs(self, *streams: StreamProtocol) -> None:
         """Check that the inputs can be rejoined: shared system tags, compatible columns.

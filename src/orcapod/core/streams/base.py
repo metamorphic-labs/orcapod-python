@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import functools
-import inspect
 import logging
 from abc import abstractmethod
 from collections import deque
@@ -17,12 +15,13 @@ from collections.abc import (
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import ClassVar, TYPE_CHECKING, Any, cast
 
 import pandas as pd
 import polars as pl
 import pyarrow as pa
 
+from orcapod.core.unique_keys import NO_UNIQUE_KEYS, UniqueKeys
 from orcapod.core.base import TraceableBase
 from orcapod.core.data_tags import data_tag_names
 from orcapod.core.streams.record_batch_input import SOURCE_BATCH_ROWS, InputChannel
@@ -51,37 +50,6 @@ if TYPE_CHECKING:
 # from types import MappingProxyType
 
 logger = logging.getLogger(__name__)
-
-
-def reads_as_its_class(obj: object, cls: type) -> bool:
-    """Whether ``obj`` is exactly ``cls`` and reads only through ``cls``'s own members.
-
-    Exact, never by inspection of what a subclass overrides: ``type(obj) is cls``, and
-    ``obj`` holds no attribute of its own that shadows a method or a property of
-    ``cls`` (an ``iter_data`` replaced on the instance). A ``functools.cached_property``
-    keeps its value in the instance by design and is not a shadow. A subclass, however
-    small, is never ``cls`` here (ITL-1347).
-
-    Args:
-        obj: The object to check.
-        cls: The class whose reading is proven.
-
-    Returns:
-        Whether ``obj`` reads as ``cls`` does.
-    """
-    if type(obj) is not cls:
-        return False
-    own = getattr(obj, "__dict__", None)
-    if not own:
-        return True
-    missing = object()
-    for name in own:
-        member = inspect.getattr_static(cls, name, missing)
-        if member is missing or isinstance(member, functools.cached_property):
-            continue
-        if callable(member) or hasattr(type(member), "__get__"):
-            return False
-    return True
 
 
 def system_tags_as_rows_give(table: pa.Table) -> bool:
@@ -1390,6 +1358,19 @@ class StreamBase(TraceableBase):
         from orcapod.core.operators import Index
 
         return Index(column, i, out=out, fail_on_miss=fail_on_miss)(self, label=label)
+
+    DERIVES_UNIQUE_KEYS: ClassVar[bool] = False
+    """Whether ``unique_keys`` is derived for this class: read for the exact class only,
+    each declaring it, and only while no member is replaced on the instance
+    (``core/unique_keys``)."""
+
+    @property
+    def unique_keys(self) -> UniqueKeys:
+        """The tag sets no two rows agree on (``core/unique_keys``).
+
+        None by default: a stream that derives or checks them says so itself.
+        """
+        return NO_UNIQUE_KEYS
 
     def arrow_schema(self) -> pa.Schema:
         """The Arrow schema of the columns this stream passes between job nodes.

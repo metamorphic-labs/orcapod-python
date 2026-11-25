@@ -16,11 +16,13 @@ import logging
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Collection, Iterator, Mapping, Sequence
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import ClassVar, TYPE_CHECKING, Any
 
 import pyarrow as pa
 
 from orcapod import contexts
+from orcapod.core.exact_class import reads_as_its_class
+from orcapod.core.unique_keys import NO_UNIQUE_KEYS, UniqueKeys, derives_unique_keys
 from orcapod.core.nodes.provenance_methods import ProvenanceMethods
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
@@ -32,7 +34,6 @@ from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
     CompleteStreamFeed,
     keys_of_rows,
-    reads_as_its_class,
     system_tags_as_rows_give,
     stream_arrow_schema,
     schema_requires_io,
@@ -909,6 +910,14 @@ class SourceNodeBase(TraceableBase, ABC):
         return explain(self)
 
     @property
+    def unique_keys(self) -> UniqueKeys:
+        """The bound stream's unique keys (``core/unique_keys``); none when unbound."""
+        if not derives_unique_keys(self):
+            return NO_UNIQUE_KEYS
+        bound = self._bound_stream()
+        return NO_UNIQUE_KEYS if bound is None else bound.unique_keys
+
+    @property
     def producer(self) -> None:
         """Source nodes have no producer pod — they are root nodes.
 
@@ -1474,6 +1483,8 @@ class SourceNode(SourceNodeBase):
         — identical to the old ``SourceSpec`` — so existing DB paths remain valid.
     """
 
+    DERIVES_UNIQUE_KEYS: ClassVar[bool] = True
+
     def _typed_zero_row_table(self) -> "pa.Table | None":
         """The slot's zero-row table from its own Arrow schemas (ITL-640).
 
@@ -1591,6 +1602,8 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         ValueError: If both *tag_schema* and *data_schema* are omitted and
             *bound_source* is ``None``.
     """
+
+    DERIVES_UNIQUE_KEYS: ClassVar[bool] = True
 
     def __init__(
         self,

@@ -1,6 +1,7 @@
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any, ClassVar
 
+from orcapod.core.unique_keys import UniqueKeys, renamed_keys
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
@@ -95,6 +96,10 @@ class MapData(UnaryOperator):
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys (``core/unique_keys``): no tag is renamed."""
+        return stream.unique_keys
 
     def __init__(
         self,
@@ -372,6 +377,13 @@ class MapTags(UnaryOperator):
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys, renamed, without those that lose a tag."""
+        dropped = set(stream.keys()[0]) - set(self.name_map)
+        return renamed_keys(
+            stream.unique_keys, self.name_map, dropped if self.drop_unmapped else ()
+        )
 
     def __init__(
         self,
@@ -668,6 +680,11 @@ class MapColumns(UnaryOperator):
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
     PROVISIONAL: ClassVar[bool] = True
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys, renamed, without those that lose a tag."""
+        tag_renames, _, dropped, _ = self._plan(*self._user_columns(stream))
+        return renamed_keys(stream.unique_keys, tag_renames, dropped)
 
     def __init__(
         self,

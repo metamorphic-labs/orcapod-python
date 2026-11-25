@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import pyarrow as pa
 
+from orcapod.core.unique_keys import UniqueKeys
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.datagrams import Tag
@@ -123,6 +124,10 @@ class AddTags(UnaryOperator):
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys (``core/unique_keys``): tags are only added."""
+        return stream.unique_keys
 
     def __init__(self, tags: Mapping[str, TagConstant], **kwargs: Any):
         if not tags:

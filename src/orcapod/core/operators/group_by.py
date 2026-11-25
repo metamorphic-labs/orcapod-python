@@ -9,6 +9,7 @@ import numpy as np
 import polars as pl
 import pyarrow as pa
 
+from orcapod.core.unique_keys import UniqueKeys, certificate
 from orcapod.core.operators.arrow_keys import (
     is_list_kind,
     part_without_rule,
@@ -317,6 +318,11 @@ class GroupBy(UnaryOperator):
 
     # Data-tags (ITL-1023): handled.
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The grouping keys: one row per key, under the joins' equality."""
+        del stream
+        return certificate([self.by])
 
     def __init__(
         self,

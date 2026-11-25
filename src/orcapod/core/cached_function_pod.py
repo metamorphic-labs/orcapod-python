@@ -6,8 +6,9 @@ import dataclasses
 import logging
 from datetime import datetime, timezone
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any
+from typing import ClassVar, TYPE_CHECKING, Any
 
+from orcapod.core.unique_keys import UniqueKeys
 from orcapod.core.data_function import CachedDataFunction
 from orcapod.core.datagrams import Datagram
 from orcapod.core.function_pod import (
@@ -56,6 +57,10 @@ class CachedFunctionPod(WrappedFunctionPod):
 
     # Expose RESULT_COMPUTED_FLAG from the shared ResultCache
     RESULT_COMPUTED_FLAG = ResultCache.RESULT_COMPUTED_FLAG
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys: each row comes from one input row, its tags kept."""
+        return stream.unique_keys
 
     def __init__(
         self,
@@ -508,6 +513,8 @@ class _CachedFunctionPodStream(FunctionPodStream):
     was stored with. This stream keeps ``__computed`` and drops the others, and its
     table has no meta columns unless asked for, as an uncached pod's table.
     """
+
+    DERIVES_UNIQUE_KEYS: ClassVar[bool] = True
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         for tag, data in super().iter_data():

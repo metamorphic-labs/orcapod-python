@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, cast
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from orcapod.core.exact_class import reads_as_its_class
+from orcapod.core.unique_keys import UniqueKeys, derived_keys
 from orcapod.protocols.core_protocols.streams import (
     RecordBatchInput,
     RecordBatchOutput,
@@ -48,7 +50,6 @@ from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
     StreamBase,
     check_head_size,
-    reads_as_its_class,
     short_stream_repr,
     typed_zero_row_input,
     typed_zero_row_table,
@@ -1870,6 +1871,10 @@ class RowsOnRead:
     # the built stream takes too (``_as_upstream_stream``), or the built stream's once
     # it is built. A protocol check (``isinstance``) reads them and builds nothing.
     @property
+    def unique_keys(self) -> UniqueKeys:
+        return self._node.unique_keys
+
+    @property
     def producer(self) -> Any:
         return self._node.producer
 
@@ -2047,6 +2052,8 @@ def produced_stream(stream: StreamProtocol) -> StreamProtocol:
 class DynamicPodStream(StreamBase):
     """Recomputable stream wrapping a ``StaticOutputOperatorPod`` invocation."""
 
+    DERIVES_UNIQUE_KEYS: ClassVar[bool] = True
+
     def __init__(
         self,
         pod: StaticOutputOperatorPod,
@@ -2109,6 +2116,11 @@ class DynamicPodStream(StreamBase):
         if self._upstreams:
             structure += (self._pod.argument_symmetry(self._upstreams),)
         return structure
+
+    @property
+    def unique_keys(self) -> UniqueKeys:
+        """The tag sets no two rows agree on, derived from the inputs' (``core/unique_keys``)."""
+        return derived_keys(self.producer, self.upstreams, self)
 
     @property
     def producer(self) -> PodProtocol:

@@ -22,12 +22,14 @@ import sys
 import logging
 from abc import abstractmethod
 from collections.abc import Collection, Iterator, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import ClassVar, TYPE_CHECKING, Any, Literal, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
 
 from orcapod import contexts
+from orcapod.core.exact_class import reads_as_its_class
+from orcapod.core.unique_keys import NO_UNIQUE_KEYS, UniqueKeys, derived_keys
 from orcapod.core.nodes.provenance_methods import ProvenanceMethods
 from orcapod.core.data_tags import (
     mark_data_tags,
@@ -52,7 +54,6 @@ from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
     StreamBase,
     check_head_size,
-    reads_as_its_class,
     short_stream_repr,
     system_tags_as_rows_give,
 )
@@ -299,6 +300,17 @@ class OperatorNodeBase(StreamBase):
     # ------------------------------------------------------------------
     # Stream interface
     # ------------------------------------------------------------------
+
+    @property
+    def unique_keys(self) -> UniqueKeys:
+        """The tag sets no two rows agree on, derived from the inputs' (``core/unique_keys``).
+
+        None in ``REPLAY`` mode: every logged run of the node's key is replayed, so a
+        tag tuple can occur once per run.
+        """
+        if self.cache_mode == CacheMode.REPLAY:
+            return NO_UNIQUE_KEYS
+        return derived_keys(self.producer, self.upstreams, self)
 
     @property
     def producer(self) -> OperatorPodProtocol:
@@ -595,6 +607,8 @@ class OperatorNode(OperatorNodeBase):
     and serialized to disk via ``Pipeline.save()``.
     """
 
+    DERIVES_UNIQUE_KEYS: ClassVar[bool] = True
+
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """Raise ``PipelineJobRequiredError`` — blueprint nodes cannot produce data.
 
@@ -833,6 +847,8 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
         - **LOG**: compute AND write to DB (append-only historical record).
         - **REPLAY**: skip computation, flow cached results downstream.
     """
+
+    DERIVES_UNIQUE_KEYS: ClassVar[bool] = True
 
     # Set once a read has reported the stored rows it skipped (rows of another data
     # context); a class default so nodes rebuilt from a saved descriptor start unset.

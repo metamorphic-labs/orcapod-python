@@ -7,11 +7,12 @@ import logging
 from abc import abstractmethod
 from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
 from functools import update_wrapper, wraps
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+from typing import ClassVar, TYPE_CHECKING, Any, Literal, Protocol, cast
 
 import pyarrow as pa
 
 from orcapod import contexts
+from orcapod.core.unique_keys import UniqueKeys, derived_keys
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
@@ -885,6 +886,10 @@ class _FunctionPodBase(TraceableBase):
 
 
 class FunctionPod(_FunctionPodBase):
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys: each row comes from one input row, its tags kept."""
+        return stream.unique_keys
+
     def __init__(
         self,
         data_function: DataFunctionProtocol,
@@ -1138,6 +1143,8 @@ def _no_content_hashes() -> pa.Array[Any]:
 class FunctionPodStream(StreamBase):
     """Recomputable stream wrapping a data function."""
 
+    DERIVES_UNIQUE_KEYS: ClassVar[bool] = True
+
     def __init__(
         self, function_pod: FunctionPodProtocol, input_stream: StreamProtocol, **kwargs
     ) -> None:
@@ -1171,6 +1178,11 @@ class FunctionPodStream(StreamBase):
         # arrived is compared at the end.
         self._reset_generation = 0
         self._input_state: tuple[object, ...] | None = None
+
+    @property
+    def unique_keys(self) -> UniqueKeys:
+        """The tag sets no two rows agree on, derived from the inputs' (``core/unique_keys``)."""
+        return derived_keys(self.producer, self.upstreams, self)
 
     @property
     def producer(self) -> PodProtocol:
