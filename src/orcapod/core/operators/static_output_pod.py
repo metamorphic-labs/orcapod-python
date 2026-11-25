@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, cast
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from orcapod.core.unique_keys import UniqueKeys, derived_keys
 from orcapod.protocols.core_protocols.streams import (
     RecordBatchInput,
     RecordBatchOutput,
@@ -1634,6 +1635,10 @@ class RowsOnRead:
     # the built stream takes too (``_as_upstream_stream``), or the built stream's once
     # it is built. A protocol check (``isinstance``) reads them and builds nothing.
     @property
+    def unique_keys(self) -> UniqueKeys:
+        return self._node.unique_keys
+
+    @property
     def producer(self) -> Any:
         return self._node.producer
 
@@ -1873,6 +1878,11 @@ class DynamicPodStream(StreamBase):
         if self._upstreams:
             structure += (self._pod.argument_symmetry(self._upstreams),)
         return structure
+
+    @property
+    def unique_keys(self) -> UniqueKeys:
+        """The tag sets no two rows agree on, derived from the inputs' (``core/unique_keys``)."""
+        return derived_keys(self.producer, self.upstreams, self)
 
     @property
     def producer(self) -> PodProtocol:

@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Collection, Sequence
 from typing import Any, ClassVar
 
+from orcapod.core.unique_keys import UniqueKeys
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
@@ -61,6 +62,10 @@ class SelectTagColumns(UnaryOperator):
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys (``core/unique_keys``): those whose tags all stay."""
+        return stream.unique_keys
 
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
         self.columns = _canonical_columns(columns)
@@ -200,6 +205,10 @@ class SelectDataColumns(UnaryOperator):
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys (``core/unique_keys``): tags are unchanged."""
+        return stream.unique_keys
 
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
         self.columns = _canonical_columns(columns)
@@ -357,6 +366,10 @@ class DropTagColumns(UnaryOperator):
     ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys (``core/unique_keys``): those whose tags all stay."""
+        return stream.unique_keys
+
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
         self.columns = _canonical_columns(columns)
         self.strict = strict
@@ -500,6 +513,10 @@ class DropDataColumns(UnaryOperator):
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys (``core/unique_keys``): tags are unchanged."""
+        return stream.unique_keys
 
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
         self.columns = _canonical_columns(columns)
@@ -883,6 +900,10 @@ class DropColumns(_TagAndDataColumnsOperator):
 
     _verb: ClassVar[str] = "drop"
 
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys (``core/unique_keys``): those whose tags all stay."""
+        return stream.unique_keys
+
     def _removed(self, columns: Collection[str]) -> list[str]:
         return [c for c in columns if c in self.columns]
 
@@ -906,6 +927,10 @@ class SelectColumns(_TagAndDataColumnsOperator):
     """
 
     _verb: ClassVar[str] = "select"
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys (``core/unique_keys``): those whose tags all stay."""
+        return stream.unique_keys
 
     def _removed(self, columns: Collection[str]) -> list[str]:
         return [c for c in columns if c not in self.columns]

@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Any
 import pyarrow as pa
 
 from orcapod import contexts
+from orcapod.core.unique_keys import NO_UNIQUE_KEYS, UniqueKeys
 from orcapod.core.nodes.provenance_methods import ProvenanceMethods
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
@@ -907,6 +908,12 @@ class SourceNodeBase(TraceableBase, ABC):
         from orcapod.core.streams.explain import explain
 
         return explain(self)
+
+    @property
+    def unique_keys(self) -> UniqueKeys:
+        """The bound stream's unique keys (``core/unique_keys``); none when unbound."""
+        bound = self._bound_stream()
+        return NO_UNIQUE_KEYS if bound is None else bound.unique_keys
 
     @property
     def producer(self) -> None:

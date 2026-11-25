@@ -23,6 +23,7 @@ import pandas as pd
 import polars as pl
 import pyarrow as pa
 
+from orcapod.core.unique_keys import NO_UNIQUE_KEYS, UniqueKeys
 from orcapod.core.base import TraceableBase
 from orcapod.core.data_tags import data_tag_names
 from orcapod.core.streams.record_batch_input import SOURCE_BATCH_ROWS, InputChannel
@@ -1385,6 +1386,14 @@ class StreamBase(TraceableBase):
         from orcapod.core.operators import Index
 
         return Index(column, i, out=out, fail_on_miss=fail_on_miss)(self, label=label)
+
+    @property
+    def unique_keys(self) -> UniqueKeys:
+        """The tag sets no two rows agree on (``core/unique_keys``).
+
+        None by default: a stream that derives or checks them says so itself.
+        """
+        return NO_UNIQUE_KEYS
 
     def arrow_schema(self) -> pa.Schema:
         """The Arrow schema of the columns this stream passes between job nodes.

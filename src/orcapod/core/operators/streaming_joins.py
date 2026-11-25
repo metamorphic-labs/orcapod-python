@@ -77,6 +77,7 @@ except those the sync path still merges before it (``StreamingJoin._close``).
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from typing import Any, ClassVar
@@ -114,12 +115,17 @@ from orcapod.core.operators.semijoin import (
 from orcapod.core.operators.static_output_pod import (
     RowBuiltFormUnavailable,
     StaticOutputOperatorPod,
+    close_inputs,
+    concatenate_batches,
+    finish_operator,
     settle_token_types,
     tokens_as,
 )
 from orcapod.core.row_spool import RowSpool
 from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS, row_built_columns
 from orcapod.protocols.core_protocols import StreamProtocol
+from orcapod.protocols.core_protocols.streams import RecordBatchInput, RecordBatchOutput
+from orcapod.core.unique_keys import joined_keys, unique_on
 from orcapod.system_constants import constants
 from orcapod.utils import arrow_utils
 
@@ -139,6 +145,10 @@ PAIRS_PER_BATCH = 8_192
 # frame holds before it is compacted.
 _COUNT = "__streaming_count"
 _COMPACT_ROWS = 65_536
+
+# How many rows of one input are read ahead and pushed at once. A push joins its rows with
+# every key held, so rows that have arrived already are pushed together.
+PUSH_ROWS = 65_536
 
 
 def _settled_by_values(schema: pa.Schema) -> pa.Schema:
@@ -815,6 +825,8 @@ class StreamingJoin(StreamingJoinKernel):
         if len(inputs) == 1:
             return
         first = inputs[order[0]]
+        # The unique keys of the rows joined so far (``core/unique_keys``).
+        unique_keys = first.unique_keys
         tag_keys = set(first.keys()[0])
         data_tags = set(stream_data_tags(first))
         for position, index in enumerate(order[1:], start=1):
@@ -833,8 +845,13 @@ class StreamingJoin(StreamingJoinKernel):
             keys = sorted(tag_keys & next_tags)
             last = position == len(inputs) - 1
             self._links.append(
-                _BinaryLink(keys, self._link_finish(keys, rename, final=last))
+                _BinaryLink(
+                    keys,
+                    self._link_finish(keys, rename, final=last),
+                    (unique_on(unique_keys, keys), unique_on(stream.unique_keys, keys)),
+                )
             )
+            unique_keys = joined_keys(unique_keys, stream.unique_keys, keys)
             self._merges.append(bool(rename))
             tag_keys |= next_tags
             data_tags |= next_data_tags
@@ -985,7 +1002,14 @@ class StreamingMergeJoin(StreamingJoinKernel):
         self._type_converter = StaticOutputOperatorPod._upstream_context(  # pyright: ignore[reportPrivateUsage]  # the operators' one rule
             left
         ).type_converter
-        self._link = _BinaryLink(sorted(self._shared_tags), self._finish)
+        self._link = _BinaryLink(
+            sorted(self._shared_tags),
+            self._finish,
+            (
+                unique_on(left.unique_keys, self._shared_tags),
+                unique_on(right.unique_keys, self._shared_tags),
+            ),
+        )
 
     def _check_settled_against_empty_inputs(self) -> None:
         """Refuse, when every input has closed, a run whose input with rows settled a
@@ -1760,3 +1784,123 @@ class StreamingRejoin(StreamingJoinKernel):
                     )
                 )
         return []
+
+
+async def run_kernel(
+    make_kernel: Callable[[Sequence[StreamProtocol]], StreamingJoinKernel],
+    inputs: Sequence[RecordBatchInput],
+    output: RecordBatchOutput,
+) -> None:
+    """Run a join kernel over an operator's channels (``async_execute_batches``).
+
+    Every input is read at once and to its end, whatever the others do: the inputs may
+    be two readers of one upstream, which a wait would block, and an input's read error
+    must be met. Each input reads ahead at most ``PUSH_ROWS`` rows and waits, and the
+    output's batches are sent one at a time, so a slow reader of the output holds the
+    join back.
+
+    The kernel's rows and files are let go at a normal end, a failure and a
+    cancellation. Channels end as in ``StaticOutputOperatorPod.async_execute_batches``.
+
+    Args:
+        make_kernel: Makes the kernel from the input streams (the descriptions).
+        inputs: The operator's input channels, in order.
+        output: The channel the result's record batches are sent into.
+    """
+    readers: list[asyncio.Task[None]] = []
+    kernel: StreamingJoinKernel | None = None
+    try:
+        # An input read already cannot be given whole: refused before anything is read.
+        claims = [channel.reserve() for channel in inputs]
+        kernel = make_kernel([channel.stream for channel in inputs])
+        changed = asyncio.Event()
+        ahead = [_ReadAhead(changed) for _ in inputs]
+        readers = [
+            asyncio.create_task(buffer.fill(channel, claim))
+            for buffer, channel, claim in zip(ahead, inputs, claims)
+        ]
+        open_inputs = set(range(len(inputs)))
+        while open_inputs:
+            changed.clear()
+            progressed = False
+            for index in sorted(open_inputs):
+                batches, ended = ahead[index].drain()
+                for batch in _push_sizes(batches):
+                    progressed = True
+                    for result in kernel.iter_push(index, batch):
+                        await output.send(result)
+                    # The readers get a turn also when nothing was sent.
+                    await asyncio.sleep(0)
+                if ended:
+                    progressed = True
+                    await readers[index]  # raises what ended it, if anything did
+                    open_inputs.discard(index)
+                    for result in kernel.close(index):
+                        await output.send(result)
+            if not progressed:
+                _ = await changed.wait()
+    except BaseException as error:
+        output.fail(error)
+        for reader in readers:
+            _ = reader.cancel()
+        _ = await asyncio.gather(*readers, return_exceptions=True)
+        await close_inputs(inputs, error)
+        raise
+    finally:
+        if kernel is not None:
+            kernel.release()
+    await finish_operator(inputs, output)
+
+
+class _ReadAhead:
+    """The record batches one input delivered and the join has not pushed yet.
+
+    Args:
+        changed: Set when a batch arrives or the input ends.
+    """
+
+    def __init__(self, changed: asyncio.Event) -> None:
+        self._changed: asyncio.Event = changed
+        self._room: asyncio.Event = asyncio.Event()
+        self._batches: list[pa.RecordBatch] = []
+        self._rows: int = 0
+        self._ended: bool = False
+
+    async def fill(self, channel: RecordBatchInput, claim: object) -> None:
+        """Read ``channel`` to its end, waiting while ``PUSH_ROWS`` rows are unread."""
+        try:
+            _ = channel.reserve(claim)
+            async for batch in channel:
+                if not batch.num_rows:
+                    continue
+                self._batches.append(batch)
+                self._rows += batch.num_rows
+                self._changed.set()
+                while self._rows >= PUSH_ROWS:
+                    self._room.clear()
+                    _ = await self._room.wait()
+        finally:
+            self._ended = True
+            self._changed.set()
+
+    def drain(self) -> tuple[list[pa.RecordBatch], bool]:
+        """Take the batches read, and whether the input has ended after them."""
+        batches, self._batches, self._rows = self._batches, [], 0
+        self._room.set()
+        return batches, self._ended
+
+
+def _push_sizes(batches: Sequence[pa.RecordBatch]) -> Iterator[pa.RecordBatch]:
+    """``batches`` put under one another and cut to at most ``PUSH_ROWS`` rows.
+
+    Args:
+        batches: Record batches of one input, in the order they arrived.
+    """
+    if len(batches) == 1:
+        # As delivered: a batch of its own is what the kernel checks.
+        table = pa.Table.from_batches(batches)
+    else:
+        table = concatenate_batches(batches)
+    if table is not None:
+        for start in range(0, table.num_rows, PUSH_ROWS):
+            yield from table.slice(start, PUSH_ROWS).combine_chunks().to_batches()

@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from orcapod import contexts
+from orcapod.core.unique_keys import NO_UNIQUE_KEYS, UniqueKeys, certificate
 from orcapod.config import OrcapodConfig
 from orcapod.core.streams.base import (
     StreamBase,
@@ -388,6 +389,28 @@ class RootSource(StreamBase):
     _key_columns: tuple[str, ...]
     """The resolved key columns of the record ids, in key order; ``()`` for the
     position. Every concrete source sets it in ``__init__``."""
+
+    KEY_COLUMNS_CHECKED: ClassVar[bool] = False
+    """Whether every read of the source refuses a repeated key (ITL-1464).
+
+    Declared ``True`` only by the library source kinds whose rows all pass
+    ``SourceStreamBuilder``, which names each row by its key columns and refuses a
+    repeat, each on its own class: read for the exact class only, never inherited.
+    """
+
+    @property
+    def unique_keys(self) -> UniqueKeys:
+        """The key columns, when they are checked and all are tags (``core/unique_keys``).
+
+        Two rows that agree on the key columns under the joins' equality have one record
+        id, which is a function of the values (a key is never a float).
+        """
+        if vars(type(self)).get("KEY_COLUMNS_CHECKED") is not True:
+            return NO_UNIQUE_KEYS
+        key = frozenset(self._key_columns)
+        if not key or not key <= set(self.keys()[0]):
+            return NO_UNIQUE_KEYS
+        return certificate([key])
 
     _arrow_schemas_cache: "tuple[pa.Schema, pa.Schema] | None" = None
 

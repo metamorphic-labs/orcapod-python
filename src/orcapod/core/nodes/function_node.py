@@ -33,6 +33,7 @@ import polars as pl
 import pyarrow as pa
 
 from orcapod import contexts
+from orcapod.core.unique_keys import UniqueKeys, derived_keys
 from orcapod.core.nodes.provenance_methods import ProvenanceMethods
 from orcapod.core.function_pod import (
     fall_through_tags,
@@ -548,6 +549,11 @@ class FunctionNodeBase(StreamBase):
     def node_type(self) -> str:
         """Return ``"side_effect_function"`` when the pod injects ``InvocationContext``, else ``"function"``."""
         return self._node_type
+
+    @property
+    def unique_keys(self) -> UniqueKeys:
+        """The tag sets no two rows agree on, derived from the inputs' (``core/unique_keys``)."""
+        return derived_keys(self.producer, self.upstreams, self)
 
     @property
     def producer(self) -> FunctionPodProtocol:

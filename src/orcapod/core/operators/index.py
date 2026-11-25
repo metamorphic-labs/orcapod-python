@@ -9,6 +9,7 @@ from typing import Any, ClassVar, cast
 
 import pyarrow as pa
 
+from orcapod.core.unique_keys import UniqueKeys
 from orcapod.types.explanation import plain_repr
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
@@ -55,6 +56,10 @@ class Index(UnaryOperator):
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys (``core/unique_keys``): each row comes from one input row."""
+        return stream.unique_keys
 
     def __init__(
         self,

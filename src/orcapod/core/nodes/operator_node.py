@@ -28,6 +28,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from orcapod import contexts
+from orcapod.core.unique_keys import NO_UNIQUE_KEYS, UniqueKeys, derived_keys
 from orcapod.core.nodes.provenance_methods import ProvenanceMethods
 from orcapod.core.data_tags import (
     mark_data_tags,
@@ -297,6 +298,17 @@ class OperatorNodeBase(StreamBase):
     # ------------------------------------------------------------------
     # Stream interface
     # ------------------------------------------------------------------
+
+    @property
+    def unique_keys(self) -> UniqueKeys:
+        """The tag sets no two rows agree on, derived from the inputs' (``core/unique_keys``).
+
+        None in ``REPLAY`` mode: every logged run of the node's key is replayed, so a
+        tag tuple can occur once per run.
+        """
+        if self.cache_mode == CacheMode.REPLAY:
+            return NO_UNIQUE_KEYS
+        return derived_keys(self.producer, self.upstreams, self)
 
     @property
     def producer(self) -> OperatorPodProtocol:

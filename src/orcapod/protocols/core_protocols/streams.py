@@ -217,6 +217,15 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
         """
         ...
 
+    @property
+    def unique_keys(self) -> frozenset[frozenset[str]]:
+        """The tag sets no two rows of the stream agree on; empty certifies nothing.
+
+        Derived from the inputs when asked, never stored; in no hash, identity, config,
+        stored row or equality (``orcapod.core.unique_keys``, ITL-1464).
+        """
+        ...
+
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """
         Generates explicit iterator over (tag, data) pairs in the stream.
