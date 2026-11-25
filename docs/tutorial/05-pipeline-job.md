@@ -155,7 +155,8 @@ print(job.diagram(collapse=True))
 #   session_means (function pod · mean_rate · current) <- GroupBy
 ```
 
-You read a node like any other stream:
+Read the node of a function pod or an operator like any other stream. The node of a source has
+`as_table()`, `keys()` and `output_schema()`, but no `for` loop and no DataFrame methods:
 
 ```python
 means = job.nodes["session_means"]
