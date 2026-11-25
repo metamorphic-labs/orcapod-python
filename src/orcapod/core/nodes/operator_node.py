@@ -141,22 +141,34 @@ def _is_library_operator(operator: object) -> bool:
     )
 
 
-def _is_described(stream: StreamProtocol) -> bool:
-    """Whether every operator ``stream`` comes from is the library's."""
-    if isinstance(stream, OperatorNodeBase) and not _is_library_operator(
-        stream.producer
-    ):
-        return False
-    return all(_is_described(upstream) for upstream in stream.upstreams)
+def _nodes_above(streams: Sequence[StreamProtocol]) -> list[StreamProtocol]:
+    """``streams`` and every stream they come from, each once."""
+    found: dict[int, StreamProtocol] = {}
+    waiting = list(streams)
+    while waiting:
+        stream = waiting.pop()
+        if id(stream) not in found:
+            found[id(stream)] = stream
+            waiting.extend(stream.upstreams)
+    return list(found.values())
 
 
-def _holds_token_lists(stream: StreamProtocol) -> bool:
-    """Whether ``stream``'s rows may carry derived token lists: an aggregation's output,
-    through any operators."""
-    if not isinstance(stream, OperatorNodeBase):
-        return False
-    return isinstance(stream.producer, (Batch, GroupBy)) or any(
-        _holds_token_lists(upstream) for upstream in stream.upstreams
+def _are_described(streams: Sequence[StreamProtocol]) -> bool:
+    """Whether every operator ``streams`` come from is the library's."""
+    return all(
+        _is_library_operator(stream.producer)
+        for stream in _nodes_above(streams)
+        if isinstance(stream, OperatorNodeBase)
+    )
+
+
+def _hold_token_lists(streams: Sequence[StreamProtocol]) -> bool:
+    """Whether rows of ``streams`` may carry derived token lists: an aggregation's
+    output, through any operators."""
+    return any(
+        isinstance(stream, OperatorNodeBase)
+        and isinstance(stream.producer, (Batch, GroupBy))
+        for stream in _nodes_above(streams)
     )
 
 
@@ -2334,10 +2346,7 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
         streams' descriptions, so no input may come from a user's operator, which would
         be applied to no row to give one.
         """
-        if not (
-            _is_library_operator(operator)
-            and all(_is_described(stream) for stream in self._input_streams)
-        ):
+        if not (_is_library_operator(operator) and _are_described(self._input_streams)):
             return False
         default = contexts.get_default_context_key()
         return self.data_context_key == default and all(
@@ -2373,7 +2382,7 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
         batches = KeptBatches(self)
 
         execute = operator.async_execute_batches
-        if any(_holds_token_lists(stream) for stream in self._input_streams):
+        if _hold_token_lists(self._input_streams):
             # A join kernel holds its rows in files, which cannot share the ids that
             # derived token lists share: the whole inputs, as on the sync path.
             if isinstance(operator, (Join, MergeJoin, SemiJoin)):

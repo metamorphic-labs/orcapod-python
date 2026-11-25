@@ -261,6 +261,8 @@ class KeptBatches:
 
     def __init__(self, node: StreamProtocol) -> None:
         self._node: StreamProtocol = node
+        # The node's keys, in the order its rows have them; asked once.
+        self._keys: tuple[list[str], list[str]] | None = None
         self._spool: RowSpool = RowSpool(memory_bytes=KEPT_ROWS_MEMORY_BYTES)
         self._schema: pa.Schema | None = None
         self._token_types: dict[str, pa.DataType] = {}
@@ -287,9 +289,9 @@ class KeptBatches:
         table = open_provenance(batch, self._token_types)
         # The columns in the order of a table built from rows; a join lists its data
         # before its system tags.
-        table = row_built_columns(
-            table, keys_in_delivered_order(self._node.keys(), table.column_names)
-        )
+        if self._keys is None:
+            self._keys = keys_in_delivered_order(self._node.keys(), table.column_names)
+        table = row_built_columns(table, self._keys)
         if self._schema is None:
             self._schema = table.schema
         elif not table.schema.equals(self._schema, check_metadata=True):
@@ -343,9 +345,8 @@ class KeptBatches:
         if not self.num_rows:
             raise ValueError("Cannot make an output stream of no rows")
         table = StaticOutputOperatorPod._flag_by_values(self._table())  # pyright: ignore[reportPrivateUsage]  # F's last step
-        tag_keys, data_keys = keys_in_delivered_order(
-            self._node.keys(), table.column_names
-        )
+        assert self._keys is not None  # a row was kept
+        tag_keys, data_keys = self._keys
         return ArrowTableStream(
             table,
             tag_columns=tag_keys,
