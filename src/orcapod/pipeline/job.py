@@ -44,6 +44,7 @@ from orcapod.pipeline.run_summary import (
     run_node_summaries,
     warn_row_failures,
 )
+from orcapod.pipeline.source_consistency import require_consistent_sources
 from orcapod.protocols import core_protocols as cp
 from orcapod.databases.utils import as_table_committing
 from orcapod.types import NodeConfig
@@ -392,7 +393,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         bound_sources: dict[str, cp.StreamProtocol] = dict(sources or {})
 
-        # Validate sources against SourceNode schemas.
+        # Report unknown names against the blueprint. Bind checks the sources.
         if bound_sources:
             source_names = {
                 node.name
@@ -405,9 +406,6 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     f"from_pipeline() received source keys with no matching SourceNode: "
                     f"{sorted(unknown)}. Known names: {sorted(source_names)}"
                 )
-            for node in pipeline._persistent_node_map.values():
-                if isinstance(node, SourceNodeBase) and node.name in bound_sources:
-                    node.validate(bound_sources[node.name])
 
         # Reconstruct via InvocationGraph (creates unbound SourceJobNodes).
         # _compiled_pipeline is intentionally left as None here so the lazy
@@ -468,6 +466,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 the job's own database again, at ``<name>/_result`` (ITL-1408).
 
         Raises:
+            InconsistentSourceError: If two sources sharing a source ID have
+                different schemas, or both hold fixed rows and those rows differ.
             SourceSpecMismatchError: If any source's columns differ from its slot's
                 declared names, roles or types.
             ValueError: If a source key has no matching ``SourceJobNode`` slot, or an
@@ -503,9 +503,6 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     f"(SourceJobNode): {sorted(unknown)}. "
                     f"Known slot names: {sorted(source_names)}"
                 )
-            for node in (self._persistent_node_map or {}).values():
-                if isinstance(node, SourceNodeBase) and node.name in sources:
-                    node.validate(sources[node.name])
 
         # A database that cannot store a node's tables is refused before anything
         # changes too (ITL-1162), and so is a caching operator over a restricted
@@ -519,6 +516,15 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             for node in (self._persistent_node_map or {}).values()
             if isinstance(node, SourceJobNode) and node.name in to_bind
         ]
+        require_consistent_sources(
+            (
+                (f"node {node.label!r}", node)
+                for node in self._persistent_node_map.values()
+            ),
+            rebinding,
+        )
+        for node, source in rebinding:
+            node.validate(source)
         refuse_restriction_conflicts(
             (self._persistent_node_map or {}).values(), rebinding=rebinding
         )
@@ -1297,6 +1303,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             )
 
         # --- Build hash-keyed OrcaDAG for topological ordering + exclusion ---
+        # A caller can change a slot or proxy directly after binding the job.
+        require_consistent_sources(
+            (f"node {node.label!r}", node)
+            for node in self._persistent_node_map.values()
+        )
         hash_dag: OrcaDAG[str] = OrcaDAG()
         for u, v in self._graph_edges:
             hash_dag.add_edge(u, v)
@@ -1756,6 +1767,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             results.
 
         Raises:
+            InconsistentSourceError: If reconstructed sources sharing a source ID
+                have different schemas.
             ValueError: If the file's format version is not the one this Orcapod
                 writes (an earlier format is refused, never migrated), or if it was
                 saved before the database key was renamed (``bindings.store``
@@ -1875,6 +1888,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     spec_name,
                     spec_name,
                 )
+
+        require_consistent_sources(
+            (f"slot {name!r}", source) for name, source in sources.items()
+        )
 
         # Reconstruct database
         effective_database = database

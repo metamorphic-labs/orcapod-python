@@ -557,14 +557,11 @@ class SourceSpecMismatchError(InputValidationError, ValueError):
 
 
 class InconsistentSourceError(ValueError):
-    """Raised when two source nodes in the same pipeline share a name but differ in schema.
+    """Raised when two sources in a pipeline disagree at a shared address.
 
-    Source node names are identity-forming: the same name in a given pipeline
-    must always refer to the same input slot (same schema).  If ``compile()``
-    finds two source nodes with identical names but different schemas — which
-    can happen when two ``RootSource`` objects share the same ``source_id`` but
-    produce different column sets — it raises this error rather than silently
-    renaming one of them.
+    Sources sharing a ``source_id`` must have the same schema. If both hold
+    fixed content, their tags, data and record IDs must also agree. Two
+    different schemas competing for one input slot also raise this error.
 
     Resolution: assign distinct ``source_id`` values to the conflicting sources
     so each slot has a unique, stable identity.

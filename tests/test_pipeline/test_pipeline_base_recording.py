@@ -240,11 +240,9 @@ class TestSourceNodeNaming:
         )
         join = Join()
         pipeline = Pipeline(name="test", auto_compile=False)
-        with pipeline:
-            join(s1, s2, label="joined")
-
         with pytest.raises(InconsistentSourceError, match="shared_id"):
-            pipeline.compile()
+            with pipeline:
+                join(s1, s2, label="joined")
 
 
 class TestRecordOperatorPodInvocation:

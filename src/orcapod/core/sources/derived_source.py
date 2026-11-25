@@ -305,6 +305,17 @@ class DerivedSource(RootSource):
     # Identity
     # -------------------------------------------------------------------------
 
+    @property
+    @override
+    def fixed_content(self) -> bytes | None:
+        """Rows are fixed only when the origin itself holds fixed content."""
+        if (
+            isinstance(self._origin, RootSource)
+            and self._origin.fixed_content is not None
+        ):
+            return self._digest_fixed_rows()
+        return None
+
     def identity_structure(self) -> Any:
         """Return what the content hash is built from.
 

@@ -78,6 +78,39 @@ same rows read by another kind, or by another version of one kind, are another s
 record id names a row within its source and never holds the source id. A job names an input
 slot by the source's name (`job.bind(sources={"units": ...})`).
 
+Within a pipeline or job, sources sharing a `source_id` must have the same Arrow schema.
+If both sources hold their rows in memory, their tags, data and record IDs must also
+agree. This applies to `ArrowTableSource`, `DictSource`, `ListSource`,
+`DataFrameSource` and wrappers over their fixed rows. Row order counts with positional
+IDs (`row_0`, `row_1`, and so on). With key columns, the same rows can arrive in any
+order. The comparison follows Orcapod's Arrow value rule, which treats signed zeros
+as equal and all NaNs as equal. Sources that read again later, including files,
+databases, caches and stored job outputs, use the ID and schema without a row
+comparison. Capture and binding reject conflicts with `InconsistentSourceError`.
+Give the conflicting sources different `source_id` values.
+
+```python
+from orcapod import Pipeline, function_pod
+from orcapod.errors import InconsistentSourceError
+from orcapod.sources import DictSource
+
+
+@function_pod(output_keys="adjusted")
+def adjust(rate: float) -> float:
+    return rate + 1
+
+
+first = DictSource([{"rate": 3.5}], source_id="rates")
+second = DictSource([{"rate": 7.25}], source_id="rates")
+try:
+    with Pipeline("rates"):
+        adjust.pod(first, label="first")
+        adjust.pod(second, label="second")
+except InconsistentSourceError as error:
+    print(error)
+# Source 'dict_v1:rates' has different rows in step 'first' and step 'second'. Give the sources different source_id values.
+```
+
 A kind's version moves when a row read before a change of its implementation could read
 differently after it (other values, other Arrow types, another record id). Saved jobs keep
 each source's name and version apart; a job loaded where a kind's version moved rebuilds the

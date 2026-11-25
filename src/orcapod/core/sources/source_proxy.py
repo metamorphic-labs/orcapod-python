@@ -96,6 +96,14 @@ class SourceProxy(RootSource):
         return self._delegate
 
     @property
+    @override
+    def fixed_content(self) -> bytes | None:
+        """The bound source's fixed rows, if it holds them."""
+        if isinstance(self._delegate, RootSource):
+            return self._delegate.fixed_content
+        return None
+
+    @property
     def is_bound(self) -> bool:
         """``True`` if a live source has been bound via `bind`."""
         return self._delegate is not None

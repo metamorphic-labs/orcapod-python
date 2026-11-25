@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Hashable
+from collections.abc import Hashable, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
@@ -17,6 +17,10 @@ from orcapod.pipeline.pod_invocation import (
     PodInvocation,
     SideEffectInvocation,
 )
+from orcapod.pipeline.source_consistency import (
+    invocation_source_uses,
+    require_consistent_sources,
+)
 from orcapod.side_effects import SideEffectNode
 from orcapod.protocols import core_protocols as cp
 from orcapod.utils.lazy_module import LazyModule
@@ -26,6 +30,7 @@ if TYPE_CHECKING:
     from orcapod.pipeline.diagram import PipelineDiagram
     from orcapod.types.provenance import Highlight
     from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+    from orcapod.pipeline.source_consistency import SourceUse
 else:
     nx = LazyModule("networkx")
 
@@ -125,6 +130,9 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         # --- Additive recording state (never cleared) -----------------
         # Maps content-hash-string → PodInvocation for each recorded invocation.
         self._invocation_lut: dict[str, PodInvocation] = {}
+        # Keep the original input objects for validation even when a live source
+        # and a fixed source share one address and their invocations coalesce.
+        self._recorded_source_uses: dict[int, SourceUse] = {}
         # Maps content-hash-string → raw stream for each unregistered upstream.
         self._source_streams: dict[str, Any] = {}
         # Topology graph — vertices and edges are content-hash strings.
@@ -350,6 +358,7 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         # every source the pipeline's streams read now (nothing is remembered: a
         # slot rebound since the last invocation changes what they read).
         require_one_restriction([*self._held_streams(), *inputs])
+        require_consistent_sources(self._source_uses(invocation))
         self._remember_invocation(key, invocation)
         self._hash_graph.add_node(key)
         for upstream, upstream_hash in upstreams:
@@ -359,6 +368,8 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
 
     def _remember_invocation(self, key: str, invocation: PodInvocation) -> None:
         """Keep the smallest explicit label when identical invocations share a node."""
+        for location, stream in invocation_source_uses(invocation):
+            self._recorded_source_uses[id(stream)] = (location, stream)
         previous = self._invocation_lut.get(key)
         if previous is not None and previous.label is not None:
             if invocation.label is None or previous.label < invocation.label:
@@ -375,6 +386,17 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                 for stream in invocation.input_streams
             ),
         ]
+
+    def _source_uses(self, extra: PodInvocation | None = None) -> Iterator[SourceUse]:
+        """Inputs before hash deduplication, with their original step names."""
+        # Prefer the labelled endpoint of a chain over an implicit projection.
+        for invocation in reversed(self._invocation_lut.values()):
+            yield from invocation_source_uses(invocation)
+        yield from self._recorded_source_uses.values()
+        if extra is not None:
+            yield from invocation_source_uses(extra)
+        for stream in self._source_streams.values():
+            yield f"source {stream.label!r}", stream
 
     # ------------------------------------------------------------------
     # Diagram (ITL-1197)
@@ -446,7 +468,7 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         """No-op — all recording state is additive and persists across with-blocks.
 
         Note:
-            ``_invocation_lut``, ``_source_streams``, and ``_hash_graph``
+            ``_invocation_lut``, ``_recorded_source_uses``, ``_source_streams``, and ``_hash_graph``
             intentionally accumulate across ``with`` blocks.
             ``_persistent_node_map``, ``_node_lut``, ``_upstreams``, and
             ``_graph_edges`` are compiled artifacts overwritten by each
@@ -509,6 +531,7 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         # the last invocation would otherwise connect a branch recorded over one
         # restriction to another (ITL-1218).
         require_one_restriction(self._held_streams())
+        require_consistent_sources(self._source_uses())
 
         source_node_cls = self.source_node_class
 
@@ -800,6 +823,11 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
             A compiled instance of ``cls``.
         """
         instance = cls(name=name)
+        require_consistent_sources(
+            use
+            for invocation in graph.invocations
+            for use in invocation_source_uses(invocation)
+        )
         instance._source_streams = dict(graph.source_streams)
         for inv in graph.invocations:
             key = inv.content_hash().to_string()

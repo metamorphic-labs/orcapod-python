@@ -4,6 +4,8 @@ import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
+from typing_extensions import override
+
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.streams.base import (
@@ -416,6 +418,33 @@ class RootSource(StreamBase):
         """
         return arrow_schema_identity(*self.arrow_schemas, self.data_context)
 
+    @property
+    def fixed_content(self) -> bytes | None:
+        """Digest of held rows for collision checks, or None for a live read.
+
+        Sources that hold immutable rows opt in. A wrapper can opt in if its
+        delegate holds fixed rows. The digest is separate from source identity.
+        """
+        return None
+
+    def _digest_fixed_rows(self) -> bytes:
+        """Compare tags, data and record IDs under the normal Arrow float rule."""
+        from orcapod.hashing.starfix_digest import digest_orcapod_table
+        from orcapod.utils.arrow_utils import key_row_order
+
+        table = self.as_table(columns={"system_tags": True})
+        if self._key_columns and table.num_rows > 1:
+            table = key_row_order(table, self._key_columns)
+        # The schemas are checked separately, including logical type identifiers.
+        # Compare encoded values directly without converting nested or extension
+        # columns to Python objects. Starfix reads their Arrow storage.
+        return digest_orcapod_table(
+            table,
+            include_metadata=False,
+            ordered_columns=False,
+            ordered_struct_fields=False,
+        )
+
     def identity_structure(self) -> Any:
         """Identity from the ``source_id``, the Arrow schema and the key columns.
 
@@ -637,3 +666,13 @@ class RootSource(StreamBase):
             cache_path_prefix=cache_path_prefix,
             **kwargs,
         )
+
+
+class FixedTableSource(RootSource):
+    """A root that holds an Arrow table for its entire lifetime."""
+
+    @property
+    @override
+    def fixed_content(self) -> bytes:
+        """Digest of the table this source holds."""
+        return self._digest_fixed_rows()
