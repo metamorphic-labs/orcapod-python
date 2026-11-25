@@ -1635,8 +1635,8 @@ class StreamBase(TraceableBase):
         its ``head``, ``tail`` and ``sort_by_tags`` choose what is shown. The view holds
         every row, except over a source that reads its rows on demand
         (``reads_in_batches``): its rows, and those of operators applied batch by batch
-        over it, are read in batches, and a result of more than
-        ``RUN_VIEW_COMPLETE_ROWS`` rows gives a ``BoundedStreamView``. For other
+        over it, are read in batches, and a large result (``RunSize``) gives a
+        ``BoundedStreamView``. For other
         column groups, use ``as_table(columns=...)`` or ``head(columns=...)`` after
         ``run()``. On a stream that keeps its rows (a pod's or operator's output stream,
         a job node, a job's side-effect node included, an in-memory source) they read the
