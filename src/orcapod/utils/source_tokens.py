@@ -18,9 +18,9 @@ Parquet (its storage is a struct with no field, which Parquet refuses).
 from __future__ import annotations
 
 import json
-from collections.abc import Collection, Mapping
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, NoReturn, cast
+from typing import Any, NoReturn, TypeAlias, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -31,6 +31,20 @@ _TEXT = pa.large_string()
 
 ROWS_PER_CHUNK = 65_536
 """The most rows whose token text is built in one step."""
+
+
+_folds: dict[str, Callable[[Sequence[str | None]], str]] = {}
+
+
+def register_fold(name: str, fold: Callable[[Sequence[str | None]], str]) -> None:
+    """Say how a ``FoldRecipe`` named ``name`` makes one token of several.
+
+    Args:
+        name: The fold's name; for a fold with an algorithm label, the label.
+        fold: One token from the members' tokens. Called once per row, with the members
+            in the recipe's order.
+    """
+    _folds[name] = fold
 
 
 @dataclass(frozen=True)
@@ -48,14 +62,14 @@ class TokenRecipe:
     record_id: str
     column: str
 
-    def to_json(self) -> str:
-        """The recipe as text: what two equal recipes share."""
-        return json.dumps([self.source_id, self.record_id, self.column])
+    def to_json(self) -> Any:  # pyright: ignore[reportExplicitAny]  # JSON
+        """The recipe as a JSON value: what two equal recipes share."""
+        return [self.source_id, self.record_id, self.column]
 
-    @classmethod
-    def from_json(cls, text: str) -> TokenRecipe:
-        """The recipe ``to_json`` wrote."""
-        return cls(*json.loads(text))
+    @property
+    def read_columns(self) -> frozenset[str]:
+        """The system-tag columns the recipe reads."""
+        return frozenset((self.source_id, self.record_id))
 
     def renamed(self, names: Mapping[str, str]) -> TokenRecipe:
         """The recipe over system-tag columns renamed by ``names``."""
@@ -65,10 +79,6 @@ class TokenRecipe:
             self.column,
         )
 
-    def reads(self, columns: Collection[str]) -> bool:
-        """Whether the recipe reads one of ``columns``."""
-        return self.source_id in columns or self.record_id in columns
-
     def text(self, batch: pa.RecordBatch) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny]  # an Arrow array
         """The tokens of ``batch``'s rows, as ``large_string``."""
         return pc.binary_join_element_wise(  # pyright: ignore[reportCallIssue, reportUnknownVariableType]  # the stubs leave out scalar arguments
@@ -77,6 +87,52 @@ class TokenRecipe:
             pa.scalar(self.column, _TEXT),  # pyright: ignore[reportArgumentType]  # as above
             pa.scalar(constants.BLOCK_SEPARATOR, _TEXT),  # pyright: ignore[reportArgumentType]  # as above
         )
+
+
+@dataclass(frozen=True)
+class FoldRecipe:
+    """How one token is made of the tokens of several merged columns, row by row.
+
+    Attributes:
+        fold: The registered fold (``register_fold``).
+        members: The merged columns' recipes, in the order they were met.
+    """
+
+    fold: str
+    members: tuple[Recipe, ...]
+
+    def to_json(self) -> Any:  # pyright: ignore[reportExplicitAny]  # JSON
+        """The recipe as a JSON value: what two equal recipes share."""
+        return {"fold": self.fold, "members": [m.to_json() for m in self.members]}
+
+    @property
+    def read_columns(self) -> frozenset[str]:
+        """The system-tag columns the members read."""
+        return frozenset[str]().union(*(m.read_columns for m in self.members))
+
+    def renamed(self, names: Mapping[str, str]) -> FoldRecipe:
+        """The recipe over system-tag columns renamed by ``names``."""
+        return FoldRecipe(self.fold, tuple(m.renamed(names) for m in self.members))
+
+    def text(self, batch: pa.RecordBatch) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny]  # an Arrow array
+        """The tokens of ``batch``'s rows, as ``large_string``."""
+        fold = _folds[self.fold]
+        members = [member.text(batch).to_pylist() for member in self.members]
+        return pa.array(
+            [fold(tokens) for tokens in zip(*members, strict=True)], type=_TEXT
+        )
+
+
+Recipe: TypeAlias = TokenRecipe | FoldRecipe
+
+
+def recipe_from_json(value: Any) -> Recipe:  # pyright: ignore[reportExplicitAny, reportAny]  # JSON
+    """The recipe whose ``to_json`` is ``value``."""
+    if isinstance(value, dict):
+        return FoldRecipe(
+            value["fold"], tuple(recipe_from_json(m) for m in value["members"])
+        )
+    return TokenRecipe(*value)
 
 
 class _DerivedTokenScalar(pa.ExtensionScalar):
@@ -102,18 +158,18 @@ class DerivedTokenType(pa.ExtensionType):
     wrapped in its type again. Two derived columns have one type only with one recipe.
     """
 
-    def __init__(self, recipe: TokenRecipe) -> None:
+    def __init__(self, recipe: Recipe) -> None:
         self.recipe = recipe
         super().__init__(pa.struct([]), "orcapod.internal.derived_token")
 
     def __arrow_ext_serialize__(self) -> bytes:
-        return self.recipe.to_json().encode()
+        return json.dumps(self.recipe.to_json()).encode()
 
     @classmethod
     def __arrow_ext_deserialize__(
         cls, storage_type: pa.DataType, serialized: bytes
     ) -> DerivedTokenType:
-        return cls(TokenRecipe.from_json(serialized.decode()))
+        return cls(recipe_from_json(json.loads(serialized)))
 
     def __arrow_ext_scalar_class__(self) -> type[pa.ExtensionScalar]:
         return _DerivedTokenScalar
@@ -137,14 +193,14 @@ class DerivedTokenType(pa.ExtensionType):
         return hash(self.recipe)
 
 
-def derived_array(recipe: TokenRecipe, rows: int) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny]  # an Arrow array
+def derived_array(recipe: Recipe, rows: int) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny]  # an Arrow array
     """A derived token column of ``rows`` rows: no row has a byte."""
     # No validity bitmap: no row is null. (The stubs do not allow the absent buffer.)
     storage = pa.Array.from_buffers(pa.struct([]), rows, cast(Any, [None]), 0, 0)
     return pa.ExtensionArray.from_storage(DerivedTokenType(recipe), storage)
 
 
-def derived_recipe(kind: pa.DataType) -> TokenRecipe | None:
+def derived_recipe(kind: pa.DataType) -> Recipe | None:
     """The recipe of a column of type ``kind``; ``None`` when it is not derived."""
     return kind.recipe if isinstance(kind, DerivedTokenType) else None
 
@@ -152,6 +208,13 @@ def derived_recipe(kind: pa.DataType) -> TokenRecipe | None:
 def derived_columns(schema: pa.Schema) -> tuple[str, ...]:
     """The names of the derived token columns of ``schema``."""
     return tuple(f.name for f in schema if derived_recipe(f.type) is not None)
+
+
+def with_recipe(table: pa.Table, name: str, recipe: Recipe) -> pa.Table:
+    """``table`` with its token column ``name`` derived by ``recipe``, its field kept."""
+    tokens = derived_array(recipe, table.num_rows)
+    field = table.schema.field(name).with_type(tokens.type)
+    return table.set_column(table.schema.get_field_index(name), field, tokens)
 
 
 def materialize(table: pa.Table, names: Collection[str] | None = None) -> pa.Table:
@@ -171,12 +234,12 @@ def materialize(table: pa.Table, names: Collection[str] | None = None) -> pa.Tab
     if not wanted:
         return table
     schema = table.schema
-    recipes: dict[str, TokenRecipe] = {}
+    recipes: dict[str, Recipe] = {}
     for name in wanted:
         recipe = derived_recipe(schema.field(name).type)
         assert recipe is not None
         recipes[name] = recipe
-    read = {c for r in recipes.values() for c in (r.source_id, r.record_id)}
+    read = {c for recipe in recipes.values() for c in recipe.read_columns}
     tags = table.select([c for c in table.column_names if c in read])
     chunks: dict[str, list[pa.Array[Any]]] = {name: [] for name in wanted}  # pyright: ignore[reportExplicitAny]  # Arrow arrays
     for batch in tags.to_batches(max_chunksize=ROWS_PER_CHUNK):
@@ -204,7 +267,7 @@ def materialize_reading(table: pa.Table, columns: Collection[str]) -> pa.Table:
             name
             for name in derived_columns(table.schema)
             if (recipe := derived_recipe(table.schema.field(name).type)) is not None
-            and recipe.reads(columns)
+            and not recipe.read_columns.isdisjoint(columns)
         ],
     )
 
@@ -226,9 +289,5 @@ def rename_read_columns(table: pa.Table, names: Mapping[str, str]) -> pa.Table:
         renamed = recipe.renamed(names)
         if renamed == recipe:
             continue
-        table = table.set_column(
-            table.schema.get_field_index(name),
-            field.with_type(DerivedTokenType(renamed)),
-            derived_array(renamed, table.num_rows),
-        )
+        table = with_recipe(table, name, renamed)
     return table
