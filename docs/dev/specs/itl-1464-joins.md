@@ -179,7 +179,7 @@ characters and one integer), as the growth of the process's physical footprint:
 | the same, strings as Polars categories | 38 | 15 ms, about 115 more |
 | a 64-bit hash of the prepared key and a row number | 23 | 5 ms, 4 more |
 
-The key's own data is 51 bytes; the rest is the string views and buffers Polars keeps. Not
+Of the 95 bytes, 42 are the key's data, 9 the row number and the constant key; the rest is the string views and buffers Polars keeps. Not
 built: the hash form would keep one equality rule (candidates with equal hashes are matched
 by `join._matched_pairs` on the keys of the rows fetched for the output), but rests on equal
 keys having equal hashes under the join's equality, which was checked
