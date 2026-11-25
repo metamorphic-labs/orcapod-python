@@ -1531,7 +1531,9 @@ what it is given is then one slice, not the table."""
 def kept_table(table: pa.Table) -> pa.Table:
     """Return ``table`` as a node keeps it: on local disk when it is large (ITL-1464).
 
-    A table of at most ``KEPT_ROWS_MEMORY_BYTES`` is returned as it is. A larger one
+    A table of at most ``KEPT_ROWS_MEMORY_BYTES`` is returned as it is, and so is one
+    with derived token lists: they share the ids of all their members, which every file
+    would hold once per column. A larger one
     is written to a ``RowSpool`` and returned read back memory-mapped: the same
     schema and values (only the arrays' chunking differs), not process memory. The
     mapping lives as long as a table that refers to it.
@@ -1542,7 +1544,8 @@ def kept_table(table: pa.Table) -> pa.Table:
     Returns:
         The table to keep.
     """
-    if table.nbytes <= KEPT_ROWS_MEMORY_BYTES or not table.num_rows:
+    lists = any(isinstance(f.type, source_tokens.MemberTokenType) for f in table.schema)
+    if lists or table.nbytes <= KEPT_ROWS_MEMORY_BYTES or not table.num_rows:
         return table
     spool = RowSpool(memory_bytes=KEPT_ROWS_MEMORY_BYTES)
     for start in range(0, table.num_rows, SPILL_SLICE_ROWS):

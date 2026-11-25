@@ -1954,7 +1954,7 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
             # one whose rows report another data context than the node's: its rows,
             # as main iterated them (the edge table is built in the node's context).
             return None
-        table = self._bound_source.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+        table = carried_table(self._bound_source, ZERO_ROW_INPUT_COLUMNS)
         if not system_tags_as_rows_give(table):
             # System tags the rows would type otherwise (a narrow integer, a
             # nullable field): the rows decide, as on main.

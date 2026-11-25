@@ -65,6 +65,7 @@ from orcapod.core.job_edges import (
 from orcapod.core.record_batch_channels import OutputChannel
 from orcapod.core.streams.record_batch_input import InputChannel
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+from orcapod.core.streams.carried import carried_table
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
     StreamBase,
@@ -130,6 +131,23 @@ async def _discard(channel: ReadableChannel[Any]) -> None:
         return
     async for _ in channel:
         pass
+
+
+def _is_library_operator(operator: object) -> bool:
+    """Whether ``operator`` is a library operator, used as its class."""
+    kind = type(operator)
+    return kind.__module__.startswith("orcapod.core.operators.") and reads_as_its_class(
+        operator, kind
+    )
+
+
+def _is_described(stream: StreamProtocol) -> bool:
+    """Whether every operator ``stream`` comes from is the library's."""
+    if isinstance(stream, OperatorNodeBase) and not _is_library_operator(
+        stream.producer
+    ):
+        return False
+    return all(_is_described(upstream) for upstream in stream.upstreams)
 
 
 def _holds_token_lists(stream: StreamProtocol) -> bool:
@@ -1773,7 +1791,7 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
                 # From the captured stream: reading the wrapper again could run the
                 # operator again (an upstream with no modified time), so the table,
                 # the keys and the gate describe one computation.
-                result_table = produced.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+                result_table = carried_table(produced, ZERO_ROW_INPUT_COLUMNS)
                 if not system_tags_as_rows_give(result_table):
                     result_table = None
             if result_table is None:
@@ -2312,11 +2330,14 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
 
         For a library operator used as its class, in the default data context throughout:
         a batch's rows are in the context its stream reports, and a row-form operator
-        may hand on rows of another (ITL-1339).
+        may hand on rows of another (ITL-1339). The channels check batches against the
+        streams' descriptions, so no input may come from a user's operator, which would
+        be applied to no row to give one.
         """
-        kind = type(operator)
-        library = kind.__module__.startswith("orcapod.core.operators.")
-        if not (library and reads_as_its_class(operator, kind)):
+        if not (
+            _is_library_operator(operator)
+            and all(_is_described(stream) for stream in self._input_streams)
+        ):
             return False
         default = contexts.get_default_context_key()
         return self.data_context_key == default and all(
