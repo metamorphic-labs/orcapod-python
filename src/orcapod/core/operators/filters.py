@@ -10,7 +10,7 @@ from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.streams import ArrowTableStream
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.types import ColumnConfig, Schema
-from orcapod.utils import arrow_utils
+from orcapod.utils import arrow_utils, source_tokens
 
 if TYPE_CHECKING:
     import numpy as np
@@ -71,9 +71,17 @@ class PolarsFilter(UnaryOperator):
             return stream
 
         # TODO: improve efficiency here...
-        table = stream.as_table(
+        whole = stream.as_carried_table(
             columns={"source": True, "system_tags": True, "sort_by_tags": False}
         )
+        # Polars reads no derived token column: one is left out, and put back for the
+        # rows kept (its recipe reads the system tags kept with them, ITL-1464), unless
+        # a predicate could read it.
+        derived = source_tokens.derived_columns(whole.schema)
+        others = {c for c in whole.column_names if c not in derived}
+        if derived and not self._reads_only(others):
+            whole, derived = source_tokens.materialize(whole), ()
+        table = whole.drop_columns(list(derived))
         df = pl.DataFrame(table)
         filtered_table = df.filter(*self.predicates, **self.constraints).to_arrow()
         # A filter passes every column through, so each one takes the
@@ -96,11 +104,39 @@ class PolarsFilter(UnaryOperator):
         filtered_table = arrow_utils.restore_schema_nullability(
             filtered_table, pa.schema(input_fields)
         )
+        for name in derived:
+            field = whole.schema.field(name)
+            recipe = source_tokens.derived_recipe(field.type)
+            assert recipe is not None
+            filtered_table = filtered_table.append_column(
+                field, source_tokens.derived_array(recipe, filtered_table.num_rows)
+            )
+        filtered_table = filtered_table.select(whole.column_names)
 
         return ArrowTableStream(
             filtered_table,
             tag_columns=stream.keys()[0],
             data_tags=stream_data_tags(stream),
+        )
+
+    def _reads_only(self, columns: Collection[str]) -> bool:
+        """Whether every predicate certainly reads columns of ``columns`` only.
+
+        Certain only for expressions that name each column they read: a selector
+        (``pl.all()``, a regular expression, a type) can read any column, and a predicate
+        that is not an expression is not looked into. A name that is no column is not
+        certain either: Polars' error then lists the columns there are.
+        """
+        if not set(self.constraints) <= set(columns):
+            return False
+        return all(
+            isinstance(predicate, pl.Expr)
+            and not predicate.meta.has_multiple_outputs()
+            and set(predicate.meta.root_names()) <= set(columns)
+            for predicate in (
+                *self.predicates,
+                *(v for v in self.constraints.values() if isinstance(v, pl.Expr)),
+            )
         )
 
     def validate_unary_input(self, stream: StreamProtocol) -> None:

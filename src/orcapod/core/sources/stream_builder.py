@@ -25,7 +25,6 @@ from orcapod.core.sources.source_ids import (
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import RowIdentifierError
 from orcapod.logical_types.identifier import LogicalTypeIdentifierError
-from orcapod.system_constants import constants
 from orcapod.types import ContentHash
 from orcapod.utils import arrow_utils, schema_utils
 from orcapod.utils.schema_utils import compute_source_schema_hash
@@ -598,7 +597,8 @@ class SourceStreamBuilder:
         key's canonical JSON), and its source id is the source's name: the two
         system-tag columns. Each source-info value is
         ``<source_id>::<record id>::<column>`` (for example ``_source_amplitude``
-        holds ``<source_id>::row_3::amplitude``). A row keeps its record id wherever
+        holds ``<source_id>::row_3::amplitude``), carried as a recipe over the two system
+        tags until its text is needed (``source_tokens``). A row keeps its record id wherever
         and however often it is read, as long as its identifier is the same
         (ITL-1154).
 
@@ -621,14 +621,13 @@ class SourceStreamBuilder:
         Returns:
             The stream over the enriched table.
         """
+        # The tokens say nothing the two system tags below and the column names do not:
+        # each is carried as that recipe, and its text is built when it is needed
+        # (``source_tokens``, ITL-1464).
         if with_source_info:
-            source_info = [
-                f"{source_id}{constants.BLOCK_SEPARATOR}{identifier}"
-                for identifier in row_identifiers
-            ]
-            table = arrow_utils.add_source_info(
+            table = arrow_utils.add_source_tokens(
                 table,
-                source_info,
+                schema_hash,
                 exclude_columns=[c for c in tag_columns if c not in data_tags],
             )
         table = arrow_utils.add_system_tag_columns(

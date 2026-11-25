@@ -62,7 +62,7 @@ from orcapod.core.sources.stream_builder import (
     row_identifiers,
 )
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
-from orcapod.core.streams.base import check_head_size
+from orcapod.core.streams.base import StreamBase, check_head_size
 from orcapod.core.streams.view import ViewStatus, StreamView
 from orcapod.databases.spiraldb_connector import (
     SpiralDBConnector,
@@ -888,7 +888,7 @@ class SpiralDBTableSource(RootSource):
             max_rows: Raise when the read would return more rows; ``None`` for no cap.
             with_source_info: Whether each stream holds its rows' source-info tokens.
                 ``False`` only where the caller returns no source-info column and
-                hashes no row (``_whole_table``): the streams then hold null tokens.
+                hashes no row (``_whole_stream``): the streams then hold null tokens.
 
         Raises:
             SourceTooLargeError: If the read would return, or returns, more than
@@ -991,35 +991,40 @@ class SpiralDBTableSource(RootSource):
     ) -> "pa.Table":
         """Scan the table and return its rows as one PyArrow table (all held in memory)."""
         config = ColumnConfig.handle_config(columns, all_info=all_info)
-        return self._whole_table(
-            self._batch_streams(with_source_info=_reads_source_info(config)),
-            columns=columns,
-            all_info=all_info,
+        with_source_info = _reads_source_info(config)
+        return self._whole_stream(
+            self._batch_streams(with_source_info=with_source_info),
+            with_source_info=with_source_info,
+        ).as_table(columns=columns, all_info=all_info)
+
+    def as_carried_table(
+        self, *, columns: ColumnConfig | dict[str, Any] | None = None
+    ) -> "pa.Table":
+        """Scan the table as ``as_table`` does, building no source-info text (ITL-1464)."""
+        return self._whole_stream(self._batch_streams()).as_carried_table(
+            columns=columns
         )
 
-    def _whole_table(
+    def _whole_stream(
         self,
         streams: Iterator["ArrowTableStream"],
         *,
-        columns: ColumnConfig | dict[str, Any] | None,
-        all_info: bool,
-    ) -> "pa.Table":
-        """Return the rows of ``streams`` (batches of one read) as one table."""
+        with_source_info: bool = True,
+    ) -> StreamBase:
+        """Return the rows of ``streams`` (batches of one read) as one stream."""
         # One stream over all the rows, so that a whole-table option (sorting by
         # tags) applies across batches. The source-info tokens are carried only for
         # a result that shows or hashes them (ITL-1464).
-        config = ColumnConfig.handle_config(columns, all_info=all_info)
-        enriched = {"source": _reads_source_info(config), "system_tags": True}
-        tables = [stream.as_table(columns=enriched) for stream in streams]
+        enriched = {"source": with_source_info, "system_tags": True}
+        tables = [stream.as_carried_table(columns=enriched) for stream in streams]
         if not tables:
-            return self._stream.as_table(columns=columns, all_info=all_info)
-        whole = ArrowTableStream(
+            return self._stream
+        return ArrowTableStream(
             table=pa.concat_tables(tables),
             tag_columns=self._tag_columns,
             system_tag_columns=self._system_tag_columns,
             data_tags=self._data_tags,
         )
-        return whole.as_table(columns=columns, all_info=all_info)
 
     def _head(
         self,
@@ -1049,11 +1054,9 @@ class SpiralDBTableSource(RootSource):
         head_limit = n if limit is None else min(n, limit)
         asof = self._asof
         table = self._lookup_table()
-        rows = self._whole_table(
-            self._read_batches(table, asof=asof, limit=head_limit, max_rows=None),
-            columns=columns,
-            all_info=all_info,
-        )
+        rows = self._whole_stream(
+            self._read_batches(table, asof=asof, limit=head_limit, max_rows=None)
+        ).as_table(columns=columns, all_info=all_info)
         if rows.num_rows < head_limit or head_limit == limit:
             return _Head(rows, True, rows.num_rows, False)
         bound, total = self._bounded_count(n, table)

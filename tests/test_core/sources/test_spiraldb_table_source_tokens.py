@@ -71,13 +71,13 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 def token_builds(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     """Record the row count of every table the source builds tokens for."""
     calls: list[int] = []
-    original = arrow_utils.add_source_info
+    original = arrow_utils.add_source_tokens
 
     def recording(table: pa.Table, *given: Any, **options: Any) -> pa.Table:
         calls.append(table.num_rows)
         return original(table, *given, **options)
 
-    monkeypatch.setattr(arrow_utils, "add_source_info", recording)
+    monkeypatch.setattr(arrow_utils, "add_source_tokens", recording)
     return calls
 
 

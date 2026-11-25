@@ -41,6 +41,7 @@ from orcapod.core.operators.provisional import (
     provisional_operator_name,
     warn_provisional_operator,
 )
+from orcapod.utils import source_tokens
 from orcapod.utils.provisional import note_provisional_use, provisional_class_name
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
@@ -584,6 +585,9 @@ class StaticOutputOperatorPod(TraceableBase):
             if not field.name.startswith(constants.SOURCE_PREFIX):
                 continue
             if pa.types.is_large_string(field.type):
+                continue
+            if source_tokens.derived_recipe(field.type) is not None:
+                # Every token of a derived column is one string.
                 continue
             values = table.column(index).to_pylist()
             kinds = {arrow_utils.source_info_arrow_type(value) for value in values}
@@ -2276,6 +2280,16 @@ class DynamicPodStream(StreamBase):
             "StreamProtocol has not been updated or is empty."
         )
         return self._cached_stream.as_table(columns=columns, all_info=all_info)
+
+    def as_carried_table(
+        self, *, columns: ColumnConfig | dict[str, Any] | None = None
+    ) -> "pa.Table":
+        """The operator's result, derived token columns as they are (ITL-1464)."""
+        self._refresh()
+        assert self._cached_stream is not None, (
+            "StreamProtocol has not been updated or is empty."
+        )
+        return self._cached_stream.as_carried_table(columns=columns)
 
     def iter_data(
         self,

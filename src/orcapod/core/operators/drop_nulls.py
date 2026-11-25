@@ -316,7 +316,7 @@ class DropNulls(UnaryOperator):
             A stream over the surviving rows, in input order, with the named
             columns non-nullable. A result with no rows has the same schema.
         """
-        table = stream.as_table(
+        table = stream.as_carried_table(
             columns={
                 "source": True,
                 "system_tags": True,

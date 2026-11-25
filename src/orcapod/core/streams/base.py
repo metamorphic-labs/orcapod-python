@@ -42,7 +42,7 @@ from orcapod.protocols.core_protocols import (
 from orcapod.protocols.core_protocols.streams import RecordBatchInput
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Condition, Schema
-from orcapod.utils import arrow_utils
+from orcapod.utils import arrow_utils, source_tokens
 
 if TYPE_CHECKING:
     from orcapod.types.explanation import Explanation
@@ -340,7 +340,12 @@ def row_built_provenance(table: pa.Table) -> pa.Table:
     changed = False
     for field, column in zip(table.schema, table.columns, strict=True):
         if field.name.startswith(constants.SOURCE_PREFIX):
-            kind = _source_info_value_type(field.type)
+            # A derived token column stays derived: its text is what the rows give.
+            kind = (
+                field.type
+                if source_tokens.derived_recipe(field.type) is not None
+                else _source_info_value_type(field.type)
+            )
             if kind != field.type:
                 column = column.cast(kind)
             new_field = pa.field(field.name, kind, nullable=field.nullable)
@@ -1508,6 +1513,18 @@ class StreamBase(TraceableBase):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> "pa.Table": ...
+
+    def as_carried_table(
+        self, *, columns: ColumnConfig | dict[str, Any] | None = None
+    ) -> "pa.Table":
+        """The table of ``as_table(columns=columns)``, as operators pass it on.
+
+        A source-info column may be derived (``utils/source_tokens.py``): a recipe over
+        the table's system tags in place of its text, which ``source_tokens.materialize``
+        builds. Internal: never stored, hashed or shown (ITL-1464). A stream that holds
+        none gives ``as_table``.
+        """
+        return self.as_table(columns=columns)
 
     def as_polars_df(
         self,
