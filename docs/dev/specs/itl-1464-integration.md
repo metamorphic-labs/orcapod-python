@@ -55,6 +55,26 @@ the lookup join and the whole job on both paths, pass 24 GB and are killed.
 Row-by-row steps are slower on sync than on `main` (12 s to 14 s here): the source's rows go
 through a local file.
 
+## The shape of a real analysis: longer ids, a function per group
+
+`chain.py setup --items 140 --id-length 72` (98 groups kept), async, the whole job. Peak
+physical footprint in GiB:
+
+| Job | 25% | 50% | 100% |
+|---|---|---|---|
+| with a cheap function per group | 2.3 | 4.2 | not completed: killed above 24 GiB of resident memory, at a footprint of at least 6.5 |
+| with one outer product of a group's event times and all peak times in the function | 13.6 | not run | not run |
+| the same, `PodConfig(max_concurrency=4)` | 5.4 | | |
+| the same, `PodConfig(max_concurrency=1)` | 3.5 | | |
+
+Function calls have no limit by default (`default_max_concurrency` is `None`): 22 ran at once
+here, the size of the event loop's thread pool. Each held 0.3 GiB for each of two arrays at
+25%; such a function's arrays grow with events times peaks, so 16 times at 100%. No library
+change bounds that: a limit on calls in flight, or a function that does not build the product.
+
+At 100% the mapped pages (14 of 21 GiB resident when the run was killed) are what a guard on
+resident memory counts.
+
 ## What is bounded, and what is not
 
 Bounded on async: sources, row-by-row operators, joins with a small or certified side. They

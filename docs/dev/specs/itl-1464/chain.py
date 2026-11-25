@@ -55,8 +55,17 @@ def items_table() -> pa.Table:
     return table.append_column("label", pa.array(labels, pa.string()))
 
 
-def setup(scale: float) -> None:
-    """Write the tables, in key order, and record their schemas."""
+def setup(scale: float, items: int, id_length: int) -> None:
+    """Write the tables, in key order, and record their schemas.
+
+    Args:
+        scale: The part of the full row counts.
+        items: How many items, so how many groups of events (7 of 10 are kept).
+        id_length: Characters of each text key (hashes and names).
+    """
+    measure.ITEMS = items
+    measure.HASH = (measure.HASH * (1 + id_length // 32))[:id_length]
+    measure.SUBJECT = measure.SUBJECT.ljust(id_length, "x")
     from orcapod.utils import arrow_utils
 
     measure.BLOCKS = 6
@@ -154,6 +163,8 @@ def main() -> None:
     _ = parser.add_argument("step", choices=["setup", *STEPS])
     _ = parser.add_argument("--store", required=True, type=Path)
     _ = parser.add_argument("--scale", type=float, default=0.25)
+    _ = parser.add_argument("--items", type=int, default=measure.ITEMS)
+    _ = parser.add_argument("--id-length", type=int, default=32)
     _ = parser.add_argument("--sync", action="store_true")
     _ = parser.add_argument("--digest", action="store_true")
     args = parser.parse_args()
@@ -161,7 +172,7 @@ def main() -> None:
     with fake.install(args.store / "spiral"):
         fake.scan_batch_rows = 65_536
         if args.step == "setup":
-            setup(args.scale)
+            setup(args.scale, args.items, args.id_length)
             return
         import tempfile
 
