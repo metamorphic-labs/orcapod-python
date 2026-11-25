@@ -173,3 +173,12 @@ the graph: settling a stream asks for the states beneath it, and so does its own
 - No meta column is shown: a stored row and a computed one have different ones.
 - A `DerivedSource` is a whole read (its origin may compute). A filter nothing passes reads the
   whole table, in batches: `max_rows` does not stop it, as it does not stop `head`.
+
+## Job nodes, as built
+
+An operator job node's `run()` view is the table its current run is kept in (memory-mapped
+when large), so it holds every row, refuses nothing, and equals
+`read_current_run(0, current_run_row_count())`. Cutting it touches only the pages of the rows
+cut; it stays valid after the node is cleared, which paging through the node would not. The
+display of any long view now gives Polars the eleven rows it needs, not the whole table. A
+function job node and a source job node still hold their rows in memory.
