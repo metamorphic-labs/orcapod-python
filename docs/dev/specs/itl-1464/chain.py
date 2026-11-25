@@ -38,7 +38,7 @@ import pyarrow as pa
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import measure  # noqa: E402
+import measure  # noqa: E402  # pyright: ignore[reportImplicitRelativeImport]  # a script beside it
 
 ITEMS_TABLE = "item"
 EVENT_ROWS = 8_100_000
@@ -125,13 +125,13 @@ def build(step: str) -> None:
         present = chosen.drop_nulls(["x_small", "y_small"])
         grouped = present.group_by(["subject_id", "session_start"])
         renamed = grouped.map_data({"timestamp": "series_time"})
-        pod = FunctionPod(PythonDataFunction(peaks, output_keys="peak_times"))
+        pod = FunctionPod(PythonDataFunction(peaks, output_keys="peak_times"))  # pyright: ignore[reportArgumentType]  # its class is a data function
         return pod(renamed, label="peaks")
 
     if step == "series":
         series()
     elif step == "chain":
-        pod = FunctionPod(PythonDataFunction(count, output_keys="counts"))
+        pod = FunctionPod(PythonDataFunction(count, output_keys="counts"))  # pyright: ignore[reportArgumentType]  # its class is a data function
         pod(trains(), series(), label="counts")
     else:
         trains()
@@ -183,9 +183,9 @@ def main() -> None:
                 "path": "sync" if args.sync else "async",
                 "events": measure._raw(measure.EVENTS).num_rows,
                 "seconds": round(time.perf_counter() - started, 1),
-                "footprint_mib": (measure._peak_footprint_bytes() or 0) >> 20,
-                "rss_mib": measure._peak_rss_bytes() >> 20,
-                "arrow_pool_mib": pa.default_memory_pool().max_memory() >> 20,
+                "footprint_mib": (measure._peak_footprint_bytes() or 0) // 2**20,
+                "rss_mib": measure._peak_rss_bytes() // 2**20,
+                "arrow_pool_mib": (pa.default_memory_pool().max_memory() or 0) // 2**20,
                 "nodes": {
                     name: node.as_table().num_rows
                     for name, node in job.nodes.items()
