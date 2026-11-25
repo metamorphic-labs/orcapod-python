@@ -695,7 +695,8 @@ every depth and metadata. The name is reserved, and listings leave it out.
 - **A table that is not recorded** (its dataset has no `__orcapod_schemas__`, or no row for
   it) reads as SpiralDB reports it: every column has the type `T | None` and no metadata, and
   a function pod must accept `None` (`x: float | None`). `UnrecordedTableSchemaWarning` says
-  so, once per table and process.
+  so, usually once per table and process (threads reading it at the same time may each
+  show it; once shown, it is not shown again).
 - **A record that is not complete** is refused: the last row written says for which project
   and dataset, how many tables, and a digest of their rows. When it is missing or does not
   fit, every read that opens a table of the dataset raises `TableSchemaError`, and so does a

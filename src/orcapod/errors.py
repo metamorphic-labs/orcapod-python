@@ -619,7 +619,8 @@ class UnrecordedTableSchemaWarning(UserWarning):
     nullable, with no Arrow metadata. A table written by an Orcapod release on pyspiral
     reads this way until its dataset is migrated
     (``scripts/migrate_spiral_schemas.py``), so its schema and its hashes differ from
-    what they were. Issued once per table and process.
+    what they were. Usually issued once per table and process: threads reading the
+    table at the same time may each issue it.
     """
 
 

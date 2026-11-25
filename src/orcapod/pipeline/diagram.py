@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from typing_extensions import override
 
+from orcapod.core.sources.display_names import node_display_names
 from orcapod.types.provenance import Highlight
 from orcapod.utils.in_development import warn_in_development
 
@@ -86,6 +87,13 @@ class _Node:
     highlighted: bool = False
     mark: str = ""
     asked: str = ""
+    shown: str = ""
+
+    @property
+    def text(self) -> str:
+        """The name drawn: the bound source's assigned label (``shown``), else the
+        node's label."""
+        return self.shown or self.label
 
     @property
     def kind_line(self) -> str:
@@ -369,11 +377,15 @@ def _build_model(
                 by_label[label], (statuses[upstream] for upstream in preds[label])
             )
 
+    source_names = node_display_names(by_label.values())
     nodes: list[_Node] = []
     for label in shown:
         node = by_label[label]
         summary = summaries.get(label)
         facts = _run_facts(summary) if is_job else ()
+        source_text, source_id = source_names.get(label, ("", ""))
+        if source_id:
+            facts = (("source id", source_id), *facts)
         try:
             tag_schema, data_schema = node.output_schema()
         except ValueError as error:
@@ -396,6 +408,7 @@ def _build_model(
                 # A highlight shows the provenance question only: no run status.
                 status="" if highlight is not None else statuses.get(label, ""),
                 facts=facts,
+                shown=source_text,
                 highlighted=highlight is not None and label in highlight.nodes,
                 mark="" if highlight is None else highlight.mark(label),
                 asked=highlight.asked_text or "asked here"
@@ -486,7 +499,7 @@ def _text_room(node: _Node) -> float:
     kind, the detail, the status), within the node width limits (ITL-1232)."""
     parts = [*node.kind_line.split(" · "), node.mark, node.asked]
     text = max(
-        len(node.label) * _CHAR_W, max(len(part) for part in parts) * _SMALL_CHAR_W
+        len(node.text) * _CHAR_W, max(len(part) for part in parts) * _SMALL_CHAR_W
     )
     return max(_MIN_W - 2 * _PAD, min(_MAX_W - 2 * _PAD, text))
 
@@ -834,7 +847,7 @@ def _schema_text(pairs: Sequence[tuple[str, str]]) -> str:
 
 def _tooltip(node: _Node, inputs: Sequence[str]) -> str:
     """The node's details as plain text, shown on hover over the inline picture."""
-    lines = [f"{node.label} ({node.kind_line})"]
+    lines = [f"{node.text} ({node.kind_line})"]
     lines.append(f"tags: {_schema_text(node.tag_schema)}")
     lines.append(f"data: {_schema_text(node.data_schema)}")
     if inputs:
@@ -901,7 +914,7 @@ def _svg(
         f'stroke-opacity="{"0.3" if lit else "0.5"}" stroke-width="1.4">'
     )
     for edge, points in layout.edges:
-        tip = f"{nodes[edge.source].label} → {nodes[edge.target].label}"
+        tip = f"{nodes[edge.source].text} → {nodes[edge.target].text}"
         if edge.folded:
             tip += f" (through {', '.join(edge.folded)})"
         dash = ' stroke-dasharray="5 3"' if edge.folded else ""
@@ -932,7 +945,7 @@ def _svg(
         )
         stroke_width = "1.4" if node.kind == "operator" else "2.2"
         dash = ' stroke-dasharray="4 3"' if node.status in _DASHED_STATUSES else ""
-        label = f"{node.label}, {node.kind_line}"
+        label = f"{node.text}, {node.kind_line}"
         emphasis = ""
         stroke = colour
         if node.highlighted:
@@ -990,7 +1003,7 @@ def _svg(
         parts.append(
             f'<text x="{_num(w / 2)}" y="{_num(label_y)}" text-anchor="middle" '
             f'font-size="{_FONT_PX}" font-weight="600" fill="currentColor">'
-            f"{_escape(_clip(node.label, w, _CHAR_W))}</text></g>"
+            f"{_escape(_clip(node.text, w, _CHAR_W))}</text></g>"
         )
     parts.append("</g></g></svg>" if caption else "</g></svg>")
     return "".join(parts)
@@ -1000,7 +1013,7 @@ def _table(nodes: Sequence[_Node], inputs: Mapping[int, Sequence[str]]) -> str:
     """Every node with its inputs, schema and run facts: shown where scripts do not run."""
     rows = "".join(
         "<tr>"
-        f"<td><b>{_escape(node.label)}</b></td>"
+        f"<td><b>{_escape(node.text)}</b></td>"
         f"<td>{_escape(node.kind_line)}</td>"
         f"<td>{_escape(', '.join(inputs.get(node.index, ())))}</td>"
         f"<td>{_escape(_schema_text(node.tag_schema))}</td>"
@@ -1078,10 +1091,10 @@ def _asset(name: str) -> str:
 
 
 def _inputs(nodes: Sequence[_Node], edges: Sequence[_Edge]) -> dict[int, list[str]]:
-    """The labels of each node's inputs, by node index, in edge order."""
+    """The drawn names of each node's inputs, by node index, in edge order."""
     inputs: dict[int, list[str]] = {}
     for edge in edges:
-        inputs.setdefault(edge.target, []).append(nodes[edge.source].label)
+        inputs.setdefault(edge.target, []).append(nodes[edge.source].text)
     return inputs
 
 
@@ -1244,6 +1257,8 @@ class PipelineDiagram:
             ``label``, ``kind`` (its ``node_type``), ``kind_text``, ``detail``,
             ``status`` (``""`` for a pipeline), ``tag_schema`` and ``data_schema``
             (lists of ``[column, type text]``) and ``facts`` (lists of ``[name, text]``);
+            a source node whose bound source has an assigned label also has ``text``, the
+            name drawn, and the fact ``source id``;
             each edge has ``source`` and ``target`` (node indices) and ``folded``
             (the labels of the steps folded into it). With a highlight, every node and
             edge also has ``highlighted``, and the model has the highlight's ``note``.
@@ -1282,6 +1297,8 @@ class PipelineDiagram:
                     "tag_schema": [list(pair) for pair in node.tag_schema],
                     "data_schema": [list(pair) for pair in node.data_schema],
                     "facts": [list(fact) for fact in node.facts],
+                    # Only where a source's assigned label is drawn (ITL-1454).
+                    **({"text": node.shown} if node.shown else {}),
                 }
                 for node in nodes
             ],
@@ -1297,8 +1314,10 @@ class PipelineDiagram:
         In development: this interface may change.
 
         Returns:
-            A title line, then ``  <label> (<kind> · <detail> · <status>) <- <inputs>``
-            per node, in topological order with ties broken by label. With a
+            A title line, then ``  <name> (<kind> · <detail> · <status>) <- <inputs>``
+            per node, in topological order with ties broken by label; the name is the
+            bound source's assigned label for a source that has one, else the node's
+            label. With a
             highlight, a line with its note follows the title, no status is shown, each
             highlighted node's line starts with ``*`` and the node the question was
             asked at with ``>`` (and ends with ``[traced from here]`` or
@@ -1315,7 +1334,7 @@ class PipelineDiagram:
                 mark = (">" if node.asked else " ") + (
                     "* " if node.highlighted else "  "
                 )
-            line = f"{mark}{node.label} ({node.kind_line})"
+            line = f"{mark}{node.text} ({node.kind_line})"
             if node.mark:
                 line += f" [{node.mark}]"
             if node.asked:

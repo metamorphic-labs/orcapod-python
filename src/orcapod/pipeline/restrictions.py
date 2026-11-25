@@ -494,6 +494,7 @@ def warn_restricted_aggregation(dag: OrcaDAG[StreamProtocol]) -> None:
     import sys
 
     from orcapod.core.operators import Batch, GroupBy, MergeJoin
+    from orcapod.core.sources.display_names import node_display_names
     from orcapod.errors import RestrictedAggregationWarning
     from orcapod.utils.warning_utils import outside_orcapod_stacklevel, warn_at_frame
 
@@ -510,14 +511,21 @@ def warn_restricted_aggregation(dag: OrcaDAG[StreamProtocol]) -> None:
         )
     if not pairs:
         return
+    # A source is named by its assigned label; its id is then given once, at the end.
+    shown = node_display_names(position)
+    texts = {slot: shown[slot][0] for slot, _, _ in pairs if slot in shown}
+    legend = "".join(
+        f" {text!r} is {shown[slot][1]}." for slot, text in sorted(texts.items())
+    )
     caller = sys._getframe(outside_orcapod_stacklevel() - 1)  # pyright: ignore[reportPrivateUsage]  # as the warnings module does
     warn_at_frame(
         "A restricted source feeds an aggregating step: "
         + "; ".join(
-            f"{slot!r} feeds {kind} {label!r}" for slot, label, kind in sorted(pairs)
+            f"{texts.get(slot, slot)!r} feeds {kind} {label!r}"
+            for slot, label, kind in sorted(pairs)
         )
         + ". Its groups are built from the rows the restriction lets through only "
-        "(each aggregated row lists its members).",
+        "(each aggregated row lists its members)." + legend,
         RestrictedAggregationWarning,
         caller,
     )
