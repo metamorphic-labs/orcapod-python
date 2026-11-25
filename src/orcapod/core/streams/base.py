@@ -564,7 +564,7 @@ class CompleteStreamFeed:
         retyped as a row retypes it. Only a stream that holds such a column (a raw
         ``ArrowTableStream``) is read that way, and its reads have no effect.
         """
-        table = self._stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+        table = self._stream.as_carried_table(columns=ZERO_ROW_INPUT_COLUMNS)
         if not system_tags_as_rows_give(table):
             from orcapod.core.operators.static_output_pod import (
                 StaticOutputOperatorPod,

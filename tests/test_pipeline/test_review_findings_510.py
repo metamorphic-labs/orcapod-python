@@ -166,9 +166,9 @@ def test_a_failed_batch_preparation_is_raised_again_without_a_second_read() -> N
     base = _plain()
 
     class Failing:
-        def as_table(self, **kwargs: Any) -> Any:
+        def as_carried_table(self, **kwargs: Any) -> Any:
             reads.append(1)
-            return base.as_table(**kwargs)
+            return base.as_carried_table(**kwargs)
 
         def keys(self, **kwargs: Any) -> Any:
             raise RuntimeError("keys failed")

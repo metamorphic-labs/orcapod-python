@@ -127,3 +127,26 @@ is the form before this change. It is the operator alone, not a job.
 cases grow with the keys of the input that arrived first, as the bound says. `many` ends its small
 side first, so it measures the bounded output; `many_open` is the worst case, two open inputs
 with no certificate, and grows with the keys of both.
+
+## Batches with derived source-info tokens
+
+A channel and the kernels take a batch whose source-info columns are derived
+(`utils/source_tokens.py`): such a column has no bytes, so it costs a held or spooled row
+nothing. The form is the input's first batch's, per column. Text first: a later derived
+batch is built as text. Derived first: a later batch in another form is refused, because the
+rows held have no text; a producer sends each column in one form. Rows sent through an
+output channel may mix forms: `concatenate_batches` builds the text of a column that does.
+
+Text is built where values are needed: a source-info column both inputs of a `MergeJoin`
+have, a merged data-tag one side of which is text, and the tokens that read system tags whose
+values a join of one pipeline hash sorts. `Rejoin`'s kernel, not wired, builds all of it.
+
+| Case (8,000,000 rows) | Text: peak RSS, Arrow pool, time | Derived |
+|---|---|---|
+| `lookup` | 257 MiB, 26 MiB, 19.9 s | 224 MiB, 10 MiB, 20.7 s |
+| `lookup_late` | 2,733 MiB, 392 MiB, 61.7 s | 2,722 MiB, 376 MiB, 45.1 s |
+| `one_to_one_late` | 2,301 MiB, 453 MiB, 60.0 s | 2,292 MiB, 435 MiB, 61.4 s |
+| `many_open` | 2,629 MiB, 941 MiB, 57.3 s | 2,484 MiB, 855 MiB, 50.8 s |
+
+Peak memory hardly moves, because the rows were on disk already: what is left in the late and
+open cases is the keys. The times were taken with other work on the machine.
