@@ -90,7 +90,7 @@ kind, it numbers them (`SelectDataColumns_1`, ...); the numbers tell the steps a
 not follow the order you wrote them in.
 
 The whole graph, rather than one node's lineage, is what the job draws when it is the last
-line of a notebook cell (see [Part 5](05-pipeline-job.md#nodes-where-the-results-are)).
+line of a notebook cell (see [Part 5](05-pipeline-job.md#nodes)).
 Clicking a node there shows its columns and its row counts in the last run.
 `job.diagram(direction="TB")` lays it out top to bottom (in the notebook, the `vertical`
 checkbox above the diagram does the same), and `print(job.diagram())` lists it as text.
@@ -342,7 +342,7 @@ status `no_match`); one that names a column the node does not have is an error.
 
 !!! note "The first diagram"
     The first diagram in a Python session issues `InDevelopmentWarning`, once. It is
-    harmless: see the note in [Part 5](05-pipeline-job.md#nodes-where-the-results-are).
+    harmless: see the note in [Part 5](05-pipeline-job.md#nodes).
 
 **On the diagram.** `trace.highlight()` marks the trace's path on the job's diagram. The
 listing shows the provenance question only, with no run status. It marks the nodes on the
@@ -540,7 +540,7 @@ result of the node, including those of earlier runs over other inputs, like
     columns: no system tags, and null source-info tokens.) Support is planned (ITL-1127).
     Until then, to store a later stage, add it to the first job.
 
-## What to remember
+## Key points
 
 - `node.upstreams` and `node.label` walk the pipeline backwards from any result.
 - `as_table(columns={"source": True})` and `columns={"system_tags": True}` reveal where
@@ -605,5 +605,3 @@ Use the source-info column of the `sessions` node.
     # 2   mouse_03        4.983160
     # 3   mouse_04        5.132812
     ```
-
-Next: [Part 9: When things go wrong](09-when-things-go-wrong.md).

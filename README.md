@@ -21,10 +21,10 @@ Orcapod to a uv project (start one with `uv init` in a new directory), and `uv r
 your code in that project's environment:
 
 ```bash
-uv add "orcapod>=0.4.0rc4"
+uv add "orcapod>=0.4.0rc7"
 ```
 
-In an environment not managed by uv, use `pip install "orcapod>=0.4.0rc4"` instead. For the
+In an environment not managed by uv, use `pip install "orcapod>=0.4.0rc7"` instead. For the
 development version, install from the repository:
 `uv add git+https://github.com/metamorphic-labs/orcapod-python`.
 
