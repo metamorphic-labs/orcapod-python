@@ -7,7 +7,7 @@ import shutil
 import warnings
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -79,8 +79,8 @@ def _facts(diagram: PipelineDiagram, label: str) -> dict[str, str]:
 
 
 def test_only_semi_join_declares_a_constraining_input() -> None:
-    assert SemiJoin.CONSTRAINING_INPUTS == {1}
-    assert Join.CONSTRAINING_INPUTS == MergeJoin.CONSTRAINING_INPUTS == frozenset()
+    assert SemiJoin.CONSTRAINING_INPUTS == (1,)
+    assert Join.CONSTRAINING_INPUTS == MergeJoin.CONSTRAINING_INPUTS == ()
 
 
 @pytest.mark.parametrize("blueprint", [False, True])
@@ -127,7 +127,7 @@ def test_a_folded_join_beneath_a_constraint_constrains_from_each_of_its_inputs()
 
 
 class _ConstrainedJoin(Join):
-    CONSTRAINING_INPUTS = frozenset({1})
+    CONSTRAINING_INPUTS = (1,)
 
 
 def test_a_foldable_step_with_a_constraining_input_is_not_folded() -> None:
@@ -142,6 +142,87 @@ def test_a_foldable_step_with_a_constraining_input_is_not_folded() -> None:
         ("a", "limited", False, ()),
         ("b", "limited", True, ()),
     }
+
+
+class _Tuple(tuple[int, ...]):
+    pass
+
+
+class _Int(int):
+    pass
+
+
+class _Raises:
+    def __get__(self, *args: Any) -> Any:
+        raise RuntimeError("read through a hook")
+
+
+def _custom_job(operator: type[Join]) -> PipelineJob:
+    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+    with job:
+        operator(label="limited")(_source("a", ["k"], "x"), _source("b", ["k"], "y"))
+    return job
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [1, None, "1", [1], {1}, frozenset({1}), (True,), (1.0,), ("1",), (2,), (-1,)]
+    + [(1, 2), (1, None), _Tuple((1,)), (_Int(1),), _Raises()],
+    ids=repr,
+)
+def test_a_malformed_declaration_counts_as_none(declared: Any) -> None:
+    class Custom(Join):
+        CONSTRAINING_INPUTS = declared
+
+    class Plain(Join):
+        pass
+
+    Plain.__name__ = "Custom"
+    for collapse in (False, True):
+        drawn, plain = (
+            _custom_job(operator).diagram(collapse=collapse)
+            for operator in (Custom, Plain)
+        )
+        assert drawn.to_dict() == plain.to_dict()
+        assert drawn.to_text() == plain.to_text()
+        assert drawn.to_svg() == plain.to_svg()
+
+
+def test_drawing_calls_nothing_of_a_users_operator() -> None:
+    class Meta(type(Join)):
+        drawing = False
+
+        def __getattribute__(cls, name: str) -> Any:
+            if name.startswith("CONSTRAIN") and Meta.drawing:
+                raise RuntimeError("metaclass hook ran")
+            return super().__getattribute__(name)
+
+    class Custom(Join, metaclass=Meta):
+        CONSTRAINING_INPUTS = (1,)
+        CONSTRAINT_MATCHES_SHARED_TAGS = cast(Any, _Raises())
+
+        def __getattribute__(self, name: str) -> Any:
+            if name.startswith("CONSTRAIN"):
+                raise RuntimeError("instance hook ran")
+            return super().__getattribute__(name)
+
+        def constraint_fact(self, tag_keys: Any) -> Any:
+            raise RuntimeError("user callback ran")
+
+    job = _custom_job(Custom)
+    Meta.drawing = True
+    diagram = job.diagram()
+    assert "constrained by b" in diagram.to_text()
+    assert not any("keeps" in name for name in _facts(diagram, "limited"))
+
+
+def test_a_users_operator_may_declare_that_it_matches_on_the_shared_tags() -> None:
+    class Custom(Join):
+        CONSTRAINING_INPUTS = (1,)
+        CONSTRAINT_MATCHES_SHARED_TAGS = True
+
+    facts = _facts(_custom_job(Custom).diagram(), "limited")
+    assert facts["keeps the rows that match on"] == "k"
 
 
 def test_one_stream_as_both_inputs_has_two_edges() -> None:

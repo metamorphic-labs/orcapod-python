@@ -7,7 +7,6 @@ from typing import Any, ClassVar, final
 
 import pyarrow as pa
 import pyarrow.compute as pc
-from typing_extensions import override
 
 from orcapod.types.explanation import plain_repr
 from orcapod.channels import ChannelClosed, ReadableChannel, WritableChannel
@@ -77,18 +76,8 @@ class SemiJoin(BinaryOperator):
     (a null key matches nothing) and keeps the left input's type (ITL-829).
     """
 
-    CONSTRAINING_INPUTS: ClassVar[frozenset[int]] = frozenset({1})
-
-    @override
-    def constraint_fact(
-        self, tag_keys: Sequence[Collection[str]]
-    ) -> tuple[str, str] | None:
-        if len(tag_keys) != 2:
-            return None
-        keys = self._match_keys(tag_keys[0], tag_keys[1])
-        if not keys:
-            return ("keeps every row", "the inputs share no tag column")
-        return ("keeps the rows that match on", ", ".join(sorted(keys)))
+    CONSTRAINING_INPUTS: ClassVar[tuple[int, ...]] = (1,)
+    CONSTRAINT_MATCHES_SHARED_TAGS: ClassVar[bool] = True
 
     @staticmethod
     def _match_keys(

@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from typing_extensions import override
 
-from orcapod.core.sources.display_names import node_display_names
+from orcapod.core.sources.display_names import class_dicts, node_display_names
 from orcapod.types.provenance import Highlight
 from orcapod.utils.in_development import warn_in_development
 
@@ -216,6 +216,22 @@ def _upstream_labels(node: Any, label_of: Mapping[int, str]) -> list[str | None]
     return [label_of.get(id(stream)) for stream in node.upstreams]
 
 
+def _declared(producer: Any, name: str) -> Any:
+    """What an operator's class declares, read without running any code of the class.
+
+    Args:
+        producer: The operator, or ``None``.
+        name: The class attribute.
+
+    Returns:
+        The value the class or its nearest base holds, as stored; ``None`` for none.
+    """
+    for namespace in class_dicts(type(producer)):
+        if name in namespace:
+            return namespace[name]
+    return None
+
+
 def _input_roles(
     node: Any, upstream_labels: Sequence[str], label_of: Mapping[int, str]
 ) -> list[tuple[str, bool]]:
@@ -236,10 +252,12 @@ def _input_roles(
     if node.node_type != "operator":
         return plain
     producer = getattr(node, "producer", None)
-    positions: frozenset[int] = getattr(producer, "CONSTRAINING_INPUTS", frozenset())
-    if not positions:
+    positions = _declared(producer, "CONSTRAINING_INPUTS")
+    if type(positions) is not tuple or not positions:
         return plain
     ordered = _upstream_labels(node, label_of)
+    if not all(type(i) is int and 0 <= i < len(ordered) for i in positions):
+        return plain
     if set(ordered) != set(upstream_labels):
         # An input is missing (a loaded graph that lost a node): positions say nothing.
         return plain
@@ -327,9 +345,12 @@ def _constraint_fact(
         by_label: The nodes, by label.
 
     Returns:
-        The operator's ``constraint_fact``, or ``None`` when it has none or the columns
-        are not available (a loaded node whose saved types cannot be restored).
+        The tags the rows match on, or ``None`` when the operator does not declare that
+        it matches on the shared tags, or the columns are not available (a loaded node
+        whose saved types cannot be restored).
     """
+    if _declared(node.producer, "CONSTRAINT_MATCHES_SHARED_TAGS") is not True:
+        return None
     try:
         tag_keys = [
             tuple(by_label[label].output_schema()[0])
@@ -338,7 +359,10 @@ def _constraint_fact(
         ]
     except ValueError:
         return None
-    return node.producer.constraint_fact(tag_keys)
+    shared = set(tag_keys[0]).intersection(*tag_keys[1:])
+    if not shared:
+        return ("keeps every row", "the inputs share no tag column")
+    return ("keeps the rows that match on", ", ".join(sorted(shared)))
 
 
 def _topological_labels(
