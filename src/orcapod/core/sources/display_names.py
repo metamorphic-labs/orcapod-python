@@ -30,15 +30,25 @@ class LabelledSource:
     parts: tuple[str, ...]
 
 
+# The slots of ``type`` itself: an attribute or property a metaclass defines under the
+# same name is not read.
+_TYPE_MRO: Any = type.__dict__["__mro__"]
+_TYPE_DICT: Any = type.__dict__["__dict__"]
+
+
+def _mro(cls: type) -> tuple[type, ...]:
+    """Return a class and its bases, read past any metaclass hook."""
+    return _TYPE_MRO.__get__(cls)
+
+
 def _class_dicts(cls: type) -> list[Mapping[str, Any]]:
     """Return the dictionaries of a class and its bases, read past any metaclass hook."""
-    mro: tuple[type, ...] = type.__getattribute__(cls, "__mro__")
-    return [type.__getattribute__(base, "__dict__") for base in mro]
+    return [_TYPE_DICT.__get__(base) for base in _mro(cls)]
 
 
 def _is_a(source: object, cls: type) -> bool:
     """Whether ``source`` is an instance of ``cls`` by its real type."""
-    return any(b is cls for b in type.__getattribute__(type(source), "__mro__"))
+    return any(b is cls for b in _mro(type(source)))
 
 
 def _stored(source: object) -> Mapping[str, Any]:

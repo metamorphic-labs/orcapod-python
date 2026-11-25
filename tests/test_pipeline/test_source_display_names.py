@@ -415,6 +415,38 @@ def test_no_metaclass_hook_runs(
     )
 
 
+def test_no_metaclass_property_runs() -> None:
+    reads: list[str] = []
+
+    def watched(name: str) -> Any:
+        def read(cls: type) -> Any:
+            reads.append(name)
+            return type.__dict__[name].__get__(cls)
+
+        return property(read)
+
+    meta: Any = type(
+        "Meta",
+        (type(DictSource),),
+        {name: watched(name) for name in ("__mro__", "__dict__")},
+    )
+
+    class Source(DictSource, metaclass=meta):
+        pass
+
+    source = Source(
+        [{"g": 0, "k": 1, "x": 1, "x2": 2}],
+        tag_columns=["g", "k"],
+        tag_only_columns=True,
+        source_id="left",
+        label="units",
+    )
+    reads.clear()
+    found = labelled_source(source)
+    assert reads == []
+    assert found is not None and found.source_id == "dict_v1:left"
+
+
 def test_a_label_that_cannot_be_read_falls_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
