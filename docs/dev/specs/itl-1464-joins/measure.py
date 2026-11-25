@@ -141,7 +141,7 @@ class Input:
             stream: StreamProtocol = self.source(start, min(BATCH, self.rows - start))
             zero = StaticOutputOperatorPod._materialize_upstream([], self.stream)
             names = zero.as_table(columns={"source": True, "system_tags": True})
-            table = stream.as_table(columns={"source": True, "system_tags": True})
+            table = getattr(stream, "as_carried_table", stream.as_table)(columns={"source": True, "system_tags": True})
             yield from table.select(names.column_names).combine_chunks().to_batches()
 
 

@@ -1183,7 +1183,7 @@ class StaticOutputOperatorPod(TraceableBase):
             output: The channel to send into; a result with no rows sends nothing.
         """
         table = row_built_columns(
-            result.as_table(columns=ZERO_ROW_INPUT_COLUMNS), result.keys()
+            result.as_carried_table(columns=ZERO_ROW_INPUT_COLUMNS), result.keys()
         )
         for batch in table.to_batches():
             if batch.num_rows:
@@ -1401,7 +1401,9 @@ def settle_token_types(
         if not field.name.startswith(constants.SOURCE_PREFIX):
             continue
         kinds: set[pa.DataType]
-        if pa.types.is_large_string(field.type):
+        # A derived column settles as the text its recipe gives (ITL-1464).
+        derived = source_tokens.derived_recipe(field.type) is not None
+        if derived or pa.types.is_large_string(field.type):
             kinds = {pa.large_string()}
         else:
             kinds = {
@@ -1413,7 +1415,8 @@ def settle_token_types(
         if len(kinds) > 1:
             raise SourceInfoTypesDisagree(field.name)
         (kind,) = kinds
-        _ = _named_tokens_as(column, kind, field.name)  # representable, or refused
+        if not derived:
+            _ = _named_tokens_as(column, kind, field.name)  # representable, or refused
         settled[field.name] = kind
     return settled
 
@@ -1493,6 +1496,31 @@ def _named_tokens_as(
         raise RowBuiltFormUnavailable(f"{name}: {error}") from error
 
 
+def _with_one_token_form(batches: Sequence[pa.RecordBatch]) -> list[pa.RecordBatch]:
+    """``batches`` with each source-info column in one form in all of them.
+
+    A column every batch derives by one recipe stays derived; one that some batches hold
+    as text, or derive otherwise, is text in all of them (ITL-1464).
+
+    Args:
+        batches: Record batches of one stream's rows.
+    """
+    kinds: dict[str, set[pa.DataType]] = {}
+    for batch in batches:
+        for field in batch.schema:
+            if field.name.startswith(constants.SOURCE_PREFIX):
+                kinds.setdefault(field.name, set()).add(field.type)
+    mixed = {name for name, types in kinds.items() if len(types) > 1}
+    formed: list[pa.RecordBatch] = []
+    for batch in batches:
+        if mixed & set(source_tokens.derived_columns(batch.schema)):
+            table = source_tokens.materialize(pa.Table.from_batches([batch]), mixed)
+            formed.extend(table.combine_chunks().to_batches())
+        else:
+            formed.append(batch)
+    return formed
+
+
 def concatenate_batches(batches: Sequence[pa.RecordBatch]) -> pa.Table | None:
     """Put a stream's record batches under one another, or ``None`` with no row.
 
@@ -1523,11 +1551,14 @@ def concatenate_batches(batches: Sequence[pa.RecordBatch]) -> pa.Table | None:
         settled = settle_token_types(batch, settled)
     prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
     opened: list[pa.RecordBatch] = []
-    for batch in rows:
+    for batch in _with_one_token_form(rows):
         columns: list[Any] = []  # pyright: ignore[reportExplicitAny]  # any column
         fields: list[pa.Field[Any]] = []  # pyright: ignore[reportExplicitAny]  # any field
         for field, column in zip(batch.schema, batch.columns, strict=True):
-            if field.name in settled:
+            if (
+                field.name in settled
+                and source_tokens.derived_recipe(field.type) is None
+            ):
                 column = _named_tokens_as(column, settled[field.name], field.name)
                 field = pa.field(field.name, settled[field.name])
             if field.name.startswith(prefixes):

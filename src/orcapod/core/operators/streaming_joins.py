@@ -129,7 +129,7 @@ from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.protocols.core_protocols.streams import RecordBatchInput, RecordBatchOutput
 from orcapod.core.unique_keys import joined_keys, unique_on
 from orcapod.system_constants import constants
-from orcapod.utils import arrow_utils
+from orcapod.utils import arrow_utils, source_tokens
 
 # The column groups an operator input and result are read with: user tags, system tags,
 # data and source info. No meta column and no context column: neither is transported.
@@ -551,6 +551,9 @@ class StreamingJoinKernel(ABC):
         # (``settle_token_types``): the input's complete table must still be buildable,
         # as the sync path builds it before matching.
         self._token_types: list[dict[str, pa.DataType]] = [{} for _ in self.inputs]
+        # The form of each input's source-info columns, as its first batch with rows
+        # holds them: text, or derived by a recipe (``source_tokens``, ITL-1464).
+        self._token_forms: list[dict[str, pa.DataType] | None] = [None] * len(inputs)
         self._emitted_any: bool = False
         # The sync path over no rows: its checks, and the output's columns.
         self.zero_row_result: StreamProtocol = operator.static_process(*self._zero_rows)
@@ -725,11 +728,17 @@ class StreamingJoinKernel(ABC):
                 + f"the column(s) {missing} its stream describes"
             )
         table = pa.Table.from_batches([batch]).select(layout.names)
+        table = self._in_one_token_form(input_index, table)
         columns = list(table.columns)
+        fields = list(layout)
         for index, (field, actual) in enumerate(zip(layout, table.schema)):
             if field.type == actual.type:
                 continue
             if not table.num_rows and pa.types.is_null(actual.type):
+                continue
+            if source_tokens.derived_recipe(actual.type) is not None:
+                # No token is null, and the recipe's text is the layout's type.
+                fields[index] = field.with_type(actual.type)
                 continue
             if table.num_rows and field.name.startswith(constants.SOURCE_PREFIX):
                 # A batch's token type follows its own tokens and can be shallower
@@ -751,7 +760,38 @@ class StreamingJoinKernel(ABC):
         self._token_types[input_index] = token_types
         if not table.num_rows:
             return layout.empty_table()
-        return pa.Table.from_arrays(columns, schema=layout)
+        return pa.Table.from_arrays(columns, schema=pa.schema(fields))
+
+    def _in_one_token_form(self, input_index: int, table: pa.Table) -> pa.Table:
+        """``table`` with its source-info columns in the form of the input's first batch.
+
+        A column that batch held as text becomes text; one it derived must be derived by
+        the same recipe, since the rows held already have no text.
+
+        Raises:
+            ValueError: If a later batch holds such a column in another form.
+        """
+        if not table.num_rows:
+            return table
+        kept = self._token_forms[input_index]
+        if kept is None:
+            kept = {
+                field.name: field.type
+                for field in table.schema
+                if source_tokens.derived_recipe(field.type) is not None
+            }
+            self._token_forms[input_index] = kept
+        texts = set(table.column_names) - set(kept)
+        table = source_tokens.materialize(table, texts)
+        for name, kind in kept.items():
+            actual = table.schema.field(name).type
+            if actual != kind:
+                raise ValueError(
+                    f"{type(self).__name__}: the source-info column {name!r} of input "
+                    + f"{input_index} changed its form between batches: {kind}, then "
+                    + f"{actual}. A producer sends each such column in one form."
+                )
+        return table
 
     def _check_settled_token_types(
         self, input_index: int, token_types: Mapping[str, pa.DataType]
@@ -996,6 +1036,9 @@ class StreamingMergeJoin(StreamingJoinKernel):
             for name in sorted(merged)
             if f"{constants.SOURCE_PREFIX}{name}" in right_names
         }
+        self._in_both = set(self._layouts[0].names) & {
+            self._rename.get(name, name) for name in right_names
+        }
         self._colliding = (set(left_data) & set(right_data)) - merged
         self._captured = (
             set(left_tags) | set(left_data) | set(right_tags) | set(right_data)
@@ -1103,6 +1146,8 @@ class StreamingMergeJoin(StreamingJoinKernel):
         for left_name, right_name in self._rename.items():
             joined = Join._merge_source_columns(joined, left_name, right_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
             joined = Join._fold_source_column(joined, left_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+            # A merge of derived tokens has a recipe, so a type, of its own (ITL-1464).
+            output_types[left_name] = joined.schema.field(left_name).type
         for name in sorted(self._colliding):
             source_name = f"{constants.SOURCE_PREFIX}{name}"
             pairs = [(name, output_types[name])]
@@ -1155,6 +1200,8 @@ class StreamingMergeJoin(StreamingJoinKernel):
             table = table.rename_columns(
                 [self._rename.get(c, c) for c in table.column_names]
             )
+        # A source-info column both inputs have becomes a list of both tokens: text.
+        table = source_tokens.materialize(table, self._in_both)
         return self._link.push(input_index, table)
 
     def release(self) -> None:
@@ -1728,6 +1775,8 @@ class StreamingRejoin(StreamingJoinKernel):
         """
         if not self._links:
             return [table]
+        # Rejoin compares shared source-info columns by value: text.
+        table = source_tokens.materialize(table)
         table = _with_context(table, self._contexts[input_index])
         position = self._position[input_index]
         step, side = (0, 0) if position == 0 else (position - 1, 1)

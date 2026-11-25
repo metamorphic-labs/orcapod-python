@@ -23,6 +23,7 @@ from unittest import mock
 import pyarrow as pa
 import pytest
 
+from orcapod.utils import source_tokens
 from orcapod.protocols.core_protocols.streams import (
     RecordBatchInput,
     RecordBatchOutput,
@@ -135,7 +136,9 @@ def test_a_channel_opened_on_a_stream_delivers_its_rows_and_refers_to_it() -> No
     as_protocol: RecordBatchInput = channel  # what an operator reads (type-checked)
     assert as_protocol.stream is stream
     batches = run(stream.open_channel().collect)
-    assert same(pa.Table.from_batches(batches), R(stream))
+    # Tokens may be derived on a channel; their text is the rows' (ITL-1464).
+    text = source_tokens.materialize(pa.Table.from_batches(batches))
+    assert same(text, R(stream))
     delivered = run(lambda: channel.to_stream())
     assert same(delivered.as_table(columns=ALL), R(stream))
     assert delivered.keys() == stream.keys()

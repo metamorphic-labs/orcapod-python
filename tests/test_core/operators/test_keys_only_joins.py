@@ -13,6 +13,7 @@ import asyncio
 import functools
 import random
 import warnings
+from collections import Counter
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,7 @@ from orcapod.core.sources import ArrowTableSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import UpstreamFailedError
 from orcapod.protocols.core_protocols import StreamProtocol
+from orcapod.utils import source_tokens
 
 from .test_streaming_joins import _arrivals, _check, _rows, _run, _sent, _transport  # pyright: ignore[reportPrivateUsage]  # the kernels' one oracle
 
@@ -502,3 +504,147 @@ def test_a_random_arrival_of_everything_once_more(spooled: Path) -> None:
             batches = _run(kernel, _arrivals(tables, random.Random(seed)))
             got = pa.Table.from_batches(batches) if batches else None
             assert (_rows(got) if got is not None else {}) == expected
+
+
+# ---------------------------------------------------------------------------
+# Batches whose source-info tokens are derived (``utils/source_tokens``)
+# ---------------------------------------------------------------------------
+
+
+def _carried(stream: StreamProtocol) -> pa.Table:
+    """An input's rows as a channel sends them: its tokens derived where they can be."""
+    feed = stream.open_channel()
+
+    async def read() -> list[pa.RecordBatch]:
+        return await feed.collect()
+
+    return pa.Table.from_batches(asyncio.run(read()))
+
+
+def _check_derived(
+    make_kernel: Callable[[Sequence[StreamProtocol]], StreamingJoinKernel],
+    sync: Callable[..., StreamProtocol],
+    inputs: Sequence[StreamProtocol],
+    texts: Sequence[bool] = (False, False, False),
+) -> list[pa.RecordBatch]:
+    """Check the rows of a kernel fed derived batches (text for ``texts``)."""
+    tables = [
+        source_tokens.materialize(_carried(s)) if text else _carried(s)
+        for s, text in zip(inputs, texts)
+    ]
+    for table, text in zip(tables, texts):
+        assert bool(source_tokens.derived_columns(table.schema)) != text
+    expected = _rows(_transport(sync(*inputs)))
+    batches: list[pa.RecordBatch] = []
+    for seed in range(6):
+        kernel = make_kernel(inputs)
+        batches = _run(kernel, _arrivals(tables, random.Random(seed)))
+        rows: Any = Counter()
+        for batch in batches:
+            rows += _rows(source_tokens.materialize(pa.Table.from_batches([batch])))
+        assert rows == expected
+        assert kernel.held_rows == 0
+    return batches
+
+
+@pytest.mark.parametrize("texts", [(False, False), (True, False), (False, True)])
+@pytest.mark.parametrize("kind", sorted(KINDS))
+def test_derived_tokens_give_the_sync_rows(
+    spooled: Path, kind: str, texts: tuple[bool, bool]
+) -> None:
+    inputs = KINDS[kind]("reversed")
+    for make, op in ((_join, Join()), (_semi, SemiJoin()), (_merge, MergeJoin())):
+        _ = _check_derived(make, op.static_process, inputs, texts)
+    assert _files(spooled) == []
+
+
+def test_a_join_carries_derived_tokens_through(spooled: Path) -> None:
+    """They cost nothing held: no text is built for a join of different pipelines."""
+    inputs = KINDS["lookup"]("tags_first")
+    batches = _check_derived(_join, Join().static_process, inputs)
+    derived = source_tokens.derived_columns(batches[0].schema)
+    assert len(derived) == 4  # two data columns of each input
+
+
+def _data_tagged(name: str, n: int) -> ArrowTableSource:
+    return ArrowTableSource(
+        pa.table(
+            {
+                "k": [i % 3 for i in range(n)],
+                "g": ["ab"[i % 2] for i in range(n)],
+                f"{name}1": list(range(n)),
+                f"{name}2": [f"{name}{i}" for i in range(n)],
+            }
+        ),
+        tag_columns=["g", "k"],
+        source_id=name,
+    )
+
+
+@pytest.mark.parametrize(
+    "texts", [(False, False, False), (True, False, False), (False, True, True)]
+)
+def test_merged_data_tags_of_derived_tokens(
+    spooled: Path, texts: tuple[bool, bool, bool]
+) -> None:
+    inputs = [_data_tagged(name, 5 + i) for i, name in enumerate("abc")]
+    _ = _check_derived(_join, Join().static_process, inputs, texts)
+    _ = _check_derived(_merge, MergeJoin().static_process, inputs[:2], texts[:2])
+    _ = _check_derived(_semi, SemiJoin().static_process, inputs[:2], texts[:2])
+
+
+def test_inputs_of_one_pipeline_hash_sort_their_system_tags(spooled: Path) -> None:
+    """Their system-tag values move, so a token derived from them is built first."""
+    inputs = [
+        ArrowTableSource(
+            pa.table(
+                {"k": [1, 2, 1], "j": [1, 1, 2], "v": ["x", "y", "z"], "w": [1, 2, 3]}
+            ),
+            tag_columns=["j", "k"],
+            tag_only_columns=True,
+            source_id=name,
+        )
+        for name in ("second", "first")
+    ]
+    _ = _check_derived(_merge, MergeJoin().static_process, inputs)
+    renamed = [s.map_data({"v": f"v{i}", "w": f"w{i}"}) for i, s in enumerate(inputs)]
+    _ = _check_derived(_join, Join().static_process, renamed)
+
+
+def test_a_producer_that_changes_a_tokens_form(spooled: Path) -> None:
+    left, right = KINDS["one_to_one"]("tags_first")
+    (derived,) = _carried(left).combine_chunks().to_batches()
+    (text,) = source_tokens.materialize(_carried(left)).combine_chunks().to_batches()
+    # Text first: later derived batches are built as text.
+    kernel = _join([left, right])
+    _ = kernel.push(0, text.slice(0, 3))
+    _ = kernel.push(0, derived.slice(3))
+    out = [b for batch in _carried(right).to_batches() for b in kernel.push(1, batch)]
+    got = source_tokens.materialize(pa.Table.from_batches(out))
+    assert _rows(got) == _rows(_transport(left.join(right)))
+    # Derived first: the rows held have no text, so text is refused, changing nothing.
+    other = _join([left, right])
+    _ = other.push(0, derived.slice(0, 3))
+    with pytest.raises(ValueError, match="changed its form"):
+        _ = other.push(0, text.slice(3))
+    assert other.held_rows == 3
+
+
+@pytest.mark.parametrize("op", [Join(), SemiJoin(), MergeJoin()], ids=lambda o: repr(o))
+def test_an_operator_after_a_join_gets_derived_batches(spooled: Path, op: Any) -> None:
+    """A chain over channels: the join's output is another operator's input."""
+    inputs = KINDS["lookup"]("reversed")
+    joined = op(*inputs)
+    then = joined.drop_nulls("spikes_y")
+
+    async def go() -> StreamProtocol:
+        middle = OutputChannel(joined)
+        last = OutputChannel(then)
+        reader = middle.open_reader()
+        await asyncio.gather(
+            op.async_execute_batches([s.open_channel() for s in inputs], middle),
+            then.producer.async_execute_batches([reader], last),
+        )
+        return last.result()
+
+    assert _rows(_transport(_bounded(go()))) == _rows(_transport(then))
