@@ -482,3 +482,58 @@ def test_a_result_streams_own_iterator_is_never_bypassed() -> None:
     first = next(iter(shadowed.iter_data()))
     shadowed.iter_data = lambda: iter([first])  # pyright: ignore[reportAttributeAccessIssue]  # an instance's own iterator
     assert [t.as_dict()["trial"] for t, _ in rows_once(shadowed)] == [0]
+
+
+def test_a_small_table_is_kept_as_it_is() -> None:
+    table = _table()
+    assert static_output_pod.kept_table(table) is table
+
+
+def test_a_large_table_is_kept_on_disk_with_the_same_schema_and_values(
+    spilled: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import gc
+
+    monkeypatch.setattr(static_output_pod, "SPILL_SLICE_ROWS", 4)
+    table = _source(False).as_table(all_info=True)
+
+    kept = static_output_pod.kept_table(table)
+
+    assert kept is not table
+    # Its spool is gone with the call and the file deleted: the mapping is the table's.
+    assert not _spool_files(spilled)
+    assert kept.schema.equals(table.schema, check_metadata=True)
+    assert kept.equals(table)
+    _ = gc.collect()
+    # The spool that wrote it is gone; the table still reads.
+    assert kept.to_pylist() == table.to_pylist()
+
+
+@pytest.mark.parametrize("tag_only", [False, True], ids=["data_tags", "tag_only"])
+@pytest.mark.parametrize("chain", ["map", "group", "batch"])
+def test_a_sync_job_node_over_spilled_rows_reads_exactly_as_one_in_memory(
+    spilled: Path, tmp_path: Path, chain: str, tag_only: bool
+) -> None:
+    job = _job(tmp_path, "spilled_sync", chain, tag_only)
+    _ = job.run()
+    node = job.nodes["out"]
+    table = node.as_table(all_info=True)
+
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(static_output_pod, "KEPT_ROWS_MEMORY_BYTES", 1 << 40)
+        in_memory = _job(tmp_path, "in_memory_sync", chain, tag_only)
+        _ = in_memory.run()
+    expected = in_memory.nodes["out"]
+
+    # Sync: the same rows in the same order, the same schema, the same hashes.
+    wanted = expected.as_table(all_info=True)
+    assert table.schema.equals(wanted.schema, check_metadata=True)
+    assert table.equals(wanted)
+    assert node.content_hash() == expected.content_hash()
+    assert [(t.as_dict(), d.as_dict()) for t, d in node.iter_data()] == [
+        (t.as_dict(), d.as_dict()) for t, d in expected.iter_data()
+    ]
+    assert node.head(3).table.equals(expected.head(3).table)
+
+    node.clear_cache()
+    assert table.to_pylist() == wanted.to_pylist()
