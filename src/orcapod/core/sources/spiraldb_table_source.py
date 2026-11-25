@@ -8,9 +8,10 @@ primary-key (key-schema) columns are the tag columns by default.
 Requires the ``spiraldb`` optional extra: ``pip install orcapod[spiraldb]``.
 Authentication is spiral-sdk's: ``SPIRAL_*`` environment variables, or the credentials
 ``spiral login`` saved.
-The SDK client is reused for reads and freshness checks, including on restricted copies.
-Use a new source after changing the SDK endpoint, credentials or options. Use the source
-as a context manager or call ``close()`` after its reads and jobs have finished.
+The SDK client is used by every source of one service address and sign-in in a process
+(ITL-1457), and by its restricted copies. Use a new source after changing the SDK
+endpoint, credentials or options: it signs in again. Use the source as a context manager
+or call ``close()`` after its reads and jobs have finished; no other source is affected.
 
 Example::
 
@@ -42,8 +43,15 @@ import asyncio
 import copy
 import dataclasses
 import os
-from collections.abc import AsyncIterator, Collection, Generator, Iterator, Mapping
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import (
+    AsyncIterator,
+    Callable,
+    Collection,
+    Generator,
+    Iterator,
+    Mapping,
+)
+from concurrent.futures import Future, ThreadPoolExecutor
 from threading import Lock
 from types import TracebackType
 from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING
@@ -778,11 +786,37 @@ class SpiralDBTableSource(RootSource):
             ValueError: If the table was dropped and created again (another table id)
                 or its columns changed: build the source again to read it.
         """
+        return self._given_asof is None and self._pin_newer(self._lookup_table())
+
+    @override
+    def _begin_check(self) -> Callable[[], Callable[[], bool]] | None:
+        """Return the service calls of the check (ITL-1457), unless a subclass or a
+        caller replaced ``check_for_new_data``: what that does is not known."""
+        if getattr(self.check_for_new_data, "__func__", None) is not _OWN_CHECK:
+            return None
+        return self._fetch_for_check
+
+    def _fetch_for_check(self) -> Callable[[], bool]:
+        """Make the service calls of ``check_for_new_data`` and return the rest of it."""
+        looked_up: Future[SpiralDBTable] = Future()
         if self._given_asof is not None:
-            return False
+            return lambda: False
+        try:
+            table = self._lookup_table()
+            table.fetch()
+            looked_up.set_result(table)
+        except BaseException as exc:
+            looked_up.set_exception(exc)
+        return lambda: self._pin_newer(looked_up.result())
+
+    def _pin_newer(self, table: SpiralDBTable) -> bool:
+        """Pin the version of ``table`` when it is newer (``check_for_new_data``).
+
+        Args:
+            table: This source's table, looked up by this check.
+        """
         # One lookup per check (ITL-1350): a table dropped and created again since
         # is found by this lookup, and its schema and version come from it.
-        table = self._lookup_table()
         schema = arrow_utils.drop_system_columns(
             table.arrow_schema().empty_table()
         ).schema
@@ -1220,3 +1254,6 @@ class SpiralDBTableSource(RootSource):
                 f"{source.table_id!r}: it is a different table."
             )
         return source
+
+
+_OWN_CHECK = SpiralDBTableSource.check_for_new_data

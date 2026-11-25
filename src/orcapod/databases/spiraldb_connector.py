@@ -25,11 +25,12 @@ import re
 import urllib.parse
 import urllib.request
 import warnings
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from concurrent.futures import Future
 from contextlib import contextmanager
 from copy import copy
-from threading import Lock, local
-from typing import TYPE_CHECKING, Any, cast
+from threading import Lock, Thread, local
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeVar, cast
 from weakref import WeakValueDictionary
 
 import pyarrow as pa
@@ -43,6 +44,7 @@ from orcapod.databases.spiraldb_nullability import (
 )
 from orcapod.databases.spiraldb_schema_table import (
     SCHEMA_TABLE,
+    SchemaRow,
     SchemaTable,
     compared_columns,
     describe_difference,
@@ -466,6 +468,53 @@ def _list_keyed_tables(client: Any, project_id: str, dataset: str) -> dict[str, 
         token = following
 
 
+_T = TypeVar("_T")
+
+
+def _work(call: Callable[[], _T], future: Future[_T]) -> None:
+    """Give ``future`` the outcome of ``call``."""
+    try:
+        future.set_result(call())
+    except BaseException as exc:
+        future.set_exception(exc)
+    finally:
+        # A kept error holds this frame: without these it would hold itself.
+        del call, future
+
+
+def _start(call: Callable[[], _T]) -> Future[_T]:
+    """Make a service call in a thread of its own.
+
+    Only the call: what it finds is judged, and warned about, by the thread that waits for
+    it, so warning filters and the line a warning names do not depend on this.
+
+    Args:
+        call: The call.
+
+    Returns:
+        Its outcome.
+    """
+    future: Future[_T] = Future()
+    try:
+        Thread(target=_work, args=(call, future), name="spiraldb-call").start()
+    except RuntimeError:  # no thread can be started (the interpreter is ending)
+        _work(call, future)
+    return future
+
+
+class _Fetched(NamedTuple):
+    """What the service says about how a snapshot is read, fetched but not judged.
+
+    Attributes:
+        found: The snapshot's schema, as SpiralDB reports it.
+        rows: The rows of the dataset's schema table as stored now, seen after the
+            snapshot was opened.
+    """
+
+    found: Future[pa.Schema]
+    rows: Future[Mapping[str, SchemaRow] | None]
+
+
 def _literal(value: Any, arrow_type: pa.DataType) -> Any:
     """Return ``value`` as a scan literal of exactly ``arrow_type`` (the service refuses
     another type), or ``None`` when the SDK has no literal that filters as Orcapod does.
@@ -540,14 +589,28 @@ class SpiralDBTable:
         self._table = table
         self._table_name = table_name
         self._readings: dict[str, _Reading] = {}
+        self._fetched: _Fetched | None = None
 
     def _reading(self, table: Any) -> _Reading:
         """Return how a snapshot of this table is read, worked out once per version."""
         self._connector._require_open()  # pyright: ignore[reportPrivateUsage]  # owns the handle
         version = str(table.version_id)
         if version not in self._readings:
-            self._readings[version] = self._connector._reading(table, self._table_name)  # pyright: ignore[reportPrivateUsage]  # owns the handle
+            fetched, self._fetched = (
+                (self._fetched, None) if table is self._table else (None, self._fetched)
+            )
+            self._readings[version] = self._connector._reading(  # pyright: ignore[reportPrivateUsage]  # owns the handle
+                table, self._table_name, fetched
+            )
         return self._readings[version]
+
+    def fetch(self) -> None:
+        """Fetch what ``arrow_schema`` needs and judge nothing: no refusal and no warning.
+
+        The next ``arrow_schema`` judges it, in its own thread. For a check that fetches
+        several tables at the same time.
+        """
+        self._fetched = self._connector._fetch(self._table, self._table_name)  # pyright: ignore[reportPrivateUsage]  # owns the handle
 
     @property
     def table_id(self) -> str:
@@ -855,7 +918,11 @@ class SpiralDBConnector:
         return SpiralDBTable(self, table, table_name)
 
     def _recorded_schema(
-        self, table: Any, table_name: str, found: pa.Schema
+        self,
+        table: Any,
+        table_name: str,
+        found: pa.Schema,
+        rows: Mapping[str, SchemaRow] | None,
     ) -> pa.Schema | None:
         """Return the schema recorded for an opened table; ``None``: as SpiralDB reports.
 
@@ -863,12 +930,12 @@ class SpiralDBConnector:
             table: The SDK's handle.
             table_name: Plain table name.
             found: The handle's schema, as SpiralDB reports it.
+            rows: The rows of the dataset's schema table; ``None`` when it has none.
 
         Raises:
-            TableSchemaError: If the dataset's schema table cannot be read or is not
-                complete, or the table's row disagrees with the table.
+            TableSchemaError: If the table's row disagrees with the table.
         """
-        row = self._schemas.row(str(table.resource_id))
+        row = None if rows is None else rows.get(str(table.resource_id))
         if row is None:
             _warn_unrecorded(self._qualified(table_name), str(table.resource_id))
             return None
@@ -890,18 +957,49 @@ class SpiralDBConnector:
             )
         return row.schema
 
-    def _reading(self, table: Any, table_name: str) -> _Reading:
+    def _fetch(self, table: Any, table_name: str) -> _Fetched:
+        """Fetch how an opened snapshot of ``table_name`` is read, judging nothing.
+
+        Both calls are made after the snapshot was opened, at the same time: no read uses
+        a schema whose schema table was not seen, complete, after its table was opened.
+        Both have ended when this returns.
+        """
+        self._require_open()
+        rows = _start(self._schemas.rows)
+        found: Future[pa.Schema] = Future()
+
+        def schema() -> pa.Schema:
+            with self._service_call("read the schema of", table_name):
+                return table.schema()
+
+        try:
+            _work(schema, found)
+        finally:
+            _ = rows.exception()  # waits
+        return _Fetched(found, rows)
+
+    def _reading(
+        self, table: Any, table_name: str, fetched: _Fetched | None = None
+    ) -> _Reading:
         """Return how an opened snapshot of ``table_name`` is read.
 
+        Args:
+            table: The SDK's handle.
+            table_name: Plain table name.
+            fetched: What was fetched for it; fetched now when not given.
+
         Raises:
-            TableSchemaError: If the table's row cannot be read or disagrees with it.
+            TableSchemaError: If the dataset's schema table cannot be read or is not
+                complete, or the table's row disagrees with the table.
         """
         self._require_open()
         qualified = self._qualified(table_name)
-        with self._service_call("read the schema of", table_name):
-            found = table.schema()
+        if fetched is None:
+            fetched = self._fetch(table, table_name)
+        found = fetched.found.result()
         with _about_table(qualified):
-            recorded = self._recorded_schema(table, table_name, found)
+            rows = fetched.rows.result()
+            recorded = self._recorded_schema(table, table_name, found, rows)
         return _Reading(found, recorded, qualified)
 
     def get_pk_columns(self, table_name: str) -> list[str]:
