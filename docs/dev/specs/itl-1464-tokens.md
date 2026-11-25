@@ -152,10 +152,10 @@ GiB, the members' record ids (about 190 bytes each, the canonical JSON of the ke
 159 seconds, about 70 are the folds of the eight system-tag and key columns, whose digests
 read every member's text, as they always did.
 
-In a job: 7.5 GiB on sync and 8.5 GiB on async for `group_by`; with a function per group
-13.6 GiB on sync and 8.5 GiB on async. On sync the source node keeps its table in memory
-through the grouping (2.5 GiB), and the function node holds every input row as objects
-(6.3 GiB for 100 rows of 80,000 members: values and token text).
+In a job, on the integration branch's head with this: 4.5 GiB on sync and 5.8 GiB on async
+for `group_by`; with a function per group 10.9 GiB on sync and 6.1 GiB on async. The
+difference on sync is the function node, which holds every input row as objects before it
+computes: 100 rows of 80,000 members, values and token text.
 
 ## Measured
 
