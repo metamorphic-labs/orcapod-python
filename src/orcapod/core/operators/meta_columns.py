@@ -19,6 +19,7 @@ import pyarrow as pa
 
 from orcapod.channels import WritableChannel
 from orcapod.core.data_tags import stream_data_tags, with_data_tags_first
+from orcapod.core.streams.carried import carried_table
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.system_constants import constants
@@ -112,8 +113,8 @@ def without_input_meta(
     """
     if not _carries_meta(stream, inputs):
         return stream
-    table = stream.as_carried_table(
-        columns={"source": True, "system_tags": True, "context": True}
+    table = carried_table(
+        stream, {"source": True, "system_tags": True, "context": True}
     )
     tag_columns = stream.keys()[0]
     return ArrowTableStream(

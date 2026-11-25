@@ -27,6 +27,7 @@ from typing import Any, cast
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from orcapod.utils import source_tokens
 from orcapod.databases._pending_commits import PendingCommit, PendingCommits
 from orcapod.databases.utils import (
     coerce_record_id,
@@ -438,6 +439,7 @@ class ConnectorArrowDatabase:
     ) -> None:
         """Add multiple records to the pending batch."""
         self._validate_record_path(record_path)
+        source_tokens.refuse_derived(records.schema)
         if records.num_rows == 0:
             return
 

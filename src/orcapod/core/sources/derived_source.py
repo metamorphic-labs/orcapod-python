@@ -23,6 +23,7 @@ from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
 )
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+from orcapod.core.streams.carried import carried_table
 from orcapod.core.streams.view import (
     ViewStatus,
     StreamView,
@@ -813,8 +814,6 @@ class DerivedSource(RootSource):
     ) -> "pa.Table":
         return self._get_stream().as_table(columns=columns, all_info=all_info)
 
-    def as_carried_table(
-        self, *, columns: ColumnConfig | dict[str, Any] | None = None
-    ) -> "pa.Table":
+    def _carried_table(self, config: ColumnConfig) -> "pa.Table":
         """The source's table, derived token columns as they are (ITL-1464)."""
-        return self._get_stream().as_carried_table(columns=columns)
+        return carried_table(self._get_stream(), config)

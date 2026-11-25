@@ -203,6 +203,8 @@ def _fold_pending(value: Any) -> Any:
 
 
 class Join(NonZeroInputOperator):
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     # Data-tags (ITL-1023): handled.
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
@@ -478,7 +480,7 @@ class Join(NonZeroInputOperator):
         # Source-info columns of merged data-tag columns, folded once at the end.
         merged_source: set[str] = set()
         table = without_meta_columns(
-            stream.as_carried_table(columns={"source": True, "system_tags": True}),
+            self._input_table(stream, columns={"source": True, "system_tags": True}),
             tag_keys,
         )
         # trick to get cartesian product; use int8 explicitly so that zero-row
@@ -492,8 +494,8 @@ class Join(NonZeroInputOperator):
         for idx, next_stream in enumerate(ordered_streams[1:], start=1):
             next_tag_keys, _ = next_stream.keys()
             next_table = without_meta_columns(
-                next_stream.as_carried_table(
-                    columns={"source": True, "system_tags": True}
+                self._input_table(
+                    next_stream, columns={"source": True, "system_tags": True}
                 ),
                 next_tag_keys,
             )

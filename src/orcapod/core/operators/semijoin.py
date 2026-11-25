@@ -76,6 +76,8 @@ class SemiJoin(BinaryOperator):
     (a null key matches nothing) and keeps the left input's type (ITL-829).
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     CONSTRAINING_INPUTS: ClassVar[tuple[int, ...]] = (1,)
     CONSTRAINT_MATCHES_SHARED_TAGS: ClassVar[bool] = True
 
@@ -224,8 +226,8 @@ class SemiJoin(BinaryOperator):
         if not common_keys:
             return left_stream
 
-        left_table = left_stream.as_carried_table(
-            columns={"source": True, "system_tags": True, "context": True}
+        left_table = self._input_table(
+            left_stream, columns={"source": True, "system_tags": True, "context": True}
         )
         # Only the right side's keys are read, never its data columns.
         right_table = right_stream.as_table().select(list(common_keys))

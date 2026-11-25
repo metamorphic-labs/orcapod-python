@@ -91,6 +91,8 @@ class MapData(UnaryOperator):
             ``SelectTagColumns`` and the other column operators.
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     # Data-tags (ITL-1023): handled.
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
@@ -179,13 +181,14 @@ class MapData(UnaryOperator):
             # nothing to rename in the data, return stream as is
             return stream
 
-        table = stream.as_carried_table(
+        table = self._input_table(
+            stream,
             columns={
                 "source": True,
                 "system_tags": True,
                 "context": True,
                 "sort_by_tags": False,
-            }
+            },
         )
 
         # A data-tag column keeps its tag under its own name, now plain; the
@@ -365,6 +368,8 @@ class MapTags(UnaryOperator):
         tag_only: Rename data-tags in the tag role only.
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     # Provisional: its identity is not frozen with data context v1 (ITL-1279).
     PROVISIONAL: ClassVar[bool] = True
 
@@ -457,13 +462,14 @@ class MapTags(UnaryOperator):
             # nothing to rename or drop in the tags, return stream as is
             return stream
 
-        table = stream.as_carried_table(
+        table = self._input_table(
+            stream,
             columns={
                 "source": True,
                 "system_tags": True,
                 "context": True,
                 "sort_by_tags": False,
-            }
+            },
         )
 
         name_map = {
@@ -664,6 +670,8 @@ class MapColumns(UnaryOperator):
             or (with ``drop_unmapped``) no data column would remain.
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     # Provisional: its identity is not frozen with data context v1 (ITL-1279).
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
@@ -799,13 +807,14 @@ class MapColumns(UnaryOperator):
         tag_renames, data_renames, tags_dropped, data_dropped = self._plan(
             tag_columns, data_columns
         )
-        table = stream.as_carried_table(
+        table = self._input_table(
+            stream,
             columns={
                 "source": True,
                 "system_tags": True,
                 "context": True,
                 "sort_by_tags": False,
-            }
+            },
         )
         dropped = {
             *tags_dropped,
