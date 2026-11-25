@@ -580,8 +580,9 @@ class StaticOutputOperatorPod(TraceableBase):
                 continue
             if pa.types.is_large_string(field.type):
                 continue
-            if source_tokens.derived_recipe(field.type) is not None:
-                # Every token of a derived column is one string.
+            if source_tokens.is_derived(field.type):
+                # A token is one string, and a list of them is never empty: the type
+                # the column declares is the one its tokens give.
                 continue
             values = table.column(index).to_pylist()
             kinds = {arrow_utils.source_info_arrow_type(value) for value in values}

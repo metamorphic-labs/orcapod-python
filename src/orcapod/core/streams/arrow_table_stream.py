@@ -28,6 +28,30 @@ ROWS_PER_PART = 8192
 """The rows whose source-info text ``iter_data`` builds at once (ITL-1464)."""
 
 
+def _parts(rows: "pa.Table") -> Iterator[tuple[int, int]]:
+    """The row ranges ``iter_data`` builds at once: all rows, or bounded ones (ITL-1464).
+
+    A table with derived tokens is cut so that a part holds at most ``ROWS_PER_PART``
+    rows and, beyond one row, at most eight times as many tokens in a column of lists.
+    """
+    if not rows.num_rows:
+        return
+    if not source_tokens.derived_columns(rows.schema):
+        yield 0, rows.num_rows
+        return
+    members = source_tokens.members_per_row(rows)
+    ends = None if members is None else members.cumsum()
+    start = 0
+    while start < rows.num_rows:
+        end = min(start + ROWS_PER_PART, rows.num_rows)
+        if ends is not None:
+            before = int(ends[start - 1]) if start else 0
+            fit = int(ends.searchsorted(before + 8 * ROWS_PER_PART, side="right"))
+            end = min(end, max(fit, start + 1))
+        yield start, end
+        start = end
+
+
 class ArrowTableStream(StreamBase):
     """
     An immutable stream based on a PyArrow Table.
@@ -93,14 +117,18 @@ class ArrowTableStream(StreamBase):
         # Dictionary-encoded columns are not currently supported (ITL-1264,
         # ITL-1277): every source and operator result becomes a stream here, so this
         # refuses them all, tags and data alike.
-        if found := schema_utils.dictionary_columns(table.schema):
+        # A derived token column is no column of these types: it is text to every reader.
+        shown = pa.schema(
+            [f for f in table.schema if not source_tokens.is_derived(f.type)]
+        )
+        if found := schema_utils.dictionary_columns(shown):
             raise schema_utils.dictionary_columns_error(
                 found, tag_columns, data_tags, system_tag_columns
             )
         # Nor are columns of a type the schema hash rejects (a union, a list view, a
         # run-end-encoded type; developer, November 21, 2026, ITL-640): a stream's
         # identity is its Arrow schema hash, which cannot hold them.
-        if found := schema_utils.schema_hash_rejected_columns(table.schema):
+        if found := schema_utils.schema_hash_rejected_columns(shown):
             raise schema_utils.schema_hash_rejected_columns_error(
                 found, tag_columns, data_tags, system_tag_columns
             )
@@ -491,13 +519,8 @@ class ArrowTableStream(StreamBase):
                 )
             # Derived tokens become text a part of the rows at a time (ITL-1464); a
             # table with none is one part.
-            size = (
-                ROWS_PER_PART
-                if source_tokens.derived_columns(rows.schema)
-                else max(rows.num_rows, 1)
-            )
-            for start in range(0, rows.num_rows, size):
-                part = source_tokens.materialize(rows.slice(start, size))
+            for start, end in _parts(rows):
+                part = source_tokens.materialize(rows.slice(start, end - start))
                 # The part is prepared once for all of its rows (ITL-1348): building
                 # ``Tag(row)`` and ``Data(row)`` from one-row slices normalized every
                 # row three times and split its columns again.

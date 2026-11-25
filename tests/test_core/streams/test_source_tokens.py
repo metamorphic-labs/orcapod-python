@@ -7,6 +7,8 @@ derived column reaches a user, a user's operator, a stored table, a hash or a pi
 
 from __future__ import annotations
 
+import hashlib
+import json
 import pickle
 from collections.abc import Callable
 from typing import Any
@@ -27,9 +29,11 @@ from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.operators import (
     AddTags,
+    Batch,
     DropColumns,
     DropNulls,
     DropTagColumns,
+    GroupBy,
     Join,
     MapColumns,
     MapData,
@@ -346,6 +350,243 @@ def test_a_recipe_survives_its_json() -> None:
         assert again == kind and again.recipe == recipe
 
 
+def _keyed(rows: int, groups: int, **kwargs: Any) -> ArrowTableSource:
+    """Rows in a shuffled order, a key with null and NaN, two tags, two data columns."""
+    order = [(i * 7919) % rows for i in range(rows)]
+    table = pa.table(
+        {
+            "t": pa.array(order, pa.int64()),
+            "g": pa.array(
+                [None if i % groups == 1 else f"g{i % groups}" for i in order]
+            ),
+            "f": pa.array([float("nan") if i % 2 else -0.0 for i in order]),
+            "x": pa.array([float(i) for i in order]),
+            "y": pa.array([f"y{i}" for i in order]),
+        }
+    )
+    return ArrowTableSource(table, tag_columns=["t", "g", "f"], **kwargs)
+
+
+AGGREGATES: dict[str, tuple[Callable[[], Any], bool]] = {
+    # The operation, and whether every list of tokens is derived after it.
+    "group_by": (lambda: _keyed(50, 4).group_by(["g"]), True),
+    "group_by_float": (lambda: _keyed(50, 4).group_by(["f", "g"]), True),
+    "group_by_one_row_groups": (lambda: _keyed(9, 3).group_by(["t"]), True),
+    "group_by_plain": (
+        lambda: _keyed(50, 4, tag_only_columns=True).group_by(["g"]),
+        True,
+    ),
+    "group_by_order": (
+        lambda: GroupBy(by=["g"], member_order=["f", "t"])(_keyed(50, 4)),
+        True,
+    ),
+    "group_by_chain": (
+        lambda: (
+            _keyed(50, 4)
+            .polars_filter(pl.col("x") > 5)
+            .group_by(["g"])
+            .map_data({"x": "z", "t": "tt"})
+            .add_tags(a=1)
+            .polars_filter(pl.col("a") == 1)
+        ),
+        True,
+    ),
+    "group_by_then_filter": (
+        lambda: _keyed(50, 4).group_by(["g"]).polars_filter(pl.col("g") == "g2"),
+        True,
+    ),
+    "group_by_kept_by_drop_nulls": (
+        lambda: _keyed(50, 4).group_by(["g"]).drop_nulls(),
+        True,
+    ),
+    "regrouped": (lambda: _keyed(50, 4).group_by(["f", "g"]).group_by(["f"]), False),
+    "join_grouped": (lambda: _other("a").join(_other("b")).group_by(["j"]), True),
+    "merge_join_grouped": (
+        lambda: MergeJoin()(
+            _other("a").map_data({"a2": "same"}), _other("b").map_data({"b2": "same"})
+        ).group_by(["j"]),
+        False,
+    ),
+    "grouped_joined": (
+        lambda: Join()(
+            _other("a").group_by(["j"]),
+            _other("b").group_by(["j"]).map_data({"k": "k2"}),
+        ),
+        True,
+    ),
+    "grouped_semi_join": (
+        lambda: _other("a").group_by(["j"]).semi_join(_other("b")),
+        True,
+    ),
+    "grouped_rejoin": (
+        lambda: Rejoin()(
+            _keyed(50, 4).group_by(["g"]).select_data_columns(["x", "g"]),
+            _keyed(50, 4).group_by(["g"]).select_data_columns(["y", "g"]),
+        ),
+        True,
+    ),
+    "grouped_merge_join": (
+        lambda: MergeJoin()(
+            _other("a").group_by(["j"]).map_data({"a2": "same"}),
+            _other("b").group_by(["j"]).map_data({"b2": "same"}),
+        ),
+        False,
+    ),
+    "batch": (lambda: Batch(batch_size=3)(_keyed(10, 4)), True),
+    "batch_dropped": (
+        lambda: Batch(batch_size=3, drop_partial_batch=True)(_keyed(10, 4)),
+        True,
+    ),
+    "batch_all": (lambda: Batch()(_keyed(10, 4)), True),
+    "batch_of_groups": (
+        lambda: Batch(batch_size=2)(_keyed(50, 5).group_by(["g"])),
+        False,
+    ),
+    "several_chunks": (
+        lambda: ArrowTableSource(
+            pa.concat_tables([_table(), _table().slice(0, 4)]).append_column(
+                "t", pa.array(range(14))
+            ),
+            tag_columns=["j", "t"],
+        ).group_by(["j"]),
+        True,
+    ),
+}
+
+
+@pytest.mark.parametrize("name", AGGREGATES)
+@pytest.mark.parametrize("chunk", [3, source_tokens.ROWS_PER_CHUNK])
+def test_an_aggregation_carries_the_tokens_and_gives_the_same_rows(
+    name: str,
+    chunk: int,
+    text_sources: Callable[[], None],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(source_tokens, "ROWS_PER_CHUNK", chunk)
+    monkeypatch.setattr(arrow_utils, "_FOLD_PART", chunk)
+    make, derived = AGGREGATES[name]
+    result = make()
+    carried = result.as_carried_table(columns=ZERO_ROW_INPUT_COLUMNS)
+    lists = [
+        f
+        for f in carried.schema
+        if f.name.startswith(constants.SOURCE_PREFIX)
+        and f.type != pa.large_string()
+        and source_tokens.derived_recipe(f.type) is None
+    ]
+    assert lists
+    assert all(source_tokens.is_derived(f.type) for f in lists) is derived
+    formed = StaticOutputOperatorPod._row_built_form(carried, result.keys())
+    plain = result.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+    from_text = StaticOutputOperatorPod._row_built_form(plain, result.keys())
+    formed = source_tokens.materialize(formed)
+    assert formed.schema.equals(from_text.schema, check_metadata=True)
+    assert_same_values(formed, from_text)
+    table = result.as_table(all_info=True)
+    rows = [(t.as_dict(columns=CARRIED), d.as_dict(columns=CARRIED)) for t, d in result]
+    assert not _derived(table)
+    text_sources()
+    oracle = make()
+    expected = oracle.as_table(all_info=True)
+    assert table.schema.equals(expected.schema, check_metadata=True)
+    assert_same_values(table, expected)
+    assert repr(rows) == repr(
+        [(t.as_dict(columns=CARRIED), d.as_dict(columns=CARRIED)) for t, d in oracle]
+    )
+
+
+def test_an_aggregation_of_no_rows_gives_text_types(
+    text_sources: Callable[[], None],
+) -> None:
+    def make() -> list[pa.Table]:
+        none = _keyed(10, 4).polars_filter(pl.col("x") > 100)
+        return [
+            s.as_table(all_info=True) for s in (none.group_by(["g"]), Batch()(none))
+        ]
+
+    tables = make()
+    text_sources()
+    for table, expected in zip(tables, make(), strict=True):
+        assert table.num_rows == 0
+        assert table.schema.equals(expected.schema, check_metadata=True)
+
+
+def test_a_grouped_stream_refuses_to_leak() -> None:
+    carried = (
+        _keyed(10, 4)
+        .group_by(["g"])
+        .as_carried_table(columns={"source": True, "system_tags": True})
+    )
+    tokens = carried.column("_source_x")
+    with pytest.raises(TypeError, match="no value"):
+        _ = tokens.to_pylist()
+    with pytest.raises(pa.ArrowNotImplementedError):
+        _ = tokens.cast(pa.large_list(pa.large_string()))
+    with pytest.raises(TypeError, match="not pickled"):
+        _ = pickle.dumps(carried)
+    with pytest.raises(pa.ArrowNotImplementedError):
+        pq.write_table(carried, pa.BufferOutputStream())
+    kind = tokens.type
+    assert (
+        source_tokens.MemberTokenType.__arrow_ext_deserialize__(
+            kind.storage_type, kind.__arrow_ext_serialize__()
+        )
+        == kind
+    )
+
+
+def test_the_lists_of_one_aggregation_share_the_members_ids() -> None:
+    """One array of ids for every token column; a spill writes it once per column, with
+    the ids' text once (a dictionary) per column too."""
+    carried: Any = (
+        _keyed(50, 4)
+        .group_by(["g"])
+        .as_carried_table(columns={"source": True, "system_tags": True})
+    )
+    addresses = {
+        tuple(
+            buffer.address
+            for buffer in carried.column(name)
+            .chunk(0)
+            .storage.values.field(0)
+            .buffers()
+            if buffer is not None
+        )
+        for name in ("_source_x", "_source_y", "_source_t")
+    }
+    assert len(addresses) == 1
+
+
+@pytest.mark.parametrize("members", [0, 1, 4095, 4096, 4097, 9000])
+def test_a_fold_is_the_digest_of_the_canonical_list(members: int) -> None:
+    values = [None if i % 5 == 0 else f'r"{i}\u00e9,' for i in range(members)]
+    text = json.dumps(values, separators=(",", ":"), ensure_ascii=False)
+    expected = "l_v1:" + hashlib.sha256(text.encode()).hexdigest()
+    assert arrow_utils.fold_system_tag_values(values, label="l_v1") == expected
+    assert arrow_utils.fold_system_tag_values(iter(values), label="l_v1") == expected
+
+
+def test_grouped_rows_are_built_a_bounded_part_at_a_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from orcapod.core.streams import arrow_table_stream
+
+    monkeypatch.setattr(arrow_table_stream, "ROWS_PER_PART", 2)
+    stream = _keyed(50, 5).group_by(["g"])
+    whole = stream.as_table(columns={"source": True})
+    sizes: list[int] = []
+    build = source_tokens.materialize
+
+    def record(table: pa.Table, names: Any = None) -> pa.Table:
+        sizes.append(table.num_rows)
+        return build(table, names)
+
+    monkeypatch.setattr(source_tokens, "materialize", record)
+    rows = list(stream)
+    assert sizes == [1] * 5  # 10 members a row: one row passes 16 with the next
+    assert [d.source_info()["x"] for _, d in rows] == whole["_source_x"].to_pylist()
+
+
 def _column_configs() -> list[dict[str, bool]]:
     groups = ("source", "system_tags", "context", "content_hash", "sort_by_tags")
     return [
@@ -502,9 +743,12 @@ def test_a_derived_column_that_leaks_is_an_error() -> None:
         _ = contexts.get_default_context().arrow_hasher.hash_table(carried)
 
 
-def test_a_spilled_table_keeps_its_recipes() -> None:
+@pytest.mark.parametrize("grouped", [False, True])
+def test_a_spilled_table_keeps_its_recipes(grouped: bool) -> None:
     """As the row spool writes it: an extension column's storage, wrapped when read."""
-    carried: Any = _source().as_carried_table(columns=CARRIED).combine_chunks()
+    stream = _keyed(50, 12)
+    made: Any = stream.group_by(["g"]) if grouped else stream
+    carried: Any = made.as_carried_table(columns=CARRIED).combine_chunks()
     arrow: Any = pa
     batch: Any = carried.to_batches()[0]
     storage = arrow.RecordBatch.from_arrays(
@@ -525,9 +769,26 @@ def test_a_spilled_table_keeps_its_recipes() -> None:
     )
     order = pa.array([7, 2, 2, 9])
     assert _derived(wrapped) == _derived(carried)
-    assert source_tokens.materialize(wrapped.take(order)).equals(
-        source_tokens.materialize(carried).take(order)
+    assert_same_values(
+        source_tokens.materialize(wrapped.take(order)),
+        source_tokens.materialize(carried).take(order),
     )
+
+
+def test_grouped_tables_of_two_reads_are_put_together() -> None:
+    """Chunks whose ids have dictionaries of their own: concatenated, combined, taken."""
+    tables: list[Any] = [
+        _keyed(n, 4, source_id="s")
+        .group_by(["g"])
+        .as_carried_table(columns={"source": True, "system_tags": True})
+        for n in (50, 23)
+    ]
+    texts = pa.concat_tables([source_tokens.materialize(t) for t in tables])
+    whole = pa.concat_tables(tables)
+    order = pa.array([6, 0, 7, 0])
+    assert_same_values(source_tokens.materialize(whole), texts)
+    assert_same_values(source_tokens.materialize(whole.combine_chunks()), texts)
+    assert_same_values(source_tokens.materialize(whole.take(order)), texts.take(order))
 
 
 def test_a_carried_column_has_no_bytes_and_is_not_null() -> None:

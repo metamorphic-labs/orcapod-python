@@ -24,7 +24,7 @@ from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
-from orcapod.utils import arrow_utils
+from orcapod.utils import arrow_utils, source_tokens
 from orcapod.utils.schema_utils import column_names
 
 # GroupBy decides which rows form a group, and in what order, with Polars, and builds
@@ -448,7 +448,13 @@ class GroupBy(UnaryOperator):
             InputValidationError: If a key is a list of any kind, or a user tag's
                 type has no order (``arrow_keys.part_without_rule``).
         """
-        table = stream.as_table(columns={"source": True, "system_tags": True})
+        table = stream.as_carried_table(columns={"source": True, "system_tags": True})
+        # A list of tokens is aggregated as text (ITL-1464).
+        table = source_tokens.materialize(
+            table,
+            set(source_tokens.derived_columns(table.schema))
+            - set(source_tokens.recipe_columns(table.schema)),
+        )
         tag_columns, _ = stream.keys()
         # The async path reaches here without ``validate_unary_input``.
         _refuse_unorderable_tags(
@@ -512,20 +518,22 @@ class GroupBy(UnaryOperator):
             return table.column(c).take(rows).combine_chunks()
 
         def folded(c: str) -> pa.Array[Any]:
-            """The fold of system-tag column ``c`` per group, over the members in order."""
+            """The fold of text column ``c`` per group, over the members in order."""
             # The members' text values in member order, folded per group; text loses
             # nothing in Python.
-            values = cast(list[Any], table.column(c).take(order).to_pylist())
-            bounds = cast(list[int], offsets.to_pylist())
             return pa.array(
                 [
                     arrow_utils.fold_system_tag_values(
-                        values[start:end], label=GROUP_BY_FOLD_LABEL
+                        members, label=GROUP_BY_FOLD_LABEL
                     )
-                    for start, end in zip(bounds[:-1], bounds[1:])
+                    for members in source_tokens.member_texts(table, c, order, offsets)
                 ],
-                table.schema.field(c).type,
+                pa.large_string(),
             )
+
+        # The source-info lists of tokens carried as recipes (ITL-1464).
+        recipes = source_tokens.recipe_columns(table.schema)
+        token_lists = source_tokens.MemberTokens(table, order, offsets)
 
         # Every stream has a data context; StreamProtocol does not declare it.
         type_converter = stream.data_context.type_converter  # pyright: ignore[reportAttributeAccessIssue]
@@ -535,7 +543,12 @@ class GroupBy(UnaryOperator):
         # folded column keep their field, a member column becomes a list.
         for field in table.drop_columns(list(dropped_columns)).schema:
             c = field.name
-            if c in member_columns:
+            if c in member_columns and c in recipes:
+                list_type = pa.large_list(pa.large_string())
+                column = token_lists.column(recipes[c], list_type)
+                fields.append(pa.field(c, column.type, nullable=False))
+                arrays.append(column)
+            elif c in member_columns:
                 list_type = arrow_utils.aggregated_list_type(
                     field.type, type_converter, column=c
                 )
@@ -546,7 +559,10 @@ class GroupBy(UnaryOperator):
                     )
                 )
             else:
-                fields.append(field)
+                # A key's source info is one fold, text whatever its members were.
+                fields.append(
+                    field.with_type(pa.large_string()) if c in recipes else field
+                )
                 arrays.append(emitted(c) if c in self.by else folded(c))
         grouped_table = pa.Table.from_arrays(arrays, schema=pa.schema(fields))
 
