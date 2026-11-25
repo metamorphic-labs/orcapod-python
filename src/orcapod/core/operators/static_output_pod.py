@@ -5,6 +5,7 @@ import dataclasses
 import logging
 from abc import abstractmethod
 from collections.abc import (
+    Generator,
     AsyncIterator,
     Collection,
     Iterable,
@@ -12,6 +13,7 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
+from contextlib import closing
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, cast
 
@@ -43,6 +45,8 @@ from orcapod.core.operators.provisional import (
 from orcapod.utils.provisional import note_provisional_use, provisional_class_name
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
+    batch_streams_of,
+    reads_in_batches,
     ZERO_ROW_INPUT_COLUMNS,
     StreamBase,
     check_head_size,
@@ -53,6 +57,8 @@ from orcapod.core.streams.base import (
     row_built_columns,
 )
 from orcapod.core.streams.view import (
+    RUN_VIEW_COMPLETE_ROWS,
+    BoundedStreamView,
     STALE_NOTE,
     default_note,
     ViewStatus,
@@ -115,6 +121,16 @@ class StaticOutputOperatorPod(TraceableBase):
     ``AddTags``, ``DropNulls``, ``Index``, ``Pick``). Such an operator can be applied
     to each Arrow record batch of its input as it arrives
     (``async_execute_batches``); every other operator needs all of an input first.
+    """
+
+    BATCHES_GIVE_THE_WHOLE: ClassVar[bool] = False
+    """Whether ``static_process`` over consecutive batches of an input gives, put
+    together, exactly its result over the whole input: rows, order, types, nullability.
+
+    Stricter than ``ROW_BY_ROW``: no type or nullable flag of the result follows the
+    values (``Pick`` and ``Index`` build their result from rows, so theirs do). Read
+    from the class itself, never inherited: a subclass that changes the operator
+    declares it again. ``run()`` of a stream uses it (ITL-1464).
     """
 
     OUTPUT_SCHEMA_IS_INPUT_SCHEMA: ClassVar[bool] = False
@@ -1832,6 +1848,9 @@ class DynamicPodStream(StreamBase):
         # that this one changed (ITL-1083).
         self._kept_states: tuple[tuple[str, object], ...] | None = None
         self._reset_generation: int = 0
+        # The window of the last large ``run()`` whose rows were not kept, with what
+        # its inputs were then (ITL-1464); shown by ``head`` only.
+        self._run_window: tuple[BoundedStreamView, tuple[object, ...]] | None = None
 
     def content_hash(self, hasher=None) -> ContentHash:
         """The stream's content hash; notes the use of a provisional operator.
@@ -1887,6 +1906,7 @@ class DynamicPodStream(StreamBase):
         self._cached_stream = None
         self._cached_time = None
         self._kept_states = None
+        self._run_window = None
         self._reset_generation += 1
 
     def _typed_zero_row_table(self) -> pa.Table | None:
@@ -2033,6 +2053,96 @@ class DynamicPodStream(StreamBase):
             self._cached_time = datetime.now(timezone.utc)
             self._kept_states = kept_states
 
+    def _reads_in_batches(self) -> bool:
+        """Whether the operator is applied batch by batch, over an input read so."""
+        return (
+            reads_as_its_class(self, DynamicPodStream)
+            and type(self._pod).__dict__.get("BATCHES_GIVE_THE_WHOLE") is True
+            and len(self._upstreams) == 1
+            and reads_in_batches(self._upstreams[0])
+        )
+
+    def _batch_streams_of_rows(self) -> Generator[StreamProtocol, None, None]:
+        """This stream's rows, in order, as one stream per batch (``run()``, ITL-1464).
+
+        Each batch of the input goes through ``static_process``, the one sync body. A
+        result of at most ``RUN_VIEW_COMPLETE_ROWS`` rows is kept, as a read keeps it;
+        a larger one is not. A current kept result is given as it is.
+        """
+        self._pod._note_provisional_identity_use()
+        self._update_cache_status()
+        if self._cached_stream is not None and self._cached_time is not None:
+            if reads_in_batches(self._cached_stream):
+                # The operator handed its input on: read as that input is.
+                yield from batch_streams_of(self._cached_stream)
+            else:
+                yield self._cached_stream
+            return
+        kept_states = _upstream_states(self._upstreams)
+        kept: list[StreamProtocol] | None = []
+        rows = 0
+        handed_on = True
+        with closing(batch_streams_of(self._upstreams[0])) as batches:
+            for batch in batches:
+                try:
+                    result = self._pod.static_process(batch)
+                except Exception:
+                    # A read of the whole input raises before the operator runs: an
+                    # error further on in the input comes first, as it did there.
+                    for _ in batches:
+                        pass
+                    raise
+                handed_on = handed_on and result is batch
+                rows += result.as_table().num_rows
+                if kept is not None:
+                    kept.append(result)
+                    if rows > RUN_VIEW_COMPLETE_ROWS:
+                        kept = None
+                yield result
+        if kept:
+            self._cached_stream = (
+                # Its input unchanged, as a read keeps it: reads nothing.
+                self._pod.static_process(*self._upstreams)
+                if handed_on
+                else joined_batches(kept)
+            )
+            self._cached_time = datetime.now(timezone.utc)
+            self._kept_states = kept_states
+            self._run_window = None
+
+    def run(self) -> StreamView:
+        """Compute every row and return a ``StreamView`` (``StreamBase.run``).
+
+        Over a source that reads its rows on demand, through operators applied batch by
+        batch, a result of more than ``RUN_VIEW_COMPLETE_ROWS`` rows is not held: the
+        view is bounded (``BoundedStreamView``), ``head`` then shows its first rows,
+        and ``as_table()`` reads and applies the operators again.
+        """
+        # Noted before the rows are read, so a change made meanwhile is seen.
+        _ = self.last_modified
+        state = (*_upstream_states(self._upstreams), self._pod.last_modified)
+        view = super().run()
+        if isinstance(view, BoundedStreamView):
+            self._run_window = (view, state)
+        return view
+
+    def _window_head(self, n: int, config: ColumnConfig) -> StreamView | None:
+        """The first rows of the last large ``run()``, or ``None`` when there are none
+        to show: no such run, changed inputs, more rows or other columns asked for."""
+        if self._run_window is None:
+            return None
+        view, state = self._run_window
+        if (*_upstream_states(self._upstreams), self._pod.last_modified) != state:
+            self._run_window = None
+            return None
+        if (
+            n > view.window_rows
+            or dataclasses.replace(config, sort_by_tags=False) != ColumnConfig()
+        ):
+            return None
+        head = view.head(n)
+        return head.sort_by_tags() if config.sort_by_tags else head
+
     def as_table(
         self,
         *,
@@ -2089,6 +2199,8 @@ class DynamicPodStream(StreamBase):
             view = head_of(
                 self._cached_stream.head(n, columns=config), self, origin="computed"
             )
+        elif (window := self._window_head(n, config)) is not None:
+            view = window
         else:
             matching = self._matching_head(n, config)
             # A view of no rows is falsy (``StreamView.__len__``): compared to None.
@@ -2154,6 +2266,32 @@ class DynamicPodStream(StreamBase):
             f"{self.__class__.__name__}(label={self.label!r}, kernel={self.producer}, "
             f"upstreams=({upstreams}))"
         )
+
+
+def joined_batches(batches: Sequence[StreamProtocol]) -> StreamProtocol:
+    """Put the batches of one operator's result together as the result itself.
+
+    Args:
+        batches: The results of consecutive batches of the input, in order; at least
+            one, all with the same columns and types.
+
+    Returns:
+        A stream over all their rows, every column group included.
+    """
+    first = batches[0]
+    return ArrowTableStream(
+        pa.concat_tables(
+            [
+                batch.as_table(
+                    columns={"source": True, "system_tags": True, "context": True}
+                )
+                for batch in batches
+            ]
+        ),
+        tag_columns=first.keys()[0],
+        data_tags=stream_data_tags(first),
+        data_context=first.data_context_key,
+    )
 
 
 def _with_explain_line(view: StreamView, stream: StreamProtocol) -> StreamView:

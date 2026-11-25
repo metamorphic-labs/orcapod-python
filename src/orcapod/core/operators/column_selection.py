@@ -60,6 +60,7 @@ class SelectTagColumns(UnaryOperator):
     # Data-tags (ITL-1023): handled.
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
+    BATCHES_GIVE_THE_WHOLE: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
@@ -199,6 +200,7 @@ class SelectDataColumns(UnaryOperator):
     # Data-tags (ITL-1023): handled.
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
+    BATCHES_GIVE_THE_WHOLE: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
@@ -355,6 +357,7 @@ class DropTagColumns(UnaryOperator):
     # Data-tags (ITL-1023): handled.
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
+    BATCHES_GIVE_THE_WHOLE: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
@@ -499,6 +502,7 @@ class DropDataColumns(UnaryOperator):
     # Data-tags (ITL-1023): handled.
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
+    BATCHES_GIVE_THE_WHOLE: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
@@ -881,6 +885,8 @@ class DropColumns(_TagAndDataColumnsOperator):
             be dropped: a stream needs at least one data column.
     """
 
+    BATCHES_GIVE_THE_WHOLE: ClassVar[bool] = True
+
     _verb: ClassVar[str] = "drop"
 
     def _removed(self, columns: Collection[str]) -> list[str]:
@@ -904,6 +910,8 @@ class SelectColumns(_TagAndDataColumnsOperator):
         InputValidationError: When called on a stream none of whose data columns is
             named: a stream needs at least one data column.
     """
+
+    BATCHES_GIVE_THE_WHOLE: ClassVar[bool] = True
 
     _verb: ClassVar[str] = "select"
 

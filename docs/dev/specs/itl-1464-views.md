@@ -1,6 +1,7 @@
 # `run()`, its view and `preview(n)` without a full table (ITL-1464, track VIEWS)
 
-Status: draft for approval, November 25, 2026, against `origin/main` 0d1e017c. Companion of
+Status: V1 to V12 approved by the coordinator, November 25, 2026 (V2, V3 and V8 flagged for
+the developer); the bounded view is implemented, `preview(n)` is not. Written, against `origin/main` 0d1e017c. Companion of
 `itl-1464-streaming-design.md` (sections 1, 3 and 4 of it). Nothing here changes a hash,
 identity, stored layout, stored byte or golden value.
 
@@ -16,8 +17,11 @@ Outside a job, only `SpiralDBTableSource` reads its rows on demand and holds non
 other source holds its table, so a table over those rows is not a new cost (a filter's
 result over it is, and stays as today). A function pod's stream keeps its results, so
 that no function is called twice: it stays as today. So the first step applies to a
-**batched chain**: zero or more row-by-row operators (`ROW_BY_ROW`, and `Filter`) over a
-source that reads in batches. Joins, `GroupBy`, `Batch`, `PolarsFilter` and function pods
+**batched chain**: zero or more operators that declare `BATCHES_GIVE_THE_WHOLE` (the column
+selections, the mappers, `AddTags`, `DropNulls`, `Filter`) over a source that reads in
+batches. `Pick` and `Index` are row by row but excluded: they build their result from rows,
+so its types and nullable flags follow the values of the batch. The flag is read from the
+class itself, so a subclass declares it again. Joins, `GroupBy`, `Batch`, `PolarsFilter` and function pods
 end the chain: they compute as today.
 
 ## The `run()` contract
@@ -28,7 +32,8 @@ end the chain: they compute as today.
 1. The source's batches are read in order (one scan, its checks unchanged: `max_rows`,
    schema, repeated keys). Each batch, shaped as `as_table()` shapes the whole, goes
    through each operator's own `static_process`: the one sync body, no second kernel.
-2. Result batches are kept whole up to **64 MiB** (all column groups). A result that ends
+2. Result batches are kept whole up to **50,000 rows** (all column groups; counted in rows,
+   not bytes, so equal data is treated alike however its batches are cut). A result that ends
    within it is complete: the view holds it, and an operator stream keeps it, exactly as
    today.
 3. A larger result drops the kept batches to a **window**: the first and last 1,000 rows
@@ -38,7 +43,9 @@ end the chain: they compute as today.
 `as_table()`, iteration and conversion are unchanged and still give every row. After a
 large `run()` of a batched chain, `as_table()` reads the source again and applies the
 operators again. No user function runs twice: a function pod is never in a batched chain.
-An error in any batch propagates and nothing is kept, as today.
+An error in any batch propagates and nothing is kept, as today. When an operator raises, the
+rest of the source is read first: an error of the source, which a whole read raises before
+the operator runs, still comes first.
 
 ## The view
 
@@ -96,9 +103,9 @@ never computes.
 | V1 | Bounded window now, disk-backed later, or wait for the local cache (N2) | window now: no file is written, and paging later only lifts refusals |
 | V2 | `as_table()` / `table` / `as_polars_df()` of a bounded view: kept rows, recompute, or refuse | refuse, pointing to the stream (a part must never read as the whole; a view never recomputes) |
 | V3 | `head`/`tail` beyond the window, `sort_by_tags` | refuse |
-| V4 | Threshold and window | 64 MiB of result (as L2), first and last 1,000 rows; constants, no config yet |
+| V4 | Threshold and window | approved at 64 MiB; implemented as 50,000 rows (bytes differ with the batches and with what is already held), first and last 1,000 rows; constants, no config yet |
 | V5 | `as_table()` after a large run of a batched chain reads and applies operators again | yes (no user function runs again) |
-| V6 | Streams in the middle of a chain keep nothing after a run of the last one (today each keeps its result) | yes: keeping one table per step is the cost being removed; each `run()`s by itself |
+| V6 | Streams in the middle of a chain keep nothing after a run of the last one (today each keeps its result) | yes, above the threshold (below it each keeps its result, as today): keeping one table per step is the cost being removed; each `run()`s by itself |
 | V7 | `PolarsFilter` in a batched chain | not until B1 decides expressions that read other rows |
 | V8 | `preview` calls user functions | yes, at most on the rows it looks at |
 | V9 | `preview` stores or keeps anything | no: not in memory, not in a database. A cached pod reads its stored results and writes none |
@@ -118,3 +125,20 @@ never computes.
 - The refusals; `head` after `run`; staleness after the source moves.
 - Memory, 2,177,155 rows of the gaze shape, before and after, for the source, a rename, a
   `drop_nulls` and a `filter`.
+
+## Measured
+
+`run()` of a synthetic SpiralDB table shaped as one session of gaze (2,177,155 rows, 13
+columns, 248 MiB of Arrow data; the diagnosis's table), peak resident memory, one process
+per row:
+
+| Stream | Before | After | Arrow pool peak before | after | Time before | after |
+|---|---|---|---|---|---|---|
+| the source | 10.8 GiB | 1.24 GiB | 9.3 GiB | 0.07 GiB | 8.9 s | 10.4 s |
+| `map_data` | 10.8 GiB | 1.40 GiB | 9.3 GiB | 0.25 GiB | 8.8 s | 10.5 s |
+| `drop_nulls` | 19.7 GiB | 1.44 GiB | 18.6 GiB | 0.28 GiB | 9.8 s | 11.1 s |
+| `filter` | 15.1 GiB | 1.45 GiB | 14.1 GiB | 0.29 GiB | 9.2 s | 10.2 s |
+| `drop_nulls`, `filter`, `map_data` | 20.1 GiB | 1.55 GiB | 18.6 GiB | 0.39 GiB | 10.2 s | 9.9 s |
+
+The Arrow pool holds nothing large after the run. What remains is mostly the set of keys the
+source remembers to refuse a repeat (outside this track), which still grows with the table.
