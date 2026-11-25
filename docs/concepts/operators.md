@@ -770,10 +770,26 @@ The conditions are:
 | two columns | `col(a) < col(b)` and the other comparisons | two columns of one Arrow type |
 | combined | several arguments and keywords (all hold), `a & b`, `a \| b`, `~a` | |
 
-Write `&`, `|` and `~`, never `and`, `or` and `not`, and put each comparison in parentheses
-when you combine it, as in Polars. Python cannot refuse `and` between two conditions:
-`(col("t") > 1.0) and (col("t") < 2.0)` silently keeps only the second. A list given as a keyword value is
-refused: membership is `col(c).is_in([...])`.
+A condition has no Python truth value. Chained comparisons such as `1.0 <= col("t") <= 2.0`
+and the operators `and`, `or` and `not` raise `TypeError`. Pass separate conditions to
+`filter()`, or use `&`, `|` and `~` with each comparison in parentheses. Use
+`col("t").between(1.0, 2.0)` for a range that includes both ends.
+
+```python
+try:
+    recorded.filter(1.0 <= col("t") <= 2.0)
+except TypeError as error:
+    print(str(error).split(".")[0])
+# Condition has no truth value
+
+bounds = (col("t") >= 1.0) & (col("t") <= 2.0)
+assert kept(recorded.filter(bounds)) == kept(recorded.filter(col("t").between(1.0, 2.0)))
+assert kept(recorded.filter(bounds)) == kept(recorded.filter(col("t") >= 1.0, col("t") <= 2.0))
+print(kept(recorded.filter(bounds)))
+# [('s1', 7), ('s1', 9)]
+```
+
+Use `col(c).is_in([...])` to test membership in a list.
 
 A condition that no row can satisfy is kept as written and keeps zero rows: Orcapod does not
 try to tell a contradiction (there is no general way). Naming one column twice in one call
