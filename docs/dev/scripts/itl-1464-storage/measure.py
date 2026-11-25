@@ -1,4 +1,7 @@
-"""Measure Delta files, Parquet encodings and provenance layouts without emitting values."""
+"""Measure Delta files, Parquet encodings and provenance layouts without emitting values.
+
+Keep the raw measurements local. Use columns.py for rounded column ratios.
+"""
 
 from __future__ import annotations
 

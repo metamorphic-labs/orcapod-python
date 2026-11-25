@@ -1,4 +1,4 @@
-"""Export anonymous per-column bytes, bytes per row, and file shares as CSV."""
+"""Summarize column families as rounded, normalized storage costs."""
 
 from __future__ import annotations
 
@@ -8,6 +8,9 @@ import json
 import sys
 from pathlib import Path
 from typing import TypedDict, cast
+
+Families = dict[str, list[int]]
+PREFIX_SETTINGS = "zstd-3-prefix-131072"
 
 
 class ByteCounts(TypedDict):
@@ -25,81 +28,68 @@ class TableCounts(TypedDict):
     arrow: dict[str, int]
     actual: ByteCounts
     computed: dict[str, ByteCounts]
-    sorted: dict[str, ByteCounts]
+
+
+def column_family(table: str, column: str) -> str | None:
+    """Group internal columns that carry the same kind of storage overhead."""
+    if column == "__input_data_hash":
+        return "Input data hash"
+    if column == "__output_data_hash":
+        return "Pipeline output data hash"
+    if table == "pdb_v1" and column in {"__record_id", "__pipeline_base_entry_id"}:
+        return "Pipeline record and base entry IDs"
+    if column in {"__record_id", "__data_id"}:
+        return "Result record and pipeline data IDs"
+    if column.startswith("_tag_"):
+        return "Pipeline system tags"
+    if column.startswith("_source_"):
+        return (
+            "Input provenance tokens"
+            if table == "pdb_v1"
+            else "Output provenance tokens"
+        )
+    return None
+
+
+def summarize(path: Path) -> dict[str, list[str]]:
+    """Normalize private measurements by the pipeline row count."""
+    tables = cast("dict[str, TableCounts]", json.loads(path.read_text()))
+    rows = tables["pdb_v1"]["actual"]["rows"]
+    sizes: Families = {}
+    for name, table in tables.items():
+        for index, column in enumerate(table["columns"]):
+            family = column_family(name, column)
+            if family is None:
+                continue
+            key = str(index)
+            summed = sizes.setdefault(family, [0, 0, 0])
+            summed[0] += table["arrow"][key]
+            summed[1] += table["actual"]["compressed"].get(key, 0)
+            summed[2] += table["computed"][PREFIX_SETTINGS]["compressed"].get(key, 0)
+    return {
+        family: [format(float(format(size / rows, ".2g")), "g") for size in variants]
+        for family, variants in sizes.items()
+    }
 
 
 def main() -> None:
-    """Write the column matrix to stdout without logging paths or values."""
+    """Write only rounded ratios, without source labels or absolute counts."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "cases", nargs="+", help="each input has form anonymous-label=metrics.json"
-    )
+    parser.add_argument("narrow", type=Path, help="local metrics for a narrow result")
+    parser.add_argument("wide", type=Path, help="local metrics for a wide result")
     args = parser.parse_args()
+    narrow, wide = summarize(args.narrow), summarize(args.wide)
     writer = csv.writer(sys.stdout, lineterminator="\n")
     writer.writerow(
-        [
-            "case",
-            "table",
-            "order",
-            "settings",
-            "column",
-            "rows",
-            "arrow_bytes",
-            "arrow_bytes_per_row",
-            "parquet_bytes",
-            "parquet_bytes_per_row",
-            "fraction_of_parquet",
+        ["column_family"]
+        + [
+            f"{width}_{variant}_bytes_per_pipeline_row"
+            for width in ("narrow", "wide")
+            for variant in ("arrow", "delta", "zstd_prefix")
         ]
     )
-    for case in cast("list[str]", args.cases):
-        label, file = case.split("=", 1)
-        metrics = cast("dict[str, TableCounts]", json.loads(Path(file).read_text()))
-        for kind, table in metrics.items():
-            variants = [("stored", "delta", table["actual"])]
-            variants.extend(
-                ("computed", key, value)
-                for key, value in table.get("computed", {}).items()
-            )
-            variants.extend(
-                ("tags", key, value) for key, value in table.get("sorted", {}).items()
-            )
-            for order, settings, measurement in variants:
-                total = measurement["bytes"]
-                rows = measurement["rows"]
-                for index, name in enumerate(table["columns"]):
-                    arrow = table["arrow"][str(index)]
-                    parquet = measurement["compressed"].get(str(index), 0)
-                    writer.writerow(
-                        [
-                            label,
-                            kind,
-                            order,
-                            settings,
-                            name,
-                            rows,
-                            arrow,
-                            round(arrow / rows, 5),
-                            parquet,
-                            round(parquet / rows, 5),
-                            round(parquet / total, 6),
-                        ]
-                    )
-                overhead = total - sum(measurement["compressed"].values())
-                writer.writerow(
-                    [
-                        label,
-                        kind,
-                        order,
-                        settings,
-                        "(file overhead)",
-                        rows,
-                        "",
-                        "",
-                        overhead,
-                        round(overhead / rows, 5),
-                        round(overhead / total, 6),
-                    ]
-                )
+    for family in narrow:
+        writer.writerow([family, *narrow[family], *wide[family]])
 
 
 if __name__ == "__main__":
