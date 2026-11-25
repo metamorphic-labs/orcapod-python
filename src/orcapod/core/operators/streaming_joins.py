@@ -51,7 +51,8 @@ How a kernel stays equal to the sync path:
   row was emitted before it can refuse. ``SemiJoin`` with no shared tag passes every
   left row whatever its right input holds, and has no shared column to refuse.
 - **Matching is the sync join's.** Each input keeps the rows it needs in a row spool
-  (memory, then local disk; ``core/row_spool``) and a Polars frame of their prepared keys and row numbers (``arrow_keys.polars_key_frame``),
+  (memory, then local disk; ``core/row_spool``) and, when it is indexed, a Polars frame
+  of their prepared keys and row numbers (``arrow_keys.polars_key_frame``),
   with the constant key every join adds (``join._with_common_key``). An arriving batch's
   key frame is joined with the other side's accumulated key frame by the sync path's own
   rule (``join._matched_pairs``), in one vectorized join, never per row: a top-level
@@ -68,10 +69,11 @@ How a kernel stays equal to the sync path:
   the last step of F), so a kernel declares every such field nullable and the stream made
   from its batches settles them.
 
-A kernel holds only what can still match: a row is let go once it has matched when the
-other side is certified unique on the keys (``core/unique_keys``); a side's rows are dropped when the other side
-closes (nothing can arrive to match them), and an arriving row is not kept once the
-other side has closed. A row whose key holds a top-level null is never kept (it matches
+A kernel holds the keys of one side of a step only (``_BinaryLink``): both sides' while both
+are certified unique on the keys (``core/unique_keys``), a pair's rows being let go when they
+match; otherwise the smaller side's, known once a side has ended. A side's rows are dropped
+when the other side ends and has been matched with them, and an arriving row is not kept
+once the other side has been indexed. A row whose key holds a top-level null is never kept (it matches
 nothing). A step of a ``Join`` chain that can never emit again (a side closed holding no
 row that can match) closes its successor's left side and releases the earlier steps,
 except those the sync path still merges before it (``StreamingJoin._close``).
