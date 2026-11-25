@@ -2,9 +2,11 @@
 
 Design only; the library is unchanged. **Round 2** (2026-11-25, afternoon): the developer's
 answers are in, and a prototype was run on a scratch branch outside this pull request.
+**Round 3** (same day): the function entry, P2 and D1 are decided; the side-effect rule is
+amended (section 3); section 4 gives the reasoning for system tags in a function entry.
 Evidence: **[ran]** a script in `itl-1466/` on `0d1e017c`; **[proto]** `probe_round2` or
 `probe_tokens` on the prototype (they fail on the library as it is); **[read]** the code;
-**[inferred]** none of these. Section 12: what is decided, what is open, and **what the
+**[inferred]** none of these. Round 3's own script is `probe_entries` [proto]. Section 12: what is decided, what is open, and **what the
 prototype sends back (P1-P5)**.
 
 ## 1. What is decided, and the result in one paragraph
@@ -14,7 +16,7 @@ for every pod kind and however many pairs the origin has; a source returns itsel
 source id enters the content hash. (3) A record id names an entry uniquely within its source.
 What it takes depends on the source: a position, key columns, or, for a derived source, a hash
 of the entry's own content: tags, system tags and data, **no source-info tokens** (tokens hold
-random result ids). A function **node** uses the pipeline table's own id.
+random result ids). A function stream or node uses the pipeline table's own id (round 3).
 
 Proposed: `as_source()` is a method of every stream, and every one that is not a source gives
 a `DerivedSource`, in **one form** (today there are two): an ordinary root source with a source
@@ -68,21 +70,37 @@ the node's at the read, never changed by `as_source`. A row has the same record 
 of the cache (D7). A node run in `LOG` loads as `OFF`, so a loaded one is refused until
 `LOG` is attached again; then its ids are equal [proto 7] (P5).
 
-**Side effects** (decided: treated "like the stream feeding into the side-effect"). Delivered by
-`as_source` and reading it: 0, for a stream and a node [proto 6]. Consequences:
+**Side effects.** Decided (round 3): `as_source` of a side-effect stream or node is its
+feeding stream's, **except that rows whose side effect failed are left out**. That changes which
+rows flow, never a row's identity: a row that passed keeps the record id it has in the feeding
+stream (2 of 3 kept their entry ids [proto, `probe_entries` 3]). Open: how the failed rows are
+known, and whether it has a source id of its own.
 
-- Over a source, `tell(units).as_source()` **is `units`**, the same object. Over a select it is
-  the select's: same source id and record ids [proto 6].
-- Rows whose delivery failed (dropped downstream by `drop_on_failure`) **are in it**: a node
-  passed on 2 rows and its `as_source` has 3 [proto 6]. Surprising, because a step after the
-  node in the same job sees 2.
-- It works before the node has run, and its rows do not depend on delivery.
-- A step **over** a side effect does not have this identity: `rnd.pod(tell(u))` and
-  `rnd.pod(u)` have different content hashes [proto 6].
-- A **plain** step over a standalone side-effect stream computes through it: reading its
-  `as_source` delivered 3 times (`head` 0) [proto 6]. Not covered by the decision: P4.
+How they could be known [proto, `probe_entries` 3]:
+
+- **Node:** the rows its run passed on, held in memory: 2 of 3 with the default config. Before a
+  run in this process there are none, so a fresh or loaded job gives zero rows. The invocation
+  log records successes only (2 rows), so it could serve after a load, but a pod with
+  `track_completion=False` writes the same log and reads nothing from it. A load-only run passes
+  all 3 rows and calls nothing, so "passed" there does not mean "succeeded". With
+  `drop_on_failure=False` the failed row is passed on (3 rows), though it failed. A second run
+  calls only the failed row again: 1 call, 2 passed.
+- **Plain stream:** each read delivers again (3 calls, then 6); `head` delivers nothing. Options:
+  deliver once, at the first read, and hold the rows (a read of an `as_source` then has an
+  effect); or refuse, naming a job. Recommend refusing: no other `as_source` read has an effect.
+
+**Own source id?** Recommend **yes**, the default from the side-effect stream's own content
+hash, as every other origin. Its content and pipeline hashes already differ from the feeding
+stream's [proto]. If it had the feeding stream's id, one id would name two contents (3 rows
+and 2), and two such sources in one job would be one source under D10 with no way to tell
+them apart. The record ids stay the feeding stream's either way.
+
 - A function pod with `ctx_arg` is a function, not this case: its `as_source` is a function's;
   a plain one runs its body, effects included, when read [read].
+- A **plain** step over a standalone side-effect stream computes through it: reading its
+  `as_source` delivered 3 times (`head` 0) [proto 6] (P4).
+- The prototype still gives the feeding stream's `as_source`, failed rows included (3 rows
+  against 2 passed) [proto 6]; it awaits the open part.
 
 **Arguments.** On a source: none returns itself. `source_id=` alone is refused, also when equal
 (a source's name is given when it is built; "no changes"). `tags_as_data=` asks for another
@@ -106,25 +124,60 @@ one pair, and a join of two `as_source` results (4 columns) gave one again [prot
 
 | Origin | What is hashed |
 |---|---|
-| Plain stream (operator, function, raw) and operator node (`OFF`, `LOG`, `REPLAY`) | one row: user tags, system tags, data. No tokens, no node hash, no meta or context columns |
-| Function **node** | nothing new: the stored `__pipeline_base_entry_id` (user tags, system tags, labelled input data hash) |
+| Plain operator stream, raw stream, operator node (`OFF`, `LOG`, `REPLAY`) | one row: user tags, system tags, data. No tokens, no node hash, no meta or context columns |
+| Function stream **and** function node | the pipeline table's base entry id: user tags, system tags and labelled input data hash of the **input** row; stored as `__pipeline_base_entry_id` |
 | Source origin (`tags_as_data` only) | nothing: the row's record id in that source |
 | `record_id_columns` given | nothing: canonical JSON of the key columns |
 
-**Function node: base entry id or entry id?** *Awaiting the developer*; the recommendation is
-the base id, as the coordinator has passed on. `__pipeline_entry_id` adds the recomputation
-index, which counts attempts in one store, so a fresh store gives another id [read]. The base
-id is equal in two fresh stores [proto 2], and 1.1 corrected to 1.2 (both round to 1) gives
-two ids: 4 rows, 4 ids [proto 4]. The output is **not** in it. Consequence: a recomputed entry
-keeps its id even when its output changed. Run twice with a new result store, the same id
-named 1 and then 101 [proto 4b]. `as_source` shows the latest recomputation per base id (the
-node's own rule), so ids stay unique: 6 stored entries, 3 rows [proto 4b]. `get_all_records()`,
-read today, has no such rule. Downstream results are keyed by data, so a changed output is
-still computed; the id does not show the change.
+**A function entry** (decided, round 3): an entry of a function stream or node is one upstream
+entry under this function. Its id is the base entry id, **the same for node and plain stream**.
+The answer, the result record and the method (local, Ray) are not part of it. Ran
+[proto, `probe_entries` 1]: plain equals node; also when the plain stream was read, fully or for
+one row, before `as_source`; with rows and tags reordered (keyed); async; another process;
+over `GroupBy`. With another answer (the function changed to add 100: 102, 104, 104), the ids
+are unchanged, for node and plain. With `LocalPythonFunctionExecutor`, unchanged. Ray hung
+starting a local cluster here and was stopped; it is read only: the id is computed before the
+executor is called.
 
-**Node and plain ids of one function differ** [proto 3]: the node's hold the input and the
-plain stream's the output. They share the default source id and the content hash, so this is
-a problem (P2). For every operator kind tried, plain, `OFF`, `LOG` and `REPLAY` ids are equal
+Consequences:
+
+- The entry id is not the recomputation entry id: that one adds the index, which counts
+  attempts in one store [read]. A recomputed entry keeps its id even when its output changed
+  (1, then 101 [proto 4b]). `as_source` shows the latest recomputation per base id, so ids stay
+  unique (6 stored entries, 3 rows [proto 4b]).
+- 1.1 corrected to 1.2, both rounding to 1, gives two entries [proto 4].
+- The plain stream needs its **input** rows. In the prototype it keeps each input row it reads
+  beside its output (`FunctionPodStream`); a design keeps only the entry id. A `head()` of a
+  plain stream shows only rows whose input it holds: rows the stream already computed. With none
+  it reports not computed, and calls nothing [proto 5: 1 of 3 held gives 1 row, 0 calls].
+- A step built **before** a job and captured into it becomes a slot. The slot renames the
+  system-tag columns by its own schema hash, so a function node over it and the plain stream
+  have the same content hash, but other column names, so other ids [proto, `probe_entries` 1].
+  Built inside the job, they are equal. This is today's slot rule, not `as_source`'s; the same
+  content hash for other stored columns is to be filed.
+
+**Why the system tags are in a function entry** [proto, `probe_entries` 2]. A function entry
+stands for one upstream entry, and an upstream entry is named by its system tags. Without them,
+the entry is (user tags, input). Each case: two input rows with one user tag and one input.
+
+| Case | Entries with system tags | Without | Calls | Result records |
+|---|---|---|---|---|
+| Repeated tag (one tag, two source rows) | 2 | 1 | 1 | 1 |
+| Dropped tag (`u` dropped: `a` and `b` become one tag) | 2 | 1 | 1 | 1 |
+| Join, one left row matching two right rows (`dur` not an input) | 2 | 1 | 1 | 1 |
+| The same, inputs swapped | 2 | 1 | 1 | 1 |
+| Control: `u` kept | 2 | 2 | 1 | 1 |
+
+With the system tags there are two entries, one for each upstream entry, and both are shown.
+Without them, two upstream entries become one: a row would vanish from `as_source`, a source
+id plus record id could not lead back to one upstream entry, and the stream would hold two rows
+of one id, which D6 refuses. The function is called **once** and **one result record** is shared
+in every case: results are keyed by the input alone. So the system tags cost no computation;
+they only keep the entries apart. The upstream's own system tags differ in each case because the
+upstream rows are distinct (by key, by position, by the join's pairing), which is the
+uniqueness argument below.
+
+For every operator kind tried, and for functions, plain, `OFF`, `LOG` and `REPLAY` ids are equal
 [proto 2, 3].
 
 **Determinism** [proto 2]: equal in a second fresh store, in another process with another hash
@@ -186,8 +239,7 @@ Over a node the walk still ends. ITL-998's ranges need nothing else.
 - **Content hash**: the root rule `(source_id, schema identity, key columns)`, plus the sorted
   mapping when `tags_as_data` is not `None`. Key columns `()` mean "the row's own id" for this
   kind; a position is no longer possible in it, so `()` is not ambiguous.
-- `tags_as_data={}` becomes another spelling of the one form; refuse an empty mapping rather
-  than keep two content hashes for one source. Code that uses it as the workaround for a joined
+- `tags_as_data={}` is refused (decided, D1): `None` means no copies [proto 5]. Code that uses it as the workaround for a joined
   node drops the argument.
 - **Pipeline hash**: schema only, unchanged, equal to the fresh form's [ran, today 4].
 - **Default name**: kept, `semantic_v1:<hex of the origin's content hash>`; the same after a
@@ -304,12 +356,12 @@ naming the store and `database=`. Fewer rows than recorded still warns.
 
 [ran, `golden_moves`: root identity on the plain form 0 of the checked entries move; a
 separate key policy marker 2; kind version 2, 14. The torch group was not run; it has no
-`DerivedSource` case.] **On the prototype: 2577 golden tests pass, torch
-included, 0 values move.** Of the existing tests of sources, pipelines and order invariance
-selected by name (derived source, `as_source`, proxy, side effect), 496 pass and 5 fail, all in
+`DerivedSource` case.] **On the prototype (round 3): 2577 golden tests pass, torch
+included, 0 values move.** Of the existing tests of sources, pipelines, function pods, side-effect
+pods and order invariance selected by name, 2336 pass and 6 fail, all in
 `test_derived_source_tags_as_data.py`: 3 pin fresh tokens on a `tags_as_data` source over a
-**source**, which D11 now keeps; 1 pins the refusal of `record_id_columns` without
-`tags_as_data`; 1 the old plain identity. The full suite was not run.
+**source**, which D11 now keeps; 1 pins `tags_as_data={}`, now refused (D1); 1 the refusal of
+`record_id_columns` without `tags_as_data`; 1 the old plain identity. The full suite was not run.
 
 **The kind version.** ITL-1425 says a changed record id needs `SOURCE_VERSION` + 1
 (`derived_v2`, 14 provisional entries). No final release carries `derived_v1` and the class is
@@ -373,26 +425,26 @@ limit), `reference/hashing.md` (rule 8, sites 4 and 5, inventory), `CLAUDE.md` a
 
 ## 12. Decisions
 
-**What the prototype sends back to the developer**
+**What the prototype sends back to the developer** (P2 decided in round 3)
 
 | # | Question | Recommendation |
 |---|---|---|
 | P1 | A `LOG` cache holds one content several times (corrected input with an equal output; results recomputed), and D6 makes `as_source` raise [proto 4, 4b] | Rows equal in tags, system tags and data are one entry: show it once, from a cache only. With kept tokens the copies differ in tokens and the cache records no order, so nothing says which token to keep; with fresh tokens there is no question. Raising stays for one run's rows |
-| P2 | One function's node and plain stream share the default source id and content hash but give other record ids [proto 3]. Downstream of both in one store, every row is stored twice under one node content hash [inferred] | Let a plain function stream use the base entry id too: it has the input row while it computes. Otherwise give its default id another name |
 | P3 | Kept tokens make `trace` fail for every row computed from an `as_source` [proto, `probe_tokens`] | Either relax that check for derived sources, as part of this work, or all tokens fresh (then P1 is also settled). I lean to fresh; if kept, D11 includes the tracing change |
-| P4 | A plain step over a standalone side-effect stream delivers when its `as_source` is read [proto 6] | Refuse it, naming a job as the remedy: looking through would give rows under an identity that says the effect ran |
+| P4 | A plain step over a standalone side-effect stream delivers when its `as_source` is read [proto 6] | Refuse it, naming a job, with the plain side-effect stream itself (section 3) |
+| S1 | Side effects: how failed rows are known; own source id | Node: its run's passed rows (none before a run; a load-only run is not a success). Plain: refuse. Own source id: yes (section 3) |
 | P5 | A `LOG` node loads as `OFF`, so `as_source` of a loaded operator is refused though its rows are stored [proto 7] | Save the cache mode with the node (its own issue); until then the refusal says to attach `LOG` again |
-| | Base or entry id for a function node | Base (section 4); awaiting the developer |
 | | Held plain-stream rows as "known content" (D10) | No; the fixed-content sources beneath a plain origin, yes (section 6) |
 
 **Decided 2026-11-25 (round 2)**
 
 | # | Decision |
 |---|---|
-| D4, D5 | Record id: hash of tags, system tags, data, no tokens; a function node, the pipeline table's own id. ITL-1154's wording is amended |
+| D4, D5 | Record id: hash of tags, system tags, data, no tokens. A function stream or node: the base entry id (tags, system tags, input hash), one recipe for both (round 3; P2 closed). ITL-1154's wording is amended |
+| D1 | One form; `tags_as_data=None` for none, `{}` refused (round 3) |
 | D6 | Repeated ids raise; an operation that repeats rows will add an index column later |
 | D7 | `OFF`: the current run's rows. Caching on: the content of the cache |
-| D8 | Plain streams stream their content, computed when read. Side effects: the feeding stream's `as_source`, delivering nothing, never refused |
+| D8 | Plain streams stream their content, computed when read. Side effects: the feeding stream's rows minus those whose side effect failed; identity of a row unchanged (round 3; the rest is S1) |
 | D10 | ITL-1469's rule; no warning |
 | D11 | Single tokens kept, lists fresh, copies and nulls fresh; by the column's type (but P3) |
 | D13 | The "only multi-pair origins" condition is dropped |
@@ -402,7 +454,6 @@ limit), `reference/hashing.md` (rule 8, sites 4 and 5, inventory), `CLAUDE.md` a
 
 | # | Question | Recommendation |
 |---|---|---|
-| D1 | One form of `DerivedSource`? | Yes: the root rule always; `tags_as_data` an option; refuse an empty mapping |
 | D2 | Which objects? | Section 3. A slot gives its bound source. Refuse unbound slots and non-job nodes |
 | D3 | Arguments on a source? | None: itself. `source_id` alone: refused. `tags_as_data`: as today. No `label` |
 | D9 | Default id | Keep the origin's content hash |

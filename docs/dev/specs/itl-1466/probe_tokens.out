@@ -5,9 +5,9 @@ Case 1: a single token per cell (a select of the units): kept
            dict_v1:units::{"s":"m1","u":"a"}::x
 Case 1 over a function node: its own result's token (random id)
   before  _source_r large_string
-           rnd:0db60db7..:v0:python.function.v1::01a214a9..::r
+           rnd:0db60db7..:v0:python.function.v1::01a214c4..::r
   after   _source_r large_string
-           rnd:0db60db7..:v0:python.function.v1::01a214a9..::r
+           rnd:0db60db7..:v0:python.function.v1::01a214c4..::r
 Case 2: a list of tokens per cell (GroupBy): fresh
   before  _source_x large_list<item: large_string>
            ['dict_v1:units::{"s":"m1","u":"a"}::x', 'dict_v1:units::{"s":"m1","u":"b"}::x']
@@ -55,5 +55,5 @@ Memoization: a second upstream store, one downstream store
 Tracing a row computed from the as_source
   kept  function node: ProvenanceInconsistencyError: node 'step': the stored entry's input token _source_r names 'rnd:..:v0:python.function.v1' '..', not the record its system tags name
   kept  plain select: ProvenanceInconsistencyError: node 'step': the stored entry's input token _source_x names 'dict_v1:units' '{"s":"m1","u":"a"}', not the record its system tags name
-  fresh function node: trace of z at node step, for s='m1', u='a': 1 row matches / step (s='m1', u='a'): z = 2 /   plus v0.0 (body function_content_v1:996108c5), computed here, computed 2026-11-25 21:43:26 UTC on local, run 586e3423149f4f64, recorded 2026-11-25 21:43:26 UTC /   derived_v1:traced arrow_v1:.. r = None /     not read: the source's rows are not h
-  fresh plain select: trace of w at node step, for s='m1', u='a': 1 row matches / step (s='m1', u='a'): w = 0.55 /   half v0.0 (body function_content_v1:fa3ec4da), computed here, computed 2026-11-25 21:43:26 UTC on local, run 3e8060bb631e4f5c, recorded 2026-11-25 21:43:26 UTC /   derived_v1:traced arrow_v1:.. x = None /     not read: the source's rows are no
+  fresh function node: trace of z at node step, for s='m1', u='a': 1 row matches / step (s='m1', u='a'): z = 2 /   plus v0.0 (body function_content_v1:996108c5), computed here, computed 2026-11-25 22:12:15 UTC on local, run 3874f99a2d744f5e, recorded 2026-11-25 22:12:15 UTC /   derived_v1:traced arrow_v1:.. r = None /     not read: the source's rows are not h
+  fresh plain select: trace of w at node step, for s='m1', u='a': 1 row matches / step (s='m1', u='a'): w = 0.55 /   half v0.0 (body function_content_v1:fa3ec4da), computed here, computed 2026-11-25 22:12:15 UTC on local, run ad7ff08da0204f3b, recorded 2026-11-25 22:12:15 UTC /   derived_v1:traced arrow_v1:.. x = None /     not read: the source's rows are no

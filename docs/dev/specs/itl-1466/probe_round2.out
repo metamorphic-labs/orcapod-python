@@ -16,7 +16,7 @@
   another process: True 
   positional, reordered, differ: ['fn', 'tot', 'join', 'group', 'batch', 'merge', 'sel']
 3. Plain streams against nodes: same default id? same record ids?
-  fn     source_id equal True, content hash equal True, record ids equal False
+  fn     source_id equal True, content hash equal True, record ids equal True
   join   source_id equal True, content hash equal True, record ids equal True
   group  source_id equal True, content hash equal True, record ids equal True
   batch  source_id equal True, content hash equal True, record ids equal True
@@ -46,6 +46,9 @@
 5. Never computes
   schema, hashes, head, preview, check: calls 0 | head ViewStatus.NOT_COMPUTED
   two reads: calls 3
+  head over a stream holding 1 of 3 rows: ViewStatus.PARTIAL 1 calls 0
+  head(2) ids are the read's first 2: True
+  tags_as_data={}: ValueError: tags_as_data={} is refused: pass None
 6. Side effects
   over a source: is the source True
   over a plain select: id equals the select's True ids True

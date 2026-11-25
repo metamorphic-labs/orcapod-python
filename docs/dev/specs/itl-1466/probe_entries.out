@@ -1,0 +1,30 @@
+1. Node and plain stream: one recipe
+  plain                                        equal
+  plain, read before as_source                 equal
+  plain, one row read before                   equal
+  plain, rows and tags reordered (keyed)       equal
+  node async                                   equal
+  node, another answer                         equal
+  plain, another answer                        equal
+   answers now [102, 104, 104]
+  node, LocalPythonFunctionExecutor            equal
+  plain, LocalPythonFunctionExecutor           equal
+  another process: True 
+  over GroupBy: node equals plain True
+  over a GroupBy built BEFORE the job (it becomes a slot): node equals plain False | content hash equal True | system-tag names equal False
+2. Why system tags are in the id: entries with and without them
+  repeated tag (one tag pair, two rows)  rows 2 | entries with 2 without 1 | calls 1 result records 1 | as_source rows 2 equal plain True
+  dropped tag, before (s, u)             rows 2 | entries with 2 without 2 | calls 1 result records 1 | as_source rows 2 equal plain True
+  dropped tag, after (u dropped)         rows 2 | entries with 2 without 1 | calls 1 result records 1 | as_source rows 2 equal plain True
+  join, two matches, dur not an input    rows 2 | entries with 2 without 1 | calls 1 result records 1 | as_source rows 2 equal plain True
+  join, inputs swapped                   rows 2 | entries with 2 without 1 | calls 1 result records 1 | as_source rows 2 equal plain True
+3. Side effect: which rows passed? (facts for the open decision)
+  default run 1: before the run 0, called 3, passed 2, log rows 2
+  default run 2: before the run 0, called 1, passed 2, log rows 2
+     load only: called 0 passed 3
+  {'drop_on_failure': False} run 1: before the run 0, called 3, passed 3, log rows 2
+  {'drop_on_failure': False} run 2: before the run 0, called 1, passed 3, log rows 2
+     load only: called 0 passed 3
+  standalone: head delivered 0 | a read passes 2 called 3 | a second read: called 6
+  content hash: stream equals feeding False | pipeline hash False
+  passed rows keep their rows' identity: True 2 of 3

@@ -262,6 +262,18 @@ print("  schema, hashes, head, preview, check: calls", CALLS["n"], "| head", v.s
 src.as_table()
 src.as_table()
 print("  two reads: calls", CALLS["n"])
+st = rnd.pod(units())
+one = next(iter(st.iter_data()))
+CALLS["n"] = 0
+v = st.as_source().head()
+print("  head over a stream holding 1 of 3 rows:", v.status, v.table.num_rows,
+      "calls", CALLS["n"])  # fmt: skip
+st.as_table()
+h = st.as_source().head(2, columns=ALL)
+rec = next(c for c in h.table.column_names if "record_id" in c)
+print("  head(2) ids are the read's first 2:", h.table.column(rec).to_pylist()
+      == st.as_source().as_table(columns=ALL).column(rec).to_pylist()[:2])  # fmt: skip
+attempt("tags_as_data={}", lambda: units().as_source({}, source_id="e"))
 
 print("6. Side effects")
 CALLS["delivered"] = 0
