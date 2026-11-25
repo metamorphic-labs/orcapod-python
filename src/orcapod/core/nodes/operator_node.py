@@ -43,6 +43,7 @@ from orcapod.core.operators.static_output_pod import (
     RowBuiltFormUnavailable,
     RowChunks,
     StaticOutputOperatorPod,
+    kept_table as spilled_when_large,
     produced_stream,
     rows_on_read,
 )
@@ -1759,6 +1760,8 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
                         StaticOutputOperatorPod._raise_as_rows_do(
                             produced.iter_data(), error
                         )
+                    # On local disk when large, read back memory-mapped (ITL-1464).
+                    kept_table = spilled_when_large(kept_table)
                     self._cached_output_stream = ArrowTableStream(
                         kept_table, tag_columns=tag_keys, data_tags=data_tags
                     )
