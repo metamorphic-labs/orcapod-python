@@ -260,6 +260,7 @@ ROW_BY_ROW = {
     "MapColumns",
     "AddTags",
     "DropNulls",
+    "Filter",
     "Index",
     "Pick",
 }

@@ -14,7 +14,14 @@ import functools
 import json
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Collection, Iterator, Mapping, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Collection,
+    Generator,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from datetime import datetime
 from typing import ClassVar, TYPE_CHECKING, Any
 
@@ -28,11 +35,20 @@ from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
 from orcapod.core.datagrams import Data, Tag
 from orcapod.core.operators.drop_nulls import _without_none  # pyright: ignore[reportPrivateUsage]  # DropNulls' rule for removing None from a type, shared, never copied
+from orcapod.core.job_edges import BatchWriter, off_the_loop, send_batch
+from orcapod.core.operators.static_output_pod import (
+    ROW_CHUNK_ROWS,
+    StaticOutputOperatorPod,
+)
 from orcapod.core.sources.base import table_is_rows
+from orcapod.core.streams.carried import carried_table
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
     CompleteStreamFeed,
+    batch_streams_of,
+    reads_in_batches,
+    row_built_columns,
     keys_of_rows,
     system_tags_as_rows_give,
     stream_arrow_schema,
@@ -1316,6 +1332,13 @@ class SourceNodeBase(TraceableBase, ABC):
         """Yield ``(tag, data)`` pairs, or raise if data is unavailable."""
         ...
 
+    def _record_batches(self) -> Generator[pa.RecordBatch, None, None] | None:
+        """This node's rows as Arrow record batches in the row-built form, or ``None``.
+
+        ``None`` here: the rows are read as ``async_iter_data`` gives them.
+        """
+        return None
+
     def _rows_table(
         self,
     ) -> tuple[pa.Table, tuple[tuple[str, ...], tuple[str, ...]]] | None:
@@ -1416,8 +1439,15 @@ class SourceNodeBase(TraceableBase, ABC):
         try:
             if observer is not None:
                 observer.on_node_start(node_label, node_hash)
-            async for tag, data in self.async_iter_data():
-                await output.send((tag, data))
+            batches = (
+                self._record_batches() if isinstance(output, BatchWriter) else None
+            )
+            if batches is None:
+                async for tag, data in self.async_iter_data():
+                    await output.send((tag, data))
+            else:
+                async for batch in off_the_loop(batches):
+                    await send_batch(output, batch, self)
             if observer is not None:
                 observer.on_node_end(node_label, node_hash)
         finally:
@@ -1930,6 +1960,49 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
             # nullable field): the rows decide, as on main.
             return None
         return table, keys_of_rows(table, self._bound_source.keys())
+
+    def _record_batches(self) -> Generator[pa.RecordBatch, None, None] | None:
+        """The bound source's rows as record batches (ITL-1464), or ``None``.
+
+        Where F of the source's table is provably its rows' own table (``_rows_table``),
+        in the default data context. A source that reads its table in batches
+        (``reads_in_batches``) is read one batch at a time; another is held already.
+        """
+        source = self._bound_source
+        if (
+            not reads_as_its_class(self, SourceJobNode)
+            or source is None
+            or self._declared_form is not None
+            or not table_is_rows(source)
+            or source.data_context_key != self.data_context_key
+            or self.data_context_key != contexts.get_default_context_key()
+        ):
+            return None
+        zero = typed_zero_row_table(source)
+        if zero is None or not system_tags_as_rows_give(zero):
+            # The system tags may not be what the rows give: the rows decide.
+            return None
+
+        def generate() -> Generator[pa.RecordBatch, None, None]:
+            streams = (
+                batch_streams_of(source)
+                if reads_in_batches(source)
+                else (stream for stream in (source,))
+            )
+            with contextlib.closing(streams):
+                for stream in streams:
+                    table = carried_table(stream, ZERO_ROW_INPUT_COLUMNS)
+                    if not system_tags_as_rows_give(table):
+                        # A null the fields do not declare: as the rows give it.
+                        rows = list(stream.iter_data())
+                        table, *_ = StaticOutputOperatorPod._rows_to_table(rows)  # pyright: ignore[reportPrivateUsage]  # the rows' own table
+                    keys = keys_of_rows(table, stream.keys())
+                    built = row_built_columns(table, keys)
+                    for batch in built.to_batches(max_chunksize=ROW_CHUNK_ROWS):
+                        if batch.num_rows:
+                            yield batch
+
+        return generate()
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """Delegate to concrete source, or raise if unbound.

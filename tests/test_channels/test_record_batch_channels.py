@@ -879,9 +879,9 @@ def test_opening_a_channel_computes_nothing() -> None:
     stream = source()
     with mock.patch.object(
         ArrowTableSource,
-        "as_table",
+        "_carried_table",
         autospec=True,
-        side_effect=ArrowTableSource.as_table,
+        side_effect=ArrowTableSource._carried_table,  # pyright: ignore[reportPrivateUsage]  # the read of a channel
     ) as read:
         channel = stream.open_channel()
         assert read.call_count == 0

@@ -17,7 +17,7 @@ import pytest
 
 from orcapod.core.sources import spiraldb_table_source as source_module
 from orcapod.sources import SpiralDBTableSource
-from orcapod.utils import arrow_utils
+from orcapod.utils import arrow_utils, source_tokens
 from tests.test_databases import fake_spiral_sdk
 
 _PROJECT = "sample"
@@ -166,15 +166,23 @@ def test_all_info_holds_every_token(
 
 
 def test_run_and_the_data_frame_build_no_tokens(
-    project: Any, token_builds: list[int]
+    project: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = _source(False)
-    token_builds.clear()
+    built: list[int] = []
+    original = source_tokens.materialize
+
+    def recording(table: pa.Table, *given: Any, **options: Any) -> pa.Table:
+        if source_tokens.derived_columns(table.schema):
+            built.append(table.num_rows)
+        return original(table, *given, **options)
+
+    monkeypatch.setattr(source_tokens, "materialize", recording)
 
     view = source.run()
     frame = source.as_polars_df()
 
-    assert token_builds == []
+    assert built == []
     assert view.total_rows == _ROWS
     assert frame.height == _ROWS
     assert frame.columns == source.as_table().column_names

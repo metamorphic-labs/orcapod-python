@@ -1610,11 +1610,11 @@ def stream_from_batches(
     if table is None:
         return StaticOutputOperatorPod._materialize_upstream([], stream)  # pyright: ignore[reportPrivateUsage]  # the zero-row input of an operator
     return StaticOutputOperatorPod._output_stream(  # pyright: ignore[reportPrivateUsage]  # F and the identity, stage 2's
-        table, _keys_in_delivered_order(stream.keys(), table.column_names), stream
+        table, keys_in_delivered_order(stream.keys(), table.column_names), stream
     )
 
 
-def _keys_in_delivered_order(
+def keys_in_delivered_order(
     keys: tuple[Sequence[str], Sequence[str]], names: Sequence[str]
 ) -> tuple[list[str], list[str]]:
     """The description's tag and data keys, in the order the delivered rows have them.
@@ -1678,8 +1678,10 @@ def settle_token_types(
             continue
         kinds: set[pa.DataType]
         # A derived column settles as the text its recipe gives (ITL-1464).
-        derived = source_tokens.derived_recipe(field.type) is not None
-        if derived or pa.types.is_large_string(field.type):
+        derived = source_tokens.is_derived(field.type)
+        if isinstance(field.type, source_tokens.MemberTokenType):
+            kinds = {field.type.list_type}
+        elif derived or pa.types.is_large_string(field.type):
             kinds = {pa.large_string()}
         else:
             kinds = {
@@ -1825,24 +1827,35 @@ def concatenate_batches(batches: Sequence[pa.RecordBatch]) -> pa.Table | None:
     settled: dict[str, pa.DataType] = {}
     for batch in rows:
         settled = settle_token_types(batch, settled)
+    return pa.concat_tables(
+        [open_provenance(batch, settled) for batch in _with_one_token_form(rows)]
+    )
+
+
+def open_provenance(
+    batch: pa.RecordBatch, settled: Mapping[str, pa.DataType]
+) -> pa.Table:
+    """``batch`` with each token column of its settled type and provenance fields nullable.
+
+    Batches of one stream then have one schema for their provenance; whether such a
+    field is nullable is decided over the complete table (``_flag_by_values``).
+
+    Args:
+        batch: A record batch of a stream's rows.
+        settled: Each source-info column's token type (``settle_token_types``).
+    """
     prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
-    opened: list[pa.RecordBatch] = []
-    for batch in _with_one_token_form(rows):
-        columns: list[Any] = []  # pyright: ignore[reportExplicitAny]  # any column
-        fields: list[pa.Field[Any]] = []  # pyright: ignore[reportExplicitAny]  # any field
-        for field, column in zip(batch.schema, batch.columns, strict=True):
-            if (
-                field.name in settled
-                and source_tokens.derived_recipe(field.type) is None
-            ):
-                column = _named_tokens_as(column, settled[field.name], field.name)
-                field = pa.field(field.name, settled[field.name])
-            if field.name.startswith(prefixes):
-                field = field.with_nullable(True)
-            columns.append(column)
-            fields.append(field)
-        opened.append(pa.RecordBatch.from_arrays(columns, schema=pa.schema(fields)))
-    return pa.Table.from_batches(opened)
+    columns: list[Any] = []  # pyright: ignore[reportExplicitAny]  # any column
+    fields: list[pa.Field[Any]] = []  # pyright: ignore[reportExplicitAny]  # any field
+    for field, column in zip(batch.schema, batch.columns, strict=True):
+        if field.name in settled and not source_tokens.is_derived(field.type):
+            column = _named_tokens_as(column, settled[field.name], field.name)
+            field = pa.field(field.name, settled[field.name])
+        if field.name.startswith(prefixes):
+            field = field.with_nullable(True)
+        columns.append(column)
+        fields.append(field)
+    return pa.Table.from_arrays(columns, schema=pa.schema(fields))
 
 
 class RowsOnRead:

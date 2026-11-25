@@ -373,20 +373,45 @@ def test_concurrent_operator_and_forwarding_failures_stay_grouped() -> None:
     class FailingWriter:
         """An output sink that fails when the first valid row is forwarded."""
 
+        def __init__(self, sending: asyncio.Event) -> None:
+            self._sending = sending
+
         async def send(self, item: tuple[TagProtocol, DataProtocol]) -> None:
-            """Reject the forwarded row."""
+            """Let the operator meet its invalid row, then reject the forwarded row."""
+            self._sending.set()
+            await asyncio.sleep(0)
             raise LookupError("output unavailable")
 
         async def close(self) -> None:
             """Allow the node to close its output even after a failure."""
 
+    class Rows:
+        """A valid row, then, once that row is being forwarded, an invalid one."""
+
+        def __init__(self, sending: asyncio.Event) -> None:
+            self._sending = sending
+            self._rows = list(source.iter_data())
+
+        async def receive(self) -> tuple[TagProtocol, DataProtocol]:
+            """The next row."""
+            if len(self._rows) == 1:
+                _ = await self._sending.wait()
+            return self._rows.pop(0)
+
+        def __aiter__(self) -> "Rows":
+            return self
+
+        async def __anext__(self) -> tuple[TagProtocol, DataProtocol]:
+            return await self.receive()
+
+        async def collect(self) -> list[tuple[TagProtocol, DataProtocol]]:
+            """Not used here."""
+            raise NotImplementedError
+
     async def run() -> None:
-        """Queue a valid row followed by an invalid row before starting both tasks."""
-        inputs: Channel[tuple[TagProtocol, DataProtocol]] = Channel(buffer_size=16)
-        for item in source.iter_data():
-            await inputs.writer.send(item)
-        await inputs.writer.close()
-        await node.async_execute([inputs.reader], FailingWriter())
+        """Fail the operator and the forwarding of its output at once."""
+        sending = asyncio.Event()
+        await node.async_execute([Rows(sending)], FailingWriter(sending))
 
     with pytest.raises(ExceptionGroup) as info:
         asyncio.run(run())

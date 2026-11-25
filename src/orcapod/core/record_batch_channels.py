@@ -429,7 +429,7 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
         expected = declared.field(column.name)
         carried = arrow_utils.normalize_to_large_types(expected.type)
         if column.name.startswith(constants.SOURCE_PREFIX):
-            if source_tokens.derived_recipe(column.type) is not None:
+            if source_tokens.is_derived(column.type):
                 if column.metadata:
                     return f"column {column.name!r} carries field metadata"
                 continue

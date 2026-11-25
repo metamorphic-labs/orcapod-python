@@ -918,19 +918,10 @@ class TestAsyncPipelineThenSyncRetrieval:
         fn_node = FunctionJobNode(pod, stream, pipeline_database=fn_db)
 
         # --- Setup stage 2: select only "result" column ---
-        # Build a placeholder stream for schema purposes (OperatorNode needs
-        # to validate inputs at construction time)
-        stage1_table = pa.table(
-            {
-                "id": pa.array([0, 1, 2], type=pa.int64()),
-                "result": pa.array([0, 2, 4], type=pa.int64()),
-            }
-        )
-        stage1_stream = ArrowTableStream(stage1_table, tag_columns=["id"])
         op = SelectDataColumns(["result"])
         op_db = InMemoryArrowDatabase()
         op_node = OperatorJobNode(
-            op, [stage1_stream], pipeline_database=op_db, cache_mode=CacheMode.LOG
+            op, [fn_node], pipeline_database=op_db, cache_mode=CacheMode.LOG
         )
 
         # --- Async pipeline execution ---

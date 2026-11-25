@@ -19,6 +19,7 @@ from collections.abc import Callable, Coroutine
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from orcapod.channels import BroadcastChannel, Channel
+from orcapod.core.job_edges import EDGE_BATCHES, EdgeReader, EdgeWriter
 from orcapod.errors import (
     OrcapodDatabaseError,
     OrcapodDatabaseWriteError,
@@ -237,22 +238,27 @@ class AsyncPipelineOrchestrator:
             node_output_channels: dict[Any, Channel | BroadcastChannel] = {}
             edge_readers: dict[tuple[Any, Any], Any] = {}
 
+            def edge_buffer(node: Any) -> int:
+                """Items an edge holds: few when they may be record batches."""
+                batches = is_source_node(node) or is_operator_node(node)
+                return min(buf, EDGE_BATCHES) if batches else buf
+
             for node, downstreams in out_edges.items():
                 if len(downstreams) == 1:
-                    ch = Channel(buffer_size=buf)
+                    ch = Channel(buffer_size=edge_buffer(node))
                     node_output_channels[node] = ch
-                    edge_readers[(node, downstreams[0])] = ch.reader
+                    edge_readers[(node, downstreams[0])] = EdgeReader(ch.reader)
                 else:
-                    bch = BroadcastChannel(buffer_size=buf)
+                    bch = BroadcastChannel(buffer_size=edge_buffer(node))
                     node_output_channels[node] = bch
                     for ds in downstreams:
-                        edge_readers[(node, ds)] = bch.add_reader()
+                        edge_readers[(node, ds)] = EdgeReader(bch.add_reader())
 
             # Terminal nodes need sink channels
             terminal_channels: list[Channel] = []
             for node in topo_order:
                 if node not in node_output_channels:
-                    ch = Channel(buffer_size=buf)
+                    ch = Channel(buffer_size=edge_buffer(node))
                     node_output_channels[node] = ch
                     terminal_channels.append(ch)
 
@@ -270,6 +276,9 @@ class AsyncPipelineOrchestrator:
                     if materialize_results:
                         collector = collectors[node]
                         writer = _CollectingWriter(writer, collector)
+                    else:
+                        # Takes a node's rows as record batches too (ITL-1464).
+                        writer = EdgeWriter(writer)
 
                     if held_rows is not None and node in held_rows:
                         # Not run: the rows of its current run feed its successors. Its
@@ -662,6 +671,9 @@ class _RowsInFlight:
 
 async def _drain(reader: Any) -> None:
     """Read ``reader`` to its end, keeping nothing."""
+    if isinstance(reader, EdgeReader):
+        await reader.discard()
+        return
     async for _ in reader:
         pass
 
@@ -812,12 +824,6 @@ def _leaves(group: BaseExceptionGroup) -> list[BaseException]:
         else:
             found.append(exc)
     return found
-
-
-async def _drain(reader: Any) -> None:
-    """Read a channel to its end, keeping no row."""
-    async for _ in reader:
-        pass
 
 
 class _CollectingWriter:

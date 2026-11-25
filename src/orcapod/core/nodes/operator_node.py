@@ -18,10 +18,11 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import sys
 import logging
 from abc import abstractmethod
-from collections.abc import Collection, Iterator, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from typing import ClassVar, TYPE_CHECKING, Any, Literal, cast
 
 import pyarrow as pa
@@ -41,6 +42,11 @@ from orcapod.core.data_tags import (
 )
 from orcapod.channels import Channel, ChannelClosed, ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
+from orcapod.core.operators.batch import Batch
+from orcapod.core.operators.group_by import GroupBy
+from orcapod.core.operators.join import Join
+from orcapod.core.operators.merge_join import MergeJoin
+from orcapod.core.operators.semijoin import SemiJoin
 from orcapod.core.operators.static_output_pod import (
     RowBuiltFormUnavailable,
     RowChunks,
@@ -49,6 +55,15 @@ from orcapod.core.operators.static_output_pod import (
     produced_stream,
     rows_on_read,
 )
+from orcapod.core.job_edges import (
+    EdgeFeed,
+    EdgeReader,
+    KeptBatches,
+    TappedFeed,
+    send_batch,
+)
+from orcapod.core.record_batch_channels import OutputChannel
+from orcapod.core.streams.record_batch_input import InputChannel
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
@@ -70,6 +85,7 @@ from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
 from orcapod.core.nodes.staleness import RunHoldingNode
 from orcapod.errors import (
     InputValidationError,
+    UpstreamFailedError,
     PipelineJobRequiredError,
     OrcapodDatabaseReadError,
     OrcapodDatabaseWriteError,
@@ -109,8 +125,21 @@ async def _discard(channel: ReadableChannel[Any]) -> None:
     Args:
         channel: The channel to drain.
     """
+    if isinstance(channel, EdgeReader):
+        await channel.discard()
+        return
     async for _ in channel:
         pass
+
+
+def _holds_token_lists(stream: StreamProtocol) -> bool:
+    """Whether ``stream``'s rows may carry derived token lists: an aggregation's output,
+    through any operators."""
+    if not isinstance(stream, OperatorNodeBase):
+        return False
+    return isinstance(stream.producer, (Batch, GroupBy)) or any(
+        _holds_token_lists(upstream) for upstream in stream.upstreams
+    )
 
 
 class _InputTap:
@@ -2278,6 +2307,130 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
     # Async channel execution
     # ------------------------------------------------------------------
 
+    def _runs_over_batches(self, operator: StaticOutputOperatorPod) -> bool:
+        """Whether an async run applies ``operator`` to Arrow record batches (ITL-1464).
+
+        For a library operator used as its class, in the default data context throughout:
+        a batch's rows are in the context its stream reports, and a row-form operator
+        may hand on rows of another (ITL-1339).
+        """
+        kind = type(operator)
+        library = kind.__module__.startswith("orcapod.core.operators.")
+        if not (library and reads_as_its_class(operator, kind)):
+            return False
+        default = contexts.get_default_context_key()
+        return self.data_context_key == default and all(
+            stream.data_context_key == default for stream in self._input_streams
+        )
+
+    async def _run_over_batches(
+        self,
+        operator: StaticOutputOperatorPod,
+        inputs: Sequence[ReadableChannel[tuple[TagProtocol, DataProtocol]]],
+        output: WritableChannel[tuple[TagProtocol, DataProtocol]],
+    ) -> tuple[StreamProtocol | None, Callable[[], list[StreamProtocol]]]:
+        """Run ``operator`` over its inputs' record batches, sending each result batch on.
+
+        Args:
+            operator: The operator.
+            inputs: The input edges, in the operator's order.
+            output: This node's output.
+
+        Returns:
+            The kept output, ``None`` for no row, and what gives the inputs with no rows.
+        """
+        feeds = [
+            TappedFeed(EdgeFeed(reader, stream))
+            for reader, stream in zip(inputs, self._input_streams, strict=True)
+        ]
+        channels = [
+            InputChannel(stream, feed)
+            for stream, feed in zip(self._input_streams, feeds, strict=True)
+        ]
+        result = OutputChannel(self, retain=False, buffer_size=1)
+        reader = result.open_reader()
+        batches = KeptBatches(self)
+
+        execute = operator.async_execute_batches
+        if any(_holds_token_lists(stream) for stream in self._input_streams):
+            # A join kernel holds its rows in files, which cannot share the ids that
+            # derived token lists share: the whole inputs, as on the sync path.
+            if isinstance(operator, (Join, MergeJoin, SemiJoin)):
+                execute = functools.partial(
+                    StaticOutputOperatorPod.async_execute_batches, operator
+                )
+
+        async def forward() -> None:
+            try:
+                async for batch in reader:
+                    batches.add(batch)
+                    await send_batch(output, batch, self)
+            except UpstreamFailedError:
+                # The operator failed: its own task raises why.
+                return
+
+        try:
+            async with asyncio.TaskGroup() as tg:
+                _ = tg.create_task(execute(channels, result))
+                _ = tg.create_task(forward())
+        except ExceptionGroup as exc:
+            # Preserve direct operator errors; concurrent failures stay grouped.
+            if len(exc.exceptions) == 1:
+                raise exc.exceptions[0] from exc
+            raise
+
+        def zero_inputs() -> list[StreamProtocol]:
+            return [
+                feed.zero_rows(stream)
+                for feed, stream in zip(feeds, self._input_streams, strict=True)
+            ]
+
+        return (batches.output_stream() if batches.num_rows else None), zero_inputs
+
+    async def _run_over_rows(
+        self,
+        operator: StaticOutputOperatorPod,
+        inputs: Sequence[ReadableChannel[tuple[TagProtocol, DataProtocol]]],
+        output: WritableChannel[tuple[TagProtocol, DataProtocol]],
+    ) -> tuple[StreamProtocol | None, Callable[[], list[StreamProtocol]]]:
+        """Run ``operator`` over its inputs' rows; as ``_run_over_batches``."""
+        intermediate: Channel[tuple[TagProtocol, DataProtocol]] = Channel()
+        # Kept as Arrow tables, not as a list of every pair (ITL-1464).
+        collected = RowChunks()
+
+        async def forward() -> None:
+            async for item in intermediate.reader:
+                collected.add(*item)
+                await output.send(item)
+
+        hashes = [s.pipeline_hash() for s in self._input_streams]
+        taps = [_InputTap(reader) for reader in inputs]
+        try:
+            async with asyncio.TaskGroup() as tg:
+                _ = tg.create_task(
+                    operator.async_execute(
+                        taps,
+                        intermediate.writer,
+                        input_pipeline_hashes=hashes,
+                    )
+                )
+                _ = tg.create_task(forward())
+        except ExceptionGroup as exc:
+            # Preserve direct operator errors; concurrent failures stay grouped.
+            if len(exc.exceptions) == 1:
+                raise exc.exceptions[0] from exc
+            raise
+
+        def zero_inputs() -> list[StreamProtocol]:
+            return [
+                StaticOutputOperatorPod._materialize_upstream(
+                    tap.rows, upstream, zero_rows=True
+                )
+                for tap, upstream in zip(taps, self._input_streams, strict=True)
+            ]
+
+        return (collected.output_stream() if collected.num_rows else None), zero_inputs
+
     async def async_execute(
         self,
         inputs: Sequence[ReadableChannel[tuple[TagProtocol, DataProtocol]]],
@@ -2363,7 +2516,6 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
                 return  # finally block closes output
 
             # Delegate to the operator, forward its rows downstream and keep them.
-            intermediate: Channel[tuple[TagProtocol, DataProtocol]] = Channel()
             should_store = (
                 not load_only
                 and self._pipeline_database is not None
@@ -2376,42 +2528,24 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
                     require_same_data_context(
                         input_stream.data_context_key, self.data_context_key
                     )
-            # Kept as Arrow tables, not as a list of every pair (ITL-1464).
-            collected = RowChunks()
-
-            async def forward() -> None:
-                async for item in intermediate.reader:
-                    collected.add(*item)
-                    await output.send(item)
-
-            hashes = [s.pipeline_hash() for s in self._input_streams]
             operator = cast(StaticOutputOperatorPod, self._operator)
-            taps = [_InputTap(reader) for reader in inputs]
-            try:
-                async with asyncio.TaskGroup() as tg:
-                    tg.create_task(
-                        operator.async_execute(
-                            taps,
-                            intermediate.writer,
-                            input_pipeline_hashes=hashes,
-                        )
-                    )
-                    tg.create_task(forward())
-            except ExceptionGroup as exc:
-                # Preserve direct operator errors; concurrent failures stay grouped.
-                if len(exc.exceptions) == 1:
-                    raise exc.exceptions[0] from exc
-                raise
+            kept: StreamProtocol | None
+            zero_inputs: Callable[[], list[StreamProtocol]]
+            if self._runs_over_batches(operator):
+                kept, zero_inputs = await self._run_over_batches(
+                    operator, inputs, output
+                )
+            else:
+                kept, zero_inputs = await self._run_over_rows(operator, inputs, output)
 
             # TaskGroup has completed. Keep the output on the node, as execute()
             # does, and store it in LOG mode (sync DB write, post-hoc). A run
             # with no rows replaces an earlier run's output too: the node then
             # reads as a zero-row table.
-            if collected.num_rows:
-                stream = collected.output_stream()
-                self._cached_output_stream = stream
+            if kept is not None:
+                self._cached_output_stream = kept
                 if should_store:
-                    self._store_output_stream(stream)
+                    self._store_output_stream(kept)
             else:
                 # A completed run with no rows keeps the operator's result over its
                 # inputs rebuilt with no rows, exactly as the sync orchestrator
@@ -2419,14 +2553,7 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
                 # sync path's columns and Arrow types (ITL-1080). An input that
                 # delivered no row is its upstream's zero-row table, as on the sync
                 # path (ITL-912). Nothing is stored for it.
-                empty_result = operator.process(
-                    *(
-                        StaticOutputOperatorPod._materialize_upstream(
-                            tap.rows, upstream, zero_rows=True
-                        )
-                        for tap, upstream in zip(taps, self._input_streams, strict=True)
-                    )
-                )
+                empty_result = operator.process(*zero_inputs())
                 # Computed, as execute() computes it, so the node reads as run, and
                 # kept in the column order of a run with rows, as execute() keeps it
                 # (ITL-1131).
