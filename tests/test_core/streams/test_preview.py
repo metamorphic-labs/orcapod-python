@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import gc
+import weakref
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -14,10 +16,12 @@ from orcapod import PipelineJob, col, function_pod
 from orcapod.core.cached_function_pod import CachedFunctionPod
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
-from orcapod.core.operators import MapData
+from orcapod.core.operators import Join, MapData, MergeJoin, PolarsFilter
 from orcapod.core.sources import ArrowTableSource, CachedSource, DerivedSource
 from orcapod.core.sources.polling_source import PollingSource
+from orcapod.core.streams import ArrowTableStream
 from orcapod.core.streams import preview as preview_module
+from orcapod.core.streams.base import reads_in_batches
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import PreviewRefusedError, RowIdentifierError
 from orcapod.side_effects import SideEffectPod
@@ -291,6 +295,99 @@ def test_a_shared_stream_is_computed_once_by_compute_all(source: Any) -> None:
     view = joined.preview(3, compute_all=True)
     assert len(view) == 3
     assert calls.seen == list(range(ROWS))
+
+
+def _branches(s: Any, count: int) -> list[Any]:
+    """Branches over one source whose whole-input results differ in every value."""
+    return [
+        s()
+        .select_data_columns(["x"])
+        .polars_filter(pl.col("x") >= k)
+        .map_data({"x": f"x{k}"})
+        for k in range(count)
+    ]
+
+
+def _joined(streams: list[Any]) -> Any:
+    first, *rest = streams
+    for other in rest:
+        first = first.join(other)
+    return first
+
+
+# Each gives the memo several temporary results of one size, freed one after another.
+TEMPORARIES: dict[str, Callable[[Any], Any]] = {
+    "joined_filters": lambda s: Join()(*_branches(s, 6)),
+    "nested_joins": lambda s: _joined(_branches(s, 6)),
+    "join_of_two_joins": lambda s: _joined(_branches(s, 4)[:2]).join(
+        _joined(_branches(s, 4)[2:])
+    ),
+    "merge_of_two_filters": lambda s: MergeJoin()(
+        *(
+            s().select_data_columns(["x"]).map_data({"x": "a"}).polars_filter(p)
+            for p in (pl.col("a") >= 0, pl.col("a") >= 20)
+        )
+    ),
+    "filters_of_tag_bys": lambda s: Join()(
+        *(
+            s()
+            .drop_nulls()
+            .tag_by("note")
+            .map_data({"x": f"x{k}"})
+            .polars_filter(pl.col(f"x{k}") > k)
+            for k in range(4)
+        )
+    ),
+}
+
+
+@pytest.mark.parametrize("name", list(TEMPORARIES))
+def test_a_temporary_result_is_never_taken_for_another(source: Any, name: str) -> None:
+    """Review of PR 571 (blocker): the memo was keyed by the identity of a freed stream,
+    so a branch was given another's rows. Repeated: the reuse depends on the allocator."""
+    whole = TEMPORARIES[name](source).as_table()
+    assert whole.num_rows
+    for attempt in range(12):
+        stream = TEMPORARIES[name](source)
+        view = stream.preview(ROWS * ROWS, compute_all=True)
+        _same(view.as_table(), whole)
+        if attempt % 3 == 0:
+            gc.collect()
+
+
+def test_a_stream_read_in_full_is_held_until_the_preview_ends() -> None:
+    """The rule itself, whatever the allocator does: the memo holds the stream."""
+    stream: Any = ArrowTableStream(_rows(), tag_columns=["subject"])
+    request = preview_module.PreviewRequest(limit=None, whole=True)
+    first = list(preview_module.preview_batches(stream, request))
+    held = weakref.ref(stream)
+    del stream
+    _ = gc.collect()
+    assert held() is not None
+    assert list(preview_module.preview_batches(held(), request)) == first
+    del request, first
+    _ = gc.collect()
+    assert held() is None
+
+
+def test_an_operator_changed_on_the_instance_is_not_applied_by_batch(
+    source: Any,
+) -> None:
+    """Review of PR 571: what its class declares says nothing of another body."""
+    pod = MapData({"note": "text"})
+    original: Any = pod.static_process
+    pod.static_process = lambda *streams: original(  # pyright: ignore[reportAttributeAccessIssue]  # replaced on the instance: the test
+        *(
+            PolarsFilter(predicates=(pl.col("x") == pl.col("x").max(),))(s)
+            for s in streams
+        )
+    )
+    stream = pod(source())
+    assert not reads_in_batches(stream)
+    with pytest.raises(PreviewRefusedError, match="compute_all=True"):
+        stream.preview(1)
+    assert stream.preview(1, compute_all=True).table.column("x").to_pylist() == [39]
+    assert stream.run().table.column("x").to_pylist() == [39]
 
 
 def test_a_function_over_a_whole_step_is_called_for_the_rows_shown(source: Any) -> None:
