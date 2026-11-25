@@ -4,6 +4,9 @@ Design only; the library is unchanged. **Round 2** (2026-11-25, afternoon): the 
 answers are in, and a prototype was run on a scratch branch outside this pull request.
 **Round 3** (same day): the function entry, P2 and D1 are decided; the side-effect rule is
 amended (section 3); section 4 gives the reasoning for system tags in a function entry.
+**Round 4** (same day): a stream's or node's behaviour as a source follows its nature: side-effect
+modes (section 3), a derived source over a plain origin reads it as the origin reads (section
+5), and the trace boundary (section 7). Round 4 is design only: the prototype is not changed.
 Evidence: **[ran]** a script in `itl-1466/` on `0d1e017c`; **[proto]** `probe_round2` or
 `probe_tokens` on the prototype (they fail on the library as it is); **[read]** the code;
 **[inferred]** none of these. Round 3's own script is `probe_entries` [proto]. Section 12: what is decided, what is open, and **what the
@@ -70,24 +73,32 @@ the node's at the read, never changed by `as_source`. A row has the same record 
 of the cache (D7). A node run in `LOG` loads as `OFF`, so a loaded one is refused until
 `LOG` is attached again; then its ids are equal [proto 7] (P5).
 
-**Side effects.** Decided (round 3): `as_source` of a side-effect stream or node is its
-feeding stream's, **except that rows whose side effect failed are left out**. That changes which
-rows flow, never a row's identity: a row that passed keeps the record id it has in the feeding
-stream (2 of 3 kept their entry ids [proto, `probe_entries` 3]). Open: how the failed rows are
-known, and whether it has a source id of its own.
+**Side effects** (decided, rounds 3 and 4). `as_source` is allowed for every side-effect
+stream and node. Its rows are the feeding stream's rows **that passed through** the side effect:
+a row whose side effect failed and was dropped is left out. Which rows flow changes; a row's
+identity does not: a row that passed keeps the record id it has in the feeding stream (2 of 3
+kept their entry ids [proto, `probe_entries` 3]). When it fires follows the kind:
 
-How they could be known [proto, `probe_entries` 3]:
+| Kind | Fires | `as_source` reads | Today |
+|---|---|---|---|
+| Node | once ever per unique input row (persistent invocation log) | the rows its run passed on | exists: a second run calls only the row that failed (1 call, 2 passed) [proto, `probe_entries` 3] |
+| Plain stream, **non-caching** | on every iteration: it reads its input again | reads through: each read of the `as_source` fires again | exists, and is today's only plain mode: 3 calls, then 6 [proto, `probe_entries` 3] |
+| Plain stream, **caching** | once per input row, the first time the row passes; the rows that passed are held | the held rows; a later read fires nothing | **new**: no such mode exists [read: `SideEffectPodStream` keeps no rows] |
 
-- **Node:** the rows its run passed on, held in memory: 2 of 3 with the default config. Before a
-  run in this process there are none, so a fresh or loaded job gives zero rows. The invocation
-  log records successes only (2 rows), so it could serve after a load, but a pod with
-  `track_completion=False` writes the same log and reads nothing from it. A load-only run passes
-  all 3 rows and calls nothing, so "passed" there does not mean "succeeded". With
-  `drop_on_failure=False` the failed row is passed on (3 rows), though it failed. A second run
-  calls only the failed row again: 1 call, 2 passed.
-- **Plain stream:** each read delivers again (3 calls, then 6); `head` delivers nothing. Options:
-  deliver once, at the first read, and hold the rows (a read of an `as_source` then has an
-  effect); or refuse, naming a job. Recommend refusing: no other `as_source` read has an effect.
+Points to settle with the new mode [inferred]:
+
+- **A failed row in the caching mode** did not pass, so it is not held. Recommend that the next
+  iteration tries it again, as a node's next run and a function stream's next read do.
+- **`drop_on_failure=False`**: the failed row is passed on (3 of 3 rows [proto, `probe_entries`
+  3]). It passed through, so it is in the `as_source`, although its side effect failed. That is
+  what the setting says; document it.
+- **Load-only run** of a node: it passes every row on and delivers nothing (3 rows, 0 calls
+  [proto, `probe_entries` 3]). Those rows passed through without firing, so by the rule they are
+  in the `as_source`, failed ones included. Recommend instead: after a load-only run a node's
+  `as_source` gives the rows its invocation log records as delivered, which is what "once ever"
+  stores; a node with `track_completion=False` keeps no such record and refuses there.
+- **Before a run** in this process a node holds nothing, so a fresh or loaded job gives zero rows
+  [read]; the same log answers there, by the same recommendation.
 
 **Own source id?** Recommend **yes**, the default from the side-effect stream's own content
 hash, as every other origin. Its content and pipeline hashes already differ from the feeding
@@ -97,10 +108,11 @@ them apart. The record ids stay the feeding stream's either way.
 
 - A function pod with `ctx_arg` is a function, not this case: its `as_source` is a function's;
   a plain one runs its body, effects included, when read [read].
-- A **plain** step over a standalone side-effect stream computes through it: reading its
-  `as_source` delivered 3 times (`head` 0) [proto 6] (P4).
+- A plain step **over** a side-effect stream follows the same rule: over a non-caching one,
+  reading its `as_source` fires the effects (3 of them, `head` none) [proto 6]; over a caching one,
+  once. P4 is settled by the modes.
 - The prototype still gives the feeding stream's `as_source`, failed rows included (3 rows
-  against 2 passed) [proto 6]; it awaits the open part.
+  against 2 passed) [proto 6].
 
 **Arguments.** On a source: none returns itself. `source_id=` alone is refused, also when equal
 (a source's name is given when it is built; "no changes"). `tags_as_data=` asks for another
@@ -210,20 +222,30 @@ depend on the sources **behind** it: renaming an upstream source moves it [ran].
 |---|---|---|
 | `as_source()`, schema, ids, hashes | nothing | nothing |
 | `head()`, preview | the origin's `head()` | the origin's current `head()`, or stored rows |
-| `as_table()`, iteration, `run()`, a job run that reads it | computes the stream **in this process, uncached**, calling its functions, once, and holds the rows | reads only |
+| `as_table()`, iteration, `run()`, a job run that reads it | reads the origin **as the origin reads** (below) | reads only |
 | Writes | nothing | nothing |
+
+**A derived source over a plain origin follows the origin's mode** (decided, round 4). It does not
+hold rows of its own: it holds what the origin holds and reads through what the origin reads
+through. Over an origin that holds its rows (a function stream, an operator stream, a caching
+side effect) a second read computes and fires nothing; over one that does not (a non-caching
+side effect, directly or anywhere beneath) each read reads the origin again, with its effects.
+The prototype holds rows itself (3 calls for two reads [proto 5]), which equals this only
+because its origins hold their rows; it is to change [read]. Record ids are unaffected: a
+function stream's entry id comes from the input row, which it keeps with its output while it
+holds it.
 
 A `head()` that has rows shows them, with a record id computed from what the row holds; it
 never fetches anything extra. Schema, hashes, `head` and the check made 0 calls; two reads made
 3, one per row [proto 5]. A head does not check uniqueness over
-rows it does not read. A user who wants functions cached uses a job; `as_source` is not a cache.
+rows it does not read. `as_source` is never a cache of its own; a user who wants results kept
+uses a job.
 
 **Run start check.** It checks the origin's root sources, then compares the origin's modified
-time. If it moved, the held rows are dropped and the derived source's time moves; nothing is
-computed in the check. For a node origin it re-reads stored rows as today.
+time. If it moved, the derived source's time moves; nothing is computed in the check. For a node origin it re-reads stored rows as today.
 
-**Immutable streams, row positions.** The source object's identity never changes; its rows are
-read at most once per origin time, as for `CSVSource`. Emission order is the origin's and is in
+**Immutable streams, row positions.** The source object's identity never changes. How often its
+rows are read is the origin's matter (above). Emission order is the origin's and is in
 no id. A load-only run refuses a plain origin that would compute
 (`refuse_unloadable_inputs` already has this rule for bound streams).
 
@@ -314,6 +336,19 @@ The last line is P3. It holds over a function node and over a plain select. The 
 is the one that makes a token agree with the pair, and the developer's model says system tags
 name why and from what, and tokens the ultimate source. Kept tokens need that check relaxed
 for a derived source: the pair leads to the `as_source` row, the token past it.
+
+**The trace boundary** (P3, recommended). A derived source is a **step** of the trace, as a
+function or an operator is. `trace` reaches it through a row's pair and reports it: the source
+id, the record id, and the kind of its origin. It then **may continue into the origin's job
+through the record id**, which names one entry there: the base entry id for a function node or
+stream, the row's content hash for an operator, the row's own record id for a source origin.
+It continues when the origin is at hand (the same process, or a job the user gives to the
+trace); otherwise it stops at the step, saying where it would continue. The check that a token
+names the record its system tags name then applies **within** a job, never across the
+boundary: past the derived source the kept token names the ultimate source, and the step
+explains why it is not the pair's. This keeps tokens kept (D11) and makes the failure of
+`probe_tokens` disappear without a special case in the tokens. Fresh tokens would also make it
+disappear, but they would lose the ultimate source from the row.
 
 ## 8. History, save, load, moved stores
 
@@ -425,14 +460,13 @@ limit), `reference/hashing.md` (rule 8, sites 4 and 5, inventory), `CLAUDE.md` a
 
 ## 12. Decisions
 
-**What the prototype sends back to the developer** (P2 decided in round 3)
+**What the prototype sends back to the developer** (P2 decided in round 3, P4 in round 4)
 
 | # | Question | Recommendation |
 |---|---|---|
-| P1 | A `LOG` cache holds one content several times (corrected input with an equal output; results recomputed), and D6 makes `as_source` raise [proto 4, 4b] | Rows equal in tags, system tags and data are one entry: show it once, from a cache only. With kept tokens the copies differ in tokens and the cache records no order, so nothing says which token to keep; with fresh tokens there is no question. Raising stays for one run's rows |
-| P3 | Kept tokens make `trace` fail for every row computed from an `as_source` [proto, `probe_tokens`] | Either relax that check for derived sources, as part of this work, or all tokens fresh (then P1 is also settled). I lean to fresh; if kept, D11 includes the tracing change |
-| P4 | A plain step over a standalone side-effect stream delivers when its `as_source` is read [proto 6] | Refuse it, naming a job, with the plain side-effect stream itself (section 3) |
-| S1 | Side effects: how failed rows are known; own source id | Node: its run's passed rows (none before a run; a load-only run is not a success). Plain: refuse. Own source id: yes (section 3) |
+| P1 | A `LOG` cache holds one content several times (corrected input with an equal output; results recomputed), and D6 makes `as_source` raise [proto 4, 4b] | **With the developer.** (a) Keep both passages, told apart by the upstream function's result id (the result record the row's token names): both rows shown, but that id is random per store, so the ids then differ between two fresh stores. (b) Show the content once: ids stay equal across stores; which passage's tokens are kept must then be chosen (the cache records no order) |
+| P3 | Kept tokens make `trace` fail for every row computed from an `as_source` [proto, `probe_tokens`] | The trace boundary: a derived source is a step that reports its record id and may continue into the origin's job through it; the token check holds within a job (section 7) |
+| S1 | Side effects, the rest: the new caching mode; a failed row in it; load-only and before a run; own source id | Retry a failed row on the next iteration; after a load-only run, and before a run, the invocation log's delivered rows (refused without `track_completion`); own source id: yes (section 3) |
 | P5 | A `LOG` node loads as `OFF`, so `as_source` of a loaded operator is refused though its rows are stored [proto 7] | Save the cache mode with the node (its own issue); until then the refusal says to attach `LOG` again |
 | | Held plain-stream rows as "known content" (D10) | No; the fixed-content sources beneath a plain origin, yes (section 6) |
 
@@ -444,7 +478,7 @@ limit), `reference/hashing.md` (rule 8, sites 4 and 5, inventory), `CLAUDE.md` a
 | D1 | One form; `tags_as_data=None` for none, `{}` refused (round 3) |
 | D6 | Repeated ids raise; an operation that repeats rows will add an index column later |
 | D7 | `OFF`: the current run's rows. Caching on: the content of the cache |
-| D8 | Plain streams stream their content, computed when read. Side effects: the feeding stream's rows minus those whose side effect failed; identity of a row unchanged (round 3; the rest is S1) |
+| D8 | Plain streams stream their content, computed when read; a derived source follows its origin's mode, held or read through (round 4). Side effects: allowed for all; the rows that passed through; a node fires once ever per row, a plain stream in its mode, caching (once per row, held; new) or non-caching (every iteration; today's); identity of a row unchanged (rounds 3, 4; P4 closed) |
 | D10 | ITL-1469's rule; no warning |
 | D11 | Single tokens kept, lists fresh, copies and nulls fresh; by the column's type (but P3) |
 | D13 | The "only multi-pair origins" condition is dropped |
@@ -461,7 +495,10 @@ limit), `reference/hashing.md` (rule 8, sites 4 and 5, inventory), `CLAUDE.md` a
 | D15 | Kind version | `derived_v1` if before 0.4.0 (0 golden moves), else `derived_v2` (14 provisional) |
 | D16 | Save, load, moved store | Loads unbound and rebinds; warn on a load-only run over an unbound slot; raise when the recorded table is absent; restriction walks enter a plain origin |
 
-Found in passing, to be filed: ordinary sources given one name and other rows in one job are
+Found in passing, to be filed: a stream built before a job becomes a slot that renames its
+system-tag columns, so a node over it has the plain stream's content hash but other stored
+columns (`repro_slot_renames.py`, on the library as it is); ordinary sources given one name and
+other rows in one job are
 silently one (more 4); the stored-schema conflict of section 2; the loaded load-only run that
 is silently empty (more 3). Not examined: `SourceProxy` of a Postgres or Spiral source,
 ephemeral results, `REPLAY` by running it, `PollingSource` under async.

@@ -1,0 +1,6 @@
+job nodes: ['SelectTagColumns:678804187ebd0f92c24f9ee85978ba105b7a7450bcd91940597db2e80310f58b', 'add']
+plain stream: ['_tag_source_id::567df99d3317a6d299161ed9c85f0576e612247e24121adbd3ce1a7e896a438b', '_tag_record_id::567df99d3317a6d299161ed9c85f0576e612247e24121adbd3ce1a7e896a438b']
+job node:     ['_tag_source_id::5c5451d9cc03c8886c9917da05e932066049b24995f4cb340bbd17066352b61f', '_tag_record_id::5c5451d9cc03c8886c9917da05e932066049b24995f4cb340bbd17066352b61f']
+content hash equal: True
+built inside the job: ['_tag_source_id::567df99d3317a6d299161ed9c85f0576e612247e24121adbd3ce1a7e896a438b', '_tag_record_id::567df99d3317a6d299161ed9c85f0576e612247e24121adbd3ce1a7e896a438b']
+content hash equal: True
