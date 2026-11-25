@@ -895,10 +895,12 @@ class SpiralDBConnector:
         """
         self._require_open()
         qualified = self._qualified(table_name)
-        if known is None:
+        found: pa.Schema
+        if known is not None:
+            found = known
+        else:
             with self._service_call("read the schema of", table_name):
-                known = table.schema()
-        found: pa.Schema = known
+                found = table.schema()
         with _about_table(qualified):
             recorded = self._recorded_schema(table, table_name, found)
         return _Reading(found, recorded, qualified)
