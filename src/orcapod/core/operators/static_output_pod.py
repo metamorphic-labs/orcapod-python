@@ -2064,7 +2064,7 @@ class DynamicPodStream(StreamBase):
         """Whether the operator is applied batch by batch, over an input read so."""
         return (
             reads_as_its_class(self, DynamicPodStream)
-            and type(self._pod).__dict__.get("BATCHES_GIVE_THE_WHOLE") is True
+            and applied_by_batch(self._pod)
             and len(self._upstreams) == 1
             and reads_in_batches(self._upstreams[0])
         )
@@ -2129,10 +2129,7 @@ class DynamicPodStream(StreamBase):
             yield from preview_batches(self._cached_stream, request)
             return
         pod = cast(StaticOutputOperatorPod, self._pod)
-        if (
-            len(self._upstreams) == 1
-            and type(pod).__dict__.get("BATCHES_GIVE_THE_WHOLE") is True
-        ):
+        if len(self._upstreams) == 1 and applied_by_batch(pod):
             keeps_every_row = pod.rows_dropped_text(0, (), self._upstreams) is None
             wanted = request if keeps_every_row else request.without_limit()
             with closing(preview_batches(self._upstreams[0], wanted)) as batches:
@@ -2319,6 +2316,17 @@ class DynamicPodStream(StreamBase):
             f"{self.__class__.__name__}(label={self.label!r}, kernel={self.producer}, "
             f"upstreams=({upstreams}))"
         )
+
+
+def applied_by_batch(pod: object) -> bool:
+    """Whether an operator may be applied batch by batch (``run()``, ``preview()``).
+
+    Its own class declares ``BATCHES_GIVE_THE_WHOLE``, and no member is replaced on the
+    instance: what the class declares says nothing of another ``static_process``.
+    """
+    return type(pod).__dict__.get(
+        "BATCHES_GIVE_THE_WHOLE"
+    ) is True and reads_as_its_class(pod, type(pod))
 
 
 def joined_batches(batches: Sequence[StreamProtocol]) -> StreamProtocol:

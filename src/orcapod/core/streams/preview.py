@@ -38,14 +38,18 @@ class PreviewRequest:
             step above may drop rows). A source reads no more.
         compute_all: Whether a step that needs its whole input may be computed.
         whole: Whether every row is asked for, by such a step.
-        kept: The batches of the streams read in full by such steps, by identity: a
-            stream two branches share is computed once. Discarded with the preview.
+        kept: Each stream read in full by such steps with its batches, by identity: a
+            stream two branches share is computed once. The stream is held with its
+            batches: many are temporary (a step's result), and the identity of one that
+            was freed is given to another. Discarded with the preview.
     """
 
     limit: int | None
     compute_all: bool = False
     whole: bool = False
-    kept: dict[int, list[StreamProtocol]] = dataclasses.field(default_factory=dict)
+    kept: dict[int, tuple[Any, list[StreamProtocol]]] = dataclasses.field(
+        default_factory=dict
+    )
 
     def without_limit(self) -> PreviewRequest:
         """The request to the input of a step that may drop rows."""
@@ -77,8 +81,8 @@ def preview_batches(
         return
     if id(stream) not in request.kept:
         with closing(give(request)) as batches:
-            request.kept[id(stream)] = list(batches)
-    yield from request.kept[id(stream)]
+            request.kept[id(stream)] = (stream, list(batches))
+    yield from request.kept[id(stream)][1]
 
 
 def slices_of(
