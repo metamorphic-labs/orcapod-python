@@ -1,0 +1,29 @@
+1 source id in the content hash
+  ArrowTableSource             True
+  DictSource                   True
+  DataFrameSource              True
+  ListSource                   True
+  CSVSource                    True
+  DeltaTableSource             True
+  SQLiteTableSource            True
+  DerivedSource tags_as_data   True
+  CachedSource(Arrow)          True
+  DerivedSource plain          False
+2 Delta store: a step over today's plain form, then over a fresh root, one path
+  plain then fresh accepted; rows 3
+  fresh then plain OrcapodDatabaseWriteError Could not write to the database for node 'next' for row {'k': 'k0'} (table 'after/8ec7327fae9a46cdb6c57a16d8634c52ca3a594e50df2da4e5833143ad63618b/v0/python.function.v1/schema:d525225839fe21e5429493bceaf6160596fe0f90df203a394c364eaafcc287f3/pdb_v1'): Inpu
+3 save and load of a job over a derived source
+  plain unbound: ['semantic_v1:111c4a576d547cc555bf1b71b4ec87a2f3a503a794b5fc15a344828b5e37c88c'] | stored 3 | load_only rows 0 []
+  fresh unbound: ['f'] | stored 3 | load_only rows 0 []
+4 two authors in one job, different default ids but one given name
+  default ids                {'a': [1, 3, 5]}
+  one given name, plain      {'a': [1, 3, 5]}
+  two given names, plain     {'a': [1, 3, 5]}
+  two given names, fresh     {'a': [1, 3, 5], 'b': [201]}
+  one given name, fresh      {'a': [1, 3, 5]}
+  two DictSources, one name   {'a': [2]}
+5 shifted rows: a positional source gains a first row
+  run 3 as_source 5
+  keyed: run 3 as_source 3
+6 side-effect job node
+  has as_source False rows 3

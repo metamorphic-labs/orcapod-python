@@ -1,0 +1,25 @@
+unique {'fn': True, 'rated': True, 'total': True, 'join': True, 'group': True, 'batch': True} {'fn': 4, 'rated': 4, 'total': 2, 'join': 4, 'group': 2, 'batch': 2}
+sync again                         {'fn': True, 'rated': True, 'total': True, 'join': True, 'group': True, 'batch': True}
+async                              {'fn': True, 'rated': True, 'total': True, 'join': True, 'group': True, 'batch': True}
+reordered, keyed                   {'fn': True, 'rated': True, 'total': True, 'join': True, 'group': True, 'batch': False}
+join inputs swapped                {'fn': True, 'rated': True, 'total': True, 'join': True, 'group': True, 'batch': True}
+other process                      True 
+positional source, reordered       {'fn': False, 'rated': False, 'total': False, 'join': False, 'group': False, 'batch': False}
+
+plain operator stream: the stored recipe recomputed on the rows
+  join plain == stored: True
+  group plain == stored: True
+  batch plain == stored: True
+  fn    plain == stored: True | content equal True
+
+duplicates
+  raw stream with a repeated row: ids 3 distinct 2
+  function over it (tags a,a,b, one input value): ids 3 distinct 2
+
+system tags only: do they name every row?
+  join 4 columns, unique True
+  group 2 columns, unique True
+  batch 2 columns, unique True
+
+source id of the origin inside the key: rename an upstream source
+  entry ids equal after renaming the source: False

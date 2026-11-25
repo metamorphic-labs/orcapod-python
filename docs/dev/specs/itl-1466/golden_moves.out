@@ -1,0 +1,15 @@
+as is: 0 move
+plain form takes the root identity (source id, schema, key columns): 0 move
+and the key policy of a row id differs from a position's, in both forms: 2 move
+     1 schema:derived_source_tags_as_data.named_source_id.content_hash
+     1 schema:key_policy_identity.derived_tags_as_data.position.content_hash
+kind version 2: 14 move
+     2 pipeline:default_source_ids.as_source
+     1 schema:derived_source_tags_as_data.named_source_id.content_hash
+     3 schema:derived_source_tags_as_data.named_source_id
+     1 schema:derived_source_tags_as_data.named_source_id.source_id
+     1 schema:derived_source_tags_as_data.record_id_column.content_hash
+     3 schema:derived_source_tags_as_data.record_id_column
+     1 schema:derived_source_tags_as_data.record_id_column.source_id
+     1 schema:key_policy_identity.derived_tags_as_data.key.content_hash
+     1 schema:key_policy_identity.derived_tags_as_data.position.content_hash
