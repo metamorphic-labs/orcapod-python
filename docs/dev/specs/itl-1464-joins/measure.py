@@ -38,7 +38,7 @@ from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.record_batch_channels import OutputChannel
 from orcapod.core import row_spool
 from orcapod.core.sources import ArrowTableSource
-from orcapod.core.streams.carried import carried_table
+from orcapod.core.streams.carried import carried_batches, carried_table
 from orcapod.protocols.core_protocols import StreamProtocol
 
 BATCH = 8_192
@@ -234,7 +234,7 @@ async def run(case: str, rows: int, barrier: bool) -> tuple[int, float, int]:
 
     async def consume() -> None:
         nonlocal count
-        async for batch in reader.carried():
+        async for batch in carried_batches(reader):
             count += batch.num_rows
 
     if barrier:

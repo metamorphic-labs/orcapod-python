@@ -128,6 +128,7 @@ from orcapod.core.row_spool import RowSpool
 from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS, row_built_columns
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.protocols.core_protocols.streams import RecordBatchInput, RecordBatchOutput
+from orcapod.core.streams.carried import carried_batches
 from orcapod.core.unique_keys import joined_keys, unique_on
 from orcapod.system_constants import constants
 from orcapod.utils import arrow_utils, source_tokens
@@ -309,8 +310,10 @@ class _Rows:
     """Rows numbered from 0 in the order held, spooled.
 
     Rows of one input may hold a source-info column as text in one batch and derived in
-    another (``source_tokens``): each run of rows of one form has a spool of its own, and
-    rows fetched from several are given as text.
+    another (``source_tokens``). Rows are held in the form of the first ones; from the
+    first rows in another form on, rows are held as text. So there are at most two spools,
+    the first of which keeps no row in memory once there is a second, and rows fetched
+    from both are given as text.
     """
 
     def __init__(self) -> None:
@@ -321,9 +324,12 @@ class _Rows:
         """Hold ``table``'s rows, numbered from ``size`` on."""
         if not table.num_rows:
             return
-        if not self._runs or not self._runs[-1][1].equals(
-            table.schema, check_metadata=True
-        ):
+        schema = self._runs[-1][1] if self._runs else table.schema
+        if not table.schema.equals(schema, check_metadata=True):
+            table = source_tokens.materialize(table)
+        if not self._runs or not table.schema.equals(schema, check_metadata=True):
+            if self._runs:
+                self._runs[-1][2].spill()
             self._runs.append((self.size, table.schema, RowSpool()))
         self._runs[-1][2].append(table)
         self.size += table.num_rows
@@ -1914,7 +1920,7 @@ async def run_kernel(
                 for batch in _push_sizes(batches):
                     progressed = True
                     for result in kernel.iter_push(index, batch):
-                        await output.send(result)
+                        await _send(output, result)
                     # The readers get a turn also when nothing was sent.
                     await asyncio.sleep(0)
                 if ended:
@@ -1922,7 +1928,7 @@ async def run_kernel(
                     await readers[index]  # raises what ended it, if anything did
                     open_inputs.discard(index)
                     for result in kernel.iter_close(index):
-                        await output.send(result)
+                        await _send(output, result)
             if not progressed:
                 _ = await changed.wait()
     except BaseException as error:
@@ -1936,6 +1942,16 @@ async def run_kernel(
         if kernel is not None:
             kernel.release()
     await finish_operator(inputs, output)
+
+
+async def _send(output: RecordBatchOutput, batch: pa.RecordBatch) -> None:
+    """Send a batch and give every other task a turn, also when the send did not wait.
+
+    A cancellation, or a reader that closes, is met between two batches, however many a
+    replay gives.
+    """
+    await output.send(batch)
+    await asyncio.sleep(0)
 
 
 class _ReadAhead:
@@ -1956,7 +1972,7 @@ class _ReadAhead:
         """Read ``channel`` to its end, waiting while ``PUSH_ROWS`` rows or more are unread."""
         try:
             _ = channel.reserve(claim)
-            async for batch in channel.carried():
+            async for batch in carried_batches(channel):
                 if not batch.num_rows:
                     continue
                 self._batches.append(_without_token_lists(batch))

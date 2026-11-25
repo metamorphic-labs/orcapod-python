@@ -66,7 +66,7 @@ from orcapod.core.job_edges import (
 from orcapod.core.record_batch_channels import OutputChannel
 from orcapod.core.streams.record_batch_input import InputChannel
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
-from orcapod.core.streams.carried import carried_table
+from orcapod.core.streams.carried import carried_batches, carried_table
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
     StreamBase,
@@ -2393,7 +2393,7 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
 
         async def forward() -> None:
             try:
-                async for batch in reader.carried():
+                async for batch in carried_batches(reader):
                     batches.add(batch)
                     await send_batch(output, batch, self)
             except UpstreamFailedError:
