@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import itertools
 import logging
-from collections.abc import Collection, Iterator
+from collections.abc import Collection, Generator, Iterator
 from typing import Any
 
 import pyarrow as pa
@@ -15,6 +15,7 @@ from orcapod.core.streams.base import (
     StreamBase,
     check_head_size,
 )
+from orcapod.core.streams.preview import PreviewRequest, slices_of
 from orcapod.core.streams.view import StreamView
 from orcapod.protocols.core_protocols import PodProtocol, StreamProtocol, TagProtocol
 from orcapod.protocols.hashing_protocols import PipelineElementProtocol
@@ -378,6 +379,12 @@ class ArrowTableStream(StreamBase):
             tag_columns=self.keys(columns=config)[0],
             total_rows=self._table.num_rows,
         )
+
+    def _preview_batches(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """Slices of the rows this stream holds (``preview_batches``)."""
+        yield from slices_of(self, request)
 
     def _typed_zero_row_table(self) -> "pa.Table":
         """This stream's table cut to no rows: its own Arrow types, no row assembled."""

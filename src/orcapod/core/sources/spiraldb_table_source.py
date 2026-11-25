@@ -64,6 +64,7 @@ from orcapod.core.sources.stream_builder import (
 )
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import check_head_size, reads_as_its_class
+from orcapod.core.streams.preview import PreviewRequest
 from orcapod.core.streams.view import ViewStatus, StreamView
 from orcapod.databases.spiraldb_connector import (
     SpiralDBConnector,
@@ -1135,9 +1136,35 @@ class SpiralDBTableSource(RootSource):
     def _batch_streams_of_rows(self) -> Generator[StreamProtocol, None, None]:
         """One scan of the table, each batch shaped as ``as_table()`` shapes the whole
         (``run()``, ITL-1464)."""
+        yield from self._shaped_batches(self._batch_streams())
+
+    @override
+    def _preview_batches(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """One scan, limited by SpiralDB when the rows wanted are known, else closed when
+        enough were read. ``max_rows`` holds only when every row is asked for."""
+        if not reads_as_its_class(self, SpiralDBTableSource):
+            yield from super()._preview_batches(request)
+            return
+        limits = [n for n in (self._limit, request.limit) if n is not None]
+        yield from self._shaped_batches(
+            self._read_batches(
+                self._lookup_table(),
+                asof=self._asof,
+                limit=min(limits, default=None),
+                max_rows=self._max_rows if request.whole else None,
+            )
+        )
+
+    def _shaped_batches(
+        self, batches: Generator[ArrowTableStream, None, None]
+    ) -> Generator[StreamProtocol, None, None]:
+        """``batches`` of one read, each shaped as ``as_table()`` shapes the whole; at
+        least one."""
         columns = {"source": True, "system_tags": True, "context": True}
         read = False
-        with closing(self._batch_streams()) as streams:
+        with closing(batches) as streams:
             for stream in streams:
                 read = True
                 yield ArrowTableStream(

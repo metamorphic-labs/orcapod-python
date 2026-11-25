@@ -6,7 +6,7 @@ import dataclasses
 import logging
 from datetime import datetime, timezone
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from orcapod.core.data_function import CachedDataFunction
 from orcapod.core.datagrams import Datagram
@@ -299,6 +299,21 @@ class CachedFunctionPod(WrappedFunctionPod):
             )
             output = output.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: True})
         return tag, output
+
+    def require_preview(self) -> None:
+        """See ``_FunctionPodBase.require_preview``: the inner pod's answer."""
+        cast("_FunctionPodBase", self._function_pod).require_preview()
+
+    def preview_data(self, data: DataProtocol) -> DataProtocol | None:
+        """The stored result, else the inner pod's, which is not stored."""
+        self.require_preview()
+        stored = self.lookup_cached_data(data)
+        if stored is not None:
+            return stored
+        output = cast("_FunctionPodBase", self._function_pod).preview_data(data)
+        if output is None:
+            return None
+        return output.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: True})
 
     def _invoke_with_hooks(
         self,
