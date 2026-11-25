@@ -2,7 +2,7 @@
 
 The pictures are drawn by Orcapod itself (``job.diagram(highlight=...)``) from the
 tutorial's synthetic dataset (``docs/tutorial/workshop_data.py``), over the pipelines of
-tutorial Part 8. Each is the diagram's standalone SVG (the image a notebook shows: on its
+the tutorial "Tracing a value". Each is the diagram's standalone SVG (the image a notebook shows: on its
 own white background, so it reads on a light and a dark page alike).
 
 Run it to rewrite the pictures after a change to the diagram::
