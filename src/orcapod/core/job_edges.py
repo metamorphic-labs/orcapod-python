@@ -264,20 +264,11 @@ class KeptBatches:
         self._spool: RowSpool = RowSpool(memory_bytes=KEPT_ROWS_MEMORY_BYTES)
         self._schema: pa.Schema | None = None
         self._token_types: dict[str, pa.DataType] = {}
-        # Rows with derived token lists, which share the ids of all their members: each
-        # file of a spool would hold them once per column (``itl-1464-tokens.md``).
-        self._in_memory: list[pa.Table] = []
 
     @property
     def num_rows(self) -> int:
         """How many rows were kept."""
-        return self._spool.size + sum(t.num_rows for t in self._in_memory)
-
-    def _table(self) -> pa.Table:
-        """Every row kept, in order."""
-        if not self._in_memory:
-            return self._spool.table()
-        return pa.concat_tables(self._in_memory)
+        return self._spool.size
 
     def add(self, batch: pa.RecordBatch) -> None:
         """Keep a batch's rows after every row kept before them."""
@@ -294,24 +285,14 @@ class KeptBatches:
             self._schema = table.schema
         elif not table.schema.equals(self._schema, check_metadata=True):
             table = self._in_one_form(table.select(self._schema.names))
-        self._keep(table)
-
-    def _keep(self, table: pa.Table) -> None:
-        """Hold ``table``, whose schema is the kept rows'."""
-        lists = any(
-            isinstance(f.type, source_tokens.MemberTokenType) for f in table.schema
-        )
-        if lists or self._in_memory:
-            self._in_memory.append(table)
-        else:
-            self._spool.append(table)
+        self._spool.append(table)
 
     def _in_one_form(self, table: pa.Table) -> pa.Table:
         """``table`` under the kept rows' schema; where only one of the two derives a
         source-info column, or they derive it otherwise, both become text."""
         assert self._schema is not None
         if not table.schema.equals(self._schema, check_metadata=True):
-            kept = self._table()
+            kept = self._spool.table()
             differing = {
                 f.name for f in table.schema if f.type != kept.schema.field(f.name).type
             }
@@ -322,13 +303,12 @@ class KeptBatches:
             if names & {*source_tokens.derived_columns(kept.schema)}:
                 self._spool.close()
                 self._spool = RowSpool(memory_bytes=KEPT_ROWS_MEMORY_BYTES)
-                self._in_memory = []
                 self._schema = source_tokens.materialize(
                     kept.schema.empty_table(), names
                 ).schema
                 for start in range(0, kept.num_rows, SPILL_SLICE_ROWS):
                     part = kept.slice(start, SPILL_SLICE_ROWS)
-                    self._keep(source_tokens.materialize(part, names))
+                    self._spool.append(source_tokens.materialize(part, names))
             table = source_tokens.materialize(table, names)
         # The spool holds one schema: a difference left is an error here, as it is
         # where rows of differing columns are put into one table.
@@ -342,7 +322,7 @@ class KeptBatches:
         """
         if not self.num_rows:
             raise ValueError("Cannot make an output stream of no rows")
-        table = StaticOutputOperatorPod._flag_by_values(self._table())  # pyright: ignore[reportPrivateUsage]  # F's last step
+        table = StaticOutputOperatorPod._flag_by_values(self._spool.table())  # pyright: ignore[reportPrivateUsage]  # F's last step
         tag_keys, data_keys = keys_in_delivered_order(
             self._node.keys(), table.column_names
         )

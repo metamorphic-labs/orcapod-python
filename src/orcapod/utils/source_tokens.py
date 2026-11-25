@@ -30,6 +30,36 @@ from orcapod.system_constants import constants
 
 _TEXT = pa.large_string()
 
+
+def _refused_storage() -> pa.DataType:
+    """The storage of a derived column: no byte a row, and a type Arrow will not hand on.
+
+    Lists of no element, of structs nested deeper than Arrow IPC (64) and the C data
+    interface write, whose innermost has no field, which Parquet refuses. No element
+    exists, so the depth costs nothing per row.
+    """
+    kind: pa.DataType = pa.struct([])
+    for _ in range(66):
+        kind = pa.struct([pa.field("", kind)])
+    return pa.list_(pa.field("", kind), 0)
+
+
+_STORAGE = _refused_storage()
+
+
+def _empty_lists(rows: int) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny]  # an Arrow array
+    """``rows`` values of ``_STORAGE``, none of them null, with no byte."""
+
+    def none_of(kind: Any) -> Any:  # pyright: ignore[reportExplicitAny, reportAny]  # a struct type
+        children = [none_of(child.type) for child in kind]
+        return pa.Array.from_buffers(kind, 0, cast(Any, [None]), 0, 0, children)
+
+    storage: Any = _STORAGE
+    return pa.Array.from_buffers(
+        _STORAGE, rows, cast(Any, [None]), 0, 0, [none_of(storage.value_type)]
+    )
+
+
 ROWS_PER_CHUNK = 65_536
 """The most rows whose token text is built in one step."""
 
@@ -174,6 +204,14 @@ class _DerivedType(pa.ExtensionType):
     def __arrow_ext_scalar_class__(self) -> type[pa.ExtensionScalar]:
         return _DerivedTokenScalar
 
+    def to_pandas_dtype(self) -> NoReturn:  # pyright: ignore[reportIncompatibleMethodOverride]  # refuses
+        """Refuse to become a data frame's column, which would hold the storage.
+
+        Raises:
+            TypeError: Always.
+        """
+        raise TypeError("a derived source-info token column has no pandas form")
+
     def __reduce__(self) -> NoReturn:
         """Refuse to be pickled: a table another process reads holds the text.
 
@@ -202,7 +240,7 @@ class DerivedTokenType(_DerivedType):
     """The Arrow type of a derived token column: no bytes, and the recipe."""
 
     def __init__(self, recipe: Recipe) -> None:
-        super().__init__(recipe, pa.struct([]), "orcapod.internal.derived_token")
+        super().__init__(recipe, _STORAGE, "orcapod.internal.derived_token")
 
     @classmethod
     def __arrow_ext_deserialize__(
@@ -217,7 +255,7 @@ class MemberTokenType(_DerivedType):
     An aggregation folds its members' system tags into one digest, so a list column
     holds the members' own ids: its storage is a list of structs of the system-tag
     values the recipe reads (dictionaries over the input's columns, so a member is a few
-    bytes and its id's text is held once), and an empty struct, which Parquet refuses.
+    bytes and its id's text is held once), and a guard no writer accepts.
 
     Attributes:
         recipe: How a member's token is made from its ids.
@@ -262,6 +300,12 @@ class MemberTokenType(_DerivedType):
         )
 
 
+def _members(names: Sequence[str], ids: Sequence[Any]) -> pa.StructArray:  # pyright: ignore[reportExplicitAny]  # Arrow arrays
+    """The members of derived lists: their ids, and the guard that refuses a write."""
+    guard = _empty_lists(len(ids[0]))
+    return pa.StructArray.from_arrays([*ids, guard], names=[*names, ""])
+
+
 class MemberTokens:
     """Builds the derived list columns of one aggregation; they share the members' ids.
 
@@ -293,10 +337,7 @@ class MemberTokens:
         if read not in self._lists:
             names = sorted(read)
             ids = [self._ids(name) for name in names]
-            guard = pa.Array.from_buffers(
-                pa.struct([]), len(self._order), cast(Any, [None]), 0, 0
-            )
-            members = pa.StructArray.from_arrays([*ids, guard], names=[*names, ""])
+            members = _members(names, ids)
             self._lists[read] = pa.LargeListArray.from_arrays(self._offsets, members)
         storage = self._lists[read]
         return pa.ExtensionArray.from_storage(
@@ -317,8 +358,7 @@ class MemberTokens:
 
 def derived_array(recipe: Recipe, rows: int) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny]  # an Arrow array
     """A derived token column of ``rows`` rows: no row has a byte."""
-    # No validity bitmap: no row is null. (The stubs do not allow the absent buffer.)
-    storage = pa.Array.from_buffers(pa.struct([]), rows, cast(Any, [None]), 0, 0)
+    storage = _empty_lists(rows)
     return pa.ExtensionArray.from_storage(DerivedTokenType(recipe), storage)
 
 
@@ -507,3 +547,152 @@ def rename_read_columns(table: pa.Table, names: Mapping[str, str]) -> pa.Table:
         if renamed != recipe:
             table = with_recipe(table, name, renamed)
     return table
+
+
+# ---------------------------------------------------------------------------
+# A table's derived columns on local disk (the row spool)
+# ---------------------------------------------------------------------------
+
+_SHELF = "__member_ids_"
+
+
+@dataclass(frozen=True)
+class Shelf:
+    """How the derived columns of tables of one schema are written (``shelve``).
+
+    A column of one token a row is not written: its type says it all. The lists of
+    tokens whose members' ids are equal are written once, as one column of ids without
+    the guard, whose dictionaries hold only the ids the rows read.
+
+    Attributes:
+        groups: For each ids column written, the list columns that have those ids.
+    """
+
+    groups: tuple[tuple[str, ...], ...]
+
+    @classmethod
+    def of(cls, tables: Sequence[pa.Table]) -> Shelf:
+        """The fewest ids columns that hold the lists of all of ``tables``."""
+        groups: list[list[str]] = []
+        schema = tables[0].schema
+        for field in schema:
+            if not isinstance(field.type, MemberTokenType):
+                continue
+            for group in groups:
+                if all(
+                    _same_ids(t.column(group[0]), t.column(field.name)) for t in tables
+                ):
+                    group.append(field.name)
+                    break
+            else:
+                groups.append([field.name])
+        return cls(tuple(tuple(group) for group in groups))
+
+    def shelve(self, table: pa.Table) -> pa.Table:
+        """``table`` without its derived columns, and with the ids of its lists.
+
+        The ids are copied: nothing of the result refers to the table's dictionaries.
+
+        Args:
+            table: The rows, each derived column in one chunk.
+        """
+        shelved = table.drop_columns(list(derived_columns(table.schema)))
+        for number, group in enumerate(self.groups):
+            shelved = shelved.append_column(
+                f"{_SHELF}{number}",
+                _trimmed_ids(cast(Any, table.column(group[0])).chunk(0)),
+            )
+        if not shelved.num_columns:
+            # Only derived columns: the number of rows must still be written.
+            shelved = pa.table({_SHELF: pa.nulls(table.num_rows)})
+        return shelved
+
+    def restore(self, shelved: pa.Table, schema: pa.Schema) -> pa.Table:
+        """The table ``shelve`` was given, of schema ``schema``, over ``shelved``'s buffers.
+
+        Args:
+            shelved: Rows ``shelve`` made, each column in one chunk.
+            schema: The table's schema.
+        """
+        rows = shelved.num_rows
+        shelf = {name: n for n, group in enumerate(self.groups) for name in group}
+        lists: dict[int, Any] = {}
+        columns: list[Any] = []
+        for field in schema:
+            kind = field.type
+            if isinstance(kind, MemberTokenType):
+                number = shelf[field.name]
+                if number not in lists:
+                    lists[number] = _with_guard(
+                        shelved.column(f"{_SHELF}{number}").chunk(0)
+                    )
+                columns.append(pa.ExtensionArray.from_storage(kind, lists[number]))
+            elif isinstance(kind, DerivedTokenType):
+                columns.append(derived_array(kind.recipe, rows))
+            else:
+                columns.append(shelved.column(field.name))
+        return pa.Table.from_arrays(columns, schema=schema)
+
+
+def _same_ids(left: pa.ChunkedArray[Any], right: pa.ChunkedArray[Any]) -> bool:  # pyright: ignore[reportExplicitAny]  # Arrow columns
+    """Whether two derived list columns, of one chunk each, have equal members' ids."""
+    one, two = (cast(Any, column.chunk(0)).storage for column in (left, right))
+    if one.type != two.type:
+        return False
+    if [b and b.address for b in one.buffers()] == [
+        b and b.address for b in two.buffers()
+    ] and one.offset == two.offset:
+        # One array: the dictionaries are not among its buffers, the indices are.
+        return all(
+            a.dictionary.equals(b.dictionary)
+            for a, b in zip(_id_columns(one), _id_columns(two), strict=True)
+        )
+    return bool(one.equals(two))
+
+
+def _id_columns(storage: Any) -> list[Any]:  # pyright: ignore[reportExplicitAny, reportAny]  # Arrow arrays
+    """The dictionary columns of the members of ``storage``'s lists."""
+    members = storage.flatten()
+    return members.flatten()[:-1]
+
+
+def _trimmed_ids(array: pa.Array[Any]) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny]  # an Arrow array
+    """A derived list chunk's ids, no guard, over dictionaries of the ids read only."""
+    storage = cast(Any, array).storage
+    members = storage.flatten()
+    names = [field.name for field in members.type][:-1]
+    ids: list[Any] = []
+    for column in members.flatten()[:-1]:
+        indices = column.indices.to_numpy()
+        texts = column.dictionary
+        if len(indices) * 8 < len(texts):
+            used, renumbered = np.unique(indices, return_inverse=True)
+        else:
+            read = np.zeros(len(texts), dtype=bool)
+            read[indices] = True
+            used = np.flatnonzero(read)
+            numbers = np.cumsum(read, dtype=np.int64) - 1
+            renumbered = numbers[indices]
+        ids.append(
+            pa.DictionaryArray.from_arrays(
+                pa.array(renumbered, column.type.index_type),
+                texts.take(pa.array(used, pa.int64())),
+            )
+        )
+    offsets = pc.subtract(storage.offsets, storage.offsets[0])
+    return pa.LargeListArray.from_arrays(
+        cast("pa.Int64Array", offsets), pa.StructArray.from_arrays(ids, names=names)
+    )
+
+
+def _with_guard(ids: Any) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny, reportAny]  # Arrow arrays
+    """``_trimmed_ids``'s array as a derived list's storage, over the same buffers."""
+    members = ids.values
+    columns = [
+        members.field(n).slice(members.offset, len(members))
+        if len(members.field(n)) != len(members)
+        else members.field(n)
+        for n in range(members.type.num_fields)
+    ]
+    names = [field.name for field in members.type]
+    return pa.LargeListArray.from_arrays(ids.offsets, _members(names, columns))
