@@ -87,8 +87,12 @@ def _with_comparable_tokens(tables: Sequence["pa.Table"]) -> "list[pa.Table]":
     differing = {
         name
         for name, kinds in types.items()
-        if any(source_tokens.derived_recipe(kind) is not None for kind in kinds)
-        and any(kind != kinds[0] for kind in kinds)
+        if len(kinds) > 1
+        and any(source_tokens.is_derived(kind) for kind in kinds)
+        and not all(
+            source_tokens.derived_recipe(kind) is not None and kind == kinds[0]
+            for kind in kinds
+        )
     }
     return [source_tokens.materialize(table, differing) for table in tables]
 

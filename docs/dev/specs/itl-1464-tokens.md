@@ -1,7 +1,7 @@
 # Source-info tokens carried as a recipe (ITL-1464, track TOKENS)
 
 Status: direction approved November 25, 2026. Step 1 (sources and row-wise operators)
-implemented with this document; step 2 (joins) is stacked on it.
+implemented with this document; step 2 (joins) and step 3 (aggregations) are stacked on it.
 
 ## The cost
 
@@ -64,7 +64,7 @@ every database's `add_records` refuse a derived column by name (`refuse_derived`
 | A function pod's outputs (`data_function.py`) | text: an output's token names the computation, not a source row |
 | `Pick` (`with_source_info`) | text: the token is extended |
 | `Index` | per row, text (the element's token) |
-| `Batch`, `GroupBy` | text lists, one element per member |
+| `Batch`, `GroupBy` | derived lists, one element per member (step 3) |
 | `Join`, `MergeJoin` merged or colliding columns | text |
 
 ## Consumers
@@ -79,7 +79,7 @@ every database's `add_records` refuse a derived column by name (`refuse_derived`
 | `Rejoin`: a shared data-tag | equality of the tokens | one recipe in every input: equal wherever the system tags are, so not compared; otherwise text (step 2) |
 | `Join`: a shared data-tag | both tokens, folded (`join_v1`) | a fold recipe (`FoldRecipe`), the same fold run when the text is made; text when a member is text (step 2) |
 | `MergeJoin`: a colliding column | both tokens, in a list | text of that column |
-| `GroupBy`, `Batch` | the members' tokens, in a list | text (below) |
+| `GroupBy`, `Batch` | the members' tokens, in a list | derived lists (step 3, below) |
 | `iter_data` (rows: function pods, side effects, async rows) | one string per column of each row | built for 8,192 rows at a time |
 | `F` (`_row_built_form`, `row_built_provenance`) | types and null flags | passes a derived column through (a token is one string and never null) |
 | Job nodes (`core/nodes/*`) | the stored text; the kept table | text until the transport calls `carried_table` |
@@ -96,15 +96,34 @@ every database's `add_records` refuse a derived column by name (`refuse_derived`
 | semi join | yes, all left columns |
 | join, rejoin | yes: each input's columns through its renamed system tags; a shared data-tag through a fold of two recipes. Not for inputs of one pipeline hash in `Join`, whose system-tag values are sorted per row |
 | merge join | yes for columns only one input has; a colliding column is a list of two tokens |
-| group by, batch | no: the system tags are folded to one digest, the members' ids are gone. The lists must be text (or carry the members' ids, a later step) |
+| group by, batch | not from the system tags, which are folded to one digest: a list column carries its members' ids |
 | function pod | an output: no. Inputs' tokens are not in its output |
 
-## Aggregations
+## Aggregations (step 3)
 
-`GroupBy` and `Batch` keep one token per member and column, so their output needs the
-members' record ids: text lists are about 300 bytes per member and column. A derived list
-(the members' record ids once, in one hidden list column, and recipes over it) is possible
-but adds a column operators would have to carry; it is not done here.
+`GroupBy` and `Batch` fold the members' system tags into one digest, so a list of tokens
+cannot be derived from the table's own system tags. A list column of `MemberTokenType`
+holds its members' ids itself: its storage is `large_list<struct<record id, source id,
+guard>>`, the two ids as dictionaries over the input's columns (a member is an index; the
+ids' text is held once, the few source ids once each), the guard a struct with no field,
+so Parquet refuses it. Every token column of one aggregation that reads the same system
+tags shares one array of ids, so a further column costs nothing.
+
+- The text is made by the same `materialize`, 65,536 members at a time, and has the type
+  the aggregation gave it (F retypes it as it does text).
+- A data-tag key's fold, and the system tags' folds, read the members' text a part at a
+  time, and the fold digests its canonical JSON a part at a time (the same bytes).
+- A list of tokens that is aggregated again, and a token that is text, are aggregated as
+  text. Matching operators carry a list column of one input; a shared one becomes text.
+- `iter_data` builds at most 8,192 rows and, beyond one row, 65,536 members at once.
+
+Sharing on a spill: Arrow IPC writes a dictionary per column, so the sharing between
+columns is lost, and a segment holds the whole dictionary of every column whatever rows it
+holds. Measured with 200,000 members in 300 groups and 9 token columns: 70 MiB held in
+memory (the whole table, its ids included), 112 MiB written for the token columns whole
+(125 MiB as text), and 96 MiB for a segment of 2 groups (0.8 MiB as text). A spool that
+splits a grouped table into segments should therefore write its token lists as text, or
+take each segment's ids out of the dictionaries first.
 
 ## Measured
 
@@ -118,4 +137,6 @@ A synthetic time series table, about 2.2 million rows, 13 columns, about 250 MiB
 | `drop_nulls` | 19.7 GiB | 2.4 GiB | 18.6 GiB | 1.7 GiB |
 | `polars_filter` | 16.6 GiB | 2.5 GiB | 9.3 GiB | 0.75 GiB |
 | `join` (8 and 14 columns) | above 24 GiB | 3.6 GiB (step 2) | | 2.6 GiB |
-| `group_by` | 20.9 GiB | 20.7 GiB (its lists are text) | 15.9 GiB | 15.9 GiB |
+| `group_by` | 20.9 GiB | 3.3 GiB (step 3) | 15.9 GiB | 1.6 GiB |
+| `drop_nulls`, `group_by`, `map_data` | above 24 GiB | 3.9 GiB (step 3) | | 1.8 GiB |
+| the same, then a function pod | above 24 GiB | 5.5 GiB (step 3) | | 2.2 GiB |

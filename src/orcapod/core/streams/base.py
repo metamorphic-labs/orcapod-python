@@ -341,12 +341,17 @@ def row_built_provenance(table: pa.Table) -> pa.Table:
     for field, column in zip(table.schema, table.columns, strict=True):
         if field.name.startswith(constants.SOURCE_PREFIX):
             # A derived token column stays derived: its text is what the rows give.
-            kind = (
-                field.type
-                if source_tokens.derived_recipe(field.type) is not None
-                else _source_info_value_type(field.type)
-            )
-            if kind != field.type:
+            if isinstance(field.type, source_tokens.MemberTokenType):
+                kind = field.type.with_list_type(
+                    _source_info_value_type(field.type.list_type)
+                )
+                if kind != field.type:
+                    column = source_tokens.retyped(column, kind)
+            elif source_tokens.is_derived(field.type):
+                kind = field.type
+            else:
+                kind = _source_info_value_type(field.type)
+            if kind != column.type:
                 column = column.cast(kind)
             new_field = pa.field(field.name, kind, nullable=field.nullable)
         elif field.name.startswith(constants.SYSTEM_TAG_PREFIX):
