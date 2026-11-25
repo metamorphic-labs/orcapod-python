@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from contextvars import ContextVar
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
     from orcapod.protocols.core_protocols import StreamProtocol
@@ -95,8 +95,14 @@ def joined_keys(
     return certificate(keys)
 
 
+class _HasKeys(Protocol):
+    """What the certificate needs of the stream it is of."""
+
+    def keys(self) -> tuple[tuple[str, ...], tuple[str, ...]]: ...
+
+
 def derived_keys(
-    pod: object, upstreams: Sequence[StreamProtocol], stream: StreamProtocol
+    pod: object, upstreams: Sequence[StreamProtocol], stream: _HasKeys
 ) -> UniqueKeys:
     """The certificate of ``stream``, the result of ``pod`` over ``upstreams``.
 

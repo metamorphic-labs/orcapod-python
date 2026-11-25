@@ -183,7 +183,7 @@ def test_joins_derive_their_certificate() -> None:
     assert lookup.join(left).unique_keys == _keys(KEY)
     assert left.join(both).unique_keys == _keys((*KEY, "depth"))
     assert left.join(none).unique_keys == frozenset()
-    assert left.join(lookup, _wide()).unique_keys == _keys(KEY)
+    assert Join()(left, lookup, _wide()).unique_keys == _keys(KEY)
     assert left.semi_join(none).unique_keys == _keys(KEY)
     assert none.semi_join(left).unique_keys == frozenset()
     renamed = left.select_data_columns(["x"])

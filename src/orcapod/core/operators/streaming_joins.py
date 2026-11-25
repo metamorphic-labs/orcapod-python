@@ -2,7 +2,8 @@
 
 The async path of ``Join``, ``MergeJoin``, ``SemiJoin`` and ``Rejoin`` (ITL-1347, stage
 5) is to read its inputs as Arrow record batches, in whatever order they arrive; these
-kernels are that computation, not yet wired into ``async_execute``. A kernel gives the
+kernels are that computation (``run_kernel``, for the operators'
+``async_execute_batches``; no job node calls that form yet). A kernel gives the
 rows of the operator's sync ``static_process`` over the same inputs as a multiset (row
 order is not a result on the async path; developer, November 22, 2026), within the
 limits each kernel's docstring states (``StreamingRejoin``: repeated origins with three
@@ -49,8 +50,8 @@ How a kernel stays equal to the sync path:
   no rows that shares a tag with the others empties the result (an inner join), so no
   row was emitted before it can refuse. ``SemiJoin`` with no shared tag passes every
   left row whatever its right input holds, and has no shared column to refuse.
-- **Matching is the sync join's.** Each input keeps the rows it needs as Arrow tables and
-  a Polars frame of their prepared keys and row numbers (``arrow_keys.polars_key_frame``),
+- **Matching is the sync join's.** Each input keeps the rows it needs in a row spool
+  (memory, then local disk; ``core/row_spool``) and a Polars frame of their prepared keys and row numbers (``arrow_keys.polars_key_frame``),
   with the constant key every join adds (``join._with_common_key``). An arriving batch's
   key frame is joined with the other side's accumulated key frame by the sync path's own
   rule (``join._matched_pairs``), in one vectorized join, never per row: a top-level
@@ -67,7 +68,8 @@ How a kernel stays equal to the sync path:
   the last step of F), so a kernel declares every such field nullable and the stream made
   from its batches settles them.
 
-A kernel holds only what can still match: a side's rows are dropped when the other side
+A kernel holds only what can still match: a row is let go once it has matched when the
+other side is certified unique on the keys (``core/unique_keys``); a side's rows are dropped when the other side
 closes (nothing can arrive to match them), and an arriving row is not kept once the
 other side has closed. A row whose key holds a top-level null is never kept (it matches
 nothing). A step of a ``Join`` chain that can never emit again (a side closed holding no

@@ -21,7 +21,8 @@ import resource
 import sys
 import time
 import warnings
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from typing import Any
 
 import numpy as np
 import pyarrow as pa
@@ -33,15 +34,15 @@ from orcapod.core.sources import ArrowTableSource
 from orcapod.protocols.core_protocols import StreamProtocol
 
 BATCH = 8_192
-SESSION = "session-2026-01-01-000000-abcdef"
+SESSION = "session-0123456789abcdef"
 
 
-def _text(values: np.ndarray, pattern: str) -> pa.Array:
+def _text(values: np.ndarray[Any, Any], pattern: str) -> pa.Array[Any]:
     return pa.array([pattern % v for v in values.tolist()], pa.large_string())
 
 
 def spikes(start: int, n: int) -> pa.Table:
-    """Event rows: seven tags and data, as the measured spike table."""
+    """Synthetic event rows: tags and data of several types."""
     i = np.arange(start, start + n)
     return pa.table(
         {
@@ -97,7 +98,14 @@ def events(start: int, n: int) -> pa.Table:
 class Input:
     """An input: a small source of its kind describes it, its rows are made as sent."""
 
-    def __init__(self, name: str, make, rows: int, tags: list[str], key: list[str]):
+    def __init__(
+        self,
+        name: str,
+        make: Callable[[int, int], pa.Table],
+        rows: int,
+        tags: list[str],
+        key: list[str],
+    ):
         self.make, self.rows, self.key, self.name = make, rows, key, name
         self.tags = tags
         self.stream = self.source(0, 4)
@@ -199,5 +207,5 @@ if __name__ == "__main__":
         f"{case:16} rows={rows:>9,} {'barrier' if barrier else 'keys':8}"
         + f" out={count:>11,} {seconds:7.1f} s"
         + f" peak={peak / unit:8.0f} MiB (import {base / unit:.0f})"
-        + f" arrow_peak={pa.default_memory_pool().max_memory() / 2**20:8.0f} MiB"
+        + f" arrow_peak={(pa.default_memory_pool().max_memory() or 0) / 2**20:8.0f} MiB"
     )
