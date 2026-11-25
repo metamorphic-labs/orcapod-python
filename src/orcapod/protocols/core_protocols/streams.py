@@ -300,7 +300,9 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
     def run(self) -> "StreamViewProtocol":
         """Compute the whole stream and return a view of all its rows.
 
-        Does the work ``as_table()`` does, through the same path and cache; a job node
+        Every row is computed, with every effect; nothing is promised about how the
+        rows are produced or held (ITL-1464), and the view of a large result may hold
+        only its ends (``BoundedStreamView``). A job node
         runs as it does in a job. Every stream has it, with no argument: it is the one
         way to compute a stream outside a job (ITL-1081). ``head()`` and the notebook
         preview never compute a row.

@@ -123,6 +123,7 @@ class AddTags(UnaryOperator):
     # Data-tags pass through as they are; the new tags are plain (ITL-1023).
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
+    BATCHES_GIVE_THE_WHOLE: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:

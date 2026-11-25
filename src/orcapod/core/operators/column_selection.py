@@ -61,6 +61,7 @@ class SelectTagColumns(UnaryOperator):
     # Data-tags (ITL-1023): handled.
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
+    BATCHES_GIVE_THE_WHOLE: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
@@ -204,6 +205,7 @@ class SelectDataColumns(UnaryOperator):
     # Data-tags (ITL-1023): handled.
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
+    BATCHES_GIVE_THE_WHOLE: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
@@ -364,6 +366,7 @@ class DropTagColumns(UnaryOperator):
     # Data-tags (ITL-1023): handled.
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
+    BATCHES_GIVE_THE_WHOLE: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
@@ -512,6 +515,7 @@ class DropDataColumns(UnaryOperator):
     # Data-tags (ITL-1023): handled.
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
+    BATCHES_GIVE_THE_WHOLE: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
@@ -898,6 +902,8 @@ class DropColumns(_TagAndDataColumnsOperator):
             be dropped: a stream needs at least one data column.
     """
 
+    BATCHES_GIVE_THE_WHOLE: ClassVar[bool] = True
+
     _verb: ClassVar[str] = "drop"
 
     def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
@@ -925,6 +931,8 @@ class SelectColumns(_TagAndDataColumnsOperator):
         InputValidationError: When called on a stream none of whose data columns is
             named: a stream needs at least one data column.
     """
+
+    BATCHES_GIVE_THE_WHOLE: ClassVar[bool] = True
 
     _verb: ClassVar[str] = "select"
 

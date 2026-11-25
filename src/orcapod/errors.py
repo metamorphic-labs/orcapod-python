@@ -1267,6 +1267,14 @@ class SideEffectLogDataContextError(OrcapodDatabaseError):
         )
 
 
+class BoundedViewError(ValueError):
+    """What was asked of a view needs rows the view does not hold (ITL-1464).
+
+    Raised by the view of a ``run()`` whose result is too large to be kept; ask the
+    stream itself for its rows.
+    """
+
+
 class ProvenanceInconsistencyError(ValueError):
     """What a job holds and what its databases store disagree about a row's provenance.
 

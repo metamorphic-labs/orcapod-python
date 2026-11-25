@@ -83,6 +83,7 @@ class Filter(UnaryOperator):
 
     # Its head shows the matching rows of its input's head (decision 13, ITL-1374).
     HEAD_FROM_INPUT_HEAD: ClassVar[bool] = True
+    BATCHES_GIVE_THE_WHOLE: ClassVar[bool] = True
 
     # Its identity is not frozen with data context v1 (ITL-1374).
     PROVISIONAL: ClassVar[bool] = True

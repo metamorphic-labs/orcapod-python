@@ -95,6 +95,7 @@ class MapData(UnaryOperator):
     # Data-tags (ITL-1023): handled.
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
+    BATCHES_GIVE_THE_WHOLE: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
@@ -376,6 +377,7 @@ class MapTags(UnaryOperator):
     # Data-tags (ITL-1023): handled.
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
+    BATCHES_GIVE_THE_WHOLE: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
     def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
@@ -679,6 +681,7 @@ class MapColumns(UnaryOperator):
     # Provisional: its identity is not frozen with data context v1 (ITL-1279).
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
+    BATCHES_GIVE_THE_WHOLE: ClassVar[bool] = True
     PROVISIONAL: ClassVar[bool] = True
 
     def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:

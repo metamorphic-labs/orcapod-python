@@ -20,6 +20,7 @@ import ast
 import dataclasses
 import html
 import importlib
+from collections import deque
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from enum import Enum
@@ -31,6 +32,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 from typing_extensions import override
 
+from orcapod.errors import BoundedViewError
 from orcapod.system_constants import constants
 
 
@@ -112,6 +114,12 @@ _ORIGIN_NOUNS = {
 # A view nobody cut to n rows (the view ``run()`` returns, or a sort of it) shows at most
 # this many rows: the first and the last half, with Polars' ellipsis row between.
 _DISPLAY_ROWS = 10
+# A ``run()`` that reads its rows batch by batch keeps every row of a result of at most
+# ``RUN_VIEW_COMPLETE_ROWS`` rows; of a larger one, the view has the first and the last
+# ``RUN_VIEW_WINDOW_ROWS`` rows (ITL-1464). Counted in rows, so equal data is always
+# treated alike, however its batches were cut.
+RUN_VIEW_COMPLETE_ROWS = 50_000
+RUN_VIEW_WINDOW_ROWS = 1_000
 _MAX_TEXT = 80
 _TEXT_START = 56
 _TEXT_END = 20
@@ -186,7 +194,8 @@ class StreamView:
     """Rows of a stream, and how they were obtained.
 
     ``head(n)`` on a stream returns a view of at most ``n`` readily available rows;
-    ``run()`` returns a view of all the computed rows. The view's ``head``, ``tail`` and
+    ``run()`` returns a view of all the computed rows (a ``BoundedStreamView``, which holds
+    only the ends, of a large result read in batches). The view's ``head``, ``tail`` and
     ``sort_by_tags`` return a new view of its own rows, with a header that says what they
     are; they never read, compute or change the stream. A view holds the columns it was
     made with: for other column groups (system tags, source info, context, content
@@ -603,6 +612,10 @@ class StreamView:
                 names = list(table.column_names)
         return pl.DataFrame(pa.table(columns, names=names))
 
+    def _with_row_count(self, rendered: str) -> str:
+        """Return Polars' rendering of the display frame, which names its row count."""
+        return rendered
+
     def _displays_every_row(self) -> bool:
         """Whether the display shows every row: a view cut to ``n`` rows, or a short one."""
         return self.display_all_rows or self.table.num_rows <= _DISPLAY_ROWS
@@ -625,7 +638,7 @@ class StreamView:
         if self.table.num_columns:
             # Polars shortens strings to its own default length; show up to _MAX_TEXT.
             with pl.Config(fmt_str_lengths=_MAX_TEXT, tbl_rows=self._display_rows()):
-                frame_html = self._display_frame()._repr_html_()
+                frame_html = self._with_row_count(self._display_frame()._repr_html_())
             columns = self._display_columns()
             names = _HeaderNames()
             names.feed(frame_html)
@@ -654,7 +667,7 @@ class StreamView:
         if self.table.num_columns:
             with pl.Config(fmt_str_lengths=_MAX_TEXT, tbl_rows=self._display_rows()):
                 frame = self._display_frame(text=True)
-                frame_text = str(frame)
+                frame_text = self._with_row_count(str(frame))
             columns = self._display_columns()
             rendered = _rendered_columns(_text_header_cells(frame_text), frame.columns)
             if rendered is not None:
@@ -677,6 +690,230 @@ class StreamView:
             f"StreamView({self.kind}[{self.label}], status={self.status.value}, "
             f"rows={self.table.num_rows})"
         )
+
+
+@dataclass(frozen=True, repr=False)
+class _EndsView(StreamView):
+    """The first and last rows of a longer view, displayed as that view is.
+
+    ``table`` holds one row more than a long view shows, so Polars renders its ellipsis.
+
+    Attributes:
+        shown_total: The row count of the whole view, named by the display.
+    """
+
+    shown_total: int = 0
+
+    @override
+    def _with_row_count(self, rendered: str) -> str:
+        # Polars names the frame's shape before anything else it renders.
+        return rendered.replace(
+            f"shape: ({self.table.num_rows:_}, ", f"shape: ({self.shown_total:_}, ", 1
+        )
+
+
+class BoundedStreamView(StreamView):
+    """The view of a ``run()`` whose rows are not held (ITL-1464).
+
+    It has the first and the last ``window_rows`` rows, the row count and the columns.
+    It is displayed as a view holding every row is. ``head(n)`` and ``tail(n)`` within
+    the window give the same views such a view gives. What needs rows it does not hold
+    (``table``, ``as_table()``, ``as_polars_df()``, ``sort_by_tags()``, a longer
+    ``head`` or ``tail``) raises ``BoundedViewError``, which names the stream's own
+    method: a part is never given as the whole, and a view never reads or computes.
+
+    Attributes:
+        window_rows: The rows held at each end.
+    """
+
+    def __init__(  # pyright: ignore[reportMissingSuperCall]  # the parent's would set ``table``
+        self, first: StreamView, last: pa.Table, total_rows: int
+    ) -> None:
+        """Make the view.
+
+        Args:
+            first: A view of the first rows, named as the stream's view is named.
+            last: The last rows, as many as ``first`` has.
+            total_rows: The row count of the whole.
+        """
+        # ``table`` is deliberately not set: reading it reaches ``__getattr__``.
+        for field in dataclasses.fields(StreamView):
+            if field.name != "table":
+                object.__setattr__(self, field.name, getattr(first, field.name))
+        object.__setattr__(self, "total_rows", total_rows)
+        object.__setattr__(
+            self, "_first", dataclasses.replace(first, total_rows=total_rows)
+        )
+        object.__setattr__(self, "_last", last)
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "table":
+            raise self._refused("its table")
+        raise AttributeError(f"{type(self).__name__!r} has no attribute {name!r}")
+
+    def _refused(self, what: str) -> BoundedViewError:
+        """Return the error for ``what``, which needs rows the view does not hold."""
+        return BoundedViewError(
+            f"{what} needs every row, and this view of {self._total():,} rows holds only "
+            f"the first and the last {self.window_rows:,}: run() does not keep a result "
+            f"of more than {RUN_VIEW_COMPLETE_ROWS:,} rows read in batches. Ask the "
+            "stream for its rows: stream.as_table(), stream.as_polars_df() or iteration "
+            "(stream.as_table(columns={'sort_by_tags': True}) sorts them)."
+        )
+
+    def _total(self) -> int:
+        return cast(int, self.total_rows)
+
+    def _held(self) -> tuple[StreamView, pa.Table]:
+        values = vars(self)
+        return cast("StreamView", values["_first"]), cast(pa.Table, values["_last"])
+
+    @property
+    def window_rows(self) -> int:
+        """The rows held at each end."""
+        return self._held()[1].num_rows
+
+    @override
+    def __len__(self) -> int:
+        return self._total()
+
+    @override
+    def __eq__(self, other: object) -> bool:
+        return self is other
+
+    @override
+    def __hash__(self) -> int:
+        return id(self)
+
+    @override
+    def as_table(self) -> pa.Table:
+        raise self._refused("as_table()")
+
+    @override
+    def as_polars_df(self) -> pl.DataFrame:
+        raise self._refused("as_polars_df()")
+
+    @override
+    def sort_by_tags(self) -> StreamView:
+        # A view with no tag column is returned as it is, as every view is.
+        if not self.tag_columns:
+            return self
+        raise self._refused("sort_by_tags()")
+
+    @override
+    def head(self, n: int = 10) -> StreamView:
+        _check_row_count(n)
+        if n > self.window_rows:
+            raise self._refused(f"head({n})")
+        return dataclasses.replace(self._held()[0].head(n), display_all_rows=True)
+
+    @override
+    def tail(self, n: int = 10) -> StreamView:
+        _check_row_count(n)
+        if n > self.window_rows:
+            raise self._refused(f"tail({n})")
+        first, last = self._held()
+        whole = dataclasses.replace(
+            first, table=last, start=self._total() - last.num_rows
+        )
+        return whole.tail(n)
+
+    @override
+    def for_stream(
+        self, stream: Any, *, origin: str | None = None, note: str | None = None
+    ) -> StreamView:
+        first, last = self._held()
+        return BoundedStreamView(
+            first.for_stream(stream, origin=origin, note=note), last, self._total()
+        )
+
+    def _ends(self) -> _EndsView:
+        """The rows the display shows, worded and counted as the whole."""
+        first, last = self._held()
+        half = _DISPLAY_ROWS // 2
+        values = {
+            f.name: getattr(first, f.name) for f in dataclasses.fields(StreamView)
+        }
+        values["table"] = pa.concat_tables(
+            [first.table.slice(0, half + 1), last.slice(last.num_rows - half)]
+        )
+        values["description"] = first._describe_rows(self._total())
+        values["display_all_rows"] = False
+        return _EndsView(**values, shown_total=self._total())
+
+    @override
+    def header(self) -> str:
+        return self._ends().header()
+
+    @override
+    def _repr_html_(self) -> str:
+        return self._ends()._repr_html_()
+
+    @override
+    def __str__(self) -> str:
+        return str(self._ends())
+
+    @override
+    def __repr__(self) -> str:
+        return (
+            f"StreamView({self.kind}[{self.label}], status={self.status.value}, "
+            f"rows={self._total()})"
+        )
+
+
+class WindowOfRows:
+    """Collects the tables of a stream's rows, batch by batch: all rows of a result of
+    at most ``RUN_VIEW_COMPLETE_ROWS`` rows, else the first and the last
+    ``RUN_VIEW_WINDOW_ROWS``. The window is copied, so no batch stays alive behind it.
+    """
+
+    def __init__(self) -> None:
+        self.total: int = 0
+        self._all: list[pa.Table] | None = []
+        self._first: list[pa.Table] = []
+        self._last: deque[pa.Table] = deque()
+
+    def add(self, table: pa.Table) -> None:
+        """Take the next rows.
+
+        Args:
+            table: The rows; every table of a stream has the same schema.
+        """
+        missing = RUN_VIEW_WINDOW_ROWS - min(self.total, RUN_VIEW_WINDOW_ROWS)
+        if missing and table.num_rows:
+            self._first.append(_copied(table.slice(0, missing)))
+        if table.num_rows:
+            end = max(table.num_rows - RUN_VIEW_WINDOW_ROWS, 0)
+            self._last.append(_copied(table.slice(end)))
+            held = sum(part.num_rows for part in self._last)
+            while held - self._last[0].num_rows >= RUN_VIEW_WINDOW_ROWS:
+                held -= self._last.popleft().num_rows
+        self.total += table.num_rows
+        if self._all is not None:
+            self._all.append(table)
+            if self.total > RUN_VIEW_COMPLETE_ROWS:
+                self._all = None
+
+    @property
+    def complete(self) -> pa.Table | None:
+        """Every row, or ``None`` when there are too many (or nothing was taken)."""
+        return pa.concat_tables(self._all) if self._all else None
+
+    @property
+    def first(self) -> pa.Table:
+        """The first rows."""
+        return pa.concat_tables(self._first)
+
+    @property
+    def last(self) -> pa.Table:
+        """The last rows."""
+        rows = pa.concat_tables(list(self._last))
+        return rows.slice(max(rows.num_rows - RUN_VIEW_WINDOW_ROWS, 0))
+
+
+def _copied(table: pa.Table) -> pa.Table:
+    """Return ``table``'s rows in buffers of their own, every value bit for bit."""
+    return table.take(pa.array(range(table.num_rows), pa.int64()))
 
 
 def _mark_columns(
