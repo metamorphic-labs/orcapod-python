@@ -21,12 +21,13 @@ from typing import Any
 import pyarrow as pa
 import pytest
 
-from orcapod.core.operators import Join, MergeJoin, SemiJoin
+from orcapod.core.operators import Join, MergeJoin, Rejoin, SemiJoin
 from orcapod.core.operators import streaming_joins
 from orcapod.core.operators.streaming_joins import (
     StreamingJoin,
     StreamingJoinKernel,
     StreamingMergeJoin,
+    StreamingRejoin,
     StreamingSemiJoin,
 )
 from orcapod.core.record_batch_channels import OutputChannel
@@ -283,30 +284,64 @@ def test_a_one_to_one_join_in_step_holds_only_the_rows_between_the_inputs(
     assert emitted == 60
 
 
-def test_a_lookup_holds_the_unique_side_and_no_row_that_matched(spooled: Path) -> None:
+def _keys_held(kernel: StreamingJoinKernel) -> list[int]:
+    """How many rows' keys each side of a kernel's links holds."""
+    return [
+        sum(frame.height for frame in side._frames)  # pyright: ignore[reportPrivateUsage]  # what it keeps
+        for link in kernel._links  # pyright: ignore[reportPrivateUsage, reportAttributeAccessIssue]  # what it keeps
+        for side in link.sides
+    ]
+
+
+@pytest.mark.parametrize("first", [0, 1])
+def test_a_lookup_holds_the_keys_of_the_side_that_ends_first(
+    spooled: Path, first: int
+) -> None:
     spikes = _source(
         "spikes", {"unit": [0, 1, 2, 3] * 10, "n": list(range(40))}, key=("n",)
     )
     units = _source("units", {"unit": [0, 1, 2], "area": [1, 1, 2]}, key=("unit",))
-    kernel = _join([spikes, units])
-    (first, *rest) = _batches(spikes, 8)
-    kernel.push(0, first)
-    assert kernel.held_rows == 8  # arrived before any unit
-    (all_units,) = _batches(units, 3)
-    kernel.push(1, all_units)
-    assert kernel.held_rows == 2 + 3  # the spikes of unit 3, and the units
-    for batch in rest:
-        kernel.push(0, batch)
-    assert kernel.held_rows == 10 + 3  # unit 3 may still arrive
-    kernel.close(1)
-    assert kernel.held_rows == 3  # it did not
-    kernel.close(0)
+    inputs = [spikes, units]
+    batches = [_batches(spikes, 8), _batches(units, 2)]
+    kernel = StreamingJoin(Join(), inputs)
+    for batch in batches[first]:
+        assert kernel.push(first, batch) == []
+    early = batches[1 - first][0]
+    assert kernel.push(1 - first, early) == []
+    assert _keys_held(kernel) == [0, 0]  # rows, no keys
+    emitted = sum(b.num_rows for b in kernel.close(first))
+    assert emitted == (6 if first == 1 else 20)
+    side = kernel._position[first]  # pyright: ignore[reportPrivateUsage]  # its side
+    held = _keys_held(kernel)
+    assert held[1 - side] == 0  # the other side never has keys, before or after
+    assert 0 < held[side] <= sum(b.num_rows for b in batches[first])
+    for batch in batches[1 - first][1:]:
+        emitted += sum(b.num_rows for b in kernel.push(1 - first, batch))
+        assert _keys_held(kernel)[1 - side] == 0
+    assert emitted == 30
+    assert kernel.close(1 - first) == []
     assert kernel.held_rows == 0
+    assert _files(spooled) == []
 
 
-def test_without_a_certificate_nothing_that_may_match_again_is_let_go(
+def test_a_row_of_a_lookup_indexed_first_is_let_go_when_it_matches(
     spooled: Path,
 ) -> None:
+    """The other side is unique, so an indexed row can match only once."""
+    spikes = _source("spikes", {"unit": [0, 0, 1, 2], "n": [1, 2, 3, 4]}, key=("n",))
+    units = _source("units", {"unit": [0, 1, 2], "area": [1, 1, 2]}, key=("unit",))
+    kernel = _join([spikes, units])
+    (all_spikes,), all_units = _batches(spikes, 4), _batches(units, 1)
+    kernel.push(0, all_spikes)
+    kernel.close(0)
+    held = 4
+    for batch in all_units:
+        held -= sum(b.num_rows for b in kernel.push(1, batch))
+        assert kernel.held_rows == held
+    assert held == 0
+
+
+def test_without_a_certificate_the_indexed_rows_stay(spooled: Path) -> None:
     left, right = (
         _sorted_source("a", 6, key=False),
         _sorted_source("b", 6, key=False),
@@ -314,8 +349,11 @@ def test_without_a_certificate_nothing_that_may_match_again_is_let_go(
     kernel = _join([left, right])
     (one,), (two,) = _batches(left, 6), _batches(right, 6)
     kernel.push(0, one)
-    assert sum(b.num_rows for b in kernel.push(1, two)) == 6
+    kernel.push(1, two)
     assert kernel.held_rows == 12
+    assert sum(b.num_rows for b in kernel.close(0)) == 6
+    assert kernel.held_rows == 6  # the left ones: a right row may still match them
+    assert sum(b.num_rows for b in kernel.push(1, two)) == 6
     kernel.release()
     assert _files(spooled) == []
 
@@ -323,16 +361,46 @@ def test_without_a_certificate_nothing_that_may_match_again_is_let_go(
 def test_a_many_to_many_match_is_emitted_in_bounded_pieces(spooled: Path) -> None:
     left = _source("a", {"k": [1] * 20 + [2], "n": list(range(21))})
     right = _source("b", {"k": [1] * 15 + [2], "m": list(range(16))})
-    kernel = _join([left, right])
     (mine,), (theirs,) = _batches(left, 21), _batches(right, 16)
-    kernel.push(0, mine)
-    sizes = [batch.num_rows for batch in kernel.push(1, theirs)]
-    assert sum(sizes) == 20 * 15 + 1
-    assert max(sizes) <= 3
+    # Replayed when a side ends, and probed after it: both in pieces.
+    replayed = _join([left, right])
+    replayed.push(0, mine)
+    replayed.push(1, theirs)
+    probed = _join([left, right])
+    probed.push(0, mine)
+    probed.close(0)
+    for batches in (replayed.close(0), probed.push(1, theirs)):
+        sizes = [batch.num_rows for batch in batches]
+        assert sum(sizes) == 20 * 15 + 1
+        assert max(sizes) <= 3
     # One arriving row's matches are cut too.
     many = _join([left, right])
     many.push(0, mine)
+    many.close(0)
     assert all(b.num_rows <= 3 for b in many.push(1, theirs.slice(0, 1)))
+
+
+def test_replayed_rows_leave_the_disk_as_they_are_matched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each input's rows are on disk at most once, and go while they are replayed."""
+    monkeypatch.setattr(
+        streaming_joins, "RowSpool", functools.partial(RowSpool, 0, str(tmp_path))
+    )
+    monkeypatch.setattr(streaming_joins, "PUSH_ROWS", 4)
+    left = _source("a", {"k": [1, 2] * 20, "n": list(range(40))})
+    right = _source("b", {"k": [1, 2], "m": [1, 2]})
+    kernel = _join([left, right])
+    for batch in _batches(left, 4):
+        kernel.push(0, batch)
+    (small,) = _batches(right, 2)
+    kernel.push(1, small)
+    assert len(_files(tmp_path)) == 11
+    seen = [len(_files(tmp_path)) for _ in kernel.iter_close(1)]
+    assert seen == sorted(seen, reverse=True)
+    assert seen[-1] <= 2 and len(_files(tmp_path)) == 1  # the indexed side's rows
+    kernel.release()
+    assert _files(tmp_path) == []
 
 
 def test_a_semi_join_holds_each_right_key_once(spooled: Path) -> None:
@@ -732,3 +800,177 @@ def test_rows_held_for_long_among_rows_that_pass_are_matched_at_the_end(
         map(str, waiting)
     )
     assert kernel.held_rows == 0
+
+
+# ---------------------------------------------------------------------------
+# Long second inputs, and an end in the middle of a replay
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("op", [Join(), SemiJoin(), MergeJoin()], ids=lambda o: repr(o))
+def test_an_endless_input_is_joined_as_it_arrives_once_the_other_has_ended(
+    spooled: Path, op: Any
+) -> None:
+    """It never ends: every row after the first input's end is sent, and none held."""
+    endless = _source("a", {"k": [1, 2, 3, 4], "n": [1, 2, 3, 4]})
+    small = _source("b", {"k": [1, 2], "m": [1, 2]}, key=("k",))
+    result = op(endless, small)
+
+    async def go() -> int:
+        channel = OutputChannel(endless, retain=False, buffer_size=1)
+        output = OutputChannel(result, retain=False, buffer_size=1)
+        reader, results = channel.open_reader(), output.open_reader()
+        run = asyncio.create_task(
+            op.async_execute_batches([reader, small.open_channel()], output)
+        )
+
+        async def produce() -> None:
+            while True:
+                for batch in _batches(endless, 2):
+                    await channel.send(batch)
+
+        producing = asyncio.create_task(produce())
+        rows = 0
+        async for batch in results:
+            rows += batch.num_rows
+            if rows > 300:
+                break
+        # What was spooled before the small input ended has been replayed and let go.
+        assert len(_files(spooled)) <= 2
+        for task in (run, producing):
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        return rows
+
+    assert _bounded(go()) > 300
+    assert _files(spooled) == []
+
+
+@pytest.mark.parametrize("end", ["cancel", "close_reader"])
+@pytest.mark.parametrize("op", [Join(), SemiJoin(), MergeJoin()], ids=lambda o: repr(o))
+def test_a_join_that_ends_while_replaying_leaves_nothing(
+    spooled: Path, op: Any, end: str
+) -> None:
+    left = _source("a", {"k": [1, 2] * 100, "n": list(range(200))})
+    right = _source("b", {"k": [1, 2], "m": [1, 2]})
+
+    async def go() -> None:
+        late = OutputChannel(right, retain=False, buffer_size=4)
+        output = OutputChannel(op(left, right), retain=False, buffer_size=1)
+        results = output.open_reader()
+        run = asyncio.create_task(
+            op.async_execute_batches([left.open_channel(), late.open_reader()], output)
+        )
+        await asyncio.sleep(0.05)  # the left rows are spooled, the left input ended
+        for batch in _batches(right, 1):
+            await late.send(batch)
+        await late.close()
+        _ = await results.receive()  # the replay has begun, and waits for this reader
+        await asyncio.sleep(0.05)
+        assert not run.done()
+        if end == "cancel":
+            run.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await run
+            with pytest.raises(UpstreamFailedError):
+                _ = await results.receive()
+        else:
+            await results.close()
+            await run  # no reader: it ends normally
+
+    _bounded(go())
+    assert _files(spooled) == []
+
+
+def test_an_input_that_fails_after_the_other_ended_fails_the_join(
+    spooled: Path,
+) -> None:
+    left = _source("a", {"k": [1, 2] * 10, "n": list(range(20))})
+    right = _source("b", {"k": [1, 2], "m": [1, 2]})
+
+    async def go() -> None:
+        failing = OutputChannel(left, retain=False, buffer_size=8)
+        op = Join()
+        output = OutputChannel(op(left, right))
+        run = asyncio.create_task(
+            op.async_execute_batches(
+                [failing.open_reader(), right.open_channel()], output
+            )
+        )
+        await failing.send(_batches(left, 5)[0])
+        await asyncio.sleep(0.05)
+        failing.fail(RuntimeError("the read broke"))
+        with pytest.raises(UpstreamFailedError, match="the read broke"):
+            await run
+
+    _bounded(go())
+    assert _files(spooled) == []
+
+
+# ---------------------------------------------------------------------------
+# Rejoin of two inputs
+# ---------------------------------------------------------------------------
+
+
+def _branches(kind: str) -> list[Any]:
+    source = _source(
+        "a",
+        {**_pairs(4, 5), "n": list(range(20))},
+        key=("n", "unit"),
+        layout="reversed",
+    )
+    if kind == "data_tags":
+        source = _data_tagged("a", 20)
+        return [
+            source.select_data_columns(["a1", "k"]),
+            source.select_data_columns(["a2"]),
+        ]
+    first = source.select_data_columns(["a_x"])
+    second = source.select_data_columns(["a_y"])
+    if kind == "filtered":
+        return [first, second.drop_nulls("a_y")]
+    if kind == "differing_tag":
+        return [first, second.map_data(a_y="z")]
+    if kind == "empty":
+        return [first, second.filter(session="none")]
+    return [first, second]
+
+
+@pytest.mark.parametrize("swapped", [False, True])
+@pytest.mark.parametrize(
+    "kind", ["plain", "filtered", "differing_tag", "empty", "data_tags"]
+)
+def test_rejoin_of_two_branches_over_channels(
+    spooled: Path, kind: str, swapped: bool
+) -> None:
+    inputs = _branches(kind)[:: -1 if swapped else 1]
+    op = Rejoin()
+    output = OutputChannel(op(*inputs))
+    _bounded(op.async_execute_batches([s.open_channel() for s in inputs], output))
+    assert _rows(_transport(output.result())) == _rows(_transport(op(*inputs)))
+    assert _files(spooled) == []
+
+
+def test_rejoin_holds_only_rows_not_matched_yet(spooled: Path) -> None:
+    inputs = _branches("plain")
+    kernel = StreamingRejoin(Rejoin(), inputs)
+    for mine, theirs in zip(_batches(inputs[0], 5), _batches(inputs[1], 5)):
+        assert kernel.push(0, mine) == []
+        assert kernel.held_rows == 5
+        assert sum(b.num_rows for b in kernel.push(1, theirs)) == 5
+        assert kernel.held_rows == 0
+        assert _files(spooled) == []
+
+
+def test_rejoin_of_three_inputs_is_a_barrier_and_equal(spooled: Path) -> None:
+    source = _source("a", {**_pairs(4, 5), "n": list(range(20))}, key=("n",))
+    inputs = [
+        source.select_data_columns(["a_x"]),
+        source.select_data_columns(["a_y"]),
+        source.map_data(a_x="x2", a_y="y2"),
+    ]
+    op = Rejoin()
+    output = OutputChannel(op(*inputs))
+    _bounded(op.async_execute_batches([s.open_channel() for s in inputs], output))
+    assert _rows(_transport(output.result())) == _rows(_transport(op(*inputs)))
