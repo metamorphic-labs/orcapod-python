@@ -1,0 +1,82 @@
+1. One pair, unique ids
+  fn     pair columns 2 rows 3 unique True arrow_v1:0000026a
+  tot    pair columns 2 rows 2 unique True arrow_v1:0000025a
+  join   pair columns 2 rows 3 unique True arrow_v1:000002cd
+  group  pair columns 2 rows 2 unique True arrow_v1:0000021d
+  batch  pair columns 2 rows 2 unique True arrow_v1:00000253
+  merge  pair columns 2 rows 3 unique True arrow_v1:00000225
+  sel    pair columns 2 rows 3 unique True arrow_v1:0000029a
+2. Stable?
+  a second fresh store                     equal
+  async                                    equal
+  rows and tags reordered, keyed           DIFFERS: ['batch']
+  join inputs swapped                      equal
+  cache OFF (current run)                  equal
+  REPLAY over a LOG store                  equal
+  another process: True 
+  positional, reordered, differ: ['fn', 'tot', 'join', 'group', 'batch', 'merge', 'sel']
+3. Plain streams against nodes: same default id? same record ids?
+  fn     source_id equal True, content hash equal True, record ids equal False
+  join   source_id equal True, content hash equal True, record ids equal True
+  group  source_id equal True, content hash equal True, record ids equal True
+  batch  source_id equal True, content hash equal True, record ids equal True
+  merge  source_id equal True, content hash equal True, record ids equal True
+  sel    source_id equal True, content hash equal True, record ids equal True
+  raw stream with two identical rows: RowIdentifierError: repeated record ids: {'arrow_v1:0000022150da982e62c2614c7a6144b8a796071d47ccd56772e06e3d752547f14a4237': 2}
+4. Input corrected 1.1 -> 1.2 in one store (keyed)
+  fn rows 4 ids unique True run's own rows 3
+  join (LOG): 4 rows
+  group (LOG): 3 rows
+  batch (LOG): 3 rows
+  merge (LOG): 4 rows
+  sel (LOG): 4 rows
+  a select OVER fn, LOG, after the same correction:
+   stored rows 4 distinct (tags, system tags, data) 3
+  LOG as_source: RowIdentifierError: repeated record ids: {'arrow_v1:0000025fbf48381ee553461a95486b867ae9d449adc3555b866708b4ea67d0c9fe65e8': 2}
+  OFF as_source: 3 rows
+4b. Nothing corrected: pipeline store kept, results recomputed (new result store)
+   fn 79748e83f2d8 [1, 3, 3]
+  sel LOG, outputs changed: 3
+   fn 79748e83f2d8 [101, 103, 103]
+  sel LOG, outputs changed: 6
+   entries 3 fn rows 3
+  sel LOG, outputs equal: 3
+   entries 6 fn rows 3
+  sel LOG, outputs equal: RowIdentifierError: repeated record ids: {'arrow_v1:0000025fbf48381ee553461a95486b867ae9d449adc3555b866708b4ea67d0c9fe65e8': 2, 'arrow_v1:00000247905570a9484e81625c3a2bb0f605632aa4a1441cd966
+5. Never computes
+  schema, hashes, head, preview, check: calls 0 | head ViewStatus.NOT_COMPUTED
+  two reads: calls 3
+6. Side effects
+  over a source: is the source True
+  over a plain select: id equals the select's True ids True
+  delivered 0
+  function OVER a standalone side effect: delivered by head 0 by a read 3
+  its identity equals the one over the feeding stream: False
+  job node: as_source is DictSource dict_v1:units delivered by as_source 0
+  rows the node passed on 2 rows of its as_source 3
+7. Bound as an input: multi-pair join, stored columns, loaded job
+  join node  sync  rows 3
+  join node  async rows 3
+  plain join sync  rows 3
+  plain join async rows 3
+  ordinary   sync  rows 3
+  ordinary   async rows 3
+  one path: True | columns and types equal: True
+  loaded cache mode CacheMode.OFF
+  loaded fn: ids equal: True
+  loaded tot: ids equal: True
+  loaded join: ids equal: RuntimeError: a loaded OFF operator node holds no rows
+  loaded group: ids equal: RuntimeError: a loaded OFF operator node holds no rows
+  loaded batch: ids equal: RuntimeError: a loaded OFF operator node holds no rows
+  loaded merge: ids equal: RuntimeError: a loaded OFF operator node holds no rows
+  loaded sel: ids equal: RuntimeError: a loaded OFF operator node holds no rows
+  loaded join, LOG attached again: True
+  loaded group, LOG attached again: True
+  loaded batch, LOG attached again: True
+  loaded merge, LOG attached again: True
+  loaded sel, LOG attached again: True
+8. Join of two as_sources; as_source of a step over as_source
+  join of two: system-tag columns 4 -> as_source 2
+  same object: True
+9. Two authors, one default id; held rows
+  one id True | record ids equal False

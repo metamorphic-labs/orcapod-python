@@ -1,0 +1,59 @@
+Case 1: a single token per cell (a select of the units): kept
+  before  _source_x large_string
+           dict_v1:units::{"s":"m1","u":"a"}::x
+  after   _source_x large_string
+           dict_v1:units::{"s":"m1","u":"a"}::x
+Case 1 over a function node: its own result's token (random id)
+  before  _source_r large_string
+           rnd:0db60db7..:v0:python.function.v1::01a214a9..::r
+  after   _source_r large_string
+           rnd:0db60db7..:v0:python.function.v1::01a214a9..::r
+Case 2: a list of tokens per cell (GroupBy): fresh
+  before  _source_x large_list<item: large_string>
+           ['dict_v1:units::{"s":"m1","u":"a"}::x', 'dict_v1:units::{"s":"m1","u":"b"}::x']
+  after   _source_x large_string
+           derived_v1:grouped::arrow_v1:000002ab..::x
+Case 3: tags_as_data copy, and a null token: fresh; x beside it kept
+  before  _source_x large_string
+           dict_v1:units::{"s":"m1","u":"a"}::x
+  after   _source_x large_string
+           dict_v1:units::{"s":"m1","u":"a"}::x
+  after   _source_unit large_string
+           derived_v1:copied::arrow_v1:0000021c..::unit
+  before  _source_n large_string
+           None
+  after   _source_n large_string
+           derived_v1:raw::arrow_v1:00000221..::n
+A list DATA column with one token (the list came from a source): kept
+  after   _source_xs large_string
+           dict_v1:lists::row_0::xs
+Two origins in one row (Join): each column keeps its own source's token
+  after   _source_x large_string
+           dict_v1:units::{"s":"m1","u":"a"}::x
+  after   _source_dur large_string
+           dict_v1:sess::{"s":"m1"}::dur
+
+Effects downstream, kept against fresh
+  base entry ids       two stores equal: kept True  fresh True  | kept equals fresh True
+  operator row hash    two stores equal: kept False fresh True  | kept equals fresh False
+  stored input tokens  two stores equal: kept False fresh True  | kept equals fresh False
+  columns              two stores equal: kept True  fresh True  | kept equals fresh True
+  op columns           two stores equal: kept True  fresh True  | kept equals fresh True
+  content hash         two stores equal: kept True  fresh True  | kept equals fresh True
+  record ids           two stores equal: kept True  fresh True  | kept equals fresh True
+  as_source of sel     two stores equal: kept True  fresh True  | kept equals fresh True
+  input token type large_string
+
+Memoization: a second upstream store, one downstream store
+  kept  run 1: calls 2, rows in the select's cache 2
+  kept  run 2: calls 0, rows in the select's cache 4
+        as_source of that cache: RowIdentifierError
+  fresh run 1: calls 2, rows in the select's cache 2
+  fresh run 2: calls 0, rows in the select's cache 2
+        as_source of that cache: 2 rows
+
+Tracing a row computed from the as_source
+  kept  function node: ProvenanceInconsistencyError: node 'step': the stored entry's input token _source_r names 'rnd:..:v0:python.function.v1' '..', not the record its system tags name
+  kept  plain select: ProvenanceInconsistencyError: node 'step': the stored entry's input token _source_x names 'dict_v1:units' '{"s":"m1","u":"a"}', not the record its system tags name
+  fresh function node: trace of z at node step, for s='m1', u='a': 1 row matches / step (s='m1', u='a'): z = 2 /   plus v0.0 (body function_content_v1:996108c5), computed here, computed 2026-11-25 21:43:26 UTC on local, run 586e3423149f4f64, recorded 2026-11-25 21:43:26 UTC /   derived_v1:traced arrow_v1:.. r = None /     not read: the source's rows are not h
+  fresh plain select: trace of w at node step, for s='m1', u='a': 1 row matches / step (s='m1', u='a'): w = 0.55 /   half v0.0 (body function_content_v1:fa3ec4da), computed here, computed 2026-11-25 21:43:26 UTC on local, run 3e8060bb631e4f5c, recorded 2026-11-25 21:43:26 UTC /   derived_v1:traced arrow_v1:.. x = None /     not read: the source's rows are no
