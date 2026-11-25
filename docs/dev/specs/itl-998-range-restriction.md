@@ -1,6 +1,7 @@
 # ITL-998: restrict a SpiralDB read to a range of a column
 
-Status: proposal, no code. The decisions to approve are D1 to D13 (section 8).
+Status: proposal, no code. Section 8 says which of the decisions D1 to D13 are approved. Depends on ITL-1465
+(D2).
 
 `SpiralDBTableSource` restricts a read by equality (`where`) and `limit=`. A long table needs a window too,
 applied by SpiralDB before rows are transferred. A range is a restriction: it chooses rows of the same data and
@@ -54,11 +55,9 @@ Cases (each is a test):
 **D2: the chained comparison.** `where(start <= col("t") < stop)` is how a window is written in mathematics.
 Python evaluates it as `(start <= col("t")) and (col("t") < stop)`, and a non-empty `Condition` is true, so the
 result is `t < stop` and the lower bound is **silently lost** (confirmed by running it; `c1 and c2` likewise).
-`ColumnRef` refuses a truth value, `Condition` does not; the `col` docstring documents this. For a window it is
-the likely mistake and it reads the wrong rows with no error, so it should be refused before ranges ship:
-`Condition.__bool__` raises, and the few internal tests (`if not condition` in `types/condition.py`,
-`pipeline/restrictions.py` and `spiraldb_table_source.py`, plus whatever the type checker and tests find) use a
-property (`condition.is_empty`). It changes public behaviour (`if condition:`), so it needs approval.
+`ColumnRef` refuses a truth value, `Condition` does not. For a window it is the likely mistake, and it reads the
+wrong rows with no error. Approved, and a separate change: **ITL-1465** makes a `Condition`'s truth value an
+error. ITL-998 depends on it and does not contain it: ranges ship after it.
 
 ## 2. Bounds, column types and literals
 
@@ -104,9 +103,25 @@ for equality, so ranges add only `sp.lt`, `sp.lte`, `sp.gt` and `sp.gte`.
 
 [live] with the prototype: a `uint64` window returned exactly the rows computed locally from the whole table;
 with an equality, and with a range of a `uint32` column, the expected number of rows; a range with no match gave zero
-rows with the full schema. All four operators on a naive `timestamp[us]` gave the expected counts, a weak check:
-the column held one value. **Not shown live:** zoned timestamps, the other units, dates, signed integers, null
-values in a compared column. The opt-in conformance test must cover them before the PR is ready (section 6).
+rows with the full schema.
+
+[live] A conformance probe on throwaway tables, one per type, dropped afterwards: 23 of 23 stored and read back
+unchanged, 2,530 checks, all equal to the answer pyarrow gives on the same rows. It covered:
+
+- `uint8` to `uint64` and `int8` to `int64` at both ends and one inside; `s`, `ms`, `us` and `ns` timestamps, each
+  naive, in UTC and in a daylight-saving zone, before and after 1970; `date32`, `date64` and a `date64` holding
+  values that are not midnight; a null in the compared column (it met no comparison, whatever the operator).
+- The SDK alone: all four operators with each stored value as the bound. A
+  literal of another unit or zone was refused for every timestamp type.
+- Through the prototype: all four operators, equality, `between` (also of one value), `start == stop` and a
+  reversed window (no row), a range with one and with two equalities, an equality and a range on one column, two
+  ranges on one column, ranges on two columns in all 24 argument orders and chained, a range of two key columns,
+  four limits, an async read, and the identity. Both 01:30 of a daylight-saving overlap are two instants.
+
+**Not shown live:** a date key column, or more than a weak check of a timestamp one: all four operators on an existing
+naive `timestamp[us]` key gave the expected counts, but it held one value (SpiralDB creates no such key today,
+so the probe's were data columns), a `ns` bound between two microseconds through Orcapod (Python
+has none), and how much the service scans. Nothing differed from D5 or D6, so neither changes.
 
 **How it is pushed down.** The scan's `filter`, not `key_ranges=`: a filter works on any column and combines
 with equalities. [live] the scan returned only the window's rows. How much the service scans to find them could
@@ -139,7 +154,8 @@ returned.
   `SourceTooLargeError` after up to `max_rows` rows were handed on, so an async job can compute some rows first,
   as with an equality today. The alternative is to count the matching keys up to `max_rows + 1` first: the SDK
   has no filtered count (`Scan.count_rows` wants splits; a keyed scan has none [live]), so that is a second scan
-  on every read. **D9:** keep today's rule; the error names the window and `limit=`.
+  on every read. **D9:** today's rule. The error names the window (`source.condition`) and the cap, and says how to
+  narrow it or raise `max_rows`.
 - **`limit`** counts matching rows, in key order. [live] the limited range equals the first rows of the full
   read that match. A `float16` equality in the same condition is compared locally, and then the limit too (as
   today); the range is still sent.
@@ -147,7 +163,7 @@ returned.
 - **`head()` and the preview** read the first `n` matching rows in one bounded scan, without `max_rows`. The
   note reads `first 2 matching rows (where timestamp >= ..., timestamp < ...); the table has about N rows`: the
   count is named as the table's. When fewer than `n` match, the total is exact and the note says `all k rows`.
-  **D10:** no count of matching rows.
+  **D10:** the table's size, labelled as such; no count of matching rows.
 - **Zero rows.** `all 0 rows`, no error, with a table of the same schema as any read [live]. Asking for the
   schema, keys or hashes reads no row.
 - **`check_for_new_data`** compares table versions (metadata only), so a commit outside the window moves the
@@ -185,7 +201,7 @@ same 488 passes and 2 failures there as on `main`. Two other drafts of ITL-1457,
 it in `spiraldb_connector.py`; the conflict is with the prototype's scan lines, so whichever lands second is
 rebased.
 
-**D11, merge order.** 555; 558; **ITL-998**; 559; 562; 566; 570; 560; 571; 567 last, rebuilt on the rest (it
+**D11, merge order.** ITL-1465 first (ITL-998 depends on it). Then 555; 558; **ITL-998**; 559; 562; 566; 570; 560; 571; 567 last, rebuilt on the rest (it
 rewrites `_whole_table`). ITL-998 is independent of the stack and need not wait for it: if 558 is slow, it goes
 first. Reason to place it early: it is small, and it changes what the stack's tests read, so the stack tests a
 window once rather than being retested. If 553 or 554 is chosen over 555, ITL-998 goes after it.
@@ -203,7 +219,7 @@ several data columns):
    non-key data column with nulls, first and last key column.
 3. Types: eight integer widths, four timestamp units naive and zoned (both 01:30 of a daylight-saving overlap),
    `date32`, `date64`; each refusal of section 2, asserting that no scan ran.
-4. Refused trees: each form of section 1; `start <= col(c) < stop` and `c1 and c2` raise (D2).
+4. Refused trees: each form of section 1; `start <= col(c) < stop` given to `where` raises (from ITL-1465).
 5. Identity: hashes, source id, record ids; chained `where` and the constructor are one mechanism; the original
    source is unchanged.
 6. Cap, limit (with a local `float16` equality too), head, preview note, zero rows, `check_for_new_data`, stale
@@ -219,7 +235,8 @@ Opt-in:
   with an equality equal the local filter of the full read; record ids a subset; reversed arguments; `limit`;
   `head`; an empty window.
 - **Conformance** (`SPIRAL_INTEGRATION_TESTS`, which writes to its own dataset): every type of section 2 and
-  nulls, against the answer pyarrow gives. This proves the fake. **D12:** required before ready.
+  nulls, against the answer pyarrow gives, as a kept form of the probe (section 2), run on the final code before
+  ready. The fake runs the same cases, so a difference between fake and service shows. **D12.**
 
 ## 7. What of the sketch to keep
 
@@ -244,23 +261,23 @@ Change:
 - `_checked_conditions` is then unused: delete it and its test import.
 - The sentence "a range of the first key columns ... is the cheapest to read" was not measured (section 2):
   remove it.
-- Add D2, docs (`docs/concepts/sources.md`: the form, half-open, the types), the changelog fragment and the
+- Add docs (`docs/concepts/sources.md`: the form, half-open, the types), the changelog fragment and the
   tests of section 6 it lacks (permutations, several columns, roles, jobs, staleness).
 
 ## 8. Decisions
 
-| # | Question | Recommendation |
-|---|---|---|
-| D1 | Form | Comparisons in `where()`, as in `filter`; no `window=` |
-| D2 | `a <= col(c) < b` silently drops `a` | Make a `Condition`'s truth value an error (public change), in this PR or just before; if declined, a warning in the docs of `where` |
-| D3 | Ranges that cannot hold together | Kept, zero rows; two different equalities stay refused |
-| D4 | Ends | Operators as written; half-open is the documented window; `between` stays closed |
-| D5 | Column types | Integers, timestamps, dates; refuse floats, strings, binary, booleans and the rest |
-| D6 | A bound the type cannot hold exactly | Refuse with `TypeError`; never round or clamp |
-| D7 | Equality of restrictions | By statement; no simplification, so `t >= 3` and `t > 2` differ |
-| D8 | Order inside the saved config | Leave in the order given (nothing hashes it) |
-| D9 | Row cap with a range | No pre-count; the cap applies to matching rows while reading, as for equality |
-| D10 | Size shown by `head` | The table's count, named as such; no count of matches |
-| D11 | Merge order | 555, 558, ITL-998, then the rest of the stack with 567 last; ITL-998 may go first |
-| D12 | Live proof of the types not shown yet | Conformance run required before ready |
-| D13 | Scope | `SpiralDBTableSource` only; other sources stay with ITL-1219 |
+| # | Question | Recommendation | State |
+|---|---|---|---|
+| D1 | Form | Comparisons in `where()`, as in `filter`; no `window=` | Approved |
+| D2 | `a <= col(c) < b` silently drops `a` | A `Condition`'s truth value is an error; not in this change, which depends on it | Approved, as ITL-1465 |
+| D3 | Ranges that cannot hold together | Kept, zero rows; two different equalities stay refused | Open |
+| D4 | Ends | Operators as written; half-open is the documented window; `between` stays closed | Fair in principle; explicit approval pending |
+| D5 | Column types | Integers, timestamps, dates; refuse floats, strings, binary, booleans and the rest | Fair in principle; explicit approval pending |
+| D6 | A bound the type cannot hold exactly | Refuse with `TypeError`; never round or clamp | Fair in principle; explicit approval pending |
+| D7 | Equality of restrictions | By statement; no simplification, so `t >= 3` and `t > 2` differ | Open |
+| D8 | Order inside the saved config | Leave in the order given (nothing hashes it) | Open |
+| D9 | Row cap with a range | Today's rule, no pre-count; a clear error naming the window and how to narrow it or raise the cap | Approved |
+| D10 | Size shown by `head` | The table's size, labelled; no count of matches | Approved |
+| D11 | Merge order | ITL-1465 before ITL-998; then 555, 558, ITL-998 and the rest of the stack with 567 last; ITL-998 may go before 555 and 558 | Open |
+| D12 | Live proof of the types | Throwaway tables now; the kept conformance test on the final code before ready | Approved; probe run, section 2 |
+| D13 | Scope | `SpiralDBTableSource` only; other sources stay with ITL-1219 | Open |
