@@ -39,7 +39,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from typing_extensions import override
 
-from orcapod.core.sources.display_names import node_display_names
+from orcapod.core.sources.display_names import class_dicts, node_display_names
 from orcapod.types.provenance import Highlight
 from orcapod.utils.in_development import warn_in_development
 
@@ -88,6 +88,7 @@ class _Node:
     mark: str = ""
     asked: str = ""
     shown: str = ""
+    keeps: tuple[str, ...] = ()
 
     @property
     def text(self) -> str:
@@ -110,6 +111,13 @@ class _Edge:
     target: int
     folded: tuple[str, ...] = ()
     highlighted: bool = False
+    # The stream only decides which rows of the target's other inputs pass (ITL-1455).
+    constrains: bool = False
+
+    @property
+    def key(self) -> tuple[int, int, bool]:
+        """What tells the edge apart: one stream can be both kinds of input."""
+        return (self.source, self.target, self.constrains)
 
 
 # ---------------------------------------------------------------------------
@@ -195,6 +203,73 @@ def _collapsible(node: Any) -> bool:
     )
 
 
+def _upstream_labels(node: Any, label_of: Mapping[int, str]) -> list[str | None]:
+    """The label of each of an operator node's inputs, in argument order.
+
+    Args:
+        node: The node.
+        label_of: The label of each node of the graph, by the node's ``id()``.
+
+    Returns:
+        One label per input; ``None`` for an input that is not a node of the graph.
+    """
+    return [label_of.get(id(stream)) for stream in node.upstreams]
+
+
+def _declared(producer: Any, name: str) -> Any:
+    """What an operator's class declares, read without running any code of the class.
+
+    Args:
+        producer: The operator, or ``None``.
+        name: The class attribute.
+
+    Returns:
+        The value the class or its nearest base holds, as stored; ``None`` for none.
+    """
+    for namespace in class_dicts(type(producer)):
+        if name in namespace:
+            return namespace[name]
+    return None
+
+
+def _input_roles(
+    node: Any, upstream_labels: Sequence[str], label_of: Mapping[int, str]
+) -> list[tuple[str, bool]]:
+    """A node's inputs, each with whether it only constrains the others (ITL-1455).
+
+    Which input positions constrain is declared by the operator's class
+    (``CONSTRAINING_INPUTS``). A stream that is both kinds of input is listed twice.
+
+    Args:
+        node: The node.
+        upstream_labels: The labels of the nodes it reads from, in drawing order.
+        label_of: The label of each node of the graph, by the node's ``id()``.
+
+    Returns:
+        The label and role of each input, in the order of ``upstream_labels``.
+    """
+    plain = [(label, False) for label in upstream_labels]
+    if node.node_type != "operator":
+        return plain
+    producer = getattr(node, "producer", None)
+    positions = _declared(producer, "CONSTRAINING_INPUTS")
+    if type(positions) is not tuple or not positions:
+        return plain
+    ordered = _upstream_labels(node, label_of)
+    if not all(type(i) is int and 0 <= i < len(ordered) for i in positions):
+        return plain
+    if set(ordered) != set(upstream_labels):
+        # An input is missing (a loaded graph that lost a node): positions say nothing.
+        return plain
+    roles = {(label, i in positions) for i, label in enumerate(ordered)}
+    return [
+        (label, constrains)
+        for label in upstream_labels
+        for constrains in (False, True)
+        if (label, constrains) in roles
+    ]
+
+
 def _run_facts(summary: NodeRunSummary | None) -> tuple[tuple[str, str], ...]:
     """What the job's last run did with a node's rows, from its ``NodeRunSummary``."""
     if summary is None:
@@ -257,6 +332,37 @@ def _failed_rows(node: Any) -> int:
     )
 
     return _last_run_failed(node) if isinstance(node, FunctionJobNode) else 0
+
+
+def _constraint_fact(
+    node: Any, label_of: Mapping[int, str], by_label: Mapping[str, Any]
+) -> tuple[str, str] | None:
+    """What a node's constraining inputs do, from its inputs' predicted tag columns.
+
+    Args:
+        node: An operator node with a constraining input.
+        label_of: The label of each node of the graph, by the node's ``id()``.
+        by_label: The nodes, by label.
+
+    Returns:
+        The tags the rows match on, or ``None`` when the operator does not declare that
+        it matches on the shared tags, or the columns are not available (a loaded node
+        whose saved types cannot be restored).
+    """
+    if _declared(node.producer, "CONSTRAINT_MATCHES_SHARED_TAGS") is not True:
+        return None
+    try:
+        tag_keys = [
+            tuple(by_label[label].output_schema()[0])
+            for label in _upstream_labels(node, label_of)
+            if label is not None
+        ]
+    except ValueError:
+        return None
+    shared = set(tag_keys[0]).intersection(*tag_keys[1:])
+    if not shared:
+        return ("keeps every row", "the inputs share no tag column")
+    return ("keeps the rows that match on", ", ".join(sorted(shared)))
 
 
 def _topological_labels(
@@ -325,12 +431,22 @@ def _build_model(
     for names in (*preds.values(), *succs.values()):
         names.sort()
 
+    label_of = {id(node): label for label, node in by_label.items()}
+    roles = {
+        label: _input_roles(node, preds[label], label_of)
+        for label, node in by_label.items()
+    }
+
     folded: set[str] = set()
     if collapse:
+        # A step with a constraining input is never folded: the constraint would be
+        # drawn as data.
         folded = {
             label
             for label, node in by_label.items()
-            if _collapsible(node) and len(succs[label]) == 1
+            if _collapsible(node)
+            and len(succs[label]) == 1
+            and not any(constrains for _, constrains in roles[label])
         }
         if highlight is not None:
             # The node the question was asked at is always shown, and so is a
@@ -359,12 +475,15 @@ def _build_model(
             found.extend(ends(upstream, (label, *via)))
         return found
 
-    edges: dict[tuple[int, int], tuple[str, ...]] = {}
+    edges: dict[tuple[int, int, bool], tuple[str, ...]] = {}
+    direct: set[tuple[int, int, bool]] = set()
     folded_into: dict[str, list[str]] = {}
     for label in shown:
-        for upstream in preds[label]:
+        for upstream, constrains in roles[label]:
             for end, via in ends(upstream, ()):
-                key = (index[end], index[label])
+                key = (index[end], index[label], constrains)
+                if not via:
+                    direct.add(key)
                 edges[key] = tuple(dict.fromkeys((*edges.get(key, ()), *via)))
                 folded_into.setdefault(label, []).extend(via)
 
@@ -394,6 +513,11 @@ def _build_model(
             # draws the graph and says why the columns are missing.
             tag_schema, data_schema = {}, {}
             facts = (*facts, ("schema", f"not available: {error}"))
+        keeps: tuple[str, str] | None = None
+        if any(constrains for _, constrains in roles[label]):
+            keeps = _constraint_fact(node, label_of, by_label)
+            if keeps is not None:
+                facts = (*facts, keeps)
         steps = list(dict.fromkeys(folded_into.get(label, [])))
         if steps:
             facts = (*facts, ("folded steps", ", ".join(steps)))
@@ -409,6 +533,7 @@ def _build_model(
                 status="" if highlight is not None else statuses.get(label, ""),
                 facts=facts,
                 shown=source_text,
+                keeps=keeps or (),
                 highlighted=highlight is not None and label in highlight.nodes,
                 mark="" if highlight is None else highlight.mark(label),
                 asked=highlight.asked_text or "asked here"
@@ -417,13 +542,13 @@ def _build_model(
             )
         )
 
-    def lit(source: int, target: int, via: tuple[str, ...]) -> bool:
+    def lit(key: tuple[int, int, bool], via: tuple[str, ...]) -> bool:
         """Whether a displayed edge is emphasized: some highlighted path leads from
         its start to its end through the steps folded into it (several folded paths
         merge into one displayed edge, so their labels are not one chain)."""
         if highlight is None:
             return False
-        start, end = shown[source], shown[target]
+        start, end = shown[key[0]], shown[key[1]]
         if not via:
             return (start, end) in highlight.edges
         inner = set(via)
@@ -433,7 +558,7 @@ def _build_model(
             for upstream, downstream in highlight.edges:
                 if upstream != current:
                     continue
-                if downstream == end:
+                if downstream == end and (current != start or key in direct):
                     return True
                 if downstream in inner and downstream not in seen:
                     seen.add(downstream)
@@ -445,9 +570,10 @@ def _build_model(
             source=source,
             target=target,
             folded=via,
-            highlighted=lit(source, target, via),
+            highlighted=lit((source, target, constrains), via),
+            constrains=constrains,
         )
-        for (source, target), via in sorted(edges.items())
+        for (source, target, constrains), via in sorted(edges.items())
     ]
     return nodes, edge_list
 
@@ -468,6 +594,9 @@ _MAX_W = 260.0
 _LAYER_GAP = 56.0
 _NODE_GAP = 22.0
 _DUMMY_GAP = 10.0
+# The free lane kept beside a box on the side where a constraining edge enters it.
+_LANE = 20.0
+_LANE_TURN = 12.0  # how far before the box's middle the edge turns towards it
 _MARGIN = 12.0
 _SWEEPS = 12
 _PLACEMENT_ROUNDS = 8
@@ -590,7 +719,7 @@ def _layout(
     for node in nodes:
         width, height = _node_size(node)
         boxes[node.index] = _Box(node.index, layer[node.index], width, height)
-    chains: dict[tuple[int, int], list[int]] = {}
+    chains: dict[tuple[int, int, bool], list[int]] = {}
     links: dict[int, list[int]] = {}
     back: dict[int, list[int]] = {}
     dummy = -1
@@ -601,7 +730,7 @@ def _layout(
             chain.append(dummy)
             dummy -= 1
         chain.append(edge.target)
-        chains[(edge.source, edge.target)] = chain
+        chains[edge.key] = chain
         for upper, lower in zip(chain, chain[1:]):
             links.setdefault(upper, []).append(lower)
             back.setdefault(lower, []).append(upper)
@@ -641,13 +770,38 @@ def _layout(
             best, best_count = [list(row) for row in layers], count
     layers = best
 
+    # The side of each box a constraining edge enters it from (-1.0 or 1.0): where its
+    # last point lies among the other inputs' in the layer before, so that it does not
+    # cross them; after them when it does not differ. The lane beside the box is kept
+    # free there.
+    sides: dict[int, float] = {}
+    if any(edge.constrains for edge in edges):
+        order = {box.key: j for row in layers for j, box in enumerate(row)}
+        arriving: dict[int, dict[bool, list[int]]] = {}
+        for edge in edges:
+            arriving.setdefault(edge.target, {False: [], True: []})[
+                edge.constrains
+            ].append(order[chains[edge.key][-2]])
+        for target, by_role in arriving.items():
+            if by_role[True]:
+                data, limits = by_role[False], by_role[True]
+                before = bool(data) and sum(limits) / len(limits) < sum(data) / len(
+                    data
+                )
+                sides[target] = -1.0 if before else 1.0
+
+    def lane(box: _Box, side: float) -> float:
+        """The room kept free beside a box, on the given side."""
+        return _LANE if sides.get(box.key) == side else 0.0
+
     def extent(box: _Box) -> float:
         return (box.height if across else box.width) if box.key >= 0 else 0.0
 
     def separation(row: Sequence[_Box], j: int) -> float:
         both_nodes = row[j - 1].key >= 0 and row[j].key >= 0
         gap = _NODE_GAP if both_nodes else _DUMMY_GAP
-        return (extent(row[j - 1]) + extent(row[j])) / 2 + gap
+        lanes = lane(row[j - 1], 1.0) + lane(row[j], -1.0)
+        return (extent(row[j - 1]) + extent(row[j])) / 2 + gap + lanes
 
     for row in layers:
         cursor = 0.0
@@ -682,10 +836,16 @@ def _layout(
                 wanted.append(sum(found) / len(found) if found else box.pos)
             place(layers[i], wanted)
 
-    lowest = min((box.pos - extent(box) / 2 for box in boxes.values()), default=0.0)
+    lowest = min(
+        (box.pos - extent(box) / 2 - lane(box, -1.0) for box in boxes.values()),
+        default=0.0,
+    )
     for box in boxes.values():
         box.pos -= lowest
-    breadth = max((box.pos + extent(box) / 2 for box in boxes.values()), default=0.0)
+    breadth = max(
+        (box.pos + extent(box) / 2 + lane(box, 1.0) for box in boxes.values()),
+        default=0.0,
+    )
 
     depth = [
         max(
@@ -725,7 +885,7 @@ def _layout(
 
     routed: list[tuple[_Edge, list[tuple[float, float]]]] = []
     for edge in edges:
-        chain = chains[(edge.source, edge.target)]
+        chain = chains[edge.key]
         points = [node_end(edge.source, leaving=True)]
         for key in chain[1:-1]:
             box = boxes[key]
@@ -733,7 +893,17 @@ def _layout(
             points.extend(
                 [point(start, box.pos), point(start + depth[box.layer], box.pos)]
             )
-        points.append(node_end(edge.target, leaving=False))
+        if edge.constrains:
+            # Down the lane beside the box, to the corner where it turns, then in.
+            box = boxes[edge.target]
+            side = sides[edge.target]
+            middle = starts[box.layer] + depth[box.layer] / 2
+            edge_of_box = box.pos + side * extent(box) / 2
+            points.append(point(starts[box.layer], edge_of_box + side * _LANE * 0.8))
+            points.append(point(middle, edge_of_box + side * _LANE * 0.8))
+            points.append(point(middle, edge_of_box))
+        else:
+            points.append(node_end(edge.target, leaving=False))
         routed.append((edge, points))
 
     breadth_total = breadth + 2 * _MARGIN
@@ -824,6 +994,34 @@ def _edge_path(points: Sequence[tuple[float, float]], across: bool) -> str:
     return " ".join(out)
 
 
+def _side_path(points: Sequence[tuple[float, float]], across: bool) -> str:
+    """The path of a constraining edge: to the lane beside its box, along it, and in.
+
+    Its last three points are the lane's start, the corner and the box's side.
+    """
+    (cx, cy), (x, y) = points[-2:]
+    turn = (cx - _LANE_TURN, cy) if across else (cx, cy - _LANE_TURN)
+    return (
+        f"{_edge_path(points[:-2], across)} L{_num(turn[0])},{_num(turn[1])} "
+        f"Q{_num(cx)},{_num(cy)} {_num(x)},{_num(y)}"
+    )
+
+
+def _side_arrow_head(
+    corner: tuple[float, float], end: tuple[float, float], across: bool
+) -> str:
+    """A filled triangle pointing from ``corner`` to ``end``, its tip at ``end``."""
+    x, y = end
+    half = _ARROW / 2
+    if across:
+        back = y + (_ARROW if corner[1] > y else -_ARROW)
+        corners = [(x - half, back), (x, y), (x + half, back)]
+    else:
+        back = x + (_ARROW if corner[0] > x else -_ARROW)
+        corners = [(back, y - half), (x, y), (back, y + half)]
+    return "M" + " L".join(f"{_num(a)},{_num(b)}" for a, b in corners) + " Z"
+
+
 def _arrow_head(end: tuple[float, float], across: bool) -> str:
     """A filled triangle pointing along the layer axis, its tip at ``end``."""
     x, y = end
@@ -841,17 +1039,22 @@ def _clip(text: str, width: float, char_width: float) -> str:
     return text if len(text) <= room else text[: max(room - 1, 1)] + "…"
 
 
+def _keeps(node: _Node) -> str:
+    """What the node's constraining inputs keep, or ``""``."""
+    return ": ".join(node.keeps)
+
+
 def _schema_text(pairs: Sequence[tuple[str, str]]) -> str:
     return ", ".join(f"{name}: {tp}" for name, tp in pairs) or "none"
 
 
-def _tooltip(node: _Node, inputs: Sequence[str]) -> str:
+def _tooltip(node: _Node, inputs: str) -> str:
     """The node's details as plain text, shown on hover over the inline picture."""
     lines = [f"{node.text} ({node.kind_line})"]
     lines.append(f"tags: {_schema_text(node.tag_schema)}")
     lines.append(f"data: {_schema_text(node.data_schema)}")
     if inputs:
-        lines.append(f"inputs: {', '.join(inputs)}")
+        lines.append(f"inputs: {inputs}")
     lines.extend(f"{name}: {text}" for name, text in node.facts)
     return "\n".join(lines)
 
@@ -859,7 +1062,7 @@ def _tooltip(node: _Node, inputs: Sequence[str]) -> str:
 def _svg(
     title: str,
     nodes: Sequence[_Node],
-    inputs: Mapping[int, Sequence[str]],
+    inputs: Mapping[int, str],
     layout: _Layout,
     across: bool,
     standalone: bool,
@@ -870,7 +1073,7 @@ def _svg(
     Args:
         title: The diagram's title, the picture's accessible name.
         nodes: The nodes.
-        inputs: The labels of each node's inputs, by node index.
+        inputs: Each node's inputs as text, by node index.
         layout: Where the nodes and edges are drawn.
         across: Whether the layers advance left to right.
         standalone: Draw it for an image of its own: on a light background, in a fixed
@@ -918,6 +1121,19 @@ def _svg(
         if edge.folded:
             tip += f" (through {', '.join(edge.folded)})"
         dash = ' stroke-dasharray="5 3"' if edge.folded else ""
+        if edge.constrains:
+            tip += ": only decides which rows pass"
+            note = _keeps(nodes[edge.target])
+            if note:
+                tip += f"\n{note}"
+            # Told from a folded data edge by the pattern too; folded, by both.
+            pattern = "8 3 2 3" if edge.folded else "3 3"
+            dash = f' class="op-dag-constraint" stroke-dasharray="{pattern}"'
+            path = _side_path(points, across)
+            head = _side_arrow_head(points[-2], points[-1], across)
+        else:
+            path = _edge_path(points, across)
+            head = _arrow_head(points[-1], across)
         accent = (
             f' class="op-dag-highlight" stroke="{_HIGHLIGHT_COLOUR}" '
             'stroke-opacity="1" stroke-width="2.6"'
@@ -928,8 +1144,8 @@ def _svg(
         parts.append(
             f'<g data-source="{edge.source}" data-target="{edge.target}"{accent}>'
             f"<title>{_escape(tip)}</title>"
-            f'<path d="{_edge_path(points, across)}"{dash}/>'
-            f'<path d="{_arrow_head(points[-1], across)}" fill="{head_fill}" '
+            f'<path d="{path}"{dash}/>'
+            f'<path d="{head}" fill="{head_fill}" '
             'stroke="none"/></g>'
         )
     parts.append('</g><g class="op-dag-nodes">')
@@ -959,7 +1175,7 @@ def _svg(
             f'<g class="op-dag-node{emphasis}" data-index="{node.index}" tabindex="0" '
             f'role="button" aria-label="{_escape(label)}" '
             f'transform="translate({_num(x)},{_num(y)})">'
-            f"<title>{_escape(_tooltip(node, inputs.get(node.index, ())))}</title>"
+            f"<title>{_escape(_tooltip(node, inputs.get(node.index, '')))}</title>"
             f'<rect width="{_num(w)}" height="{_num(h)}" rx="{_num(radius)}" '
             f'fill="{colour}" fill-opacity="0.14" stroke="{stroke}" '
             f'stroke-width="{stroke_width}"{dash}/>'
@@ -1009,13 +1225,13 @@ def _svg(
     return "".join(parts)
 
 
-def _table(nodes: Sequence[_Node], inputs: Mapping[int, Sequence[str]]) -> str:
+def _table(nodes: Sequence[_Node], inputs: Mapping[int, str]) -> str:
     """Every node with its inputs, schema and run facts: shown where scripts do not run."""
     rows = "".join(
         "<tr>"
         f"<td><b>{_escape(node.text)}</b></td>"
         f"<td>{_escape(node.kind_line)}</td>"
-        f"<td>{_escape(', '.join(inputs.get(node.index, ())))}</td>"
+        f"<td>{_escape(inputs.get(node.index, ''))}</td>"
         f"<td>{_escape(_schema_text(node.tag_schema))}</td>"
         f"<td>{_escape(_schema_text(node.data_schema))}</td>"
         f"<td>{_escape('; '.join(f'{n}: {t}' for n, t in node.facts))}</td>"
@@ -1090,11 +1306,24 @@ def _asset(name: str) -> str:
     return _compact(text, css=name.endswith(".css"))
 
 
-def _inputs(nodes: Sequence[_Node], edges: Sequence[_Edge]) -> dict[int, list[str]]:
-    """The drawn names of each node's inputs, by node index, in edge order."""
-    inputs: dict[int, list[str]] = {}
+def _inputs(nodes: Sequence[_Node], edges: Sequence[_Edge]) -> dict[int, str]:
+    """Each node's inputs as text, by node index: drawn names in edge order.
+
+    The inputs that only constrain follow the others: ``a; constrained by b``.
+    """
+    data: dict[int, list[str]] = {}
+    limits: dict[int, list[str]] = {}
     for edge in edges:
-        inputs.setdefault(edge.target, []).append(nodes[edge.source].text)
+        names = limits if edge.constrains else data
+        names.setdefault(edge.target, []).append(nodes[edge.source].text)
+    inputs: dict[int, str] = {}
+    for target in dict.fromkeys(edge.target for edge in edges):
+        parts: list[str] = []
+        if target in data:
+            parts.append(", ".join(data[target]))
+        if target in limits:
+            parts.append(f"constrained by {', '.join(limits[target])}")
+        inputs[target] = "; ".join(parts)
     return inputs
 
 
@@ -1241,8 +1470,8 @@ class PipelineDiagram:
         """
         return f"{self._kind.capitalize()} {self._name!r}"
 
-    def _inputs(self) -> dict[int, list[str]]:
-        """The labels of each node's inputs, in edge order."""
+    def _inputs(self) -> dict[int, str]:
+        """Each node's inputs as text, by node index."""
         return _inputs(self._nodes, self._edges)
 
     def to_dict(self) -> dict[str, Any]:
@@ -1260,7 +1489,10 @@ class PipelineDiagram:
             a source node whose bound source has an assigned label also has ``text``, the
             name drawn, and the fact ``source id``;
             each edge has ``source`` and ``target`` (node indices) and ``folded``
-            (the labels of the steps folded into it). With a highlight, every node and
+            (the labels of the steps folded into it), and ``constrains`` (``True``) when
+            the stream only decides which rows of the other inputs pass (``SemiJoin``'s
+            right input); a stream that is both kinds of input of a node has two edges.
+            With a highlight, every node and
             edge also has ``highlighted``, and the model has the highlight's ``note``.
         """
         return self._model(self._nodes, self._edges)
@@ -1303,7 +1535,13 @@ class PipelineDiagram:
                 for node in nodes
             ],
             "edges": [
-                {"source": e.source, "target": e.target, "folded": list(e.folded)}
+                {
+                    "source": e.source,
+                    "target": e.target,
+                    "folded": list(e.folded),
+                    # Only where the stream constrains the other inputs (ITL-1455).
+                    **({"constrains": True} if e.constrains else {}),
+                }
                 for e in edges
             ],
         }
@@ -1317,7 +1555,8 @@ class PipelineDiagram:
             A title line, then ``  <name> (<kind> · <detail> · <status>) <- <inputs>``
             per node, in topological order with ties broken by label; the name is the
             bound source's assigned label for a source that has one, else the node's
-            label. With a
+            label. Inputs that only constrain the others follow them
+            (``<- a; constrained by b``). With a
             highlight, a line with its note follows the title, no status is shown, each
             highlighted node's line starts with ``*`` and the node the question was
             asked at with ``>`` (and ends with ``[traced from here]`` or
@@ -1340,7 +1579,7 @@ class PipelineDiagram:
             if node.asked:
                 line += f" [{node.asked}]"
             if node.index in inputs:
-                line += " <- " + ", ".join(inputs[node.index])
+                line += " <- " + inputs[node.index]
             lines.append(line)
         # A lone surrogate cannot be printed or saved as UTF-8: shown as U+FFFD.
         return _SURROGATE.sub("\ufffd", "\n".join(lines))
