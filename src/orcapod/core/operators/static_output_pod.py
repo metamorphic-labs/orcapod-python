@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import logging
 from abc import abstractmethod
@@ -515,10 +516,10 @@ class StaticOutputOperatorPod(TraceableBase):
         if rows:
             # Kept as Arrow chunks, on local disk when large (ITL-1464): the table
             # ``_materialize_to_stream`` builds.
-            chunks = RowChunks()
-            for tag, data in rows:
-                chunks.add(tag, data)
-            return chunks.output_stream()
+            with contextlib.closing(RowChunks()) as chunks:
+                for tag, data in rows:
+                    chunks.add(tag, data)
+                return chunks.output_stream()
         return StaticOutputOperatorPod._zero_rows_in_row_order(result)
 
     @staticmethod
@@ -1084,19 +1085,19 @@ class StaticOutputOperatorPod(TraceableBase):
                     f"input_pipeline_hashes length ({len(input_pipeline_hashes)}) "
                     f"must match inputs length ({len(inputs)})"
                 )
-            all_rows = await asyncio.gather(*(collect_row_chunks(ch) for ch in inputs))
-            if not all(rows.num_rows for rows in all_rows):
-                # Every barrier operator that exists gives no rows when an input has
-                # none. The typed empty stream the sync path returns needs a schema
-                # the channels do not carry (ITL-858), so nothing is emitted (ITL-865).
-                return
-            streams = [
-                rows.input_stream(pipeline_hash)
-                for rows, pipeline_hash in zip(all_rows, input_pipeline_hashes)
-            ]
-            result = self.static_process(*streams)
-            for tag, data in rows_once(result):
-                await output.send((tag, data))
+            async with collected_row_chunks(inputs) as all_rows:
+                if not all(rows.num_rows for rows in all_rows):
+                    # Every barrier operator that exists gives no rows when an input has
+                    # none. The typed empty stream the sync path returns needs a schema
+                    # the channels do not carry (ITL-858), so nothing is emitted (ITL-865).
+                    return
+                streams = [
+                    rows.input_stream(pipeline_hash)
+                    for rows, pipeline_hash in zip(all_rows, input_pipeline_hashes)
+                ]
+                result = self.static_process(*streams)
+                for tag, data in rows_once(result):
+                    await output.send((tag, data))
         finally:
             await output.close()
 
@@ -1322,7 +1323,8 @@ class RowChunks:
     same table. Rows whose columns disagree raise ``pyarrow.ArrowInvalid`` as there,
     and as there only when the table is asked for (``row_table``), never when a row
     is added; the message's table index is then the row's place in its chunk, or the
-    chunk's place.
+    chunk's place. Once a chunk could not be built, no later row is kept and every read
+    raises that error; a chunk is never built again.
 
     Sealed chunks are held by a ``RowSpool``: in memory up to
     ``KEPT_ROWS_MEMORY_BYTES``, beyond that in a private temporary file read back
@@ -1337,43 +1339,75 @@ class RowChunks:
 
     def __init__(self) -> None:
         # Sealed chunks: in memory up to the spool's limit, then on local disk, read
-        # back memory-mapped (``kept_rows``), so a large output is not process memory.
-        self._spool = RowSpool(memory_bytes=KEPT_ROWS_MEMORY_BYTES)
-        self._names: list[str] | None = None
+        # back memory-mapped, so a large output is not process memory.
+        self._spool: RowSpool = RowSpool(memory_bytes=KEPT_ROWS_MEMORY_BYTES)
         self._schema: pa.Schema | None = None
         self._context_chunks: list[pa.Array[Any]] = []  # pyright: ignore[reportExplicitAny]  # any array
         self._pending: list[tuple[TagProtocol, DataProtocol]] = []
         self._tag_keys: tuple[str, ...] = ()
         self._data_tags: tuple[str, ...] = ()
         self._first_context_key: str | None = None
+        self._failure: Exception | None = None
         self.num_rows: int = 0
-        self._unsealable: bool = False
 
     def add(self, tag: TagProtocol, data: DataProtocol) -> None:
-        """Keep one row, after every row added before it."""
-        if self.num_rows == 0:
+        """Keep one row, after every row added before it.
+
+        Nothing of the row is read until its chunk is built.
+
+        Raises:
+            MemoryError: If a full chunk cannot be built for want of memory.
+            OSError: If a full chunk cannot be kept: no room on the local disk.
+        """
+        self.num_rows += 1
+        if self._failure is not None:
+            # The rows can no longer make a table: ``row_table`` raises, so none is kept.
+            return
+        self._pending.append((tag, data))
+        if len(self._pending) >= ROW_CHUNK_ROWS:
+            try:
+                self._seal()
+            except (MemoryError, OSError):
+                # The process, not the rows, failed: the run ends here.
+                raise
+            except Exception:  # noqa: BLE001  # raised by ``row_table``
+                # Rows that cannot make one table (columns that disagree). Receiving
+                # a row never raised for them: the error belongs to the read of the
+                # table, which a barrier whose other input is empty never makes.
+                pass
+
+    def _seal(self) -> None:
+        """Build the pending rows into one chunk and let the pairs go.
+
+        All or nothing, and never twice: after a failure nothing is built or given
+        again (every read raises the failure), and the rows kept so far are let go,
+        their files with them.
+        """
+        if self._failure is not None:
+            raise self._failure
+        if not self._pending:
+            return
+        try:
+            chunk, contexts_of_rows = self._build_chunk(self._pending)
+            self._spool.append(chunk)
+            self._context_chunks.append(contexts_of_rows)
+            self._pending = []
+        except Exception as error:
+            self._failure = error
+            self.close()
+            raise
+
+    def _build_chunk(
+        self, rows: list[tuple[TagProtocol, DataProtocol]]
+    ) -> tuple[pa.Table, pa.Array[Any]]:  # pyright: ignore[reportExplicitAny]  # any array
+        """Build rows into a table in the first chunk's columns, and their contexts."""
+        from orcapod.utils import arrow_utils
+
+        if self._schema is None:
+            tag, data = rows[0]
             self._tag_keys = tuple(tag.keys())
             self._data_tags = data_tag_names(tag.keys(), data.keys())
             self._first_context_key = data.data_context_key
-        self._pending.append((tag, data))
-        self.num_rows += 1
-        if len(self._pending) >= ROW_CHUNK_ROWS and not self._unsealable:
-            try:
-                self._seal()
-            except Exception:
-                # Rows that cannot make one table (columns that disagree). Receiving
-                # a row never raised: the error belongs to the read of the table
-                # (``row_table``), which a barrier whose other input is empty never
-                # makes. The rows wait as they came, and nothing more is sealed.
-                self._unsealable = True
-
-    def _seal(self) -> None:
-        """Build the pending rows into Arrow tables and let the pairs go."""
-        from orcapod.utils import arrow_utils
-
-        rows = self._pending
-        if not rows:
-            return
         tag_tables = [tag.as_table(columns={"system_tags": True}) for tag, _ in rows]
         data_tables = [data.as_table(columns={"source": True}) for _, data in rows]
         if self._data_tags:
@@ -1384,34 +1418,40 @@ class RowChunks:
             arrow_utils.concat_tables_by_name(tag_tables).combine_chunks(),
             arrow_utils.concat_tables_by_name(data_tables).combine_chunks(),
         )
-        if self._names is None:
-            self._names = chunk.column_names
-        elif chunk.column_names != self._names and set(chunk.column_names) == set(
-            self._names
-        ):
-            # Columns are matched by name, as ``concat_tables_by_name`` matches them.
-            chunk = chunk.select(self._names)
         first = self._schema
         if first is None:
             self._schema = chunk.schema
         elif not chunk.schema.equals(first, check_metadata=True):
-            # What joining it with the earlier chunks gives: their schema, or the
-            # error a table built from rows of differing columns raises.
-            chunk = pa.concat_tables([first.empty_table(), chunk]).combine_chunks()
-        self._spool.append(chunk)
-        self._context_chunks.append(
-            pa.array([data.data_context_key for _, data in rows], pa.large_string())
+            # What joining it with the earlier chunks gives: their schema, the columns
+            # matched by name, or the error a table built from rows of differing
+            # columns raises.
+            chunk = arrow_utils.concat_tables_by_name(
+                [first.empty_table(), chunk]
+            ).combine_chunks()
+        return chunk, pa.array(
+            [data.data_context_key for _, data in rows], pa.large_string()
         )
+
+    def close(self) -> None:
+        """Let the rows go and delete their files; a table already built stays valid.
+
+        Whoever made this closes it, also on an error or a cancellation: an exception
+        that is kept keeps the frames of the run, and this object with them.
+        """
+        self._spool.close()
         self._pending = []
+        self._context_chunks = []
 
     def row_table(self) -> tuple[pa.Table, tuple[str, ...], tuple[str, ...]]:
         """Return what ``_rows_to_table`` returns for the rows added, in order.
 
         Returns:
-            The concatenated table, the user tag column names and the data-tags.
+            The concatenated table, the user tag column names and the data-tags. The
+            table stays valid after ``close``.
 
         Raises:
-            ValueError: If no row was added.
+            ValueError: If no row was added, or the rows were let go (``close``).
+            Exception: The error of a chunk that could not be built, on every call.
         """
         if self.num_rows == 0:
             raise ValueError("Cannot materialize an empty list of rows into a stream")
@@ -1495,10 +1535,10 @@ def kept_table(table: pa.Table) -> pa.Table:
     """
     if table.nbytes <= KEPT_ROWS_MEMORY_BYTES or not table.num_rows:
         return table
-    spool = RowSpool(memory_bytes=KEPT_ROWS_MEMORY_BYTES)
-    for start in range(0, table.num_rows, SPILL_SLICE_ROWS):
-        spool.append(table.slice(start, SPILL_SLICE_ROWS))
-    return spool.table()
+    with RowSpool(memory_bytes=KEPT_ROWS_MEMORY_BYTES) as spool:
+        for start in range(0, table.num_rows, SPILL_SLICE_ROWS):
+            spool.append(table.slice(start, SPILL_SLICE_ROWS))
+        return spool.table()
 
 
 async def collect_row_chunks(
@@ -1513,12 +1553,64 @@ async def collect_row_chunks(
         channel: The input channel.
 
     Returns:
-        The rows; ``num_rows`` is 0 when the channel delivered none.
+        The rows, for the caller to close; ``num_rows`` is 0 when the channel delivered
+        none. Closed here when the read fails or is cancelled.
     """
     chunks = RowChunks()
-    async for tag, data in channel:
-        chunks.add(tag, data)
+    try:
+        async for tag, data in channel:
+            chunks.add(tag, data)
+    except BaseException:
+        chunks.close()
+        raise
     return chunks
+
+
+async def collect_all_row_chunks(
+    channels: Sequence[ReadableChannel[tuple[TagProtocol, DataProtocol]]],
+) -> list[RowChunks]:
+    """Read every channel to its end, at the same time (``collect_row_chunks``).
+
+    When one read fails, or this call is cancelled, every other read is cancelled and
+    ended before the error is raised: no reader outlives the call.
+
+    Args:
+        channels: The input channels.
+
+    Returns:
+        The rows of each channel, in the channels' order.
+    """
+    tasks = [asyncio.create_task(collect_row_chunks(channel)) for channel in channels]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            _ = task.cancel()
+        _ = await asyncio.gather(*tasks, return_exceptions=True)
+        for task in tasks:
+            if not task.cancelled() and task.exception() is None:
+                task.result().close()
+        raise
+
+
+@contextlib.asynccontextmanager
+async def collected_row_chunks(
+    channels: Sequence[ReadableChannel[tuple[TagProtocol, DataProtocol]]],
+) -> AsyncIterator[list[RowChunks]]:
+    """``collect_all_row_chunks``, closing every channel's rows when the block ends.
+
+    Args:
+        channels: The input channels.
+
+    Yields:
+        The rows of each channel, in the channels' order.
+    """
+    rows = await collect_all_row_chunks(channels)
+    try:
+        yield rows
+    finally:
+        for chunks in rows:
+            chunks.close()
 
 
 ROW_BUILT_OUTPUT = "_orcapod_row_built_output"

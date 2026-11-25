@@ -2315,6 +2315,10 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
         node_hash = self.content_hash().to_string()
         ctx_obs = obs.contextualize(*self.node_identity_path)
 
+        # Kept as Arrow tables, not as a list of every pair (ITL-1464); closed below,
+        # so a run that fails or is cancelled leaves no file on local disk.
+        collected = RowChunks()
+
         try:
             ctx_obs.on_node_start(node_label, node_hash)
             self._run_load_only = load_only
@@ -2360,8 +2364,6 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
                     require_same_data_context(
                         input_stream.data_context_key, self.data_context_key
                     )
-            # Kept as Arrow tables, not as a list of every pair (ITL-1464).
-            collected = RowChunks()
 
             async def forward() -> None:
                 async for item in intermediate.reader:
@@ -2427,6 +2429,7 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
             self.clear_cache()
             raise
         finally:
+            collected.close()
             try:
                 await output.close()
             except BaseException:
