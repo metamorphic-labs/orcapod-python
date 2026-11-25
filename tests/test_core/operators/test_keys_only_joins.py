@@ -586,3 +586,20 @@ def test_rows_held_for_long_among_rows_that_pass_are_matched_at_the_end(
         map(str, waiting)
     )
     assert kernel.held_rows == 0
+
+
+def test_one_old_row_does_not_pin_what_later_rows_cost(spooled: Path) -> None:
+    """Review of #565: a mask numbered from an old row grew with every later one."""
+    left, right = _sorted_source("a", 400), _sorted_source("b", 400)
+    kernel = StreamingJoin(Join(), [left, right])
+    (link,) = kernel._links  # pyright: ignore[reportPrivateUsage]  # what it keeps
+    lefts, rights = _batches(left, 4), _batches(right, 4)
+    _ = kernel.push(0, lefts[0])  # never matched until the end
+    for mine, theirs in zip(lefts[1:], rights[1:]):
+        _ = kernel.push(0, mine)
+        _ = kernel.push(1, theirs)
+        for side in link.sides:
+            assert len(side._alive) <= 32  # pyright: ignore[reportPrivateUsage]  # what it keeps
+            assert len(side._numbers) <= 32  # pyright: ignore[reportPrivateUsage]  # what it keeps
+    assert kernel.held_rows == 4
+    assert sum(b.num_rows for b in kernel.push(1, rights[0])) == 4

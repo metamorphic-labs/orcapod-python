@@ -146,7 +146,7 @@ PAIRS_PER_BATCH = 8_192
 # The pair-count column of a many-to-many match, and how many removed rows a side's key
 # frame holds before it is compacted.
 _COUNT = "__streaming_count"
-_COMPACT_ROWS = 65_536
+_COMPACT_ROWS = 1_024
 
 # How many rows of one input are read ahead and pushed at once. A push joins its rows with
 # every key held, so rows that have arrived already are pushed together.
@@ -323,10 +323,11 @@ class _Side:
         self._constant_key: bool = constant_key
         self._frames: list[pl.DataFrame] = []
         self._spool: RowSpool = RowSpool()
-        # Whether each row is still held, by its number less ``_base`` (grown by
-        # doubling); no row numbered below ``_base`` is held.
-        self._alive: npt.NDArray[np.bool_] = np.ones(0, dtype=np.bool_)
-        self._base: int = 0
+        # Beside the key frame's rows, their numbers (ascending) and whether each is still
+        # held: as long as the frame, whatever the numbers are.
+        self._numbers: npt.NDArray[np.int64] = np.empty(0, dtype=np.int64)
+        self._alive: npt.NDArray[np.bool_] = np.empty(0, dtype=np.bool_)
+        self._count: int = 0
         self._removed_count: int = 0
 
     def key_frame(self, table: pa.Table) -> pl.DataFrame:
@@ -340,18 +341,28 @@ class _Side:
         if not table.num_rows:
             return
         # Numbered after the rows already held, as the spool numbers them.
-        self._frames.append(frame.with_columns(pl.col(self.row) + self._spool.size))
+        first = self._spool.size
+        self._frames.append(frame.with_columns(pl.col(self.row) + first))
         self._spool.append(table)
         self.rows += table.num_rows
-        numbered = self._spool.size - self._base
-        if numbered > len(self._alive):
-            grown = np.ones(2 * numbered, dtype=np.bool_)
-            grown[: len(self._alive)] = self._alive
-            self._alive = grown
+        count = self._count + table.num_rows
+        if count > len(self._numbers):
+            for name in ("_numbers", "_alive"):
+                old = getattr(self, name)
+                grown = np.empty(2 * count, dtype=old.dtype)
+                grown[: self._count] = old[: self._count]
+                setattr(self, name, grown)
+        self._numbers[self._count : count] = np.arange(first, self._spool.size)
+        self._alive[self._count : count] = True
+        self._count = count
 
     def held(self, rows: npt.NDArray[np.int64]) -> npt.NDArray[np.int64]:
-        """Those of ``rows`` that were not removed."""
-        return rows[self._alive[rows - self._base]]
+        """Those of ``rows``, numbers in the key frame, that were not removed."""
+        return rows[self._alive[self._positions(rows)]]
+
+    def _positions(self, rows: npt.NDArray[np.int64]) -> npt.NDArray[np.int64]:
+        """Where the rows with these numbers are in the key frame."""
+        return np.searchsorted(self._numbers[: self._count], rows)
 
     def take(self, rows: npt.NDArray[np.int64]) -> pa.Table:
         """The held rows with these numbers, in this order."""
@@ -366,41 +377,41 @@ class _Side:
             self._frames = [pl.concat(self._frames, rechunk=False)]
         return self._frames[0]
 
+    def held_frame(self) -> pl.DataFrame:
+        """The key frame of the rows held, without the removed ones."""
+        frame = self.frame()
+        if not self._removed_count:
+            return frame
+        return frame.filter(pl.Series(self._alive[: self._count]))
+
     def remove(self, rows: npt.NDArray[np.int64]) -> None:
         """Let rows go that can never match again: each is held, each given once."""
         if not len(rows):
             return
         self._spool.discard(rows)
         self.rows -= len(rows)
-        self._alive[rows - self._base] = False
+        self._alive[self._positions(rows)] = False
         self._removed_count += len(rows)
         if not self.rows or self._removed_count >= max(self.rows, _COMPACT_ROWS):
             self._compact()
 
     def _compact(self) -> None:
-        """Drop the removed rows from the key frame, and the numbers below the rest."""
+        """Drop the removed rows from the key frame."""
+        if self.rows:
+            self._frames = [self.held_frame()]
+            self._numbers = self._numbers[: self._count][self._alive[: self._count]]
+        else:
+            self._frames, self._numbers = [], np.empty(0, dtype=np.int64)
+        self._count = len(self._numbers)
+        self._alive = np.ones(self._count, dtype=np.bool_)
         self._removed_count = 0
-        if not self.rows:
-            self._frames, self._base = [], self._spool.size
-            self._alive = np.ones(0, dtype=np.bool_)
-            return
-        frame = self.frame()
-        rows = frame.get_column(self.row).to_numpy()
-        kept = frame.filter(pl.Series(self._alive[rows - self._base]))
-        self._frames = [kept]
-        # The frame's rows are in the order of their numbers.
-        base = int(kept.get_column(self.row)[0])
-        self._alive = self._alive[base - self._base :].copy()
-        self._base = base
 
     def clear(self) -> None:
         """Drop every row held, and their files."""
-        self._frames = []
-        self._alive = np.ones(0, dtype=np.bool_)
-        self._removed_count, self._base = 0, 0
+        self.rows = 0
+        self._compact()
         self._spool.close()
         self._spool = RowSpool()
-        self.rows = 0
 
 
 class _BinaryLink:
