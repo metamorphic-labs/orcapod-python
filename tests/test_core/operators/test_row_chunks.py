@@ -537,3 +537,43 @@ def test_a_sync_job_node_over_spilled_rows_reads_exactly_as_one_in_memory(
 
     node.clear_cache()
     assert table.to_pylist() == wanted.to_pylist()
+
+
+@pytest.mark.parametrize("orchestrator", ["sync", "async"])
+@pytest.mark.parametrize("on_disk", [False, True], ids=["in_memory", "on_disk"])
+def test_a_job_nodes_current_run_is_read_a_page_at_a_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, orchestrator: str, on_disk: bool
+) -> None:
+    monkeypatch.setattr(static_output_pod, "ROW_CHUNK_ROWS", 3)
+    if on_disk:
+        monkeypatch.setattr(static_output_pod, "KEPT_ROWS_MEMORY_BYTES", 0)
+        monkeypatch.setattr("tempfile.tempdir", str(tmp_path))
+    job = _job(tmp_path, "paged", "map", False)
+    node = job.nodes["out"]
+
+    # No current run: nothing to count or read.
+    assert node.current_run_row_count() is None
+    assert node.read_current_run(0, 5) is None
+
+    if orchestrator == "sync":
+        _ = job.run()
+    else:
+        _ = job.run(orchestrator=AsyncPipelineOrchestrator())
+
+    assert node.current_run_row_count() == _ROWS
+    configurations: list[dict[str, Any]] = [
+        {},
+        {"columns": {"system_tags": True, "source": True}},
+        {"columns": {"sort_by_tags": True}},
+        {"all_info": True},
+    ]
+    for given in configurations:
+        whole = node.as_table(**given)
+        pages = [node.read_current_run(start, 4, **given) for start in (0, 4, 8, 12)]
+        assert [page.num_rows for page in pages] == [4, 4, 3, 0]
+        assert pa.concat_tables(pages).equals(whole)
+        assert pages[0].schema.equals(whole.schema, check_metadata=True)
+
+    node.clear_cache()
+    assert node.current_run_row_count() is None
+    assert node.read_current_run(0, 5) is None
