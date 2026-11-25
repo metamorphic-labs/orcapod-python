@@ -877,7 +877,9 @@ def test_a_polling_source_is_read_once_through_a_channel() -> None:
 
 
 def test_opening_a_channel_computes_nothing() -> None:
-    """The stream's table is read at the first ``receive``, not when the channel opens."""
+    """The stream's table is read at the first ``receive``, not when the channel opens.
+
+    A library class's table is read with its tokens as they are (``carried_table``)."""
     stream = source()
     with mock.patch.object(
         ArrowTableSource,

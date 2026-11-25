@@ -472,6 +472,13 @@ class GroupBy(UnaryOperator):
         system_tag_columns = tuple(
             c for c in table.column_names if c.startswith(constants.SYSTEM_TAG_PREFIX)
         )
+        # One chunk each: they are taken by row number a part at a time, and a take from
+        # many chunks of text puts all of them together every time (ITL-1464).
+        for c in system_tag_columns:
+            at = table.schema.get_field_index(c)
+            table = table.set_column(
+                at, table.schema.field(c), table.column(c).combine_chunks()
+            )
         # The source info of a data-tag key: the key's value is the merge of its
         # members' equal values, so its source info is one token, the fold of the
         # members' tokens in member order, as the system tags fold (ITL-1017).

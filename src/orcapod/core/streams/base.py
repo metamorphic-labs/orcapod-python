@@ -22,6 +22,7 @@ import pandas as pd
 import polars as pl
 import pyarrow as pa
 
+from orcapod.core.streams.carried import carried_table
 from orcapod.core.unique_keys import NO_UNIQUE_KEYS, UniqueKeys
 from orcapod.core.base import TraceableBase
 from orcapod.core.data_tags import data_tag_names
@@ -594,8 +595,6 @@ class CompleteStreamFeed:
         retyped as a row retypes it. Only a stream that holds such a column (a raw
         ``ArrowTableStream``) is read that way, and its reads have no effect.
         """
-        from orcapod.core.streams.carried import carried_table
-
         table = carried_table(self._stream, ZERO_ROW_INPUT_COLUMNS)
         if not system_tags_as_rows_give(table):
             from orcapod.core.operators.static_output_pod import (
