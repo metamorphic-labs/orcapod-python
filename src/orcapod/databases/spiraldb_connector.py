@@ -25,7 +25,7 @@ import re
 import urllib.parse
 import urllib.request
 import warnings
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Generator, Iterator, Mapping
 from concurrent.futures import Future
 from contextlib import contextmanager
 from copy import copy
@@ -469,6 +469,7 @@ def _list_keyed_tables(client: Any, project_id: str, dataset: str) -> dict[str, 
 
 
 _T = TypeVar("_T")
+_Rows = Mapping[str, SchemaRow] | None  # of a dataset's schema table
 
 
 def _work(call: Callable[[], _T], future: Future[_T]) -> None:
@@ -512,7 +513,7 @@ class _Fetched(NamedTuple):
     """
 
     found: Future[pa.Schema]
-    rows: Future[Mapping[str, SchemaRow] | None]
+    rows: Future[_Rows]
 
 
 def _literal(value: Any, arrow_type: pa.DataType) -> Any:
@@ -570,6 +571,24 @@ def _equals(array: Any, value: Any) -> Any:
     return compute.fill_null(mask, False)
 
 
+class OpenedSnapshot(NamedTuple):
+    """A table's snapshot that was opened and whose schema was fetched, kept for reading it
+    again (``SpiralDBConnector.lookup_table``, ITL-1457). A snapshot never changes.
+
+    Attributes:
+        handle: The SDK's handle.
+        found: The snapshot's schema, as SpiralDB reports it.
+    """
+
+    handle: Any
+    found: pa.Schema
+
+    @property
+    def id_and_version(self) -> tuple[str, str]:
+        """Which snapshot it is."""
+        return str(self.handle.resource_id), str(self.handle.version_id)
+
+
 class SpiralDBTable:
     """One SpiralDB table, looked up once (``SpiralDBConnector.lookup_table``).
 
@@ -590,6 +609,35 @@ class SpiralDBTable:
         self._table_name = table_name
         self._readings: dict[str, _Reading] = {}
         self._fetched: _Fetched | None = None
+        # The handle this lookup opened, while a kept one is read in its place.
+        self._opened_now: Any | None = None
+
+    def _read_kept(self, kept: OpenedSnapshot, rows: Future[_Rows]) -> None:
+        """Read the snapshot this lookup opened through a handle of it opened before.
+
+        Args:
+            kept: The same snapshot.
+            rows: The schema table's rows, seen during this lookup.
+        """
+        found: Future[pa.Schema] = Future()
+        found.set_result(kept.found)
+        self._fetched = _Fetched(found, rows)
+        self._opened_now, self._table = self._table, kept.handle
+
+    def _leave_kept(self) -> bool:
+        """Go back from the kept handle to the one this lookup opened, as if none had been
+        kept; return whether there was one to leave."""
+        if self._opened_now is None:
+            return False
+        self._table, self._opened_now = self._opened_now, None
+        self._fetched = None
+        self._readings.clear()
+        return True
+
+    def opened_snapshot(self) -> OpenedSnapshot | None:
+        """Return this lookup's snapshot to keep, once its schema was accepted."""
+        reading = self._readings.get(str(self._table.version_id))
+        return None if reading is None else OpenedSnapshot(self._table, reading.found)
 
     def _reading(self, table: Any) -> _Reading:
         """Return how a snapshot of this table is read, worked out once per version."""
@@ -610,6 +658,8 @@ class SpiralDBTable:
         The next ``arrow_schema`` judges it, in its own thread. For a check that fetches
         several tables at the same time.
         """
+        if self._fetched is not None:
+            return
         self._fetched = self._connector._fetch(self._table, self._table_name)  # pyright: ignore[reportPrivateUsage]  # owns the handle
 
     @property
@@ -653,8 +703,41 @@ class SpiralDBTable:
         limit: int | None = None,
         asof: int | None = None,
     ) -> Iterator[pa.RecordBatch]:
-        """Yield prepared Arrow batches from this resolved table in key order."""
-        connector = self._connector
+        """Yield prepared Arrow batches from this resolved table in key order.
+
+        Of a kept handle that fails before it gave a batch nothing was used: the snapshot
+        is then read through the handle this lookup opened, as if none had been kept.
+        """
+        batches = self._scan(where=where, limit=limit, asof=asof)
+        if self._opened_now is None or self._at(asof) is not self._table:
+            yield from batches
+            return
+        # Judged outside the attempt: a refusal is a refusal.
+        _ = self._reading(self._table)
+        try:
+            first = next(batches, None)
+        except (TableSchemaError, NullInNonNullableColumnError):
+            raise
+        except Exception as exc:
+            if not self._leave_kept():
+                raise
+            logger.debug("a kept SpiralDB snapshot could not be read again: %s", exc)
+            batches, first = self._scan(where=where, limit=limit, asof=asof), None
+        try:
+            if first is not None:
+                yield first
+            yield from batches
+        finally:
+            batches.close()
+
+    def _scan(
+        self,
+        *,
+        where: Mapping[str, object] | None,
+        limit: int | None,
+        asof: int | None,
+    ) -> Generator[pa.RecordBatch, None, None]:
+        """Yield the batches of ``scan_batches``."""
         table = self._at(asof)
         reading = self._reading(table)
         predicate = None
@@ -671,7 +754,7 @@ class SpiralDBTable:
                 continue
             equals = sp.eq(sp.column(column), literal)
             predicate = equals if predicate is None else sp.and_(predicate, equals)
-        with connector._service_call("read", self._table_name):  # pyright: ignore[reportPrivateUsage]  # owns the handle
+        with self._connector._service_call("read", self._table_name):  # pyright: ignore[reportPrivateUsage]  # owns the handle
             reader = table.scan(
                 filter=predicate,
                 # The limit counts rows that match every condition.
@@ -681,7 +764,7 @@ class SpiralDBTable:
         left = limit
         try:
             while left is None or left > 0:
-                with connector._service_call("read", self._table_name):  # pyright: ignore[reportPrivateUsage]  # owns the handle
+                with self._connector._service_call("read", self._table_name):  # pyright: ignore[reportPrivateUsage]  # owns the handle
                     batch = next(reader, None)
                 if batch is None:
                     return
@@ -718,17 +801,31 @@ class SpiralDBTable:
         known = (self.table_id, str(table.version_id))
         counted, exact = counts.get(known, (0, False))
         if not exact and (at_most is None or counted < at_most):
-            with connector._service_call("count the rows of", self._table_name):  # pyright: ignore[reportPrivateUsage]  # owns the handle
-                reader = table.scan(
-                    [self.key_columns[0]], limit=at_most, batch_rows=_SCAN_BATCH_ROWS
-                ).to_reader()
-                try:
-                    counted = sum(batch.num_rows for batch in reader)
-                finally:
-                    reader.close()
+            try:
+                counted = self._count_keys(table, at_most)
+            except Exception as exc:
+                if table is not self._table or not self._leave_kept():
+                    raise
+                logger.debug("a kept SpiralDB snapshot could not be counted: %s", exc)
+                counted = None
+            if counted is None:
+                table = self._table
+                _ = self._reading(table)
+                counted = self._count_keys(table, at_most)
             exact = at_most is None or counted < at_most
             counts[known] = (counted, exact)
         return counted if at_most is None else min(counted, at_most)
+
+    def _count_keys(self, table: Any, at_most: int | None) -> int:
+        """Count the keys of a snapshot, at most ``at_most`` of them."""
+        with self._connector._service_call("count the rows of", self._table_name):  # pyright: ignore[reportPrivateUsage]  # owns the handle
+            reader = table.scan(
+                [self.key_columns[0]], limit=at_most, batch_rows=_SCAN_BATCH_ROWS
+            ).to_reader()
+            try:
+                return sum(batch.num_rows for batch in reader)
+            finally:
+                reader.close()
 
     def row_count_estimate(self, asof: int | None = None) -> int:
         """Return the table's row count, exact, by reading every key (``count_rows``)."""
@@ -883,11 +980,20 @@ class SpiralDBConnector:
             )
         return sorted(name for name in listed.values() if name != SCHEMA_TABLE)
 
-    def lookup_table(self, table_name: str) -> SpiralDBTable:
+    def lookup_table(
+        self, table_name: str, kept: OpenedSnapshot | None = None
+    ) -> SpiralDBTable:
         """Look the table up once, for several items of its metadata (ITL-1350).
+
+        The table is opened by name, and its dataset's schema table is checked before
+        anything is read from it, also when a snapshot was kept. If the name leads to that
+        very snapshot (one id and one version), the returned table reads through its
+        handle, whose schema and plan need not be fetched again; if not, ``kept`` plays no
+        part.
 
         Args:
             table_name: Plain table name (no dataset prefix).
+            kept: A snapshot opened before, by a connector on this client.
 
         Returns:
             The table: its id and key columns, and its schema and version when asked.
@@ -906,16 +1012,25 @@ class SpiralDBConnector:
             or "." in table_name
         ):
             raise SpiralDBTableNotFoundError(missing)
-        table = _open_keyed_table(
-            self._client,
-            self._project_id,
-            self._dataset,
-            table_name,
-            self._health,
-        )
+        rows = None if kept is None else _start(self._schemas.rows)
+        try:
+            table = _open_keyed_table(
+                self._client,
+                self._project_id,
+                self._dataset,
+                table_name,
+                self._health,
+            )
+        finally:
+            if rows is not None:
+                _ = rows.exception()  # waits
         if table is None:
             raise SpiralDBTableNotFoundError(missing)
-        return SpiralDBTable(self, table, table_name)
+        found = SpiralDBTable(self, table, table_name)
+        if kept is not None and rows is not None:
+            if kept.id_and_version == (found.table_id, str(table.version_id)):
+                found._read_kept(kept, rows)  # pyright: ignore[reportPrivateUsage]  # made here
+        return found
 
     def _recorded_schema(
         self,

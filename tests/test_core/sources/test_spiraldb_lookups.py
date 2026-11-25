@@ -202,7 +202,8 @@ def test_each_check_looks_the_table_up_once(
         calls.clear()
         assert source.check_for_new_data() is False
         # Before ITL-1350: 3 lookups (id, schema, version).
-        assert calls == {"lookup": 1, "schema": 1, "open_schemas": 1}
+        # And its schema is that of the kept snapshot (ITL-1457).
+        assert calls == {"lookup": 1, "open_schemas": 1}
     sync, async_ = _sync_and_async_rows(source)
     assert sorted(sync) == sorted(async_) == _expected_rows([0, 1, 2])
 
@@ -221,8 +222,9 @@ def test_a_check_still_finds_a_table_created_again(
     calls.clear()
     with pytest.raises(ValueError, match="dropped and created again"):
         source.check_for_new_data()
-    # Refused on the id, before the new table's schema or version is read.
-    assert calls == {"lookup": 1}
+    # Refused on the id, before the new table's schema or version is read. The schema table
+    # is checked at the same time as the open (ITL-1457), and what it said plays no part.
+    assert calls == {"lookup": 1, "open_schemas": 1, "read_schemas": 1}
 
 
 def test_missing_table_matches_source_diagnostic(
@@ -261,7 +263,7 @@ def test_restricted_copy_keeps_client_after_parent_closes(
     source.close()
     calls.clear()
     assert sorted(cast("list[int]", restricted.as_table()["k"].to_pylist())) == [0, 2]
-    assert calls == {"lookup": 1, "open_schemas": 1, "schema": 1, "scan": 1}
+    assert calls == {"lookup": 1, "open_schemas": 1, "scan": 1}
     restricted.close()
 
 
@@ -315,7 +317,7 @@ def test_each_read_resolves_once_and_reuses_its_client(
             else cast("list[int]", source.as_table()["k"].to_pylist())
         )
         assert sorted(keys) == expected
-        assert calls == {"lookup": 1, "open_schemas": 1, "schema": 1, "scan": 1} | (
+        assert calls == {"lookup": 1, "open_schemas": 1, "scan": 1} | (
             {} if restricted or round_ else {"count": 1}
         )
 
@@ -327,7 +329,6 @@ def test_each_read_resolves_once_and_reuses_its_client(
     assert calls == {
         "lookup": 1,
         "open_schemas": 1,
-        "schema": 1,
         "scan": 1,
     } | ({"count": 1} if restricted else {})
 
@@ -411,7 +412,8 @@ def test_each_read_refuses_a_replacement_before_scanning(
     calls.clear()
     with pytest.raises(ValueError, match="dropped and created again"):
         reads[mode]()
-    assert calls == {"lookup": 1}
+    # Nothing is scanned. The schema table is checked at the same time as the open.
+    assert calls == {"lookup": 1, "open_schemas": 1, "read_schemas": 1}
 
 
 def test_two_async_job_readers_use_the_restricted_sources_endpoint(
@@ -452,14 +454,13 @@ def test_job_reuses_client_but_refreshes_table_each_run(
     assert calls == {
         "lookup": 2,
         "open_schemas": 2,
-        "schema": 2,
         "count": 1,
         "scan": 1,
     }
 
     calls.clear()
     job.run(orchestrator=runner)
-    assert calls == {"lookup": 1, "open_schemas": 1, "schema": 1}
+    assert calls == {"lookup": 1, "open_schemas": 1}
 
 
 def test_freshness_catches_metadata_schema_changes(
@@ -478,7 +479,7 @@ def test_freshness_catches_metadata_schema_changes(
     calls.clear()
     with pytest.raises(ValueError, match="the table has column .x."):
         source.check_for_new_data()
-    assert calls == {"lookup": 1, "open_schemas": 1, "read_schemas": 1, "schema": 1}
+    assert calls == {"lookup": 1, "open_schemas": 1, "read_schemas": 1}
 
 
 def test_freshness_pins_newer_version(calls: collections.Counter[str]) -> None:
@@ -487,7 +488,8 @@ def test_freshness_pins_newer_version(calls: collections.Counter[str]) -> None:
     table.write(_rows(_ARRANGED["layout"], [3]))
     calls.clear()
     assert source.check_for_new_data()
-    assert calls == {"lookup": 1, "open_schemas": 1, "schema": 1}
+    # The kept snapshot is another version: the schema table is seen again, after the open.
+    assert calls == {"lookup": 1, "open_schemas": 2, "schema": 1}
     assert sorted(cast("list[int]", source.as_table()["k"].to_pylist())) == [0, 1, 2, 3]
 
 

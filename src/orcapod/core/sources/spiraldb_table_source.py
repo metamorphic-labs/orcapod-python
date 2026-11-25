@@ -73,6 +73,7 @@ from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.core.streams.base import check_head_size
 from orcapod.core.streams.view import ViewStatus, StreamView
 from orcapod.databases.spiraldb_connector import (
+    OpenedSnapshot,
     SpiralDBConnector,
     SpiralDBTable,
     SpiralDBTableNotFoundError,
@@ -359,6 +360,7 @@ class SpiralDBTableSource(RootSource):
         self._overrides = None if overrides is None else dict(overrides)
         self._connection: SpiralDBConnector | None = None
         self._connection_lock = Lock()
+        self._kept: OpenedSnapshot | None = None  # of the pinned version, or of none
         self._pid = os.getpid()
         self._closed = False
         self._condition = Condition()
@@ -391,6 +393,7 @@ class SpiralDBTableSource(RootSource):
             # One version for every read of this source object. A given version is
             # used as it is; a table that was never written has no version to pin.
             self._asof = asof if asof is not None else (table.version() or None)
+            self._keep(table)
 
             # The default tags are the primary key, whatever identifies the rows.
             resolved_tags = (
@@ -722,6 +725,7 @@ class SpiralDBTableSource(RootSource):
             if self._connection is not None:
                 self._connection.close()
                 self._connection = None
+            self._kept = None
 
     def __enter__(self) -> SpiralDBTableSource:
         """Return this source for use as a context manager."""
@@ -741,9 +745,37 @@ class SpiralDBTableSource(RootSource):
         """The table as error messages name it."""
         return f"{self._project_id}/{self._dataset}.{self._table_name}"
 
-    def _lookup_table(self) -> SpiralDBTable:
-        """Resolve the name and check that it still identifies this source's table."""
-        table = self._connector().lookup_table(self._table_name)
+    def _keep(self, table: SpiralDBTable) -> None:
+        """Keep the snapshot of ``table`` for reading it again, if it is the pinned one.
+
+        Args:
+            table: This source's table, its schema accepted.
+        """
+        snapshot = table.opened_snapshot()
+        if (
+            snapshot is not None
+            and self._asof is not None
+            and snapshot.id_and_version == (self._table_id, str(self._asof))
+        ):
+            # No lock: a read that ends in a forked child must not wait for one.
+            self._kept = snapshot
+            if self._closed:
+                self._kept = None
+
+    def _lookup_table(self, asof: int | None) -> SpiralDBTable:
+        """Resolve the name and check that it still identifies this source's table.
+
+        Args:
+            asof: The version that is to be read. Its kept snapshot is read again if the
+                table still has that version; every refusal is judged afresh (ITL-1457).
+        """
+        kept = self._kept
+        if kept is not None and kept.id_and_version != (self._table_id, str(asof)):
+            kept = None
+        table = self._connector().lookup_table(self._table_name, kept)
+        if kept is not None and table.version() != asof:
+            # Versions only move on: it cannot be read through again.
+            self._kept = None
         table_id = table.table_id
         if table_id != self._table_id:
             raise ValueError(
@@ -763,7 +795,10 @@ class SpiralDBTableSource(RootSource):
         cost grows with the table.
         """
         asof = self._asof
-        return self._lookup_table().row_count_estimate(asof=asof)
+        table = self._lookup_table(asof)
+        count = table.row_count_estimate(asof=asof)
+        self._keep(table)
+        return count
 
     @override
     def check_for_new_data(self) -> bool:
@@ -786,7 +821,9 @@ class SpiralDBTableSource(RootSource):
             ValueError: If the table was dropped and created again (another table id)
                 or its columns changed: build the source again to read it.
         """
-        return self._given_asof is None and self._pin_newer(self._lookup_table())
+        return self._given_asof is None and self._pin_newer(
+            self._lookup_table(self._asof)
+        )
 
     @override
     def _begin_check(self) -> Callable[[], Callable[[], bool]] | None:
@@ -802,7 +839,7 @@ class SpiralDBTableSource(RootSource):
         if self._given_asof is not None:
             return lambda: False
         try:
-            table = self._lookup_table()
+            table = self._lookup_table(self._asof)
             table.fetch()
             looked_up.set_result(table)
         except BaseException as exc:
@@ -828,8 +865,10 @@ class SpiralDBTableSource(RootSource):
             )
         version = table.version() or None
         if version is None or (self._asof is not None and version <= self._asof):
+            self._keep(table)
             return False
         self._asof = version
+        self._keep(table)
         self._update_modified_time()
         return True
 
@@ -871,10 +910,13 @@ class SpiralDBTableSource(RootSource):
                 key column holds a null.
         """
         asof = self._asof
-        table = self._lookup_table()
-        yield from self._read_batches(
-            table, asof=asof, limit=self._limit, max_rows=self._max_rows
-        )
+        table = self._lookup_table(asof)
+        try:
+            yield from self._read_batches(
+                table, asof=asof, limit=self._limit, max_rows=self._max_rows
+            )
+        finally:
+            self._keep(table)
 
     def _read_batches(
         self,
@@ -1046,12 +1088,13 @@ class SpiralDBTableSource(RootSource):
         limit = self._limit
         head_limit = n if limit is None else min(n, limit)
         asof = self._asof
-        table = self._lookup_table()
+        table = self._lookup_table(asof)
         rows = self._whole_table(
             self._read_batches(table, asof=asof, limit=head_limit, max_rows=None),
             columns=columns,
             all_info=all_info,
         )
+        self._keep(table)
         if rows.num_rows < head_limit or head_limit == limit:
             return _Head(rows, True, rows.num_rows, False)
         bound, total = self._bounded_count(n, table)
@@ -1077,8 +1120,9 @@ class SpiralDBTableSource(RootSource):
             return shown, None
         allowed = min(self._max_rows or DEFAULT_MAX_ROWS, DEFAULT_MAX_ROWS)
         bound = max(allowed, shown)
-        handle = self._lookup_table() if table is None else table
-        total = handle.count_rows(asof=self._asof, at_most=bound + 1)
+        asof = self._asof
+        handle = self._lookup_table(asof) if table is None else table
+        total = handle.count_rows(asof=asof, at_most=bound + 1)
         return bound, (None if total > bound else total)
 
     def _head_note(self, head: "_Head", sorted_by_tags: bool = False) -> str:

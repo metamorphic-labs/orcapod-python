@@ -7,13 +7,15 @@ warnings are those of sources that share nothing.
 
 from __future__ import annotations
 
+import asyncio
 import collections
 import gc
 import os
 import threading
+import types
 import warnings
 import weakref
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -26,6 +28,7 @@ from orcapod.databases import InMemoryArrowDatabase, SpiralDBConnector
 from orcapod.databases import spiraldb_connector as connector_module
 from orcapod.databases import spiraldb_schema_table as st
 from orcapod.errors import (
+    NullInNonNullableColumnError,
     SourceCheckFailedWarning,
     TableSchemaError,
     UnrecordedTableSchemaWarning,
@@ -334,7 +337,7 @@ def test_an_unknown_sign_in_is_not_shared(
     assert {tuple(_ks(s)) for s in kept} == {(0, 1, 2, 3)}
 
 
-@pytest.mark.parametrize("failing", ["open", "schema", "scan"])
+@pytest.mark.parametrize("failing", ["open", "scan"])
 def test_a_client_whose_call_failed_is_given_to_no_new_source(
     calls: _Calls, monkeypatch: pytest.MonkeyPatch, failing: str
 ) -> None:
@@ -342,7 +345,6 @@ def test_a_client_whose_call_failed_is_given_to_no_new_source(
     source = _source("a")
     cls, name = {
         "open": (fake.FakeClient, "keyed_table"),
-        "schema": (fake.FakeKeyedTable, "schema"),
         "scan": (fake.FakeKeyedTable, "scan"),
     }[failing]
     with monkeypatch.context() as broken:
@@ -505,17 +507,25 @@ def test_a_changed_schema_table_is_read_again_once(calls: _Calls) -> None:
     assert counts["read schemas"] == 1 and counts["open schemas"] == 6
 
 
+def _moved_on(source: SpiralDBTableSource) -> None:
+    """Write the source's table, and read once: no kept snapshot is its current one."""
+    _write("a", 60)
+    _ = source.head()
+
+
 def test_the_schema_table_is_seen_after_the_open_and_before_any_scan(
     calls: _Calls,
 ) -> None:
     source = _source("a", max_rows=None)
+    _moved_on(source)
     for read in (source.as_table, source.head, lambda: source.row_count_estimate):
         calls.take()
         read()
         log = calls.log
-        assert log[0] == "open"
-        assert set(log[1:3]) == {"schema", "open schemas"}
-        assert set(log[3:]) <= {"scan"}
+        assert log[:2] == ["open", "open by id"]
+        first = log.index("scan") if "scan" in log else len(log)
+        assert set(log[2:first]) <= {"schema", "open schemas", "open by id"}
+        assert log.count("open schemas") == 1
 
 
 def test_the_schema_table_and_the_tables_schema_are_fetched_at_the_same_time(
@@ -536,13 +546,14 @@ def test_the_schema_table_and_the_tables_schema_are_fetched_at_the_same_time(
 
     monkeypatch.setattr(fake.FakeClient, "keyed_table", new_opened)
     monkeypatch.setattr(fake.FakeKeyedTable, "schema", new_schema)
-    assert _ks(_source("a")) == [0, 1, 2, 3]
+    assert _source("a").table_id
 
 
 def test_the_tables_own_error_comes_before_the_schema_tables(
     root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source = _source("a")
+    _moved_on(source)
     _damage(table_count=9)
     schema = fake.FakeKeyedTable.schema
 
@@ -710,7 +721,7 @@ def test_a_source_with_a_given_version_makes_no_call(calls: _Calls) -> None:
     _write("b", 5)
     calls.take()
     assert node_run.check_sources(sources) == ()
-    assert calls.take() == {"open": 2, "schema": 2, "open schemas": 2}
+    assert calls.take() == {"open": 2, "open schemas": 2}
 
 
 def test_a_closed_source_is_reported_like_any_failing_check(root: Path) -> None:
@@ -725,7 +736,7 @@ def test_a_closed_source_is_reported_like_any_failing_check(root: Path) -> None:
 
 def test_the_calls_each_action_makes(calls: _Calls) -> None:
     """A call more is a call repeated."""
-    read = {"open": 1, "schema": 1, "open schemas": 1, "scan": 1}
+    read = {"open": 1, "open schemas": 1, "scan": 1}
     sources = [_source(n) for n in _TABLES]
     assert calls.take() == {
         "client": 1,
@@ -742,19 +753,271 @@ def test_the_calls_each_action_makes(calls: _Calls) -> None:
         "run": (first.run, read),
         "where": (lambda: first.where(j="j0"), {}),
         "restricted read": (lambda: first.where(j="j0").as_table(), read),
-        "count": (
-            lambda: first.row_count_estimate,
-            {"open": 1, "schema": 1, "open schemas": 1},
-        ),
+        "count": (lambda: first.row_count_estimate, {"open": 1, "open schemas": 1}),
     }
     for name, (action, budget) in actions.items():
         action()
         assert calls.take() == budget, name
     job = _job(sources)
     for runner, budget in (
-        (None, {"open": 6, "schema": 6, "open schemas": 6, "scan": 5}),
-        (None, {"open": 3, "schema": 3, "open schemas": 3}),
-        (AsyncPipelineOrchestrator(), {"open": 3, "schema": 3, "open schemas": 3}),
+        (None, {"open": 6, "open schemas": 6, "scan": 5}),
+        (None, {"open": 3, "open schemas": 3}),
+        (AsyncPipelineOrchestrator(), {"open": 3, "open schemas": 3}),
     ):
         job.run(orchestrator=runner)
         assert calls.take() == budget
+
+
+# ------------------------------------------------------------------- the kept snapshot
+
+
+def _reads(source: SpiralDBTableSource) -> dict[str, Callable[[], Any]]:
+    async def collect() -> list[Any]:
+        return [t.as_dict()["k"] async for t, _ in source.async_iter_data()]
+
+    return {
+        "table": lambda: source.as_table()["k"].to_pylist(),
+        "iter": lambda: [t.as_dict()["k"] for t, _ in source.iter_data()],
+        "async": lambda: sorted(asyncio.run(collect())),
+        "head": lambda: source.head(9).table["k"].to_pylist(),
+        "run": lambda: source.run().table["k"].to_pylist(),
+        "count": lambda: list(range(source.row_count_estimate)),
+    }
+
+
+_READS = ["table", "iter", "async", "head", "run", "count"]
+_CHANGES: dict[str, Callable[[], Any]] = {
+    "dropped": lambda: fake.ExternalProject("p").drop_table("default.a"),
+    "recreated": lambda: (
+        fake.ExternalProject("p").drop_table("default.a"),
+        fake.ExternalProject("p")
+        .create_table("default.a", key_schema=[_SCHEMA.field("k"), _SCHEMA.field("j")])
+        .write(_rows(0)),
+    ),
+    "withdrawn": lambda: _damage(rows_digest="withdrawn"),
+    "incomplete": lambda: _damage(table_count=9),
+    "re-recorded": lambda: fake.migrate("p", {"a": _other_flags()}),
+    "new rows": lambda: _write("a", 60),
+    "new column": lambda: (
+        fake.ExternalProject("p")
+        .table("default.a")
+        .write(_rows(60).append_column("w", pa.array([1] * 4)))
+    ),
+    "nothing": lambda: None,
+}
+
+
+def _other_flags() -> pa.Schema:
+    return pa.schema([f.with_nullable(True) if f.name == "x" else f for f in _SCHEMA])
+
+
+def _outcome(read: Callable[[], Any]) -> tuple[str, str]:
+    """What a read gives or raises, without the parts that name this run's ids."""
+    with warnings.catch_warnings(record=True) as seen:
+        warnings.simplefilter("always")
+        try:
+            result = repr(read())
+        except Exception as exc:
+            result = f"{type(exc).__name__}: {exc} {getattr(exc, '__notes__', [])}"
+    return result, repr([str(w.message) for w in seen])
+
+
+@pytest.mark.parametrize("read", _READS)
+@pytest.mark.parametrize("change", sorted(_CHANGES))
+@pytest.mark.parametrize("restricted", [False, True])
+def test_a_kept_snapshot_changes_no_outcome(
+    calls: _Calls, change: str, read: str, restricted: bool
+) -> None:
+    """Two sources on one table, one of which keeps nothing: equal rows and refusals,
+    before and after a check."""
+    keeping, plain = _source("a"), _source("a")
+    if restricted:
+        keeping, plain = keeping.where(j="j0"), plain.where(j="j0")
+
+    def forget() -> None:
+        plain._kept = None  # pyright: ignore[reportPrivateUsage]  # keeps nothing
+
+    for _ in range(2):
+        forget()
+        assert _outcome(_reads(keeping)[read]) == _outcome(_reads(plain)[read])
+    _CHANGES[change]()
+    steps: list[Callable[[SpiralDBTableSource], Any]] = [
+        lambda source: _reads(source)[read](),
+        lambda source: source.check_for_new_data(),
+        lambda source: _reads(source)[read](),
+        lambda source: source.where(k=1).as_table().to_pydict(),
+    ]
+    for step in steps:
+        forget()
+        expected = _outcome(lambda step=step: step(plain))
+        calls.take()
+        assert _outcome(lambda step=step: step(keeping)) == expected
+        if change in ("dropped", "recreated", "withdrawn", "incomplete"):
+            assert "scan" not in calls.take()
+
+
+def test_a_kept_snapshot_is_read_only_after_both_confirm(calls: _Calls) -> None:
+    source = _source("a", max_rows=None)
+    for read in _READS[:-1]:
+        calls.take()
+        _reads(source)[read]()
+        assert set(calls.log[:2]) == {"open", "open schemas"}
+        assert set(calls.log[2:]) == {"scan"}
+
+
+def test_the_open_and_the_schema_table_are_checked_at_the_same_time(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source("a")
+    both = threading.Barrier(2)
+    opened = fake.FakeClient.keyed_table
+
+    def new_opened(self: Any, project: str, dataset: str, name: str, **given: Any):
+        both.wait(10)
+        return opened(self, project, dataset, name, **given)
+
+    monkeypatch.setattr(fake.FakeClient, "keyed_table", new_opened)
+    assert _ks(source) == [0, 1, 2, 3]
+
+
+def test_the_opens_error_comes_before_the_schema_tables(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source("a")
+
+    def denied(self: Any, project: str, dataset: str, name: str, **given: Any):
+        raise fake.SpiralError(f"status 403 {name}")
+
+    monkeypatch.setattr(fake.FakeClient, "keyed_table", denied)
+    with pytest.raises(fake.SpiralError, match="403 a\n") as raised:
+        source.as_table()
+    assert raised.value.__notes__ == ["SpiralDB: could not open table p/default/a"]
+
+
+@pytest.mark.parametrize("read", _READS)
+@pytest.mark.parametrize("when", ["plan", "first batch"])
+def test_a_kept_snapshot_that_fails_is_read_afresh(
+    calls: _Calls, monkeypatch: pytest.MonkeyPatch, read: str, when: str
+) -> None:
+    """A grant or credential that a handle holds may expire."""
+    source, kept = _source("a"), []
+    expected = _reads(_source("a"))[read]()
+    kept.append(source._kept.handle)  # pyright: ignore[reportPrivateUsage, reportOptionalMemberAccess]  # the handle that fails
+    scan = fake.FakeKeyedTable.scan
+
+    class Expired:
+        """A scan whose reader fails at its first batch."""
+
+        def to_reader(self) -> Any:
+            """Return itself."""
+            return self
+
+        def __iter__(self) -> Any:
+            return self
+
+        def __next__(self) -> Any:
+            raise fake.SpiralError("grant expired")
+
+        def close(self) -> None:
+            """Nothing to close."""
+
+    def new_scan(self: Any, *args: Any, **given: Any) -> Any:
+        if self is not kept[0]:
+            return scan(self, *args, **given)
+        if when == "plan":
+            raise fake.SpiralError("grant expired")
+        return Expired()
+
+    monkeypatch.setattr(fake.FakeKeyedTable, "scan", new_scan)
+    assert _reads(source)[read]() == expected
+    # The snapshot opened afresh is the one that is kept now.
+    assert source._kept is not None and source._kept.handle is not kept[0]  # pyright: ignore[reportPrivateUsage]  # the subject
+    calls.take()
+    assert _reads(source)[read]() == expected
+    assert "schema" not in calls.take()
+
+
+def test_a_kept_snapshot_that_fails_later_fails_the_read(
+    root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No row may be given twice, or of two reads."""
+    source = _source("a", max_rows=None)
+    scan = fake.FakeKeyedTable.scan
+
+    def new_scan(self: Any, *args: Any, **given: Any) -> Any:
+        rows = scan(self, *args, **given).to_table()
+
+        def batches() -> Iterator[Any]:
+            yield rows.slice(0, 2).to_batches()[0]
+            raise fake.SpiralError("status 500")
+
+        reader = batches()
+        return types.SimpleNamespace(to_reader=lambda: reader)
+
+    monkeypatch.setattr(fake.FakeKeyedTable, "scan", new_scan)
+    rows = source.iter_data()
+    assert [next(rows)[0].as_dict()["k"] for _ in range(2)] == [0, 1]
+    with pytest.raises(fake.SpiralError, match="500") as raised:
+        next(rows)
+    assert raised.value.__notes__ == ["SpiralDB: could not read p/default/a"]
+
+
+def test_a_null_in_a_kept_snapshot_is_refused_and_not_read_afresh(
+    calls: _Calls,
+) -> None:
+    source = _source("a", max_rows=None)
+    bad = _rows(0).to_pylist()
+    bad[0]["x"] = None
+    fake.ExternalProject("p").table("default.a").write(
+        pa.Table.from_pylist(
+            bad, schema=pa.schema([f.with_nullable(True) for f in _SCHEMA])
+        )
+    )
+    assert source.check_for_new_data()
+    for _ in range(2):
+        calls.take()
+        with pytest.raises(NullInNonNullableColumnError, match="p/default/a"):
+            source.as_table()
+        assert calls.take()["scan"] == 1
+
+
+def test_a_check_keeps_the_version_it_pins(calls: _Calls) -> None:
+    source = _source("a")
+    copy = source.where(j="j0")
+    _write("a", 60)
+    assert source.check_for_new_data()
+    calls.take()
+    assert _ks(source) == [0, 1, 2, 3, 60]
+    assert "schema" not in calls.take()
+    # A copy pins its own version still.
+    assert _ks(copy) == [0, 2]
+
+
+def test_a_closed_source_keeps_nothing(root: Path) -> None:
+    source = _source("a")
+    rows = source.iter_data()
+    _ = next(rows)
+    source.close()
+    assert source._kept is None  # pyright: ignore[reportPrivateUsage]  # the subject
+    assert len(list(rows)) == 3
+    assert source._kept is None  # pyright: ignore[reportPrivateUsage]  # the subject
+
+
+def test_threads_read_one_kept_snapshot(root: Path) -> None:
+    source = _source("a")
+    reads = [
+        _reads(source.where(j="j0") if i % 2 else source)["table"] for i in range(32)
+    ]
+    with ThreadPoolExecutor(8) as pool:
+        found = list(pool.map(lambda read: read(), reads))
+    assert found == [[0, 1, 2, 3], [0, 2]] * 16
+
+
+def test_an_early_stop_closes_the_reader(root: Path) -> None:
+    table = SpiralDBConnector("p").lookup_table("a")
+    _ = table.arrow_schema()
+    again = SpiralDBConnector("p").lookup_table("a", table.opened_snapshot())
+    batches = again.scan_batches()
+    _ = next(batches)
+    assert isinstance(batches, Generator)
+    batches.close()
