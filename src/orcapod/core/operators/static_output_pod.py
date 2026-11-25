@@ -2101,10 +2101,8 @@ class DynamicPodStream(StreamBase):
                 yield result
         if kept:
             self._cached_stream = (
-                # Its input unchanged, as a read keeps it: reads nothing.
-                self._pod.static_process(*self._upstreams)
-                if handed_on
-                else joined_batches(kept)
+                # Its input unchanged, as a read keeps it; nothing is read again.
+                self._upstreams[0] if handed_on else joined_batches(kept)
             )
             self._cached_time = datetime.now(timezone.utc)
             self._kept_states = kept_states
@@ -2332,8 +2330,28 @@ def _upstream_state(stream: StreamProtocol) -> tuple[str, object]:
         return ("generation", generation + int(stream.is_stale))
     if isinstance(stream, DynamicPodStream):
         _ = stream.last_modified
+        if reads_in_batches(stream):
+            # It may have been read without keeping a result (``run()``, ITL-1464), and
+            # then notices no change of its own inputs: what it is computed from is
+            # part of its state, up to the source.
+            return ("generation", _chain_state(stream))
         return ("generation", stream._reset_generation)  # pyright: ignore[reportPrivateUsage]  # same class
     return ("time", stream.last_modified)
+
+
+def _chain_state(stream: DynamicPodStream) -> object:
+    """The state of an operator stream read in batches and of everything beneath it.
+
+    Its reset generation, its operator's modified time and the states of its inputs, so
+    it differs after any change of the source or of an operator in the chain, whether or
+    not a stream of the chain keeps a result. Keeping one is not a change. An unknown
+    time (``None``) counts as a change: the state equals no other.
+    """
+    inputs = _upstream_states(stream.upstreams)
+    pod_time = stream.producer.last_modified
+    if pod_time is None or ("time", None) in inputs:
+        return object()
+    return (stream._reset_generation, pod_time, inputs)  # pyright: ignore[reportPrivateUsage]  # same class
 
 
 def _upstream_states(

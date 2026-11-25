@@ -194,7 +194,8 @@ class StreamView:
     """Rows of a stream, and how they were obtained.
 
     ``head(n)`` on a stream returns a view of at most ``n`` readily available rows;
-    ``run()`` returns a view of all the computed rows. The view's ``head``, ``tail`` and
+    ``run()`` returns a view of all the computed rows (a ``BoundedStreamView``, which holds
+    only the ends, of a large result read in batches). The view's ``head``, ``tail`` and
     ``sort_by_tags`` return a new view of its own rows, with a header that says what they
     are; they never read, compute or change the stream. A view holds the columns it was
     made with: for other column groups (system tags, source info, context, content

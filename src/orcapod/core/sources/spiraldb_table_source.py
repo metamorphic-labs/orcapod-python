@@ -1135,18 +1135,30 @@ class SpiralDBTableSource(RootSource):
     def _batch_streams_of_rows(self) -> Generator[StreamProtocol, None, None]:
         """One scan of the table, each batch shaped as ``as_table()`` shapes the whole
         (``run()``, ITL-1464)."""
+        columns = {"source": True, "system_tags": True, "context": True}
+        read = False
         with closing(self._batch_streams()) as streams:
             for stream in streams:
+                read = True
                 yield ArrowTableStream(
                     self._whole_table(
                         iter([stream]),
-                        columns={"source": True, "system_tags": True, "context": True},
+                        columns=columns,
                         all_info=False,
                     ),
                     tag_columns=self._tag_columns,
                     data_tags=self._data_tags,
                     data_context=self.data_context_key,
                 )
+        if not read:
+            # No row: the typed table of none that ``as_table()`` gives, without a
+            # second scan.
+            yield ArrowTableStream(
+                self._stream.as_table(columns=columns),
+                tag_columns=self._tag_columns,
+                data_tags=self._data_tags,
+                data_context=self.data_context_key,
+            )
 
     def run(self) -> StreamView:
         """Read every row the source reads and return a ``StreamView`` of them.

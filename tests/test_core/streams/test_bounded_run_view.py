@@ -167,6 +167,14 @@ def test_a_small_run_shows_what_the_whole_shows(source: Any, name: str) -> None:
     assert ran._repr_html_() == whole._repr_html_()
 
 
+def test_a_pass_through_run_scans_once(source: Any) -> None:
+    """An operator that hands its input on keeps its input, without a second scan."""
+    stream = CHAINS["select_data_pass_through"](source())
+    fake_spiral_sdk.scan_log.clear()
+    assert len(stream.run()) == 40
+    assert len(fake_spiral_sdk.scan_log) == 1
+
+
 def test_a_run_of_at_most_the_limit_is_kept_and_reads_once(source: Any) -> None:
     """A small result is kept at every step of the chain: no second scan."""
     first = source().drop_nulls(["amplitude"])
@@ -310,6 +318,143 @@ def test_head_after_the_source_moved_shows_no_old_rows(source: Any) -> None:
     assert root.check_for_new_data()
     assert stream.head(3).status is ViewStatus.NOT_COMPUTED
     assert len(stream.run()) == 41
+
+
+def _change_rows(name: str, rows: pa.Table) -> None:
+    fake_spiral_sdk.ExternalProject(_PROJECT).table(f"default.{name}").write(rows)
+
+
+def _changes_source(root: Any, _steps: list[Any]) -> None:
+    changed = (
+        _rows(40).slice(0, 1).set_column(2, "amplitude", pa.array([1e6], pa.float32()))
+    )
+    _change_rows("event_40", changed)
+    assert root.check_for_new_data()
+
+
+def _clears_the_intermediate(_root: Any, steps: list[Any]) -> None:
+    steps[0].clear_cache()
+
+
+def _reruns_an_operator(_root: Any, steps: list[Any]) -> None:
+    steps[0].producer._update_modified_time()
+
+
+_UPSTREAM_CHANGES = [_changes_source, _clears_the_intermediate, _reruns_an_operator]
+
+_READS_BEFORE: dict[str, Callable[[Any, list[Any]], None]] = {
+    "nothing": lambda root, steps: None,
+    "ran_the_intermediate": lambda root, steps: steps[0].run(),
+    "read_the_intermediate": lambda root, steps: steps[0].as_table(),
+}
+
+
+@pytest.mark.usefixtures("small_limits")
+@pytest.mark.parametrize("change", _UPSTREAM_CHANGES)
+@pytest.mark.parametrize("before", list(_READS_BEFORE))
+@pytest.mark.parametrize("when", ["before_run", "after_run"])
+@pytest.mark.parametrize("depth", [1, 3])
+@pytest.mark.parametrize("small", [True, False], ids=["retained", "window"])
+def test_no_result_is_shown_or_read_after_an_upstream_change(
+    source: Any, change: Any, before: str, when: str, depth: int, small: bool
+) -> None:
+    """Review of PR 560 (blocker): an intermediate that kept nothing hid a change.
+
+    The last step keeps its complete (small) result or its window, over intermediates
+    above the limit; a change of the source, a cleared intermediate or a modified
+    operator is seen by ``head``, the preview, ``as_table()``, ``run()`` and a step
+    over it, also when the intermediate was run or read on its own.
+    """
+    root = source()
+
+    def build(over: Any) -> list[Any]:
+        steps = [over.map_data({"note": "text"})]
+        for i in range(depth - 1):
+            steps.append(steps[-1].add_tags({f"extra_{i}": i}))
+        if small:
+            steps.append(steps[-1].filter(col("amplitude") >= 1e5))
+        else:
+            steps.append(steps[-1].map_data({"text": "words"}))
+        return steps
+
+    steps = build(root)
+    last = steps[-1]
+    over_last = last.add_tags(cohort="A")
+    if when == "before_run":
+        _ = _READS_BEFORE[before](root, steps)
+    assert isinstance(last.run(), BoundedStreamView) is not small
+    _ = over_last.run()
+    if when == "after_run":
+        _ = _READS_BEFORE[before](root, steps)
+    assert last.head(1).status is ViewStatus.ROWS  # not a change
+    assert over_last.head(1).status is ViewStatus.ROWS
+
+    change(root, steps)
+
+    for stream in (over_last, last):
+        assert stream.head(1).status is ViewStatus.NOT_COMPUTED or small
+        if small:
+            assert "computed rows" not in stream.head(1).header()
+            assert "computed: no rows" not in stream.head(1).header()
+        assert "then sorted by tags" not in stream._repr_html_()
+    fresh = build(source())
+    _same(last.as_table(), fresh[-1].as_table())
+    _same(over_last.as_table(), fresh[-1].add_tags(cohort="A").as_table())
+    assert len(last.run()) == len(fresh[-1].as_table())
+    assert over_last.run().total_rows == len(fresh[-1].as_table())
+
+
+@pytest.mark.usefixtures("small_limits")
+@pytest.mark.parametrize("change", _UPSTREAM_CHANGES)
+def test_every_step_over_a_shared_intermediate_sees_a_change(
+    source: Any, change: Any
+) -> None:
+    """Two branches, a function pod and a join over one intermediate that kept nothing."""
+
+    @function_pod(output_keys="double")
+    def double(amplitude: float | None) -> float:
+        return 2 * (amplitude or 0.0)
+
+    def build(over: Any) -> tuple[list[Any], list[Any]]:
+        shared = over.map_data({"note": "text"})
+        one = shared.filter(col("amplitude") >= 1e5)
+        two = shared.add_tags(cohort="A").filter(col("amplitude") >= 30.0)
+        joined = one.map_data(
+            {"amplitude": "a", "text": "b", "trace": "c", "flag": "d"}
+        ).join(two)
+        grouped = two.group_by("subject")
+        return [shared], [one, two, double.pod(two), joined, grouped]
+
+    root = source(tag_only_columns=True)
+    shared, ends = build(root)
+    for stream in (*shared, *ends):
+        _ = stream.run()
+    change(root, shared)
+    _, fresh = build(source(tag_only_columns=True))
+    for stream, expected in zip(ends, fresh, strict=True):
+        _same(stream.as_table(), expected.as_table())
+
+
+@pytest.mark.parametrize("name", list(CHAINS))
+@pytest.mark.parametrize("restriction", [{"subject": "absent"}, None])
+def test_a_read_of_no_rows_scans_once(source: Any, name: str, restriction: Any) -> None:
+    """Review of PR 560: an empty source was scanned twice; its result is typed the same."""
+    n = 40 if restriction else 1
+    kwargs: dict[str, Any] = {"tag_only_columns": True, "where": restriction}
+    if restriction is None:
+        kwargs["where"] = {"timestamp": 7}
+    whole = CHAINS[name](source(n, **kwargs))
+    ran = CHAINS[name](source(n, **kwargs))
+    fake_spiral_sdk.scan_log.clear()
+    view = ran.run()
+    assert len(fake_spiral_sdk.scan_log) == 1
+    assert view.total_rows == 0
+    assert view.status is ViewStatus.ROWS
+    _same(view.as_table(), whole.as_table())
+    for config in CONFIGS:
+        _same(ran.as_table(columns=config), whole.as_table(columns=config))
+    expected = whole._view_of_rows(whole.as_table(), whole._RUN_ORIGIN)
+    assert str(view) == str(expected)
 
 
 @pytest.mark.usefixtures("small_limits")

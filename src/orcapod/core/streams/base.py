@@ -99,7 +99,8 @@ def reads_in_batches(stream: object) -> bool:
 
 
 def batch_streams_of(stream: object) -> Generator[StreamProtocol, None, None]:
-    """The rows of a stream that ``reads_in_batches``, in order, one stream per batch."""
+    """The rows of a stream that ``reads_in_batches``, in order, one stream per batch: at
+    least one, with no row when there is none."""
     return cast("StreamBase", stream)._batch_streams_of_rows()  # pyright: ignore[reportPrivateUsage]  # shared by the stream kinds
 
 
@@ -1632,9 +1633,7 @@ class StreamBase(TraceableBase):
             ``ROWS``; bounded as said above.
         """
         if self._reads_in_batches():
-            view = self._run_in_batches()
-            if view is not None:
-                return view
+            return self._run_in_batches()
         return self._view_of_rows(self.as_table(), self._RUN_ORIGIN)
 
     def _reads_in_batches(self) -> bool:
@@ -1645,8 +1644,8 @@ class StreamBase(TraceableBase):
         """See ``batch_streams_of``; asked only when ``_reads_in_batches``."""
         raise NotImplementedError(f"{type(self).__name__} has no rows in batches")
 
-    def _run_in_batches(self) -> StreamView | None:
-        """The ``run()`` view of rows read batch by batch; ``None`` for no batch."""
+    def _run_in_batches(self) -> StreamView:
+        """The ``run()`` view of rows read batch by batch, in one read."""
         rows = WindowOfRows()
         with closing(self._batch_streams_of_rows()) as batches:
             for batch in batches:
@@ -1654,8 +1653,6 @@ class StreamBase(TraceableBase):
         complete = rows.complete
         if complete is not None:
             return self._view_of_rows(complete, self._RUN_ORIGIN)
-        if rows.total == 0:
-            return None
         first = self._view_of_rows(rows.first, self._RUN_ORIGIN)
         return BoundedStreamView(first, rows.last, rows.total)
 

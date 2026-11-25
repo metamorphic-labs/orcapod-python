@@ -142,3 +142,13 @@ per row:
 
 The Arrow pool holds nothing large after the run. What remains is mostly the set of keys the
 source remembers to refuse a repeat (outside this track), which still grows with the table.
+
+## Staleness of a chain that keeps nothing
+
+An operator stream tells a change of an operator stream beneath it by that stream's reset
+generation, which moves when it discards a kept result. A stream of a batched chain may have
+been read without keeping one, and then discards nothing. So the state of such a stream is
+its generation, its operator's modified time and the state of its own input, down to the
+source (`_chain_state`): a change anywhere beneath is seen by every kept result and window
+above it, whichever streams of the chain hold rows. A source with no row gives one batch of
+none, so its run scans once.
