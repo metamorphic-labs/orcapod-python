@@ -9,6 +9,9 @@ import os
 import signal
 import subprocess
 import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -352,6 +355,44 @@ elif case == "inherited":
     in_child(use)
     assert spool.take(np.array([1, 0])).equals(table.take(pa.array([1, 0])))
     spool.close()
+elif case in ("root_lock", "unpublished"):
+    # A fork while another thread has just opened the root's lock file, or has made a
+    # directory and not yet recorded it; then the parent is killed holding the lock.
+    opened, resume = threading.Event(), threading.Event()
+    name = "fdopen" if case == "root_lock" else "_make_process_directory"
+    where = os if case == "root_lock" else row_spool
+    original = getattr(where, name)
+    def paused(*args, **kwargs):
+        result = original(*args, **kwargs)
+        opened.set()
+        resume.wait(30)
+        return result
+    setattr(where, name, paused)
+    if case == "root_lock":
+        import fcntl
+        locked, take_lock = threading.Event(), fcntl.lockf
+        def lockf(*args):
+            take_lock(*args)
+            locked.set()
+            threading.Event().wait(30)
+        fcntl.lockf = lockf
+    spool = RowSpool(0, root)
+    threading.Thread(target=spool.append, args=(table,), daemon=True).start()
+    assert opened.wait(10)
+    ready, wait = os.pipe()
+    child = os.fork()
+    if child == 0:
+        signal.alarm(120)  # never left behind
+        os.write(wait, b"x")
+        os.close(1)
+        os.close(2)
+        signal.pause()
+    os.read(ready, 1)
+    if case == "root_lock":
+        resume.set()
+        assert locked.wait(10)
+    print(child, flush=True)
+    os.kill(os.getpid(), signal.SIGKILL)
 elif case == "outlived":
     # A child that outlives its parent does not keep the parent's directory locked.
     spool = RowSpool(0, root)
@@ -397,15 +438,21 @@ def test_a_forked_child_neither_waits_for_nor_touches_its_parents_spools(
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="needs fork")
-def test_a_child_that_outlives_its_killed_parent_does_not_stop_the_sweep(
-    tmp_path: Path,
+@pytest.mark.parametrize("case", ["outlived", "root_lock", "unpublished"])
+def test_a_child_that_outlives_its_killed_parent_holds_none_of_its_locks(
+    tmp_path: Path, case: str
 ) -> None:
-    done = _fork("outlived", tmp_path)
-    (left,) = tmp_path.glob("orcapod-spool-*")
+    done = _fork(case, tmp_path)
+    left = list(tmp_path.glob("orcapod-spool-*"))
+    assert bool(left) == (case != "root_lock")
     child = int(done.stdout)
     try:
+        # Another process spills at once, and sweeps what the killed one left.
+        other = _child(tmp_path, "exit")
+        _ = other.communicate(timeout=30)
+        assert other.returncode == 0
+        assert not any(directory.exists() for directory in left)
         spool, _ = _filled(tmp_path, [10], 0)
-        assert not left.exists()
         spool.close()
     finally:
         os.kill(child, signal.SIGKILL)
@@ -500,4 +547,73 @@ def test_a_removal_that_stopped_part_way_is_finished(tmp_path: Path) -> None:
     (left / "lock").touch()
     spool, _ = _filled(tmp_path, [10], 0)
     assert not left.exists()
+    spool.close()
+
+
+def test_a_process_never_sweeps_its_own_directory(tmp_path: Path) -> None:
+    """Its own record lock would not stop it: also when a root has two names."""
+    root, alias = tmp_path / "root", tmp_path / "alias"
+    root.mkdir()
+    alias.symlink_to(root, target_is_directory=True)
+    first, rows = _filled(root, [10], 0)
+    second, _ = _filled(alias, [10], 0)
+    assert len(list(root.glob("orcapod-spool-*"))) == 2
+    # And the first directory is still locked for every other process.
+    other = _child(root, "exit")
+    _ = other.communicate()
+    assert other.returncode == 0
+    assert first.take(np.array([9])).equals(rows.slice(9, 1))
+    first.close()
+    second.close()
+
+
+@pytest.mark.parametrize("read", ["take", "table", "slice"])
+def test_a_close_waits_for_a_read_of_another_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read: str
+) -> None:
+    spool, rows = _filled(tmp_path, [10, 10], 0)
+    about_to_map, go_on = threading.Event(), threading.Event()
+    original = pa.memory_map
+
+    def parked(path: str) -> Any:
+        about_to_map.set()
+        assert go_on.wait(10)
+        return original(path)
+
+    monkeypatch.setattr(pa, "memory_map", parked)
+    reads: dict[str, Any] = {
+        "take": lambda: spool.take(np.arange(20)),
+        "table": spool.table,
+        "slice": lambda: spool.slice(0, 20),
+    }
+    with ThreadPoolExecutor(2) as pool:
+        result = pool.submit(reads[read])
+        assert about_to_map.wait(10)
+        closed = pool.submit(spool.close)
+        with pytest.raises(FutureTimeout):
+            closed.result(timeout=0.1)
+        go_on.set()
+        assert result.result(10).equals(rows)
+        closed.result(10)
+    assert _files(tmp_path) == []
+    with pytest.raises(ValueError, match="closed"):
+        reads[read]()
+
+
+def test_threads_append_and_read_one_spool(tmp_path: Path) -> None:
+    spool = RowSpool(1 << 12, str(tmp_path))
+
+    def work(number: int) -> None:
+        for i in range(20):
+            spool.append(pa.table({"a": [number] * 5, "b": [i] * 5}))
+            rows = np.arange(0, spool.size, 7)
+            assert spool.take(rows).num_rows == len(rows)
+            _ = spool.table()
+
+    with ThreadPoolExecutor(4) as pool:
+        for done in [pool.submit(work, n) for n in range(4)]:
+            done.result(60)
+    assert spool.size == spool.table().num_rows == 400
+    counts = spool.table().group_by(["a", "b"]).aggregate([([], "count_all")])
+    assert set(counts.column("count_all").to_pylist()) == {5}
     spool.close()
