@@ -30,17 +30,26 @@ system-tag column names of the same table, and the column's name at the source.
 - Text is made in one function, `materialize`, at most 65,536 rows at a time.
 
 A derived column is loud where it does not belong: reading a value, casting to text,
-hashing, pickling and writing Parquet (so Delta) each raise.
+hashing, pickling, storing and writing Parquet each raise.
 
 ## Where a derived table can go
 
-`StreamProtocol.as_carried_table(columns=)` is the internal read: the table of `as_table`
-with derived columns left as they are. Only library operators call it. The default is
-`as_table` (text), so a user's operator, source or stream, and every job node today, is
-given and gives text. `ArrowTableStream`, `DynamicPodStream`, and the sources over a held
-or scanned table answer it without text. `as_table` with any columns, `iter_data`, `head`,
-`run`, the data frame methods and the identity table give text, as before. A read without
-the system tags gives text (the recipe would have nothing to read).
+`core/streams/carried.py` holds the internal read, `carried_table(stream, columns)`: the
+table of `as_table` with derived columns left as they are. It is a private library function,
+no part of a stream's interface. Both ends are exact:
+
+- the stream: its own class declares `_carried_table` (the library's `ArrowTableStream`,
+  `DynamicPodStream` and source kinds), and the object reads as that class
+  (`reads_as_its_class`). A subclass, a replaced `as_table` and a user's stream are read
+  through `as_table`, and give text;
+- the reader: an operator whose own class declares `CARRIES_TOKENS`, through
+  `StaticOutputOperatorPod._input_table`. A user's operator, also a subclass of a library
+  one, reads text.
+
+`as_table` with any columns, `iter_data`, `head`, `run`, the data frame methods and the
+identity table give text, as before, and so does a read without the system tags (the recipe
+would have nothing to read). The Arrow hashers (schemas, and tables without rows too) and
+every database's `add_records` refuse a derived column by name (`refuse_derived`).
 
 ## Producers of `_source_` columns
 
@@ -72,7 +81,7 @@ the system tags gives text (the recipe would have nothing to read).
 | `GroupBy`, `Batch` | the members' tokens, in a list | text (below) |
 | `iter_data` (rows: function pods, side effects, async rows) | one string per column of each row | built for 8,192 rows at a time |
 | `F` (`_row_built_form`, `row_built_provenance`) | types and null flags | passes a derived column through (a token is one string and never null) |
-| Job nodes (`core/nodes/*`) | the stored text; the kept table | text until the transport calls `as_carried_table` |
+| Job nodes (`core/nodes/*`) | the stored text; the kept table | text until the transport calls `carried_table` |
 | Function node pipeline table, result table, operator and source caches | stored text | unchanged: they read rows or `as_table` |
 | Record-batch channels, streaming joins | types, values | unchanged (text) |
 | Provenance trace (`pipeline/provenance.py`) | text | unchanged |

@@ -1514,18 +1514,6 @@ class StreamBase(TraceableBase):
         all_info: bool = False,
     ) -> "pa.Table": ...
 
-    def as_carried_table(
-        self, *, columns: ColumnConfig | dict[str, Any] | None = None
-    ) -> "pa.Table":
-        """The table of ``as_table(columns=columns)``, as operators pass it on.
-
-        A source-info column may be derived (``utils/source_tokens.py``): a recipe over
-        the table's system tags in place of its text, which ``source_tokens.materialize``
-        builds. Internal: never stored, hashed or shown (ITL-1464). A stream that holds
-        none gives ``as_table``.
-        """
-        return self.as_table(columns=columns)
-
     def as_polars_df(
         self,
         *,

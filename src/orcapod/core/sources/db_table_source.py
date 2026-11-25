@@ -84,6 +84,7 @@ class DBTableSource(RootSource):
     SOURCE_VERSION: ClassVar[int] = 1
     """The version of this kind's implementation, in the kind part (ITL-1425)."""
     TABLE_IS_ROWS: ClassVar[bool] = True
+    _carried_table = RootSource._carried_from_stream
     TAKES_TAG_ONLY_COLUMNS: ClassVar[bool] = True
 
     def __init__(

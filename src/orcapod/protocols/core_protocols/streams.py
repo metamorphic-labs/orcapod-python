@@ -255,17 +255,6 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
         """
         ...
 
-    def as_carried_table(
-        self, *, columns: ColumnConfig | dict[str, Any] | None = None
-    ) -> "pa.Table":
-        """The table of ``as_table(columns=columns)``, as operators pass it on.
-
-        A source-info column may be derived (``utils/source_tokens.py``): a recipe over
-        the table's system tags in place of its text. Internal: never stored, hashed or
-        shown (ITL-1464).
-        """
-        ...
-
     def as_table(
         self,
         *,

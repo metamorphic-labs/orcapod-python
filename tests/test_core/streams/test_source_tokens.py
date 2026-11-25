@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pickle
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import polars as pl
@@ -22,8 +23,14 @@ from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.streams import ArrowTableStream
+from orcapod.core.streams.carried import carried_table
 from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS
-from orcapod.databases import InMemoryArrowDatabase
+from orcapod.databases import (
+    ConnectorArrowDatabase,
+    DeltaTableDatabase,
+    InMemoryArrowDatabase,
+    SQLiteConnector,
+)
 from orcapod.operators import (
     AddTags,
     DropColumns,
@@ -36,7 +43,8 @@ from orcapod.operators import (
     SelectDataColumns,
     TagBy,
 )
-from orcapod.sources import ArrowTableSource, CachedSource
+from orcapod.protocols.core_protocols import StreamProtocol
+from orcapod.sources import ArrowTableSource, CachedSource, SpiralDBTableSource
 from orcapod.system_constants import constants
 from orcapod.utils import arrow_utils, source_tokens
 from tests.test_core.operators.test_async_sync_equivalence import (
@@ -45,6 +53,7 @@ from tests.test_core.operators.test_async_sync_equivalence import (
     Case,
 )
 from tests.test_core.operators.test_row_built_form import assert_same_values
+from tests.test_databases import fake_spiral_sdk as fake
 
 CARRIED = {"source": True, "system_tags": True, "context": True}
 
@@ -115,6 +124,9 @@ ROW_WISE: dict[str, Callable[[], Any]] = {
     "select_data": lambda: SelectDataColumns(["y"])(_source()),
     "drop_tags": lambda: DropTagColumns(["k"])(_source()),
     "drop_columns": lambda: DropColumns(["k", "x"])(_source()),
+    "select_columns": lambda: _source().select_columns(["k", "y"]),
+    "select_tags": lambda: _source().select_tag_columns(["k"]),
+    "drop_data": lambda: _source().drop_data_columns(["y"]),
     "add_tags": lambda: AddTags({"b": 1, "a": "q"})(_source()),
     "tag_by": lambda: TagBy(["x"])(DropNulls(["x"])(_plain_source())),
     "chain": lambda: (
@@ -132,7 +144,7 @@ def test_a_row_wise_operator_carries_the_tokens_and_gives_the_same_rows(
     name: str, text_sources: Callable[[], None]
 ) -> None:
     result = ROW_WISE[name]()
-    carried = result.as_carried_table(columns=CARRIED)
+    carried = carried_table(result, CARRIED)
     tokens = [c for c in carried.column_names if c.startswith(constants.SOURCE_PREFIX)]
     assert tokens and set(_derived(carried)) == set(tokens)
     table = result.as_table(all_info=True)
@@ -141,7 +153,7 @@ def test_a_row_wise_operator_carries_the_tokens_and_gives_the_same_rows(
     text_sources()
     oracle = ROW_WISE[name]()
     expected = oracle.as_table(all_info=True)
-    assert not _derived(oracle.as_carried_table(columns=CARRIED))
+    assert not _derived(carried_table(oracle, CARRIED))
     assert table.schema.equals(expected.schema, check_metadata=True)
     assert_same_values(table, expected)
     assert rows == [
@@ -160,7 +172,7 @@ def test_every_operator_gives_what_text_sources_give(
     F (the table a job node hands on) of the carried form."""
     result = case.make_op()(*case.make_sources())
     table = result.as_table(all_info=True)
-    carried = result.as_carried_table(columns=ZERO_ROW_INPUT_COLUMNS)
+    carried = carried_table(result, ZERO_ROW_INPUT_COLUMNS)
     plain = result.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
     built = source_tokens.materialize(carried)
     assert built.schema.equals(plain.schema, check_metadata=True)
@@ -211,7 +223,7 @@ def test_no_public_read_gives_a_derived_column(make: Callable[[], Any]) -> None:
 def test_a_table_without_its_system_tags_holds_text() -> None:
     """The recipe reads the system tags, so a table without them is never carried."""
     for config in ({"source": True}, {"source": True, "context": True}):
-        table = _source().as_carried_table(columns=config)
+        table = carried_table(_source(), config)
         assert not _derived(table)
         assert table.column("_source_x").type == pa.large_string()
 
@@ -320,7 +332,7 @@ def test_stored_rows_hold_text(text_sources: Callable[[], None]) -> None:
 
 
 def test_a_derived_column_that_leaks_is_an_error() -> None:
-    carried = _source().as_carried_table(columns=CARRIED)
+    carried = carried_table(_source(), CARRIED)
     tokens = carried.column("_source_x")
     with pytest.raises(TypeError, match="no value"):
         _ = tokens.to_pylist()
@@ -330,13 +342,47 @@ def test_a_derived_column_that_leaks_is_an_error() -> None:
         _ = pickle.dumps(carried)
     with pytest.raises(pa.ArrowNotImplementedError):
         pq.write_table(carried, pa.BufferOutputStream())
-    with pytest.raises(Exception, match="no value|derived"):
-        _ = contexts.get_default_context().arrow_hasher.hash_table(carried)
+    hasher = contexts.get_default_context().arrow_hasher
+    for hash_it in (
+        lambda: hasher.hash_table(carried),
+        lambda: hasher.hash_table(carried.slice(0, 0)),
+        lambda: hasher.hash_schema(carried.schema),
+        lambda: hasher.hash_table_strict(carried),
+        lambda: hasher.hash_table_ordered(carried),
+    ):
+        with pytest.raises(TypeError, match="derived"):
+            _ = hash_it()
+
+
+@pytest.mark.parametrize("rows", [0, 3])
+@pytest.mark.parametrize("kind", ["memory", "delta", "connector"])
+def test_a_store_refuses_a_derived_column(kind: str, rows: int, tmp_path: Path) -> None:
+    carried = carried_table(_source(), CARRIED).slice(0, rows)
+    records = carried.append_column(
+        "rid", pa.array([str(i).encode() for i in range(rows)], pa.large_binary())
+    )
+    databases: dict[str, Callable[[], Any]] = {
+        "memory": InMemoryArrowDatabase,
+        "delta": lambda: DeltaTableDatabase(str(tmp_path / "delta")),
+        "connector": lambda: ConnectorArrowDatabase(
+            SQLiteConnector(str(tmp_path / "store.db"))
+        ),
+    }
+    database = databases[kind]()
+    with pytest.raises(TypeError, match="derived"):
+        database.add_records(("t",), records, record_id_column="rid", flush=True)
+
+
+def test_the_carried_read_is_no_part_of_a_stream() -> None:
+    """Review of PR 563: no public name gives a derived column."""
+    for stream in (_source(), ROW_WISE["chain"]()):
+        assert not [n for n in dir(stream) if "carried" in n and not n.startswith("_")]
+    assert "carried" not in " ".join(dir(StreamProtocol))
 
 
 def test_a_spilled_table_keeps_its_recipes() -> None:
     """As the row spool writes it: an extension column's storage, wrapped when read."""
-    carried: Any = _source().as_carried_table(columns=CARRIED).combine_chunks()
+    carried: Any = carried_table(_source(), CARRIED).combine_chunks()
     arrow: Any = pa
     batch: Any = carried.to_batches()[0]
     storage = arrow.RecordBatch.from_arrays(
@@ -363,7 +409,7 @@ def test_a_spilled_table_keeps_its_recipes() -> None:
 
 
 def test_a_carried_column_has_no_bytes_and_is_not_null() -> None:
-    carried = _source().as_carried_table(columns=CARRIED)
+    carried = carried_table(_source(), CARRIED)
     taken = carried.take(pa.array([1, 5])).filter(pc.field("k") > 1)
     for table in (carried, taken, pa.concat_tables([carried, taken]).combine_chunks()):
         for name in _derived(table):
@@ -394,7 +440,7 @@ def test_extended_system_tag_names_are_followed_and_sorting_builds_the_text() ->
     )
     tables = [
         arrow_utils.append_to_system_tags(
-            s.as_carried_table(columns={"source": True, "system_tags": True}), f"h:{i}"
+            carried_table(s, {"source": True, "system_tags": True}), f"h:{i}"
         )
         for i, s in enumerate((left, right))
     ]
@@ -438,12 +484,114 @@ def test_no_rows_hold_text_types() -> None:
     assert table.schema.equals(_source().as_table(all_info=True).schema)
 
 
-def test_a_source_with_its_own_read_gives_its_own_table() -> None:
-    """A subclass, or an object, with its own ``as_table`` is read through it."""
+class _OwnSource(ArrowTableSource):
+    def as_table(self, **kwargs: Any) -> pa.Table:
+        return super().as_table(**kwargs).slice(0, 2)
 
-    class Own(ArrowTableSource):
-        def as_table(self, **kwargs: Any) -> pa.Table:
-            return super().as_table(**kwargs).slice(0, 2)
 
-    own = Own(_table(), tag_columns=["k"])
-    assert own.drop_columns(["x"]).as_table().num_rows == 2
+class _OwnStream(ArrowTableStream):
+    def as_table(self, **kwargs: Any) -> pa.Table:
+        return super().as_table(**kwargs).slice(0, 2)
+
+
+class _OwnSpiral(SpiralDBTableSource):
+    def as_table(self, **kwargs: Any) -> pa.Table:
+        return super().as_table(**kwargs).slice(0, 2)
+
+
+class _Forwarding:
+    """A stream of the read interface as it is, forwarding to another."""
+
+    def __init__(self, inner: Any) -> None:
+        self.inner = inner
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self.inner, name)
+
+
+def _raw(kind: type[ArrowTableStream]) -> ArrowTableStream:
+    return kind(
+        carried_table(_source(), {"source": True, "system_tags": True}),
+        tag_columns=["k", "j"],
+        data_tags=["k"],
+    )
+
+
+def _replaced() -> Any:
+    source = _source()
+    read = source.as_table
+    setattr(source, "as_table", lambda **kwargs: read(**kwargs).slice(0, 2))  # noqa: B010  # the point
+    return source
+
+
+@pytest.mark.parametrize("kind", ["source", "stream", "spiral", "replaced"])
+def test_a_stream_with_its_own_read_is_read_through_it(
+    kind: str, tmp_path: Path
+) -> None:
+    """Review of PRs 563 and 564: a subclass, or an object, with its own ``as_table``."""
+    with fake.install(tmp_path):
+        if kind == "spiral":
+            table = fake.ExternalProject("example").create_table(
+                "default.demo", key_schema=pa.schema([("k", pa.uint64())])
+            )
+            table.write(
+                pa.table({"k": pa.array([1, 2, 3], pa.uint64()), "x": [3.0, 4.0, 5.0]})
+            )
+        own: Any = {
+            "source": lambda: _OwnSource(_table(), tag_columns=["k"]),
+            "stream": lambda: _raw(_OwnStream),
+            "spiral": lambda: _OwnSpiral("example", "demo"),
+            "replaced": _replaced,
+        }[kind]()
+        assert not _derived(carried_table(own, CARRIED))
+        assert own.map_data({"x": "z"}).as_table().num_rows == 2
+        assert own.polars_filter(pl.col("k") > -1).as_table().num_rows == 2
+
+
+def test_a_stream_without_the_internal_read_is_read_as_before() -> None:
+    forwarding: Any = _Forwarding(_source())
+    assert not _derived(carried_table(forwarding, CARRIED))
+    result = DropNulls(["x"]).static_process(forwarding)
+    assert result.as_table(all_info=True).equals(
+        DropNulls(["x"]).static_process(_source()).as_table(all_info=True)
+    )
+
+
+class _OwnDropNulls(DropNulls):
+    """A user's operator over a library one."""
+
+    seen: list[pa.Table] = []
+
+    def unary_static_process(self, stream: Any) -> Any:
+        self.seen.append(self._input_table(stream, CARRIED))
+        return super().unary_static_process(stream)
+
+
+def test_a_subclass_of_a_library_operator_reads_text() -> None:
+    _OwnDropNulls.seen = []
+    result = _OwnDropNulls(["x"])(_source())
+    assert not _derived(carried_table(result, CARRIED))
+    (seen,) = _OwnDropNulls.seen
+    assert not _derived(seen)
+
+
+def test_every_library_source_is_read_without_text() -> None:
+    """Each kind declares the read itself; the ones with rows of their own do not."""
+    from orcapod import sources
+
+    declared = {
+        name
+        for name in dir(sources)
+        if isinstance(cls := getattr(sources, name), type)
+        and "_carried_table" in vars(cls)
+    }
+    kinds = {
+        name
+        for name in dir(sources)
+        if isinstance(cls := getattr(sources, name), type)
+        and vars(cls).get("TABLE_IS_ROWS") is True
+    }
+    assert kinds - declared == {"CachedSource"}
+    assert declared <= kinds
