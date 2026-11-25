@@ -24,7 +24,7 @@ import sys
 import uuid
 from abc import abstractmethod
 from collections import Counter
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from datetime import datetime, timezone
 from functools import partial
 from typing import ClassVar, Any, Literal, NamedTuple, cast
@@ -35,6 +35,13 @@ import pyarrow as pa
 from orcapod import contexts
 from orcapod.core.unique_keys import UniqueKeys, derived_keys
 from orcapod.core.nodes.provenance_methods import ProvenanceMethods
+from orcapod.core.held_rows import (
+    HELD_CHUNK_ROWS,
+    HeldPairs,
+    HeldRows,
+    RowTypes,
+    batched,
+)
 from orcapod.core.function_pod import (
     fall_through_tags,
     function_input,
@@ -297,6 +304,17 @@ def _with_datagram_id(data: Data, datagram_id: uuid.UUID) -> Data:
         record_uuid=datagram_id,
         data_context=data.data_context_key,
     )
+
+
+_ROW_TYPES = RowTypes(Tag, Data)
+
+
+def held_pairs() -> HeldPairs:
+    """An empty ``HeldPairs`` for rows of ``Tag`` and ``Data``.
+
+    For the side-effect job nodes: one place gives them the row classes.
+    """
+    return HeldPairs(_ROW_TYPES)
 
 
 def rows_as_output_stream(
@@ -756,7 +774,7 @@ class FunctionNodeBase(StreamBase):
         if self._read_finds_stale():
             self.clear_cache()
         if self._cached_output_table is None:
-            self._cached_output_table = self._table_from_pairs(list(self.iter_data()))
+            self._cached_output_table = self._table_from_pairs(self.iter_data())
 
         column_config = ColumnConfig.handle_config(columns, all_info=all_info)
 
@@ -824,7 +842,7 @@ class FunctionNodeBase(StreamBase):
         )
 
     def _table_from_pairs(
-        self, pairs: "list[tuple[TagProtocol, DataProtocol]]"
+        self, pairs: "Iterable[tuple[TagProtocol, DataProtocol]]"
     ) -> "pa.Table":
         """Return the output rows ``pairs`` as one table with every column group.
 
@@ -842,7 +860,31 @@ class FunctionNodeBase(StreamBase):
             InputValidationError: If two rows give one column different Arrow
                 types, naming this node, the column and both types.
         """
-        if not pairs:
+        # A batch of rows at a time, one chunk each, so at most that many rows are held
+        # as pairs and one-row tables (ITL-1464).
+        tag_tables: list[pa.Table] = []
+        data_tables: list[pa.Table] = []
+        try:
+            for rows in batched(pairs, HELD_CHUNK_ROWS):
+                tag_tables.append(
+                    _concat_row_tables(
+                        [tag.as_table(columns={"system_tags": True}) for tag, _ in rows]
+                    ).combine_chunks()
+                )
+                data_tables.append(
+                    _concat_row_tables(
+                        [
+                            data.as_table(columns={"source": True, "context": True})
+                            for _, data in rows
+                        ]
+                    ).combine_chunks()
+                )
+            # One table per batch, put together by the rule that makes each batch's.
+            tag_table = _concat_row_tables(tag_tables) if tag_tables else None
+            data_table = _concat_row_tables(data_tables) if data_tables else None
+        except InputValidationError as exc:
+            raise InputValidationError(f"Function node {self.label!r}: {exc}") from exc
+        if tag_table is None or data_table is None:
             # No data was produced (node has not been run yet or produced zero
             # outputs): the table computed rows would have, with no row (ITL-912).
             typed = self._zero_row_output_table()
@@ -856,18 +898,6 @@ class FunctionNodeBase(StreamBase):
                     tag_python_schema + data_python_schema
                 ),
             )
-        try:
-            tag_table = _concat_row_tables(
-                [tag.as_table(columns={"system_tags": True}) for tag, _ in pairs]
-            )
-            data_table = _concat_row_tables(
-                [
-                    data.as_table(columns={"source": True, "context": True})
-                    for _, data in pairs
-                ]
-            )
-        except InputValidationError as exc:
-            raise InputValidationError(f"Function node {self.label!r}: {exc}") from exc
         # A data-tag is one column: laid out once, among the tags.
         shared = [c for c in data_table.column_names if c in tag_table.column_names]
         if shared:
@@ -917,23 +947,27 @@ class FunctionNodeBase(StreamBase):
             note=BLUEPRINT_NOTE,
         )
 
-    def _head_of_pairs(
+    def _head_of_rows(
         self,
-        pairs: "Sequence[tuple[TagProtocol, DataProtocol | None]]",
+        rows: "Sequence[tuple[TagProtocol, DataProtocol]]",
+        total: int,
+        missing: int,
         n: int,
         config: ColumnConfig,
         origin: str,
     ) -> StreamView:
-        """Return the first ``n`` of ``pairs`` as this node's head.
+        """Return the first ``n`` of ``rows`` as this node's head.
 
-        A ``None`` output (a filtered input) is not a row. An ``EmptyData`` placeholder
-        (a result kept in an ephemeral database that is gone) has no values to show: it is
-        left out and counted in the note.
+        Args:
+            rows: The node's first rows with values: every one of them with sorting, at
+                least one when there is one.
+            total: How many rows with values the node has.
+            missing: How many results have no values to show: kept in an ephemeral
+                database that is gone (``EmptyData``). They are left out and noted.
+            n: How many rows to show.
+            config: The column groups.
+            origin: Where the rows came from (``StreamView``).
         """
-        rows = [
-            (t, d) for t, d in pairs if d is not None and not isinstance(d, EmptyData)
-        ]
-        missing = sum(1 for _, d in pairs if isinstance(d, EmptyData))
         # With sorting, every row is shaped and sorted (each keeps its own content
         # hash), then the first n are taken: the head is ``as_table(config)[:n]``.
         # At least one row is shaped even for n == 0, so that the empty head has the
@@ -957,7 +991,7 @@ class FunctionNodeBase(StreamBase):
             self,
             table,
             tag_columns=self.keys(columns=config)[0],
-            total_rows=len(rows),
+            total_rows=total,
             origin=origin,
             note=note,
         )
@@ -1474,9 +1508,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         )
 
         # stream-level caching state
-        self._cached_output_datas: dict[
-            bytes, tuple[TagProtocol, DataProtocol | None]
-        ] = {}
+        # Full chunks of them on local disk when they are many (ITL-1464).
+        self._cached_output_datas: HeldRows = HeldRows(_ROW_TYPES)
         self._cached_output_table: "pa.Table | None" = None
         self._cached_content_hash_column: "pa.Array | None" = None
         self._run_entry_counts = None
@@ -1946,7 +1979,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             )
 
         # FunctionJobNode — stream-level caching state
-        node._cached_output_datas = {}
+        node._cached_output_datas = HeldRows(_ROW_TYPES)
         node._cached_output_table = None
         node._cached_content_hash_column = None
 
@@ -2033,6 +2066,31 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             pair = cache.get(eid)
             if pair is not None and pair[1] is not None:
                 yield pair[0], pair[1]
+
+    def _held_head(
+        self, n: int
+    ) -> tuple[list[tuple[TagProtocol, DataProtocol]], int, int]:
+        """The first ``n`` of ``_held_pairs`` that have values, and two counts.
+
+        Returns:
+            The rows, how many rows have values, and how many are placeholders for a
+            result that is gone. Rows not returned are counted, not built.
+        """
+        cache = self._cached_output_datas
+        rows: list[tuple[TagProtocol, DataProtocol]] = []
+        total = missing = 0
+        for eid in self._run_entry_order if self._run_entry_counts is not None else ():
+            if not cache.has_data(eid):
+                continue
+            kept = cache.is_kept(eid)
+            pair = cache[eid] if kept or len(rows) < n else None
+            if kept and pair is not None and isinstance(pair[1], EmptyData):
+                missing += 1
+                continue
+            total += 1
+            if pair is not None and pair[1] is not None and len(rows) < n:
+                rows.append((pair[0], pair[1]))
+        return rows, total, missing
 
     def _set_run_rows(
         self,
@@ -2693,12 +2751,10 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             base_entry_ids = [eid for _, _, eid in upstream_entries]
 
             # Hot-load any already-computed results from DB into _cached_output_datas.
-            # get_cached_results() is called for its side effect (populating the
-            # in-memory cache); the returned dict is intentionally discarded here so
-            # that the per-data cache-hit check below uses _cached_output_datas
-            # directly — which includes None-output entries (function returned None)
-            # and prevents spurious recomputation of already-processed data.
-            self.get_cached_results(base_entry_ids=base_entry_ids)
+            # The per-data cache-hit check below uses _cached_output_datas directly,
+            # which includes None-output entries (function returned None) and prevents
+            # spurious recomputation of already-processed data.
+            self._load_missing(base_entry_ids)
 
             # Base entry ids of the inputs that gave a row (a cache hit or a
             # successful computation), one per input: the node's rows afterwards.
@@ -2707,10 +2763,9 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             for tag, data, base_entry_id in upstream_entries:
                 ctx_obs.on_data_start(node_label, tag, data)
 
-                if base_entry_id in self._cached_output_datas and not isinstance(
-                    self._cached_output_datas[base_entry_id][1], EmptyData
-                ):
-                    tag_out, result = self._cached_output_datas[base_entry_id]
+                entry = self._cached_output_datas.get(base_entry_id)
+                if entry is not None and not isinstance(entry[1], EmptyData):
+                    tag_out, result = entry
                     ctx_obs.on_data_end(node_label, tag, data, result, cached=True)
                     emitted_entry_ids.append(base_entry_id)
                     if result is not None:
@@ -2767,6 +2822,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 self._commit_or_end_node(
                     self._row_processed, ctx_obs, node_label, node_hash
                 )
+                # Outside the row's handler: a full local disk is no row failure.
+                self._cached_output_datas.spill()
 
             self._commit_or_end_node(
                 self._commit_at_node_end, ctx_obs, node_label, node_hash
@@ -2995,22 +3052,37 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         if self._cached_function_pod is None or not base_entry_ids:
             return {}
 
+        self._load_missing(base_entry_ids)
+        return {
+            eid: cast(
+                "tuple[TagProtocol, DataProtocol]", self._cached_output_datas[eid]
+            )
+            for eid in base_entry_ids
+            if self._cached_output_datas.has_data(eid)
+        }
+
+    def _load_missing(self, base_entry_ids: list[bytes]) -> None:
+        """Load the stored results of the entries not held yet (``get_cached_results``)."""
+        if self._cached_function_pod is None:
+            return
         missing = [
             eid for eid in base_entry_ids if eid not in self._cached_output_datas
         ]
-        if missing:
-            loaded = self._load_cached_entries(missing)
-            self._cached_output_datas.update(loaded)
-            if loaded:
-                self._cached_output_table = None
-                self._cached_content_hash_column = None
+        if not missing:
+            return
+        loaded = self._load_cached_entries(missing)
+        self._hold_loaded(loaded)
 
-        return {
-            eid: self._cached_output_datas[eid]
-            for eid in base_entry_ids
-            if eid in self._cached_output_datas
-            and self._cached_output_datas[eid][1] is not None
-        }
+    def _hold_loaded(
+        self, loaded: "dict[bytes, tuple[TagProtocol, DataProtocol]]"
+    ) -> None:
+        """Hold the results ``loaded`` from the databases."""
+        for entry_id, pair in loaded.items():
+            self._cached_output_datas[entry_id] = pair
+            self._cached_output_datas.spill()
+        if loaded:
+            self._cached_output_table = None
+            self._cached_content_hash_column = None
 
     async def _async_process_data_internal(
         self,
@@ -4119,13 +4191,11 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         ctx_obs.on_node_start(node_label, node_hash, tag_schema=None)
         try:
             loaded = self._load_cached_entries()
-            self._cached_output_datas.update(loaded)
-            if loaded:
-                self._cached_output_table = None
-                self._cached_content_hash_column = None
+            self._hold_loaded(loaded)
 
             sent: list[bytes] = []
-            for entry_id, (tag, data) in list(self._cached_output_datas.items()):
+            for entry_id in list(self._cached_output_datas):
+                tag, data = self._cached_output_datas[entry_id]
                 if data is not None and not isinstance(data, EmptyData):
                     ctx_obs.on_data_start(node_label, tag, data)
                     ctx_obs.on_data_end(node_label, tag, data, data, cached=True)
@@ -4184,7 +4254,11 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             return self._head_without_rows(
                 config, ViewStatus.NOT_COMPUTED, note=STALE_NOTE
             )
-        head = self._head_of_pairs(list(self._held_pairs()), n, config, origin="held")
+        # With sorting every row is shaped and sorted; otherwise the first ones are.
+        rows, total, missing = self._held_head(
+            sys.maxsize if config.sort_by_tags else max(n, 1)
+        )
+        head = self._head_of_rows(rows, total, missing, n, config, origin="held")
         if not self._run_load_only:
             return head
         # A load-only run's rows have their own status: they may lack the inputs it
@@ -4255,9 +4329,9 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         if counts is None:
             return 0
         return sum(
-            counts.get(entry_id, 0)
-            for entry_id, (_, data) in self._cached_output_datas.items()
-            if data is not None
+            count
+            for entry_id, count in counts.items()
+            if self._cached_output_datas.has_data(entry_id)
         )
 
     def _prepare_held_read(self) -> None:
@@ -4555,10 +4629,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
 
                 # Load pipeline DB → in-memory cache keyed by base_entry_id.
                 loaded = self._load_cached_entries()
-                self._cached_output_datas.update(loaded)
-                if loaded:
-                    self._cached_output_table = None
-                    self._cached_content_hash_column = None
+                self._hold_loaded(loaded)
                 cached_by_base_entry_id: dict[
                     bytes, tuple[TagProtocol, DataProtocol]
                 ] = dict(loaded)
@@ -4679,6 +4750,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                         # Commits every commit_every_rows rows inside a job (ITL-919);
                         # no await in between, so no other row interleaves.
                         self._row_processed()
+                        self._cached_output_datas.spill()
                         await output.send((clean_tag, output_data))
                         # Recorded once the output took the row (see route_inputs).
                         run_entry_ids.append(base_entry_id)

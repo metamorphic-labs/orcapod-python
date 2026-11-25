@@ -46,6 +46,7 @@ from orcapod.core.operators.batch import Batch
 from orcapod.core.operators.group_by import GroupBy
 from orcapod.core.operators.join import Join
 from orcapod.core.operators.merge_join import MergeJoin
+from orcapod.core.operators.rejoin import Rejoin
 from orcapod.core.operators.semijoin import SemiJoin
 from orcapod.core.operators.static_output_pod import (
     RowBuiltFormUnavailable,
@@ -65,7 +66,7 @@ from orcapod.core.job_edges import (
 from orcapod.core.record_batch_channels import OutputChannel
 from orcapod.core.streams.record_batch_input import InputChannel
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
-from orcapod.core.streams.carried import carried_table
+from orcapod.core.streams.carried import carried_batches, carried_table
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
     StreamBase,
@@ -2385,14 +2386,14 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
         if _hold_token_lists(self._input_streams):
             # A join kernel holds its rows in files, which cannot share the ids that
             # derived token lists share: the whole inputs, as on the sync path.
-            if isinstance(operator, (Join, MergeJoin, SemiJoin)):
+            if isinstance(operator, (Join, MergeJoin, Rejoin, SemiJoin)):
                 execute = functools.partial(
                     StaticOutputOperatorPod.async_execute_batches, operator
                 )
 
         async def forward() -> None:
             try:
-                async for batch in reader:
+                async for batch in carried_batches(reader):
                     batches.add(batch)
                     await send_batch(output, batch, self)
             except UpstreamFailedError:

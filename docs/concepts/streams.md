@@ -214,14 +214,15 @@ A view holds every row of the stream, with one exception, the bounded view. A
 `SpiralDBTableSource` holds no rows, and `run()` reads it in batches; so are read the
 operators that choose or rename columns, add tags or drop rows (`select_*`, `drop_*`,
 `map_*`, `add_tags`, `drop_nulls`, `filter`) and the chains of them over such a source. A
-result of at most 50,000 rows is held, as everywhere else. A larger one is not: its view has
+result of at most 50,000 rows and 64 MiB of values (the values themselves, whatever their
+layout in memory), or of at most 2,000 rows, is held, as everywhere else. A larger one is not: its view has
 the row count, the columns, and the first and the last 1,000 rows. It is displayed as any
 view, and `head(n)` and `tail(n)` up to 1,000 rows give what any view gives. What needs the
 other rows (`table`, `as_table()`, `as_polars_df()`, `sort_by_tags()`, a longer `head` or
 `tail`) raises `BoundedViewError`: a part is never given as the whole. Ask the stream itself,
 `stream.as_table()`, which reads the source again and applies the operators again (no function
 of yours runs a second time). `stream.head(n)` after such a run shows its first rows. Whether
-a view is bounded depends only on the kind of stream and on its row count, so equal data
+a view is bounded depends only on the kind of stream and on its rows, so equal data
 always gives the same kind of view. A `polars_filter`, `pick`, `index`, `tag_by`, join,
 `group_by` or `batch`, a function pod, and everything after one, computes its whole result
 and holds it, also over a `SpiralDBTableSource`.
@@ -241,7 +242,7 @@ What `run()` does on each kind of object:
 | Object | `run()` |
 |---|---|
 | An in-memory source (`DictSource`, `ArrowTableSource`, ...), a Delta or SQL table source | nothing to compute: a view of the rows it holds |
-| A `SpiralDBTableSource` | reads the whole table in batches (`head()` is the bounded read); every call reads again; a bounded view above 50,000 rows |
+| A `SpiralDBTableSource` | reads the whole table in batches (`head()` is the bounded read); every call reads again; a bounded view above 50,000 rows or 64 MiB |
 | A `PollingSource` (provisional, see [Provisional sources](sources.md#provisional-sources)) | polls, as `as_table()` does |
 | A `CachedSource` | reads its cache and writes the wrapped source's new rows to it |
 | A function pod's or operator's output stream | computes what is not computed yet |

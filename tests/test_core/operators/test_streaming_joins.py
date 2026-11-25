@@ -694,13 +694,15 @@ def test_semi_join_holds_undecided_left_rows_only_until_the_right_input_ends() -
     left_table = _transport(left)
     assert kernel.push(0, left_table.to_batches()[0]) == []
     assert kernel.held_rows == left_table.num_rows
-    emitted = kernel.push(1, _transport(right).to_batches()[0])
-    matched = sum(batch.num_rows for batch in emitted)
-    assert matched > 0
-    assert kernel.held_rows == left_table.num_rows - matched + 1
-    # The right input ends: the undecided left rows are dropped; the right keys stay
-    # for left rows still to arrive.
-    kernel.close(1)
+    assert kernel.push(1, _transport(right).to_batches()[0]) == []
+    assert kernel.held_rows == left_table.num_rows + 1
+    # The right input ends: the left rows are decided; the right keys stay for left rows
+    # still to arrive, which are decided at once.
+    matched = sum(batch.num_rows for batch in kernel.close(1))
+    assert 0 < matched < left_table.num_rows
+    assert kernel.held_rows == 1
+    again = kernel.push(0, left_table.to_batches()[0])
+    assert sum(batch.num_rows for batch in again) == matched
     assert kernel.held_rows == 1
     kernel.close(0)
     assert kernel.held_rows == 0
@@ -881,13 +883,15 @@ def test_source_info_lists_of_different_lengths_raise_when_their_batch_arrives(
 ) -> None:
     # The descriptions agree (one type of token list); the lengths are values. The
     # sync path refuses the run; the kernel raises the same error when the offending
-    # pair arrives, after the rows already decided (module docstring).
+    # pair is matched, after the rows already decided (module docstring): when its batch
+    # arrives, once the other input has ended.
     left = _data_tag_stream("v", [["a"], ["b"]])
     right = _data_tag_stream("w", [["c"], ["d", "e"]])
     with pytest.raises(ValueError, match="different lengths") as sync_error:
         operator.static_process(_row_built(left), _row_built(right))
     instance = kernel(operator, (left, right))
     instance.push(0, _sent(left).combine_chunks().to_batches()[0])
+    assert instance.close(0) == []
     sent = _sent(right).combine_chunks()
     emitted = instance.push(1, sent.slice(0, 1).to_batches()[0])
     assert sum(batch.num_rows for batch in emitted) == 1
@@ -947,13 +951,12 @@ def test_semi_join_never_holds_a_left_row_with_a_null_key(pool: str) -> None:
     kernel = StreamingSemiJoin(SemiJoin(), (left, right))
     assert kernel.push(0, left_rows.to_batches()[0]) == []
     assert kernel.held_rows == left_rows.num_rows - null_keys
-    # The left input ends and the right rows arrive: every left row with a key is
-    # emitted, and nothing is held.
-    kernel.close(0)
-    emitted = kernel.push(1, _sent(right).combine_chunks().to_batches()[0])
+    # Every left row with a key is emitted when the right input ends, and none is held.
+    assert kernel.close(0) == []
+    assert kernel.push(1, _sent(right).combine_chunks().to_batches()[0]) == []
+    emitted = kernel.close(1)
     assert sum(batch.num_rows for batch in emitted) == left_rows.num_rows - null_keys
     assert kernel.held_rows == 0
-    assert kernel.close(1) == []
 
 
 def test_join_still_refuses_merged_source_info_when_a_later_input_ends_empty() -> None:
@@ -987,8 +990,10 @@ def test_join_still_refuses_merged_source_info_when_a_later_input_ends_empty() -
         kernel = StreamingJoin(Join(), inputs)
         assert kernel.close(empty) == []
         kernel.push(first, _sent(inputs[first]).combine_chunks().to_batches()[0])
+        kernel.push(second, _sent(inputs[second]).combine_chunks().to_batches()[0])
+        # The first of the two to end decides their pairs.
         with pytest.raises(ValueError, match="different lengths") as kernel_error:
-            kernel.push(second, _sent(inputs[second]).combine_chunks().to_batches()[0])
+            kernel.close(first)
         assert str(kernel_error.value) == str(sync_error.value)
         checked += 1
     assert checked > 0
@@ -1081,6 +1086,7 @@ def test_with_several_offending_pairs_the_first_observed_is_refused(
     for whole in (0, 1):
         instance = kernel(operator, inputs)
         instance.push(whole, _sent(inputs[whole]).combine_chunks().to_batches()[0])
+        assert instance.close(whole) == []
         first_row = _sent(inputs[1 - whole]).combine_chunks().slice(0, 1)
         with pytest.raises(ValueError, match=form) as error:
             instance.push(1 - whole, first_row.to_batches()[0])

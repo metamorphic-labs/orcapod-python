@@ -189,6 +189,20 @@ def test_a_table_outlives_its_spool(
     assert part.equals(rows.slice(30, 100))
 
 
+def test_rows_are_written_when_asked(tmp_path: Path) -> None:
+    spool, rows = _filled(tmp_path, [10, 5], 10**9)
+    spool.spill()
+    spool.spill()  # nothing in memory: nothing to write
+    assert spool.memory_bytes == 0
+    assert len(_files(tmp_path)) == 1
+    spool.append(_table(15, 5))
+    assert spool.memory_bytes
+    assert spool.table().equals(pa.concat_tables([rows, _table(15, 5)]))
+    spool.close()
+    with pytest.raises(ValueError, match="closed"):
+        spool.spill()
+
+
 def test_nothing_is_written_below_the_limit(tmp_path: Path) -> None:
     spool, _ = _filled(tmp_path, [10, 10], 10**9)
     assert list(tmp_path.iterdir()) == []

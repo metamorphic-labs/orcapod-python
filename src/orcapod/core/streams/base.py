@@ -22,6 +22,7 @@ import pandas as pd
 import polars as pl
 import pyarrow as pa
 
+from orcapod.core.streams.carried import carried_table
 from orcapod.core.unique_keys import NO_UNIQUE_KEYS, UniqueKeys
 from orcapod.core.base import TraceableBase
 from orcapod.core.data_tags import data_tag_names
@@ -593,8 +594,6 @@ class CompleteStreamFeed:
         retyped as a row retypes it. Only a stream that holds such a column (a raw
         ``ArrowTableStream``) is read that way, and its reads have no effect.
         """
-        from orcapod.core.streams.carried import carried_table
-
         table = carried_table(self._stream, ZERO_ROW_INPUT_COLUMNS)
         if not system_tags_as_rows_give(table):
             from orcapod.core.operators.static_output_pod import (
@@ -1636,8 +1635,8 @@ class StreamBase(TraceableBase):
         its ``head``, ``tail`` and ``sort_by_tags`` choose what is shown. The view holds
         every row, except over a source that reads its rows on demand
         (``reads_in_batches``): its rows, and those of operators applied batch by batch
-        over it, are read in batches, and a result of more than
-        ``RUN_VIEW_COMPLETE_ROWS`` rows gives a ``BoundedStreamView``. For other
+        over it, are read in batches, and a large result (``RunSize``) gives a
+        ``BoundedStreamView``. For other
         column groups, use ``as_table(columns=...)`` or ``head(columns=...)`` after
         ``run()``. On a stream that keeps its rows (a pod's or operator's output stream,
         a job node, a job's side-effect node included, an in-memory source) they read the

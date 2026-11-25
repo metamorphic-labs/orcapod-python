@@ -6,6 +6,7 @@ from typing import Any, ClassVar, cast
 import numpy as np
 import pyarrow as pa
 
+from orcapod.core.streams.carried import carried_batches
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.protocols.core_protocols.streams import (
     RecordBatchInput,
@@ -349,7 +350,7 @@ class Batch(UnaryOperator):
         try:
             waiting: list[pa.RecordBatch] = []
             rows = 0
-            async for batch in channel:
+            async for batch in carried_batches(channel):
                 if not batch.num_rows:
                     continue  # nothing to batch, nothing to hold
                 waiting.append(batch)

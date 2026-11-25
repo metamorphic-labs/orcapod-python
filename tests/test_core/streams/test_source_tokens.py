@@ -951,6 +951,20 @@ def test_a_spool_writes_a_groups_own_ids_once(tmp_path: Path) -> None:
         assert held.memory_bytes < 8 * ids
 
 
+def test_discarded_lists_are_counted_as_they_were_held() -> None:
+    """What a spool says it holds comes back to nothing."""
+    carried = carried_table(
+        _keyed(500, 20).group_by(["g"]), {"source": True, "system_tags": True}
+    )
+    with RowSpool() as spool:
+        for part in _own_chunks(carried, [3, 5]):
+            spool.append(part)
+        assert spool.memory_bytes > 0
+        for start in range(0, spool.size, 4):
+            spool.discard(np.arange(start, min(start + 4, spool.size), dtype=np.int64))
+        assert spool.memory_bytes == 0
+
+
 def test_a_spilled_list_pins_nothing_of_the_tables_ids() -> None:
     """Rows kept in memory hold their own ids, not the dictionary of every row."""
     carried = carried_table(
