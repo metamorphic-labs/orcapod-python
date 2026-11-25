@@ -256,6 +256,8 @@ laid out left to right. Here is `job` as the last line of a cell, after its run,
 - **A node's details.** Click a node (or focus it and press Enter) to see its schema: its tag
   and data columns, the nodes it reads from and, for a job, its run status and the row counts
   of the job's last run.
+- **Constraining inputs.** The right input of a `SemiJoin` only decides which rows pass: a
+  dashed edge entering from the side of the box.
 - **Statuses.** Each node of a job shows one: `not run`, `current`, `stale`, `failed`,
   `loaded only`, `partial`, or `bound` or `unbound` for a source slot. Before `job.run()`
   every node but the sources says `not run`.

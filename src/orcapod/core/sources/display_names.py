@@ -41,7 +41,7 @@ def _mro(cls: type) -> tuple[type, ...]:
     return _TYPE_MRO.__get__(cls)
 
 
-def _class_dicts(cls: type) -> list[Mapping[str, Any]]:
+def class_dicts(cls: type) -> list[Mapping[str, Any]]:
     """Return the dictionaries of a class and its bases, read past any metaclass hook."""
     return [_TYPE_DICT.__get__(base) for base in _mro(cls)]
 
@@ -53,7 +53,7 @@ def _is_a(source: object, cls: type) -> bool:
 
 def _stored(source: object) -> Mapping[str, Any]:
     """Return an object's instance dictionary, read past any hook its class defines."""
-    for namespace in _class_dicts(type(source)):
+    for namespace in class_dicts(type(source)):
         found = namespace.get("__dict__")
         if type(found) is GetSetDescriptorType:
             return found.__get__(source)
@@ -62,7 +62,7 @@ def _stored(source: object) -> Mapping[str, Any]:
 
 def _class_value(source: object, name: str) -> Any:
     """Return what the class of ``source`` or its nearest base declares as ``name``."""
-    return next(d[name] for d in _class_dicts(type(source)) if name in d)
+    return next(d[name] for d in class_dicts(type(source)) if name in d)
 
 
 _LINE_BREAKS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
