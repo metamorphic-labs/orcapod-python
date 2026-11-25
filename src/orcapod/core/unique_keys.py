@@ -18,10 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Protocol
-
-if TYPE_CHECKING:
-    from orcapod.protocols.core_protocols import StreamProtocol
+from typing import Protocol
 
 UniqueKeys = frozenset[frozenset[str]]
 
@@ -102,7 +99,7 @@ class _HasKeys(Protocol):
 
 
 def derived_keys(
-    pod: object, upstreams: Sequence[StreamProtocol], stream: _HasKeys
+    pod: object, upstreams: Sequence[object], stream: _HasKeys
 ) -> UniqueKeys:
     """The certificate of ``stream``, the result of ``pod`` over ``upstreams``.
 
