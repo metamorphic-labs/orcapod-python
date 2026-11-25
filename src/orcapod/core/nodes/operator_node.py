@@ -2027,6 +2027,51 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
             return iter([])
         return current.iter_data()
 
+    def current_run_row_count(self) -> int | None:
+        """How many rows the node's current run has, or ``None`` without one.
+
+        Read-only, as ``as_table``: never computes and never reads the database.
+        ``None`` before a run in this process, after ``clear_cache()`` or once the
+        node is stale (where ``as_table`` gives a zero-row table). Nothing is read
+        when the node holds its run as a table (ITL-1464).
+        """
+        current = self._current_output()
+        if current is None:
+            return None
+        if isinstance(current, ArrowTableStream):
+            return current.num_rows
+        return current.as_table().num_rows
+
+    def read_current_run(
+        self,
+        start: int,
+        length: int,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> "pa.Table | None":
+        """Return rows ``start`` to ``start + length`` of the current run, or ``None``.
+
+        Exactly ``as_table(columns=columns, all_info=all_info).slice(start, length)``
+        when the node holds a current run, for a view that shows a page at a time
+        (ITL-1464): a large run is kept in a memory-mapped file, and only the pages
+        of the rows read are touched (see ``ArrowTableStream.read_rows`` for the two
+        configurations that read every row). ``None`` without a current run, as
+        ``current_run_row_count``.
+
+        Args:
+            start: The first row's position.
+            length: How many rows; fewer are returned at the end.
+            columns: Column groups, exactly as for ``as_table``.
+            all_info: As for ``as_table``.
+        """
+        current = self._current_output()
+        if current is None:
+            return None
+        if isinstance(current, ArrowTableStream):
+            return current.read_rows(start, length, columns=columns, all_info=all_info)
+        return current.as_table(columns=columns, all_info=all_info).slice(start, length)
+
     def as_table(
         self,
         *,

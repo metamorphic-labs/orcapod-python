@@ -379,6 +379,40 @@ class ArrowTableStream(StreamBase):
             total_rows=self._table.num_rows,
         )
 
+    @property
+    def num_rows(self) -> int:
+        """How many rows the stream holds; nothing is read or assembled."""
+        return self._table.num_rows
+
+    def read_rows(
+        self,
+        start: int,
+        length: int,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> "pa.Table":
+        """Return rows ``start`` to ``start + length`` of ``as_table(...)``.
+
+        Exactly ``as_table(columns=columns, all_info=all_info).slice(start, length)``,
+        for a reader that shows a page at a time (ITL-1464). The columns are views of
+        the table the stream holds: when that table is memory-mapped, only the pages
+        of the rows read are touched. Two configurations read every row first:
+        ``sort_by_tags`` (the page is of the sorted rows) and ``content_hash`` (a
+        row's hash is computed from the row).
+
+        Args:
+            start: The first row's position.
+            length: How many rows; fewer are returned at the end.
+            columns: Column groups, exactly as for ``as_table``.
+            all_info: As for ``as_table``.
+
+        Returns:
+            The rows, in the order ``as_table`` gives them.
+        """
+        config = ColumnConfig.handle_config(columns, all_info=all_info)
+        return self._assemble_table(config, limit=None).slice(start, length)
+
     def _typed_zero_row_table(self) -> "pa.Table":
         """This stream's table cut to no rows: its own Arrow types, no row assembled."""
         return self._assemble_table(ZERO_ROW_INPUT_COLUMNS, limit=0)
