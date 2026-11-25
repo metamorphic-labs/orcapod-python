@@ -159,6 +159,12 @@ def test_fixed_sources_can_be_wrapped() -> None:
     _refused(left, wrapper, PipelineJob())
 
 
+def test_implicit_projection_conflict_names_both_function_steps() -> None:
+    first = DictSource([{"x": 1, "y": 2}], source_id="shared")
+    second = DictSource([{"x": 100, "y": 2}], source_id="shared")
+    _refused(first, second, PipelineJob())
+
+
 def test_derived_from_fixed_sources() -> None:
     def derived(x: int) -> DerivedSource:
         origin = DictSource(
