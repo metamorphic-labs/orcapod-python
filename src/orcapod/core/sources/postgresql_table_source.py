@@ -176,6 +176,7 @@ class PostgreSQLTableSource(DBTableSource):
     SOURCE_VERSION: ClassVar[int] = 1
     """The version of this kind's implementation, in the kind part (ITL-1425)."""
     TABLE_IS_ROWS: ClassVar[bool] = True
+    _carried_table = DBTableSource._carried_from_stream
 
     def __init__(
         self,

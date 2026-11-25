@@ -364,6 +364,8 @@ class Rejoin(Join):
     release.
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     PROVISIONAL: ClassVar[bool] = True
 
     def validate_nonzero_inputs(self, *streams: StreamProtocol) -> None:
@@ -457,8 +459,9 @@ class Rejoin(Join):
             tag_keys, _ = stream.keys()
             tables.append(
                 without_meta_columns(
-                    stream.as_carried_table(
-                        columns={"source": True, "system_tags": True, "context": True}
+                    self._input_table(
+                        stream,
+                        columns={"source": True, "system_tags": True, "context": True},
                     ),
                     tag_keys,
                 )

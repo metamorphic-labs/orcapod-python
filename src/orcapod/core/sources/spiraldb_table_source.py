@@ -62,6 +62,7 @@ from orcapod.core.sources.stream_builder import (
     row_identifiers,
 )
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+from orcapod.core.streams.carried import carried_table
 from orcapod.core.streams.base import StreamBase, check_head_size
 from orcapod.core.streams.view import ViewStatus, StreamView
 from orcapod.databases.spiraldb_connector import (
@@ -963,20 +964,16 @@ class SpiralDBTableSource(RootSource):
             columns=columns, all_info=all_info
         )
 
-    def as_carried_table(
-        self, *, columns: ColumnConfig | dict[str, Any] | None = None
-    ) -> "pa.Table":
+    def _carried_table(self, config: ColumnConfig) -> "pa.Table":
         """Scan the table as ``as_table`` does, building no source-info text (ITL-1464)."""
-        return self._whole_stream(self._batch_streams()).as_carried_table(
-            columns=columns
-        )
+        return carried_table(self._whole_stream(self._batch_streams()), config)
 
     def _whole_stream(self, streams: Iterator["ArrowTableStream"]) -> StreamBase:
         """Return the rows of ``streams`` (batches of one read) as one stream."""
         # One stream over all the rows, so that a whole-table option (sorting by
         # tags) applies across batches.
         enriched = {"source": True, "system_tags": True}
-        tables = [stream.as_carried_table(columns=enriched) for stream in streams]
+        tables = [carried_table(stream, enriched) for stream in streams]
         if not tables:
             return self._stream
         return ArrowTableStream(

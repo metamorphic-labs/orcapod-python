@@ -382,11 +382,8 @@ class ArrowTableStream(StreamBase):
         columns_config = ColumnConfig.handle_config(columns, all_info=all_info)
         return self._assemble_table(columns_config, limit=None)
 
-    def as_carried_table(
-        self, *, columns: ColumnConfig | dict[str, Any] | None = None
-    ) -> "pa.Table":
-        """The table with its derived token columns as they are (ITL-1464)."""
-        config = ColumnConfig.handle_config(columns)
+    def _carried_table(self, config: ColumnConfig) -> "pa.Table":
+        """The table with its derived token columns as they are (``carried_table``)."""
         return self._assemble_table(config, limit=None, carried=config.system_tags)
 
     def head(
@@ -433,7 +430,7 @@ class ArrowTableStream(StreamBase):
         Args:
             columns_config: The column groups to include, and whether to sort by tags.
             limit: Assemble only the first ``limit`` rows; ``None`` for all of them.
-            carried: Leave a derived token column derived (``as_carried_table``), which
+            carried: Leave a derived token column derived (``carried_table``), which
                 needs the system tags in the table; ``False`` gives its text.
         """
         output_table = self._table

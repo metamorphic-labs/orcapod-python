@@ -57,6 +57,8 @@ class Batch(UnaryOperator):
         drop_partial_batch: Drop a last batch with fewer than ``batch_size`` rows.
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     # Provisional: its identity is not frozen with data context v1 (ITL-1279).
     PROVISIONAL: ClassVar[bool] = True
 
@@ -150,7 +152,7 @@ class Batch(UnaryOperator):
         Returns:
             A stream with one row per batch.
         """
-        table = stream.as_carried_table(columns={"source": True, "system_tags": True})
+        table = self._input_table(stream, columns={"source": True, "system_tags": True})
         # A list of tokens is aggregated as text (ITL-1464).
         table = source_tokens.materialize(
             table,

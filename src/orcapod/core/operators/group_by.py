@@ -312,6 +312,8 @@ class GroupBy(UnaryOperator):
         NotImplementedError: If ``member_order`` is a function.
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     # Provisional: its identity is not frozen with data context v1 (ITL-1279).
     PROVISIONAL: ClassVar[bool] = True
 
@@ -448,7 +450,7 @@ class GroupBy(UnaryOperator):
             InputValidationError: If a key is a list of any kind, or a user tag's
                 type has no order (``arrow_keys.part_without_rule``).
         """
-        table = stream.as_carried_table(columns={"source": True, "system_tags": True})
+        table = self._input_table(stream, columns={"source": True, "system_tags": True})
         # A list of tokens is aggregated as text (ITL-1464).
         table = source_tokens.materialize(
             table,
