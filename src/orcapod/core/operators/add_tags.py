@@ -117,6 +117,8 @@ class AddTags(UnaryOperator):
             ``::`` separator).
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     # Provisional: its identity is not frozen with data context v1 (ITL-1279).
     PROVISIONAL: ClassVar[bool] = True
 
@@ -327,13 +329,14 @@ class AddTags(UnaryOperator):
         """
         tag_keys, _ = stream.keys()
         data_context = stream.data_context  # pyright: ignore[reportAttributeAccessIssue]  # StreamProtocol omits data_context, which every concrete stream provides (ITL-844)
-        table = stream.as_carried_table(
+        table = self._input_table(
+            stream,
             columns={
                 "source": True,
                 "system_tags": True,
                 "context": True,
                 "sort_by_tags": False,
-            }
+            },
         )
         return ArrowTableStream(
             self._with_constants(table, tag_keys, data_context.type_converter),

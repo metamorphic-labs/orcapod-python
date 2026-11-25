@@ -41,6 +41,8 @@ class PolarsFilter(UnaryOperator):
     Operator that applies Polars filtering to a stream
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     # Data-tags (ITL-1023): handled.
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
@@ -76,8 +78,8 @@ class PolarsFilter(UnaryOperator):
             return stream
 
         # TODO: improve efficiency here...
-        whole = stream.as_carried_table(
-            columns={"source": True, "system_tags": True, "sort_by_tags": False}
+        whole = self._input_table(
+            stream, columns={"source": True, "system_tags": True, "sort_by_tags": False}
         )
         # Polars reads no derived token column: one is left out, and put back for the
         # rows kept (its recipe reads the system tags kept with them, ITL-1464), unless

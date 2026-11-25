@@ -74,6 +74,8 @@ class TagBy(UnaryOperator):
             column name, or one holding ``::``.
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     # Provisional: its identity is not frozen with data context v1 (ITL-1279).
     PROVISIONAL: ClassVar[bool] = True
 
@@ -214,13 +216,14 @@ class TagBy(UnaryOperator):
         """
         tag_columns, _ = stream.keys()
         # The context column too, so each row keeps its own data context key.
-        table = stream.as_carried_table(
+        table = self._input_table(
+            stream,
             columns={
                 "source": True,
                 "system_tags": True,
                 "context": True,
                 "sort_by_tags": False,
-            }
+            },
         )
         return ArrowTableStream(
             table,

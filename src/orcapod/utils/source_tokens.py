@@ -9,7 +9,7 @@ columns. Filtering, taking, slicing, concatenating, selecting and renaming carry
 column as any other; nothing is computed until the text is needed (``materialize``).
 
 A derived column is an internal form of a table that operators pass on
-(``StreamProtocol.as_carried_table``). It never leaves the library: ``as_table``, rows,
+(``core/streams/carried.py``). It never leaves the library: ``as_table``, rows,
 stored tables and everything hashed hold the text. A place that forgets fails loudly: no
 value of a derived column can be read, cast to text, hashed, pickled, or written to
 Parquet (its storage is a struct with no field, which Parquet refuses).
@@ -215,6 +215,19 @@ def with_recipe(table: pa.Table, name: str, recipe: Recipe) -> pa.Table:
     tokens = derived_array(recipe, table.num_rows)
     field = table.schema.field(name).with_type(tokens.type)
     return table.set_column(table.schema.get_field_index(name), field, tokens)
+
+
+def refuse_derived(schema: pa.Schema) -> None:
+    """Raise if a column of ``schema`` is derived: hashes and stores take text only.
+
+    Raises:
+        TypeError: Naming the derived columns.
+    """
+    if derived := derived_columns(schema):
+        raise TypeError(
+            f"columns {list(derived)} are derived source-info tokens: their text must "
+            + "be built first (source_tokens.materialize)"
+        )
 
 
 def materialize(table: pa.Table, names: Collection[str] | None = None) -> pa.Table:
