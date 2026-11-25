@@ -1317,13 +1317,13 @@ def _inputs(nodes: Sequence[_Node], edges: Sequence[_Edge]) -> dict[int, str]:
         names = limits if edge.constrains else data
         names.setdefault(edge.target, []).append(nodes[edge.source].text)
     inputs: dict[int, str] = {}
-    for edge in edges:
-        parts = []
-        if edge.target in data:
-            parts.append(", ".join(data[edge.target]))
-        if edge.target in limits:
-            parts.append(f"constrained by {', '.join(limits[edge.target])}")
-        inputs[edge.target] = "; ".join(parts)
+    for target in dict.fromkeys(edge.target for edge in edges):
+        parts: list[str] = []
+        if target in data:
+            parts.append(", ".join(data[target]))
+        if target in limits:
+            parts.append(f"constrained by {', '.join(limits[target])}")
+        inputs[target] = "; ".join(parts)
     return inputs
 
 

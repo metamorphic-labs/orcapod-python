@@ -20,6 +20,14 @@ from orcapod.pipeline.diagram import _Edge, _layout, _Node
 from orcapod.sources import DictSource
 from orcapod.types.provenance import Highlight
 
+from ..test_core.operators.several_items import (
+    MAIN,
+    P,
+    Q,
+    Arrangement,
+    arrangements,
+    make_source,
+)
 from .test_diagram import _run_view
 
 CALLS: list[str] = []
@@ -168,7 +176,8 @@ def _custom_job(operator: type[Join]) -> PipelineJob:
     "declared",
     [1, None, "1", [1], {1}, frozenset({1}), (True,), (1.0,), ("1",), (2,), (-1,)]
     + [(1, 2), (1, None), _Tuple((1,)), (_Int(1),), _Raises()],
-    ids=repr,
+    # Not the repr, which can hold an address: every xdist worker must collect one name.
+    ids=lambda value: type(value).__name__,
 )
 def test_a_malformed_declaration_counts_as_none(declared: Any) -> None:
     class Custom(Join):
@@ -186,6 +195,52 @@ def test_a_malformed_declaration_counts_as_none(declared: Any) -> None:
         assert drawn.to_dict() == plain.to_dict()
         assert drawn.to_text() == plain.to_text()
         assert drawn.to_svg() == plain.to_svg()
+
+
+@pytest.mark.parametrize("arrangement", arrangements(MAIN), ids=lambda a: a.id)
+@pytest.mark.parametrize("positions", [(1, 2), (2, 1), (0, 2), (2, 0), (0, 1)], ids=str)
+def test_several_constraining_positions_in_any_order(
+    arrangement: Arrangement, positions: tuple[int, ...]
+) -> None:
+    class Custom(Join):
+        CONSTRAINING_INPUTS = positions
+        CONSTRAINT_MATCHES_SHARED_TAGS = True
+
+    partners = [
+        make_source(spec, Arrangement(spec.tags, arrangement.layout, arrangement.roles))
+        for spec in (P, Q)
+    ]
+    sources = [make_source(MAIN, arrangement), *partners]
+    names = [MAIN.source_id, P.source_id, Q.source_id]
+    shared = sorted(set(MAIN.tags) & set(P.tags) & set(Q.tags))
+    # The positions are argument positions, in either order of the arguments.
+    for order in ((0, 1, 2), (2, 1, 0)):
+        job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+        with job:
+            Custom(label="limited")(*(sources[i] for i in order))
+        diagram = job.diagram()
+        assert _edges(diagram) == {
+            (names[i], "limited", position in positions, ())
+            for position, i in enumerate(order)
+        }
+        facts = _facts(diagram, "limited")
+        if shared:
+            assert facts["keeps the rows that match on"] == ", ".join(shared)
+        else:
+            assert "keeps every row" in facts
+
+
+@pytest.mark.parametrize("arrangement", arrangements(MAIN), ids=lambda a: a.id)
+def test_a_semi_join_s_keys_are_listed_whatever_the_arrangement(
+    arrangement: Arrangement,
+) -> None:
+    other = make_source(P, Arrangement(P.tags, arrangement.layout, arrangement.roles))
+    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+    with job, warnings.catch_warnings():
+        warnings.simplefilter("ignore", SemiJoinIgnoredColumnWarning)
+        SemiJoin(label="limited")(make_source(MAIN, arrangement), other)
+    shared = ", ".join(sorted(set(MAIN.tags) & set(P.tags)))
+    assert _facts(job.diagram(), "limited")["keeps the rows that match on"] == shared
 
 
 def test_drawing_calls_nothing_of_a_users_operator() -> None:
