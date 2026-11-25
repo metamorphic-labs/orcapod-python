@@ -50,8 +50,10 @@ def name_kind(name: str) -> str:
 
 def delta_files(root: Path) -> list[Path]:
     """List active Parquet files in addition order according to Delta logs."""
+    root = root.resolve()
     active = {
-        Path(unquote(urlparse(uri).path)) for uri in DeltaTable(str(root)).file_uris()
+        Path(unquote(urlparse(uri).path)).resolve()
+        for uri in DeltaTable(str(root)).file_uris()
     }
     ordered = []
     for log in sorted((root / "_delta_log").glob("*.json")):
