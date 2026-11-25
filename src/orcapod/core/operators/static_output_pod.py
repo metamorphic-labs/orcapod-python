@@ -801,11 +801,11 @@ class StaticOutputOperatorPod(TraceableBase):
         table = typed_zero_row_input(upstream)
         if table is None:
             return None
-        tag_keys = upstream.keys()[0]
+        tag_keys, data_keys = upstream.keys()
         return StaticOutputOperatorPod._as_upstream_stream(
             StaticOutputOperatorPod._as_row_built_table(table, tag_keys),
             tag_keys,
-            stream_data_tags(upstream),
+            data_tag_names(tag_keys, data_keys),
             upstream,
         )
 
