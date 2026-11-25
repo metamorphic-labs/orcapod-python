@@ -12,8 +12,7 @@ Three causes account for the memory, in this order of size:
    as a pair of datagram objects, and every operator job node keeps every pair of its
    output until the run ends. One async job over 200,000 rows peaks at 19.7 GiB
    (102 KiB per row, 877 times the input); the cost is linear in rows, so the full
-   session (2,177,155 rows) extrapolates to about 210 GiB. This is the workshop
-   notebook's 145 to 166 GB.
+   session (about 2.2 million rows) extrapolates to about 210 GiB. This is the size of the reported notebook run.
 2. **Source-info tokens are 35 times the data.** A source writes one string per row and
    data column, `<source id>::<record id>::<column>`, about 324 bytes each here. With 13
    data columns (every key column is a data-tag, so it has a token too) that is 4.2 KiB
@@ -39,11 +38,11 @@ enough that no SpiralDB read was needed.
   step, each in a fresh process, killed above 24 GiB of resident memory).
 - Tables: synthetic, with the column names and Arrow types of three tables of a SpiralDB
   sample dataset, one session each:
-  - a gaze time series: 13 columns (5 key columns: two strings, a timestamp, a `uint32`,
+  - a time series: 13 columns (5 key columns: two strings, a timestamp, a `uint32`,
     a `uint64`; 8 value columns: two short strings, two `float`, three `double`, a
     `bool`), 120 bytes per row;
-  - a spike event table: 8 columns (7 key columns), 79 bytes per row;
-  - a unit location table: 14 columns (9 key columns), 300 rows.
+  - an event table: 8 columns (7 key columns), 79 bytes per row;
+  - a small lookup table: 14 columns (9 key columns), a few hundred rows.
 - They are stored in the test suite's disk-backed fake of the SpiralDB client
   (`tests/test_databases/fake_spiral_sdk.py`), so the real `SpiralDBTableSource` reads
   them. The fake memory-maps its file, so the rows it hands over are not process memory
@@ -56,7 +55,7 @@ enough that no SpiralDB read was needed.
 - The synthetic ids are shorter than live ones (a 23-character project id, a
   32-character hash key), so a live token is longer and the live numbers are higher.
 
-## The sync path, outside a job (2,177,155 rows)
+## The sync path, outside a job (about 2.2 million rows)
 
 "Ratio" is peak resident memory, less the import baseline, over the input's Arrow bytes.
 
@@ -72,7 +71,7 @@ enough that no SpiralDB read was needed.
 | `source.drop_nulls(...)` | 248 MiB | 277 MiB | 19.7 GiB | 18.6 GiB | 80 | input with tokens and a filtered copy with tokens, both held |
 | `source.polars_filter(...)` | 248 MiB | 141 MiB | 16.6 GiB | 9.3 GiB | 68 | input with tokens, and every column copied into Polars and back |
 | `source.group_by(key)` | 248 MiB | 143 MiB | 20.9 GiB | 15.9 GiB | 85 | input with tokens, the sorted copy, and a token list per group and column |
-| `spikes.join(locations)` | 164 MiB | - | killed, above 24 GiB | - | above 150 | at 200,000 rows: 2.96 GiB, ratio 191. Each output row carries the tokens of both inputs: 22 columns |
+| `events.join(lookup)` | 164 MiB | - | killed, above 24 GiB | - | above 150 | at 200,000 rows: 2.96 GiB, ratio 191. Each output row carries the tokens of both inputs: 22 columns |
 | `drop_nulls`, `group_by`, `map_data` | 248 MiB | - | killed, above 24 GiB | - | above 100 | at 200,000 rows: 2.89 GiB, ratio 123 |
 | the same, then a function pod | 248 MiB | - | killed, above 24 GiB | - | above 100 | at 200,000 rows: 3.05 GiB, ratio 131 |
 | `source.flow()` | 248 MiB | - | killed, above 24 GiB | - | above 100 | at 200,000 rows: 3.58 GiB, 18 KiB per row |
@@ -116,7 +115,7 @@ Three places hold every row this way today:
 ### The keys a source remembers
 
 `SpiralDBTableSource` keeps the record id of every row it has read during one read, to
-refuse a repeated key. At 2,177,155 rows that is a Python set of about 130-character
+refuse a repeated key. At about 2.2 million rows that is a Python set of about 130-character
 strings: roughly 0.5 GiB, most of the 1.4 GiB of plain iteration.
 
 ## Inside a job: sync and async
@@ -142,7 +141,7 @@ The last job at larger sizes:
 | 50,000 | 1.09 GiB | 19.8 KiB | 5.05 GiB | 103 KiB | 32 s |
 | 100,000 | 1.99 GiB | 19.4 KiB | 9.98 GiB | 103 KiB | 63 s |
 | 200,000 | 3.81 GiB | 19.2 KiB | 19.67 GiB | 102 KiB | 127 s |
-| 2,177,155 | killed, above 24 GiB (41 GiB extrapolated) | | not run (207 GiB extrapolated) | | (23 min extrapolated) |
+| about 2.2 million | killed, above 24 GiB (41 GiB extrapolated) | | not run (207 GiB extrapolated) | | (23 min extrapolated) |
 
 ### Does the async path stream today?
 
@@ -177,7 +176,7 @@ practice it has the same gathering as sync, at the per-row object price.
 
 ## What each cause is worth
 
-| Cause | Where | Size at 2.18 million rows | What removes it |
+| Cause | Where | Size at 2.2 million rows | What removes it |
 |---|---|---|---|
 | Rows as objects, kept by every async node | async transport, `OperatorNode.async_execute`, `iter_data` cache, `flow()` | about 100 KiB per row and node chain: 200 GiB | record batches between nodes (ITL-1347 wiring); a node keeps a reference to stored or spilled rows, not the rows |
 | Source-info tokens | every source read, every operator's input and output | 4.2 KiB per row per tokenized copy: 9 GiB per copy, 2 to 3 copies per operator | not building them where nothing reads them (prototype, below); deriving a source's tokens from its system tags until an operator changes them (design) |
@@ -189,7 +188,7 @@ practice it has the same gathering as sync, at the per-row object price.
 
 A `SpiralDBTableSource` read whose result holds no source-info column and no content hash
 (`as_table()`, `run()`, `as_polars_df()` with the default columns) no longer builds
-tokens. Same rows, same table, at 2,177,155 rows:
+tokens. Same rows, same table, at about 2.2 million rows:
 
 | Step | Peak RSS before | Peak RSS after | Arrow pool peak before | after |
 |---|---|---|---|---|
@@ -203,3 +202,23 @@ It removes the largest cost of the reported case (a) and nothing of case (b): an
 operator and a job still read the tokens. What remains of the 1.96 GiB is the system
 tags (0.5 GiB of Arrow), the set of keys seen (0.5 GiB of Python strings) and the copy
 made when the batches are joined.
+
+## The first transport step's effect
+
+Async rows kept as Arrow tables of at most 8,192 rows instead of one pair of objects per
+row (the orchestrator's collectors and drain, an operator job node's kept output, a
+barrier operator's gathered input and its result while sent). Async job, peak resident
+memory less the import, per row; before at 20,000 rows, after at 200,000:
+
+| Job | Before | After |
+|---|---|---|
+| `map_data` | 54 KiB | 7.7 KiB |
+| `drop_nulls` | 90 KiB | 8.6 KiB |
+| `polars_filter` | 109 KiB | 12.5 KiB |
+| `join` (large with small) | 68 KiB | 21 KiB |
+| `group_by` | 57 KiB | 15 KiB |
+| `drop_nulls`, `group_by`, `map_data`, function pod | 102 KiB (19.7 GiB at 200,000 rows) | 24 KiB (4.8 GiB) |
+
+The async path now costs about what the sync path does. What remains is cause 2 and
+cause 3: each node keeps its tokenized table (about 4.5 KiB per row per copy), and
+`Join` buffers both inputs in the row form.

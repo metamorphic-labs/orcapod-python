@@ -1,7 +1,7 @@
 """Run every step of ``measure.py`` in its own process, under a memory guard (ITL-1464).
 
     uv run python docs/dev/specs/itl-1464/run_measurements.py --store <dir> \
-        --rows 2177155 --out <results.jsonl> [--steps as_table run ...]
+        --rows 2200000 --out <results.jsonl> [--steps as_table run ...]
 
 A step whose resident memory passes ``--guard-gb`` (24 by default) is killed and
 recorded as ``killed``; nothing here may starve the machine it runs on.
@@ -79,7 +79,7 @@ def run_step(
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--store", required=True, type=Path)
-    parser.add_argument("--rows", type=int, default=2_177_155)
+    parser.add_argument("--rows", type=int, default=2_200_000)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--guard-gb", type=float, default=24.0)
     parser.add_argument("--steps", nargs="*", default=DEFAULT_STEPS)

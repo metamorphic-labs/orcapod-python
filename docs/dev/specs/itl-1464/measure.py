@@ -1,15 +1,14 @@
-"""Measure the memory of one step of a workshop-shaped pipeline (ITL-1464).
+"""Measure the memory of one step of an analysis-shaped pipeline (ITL-1464).
 
 One step per process, so that a step's peak is its own::
 
-    uv run python docs/dev/specs/itl-1464/measure.py setup --rows 2177155 --store <dir>
+    uv run python docs/dev/specs/itl-1464/measure.py setup --rows 2200000 --store <dir>
     uv run python docs/dev/specs/itl-1464/measure.py <step> --store <dir>
 
 ``run_measurements.py`` runs every step under a memory guard and writes the table.
 
 The tables are synthetic: the column names and Arrow types of three tables of a
-SpiralDB sample dataset (a gaze time series, a spike event table and a unit location
-table), with generated values. They are stored in the disk-backed fake of the SpiralDB
+SpiralDB sample dataset (a time series, an event table and a small lookup table), with generated values. They are stored in the disk-backed fake of the SpiralDB
 client that the test suite uses (``tests/test_databases/fake_spiral_sdk.py``), so the
 real ``SpiralDBTableSource`` reads them: the code under measurement is the library's,
 only the service is replaced. The fake memory-maps the stored file, so the rows it
@@ -45,51 +44,51 @@ sys.path.insert(0, str(REPOSITORY))
 from tests.test_databases import fake_spiral_sdk as fake  # noqa: E402
 
 PROJECT = "synthetic-sample-000000"
-GAZE = "experiment_gaze_online_timeseries"
-SPIKES = "spike_event"
-LOCATIONS = "unit_location"
+SERIES = "time_series"
+EVENTS = "event"
+LOCATIONS = "lookup"
 
 SESSION_START = datetime(2026, 1, 1, 12, 0, 0)
 SUBJECT = "subject"
 HASH = "0123456789abcdef0123456789abcdef"
-EXPERIMENTS = 6
-UNITS = 300
+BLOCKS = 6
+ITEMS = 300
 
-GAZE_KEYS = [
-    "experiment_preprocessing_hash",
+SERIES_KEYS = [
+    "processing_hash",
     "subject_id",
-    "session_start_datetime",
-    "experiment_index",
+    "session_start",
+    "block_index",
     "timestamp",
 ]
-EXPERIMENT_KEY = GAZE_KEYS[:4]
-SPIKE_KEYS = [
-    "spike_extraction_hash",
+BLOCK_KEY = SERIES_KEYS[:4]
+EVENT_KEYS = [
+    "extraction_hash",
     "subject_id",
-    "session_start_datetime",
+    "session_start",
     "recording_index",
-    "probe_index",
+    "device_index",
     "timestamp",
-    "unit_id",
+    "item_id",
 ]
-UNIT_KEY = [
-    "spike_extraction_hash",
+ITEM_KEY = [
+    "extraction_hash",
     "subject_id",
-    "session_start_datetime",
+    "session_start",
     "recording_index",
-    "probe_index",
-    "unit_id",
+    "device_index",
+    "item_id",
 ]
 LOCATION_KEYS = [
-    "spike_extraction_hash",
-    "localization_hash",
+    "extraction_hash",
+    "placement_hash",
     "subject_id",
-    "session_start_datetime",
+    "session_start",
     "recording_index",
-    "probe_index",
-    "unit_id",
-    "atlas_id",
-    "atlas_label_region_short",
+    "device_index",
+    "item_id",
+    "map_id",
+    "region_short",
 ]
 
 
@@ -97,81 +96,73 @@ def _constant(value: Any, kind: pa.DataType, rows: int) -> pa.Array[Any]:
     return pa.array([value] * rows, kind)
 
 
-def gaze_table(rows: int) -> pa.Table:
-    """Return ``rows`` rows shaped like one session of the gaze time series."""
+def time_series_table(rows: int) -> pa.Table:
+    """Return ``rows`` rows shaped like one session of the time series."""
     rng = np.random.default_rng(0)
-    per_experiment = -(-rows // EXPERIMENTS)
-    experiment = np.repeat(np.arange(EXPERIMENTS, dtype=np.uint32), per_experiment)[
-        :rows
-    ]
+    per_block = -(-rows // BLOCKS)
+    block = np.repeat(np.arange(BLOCKS, dtype=np.uint32), per_block)[:rows]
     timestamp = np.arange(rows, dtype=np.uint64) * 5_000 + 1_700_000_000_000_000
     x = rng.normal(size=rows)
     y = rng.normal(size=rows)
-    # A few nulls, as blinks leave: ``drop_nulls`` has rows to drop.
+    # A few nulls: ``drop_nulls`` has rows to drop.
     missing = rng.random(rows) < 0.02
     return pa.table(
         {
-            "experiment_preprocessing_hash": _constant(HASH, pa.string(), rows),
+            "processing_hash": _constant(HASH, pa.string(), rows),
             "subject_id": _constant(SUBJECT, pa.string(), rows),
-            "session_start_datetime": _constant(
-                SESSION_START, pa.timestamp("us"), rows
-            ),
-            "experiment_index": pa.array(experiment),
+            "session_start": _constant(SESSION_START, pa.timestamp("us"), rows),
+            "block_index": pa.array(block),
             "timestamp": pa.array(timestamp),
-            "eye_tracking_software": _constant("tracker", pa.string(), rows),
-            "eye_tracking_software_version": _constant("1.2.3", pa.string(), rows),
-            "eye_x_deg": pa.array(x.astype(np.float32), mask=missing),
-            "eye_x_px": pa.array(x * 100, mask=missing),
-            "eye_y_deg": pa.array(y.astype(np.float32), mask=missing),
-            "eye_y_px": pa.array(y * 100, mask=missing),
-            "gaze_unreliable": pa.array(missing),
-            "pupil_size_norm": pa.array(rng.random(rows)),
+            "software": _constant("reader", pa.string(), rows),
+            "software_version": _constant("1.2.3", pa.string(), rows),
+            "x_small": pa.array(x.astype(np.float32), mask=missing),
+            "x_wide": pa.array(x * 100, mask=missing),
+            "y_small": pa.array(y.astype(np.float32), mask=missing),
+            "y_wide": pa.array(y * 100, mask=missing),
+            "unreliable": pa.array(missing),
+            "level": pa.array(rng.random(rows)),
         }
     )
 
 
-def spike_table(rows: int) -> pa.Table:
-    """Return ``rows`` rows shaped like one session of the spike event table."""
+def event_table(rows: int) -> pa.Table:
+    """Return ``rows`` rows shaped like one session of the event table."""
     rng = np.random.default_rng(1)
     timestamp = np.arange(rows, dtype=np.uint64) * 400 + 1_700_000_000_000_000
     return pa.table(
         {
-            "spike_extraction_hash": _constant(HASH, pa.string(), rows),
+            "extraction_hash": _constant(HASH, pa.string(), rows),
             "subject_id": _constant(SUBJECT, pa.string(), rows),
-            "session_start_datetime": _constant(
-                SESSION_START, pa.timestamp("us"), rows
-            ),
+            "session_start": _constant(SESSION_START, pa.timestamp("us"), rows),
             "recording_index": _constant(0, pa.uint32(), rows),
-            "probe_index": _constant(0, pa.uint32(), rows),
+            "device_index": _constant(0, pa.uint32(), rows),
             "timestamp": pa.array(timestamp),
-            "unit_id": pa.array(rng.integers(0, UNITS, rows).astype(np.uint32)),
-            "spike_amplitude_uv": pa.array(rng.normal(size=rows).astype(np.float32)),
+            "item_id": pa.array(rng.integers(0, ITEMS, rows).astype(np.uint32)),
+            "amplitude": pa.array(rng.normal(size=rows).astype(np.float32)),
         }
     )
 
 
-def location_table() -> pa.Table:
-    """Return one row per unit, shaped like the unit location table."""
+def lookup_table() -> pa.Table:
+    """Return one row per item, shaped like the lookup table."""
     rng = np.random.default_rng(2)
-    rows = UNITS
+    rows = ITEMS
     return pa.table(
         {
-            "spike_extraction_hash": _constant(HASH, pa.string(), rows),
-            "localization_hash": _constant(HASH[::-1], pa.string(), rows),
+            "extraction_hash": _constant(HASH, pa.string(), rows),
+            "placement_hash": _constant(HASH[::-1], pa.string(), rows),
             "subject_id": _constant(SUBJECT, pa.string(), rows),
-            "session_start_datetime": _constant(
-                SESSION_START, pa.timestamp("us"), rows
-            ),
+            "session_start": _constant(SESSION_START, pa.timestamp("us"), rows),
             "recording_index": _constant(0, pa.uint32(), rows),
-            "probe_index": _constant(0, pa.uint32(), rows),
-            "unit_id": pa.array(np.arange(rows, dtype=np.uint32)),
-            "atlas_id": _constant("atlas", pa.string(), rows),
-            "atlas_label_region_short": _constant("V1", pa.string(), rows),
-            "atlas_label_region_full": _constant("area", pa.string(), rows),
-            "chamber_id": _constant("chamber", pa.string(), rows),
-            "chamber_x_um": pa.array(rng.normal(size=rows)),
-            "chamber_y_um": pa.array(rng.normal(size=rows)),
-            "chamber_z_um": pa.array(rng.normal(size=rows)),
+            "device_index": _constant(0, pa.uint32(), rows),
+            "item_id": pa.array(np.arange(rows, dtype=np.uint32)),
+            "map_id": _constant("map", pa.string(), rows),
+            "region_short": _constant("r1", pa.string(), rows),
+            "region_full": _constant("area", pa.string(), rows),
+            "frame_id": _constant("frame", pa.string(), rows),
+            "x_um": pa.array(rng.normal(size=rows)),
+            "y_um": pa.array(rng.normal(size=rows)),
+            "z_um": pa.array(rng.normal(size=rows)),
         }
     )
 
@@ -182,9 +173,9 @@ def setup(rows: int) -> None:
 
     store = fake._store()
     for name, keys, table in (
-        (GAZE, GAZE_KEYS, gaze_table(rows)),
-        (SPIKES, SPIKE_KEYS, spike_table(rows)),
-        (LOCATIONS, LOCATION_KEYS, location_table()),
+        (SERIES, SERIES_KEYS, time_series_table(rows)),
+        (EVENTS, EVENT_KEYS, event_table(rows)),
+        (LOCATIONS, LOCATION_KEYS, lookup_table()),
     ):
         made = fake.ExternalProject(PROJECT).create_table(
             f"default.{name}", key_schema=[table.schema.field(k) for k in keys]
@@ -216,19 +207,19 @@ def _raw(name: str) -> pa.Table:
 
 def step_raw_copy() -> tuple[int, int, Any]:
     """The rows alone, copied into process memory: the floor every step stands on."""
-    raw = _raw(GAZE)
+    raw = _raw(SERIES)
     # ``take`` writes new buffers: the rows as private memory of this process.
     copy = raw.take(np.arange(raw.num_rows))
     return raw.nbytes, copy.nbytes, copy
 
 
 def step_as_table() -> tuple[int, int, Any]:
-    table = _source(GAZE).as_table()
-    return _raw(GAZE).nbytes, table.nbytes, table
+    table = _source(SERIES).as_table()
+    return _raw(SERIES).nbytes, table.nbytes, table
 
 
 def step_as_table_all_info() -> tuple[int, int, Any]:
-    table = _source(GAZE).as_table(all_info=True)
+    table = _source(SERIES).as_table(all_info=True)
     groups: dict[str, int] = {"user": 0, "source_info": 0, "system_tags": 0, "other": 0}
     for name in table.column_names:
         size = table.column(name).nbytes
@@ -241,105 +232,105 @@ def step_as_table_all_info() -> tuple[int, int, Any]:
         else:
             groups["user"] += size
     print(json.dumps({"column_group_bytes": groups}), file=sys.stderr)
-    return _raw(GAZE).nbytes, table.nbytes, table
+    return _raw(SERIES).nbytes, table.nbytes, table
 
 
 def step_run() -> tuple[int, int, Any]:
-    view = _source(GAZE).run()
-    return _raw(GAZE).nbytes, 0, view
+    view = _source(SERIES).run()
+    return _raw(SERIES).nbytes, 0, view
 
 
 def step_run_then_as_table() -> tuple[int, int, Any]:
-    source = _source(GAZE)
+    source = _source(SERIES)
     view = source.run()
     table = source.as_table()
-    return _raw(GAZE).nbytes, table.nbytes, (view, table)
+    return _raw(SERIES).nbytes, table.nbytes, (view, table)
 
 
 def step_as_polars_df() -> tuple[int, int, Any]:
-    frame = _source(GAZE).as_polars_df()
-    return _raw(GAZE).nbytes, int(frame.estimated_size()), frame
+    frame = _source(SERIES).as_polars_df()
+    return _raw(SERIES).nbytes, int(frame.estimated_size()), frame
 
 
 def step_iterate() -> tuple[int, int, Any]:
     count = 0
-    for _tag, _data in _source(GAZE):
+    for _tag, _data in _source(SERIES):
         count += 1
-    return _raw(GAZE).nbytes, 0, count
+    return _raw(SERIES).nbytes, 0, count
 
 
 def step_iterate_read_one_value() -> tuple[int, int, Any]:
     total = 0.0
-    for _tag, data in _source(GAZE):
-        total += data["pupil_size_norm"]
-    return _raw(GAZE).nbytes, 0, total
+    for _tag, data in _source(SERIES):
+        total += data["level"]
+    return _raw(SERIES).nbytes, 0, total
 
 
 def step_flow() -> tuple[int, int, Any]:
-    pairs = _source(GAZE).flow()
-    return _raw(GAZE).nbytes, 0, pairs
+    pairs = _source(SERIES).flow()
+    return _raw(SERIES).nbytes, 0, pairs
 
 
 def step_drop_nulls() -> tuple[int, int, Any]:
-    table = _source(GAZE).drop_nulls(["eye_x_deg", "eye_y_deg"]).as_table()
-    return _raw(GAZE).nbytes, table.nbytes, table
+    table = _source(SERIES).drop_nulls(["x_small", "y_small"]).as_table()
+    return _raw(SERIES).nbytes, table.nbytes, table
 
 
 def step_polars_filter() -> tuple[int, int, Any]:
     import polars as pl
 
-    table = _source(GAZE).polars_filter(pl.col("pupil_size_norm") > 0.5).as_table()
-    return _raw(GAZE).nbytes, table.nbytes, table
+    table = _source(SERIES).polars_filter(pl.col("level") > 0.5).as_table()
+    return _raw(SERIES).nbytes, table.nbytes, table
 
 
 def step_map_data() -> tuple[int, int, Any]:
-    table = _source(GAZE).map_data({"pupil_size_norm": "pupil"}).as_table()
-    return _raw(GAZE).nbytes, table.nbytes, table
+    table = _source(SERIES).map_data({"level": "pupil"}).as_table()
+    return _raw(SERIES).nbytes, table.nbytes, table
 
 
 def step_join() -> tuple[int, int, Any]:
-    table = _source(SPIKES).join(_source(LOCATIONS)).as_table()
-    return _raw(SPIKES).nbytes + _raw(LOCATIONS).nbytes, table.nbytes, table
+    table = _source(EVENTS).join(_source(LOCATIONS)).as_table()
+    return _raw(EVENTS).nbytes + _raw(LOCATIONS).nbytes, table.nbytes, table
 
 
-def _grouped_gaze() -> Any:
+def _grouped_series() -> Any:
     return (
-        _source(GAZE)
-        .drop_nulls(["eye_x_deg", "eye_y_deg"])
-        .group_by(EXPERIMENT_KEY)
-        .map_data({"timestamp": "gaze_time"})
+        _source(SERIES)
+        .drop_nulls(["x_small", "y_small"])
+        .group_by(BLOCK_KEY)
+        .map_data({"timestamp": "sample_time"})
     )
 
 
 def step_group_by() -> tuple[int, int, Any]:
-    table = _source(GAZE).group_by(EXPERIMENT_KEY).as_table()
-    return _raw(GAZE).nbytes, table.nbytes, table
+    table = _source(SERIES).group_by(BLOCK_KEY).as_table()
+    return _raw(SERIES).nbytes, table.nbytes, table
 
 
 def step_group_by_chain() -> tuple[int, int, Any]:
-    table = _grouped_gaze().as_table()
-    return _raw(GAZE).nbytes, table.nbytes, table
+    table = _grouped_series().as_table()
+    return _raw(SERIES).nbytes, table.nbytes, table
 
 
 def _onsets_pod() -> Any:
     from orcapod import function_pod
 
-    @function_pod(output_keys="fixation_onset")
-    def fixation_onsets(
-        gaze_time: list[int], eye_x_deg: list[float], eye_y_deg: list[float]
+    @function_pod(output_keys="onset")
+    def onsets(
+        sample_time: list[int], x_small: list[float], y_small: list[float]
     ) -> list[int]:
-        t, x, y = np.asarray(gaze_time), np.asarray(eye_x_deg), np.asarray(eye_y_deg)
+        t, x, y = np.asarray(sample_time), np.asarray(x_small), np.asarray(y_small)
         speed = np.hypot(np.diff(x), np.diff(y)) / (np.diff(t) / 1_000_000)
         moving = speed > 40
         ends = np.flatnonzero(moving[:-1] & ~moving[1:]) + 1
         return [int(t[i]) for i in ends]
 
-    return fixation_onsets
+    return onsets
 
 
 def step_function_pod() -> tuple[int, int, Any]:
-    table = _onsets_pod().pod(_grouped_gaze()).as_table()
-    return _raw(GAZE).nbytes, table.nbytes, table
+    table = _onsets_pod().pod(_grouped_series()).as_table()
+    return _raw(SERIES).nbytes, table.nbytes, table
 
 
 def _job(store: Path) -> Any:
@@ -347,15 +338,23 @@ def _job(store: Path) -> Any:
     from orcapod.databases import DeltaTableDatabase
 
     database = DeltaTableDatabase(str(store / "results"))
-    with PipelineJob(name="fixation_response", database=database) as job:
-        _onsets_pod().pod(_grouped_gaze(), label="onsets")
+    with PipelineJob(name="chain", database=database) as job:
+        _onsets_pod().pod(_grouped_series(), label="onsets")
     return job
 
 
 def step_job_run(store: Path) -> tuple[int, int, Any]:
     job = _job(store)
     job.run()
-    return _raw(GAZE).nbytes, 0, job
+    return _raw(SERIES).nbytes, 0, job
+
+
+def step_job_run_async_unkept(store: Path) -> tuple[int, int, Any]:
+    from orcapod.pipeline import AsyncPipelineOrchestrator
+
+    job = _job(store)
+    job.run(orchestrator=AsyncPipelineOrchestrator(), materialize_results=False)
+    return _raw(SERIES).nbytes, 0, job
 
 
 def step_job_run_async(store: Path) -> tuple[int, int, Any]:
@@ -363,20 +362,18 @@ def step_job_run_async(store: Path) -> tuple[int, int, Any]:
 
     job = _job(store)
     job.run(orchestrator=AsyncPipelineOrchestrator())
-    return _raw(GAZE).nbytes, 0, job
+    return _raw(SERIES).nbytes, 0, job
 
 
 def _operator_chains() -> dict[str, Callable[[], Any]]:
     import polars as pl
 
     return {
-        "map_data": lambda: _source(GAZE).map_data({"pupil_size_norm": "pupil"}),
-        "drop_nulls": lambda: _source(GAZE).drop_nulls(["eye_x_deg", "eye_y_deg"]),
-        "polars_filter": lambda: _source(GAZE).polars_filter(
-            pl.col("pupil_size_norm") > 0.5
-        ),
-        "join": lambda: _source(SPIKES).join(_source(LOCATIONS)),
-        "group_by": lambda: _source(GAZE).group_by(EXPERIMENT_KEY),
+        "map_data": lambda: _source(SERIES).map_data({"level": "pupil"}),
+        "drop_nulls": lambda: _source(SERIES).drop_nulls(["x_small", "y_small"]),
+        "polars_filter": lambda: _source(SERIES).polars_filter(pl.col("level") > 0.5),
+        "join": lambda: _source(EVENTS).join(_source(LOCATIONS)),
+        "group_by": lambda: _source(SERIES).group_by(BLOCK_KEY),
     }
 
 
@@ -393,9 +390,12 @@ def _operator_job(chain: str, orchestrator: str) -> Callable[[Path], Any]:
             _operator_chains()[chain]()
         if orchestrator == "async":
             job.run(orchestrator=AsyncPipelineOrchestrator())
+        elif orchestrator == "async_unkept":
+            # The orchestrator keeps no node's rows for its result.
+            job.run(orchestrator=AsyncPipelineOrchestrator(), materialize_results=False)
         else:
             job.run()
-        name = SPIKES if chain == "join" else GAZE
+        name = EVENTS if chain == "join" else SERIES
         return _raw(name).nbytes, 0, job
 
     return step
@@ -405,7 +405,7 @@ STEPS: dict[str, Callable[..., tuple[int, int, Any]]] = {
     **{
         f"job_{chain}_{orchestrator}": _operator_job(chain, orchestrator)
         for chain in ("map_data", "drop_nulls", "polars_filter", "join", "group_by")
-        for orchestrator in ("sync", "async")
+        for orchestrator in ("sync", "async", "async_unkept")
     },
     "raw_copy": step_raw_copy,
     "as_table": step_as_table,
@@ -425,6 +425,7 @@ STEPS: dict[str, Callable[..., tuple[int, int, Any]]] = {
     "function_pod": step_function_pod,
     "job_run": step_job_run,
     "job_run_async": step_job_run_async,
+    "job_run_async_unkept": step_job_run_async_unkept,
 }
 
 
@@ -437,7 +438,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("step", choices=["setup", *STEPS])
     parser.add_argument("--store", required=True, type=Path)
-    parser.add_argument("--rows", type=int, default=2_177_155)
+    parser.add_argument("--rows", type=int, default=2_200_000)
     parser.add_argument("--tracemalloc", action="store_true")
     args = parser.parse_args()
     warnings.simplefilter("ignore")
@@ -461,7 +462,7 @@ def main() -> None:
         elapsed = time.perf_counter() - started
         record: dict[str, Any] = {
             "step": args.step,
-            "rows": _raw(GAZE).num_rows,
+            "rows": _raw(SERIES).num_rows,
             "input_arrow_bytes": in_bytes,
             "output_arrow_bytes": out_bytes,
             "rss_before_bytes": before,

@@ -5,8 +5,8 @@ measurements it rests on are in `itl-1464-memory-diagnosis.md`. Decisions the de
 has made are marked **Decided**; decisions still open are marked **OPEN** and listed again
 at the end.
 
-LFP tables are out of scope (developer, November 25, 2026): one LFP row holds 384 samples,
-and a session of them is a different problem. Nothing here is designed or tested for them.
+Tables whose rows hold long sample arrays are out of scope (developer, November 25, 2026):
+a session of them is a different problem. Nothing here is designed or tested for them.
 
 ## The governing rules
 
@@ -79,7 +79,7 @@ One mechanism holds rows that are computed but not in memory.
   the process, no result is read from it by a later process, and it holds no hash.
 
 Without source-info tokens materialized (section 7) a cache file is about the size of the
-rows' Arrow data: 248 MiB for the measured 2.18 million row session.
+rows' Arrow data: 248 MiB for the measured 2.2 million row session.
 
 ## 3. What a job node keeps, and the view
 
@@ -451,10 +451,10 @@ With sections 2 to 7 in place, for a job run by the async orchestrator:
 
 **The bound to state to users**: peak memory of an async job is
 `(batches in flight) × (batch bytes) + (key bytes + 8) × (rows indexed by joins and groupings) + 16 × (rows of verified sources) + the largest single row`.
-For the measured session (2.18 million rows of 120 bytes, one grouping, one function
+For the measured session (2.2 million rows of 120 bytes, one grouping, one function
 pod) that is under 0.5 GiB, against about 210 GiB today.
 
-**Proposed budget for the workshop** (**OPEN, M1**): a job over every non-LFP table of a
+**Proposed budget for the workshop** (**OPEN, M1**): a job over every table in scope of a
 sample dataset peaks below 4 GiB on the async path, checked on synthetic tables of the
 dataset's shapes and then once live, read-only.
 
@@ -487,7 +487,9 @@ the synthetic tables of the diagnosis; none changes a hash, a stored layout or a
 value.
 
 1. **Done (PR 558)**: a SpiralDB read that returns no tokens builds none.
-2. Rows on the async path as record batches: wire `async_execute_batches` and the
+2. **First part done (PR 562)**: rows kept on the async path as Arrow tables of at most
+   8,192 rows, never as a list of pairs (async now costs about what sync does). Remaining:
+   rows on the async path as record batches: wire `async_execute_batches` and the
    record-batch channels into the nodes and the async orchestrator (ITL-1347's remaining
    stages), give `PolarsFilter` `ROW_BY_ROW`. Removes the 18 to 110 KiB per row.
 3. The local cache, and job nodes that keep a reference (section 3). Removes "every node
@@ -524,11 +526,19 @@ holds rows (cache files, `as_table()`, the sync path).
 | T1 | Source tokens held as a recipe until read | yes, after the transport |
 | T2 | Token lists of `GroupBy` and `Batch` as a recipe | after T1, measured first |
 | U1 | Iteration keeps no row objects | accept |
-| M1 | The workshop budget | 4 GiB peak, async, non-LFP |
+| M1 | The workshop budget | 4 GiB peak, async, tables in scope |
+
+Approved by the coordinator on the developer's delegation (November 25, 2026), each for
+the developer's review: N1 (a job node reads its run's rows from storage or a local
+spill file, a page at a time; spill files under a temporary directory per job run,
+removed with the job or the process, never part of a stored path or hash; same rows,
+same order on sync), T1 as a direction (design first, implemented after the transport),
+and the interim transport step of PR 562. The local cache of section 2 is one shared
+module, `core/row_spool.py` (PR 559), used by joins, views and job nodes alike.
 
 Decided by the developer (November 24 and 25, 2026), recorded above: `run()` promises
 computation and nothing about how; async is the primary memory-bounded path; joins keep
 keys only, with rows fetched from a local cache; certificates originate in Orcapod and
 are trusted by derivation, a source's claim is verified as data flows, and a key the
 store enforces is trusted; a certificate enters no hash or identity; an async join's
-memory is at worst linear in one input; LFP is out of scope.
+memory is at worst linear in one input; tables of long sample arrays are out of scope.
