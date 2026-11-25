@@ -36,7 +36,8 @@ held: the pairs are counted first, then made in pieces; one arriving row with mo
 than a piece has its pairs listed (16 bytes each, at most the held rows) and is sent in
 pieces.
 
-Every input is read at once and to its end, at most 65,536 rows ahead of the join. Nothing
+Every input is read at once and to its end, each until 65,536 rows wait for the join (the
+producer's last batch is taken whole, whatever its size). Nothing
 waits for one input to end, because both inputs may read one upstream (a diamond).
 
 Not covered: `Rejoin` stays a barrier on this path, because its kernel can differ from the
@@ -50,15 +51,18 @@ batch, read memory-mapped, under a directory of this process in the system's tem
 directory. A file is deleted when its last row is discarded; the rest at a normal end, a
 failure, a cancellation, collection and exit. A killed process leaves its directory; the
 next process to spill there removes it (it holds no lock any more). A spool belongs to one
-thread of one process; a forked child's copy refuses every use.
+process, whose threads may all use it, one call at a time; a forked child's copy refuses
+every read and write.
 
 ## Certificates
 
 `StreamProtocol.unique_keys` is a set of tag sets on which no two rows agree, under the
 joins' equality. It is derived when asked and stored nowhere: in no hash, identity, config,
 stored row or equality. A wrong certificate would lose rows, so only what is certain is
-certified, and a rule is read from the exact class: a subclass certifies nothing unless it
-declares a rule.
+certified: a rule is read from the exact class, and only while no member of the instance is
+replaced (`reads_as_its_class`), for the source, the pod, the stream and the node alike. A
+subclass or a customized instance certifies nothing, and a customized join runs its own sync
+call over its whole inputs.
 
 | Stream | Certificate |
 |---|---|

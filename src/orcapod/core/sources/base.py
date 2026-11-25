@@ -5,11 +5,11 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from orcapod import contexts
+from orcapod.core.exact_class import reads_as_its_class
 from orcapod.core.unique_keys import NO_UNIQUE_KEYS, UniqueKeys, certificate
 from orcapod.config import OrcapodConfig
 from orcapod.core.streams.base import (
     StreamBase,
-    reads_as_its_class,
     typed_arrow_schemas,
     typed_zero_row_table,
 )
@@ -395,7 +395,8 @@ class RootSource(StreamBase):
 
     Declared ``True`` only by the library source kinds whose rows all pass
     ``SourceStreamBuilder``, which names each row by its key columns and refuses a
-    repeat, each on its own class: read for the exact class only, never inherited.
+    repeat, each on its own class: read for the exact class only, never inherited, and
+    for an instance with no member replaced.
     """
 
     @property
@@ -405,7 +406,10 @@ class RootSource(StreamBase):
         Two rows that agree on the key columns under the joins' equality have one record
         id, which is a function of the values (a key is never a float).
         """
-        if vars(type(self)).get("KEY_COLUMNS_CHECKED") is not True:
+        kind = type(self)
+        if vars(kind).get("KEY_COLUMNS_CHECKED") is not True:
+            return NO_UNIQUE_KEYS
+        if not reads_as_its_class(self, kind):
             return NO_UNIQUE_KEYS
         key = frozenset(self._key_columns)
         if not key or not key <= set(self.keys()[0]):

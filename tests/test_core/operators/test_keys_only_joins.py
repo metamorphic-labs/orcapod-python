@@ -648,3 +648,87 @@ def test_an_operator_after_a_join_gets_derived_batches(spooled: Path, op: Any) -
         return last.result()
 
     assert _rows(_transport(_bounded(go()))) == _rows(_transport(then))
+
+
+@pytest.mark.parametrize("spare", ["source", "operator"])
+def test_a_customized_input_that_repeats_a_key_loses_no_row(
+    spooled: Path, spare: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of #565: the instance gives two rows of a key its class would refuse."""
+    left = _source("a", {"k": [1], "n": [7]}, key=("k",))
+    twice = _source("b", {"k": [1, 1], "m": [1, 2]})
+    once = _source("b", {"k": [1], "m": [1]}, key=("k",))
+    if spare == "source":
+        right: Any = once
+        right.as_table = twice.as_table
+        right.iter_data = twice.iter_data
+    else:
+        op: Any = SemiJoin()
+        op.binary_static_process = lambda *_: twice
+        right = op(once, once)
+    monkeypatch.setattr(streaming_joins, "PUSH_ROWS", 1)
+    join = Join()
+    output = OutputChannel(join(left, right))
+    inputs = [left.open_channel(), right.open_channel()]
+    _bounded(join.async_execute_batches(inputs, output))
+    assert output.result().as_table().num_rows == 2
+
+
+@pytest.mark.parametrize("op", [Join(), SemiJoin(), MergeJoin()], ids=lambda o: repr(o))
+def test_a_customized_join_keeps_its_own_computation(op: Any) -> None:
+    inputs = _one_to_one("tags_first")
+    original = op.static_process
+
+    def first_row(*streams: StreamProtocol) -> StreamProtocol:
+        joined = original(*streams)
+        table = joined.as_table(columns={"source": True, "system_tags": True})
+        return ArrowTableStream(table.slice(0, 1), tag_columns=joined.keys()[0])
+
+    op.static_process = first_row
+    output = OutputChannel(op(*inputs))
+    _bounded(op.async_execute_batches([s.open_channel() for s in inputs], output))
+    assert output.result().as_table().num_rows == 1
+
+
+def test_what_an_in_step_join_keeps_does_not_grow_with_the_rows_that_passed(
+    spooled: Path,
+) -> None:
+    """Review of #565: the held-row mask was numbered from the first row ever held."""
+    left, right = _sorted_source("a", 400), _sorted_source("b", 400)
+    kernel = StreamingJoin(Join(), [left, right])
+    (link,) = kernel._links  # pyright: ignore[reportPrivateUsage]  # what it keeps
+    for mine, theirs in zip(_batches(left, 4), _batches(right, 4)):
+        _ = kernel.push(0, mine)
+        _ = kernel.push(1, theirs)
+        for side in link.sides:
+            assert len(side._alive) <= 8  # pyright: ignore[reportPrivateUsage]  # what it keeps
+            assert sum(f.height for f in side._frames) <= 4  # pyright: ignore[reportPrivateUsage]  # what it keeps
+
+
+def test_rows_held_for_long_among_rows_that_pass_are_matched_at_the_end(
+    spooled: Path,
+) -> None:
+    """The numbering is moved past removed rows while earlier and later ones are held."""
+    n = 200
+    left = _sorted_source("a", n)
+    right = _sorted_source("b", n)
+    kernel = _join([left, right])
+    mine = _sent(left).sort_by("t")
+    theirs = _sent(right).sort_by("t")
+    waiting = [5, 6, 90, 150]
+    passing = [i for i in range(n) if i not in waiting]
+    got = 0
+    for batch in mine.combine_chunks().to_batches(max_chunksize=10):
+        got += sum(b.num_rows for b in kernel.push(0, batch))
+        low = batch.column("t")[0].as_py()
+        rows = [i for i in passing if low <= i < low + 10]
+        (part,) = theirs.take(pa.array(rows)).combine_chunks().to_batches()
+        got += sum(b.num_rows for b in kernel.push(1, part))
+    assert got == len(passing)
+    assert kernel.held_rows == len(waiting)
+    (last,) = theirs.take(pa.array(waiting)).combine_chunks().to_batches()
+    out = pa.Table.from_batches(kernel.push(1, last))
+    assert sorted(str(t) for t in out.column("t").to_pylist()) == sorted(
+        map(str, waiting)
+    )
+    assert kernel.held_rows == 0

@@ -9,6 +9,7 @@ import polars as pl
 import pyarrow as pa
 
 from orcapod.protocols.core_protocols.streams import RecordBatchInput, RecordBatchOutput
+from orcapod.core.exact_class import reads_as_its_class
 from orcapod.core.unique_keys import UniqueKeys, joined_keys
 from orcapod.types.explanation import plain_repr
 from orcapod.core.operators.meta_columns import (
@@ -751,8 +752,9 @@ class Join(NonZeroInputOperator):
             inputs: One input channel per input stream, in the operator's order.
             output: The channel the result's record batches are sent into.
         """
-        if type(self) is not Join:
-            # A subclass may compute other rows: its own sync call over all of its inputs.
+        if not reads_as_its_class(self, Join):
+            # A subclass, or an instance with a member replaced, may compute other rows:
+            # its own sync call over all of its inputs.
             await super().async_execute_batches(inputs, output)
             return
         # The kernels are built on this module's join rules.
