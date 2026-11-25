@@ -1,17 +1,16 @@
-# Part 6: Re-runs and caching
+# Part 6: Re-runs
 
-In Part 5 a second run computed nothing, because nothing had changed. Real work is a loop:
-new data arrives, a value gets corrected, you improve a function. This part shows what
-Orcapod recomputes in each case, and one case where it does **not** recompute although you
-would expect it to. That case is the most common surprise for new users, so take the time to
-run it.
+In Part 5 a second run computed nothing, because nothing had changed. This part shows what
+Orcapod recomputes when new data arrives, when a value is corrected, and when you change a
+function. Editing a function's code alone recomputes **nothing**, which is the most common
+surprise for new users.
 
 You will:
 
 - add rows and correct a value, and see only the affected rows computed
 - edit a function and see the old results come back
 - force recomputation by bumping the function's version
-- learn the rule that explains all three
+- learn the rule for reusing a stored result
 
 ```python
 from workshop_data import make_dataset
@@ -60,16 +59,13 @@ print(len(rates), len(calls))
 # 64 63
 ```
 
-This part uses an in-memory database so that the page runs quickly. Everything shown behaves
-the same with a `DeltaTableDatabase`.
+`run` builds the job from Part 5 without the per-session mean, runs it over the shared
+`database`, and returns the sorted result. The first run computed 63 results for 64 units, as in
+Part 5. A `DeltaTableDatabase` behaves the same.
 
-The helper `run` builds the job from Part 5 (without the per-session mean, to keep the
-output short), runs it over the one shared `database`, and returns the result sorted. The first
-run computed 63 results for 64 units, as before (a count of `job.run()`; see Part 5).
+## New rows
 
-## New rows: only the new rows are computed
-
-Two more units were sorted on one probe. Write a new units file with two extra lines:
+Write a new units file with two extra lines:
 
 ```python
 original = (data_dir / "units.csv").read_text()
@@ -86,9 +82,9 @@ print(len(rates), len(calls))
 
 66 rows in the result, and two more calls. The other 64 rows were read from the database.
 
-## A corrected value: only that row is computed
+## Changes to the input
 
-A spike count turns out to be wrong: unit 0 of the first probe had 150 spikes, not 149.
+Correct one value, the spike count of unit 0 of the first probe, from 149 to 150:
 
 ```python
 (data_dir / "units_fixed.csv").write_text(
@@ -104,10 +100,9 @@ print(rates.head(2))
 # 1   mouse_01      s1  imec0     1  5.433333
 ```
 
-One call, for the one row whose input changed, and the result shows the new value.
+One call, for the row whose input changed.
 
-Now change a value the function does **not** use, the depth of that unit. Start from the
-corrected file, so that the spike count stays 150 and only the depth differs:
+Now change a value the function does **not** use, for example the depth of that unit:
 
 ```python
 fixed = (data_dir / "units_fixed.csv").read_text()
@@ -120,16 +115,11 @@ print(len(calls))
 # 66
 ```
 
-No call. `firing_rate` only receives `n_spikes` and `duration_s`, and those are unchanged.
-This is why Part 2's Rule 2 drops the data columns a function does not take before the pod
-sees a row: a result depends on exactly the columns the function receives, so a change to any
-other column leaves it valid. (The `select_data_columns` calls in `run` only make that
-explicit; the pod would drop `depth_um` without them.)
+No calls. `firing_rate` receives only `n_spikes` and `duration_s` (Part 2, Rule 2).
 
-## An edited function: nothing is recomputed
+## Changes to the function
 
-Now the surprise. Suppose you decide rates should be reported to one decimal place, and
-edit the function:
+Suppose you want rates with one decimal place, and edit the function:
 
 ```python
 @function_pod(output_keys="rate_hz")
@@ -147,16 +137,14 @@ print(rates.head(2))
 # 1   mouse_01      s1  imec0     1  5.433333
 ```
 
-No call, and the **old** values. There is no error and no warning.
+No calls, and the **old** values. Orcapod raises no error and prints no warning.
 
 !!! warning "Editing a function's code does not recompute its results"
     Orcapod does not look at a function's source code. It identifies a function by three
     things: its **name**, its **output** (each output name with its type, in any order),
-    and its **major version**. As long as those are the same, stored results are reused,
-    whatever the body now says, and whichever position of the returned tuple each output
-    name takes.
+    and its **major version**. As long as those are the same, stored results are reused.
 
-## Bump the major version
+## Versioning a pod
 
 Every function pod has a version, `"v0.0"` unless you say otherwise. The number before the
 dot is the major version. When you change what a function computes, raise it:
@@ -177,18 +165,16 @@ print(rates.head(2))
 # 1   mouse_01      s1  imec0     1      5.4
 ```
 
-63 new calls and new values. The results of version 0 are still in the database, untouched;
-version 1 has its own. If you went back to the `v0.0` function you would get the old numbers
-without any computation.
+63 new calls and new values. The results of version 0 stay in the database, and going back to
+the `v0.0` function returns them without any computation.
 
-A change after the dot is **not** enough. `version="v0.1"` shares its stored results with
-`"v0.0"`. Use the minor number for changes that cannot alter results, such as a comment or a
-faster implementation of the same calculation.
+A change after the dot is **not** enough: `version="v0.1"` shares its stored results with
+`"v0.0"`. Use the minor number for changes that cannot alter results, such as a faster
+implementation of the same calculation.
 
-Renaming the function, or renaming its output column, also starts from an empty slate,
-because those are part of its identity too.
+Renaming the function or its output column also makes every row compute again.
 
-## The rule
+## Reuse rule
 
 A stored result is reused when **all** of these are the same as when it was computed:
 
@@ -196,16 +182,11 @@ A stored result is reused when **all** of these are the same as when it was comp
 2. the values of the function's inputs for that row;
 3. the job's `name` and database.
 
-Change any one and the affected rows are computed, unless a result is already stored for
-the new combination (going back to an earlier version finds that version's results). Change
-none and nothing is. Where the
-input values came from does not matter: which file, which source, which steps before the
-function.
+Change any one, and the result is looked up under the new combination. It is computed if none
+is stored there. Where the input values came from does not matter.
 
-Orcapod implements this with hashes. A **hash** is a short fingerprint computed from some
-content: the same content always gives the same hash, and different content gives, in
-practice, a different one. Every stream carries two of them. You do not need them to use
-Orcapod, but they explain the rule:
+Orcapod implements this rule with hashes. A **hash** is a short fingerprint computed from some
+content. Every stream carries two of them, a pipeline hash and a content hash:
 
 ```python
 units = CSVSource(
@@ -223,21 +204,20 @@ print(units.pipeline_hash() == units_more.pipeline_hash())
 # True
 ```
 
-The **pipeline hash** covers structure only: column names and types, and the steps applied.
-The two files have different rows but the same columns, so their pipeline hashes are equal.
-The job uses it to name the table in which it records which inputs each function node
-received, so runs of one pipeline over different files share that record.
+The **pipeline hash** covers structure: column names and types, and the steps applied. The two
+files have the same columns, so their pipeline hashes are equal. The job uses this hash to name
+the table in which it records the inputs of each function node.
 
-The results themselves are filed under the function (its name, output and major version)
-and a hash of the input values of each row. That is why the run over `units_more.csv` found
-the results computed from `units.csv`, and how two extra rows meant two extra calls.
+The **content hash** also covers which sources the data came from.
 
-The second hash, the **content hash**, also covers which sources the data came from. See
-[Identity & Hashing](../concepts/identity.md) for the full picture.
+Results are stored under the function (its name, output and major version) and a hash of each
+row's input values. That is why the run over `units_more.csv` found the results computed from
+`units.csv`. See [Identity & Hashing](../concepts/identity.md) for more.
 
-## What to remember
+## Key points
 
-- New or changed input rows are computed; everything else is read from the database.
+- New rows, and rows whose inputs changed, are computed. Other results are read from the
+  database.
 - **Editing a function body does not recompute.** Bump the major version (`"v0.0"` to
   `"v1.0"`), or rename the function.
 - A minor version bump (`"v0.0"` to `"v0.1"`) does not recompute.
@@ -305,16 +285,15 @@ which of these four changes cause function calls on the next `run(...)`, and how
 run the pipeline since. Which stored results are wrong, and what do you do?
 
 ??? success "Solution"
-    Rows computed before the fix hold values from the buggy code. Rows that were new after
-    the fix hold correct values. Both are filed under the same function identity, so you
-    cannot tell them apart from the results alone.
+    Rows computed before the fix hold values from the old code. Rows that were new after the
+    fix hold correct values. Both are stored under the same function identity, so you cannot
+    tell them apart from the results alone.
 
     Bump the major version and run again. Every row is then computed with the current code
     and stored under the new version. The mixed results stay in the database under the old
     version and are no longer used.
 
-    The habit to build: change the behaviour of a function, change its major version, in
-    the same edit.
+    Change a function's major version in the same edit that changes what it computes.
 
 **3.** A colleague runs the same pipeline code over the same database directory, but named
 their job `"analysis"` instead of `"workshop"`. Are your stored results reused?
@@ -344,5 +323,3 @@ their job `"analysis"` instead of `"workshop"`. Are your stored results reused?
     ```
 
     Agree on a job name with the people you share a database with.
-
-Next: [Part 7: Working with files](07-files.md).

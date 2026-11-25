@@ -10,20 +10,22 @@ Orcapod's test suite, so what a page shows is what the library prints.
 
 ## What you will build
 
-A pipeline that takes a small extracellular-recording dataset and computes, for every
-recording session, the mean firing rate of its units. Along the way you will store the
+A pipeline that takes a small synthetic neural dataset and computes, for every recording
+session, the mean firing rate of its units. The dataset is only the example: the same steps
+apply to any analysis that starts from tables or files. Along the way you will store the
 results in a database, re-run the pipeline so that only new work is computed, read and write
 files, and trace a result back to the rows it came from.
 
 ## The dataset
 
-The data is synthetic. A short script generates it on your machine; nothing is downloaded and
-no real recordings are involved. It imitates a tiny study:
+A short script generates the data on your machine. It imitates a small study of neural
+recordings in mice. A *probe* is a recording device placed in one brain region, a *unit* is
+one neuron detected on a probe, and a *spike* is one event of a unit:
 
 - 4 mice, two wildtype and two knockout
 - 2 recording sessions per mouse
 - 2 probes per session (`imec0` in V1, `imec1` in CA1)
-- 4 sorted units per probe
+- 4 units per probe
 
 ```
 workshop_data/
@@ -52,10 +54,10 @@ workshop_data/
 | [3. Reshaping with operators](03-operators.md) | Joining, filtering, renaming | 20 min |
 | [4. Many rows into one](04-many-rows-into-one.md) | Grouping rows and computing over the group | 20 min |
 | [5. Keeping results](05-pipeline-job.md) | `PipelineJob`: run a pipeline against a database | 20 min |
-| [6. Re-runs and caching](06-reruns-and-caching.md) | What is recomputed, and what is not | 20 min |
+| [6. Re-runs](06-reruns-and-caching.md) | What is recomputed, and what is not | 20 min |
 | [7. Working with files](07-files.md) | Functions that read and write files | 20 min |
 | [8. Inspecting and tracing](08-inspecting-and-tracing.md) | Where a result came from | 20 min |
-| [9. When things go wrong](09-when-things-go-wrong.md) | Reading errors; failures inside a run | 15 min |
+| [9. Handling errors](09-when-things-go-wrong.md) | Errors while building a pipeline; failed rows in a run | 15 min |
 | [10. Where next](10-where-next.md) | Features this tutorial did not cover | optional |
 
 Parts 0 to 6 are the core and should be done in order. Parts 7 to 10 can be read in any

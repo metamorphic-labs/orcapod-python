@@ -1,16 +1,15 @@
 # Part 7: Working with files
 
-Recordings do not live in CSV cells. They are files: binary dumps, spike tables, images,
-one folder per session. A pipeline over such data passes *references to files* from step to
-step, and the functions open them. Orcapod supports this with a file type that it identifies
-by **content**, so that a result is recomputed when the file it was computed from changes,
-and not otherwise.
+Much data is kept in files: images, binary recordings, tables, often with one folder per
+recording. A pipeline over such data passes *references to files* from step to step, and the
+functions open them. Orcapod identifies a file by its **content**, so a result is recomputed
+when the file it was computed from changes.
 
 You will:
 
 - build a stream whose data column holds files
 - write function pods that read a file and that write one
-- see what makes a file-based result recompute
+- see when a file-based result is recomputed
 - treat a whole folder as one input
 
 ```python
@@ -32,8 +31,8 @@ spike) and a text file of notes.
 
 ## A stream of files
 
-`op.File(path)` marks a value as "this file". Build one row per spike file. There is no
-table listing them, so walk the folders and use `DictSource`:
+`op.File(path)` refers to a file. Walk the folders and build one row per spike file with
+`DictSource`:
 
 ```python
 def spike_file_rows():
@@ -63,16 +62,16 @@ print(spike_files.as_table().num_rows)
 # 16
 ```
 
-The data column has type `File`. Two things about `op.File`:
+The data column has type `File`.
 
-- It checks that the file exists **when you create it**. `op.File("no_such_file.csv")`
-  raises `FileNotFoundError` on the spot, not later in the middle of a run.
-- It behaves like a `pathlib.Path`: `.name`, `.stem`, `.parent`, `.read_text()`, `.open()`
-  all work, and `str(f)` is the path.
+- `op.File` checks that the file exists when you create it: `op.File("no_such_file.csv")`
+  raises `FileNotFoundError`.
+- It behaves like a `pathlib.Path`: `.name`, `.stem`, `.parent`, `.read_text()` and `.open()`
+  all work.
 
 ## A function that reads a file
 
-Annotate the parameter as `op.File` and open it however you like:
+Annotate the parameter as `op.File`:
 
 ```python
 import csv
@@ -122,9 +121,9 @@ print(len(calls))
 # 16
 ```
 
-## What makes a file result recompute
+## Changed and moved files
 
-Change the content of one file. Here, one spike is appended to the first file:
+Append one spike to the first file:
 
 ```python
 first = data_dir / "sessions" / "mouse_01_s1" / "spikes_imec0.csv"
@@ -138,11 +137,10 @@ print(counts.head(1))
 # 0   mouse_01      s1  imec0      1737
 ```
 
-One call, for the file that changed. Nobody told Orcapod which file was edited. A `File` is
-identified by a hash of its content, so a changed file is a changed input.
+One call, for the file that changed. Orcapod identifies a `File` by a hash of its content, so a
+changed file is a changed input to the pod.
 
-The reverse also holds. The same content under a different name or location is the *same*
-input:
+The same content under a different name or location is the same input:
 
 ```python
 import shutil
@@ -171,19 +169,16 @@ print(len(calls))
 moved.unlink()
 ```
 
-No call: the stored result for that content was reused. You can reorganise a data directory
-without recomputing anything.
+No calls. Moving or renaming files recomputes nothing.
 
-!!! warning "`pathlib.Path` columns are identified by the path, not the content"
-    You may also put plain `pathlib.Path` values in a source and annotate a parameter as
-    `Path`. Orcapod then identifies the value by the path *string*. If the file's content
-    changes and its path does not, **nothing is recomputed**. Use `op.File` for every input
-    whose content matters, which is nearly always.
+!!! warning "`pathlib.Path` columns are identified by the path"
+    A source can also hold plain `pathlib.Path` values, for a parameter annotated as `Path`.
+    Orcapod does not read those files: if a file changes and its path stays the same,
+    **nothing is recomputed**. Use `op.File` for input files.
 
 ## A function that writes a file
 
-A function may produce a file. Write it, and return its path. Annotate the return type as
-`Path`:
+Write the file, return its path, and annotate the return type as `Path`:
 
 ```python
 out_dir = Path("spike_summaries")
@@ -221,24 +216,22 @@ print(len(list(out_dir.iterdir())))
 # 16
 ```
 
-Three things to keep in mind when a function writes files:
-
-- **Choose the output name from the inputs**, as above, so that two rows never write to the
-  same file. Two rows whose files have the same content share one stored result, and so
-  one output path, which holds the right summary for both. A changed file's new result,
-  though, overwrites the old output under the same name, while the stored result of the old
-  content still points there; to keep both, put a digest of the file's content into the
+- **Give every different input its own output file.** Build the output name from the inputs, as
+  above. Rows whose files have the same content share one stored result, and so one output
+  file. The names above do not change when an input file is edited, so the new result
+  overwrites the old output file, and the stored result of the old content still points to
+  it. If the edit is then undone, Orcapod returns that stored path, which now holds the
+  wrong output. For input files that may change, include a hash of the file's content in the
   output name.
-- **The database remembers the path, not the file.** If you delete `spike_summaries/` and
-  run again, Orcapod finds the stored results, calls nothing, and hands you paths to files
-  that no longer exist. Treat output files as part of the database: delete both or neither.
-- **Paths are stored as you returned them.** A relative path, as here, only means something
-  from the directory the script was run in. For work you intend to keep, build output paths
-  from an absolute directory.
+- **The database stores the path, even if the file is deleted.** If you delete
+  `spike_summaries/` and run again, Orcapod calls nothing and returns paths to files that no
+  longer exist. Keep or delete output files together with the database.
+- **Paths are stored as you returned them.** A relative path, as here, only works from the
+  directory the script was run in. For results you keep, return absolute paths.
 
 ## A folder as one input
 
-Some inputs are a folder, not a file: a session directory, an image stack. `op.Directory`
+Some inputs could be a folder, such as a session directory or an image stack. `op.Directory`
 identifies a folder by the names and content of everything in it:
 
 ```python
@@ -286,34 +279,23 @@ print(len(calls) - before)
 # 0
 ```
 
-Without `ignore`, any change to any file in the folder makes it a new input.
+Without `ignore`, a change to any file in the folder makes it a new input. See
+[File and path types](../concepts/file-types.md) for more on `File`, `Directory` and `Path`.
 
 ## Large files
 
-Identifying a file by content means reading it. For files of many gigabytes that takes
-longer than you want to wait on every run. Orcapod can remember a file's hash and reuse it
-as long as the file's size and modification time are unchanged. To turn this on
-(optional), call this once, at the start of your script:
+Orcapod reads a file to identify it, which takes a long time for large files. It can instead
+remember a file's hash while the file's size and modification time stay the same; see
+[File Hash Caching](../concepts/file-hash-caching.md).
 
-```python
-op.enable_file_hash_caching(db_path=Path("workshop_hashes.sqlite"))
-```
-
-This keeps the hashes in a file in your working directory. Without `db_path` they go to
-`~/.orcapod/file_hash_cache.db`, in your home directory.
-
-The details and options are on the [File Hash Caching](../concepts/file-hash-caching.md)
-page. With the small files of this tutorial it makes no noticeable difference.
-
-## What to remember
+## Key points
 
 - `op.File(path)` in a source, `op.File` as a parameter type. Files are identified by
-  content: edit a file and its results are recomputed; move it and they are not.
+  content only. Editing a file recomputes its results; moving it does not.
 - Plain `Path` values are identified by path only.
-- A function that writes a file returns its `Path`. The database keeps the path; keep the file.
+- A function that writes a file returns its `Path`. The database stores the path;
+  it does not track the file itself.
 - `op.Directory(path, ignore=[...])` treats a folder as one input.
-
-More detail: [File and path types](../concepts/file-types.md).
 
 ## Exercises
 
@@ -347,8 +329,7 @@ it. Check your result for `mouse_02, s1, imec1` against `units.csv`.
     # 237
     ```
 
-    This pod was applied directly, without a job, so nothing was stored. That is fine for
-    a quick check.
+    This pod was applied without a job, so nothing was stored.
 
 **2.** Write one output file **per session**: a text file `<subject>_<session>_total.txt`
 containing the total number of spikes over both probes. (Hint: Part 4. After
@@ -356,9 +337,8 @@ containing the total number of spikes over both probes. (Hint: Part 4. After
 
 ??? success "Solution"
     Group the spike files by session, then hand the list of files to one function call.
-    The function has no access to the tags, so it takes the session's name from the folder
-    the files are in. (The first `group_by`, like the first `filter`, prints a
-    `ProvisionalHashWarning`: see [Messages you can ignore](00-setup.md#messages-you-can-ignore).)
+    The function does not receive the tags, so it takes the session's name from the folder
+    the files are in.
 
     ```python
     totals_dir = Path("session_totals")
@@ -395,16 +375,15 @@ containing the total number of spikes over both probes. (Hint: Part 4. After
     # mouse_04_s2_total.txt 2462
     ```
 
-    The rows of a stream have no promised order, so they are sorted by their tags before
-    printing.
+
 
 **3.** In `run_folders`, remove `ignore=["notes.txt"]` and run it twice, editing a
 `notes.txt` in between. How many calls does each run make, and why?
 
 ??? success "Solution"
-    The first run makes 8 calls: without `ignore`, each folder's identity now includes its
-    notes file, so all eight are inputs that have not been seen before. After the edit, the
-    second run makes 1 call, for the one folder whose content changed.
+    The first run makes 8 calls: each folder's identity now includes its notes file, so all
+    eight are new inputs. After the edit, the second run makes 1 call, for the folder whose
+    content changed.
 
     ```python
     def run_folders_strict():
@@ -437,5 +416,3 @@ containing the total number of spikes over both probes. (Hint: Part 4. After
     print(len(calls) - before)
     # 1
     ```
-
-Next: [Part 8: Inspecting and tracing](08-inspecting-and-tracing.md).

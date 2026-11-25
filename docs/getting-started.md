@@ -11,15 +11,15 @@ with `uv init` (in a new directory) and add Orcapod to it:
 
 ```bash
 uv init
-uv add "orcapod>=0.4.0rc4"
+uv add "orcapod>=0.4.0rc7"
 ```
 
-In an environment not managed by uv, `pip install "orcapod>=0.4.0rc4"` installs it instead.
+In an environment not managed by uv, `pip install "orcapod>=0.4.0rc7"` installs it instead.
 
-The workshop uses the latest 0.4.0 release candidate, which these commands install. The
-latest stable release on PyPI is 0.1.4 (0.3.0 was withdrawn), which a plain `uv add orcapod` installs and this guide does not
-cover. For the development version, install from the repository:
-`uv add git+https://github.com/metamorphic-labs/orcapod-python`.
+The workshop uses the latest 0.4.0 release candidate, which these commands install. The latest
+stable release on PyPI is 0.1.4 (0.3.0 was withdrawn), which a plain `uv add orcapod` installs
+and this guide does not cover. For the development version, install from the repository: `uv
+add git+https://github.com/metamorphic-labs/orcapod-python`.
 
 ## Creating a source
 
@@ -40,20 +40,15 @@ source = DictSource(
 )
 ```
 
-There are two important concepts here:
+- **Tag columns** (`tag_columns`) are the keys that identify each row, like primary keys in a
+  database or independent variables in an experiment. Here, `experiment` identifies each
+  measurement.
+- **Data columns** hold the values. Here they are `temperature` and `pressure`.
 
-- **Tag columns** (`tag_columns`) are the keys that identify each row -- like primary keys
-  in a database or independent variables in an experiment. Here, `experiment` uniquely
-  identifies each measurement.
-- **Data columns** are the actual data payload. In this example, `temperature` and
-  `pressure` are the data columns.
+Here a column is either a tag or data. `tag_only_columns=True` sets that; see
+[Data-tags](concepts/data-tags.md) for columns with both roles.
 
-By default a source's tag columns are also data columns: each is a **data-tag**, one
-column seen in both roles, so a function can read it. `tag_only_columns=True` keeps the tags
-plain (a tag only), which is what this example does, so the data columns are exactly the
-columns that are not tags. See [Data-tags](concepts/data-tags.md).
-
-The `source_id` is a human-readable name used for provenance tracking.
+The `source_id` names the source. Orcapod uses it when it records where a value came from.
 
 !!! note
     Orcapod provides several source types beyond `DictSource`: `ListSource`, `CSVSource`,
@@ -62,10 +57,10 @@ The `source_id` is a human-readable name used for provenance tracking.
 
 ## Inspecting the stream
 
-In Orcapod, a source *is* a stream. You can inspect it immediately without any extra
-conversion step. In a notebook, put `source` on the last line of a cell to see a table of
-its first rows; [Working in notebooks](concepts/notebooks.md) shows what that table and
-Orcapod's other notebook displays show.
+Every step in Orcapod takes streams and returns a stream. A source is the stream that brings
+data in, so you can inspect it right away. In a notebook, put `source` on the last line of a
+cell to see a table of its first rows; [Working in notebooks](concepts/notebooks.md) shows
+what that table and Orcapod's other notebook displays show.
 
 ### Schema
 
@@ -93,8 +88,7 @@ print(data_keys)
 
 ### Iterating over rows
 
-A stream is iterable: a `for` loop walks through each (Tag, Data) pair. Iterating a stream
-is the same as calling its `iter_data()` method:
+A `for` loop over a stream gives one (tag, data) pair per row:
 
 ```python
 for tag, data in source:
@@ -127,24 +121,22 @@ from orcapod import function_pod
 
 @function_pod(output_keys=["temp_fahrenheit", "is_high_pressure"])
 def analyze_conditions(temperature: float, pressure: float) -> tuple[float, bool]:
-    temp_f = temperature * 9.0 / 5.0 + 32.0
-    is_high = pressure > 1.0
-    return temp_f, is_high
+    temp_fahrenheit = temperature * 9.0 / 5.0 + 32.0
+    is_high_pressure = pressure > 1.0
+    return temp_fahrenheit, is_high_pressure
 ```
 
-A few things to note about function pods:
-
-- **Parameter names match data column names.** The function's parameter names
-  (`temperature`, `pressure`) must match the data column names from the input stream
-  exactly -- one parameter per data column. Data columns the function does not take are
-  dropped when you call the pod; `pod(stream, strict=True)` and `pod.process(stream)`
-  reject them instead (see [Function Pods](concepts/function-pods.md#input-columns)).
+- **Parameter names match data column names.** Each parameter takes the data column with
+  exactly its name, here `temperature` and `pressure`.
+- **Data columns the function does not take are dropped** when you call the pod.
+  `pod(stream, strict=True)` and `pod.process(stream)` reject them instead (see
+  [Function Pods](concepts/function-pods.md#input-columns)).
 - **Type annotations define the schemas.** Orcapod uses them to build the output schema and
   to validate compatibility when the pod is applied. A parameter without an annotation needs
   its type in the decorator's `input_schema` mapping instead.
-- **`output_keys` names the output columns.** Since the function returns a tuple of two
-  values, `output_keys` must be a list of two names. For a function returning a single
-  value, pass a single string (e.g., `output_keys="result"`).
+- **`output_keys` names the output columns.** The function returns a tuple of two
+  values, so `output_keys` is a list of two names, in the order of the tuple. A function that
+  returns one value takes a single string, such as `output_keys="result"`.
 - **The decorator creates a `.pod` attribute.** You call `.pod(stream)` to apply
   the function to a stream.
 
@@ -154,13 +146,8 @@ Now apply it:
 result = analyze_conditions.pod(source)
 ```
 
-!!! tip
-    For an operator, `op(stream)` is a shorthand for `op.process(stream)`. For a function
-    pod, `pod(stream)` also drops the data columns the function does not take, while
-    `pod.process(stream)` is exact and rejects them.
-
-The `result` is a new stream. Tags are preserved from the input; the data columns
-are replaced with the function's outputs.
+`result` is a new stream. It has the tags of the input, and the function's outputs as its
+data columns.
 
 ## Inspecting the result
 
@@ -174,8 +161,8 @@ print(data_schema)
 # Schema({'temp_fahrenheit': float, 'is_high_pressure': bool})
 ```
 
-The tag schema is unchanged -- function pods never modify tags. The data schema
-now reflects the function's output types.
+The tag schema is unchanged: a function pod passes tags through. The data schema holds the
+function's outputs.
 
 Iterate over the results:
 
@@ -219,9 +206,9 @@ source = DictSource(
 # Define a transformation
 @function_pod(output_keys=["temp_fahrenheit", "is_high_pressure"])
 def analyze_conditions(temperature: float, pressure: float) -> tuple[float, bool]:
-    temp_f = temperature * 9.0 / 5.0 + 32.0
-    is_high = pressure > 1.0
-    return temp_f, is_high
+    temp_fahrenheit = temperature * 9.0 / 5.0 + 32.0
+    is_high_pressure = pressure > 1.0
+    return temp_fahrenheit, is_high_pressure
 
 # Apply and view results
 result = analyze_conditions.pod(source)
@@ -242,25 +229,7 @@ With `pip`, in the activated environment: `python my_pipeline.py`.
 
 ## Keeping results
 
-Everything above runs in memory: nothing is stored, so each new run computes everything again. To
-save results in a database and have later runs compute only what is new, record the same
-steps inside a `PipelineJob`. See [Pipelines and Jobs](concepts/pipeline-job.md), or work
-through the [Tutorial](tutorial/index.md), which builds up to it step by step.
-
-## Next steps
-
-Now that you have the basics, explore these topics:
-
-- [Sources](concepts/sources.md) -- learn about the different source types and how
-  provenance tracking works.
-- [Streams](concepts/streams.md) -- understand the immutable (Tag, Data) stream model.
-- [Working in notebooks](concepts/notebooks.md) -- what streams, run summaries and pipeline
-  diagrams show at the end of a notebook cell.
-- [Function Pods](concepts/function-pods.md) -- advanced function pod usage, including
-  caching with databases.
-- [Operators](concepts/operators.md) -- structural transforms like Join, Batch, and Filter
-  that work on tags and stream structure without inspecting data content.
-- [Identity & Hashing](concepts/identity.md) -- how Orcapod tracks content identity and
-  pipeline structure for reproducibility.
-- [Tutorial](tutorial/index.md) -- a self-paced course with exercises, on one small dataset.
-- [Troubleshooting](troubleshooting.md) -- common errors, their causes and fixes.
+The results above are held in memory, so each new run computes everything again. To save
+results in a database and have later runs compute only what is new, record the same steps
+inside a `PipelineJob`. See [Pipelines and Jobs](concepts/pipeline-job.md), or work through
+the [Tutorial](tutorial/index.md), which builds up to it step by step.
