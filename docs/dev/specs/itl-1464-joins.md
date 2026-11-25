@@ -166,7 +166,7 @@ in one and derived in another, however they arrive; rows fetched from both are t
 
 Text is built where values are needed: a source-info column both inputs of a `MergeJoin`
 have, a merged data-tag one side of which is text, and the tokens that read system tags whose
-values a join of one pipeline hash sorts. `Rejoin`'s kernel, not wired, builds all of it.
+values a join of one pipeline hash sorts. `Rejoin`'s kernel builds all of it.
 
 ## The bytes of a held key row
 
@@ -179,9 +179,40 @@ characters and one integer), as the growth of the process's physical footprint:
 | the same, strings as Polars categories | 38 | 15 ms, about 115 more |
 | a 64-bit hash of the prepared key and a row number | 23 | 5 ms, 4 more |
 
-Of the 95 bytes, 42 are the key's data, 9 the row number and the constant key; the rest is the string views and buffers Polars keeps. Not
-built: the hash form would keep one equality rule (candidates with equal hashes are matched
-by `join._matched_pairs` on the keys of the rows fetched for the output), but rests on equal
-keys having equal hashes under the join's equality, which was checked
-for floats (signed zero, every NaN), lists and structs. An index alone is not a full
-join: these are measurements of the frames, not of a whole join.
+Of the 95 bytes, 42 are the key's data and 9 the row number and the constant key; the rest is
+the string views and buffers Polars keeps. The join's own 9 bytes per row (its place and
+whether it is held) are beside every form. These are measurements of the frames, not of a
+whole join.
+
+### A hash index (not built; for the developer)
+
+The index would hold, for a key without a nested column, the 64-bit `hash_rows` of the
+prepared key and the row number. An arriving batch's hashes pick candidate pairs; the rows of
+the candidates are fetched, as they are for the output anyway, and each candidate pair is
+matched by `join._matched_pairs` on its real keys (with the pair's number as one more key).
+So there is one equality rule, and two keys of one hash cost a fetch, never a wrong row.
+
+Gain, estimated and not measured: the 1:1 case with one input entirely first (2,456 MiB at
+8,000,000 rows) would fall well below 1 GiB, and a probe would take a fifth of the time.
+
+Risk: it rests on keys that a join takes as equal having equal hashes, across frames, chunks
+and slices. Polars documents no such promise for `hash_rows`. If it failed, a pair would be
+missing from the output and nothing would say so. The coordinator deferred it for that
+reason (November 25, 2026): the memory of today's form fits the target.
+
+Checked so far, by hand and not as a test: signed zeros and NaNs of several payloads at
+64 bits, signed zeros and NaNs at 32 bits, floats in lists and structs, strings across chunks
+and slices.
+
+Test plan, if it is built:
+
+1. For every key type a join allows (`arrow_keys.part_without_rule`), every pair of values of
+   the types' edge pools: the join's equality implies equal hashes.
+2. The same with the two keys in different frames, chunk layouts, slices and frames of other
+   columns beside them, and with strings on both sides of the 12-byte view limit.
+3. The certificate graphs (`test_certificate_graphs.py`) and every kernel test, run with both
+   indexes: equal rows.
+4. A run with every hash forced equal (all candidates), and with a hash of few bits: equal
+   rows, bounded memory of the candidates.
+5. A check at the first batch of a run that Polars' hashes of fixed vectors (signed zeros,
+   NaN payloads, a sliced string) agree with the join; if not, the frame index is used.
