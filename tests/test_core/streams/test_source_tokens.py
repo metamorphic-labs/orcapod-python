@@ -21,6 +21,7 @@ import pytest
 from orcapod import contexts
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators.base import UnaryOperator
+from orcapod.core.operators.join import JOIN_FOLD_LABEL
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.streams import ArrowTableStream
 from orcapod.core.streams.carried import carried_table
@@ -36,10 +37,13 @@ from orcapod.operators import (
     DropColumns,
     DropNulls,
     DropTagColumns,
+    Join,
     MapColumns,
     MapData,
     MapTags,
+    MergeJoin,
     PolarsFilter,
+    Rejoin,
     SelectDataColumns,
     TagBy,
 )
@@ -188,6 +192,170 @@ def test_every_operator_gives_what_text_sources_give(
     expected = case.make_op()(*case.make_sources()).as_table(all_info=True)
     assert table.schema.equals(expected.schema, check_metadata=True)
     assert_same_values(table, expected)
+
+
+def _other(name: str, **kwargs: Any) -> ArrowTableSource:
+    """A source sharing the data-tags ``k`` and ``j``, of its own schema (``name``)."""
+    table = pa.table(
+        {
+            f"{name}1": pa.array([float(i) for i in range(12)]),
+            "j": pa.array([f"j{i % 3}" for i in range(12)]),
+            "k": pa.array(reversed(range(12)), pa.int32()),
+            f"{name}2": pa.array([f"v{i}" for i in range(12)]),
+        }
+    )
+    return ArrowTableSource(table, tag_columns=["j", "k"], **kwargs)
+
+
+def _text_other(name: str) -> ArrowTableStream:
+    """``_other`` as a raw stream whose tokens are text already."""
+    source = _other(name)
+    return ArrowTableStream(
+        source.as_table(columns={"source": True, "system_tags": True}),
+        tag_columns=["j", "k"],
+        data_tags=["j", "k"],
+    )
+
+
+MATCHES: dict[str, tuple[Callable[[], Any], set[str]]] = {
+    # The columns whose tokens may be text after it, by name; every other is derived.
+    "join_2": (lambda: _other("a").join(_other("b")), set()),
+    "join_2_swapped": (lambda: _other("b").join(_other("a")), set()),
+    "join_3": (lambda: Join()(_other("c"), _other("a"), _other("b")), set()),
+    "join_chain": (lambda: _other("a").join(_other("b")).join(_other("c")), set()),
+    "join_then_row_wise": (
+        lambda: (
+            _other("a")
+            .join(_other("b"))
+            .map_data({"a1": "x", "b2": "y"})
+            .drop_nulls()
+            .polars_filter(pl.col("x") > 3)
+        ),
+        set(),
+    ),
+    "join_tag_only": (
+        lambda: _source().join(_other("a", tag_only_columns=["j"])),
+        set(),
+    ),
+    "join_text_member": (
+        lambda: Join()(_other("a"), _text_other("b"), _other("c")),
+        {"j", "k", "b1", "b2"},
+    ),
+    "join_one_schema": (
+        lambda: (
+            _other("a", source_id="s2")
+            .map_data({"a1": "p", "a2": "q"})
+            .join(_other("a", source_id="s1").map_data({"a1": "p2", "a2": "q2"}))
+        ),
+        set(),
+    ),
+    "semi_join": (lambda: _source().semi_join(_plain_source()), set()),
+    "merge_join": (
+        lambda: MergeJoin()(
+            _other("a").map_data({"a2": "same"}), _other("b").map_data({"b2": "same"})
+        ),
+        {"same"},
+    ),
+    "rejoin": (
+        lambda: Rejoin()(
+            _other("a").select_data_columns(["a1", "j", "k"]),
+            _other("a").select_data_columns(["a2", "j", "k"]),
+        ),
+        set(),
+    ),
+    "rejoin_filtered": (
+        lambda: Rejoin()(
+            _other("a").select_data_columns(["a1", "j", "k"]),
+            _other("a").polars_filter(pl.col("a1") > 3).drop_data_columns(["a1"]),
+        ),
+        set(),
+    ),
+}
+
+
+@pytest.mark.parametrize("name", MATCHES)
+def test_a_match_carries_the_tokens_and_gives_the_same_rows(
+    name: str, text_sources: Callable[[], None]
+) -> None:
+    make, text = MATCHES[name]
+    result = make()
+    carried = carried_table(result, {"source": True, "system_tags": True})
+    tokens = {
+        c.removeprefix("_source_")
+        for c in carried.column_names
+        if c.startswith(constants.SOURCE_PREFIX)
+    }
+    derived = {c.removeprefix("_source_") for c in _derived(carried)}
+    assert tokens - derived == text & tokens
+    table = result.as_table(all_info=True)
+    rows = [(t.as_dict(all_info=True), d.as_dict(all_info=True)) for t, d in result]
+    assert table.num_rows > 0
+    text_sources()
+    oracle = make()
+    expected = oracle.as_table(all_info=True)
+    assert table.schema.equals(expected.schema, check_metadata=True)
+    assert_same_values(table, expected)
+    assert rows == [
+        (t.as_dict(all_info=True), d.as_dict(all_info=True)) for t, d in oracle
+    ]
+
+
+@pytest.mark.parametrize("order", [("s1", "s2"), ("s2", "s1")])
+def test_inputs_of_one_pipeline_hash_keep_their_own_tokens(
+    order: tuple[str, str], text_sources: Callable[[], None]
+) -> None:
+    """Two sources of one schema, every column a data-tag: the join sorts their
+    system-tag values per row, so the tokens that read them are text first."""
+
+    def make() -> Any:
+        streams = [
+            ArrowTableSource(
+                _table().select(["k", "j"]).slice(i),
+                tag_columns=["k", "j"],
+                source_id=s,
+            )
+            for i, s in enumerate(order)
+        ]
+        assert streams[0].pipeline_hash() == streams[1].pipeline_hash()
+        return streams[0].join(streams[1])
+
+    result = make()
+    assert not _derived(carried_table(result, CARRIED))
+    table = result.as_table(all_info=True)
+    text_sources()
+    expected = make().as_table(all_info=True)
+    assert table.num_rows == 9
+    assert table.schema.equals(expected.schema, check_metadata=True)
+    assert_same_values(table, expected)
+
+
+def test_a_join_fold_is_the_fold_of_its_members() -> None:
+    """The merged token is ``join_v1`` of the inputs' own tokens, whatever the order."""
+    a, b = _other("a"), _other("b")
+    table = a.join(b).as_table(columns={"source": True})
+    own = [
+        dict(zip(t["k"].to_pylist(), t["_source_k"].to_pylist(), strict=True))
+        for t in (s.as_table(columns={"source": True}) for s in (a, b))
+    ]
+    for key, token in zip(
+        table["k"].to_pylist(), table["_source_k"].to_pylist(), strict=True
+    ):
+        assert token == arrow_utils.fold_system_tag_values(
+            sorted(tokens[key] for tokens in own), label=JOIN_FOLD_LABEL
+        )
+
+
+def test_a_recipe_survives_its_json() -> None:
+    leaf = source_tokens.TokenRecipe("s", "r", "c")
+    fold = source_tokens.FoldRecipe(
+        JOIN_FOLD_LABEL, (leaf, source_tokens.FoldRecipe(JOIN_FOLD_LABEL, (leaf, leaf)))
+    )
+    for recipe in (leaf, fold):
+        kind = source_tokens.DerivedTokenType(recipe)
+        again = source_tokens.DerivedTokenType.__arrow_ext_deserialize__(
+            pa.struct([]), kind.__arrow_ext_serialize__()
+        )
+        assert again == kind and again.recipe == recipe
 
 
 def _column_configs() -> list[dict[str, bool]]:
@@ -595,3 +763,42 @@ def test_every_library_source_is_read_without_text() -> None:
     }
     assert kinds - declared == {"CachedSource"}
     assert declared <= kinds
+
+
+@pytest.mark.parametrize("kind", ["join", "merge_join", "semi_join", "rejoin"])
+def test_a_match_reads_a_stream_with_its_own_read_through_it(kind: str) -> None:
+    """Review of PR 564: a subclass that shows fewer rows is matched on those."""
+
+    def matched(left: Any) -> Any:
+        return {
+            "join": lambda: left.join(_other("a")),
+            "merge_join": lambda: MergeJoin()(left, _other("a")),
+            "semi_join": lambda: left.semi_join(_other("a")),
+            "rejoin": lambda: Rejoin()(left, _source().select_data_columns(["k"])),
+        }[kind]()
+
+    # Of the stream's ten rows its own read shows k = 0 and 1; the matches of the others
+    # are left out. (``_other`` holds j of another k, so k = 1, 4 and 7 match it.)
+    own = matched(_raw(_OwnStream)).as_table()["k"].to_pylist()
+    whole = matched(_raw(ArrowTableStream)).as_table()["k"].to_pylist()
+    expected = list(range(10)) if kind == "rejoin" else [1, 4, 7]
+    assert sorted(whole) == expected
+    assert sorted(own) == [k for k in expected if k < 2]
+
+
+class _OwnJoin(Join):
+    """A user's operator over a library one."""
+
+    seen: list[pa.Table] = []
+
+    def static_process(self, *streams: Any) -> Any:
+        self.seen.extend(self._input_table(s, CARRIED) for s in streams)
+        return super().static_process(*streams)
+
+
+def test_a_subclass_of_a_join_reads_text() -> None:
+    _OwnJoin.seen = []
+    result = _OwnJoin()(_other("a"), _other("b"))
+    assert not _derived(carried_table(result, CARRIED))
+    assert [_derived(t) for t in _OwnJoin.seen] == [(), ()]
+    assert result.as_table().num_rows == 12

@@ -32,7 +32,7 @@ from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
-from orcapod.utils import arrow_utils, schema_utils
+from orcapod.utils import arrow_utils, schema_utils, source_tokens
 
 
 def _output_types(
@@ -155,6 +155,8 @@ class MergeJoin(BinaryOperator):
     the other is ``T`` in both roles (ITL-829). Every other colliding data column is
     merged into a list in argument order, as for plain inputs.
     """
+
+    CARRIES_TOKENS: ClassVar[bool] = True
 
     # Provisional: its identity is not frozen with data context v1 (ITL-1279).
     PROVISIONAL: ClassVar[bool] = True
@@ -397,11 +399,15 @@ class MergeJoin(BinaryOperator):
         # Tables with source info and system tags, each input's system-tag
         # column names extended with its pipeline hash and argument index.
         left_table = arrow_utils.append_to_system_tags(
-            left_stream.as_table(columns={"source": True, "system_tags": True}),
+            self._input_table(
+                left_stream, columns={"source": True, "system_tags": True}
+            ),
             self._system_tag_suffix(left_stream, 0),
         )
         right_table = arrow_utils.append_to_system_tags(
-            right_stream.as_table(columns={"source": True, "system_tags": True}),
+            self._input_table(
+                right_stream, columns={"source": True, "system_tags": True}
+            ),
             self._system_tag_suffix(right_stream, 1),
         )
 
@@ -428,6 +434,12 @@ class MergeJoin(BinaryOperator):
             right_table = right_table.rename_columns(
                 [right_source.get(c, c) for c in right_table.column_names]
             )
+
+        # A source-info column both inputs have becomes a list of both tokens: text
+        # (ITL-1464). Any other is carried as it is.
+        both = set(left_table.column_names) & set(right_table.column_names)
+        left_table = source_tokens.materialize(left_table, both)
+        right_table = source_tokens.materialize(right_table, both)
 
         # Find colliding data columns (a merged data-tag column is not one)
         colliding_keys = (set(left_data_keys) & set(right_data_keys)) - merged
@@ -496,6 +508,8 @@ class MergeJoin(BinaryOperator):
         for left_name, right_name in right_source.items():
             joined = Join._merge_source_columns(joined, left_name, right_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
             joined = Join._fold_source_column(joined, left_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+            # A merge of derived tokens has a recipe, so a type, of its own (ITL-1464).
+            output_types[left_name] = joined.schema.field(left_name).type
 
         # Use the left stream's type converter — not the default context — so that a
         # MergeJoin over streams built with a non-default DataContext reconstructs the
