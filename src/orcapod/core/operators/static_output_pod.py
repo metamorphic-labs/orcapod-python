@@ -1169,7 +1169,7 @@ class StaticOutputOperatorPod(TraceableBase):
                 # cannot make one table with the earlier ones is refused, as the sync
                 # path refuses the whole input, never processed alone.
                 settled: dict[str, pa.DataType] = {}
-                async for batch in channel:
+                async for batch in channel.carried():
                     settled = settle_token_types(batch, settled)
                     await self._send_processed([batch], channel.stream, output)
             else:
@@ -1210,7 +1210,7 @@ class StaticOutputOperatorPod(TraceableBase):
             output: The channel to send into; a result with no rows sends nothing.
         """
         table = row_built_columns(
-            result.as_carried_table(columns=ZERO_ROW_INPUT_COLUMNS), result.keys()
+            carried_table(result, ZERO_ROW_INPUT_COLUMNS), result.keys()
         )
         for batch in table.to_batches():
             if batch.num_rows:

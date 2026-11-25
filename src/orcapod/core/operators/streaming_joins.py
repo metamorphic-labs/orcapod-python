@@ -145,7 +145,7 @@ PAIRS_PER_BATCH = 8_192
 # The pair-count column of a many-to-many match, and how many removed rows a side's key
 # frame holds before it is compacted.
 _COUNT = "__streaming_count"
-_COMPACT_ROWS = 65_536
+_COMPACT_ROWS = 1_024
 
 # How many rows of one input are read ahead and pushed at once. A push joins its rows with
 # every key held, so rows that have arrived already are pushed together.
@@ -302,6 +302,87 @@ def _side_by_side(left: pa.Table, right: pa.Table, keys: Sequence[str]) -> pa.Ta
     return pa.Table.from_arrays(arrays, names=names)
 
 
+class _Rows:
+    """Rows numbered from 0 in the order held, spooled.
+
+    Rows of one input may hold a source-info column as text in one batch and derived in
+    another (``source_tokens``): each run of rows of one form has a spool of its own, and
+    rows fetched from several are given as text.
+    """
+
+    def __init__(self) -> None:
+        self.size: int = 0
+        self._runs: list[tuple[int, pa.Schema, RowSpool]] = []
+
+    def append(self, table: pa.Table) -> None:
+        """Hold ``table``'s rows, numbered from ``size`` on."""
+        if not table.num_rows:
+            return
+        if not self._runs or not self._runs[-1][1].equals(
+            table.schema, check_metadata=True
+        ):
+            self._runs.append((self.size, table.schema, RowSpool()))
+        self._runs[-1][2].append(table)
+        self.size += table.num_rows
+
+    def _by_run(
+        self, rows: npt.NDArray[np.int64]
+    ) -> Iterator[tuple[RowSpool, npt.NDArray[np.int64], npt.NDArray[np.int64]]]:
+        """Each run that holds some of ``rows``: its spool, their positions in ``rows``
+        and their numbers in the spool."""
+        starts = np.array([start for start, _, _ in self._runs], dtype=np.int64)
+        runs = np.searchsorted(starts, rows, side="right") - 1
+        for run in np.unique(runs):
+            positions = np.flatnonzero(runs == run)
+            start, _, spool = self._runs[int(run)]
+            yield spool, positions, rows[positions] - start
+
+    def take(self, rows: npt.NDArray[np.int64]) -> pa.Table:
+        """The rows with these numbers, in this order."""
+        parts = [(at, spool.take(local)) for spool, at, local in self._by_run(rows)]
+        if len(parts) == 1:
+            return parts[0][1]
+        taken = _one_form([part for _, part in parts]).combine_chunks()
+        order = np.argsort(np.concatenate([at for at, _ in parts]))
+        return taken.take(pa.array(order, pa.int64()))
+
+    def block(self, start: int, length: int) -> pa.Table:
+        """``length`` rows from ``start`` on, none of them discarded, without copying."""
+        parts: list[pa.Table] = []
+        for run_start, _, spool in self._runs:
+            first = max(start - run_start, 0)
+            last = min(start + length - run_start, spool.size)
+            if first < last:
+                parts.append(spool.slice(first, last - first))
+        return _one_form(parts)
+
+    def discard(self, rows: npt.NDArray[np.int64]) -> None:
+        """Say that these rows are never fetched again."""
+        for spool, _, local in self._by_run(rows):
+            spool.discard(local)
+
+    def close(self) -> None:
+        """Let every row and file go."""
+        for _, _, spool in self._runs:
+            spool.close()
+        self._runs = []
+
+
+def _one_form(tables: Sequence[pa.Table]) -> pa.Table:
+    """``tables`` under one another, a source-info column of several forms as text.
+
+    Args:
+        tables: Rows of one input, at least one table.
+    """
+    kinds: dict[str, set[pa.DataType]] = {}
+    for table in tables:
+        for field in table.schema:
+            if field.name.startswith(constants.SOURCE_PREFIX):
+                kinds.setdefault(field.name, set()).add(field.type)
+    mixed = {name for name, types in kinds.items() if len(types) > 1}
+    return pa.concat_tables([source_tokens.materialize(t, mixed) for t in tables])
+
+
 class _Side:
     """One side of a symmetric join: its rows' key frame, the rows themselves spooled.
 
@@ -317,15 +398,15 @@ class _Side:
         self.keys: list[str] = list(keys)
         self.row: str = row
         self.closed: bool = False
-        self.schema: pa.Schema | None = None
         self.rows: int = 0
         self._constant_key: bool = constant_key
+        self._rows: _Rows = _Rows()
+        # The key frame, and beside its rows their numbers (ascending) and whether each
+        # is still held: as long as the frame, whatever the numbers are.
         self._frames: list[pl.DataFrame] = []
-        self._spool: RowSpool = RowSpool()
-        # Whether each row is still held, by its number less ``_base`` (grown by
-        # doubling); no row numbered below ``_base`` is held.
-        self._alive: npt.NDArray[np.bool_] = np.ones(0, dtype=np.bool_)
-        self._base: int = 0
+        self._numbers: npt.NDArray[np.int64] = np.empty(0, dtype=np.int64)
+        self._alive: npt.NDArray[np.bool_] = np.empty(0, dtype=np.bool_)
+        self._count: int = 0
         self._removed_count: int = 0
 
     def key_frame(self, table: pa.Table) -> pl.DataFrame:
@@ -338,57 +419,65 @@ class _Side:
         """Hold ``table``'s rows, with ``frame`` from ``key_frame``."""
         if not table.num_rows:
             return
-        # Numbered after the rows already held, as the spool numbers them.
-        self._frames.append(frame.with_columns(pl.col(self.row) + self._spool.size))
-        self._spool.append(table)
+        self._add_frame(frame, self._rows.size)
+        self._rows.append(table)
         self.rows += table.num_rows
-        numbered = self._spool.size - self._base
-        if numbered > len(self._alive):
-            grown = np.ones(2 * numbered, dtype=np.bool_)
-            grown[: len(self._alive)] = self._alive
-            self._alive = grown
+
+    def _add_frame(self, frame: pl.DataFrame, first: int) -> None:
+        """Hold the keys of rows numbered from ``first``, in ``frame``'s order."""
+        self._frames.append(frame.with_columns(pl.col(self.row) + first))
+        count = self._count + frame.height
+        if count > len(self._numbers):
+            for name in ("_numbers", "_alive"):
+                old = getattr(self, name)
+                grown = np.empty(2 * count, dtype=old.dtype)
+                grown[: self._count] = old[: self._count]
+                setattr(self, name, grown)
+        self._numbers[self._count : count] = np.arange(first, first + frame.height)
+        self._alive[self._count : count] = True
+        self._count = count
 
     def spool(self, table: pa.Table) -> None:
         """Hold ``table``'s rows without their keys, until ``index`` or ``replay``."""
-        self._spool.append(table)
+        self._rows.append(table)
         self.rows += table.num_rows
 
     def index(self) -> None:
         """Prepare the keys of the rows held without them (every row held)."""
-        for rows in self._row_blocks():
+        for start in range(0, self._rows.size, PUSH_ROWS):
             # Only the keys are read, and nothing is copied.
-            table = self._spool.slice(int(rows[0]), len(rows))
-            frame = self.key_frame(table.select(self.keys) if self.keys else table)
-            self._frames.append(frame.with_columns(pl.col(self.row) + int(rows[0])))
-        self._alive = np.ones(self._spool.size, dtype=np.bool_)
+            table = self._rows.block(start, min(PUSH_ROWS, self._rows.size - start))
+            self._add_frame(
+                self.key_frame(table.select(self.keys) if self.keys else table), start
+            )
 
     def replay(self) -> Iterator[pa.Table]:
         """Give the rows held without keys, in order, in blocks, and let each block go.
 
         A block's rows are let go once the next one is asked for.
         """
-        for rows in self._row_blocks():
-            yield self._spool.take(rows)
-            self._spool.discard(rows)
+        for start in range(0, self._rows.size, PUSH_ROWS):
+            rows = np.arange(start, min(start + PUSH_ROWS, self._rows.size))
+            yield self._rows.take(rows)
+            self._rows.discard(rows)
             self.rows -= len(rows)
 
-    def _row_blocks(self) -> Iterator[npt.NDArray[np.int64]]:
-        """The row numbers of the rows held, none let go, ``PUSH_ROWS`` at a time."""
-        for start in range(0, self._spool.size, PUSH_ROWS):
-            yield np.arange(start, min(start + PUSH_ROWS, self._spool.size))
-
     def held(self, rows: npt.NDArray[np.int64]) -> npt.NDArray[np.int64]:
-        """Those of ``rows`` that were not removed."""
-        return rows[self._alive[rows - self._base]]
+        """Those of ``rows``, numbers in the key frame, that were not removed."""
+        return rows[self._alive[self._positions(rows)]]
+
+    def _positions(self, rows: npt.NDArray[np.int64]) -> npt.NDArray[np.int64]:
+        """Where the rows with these numbers are in the key frame."""
+        return np.searchsorted(self._numbers[: self._count], rows)
 
     def take(self, rows: npt.NDArray[np.int64]) -> pa.Table:
         """The held rows with these numbers, in this order."""
-        return self._spool.take(rows)
+        return self._rows.take(rows)
 
     def frame(self) -> pl.DataFrame:
         """The key frame of the rows held and, until compacted, of removed ones.
 
-        A caller whose removed rows can match again asks ``held`` which are held.
+        A caller whose removed rows can match again asks ``held_frame``.
         """
         if len(self._frames) != 1:
             self._frames = [pl.concat(self._frames, rechunk=False)]
@@ -399,44 +488,36 @@ class _Side:
         frame = self.frame()
         if not self._removed_count:
             return frame
-        rows = frame.get_column(self.row).to_numpy()
-        return frame.filter(pl.Series(self._alive[rows - self._base]))
+        return frame.filter(pl.Series(self._alive[: self._count]))
 
     def remove(self, rows: npt.NDArray[np.int64]) -> None:
         """Let rows go that can never match again: each is held, each given once."""
         if not len(rows):
             return
-        self._spool.discard(rows)
+        self._rows.discard(rows)
         self.rows -= len(rows)
-        self._alive[rows - self._base] = False
+        self._alive[self._positions(rows)] = False
         self._removed_count += len(rows)
         if not self.rows or self._removed_count >= max(self.rows, _COMPACT_ROWS):
             self._compact()
 
     def _compact(self) -> None:
-        """Drop the removed rows from the key frame, and the numbers below the rest."""
+        """Drop the removed rows from the key frame."""
+        if self.rows:
+            self._frames = [self.held_frame()]
+            self._numbers = self._numbers[: self._count][self._alive[: self._count]]
+        else:
+            self._frames, self._numbers = [], np.empty(0, dtype=np.int64)
+        self._count = len(self._numbers)
+        self._alive = np.ones(self._count, dtype=np.bool_)
         self._removed_count = 0
-        if not self.rows:
-            self._frames, self._base = [], self._spool.size
-            self._alive = np.ones(0, dtype=np.bool_)
-            return
-        frame = self.frame()
-        rows = frame.get_column(self.row).to_numpy()
-        kept = frame.filter(pl.Series(self._alive[rows - self._base]))
-        self._frames = [kept]
-        # The frame's rows are in the order of their numbers.
-        base = int(kept.get_column(self.row)[0])
-        self._alive = self._alive[base - self._base :].copy()
-        self._base = base
 
     def clear(self) -> None:
         """Drop every row held, and their files."""
-        self._frames = []
-        self._alive = np.ones(0, dtype=np.bool_)
-        self._removed_count, self._base = 0, 0
-        self._spool.close()
-        self._spool = RowSpool()
         self.rows = 0
+        self._compact()
+        self._rows.close()
+        self._rows = _Rows()
 
 
 class _BinaryLink:
@@ -451,10 +532,12 @@ class _BinaryLink:
             only if, the other side is unique: it can match nothing else.
 
     With both sides unique (one to one) rows are matched as they arrive and let go. Any
-    other link holds the keys of one side only: while both sides are open, the rows of
-    both are spooled without keys and nothing is emitted; when a side ends, its keys are
-    prepared, the other side's spooled rows are matched with them and let go, and every
-    row still to arrive is matched at once and not held.
+    other link holds the keys of its smaller side only. Rows are spooled without keys
+    until a side is known to be the smaller one: when one has ended, the other is spooled
+    on until it has as many rows (the ended side is indexed) or ends with fewer (it is
+    indexed itself). An ended side of at most ``PUSH_ROWS`` rows is indexed at once. Then
+    the other side's spooled rows are matched with the index and let go, and every row
+    still to arrive is matched at once and not held.
     """
 
     def __init__(
@@ -466,6 +549,7 @@ class _BinaryLink:
         self.unique: tuple[bool, bool] = unique
         self.keys: list[str] = list(keys)
         self.one_to_one: bool = all(unique)
+        self._indexed: bool = self.one_to_one
         self.sides: tuple[_Side, _Side] = (_Side(keys, _ROW[0]), _Side(keys, _ROW[1]))
         self._finish: Callable[[pa.Table, pa.Schema, pa.Schema], pa.Table] = finish
 
@@ -506,8 +590,6 @@ class _BinaryLink:
             The output rows of the new pairs, in pieces of at most ``PAIRS_PER_BATCH``.
         """
         this, other = self.sides[side], self.sides[1 - side]
-        if this.schema is None:
-            this.schema = table.schema
         if other.closed and not other.rows:
             # Nothing can pair with these rows, and none is held: no key to prepare.
             return
@@ -517,10 +599,28 @@ class _BinaryLink:
             table = table.filter(_has_whole_key(table, self.keys))
             if not table.num_rows:
                 return
-        if not self.one_to_one and not other.closed:
-            this.spool(table)
+        if self._indexed:
+            yield from self._match(side, table)
             return
-        yield from self._match(side, table)
+        this.spool(table)
+        if other.closed and this.rows >= other.rows:
+            yield from self._index(1 - side)
+
+    def _index(self, side: int) -> Iterator[pa.Table]:
+        """Index ``side``, which has ended, and match the other side's spooled rows.
+
+        Args:
+            side: The side no larger than the other.
+
+        Yields:
+            The output rows of the pairs, in pieces.
+        """
+        self._indexed = True
+        self.sides[side].index()
+        other = self.sides[1 - side]
+        for table in other.replay():
+            yield from self._match(1 - side, table)
+        other.clear()
 
     def _match(self, side: int, table: pa.Table) -> Iterator[pa.Table]:
         """Match ``table``'s rows, whose keys are whole, with the other side's keys.
@@ -549,12 +649,8 @@ class _BinaryLink:
                     gone.append(theirs)
                 taken = (table.take(pa.array(mine, pa.int64())), other.take(theirs))
                 left, right = taken if side == 0 else (taken[1], taken[0])
-                assert self.sides[0].schema is not None
-                assert self.sides[1].schema is not None
                 yield self._finish(
-                    _side_by_side(left, right, self.keys),
-                    self.sides[0].schema,
-                    self.sides[1].schema,
+                    _side_by_side(left, right, self.keys), left.schema, right.schema
                 )
         if gone:
             other.remove(np.concatenate(gone))
@@ -573,17 +669,22 @@ class _BinaryLink:
             side: The side that ends.
 
         Yields:
-            The output rows that decides: those of the other side's spooled rows, when
-            ``side`` is the first of a link's sides to end.
+            The output rows that decides: those of spooled rows, when it is now known
+            which side is the smaller one.
         """
         this, other = self.sides[side], self.sides[1 - side]
         this.closed = True
-        if this.rows and other.rows and not self.one_to_one and not other.closed:
-            this.index()
-            for table in other.replay():
-                yield from self._match(1 - side, table)
-        elif not self.one_to_one and not other.closed:
-            this.index()
+        if not self._indexed:
+            if other.closed:
+                # Both ended: ``other`` ended first, with more rows than this one.
+                if this.rows:
+                    yield from self._index(side)
+                this.clear()
+            elif this.rows and (this.rows <= PUSH_ROWS or other.rows >= this.rows):
+                yield from self._index(side)
+                return
+            elif this.rows:
+                return
         other.clear()
 
 
@@ -637,9 +738,6 @@ class StreamingJoinKernel(ABC):
         # (``settle_token_types``): the input's complete table must still be buildable,
         # as the sync path builds it before matching.
         self._token_types: list[dict[str, pa.DataType]] = [{} for _ in self.inputs]
-        # The form of each input's source-info columns, as its first batch with rows
-        # holds them: text, or derived by a recipe (``source_tokens``, ITL-1464).
-        self._token_forms: list[dict[str, pa.DataType] | None] = [None] * len(inputs)
         self._emitted_any: bool = False
         # The sync path over no rows: its checks, and the output's columns.
         self.zero_row_result: StreamProtocol = operator.static_process(*self._zero_rows)
@@ -822,7 +920,6 @@ class StreamingJoinKernel(ABC):
                 + f"the column(s) {missing} its stream describes"
             )
         table = pa.Table.from_batches([batch]).select(layout.names)
-        table = self._in_one_token_form(input_index, table)
         columns = list(table.columns)
         fields = list(layout)
         for index, (field, actual) in enumerate(zip(layout, table.schema)):
@@ -855,37 +952,6 @@ class StreamingJoinKernel(ABC):
         if not table.num_rows:
             return layout.empty_table()
         return pa.Table.from_arrays(columns, schema=pa.schema(fields))
-
-    def _in_one_token_form(self, input_index: int, table: pa.Table) -> pa.Table:
-        """``table`` with its source-info columns in the form of the input's first batch.
-
-        A column that batch held as text becomes text; one it derived must be derived by
-        the same recipe, since the rows held already have no text.
-
-        Raises:
-            ValueError: If a later batch holds such a column in another form.
-        """
-        if not table.num_rows:
-            return table
-        kept = self._token_forms[input_index]
-        if kept is None:
-            kept = {
-                field.name: field.type
-                for field in table.schema
-                if source_tokens.derived_recipe(field.type) is not None
-            }
-            self._token_forms[input_index] = kept
-        texts = set(table.column_names) - set(kept)
-        table = source_tokens.materialize(table, texts)
-        for name, kind in kept.items():
-            actual = table.schema.field(name).type
-            if actual != kind:
-                raise ValueError(
-                    f"{type(self).__name__}: the source-info column {name!r} of input "
-                    + f"{input_index} changed its form between batches: {kind}, then "
-                    + f"{actual}. A producer sends each such column in one form."
-                )
-        return table
 
     def _check_settled_token_types(
         self, input_index: int, token_types: Mapping[str, pa.DataType]
@@ -1514,8 +1580,6 @@ class _RejoinLink:
             The output rows of the matched pairs, or ``None`` when there is none.
         """
         this, other = self.sides[side], self.sides[1 - side]
-        if this.schema is None:
-            this.schema = table.schema
         table = _with_system_tags(table, self.system)
         if not table.num_rows:
             return None
@@ -1553,12 +1617,8 @@ class _RejoinLink:
             if name not in left.column_names:
                 names.append(name)
                 arrays.append(right.column(name))
-        assert self.sides[0].schema is not None
-        assert self.sides[1].schema is not None
         return self._finish(
-            pa.Table.from_arrays(arrays, names=names),
-            self.sides[0].schema,
-            self.sides[1].schema,
+            pa.Table.from_arrays(arrays, names=names), left.schema, right.schema
         )
 
     def _note_differing(self, rest: pa.Table, other: _Side, side: int) -> None:
@@ -1893,7 +1953,7 @@ class _ReadAhead:
         """Read ``channel`` to its end, waiting while ``PUSH_ROWS`` rows or more are unread."""
         try:
             _ = channel.reserve(claim)
-            async for batch in channel:
+            async for batch in channel.carried():
                 if not batch.num_rows:
                     continue
                 self._batches.append(batch)

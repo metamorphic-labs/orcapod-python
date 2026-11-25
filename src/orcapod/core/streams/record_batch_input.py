@@ -21,11 +21,12 @@ import weakref
 from collections.abc import AsyncIterator, Coroutine
 from typing import TYPE_CHECKING, Any, Protocol
 
+import pyarrow as pa
+
 from orcapod.channels import ChannelClosed
+from orcapod.utils import source_tokens
 
 if TYPE_CHECKING:
-    import pyarrow as pa
-
     from orcapod.protocols.core_protocols.streams import StreamProtocol
 
 SOURCE_BATCH_ROWS = 65_536
@@ -235,7 +236,34 @@ class InputChannel:
             )
 
     async def receive(self) -> pa.RecordBatch:
-        """Return the next Arrow record batch.
+        """Return the next Arrow record batch, its source-info tokens as text.
+
+        The text of a derived token column (``utils/source_tokens.py``) is built here: a
+        recipe leaves the library in no batch. The rest is as ``_receive_carried``.
+        """
+        batch = await self._receive_carried()
+        if not source_tokens.derived_columns(batch.schema):
+            return batch
+        table = source_tokens.materialize(pa.Table.from_batches([batch]))
+        return table.combine_chunks().to_batches()[0]
+
+    async def carried(self) -> AsyncIterator[pa.RecordBatch]:
+        """Iterate over the remaining record batches as they travel, for an operator.
+
+        Their source-info columns may be derived; the end and the errors are those of
+        iterating the channel.
+        """
+        while True:
+            try:
+                batch = await self._receive_carried()
+            except ChannelClosed:
+                if self._ended and not self._closed:
+                    return
+                raise
+            yield batch
+
+    async def _receive_carried(self) -> pa.RecordBatch:
+        """Return the next Arrow record batch, as it travels.
 
         A read that is cancelled while it waits closes the channel, as ``close`` does:
         a consumer that stops reading never holds its producer.
@@ -365,7 +393,9 @@ class InputChannel:
         if opened_on is not None and getattr(opened_on, ROW_BUILT_OUTPUT, False):
             await self.close()
             return opened_on
-        return stream_from_batches(self._stream, await self.collect())
+        return stream_from_batches(
+            self._stream, [batch async for batch in self.carried()]
+        )
 
     async def collect(self) -> list[pa.RecordBatch]:
         """Read to the end and return every remaining record batch, in arrival order.

@@ -32,7 +32,7 @@ from orcapod.core.operators.streaming_joins import (
 )
 from orcapod.core.record_batch_channels import OutputChannel
 from orcapod.core.row_spool import RowSpool
-from orcapod.core.sources import ArrowTableSource
+from orcapod.core.sources import ArrowTableSource, DictSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import UpstreamFailedError
 from orcapod.protocols.core_protocols import StreamProtocol
@@ -52,12 +52,14 @@ def _quiet() -> Any:
 
 @pytest.fixture(params=["memory", "disk"])
 def spooled(request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: Any) -> Path:
-    """Every spool in memory, or every row on disk; output in pieces of 3 rows."""
+    """Every spool in memory, or every row on disk; output in pieces of 3 rows, and an
+    ended side of more than 2 rows indexed only once it is known to be the smaller."""
     limit = 0 if request.param == "disk" else 1 << 40
     monkeypatch.setattr(
         streaming_joins, "RowSpool", functools.partial(RowSpool, limit, str(tmp_path))
     )
     monkeypatch.setattr(streaming_joins, "PAIRS_PER_BATCH", 3)
+    monkeypatch.setattr(streaming_joins, "PUSH_ROWS", 2)
     monkeypatch.setattr(streaming_joins, "_COMPACT_ROWS", 4)
     return tmp_path
 
@@ -294,7 +296,7 @@ def _keys_held(kernel: StreamingJoinKernel) -> list[int]:
 
 
 @pytest.mark.parametrize("first", [0, 1])
-def test_a_lookup_holds_the_keys_of_the_side_that_ends_first(
+def test_a_join_holds_the_keys_of_its_smaller_side_whichever_ends_first(
     spooled: Path, first: int
 ) -> None:
     spikes = _source(
@@ -304,32 +306,65 @@ def test_a_lookup_holds_the_keys_of_the_side_that_ends_first(
     inputs = [spikes, units]
     batches = [_batches(spikes, 8), _batches(units, 2)]
     kernel = StreamingJoin(Join(), inputs)
+    small = kernel._position[1]  # pyright: ignore[reportPrivateUsage]  # its side
+    emitted = 0
+
+    def step(out: list[pa.RecordBatch]) -> None:
+        nonlocal emitted
+        emitted += sum(b.num_rows for b in out)
+        held = _keys_held(kernel)
+        assert held[1 - small] == 0  # the larger side never has keys
+        assert held[small] <= 3
+
     for batch in batches[first]:
-        assert kernel.push(first, batch) == []
-    early = batches[1 - first][0]
-    assert kernel.push(1 - first, early) == []
-    assert _keys_held(kernel) == [0, 0]  # rows, no keys
-    emitted = sum(b.num_rows for b in kernel.close(first))
-    assert emitted == (6 if first == 1 else 20)
-    side = kernel._position[first]  # pyright: ignore[reportPrivateUsage]  # its side
-    held = _keys_held(kernel)
-    assert held[1 - side] == 0  # the other side never has keys, before or after
-    assert 0 < held[side] <= sum(b.num_rows for b in batches[first])
-    for batch in batches[1 - first][1:]:
-        emitted += sum(b.num_rows for b in kernel.push(1 - first, batch))
-        assert _keys_held(kernel)[1 - side] == 0
+        step(kernel.push(first, batch))
+    step(kernel.close(first))
+    assert emitted == 0
+    for batch in batches[1 - first]:
+        step(kernel.push(1 - first, batch))
+    if first == 0:
+        assert emitted == 0  # the units may still be more than the spikes
+    step(kernel.close(1 - first))
     assert emitted == 30
-    assert kernel.close(1 - first) == []
     assert kernel.held_rows == 0
     assert _files(spooled) == []
 
 
-def test_a_row_of_a_lookup_indexed_first_is_let_go_when_it_matches(
+def test_an_ended_side_is_indexed_once_the_other_has_as_many_rows(
     spooled: Path,
+) -> None:
+    """The wait is bounded by the ended side's rows: nothing waits for an end."""
+    left = _source("a", {"k": [1, 2] * 5, "n": list(range(10))})
+    right = _source("b", {"k": [1, 2] * 50, "m": list(range(100))})
+    kernel = _join([left, right])
+    for batch in _batches(left, 5):
+        assert kernel.push(0, batch) == []
+    assert kernel.close(0) == []
+    emitted = [
+        sum(b.num_rows for b in kernel.push(1, batch)) for batch in _batches(right, 5)
+    ]
+    assert emitted[:2] == [0, 50]  # ten rows arrived: the left ten are indexed
+    assert emitted[2:] == [25] * 18
+    assert kernel.held_rows == 10
+
+
+def test_a_small_ended_side_is_indexed_at_once(spooled: Path) -> None:
+    left = _source("a", {"k": [1, 2], "n": [1, 2]})
+    right = _source("b", {"k": [1, 2] * 5, "m": list(range(10))})
+    kernel = _join([left, right])
+    for batch in _batches(left, 2):
+        kernel.push(0, batch)
+    kernel.close(0)
+    assert sum(b.num_rows for b in kernel.push(1, _batches(right, 1)[0])) == 1
+
+
+def test_a_row_of_a_lookup_indexed_first_is_let_go_when_it_matches(
+    spooled: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The other side is unique, so an indexed row can match only once."""
     spikes = _source("spikes", {"unit": [0, 0, 1, 2], "n": [1, 2, 3, 4]}, key=("n",))
     units = _source("units", {"unit": [0, 1, 2], "area": [1, 1, 2]}, key=("unit",))
+    monkeypatch.setattr(streaming_joins, "PUSH_ROWS", 64)  # indexed at once
     kernel = _join([spikes, units])
     (all_spikes,), all_units = _batches(spikes, 4), _batches(units, 1)
     kernel.push(0, all_spikes)
@@ -358,7 +393,10 @@ def test_without_a_certificate_the_indexed_rows_stay(spooled: Path) -> None:
     assert _files(spooled) == []
 
 
-def test_a_many_to_many_match_is_emitted_in_bounded_pieces(spooled: Path) -> None:
+def test_a_many_to_many_match_is_emitted_in_bounded_pieces(
+    spooled: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(streaming_joins, "PUSH_ROWS", 64)  # indexed at once
     left = _source("a", {"k": [1] * 20 + [2], "n": list(range(21))})
     right = _source("b", {"k": [1] * 15 + [2], "m": list(range(16))})
     (mine,), (theirs,) = _batches(left, 21), _batches(right, 16)
@@ -584,7 +622,7 @@ def _carried(stream: StreamProtocol) -> pa.Table:
     feed = stream.open_channel()
 
     async def read() -> list[pa.RecordBatch]:
-        return await feed.collect()
+        return [batch async for batch in feed.carried()]
 
     return pa.Table.from_batches(asyncio.run(read()))
 
@@ -679,23 +717,55 @@ def test_inputs_of_one_pipeline_hash_sort_their_system_tags(spooled: Path) -> No
     _ = _check_derived(_join, Join().static_process, renamed)
 
 
-def test_a_producer_that_changes_a_tokens_form(spooled: Path) -> None:
+@pytest.mark.parametrize("first", ["text", "derived"])
+def test_a_producer_that_changes_a_tokens_form(spooled: Path, first: str) -> None:
     left, right = KINDS["one_to_one"]("tags_first")
     (derived,) = _carried(left).combine_chunks().to_batches()
     (text,) = source_tokens.materialize(_carried(left)).combine_chunks().to_batches()
-    # Text first: later derived batches are built as text.
+    one, two = (text, derived) if first == "text" else (derived, text)
     kernel = _join([left, right])
-    _ = kernel.push(0, text.slice(0, 3))
-    _ = kernel.push(0, derived.slice(3))
-    out = [b for batch in _carried(right).to_batches() for b in kernel.push(1, batch)]
-    got = source_tokens.materialize(pa.Table.from_batches(out))
-    assert _rows(got) == _rows(_transport(left.join(right)))
-    # Derived first: the rows held have no text, so text is refused, changing nothing.
-    other = _join([left, right])
-    _ = other.push(0, derived.slice(0, 3))
-    with pytest.raises(ValueError, match="changed its form"):
-        _ = other.push(0, text.slice(3))
-    assert other.held_rows == 3
+    _ = kernel.push(0, one.slice(0, 3))
+    _ = kernel.push(0, two.slice(3))
+    rows: Any = Counter()
+    for batch in _carried(right).to_batches():
+        for out in kernel.push(1, batch):
+            rows += _rows(source_tokens.materialize(pa.Table.from_batches([out])))
+    assert rows == _rows(_transport(left.join(right)))
+
+
+@pytest.mark.parametrize("staged", [False, True])
+@pytest.mark.parametrize("kind", ["one_to_one", "lookup", "many_to_many"])
+@pytest.mark.parametrize("op", [Join(), SemiJoin(), MergeJoin()], ids=lambda o: repr(o))
+def test_batches_of_both_forms_however_they_arrive(
+    spooled: Path, op: Any, kind: str, staged: bool
+) -> None:
+    """Review of #567: grouped arrivals succeeded where staged ones were refused."""
+    inputs = KINDS[kind]("tags_first")
+    expected = _rows(_transport(op(*inputs)))
+    tables = [_carried(s) for s in inputs]
+
+    async def go() -> StreamProtocol:
+        channels = [OutputChannel(s, retain=False, buffer_size=8) for s in inputs]
+        output = OutputChannel(op(*inputs))
+        readers = [channel.open_reader() for channel in channels]
+        run = asyncio.create_task(op.async_execute_batches(readers, output))
+        for channel, table in zip(channels, tables):
+            size = max(1, table.num_rows // 3)
+            for start in range(0, table.num_rows, size):
+                part = table.slice(start, size)
+                if (start // size) % 2:
+                    part = source_tokens.materialize(part)
+                for batch in part.combine_chunks().to_batches():
+                    await channel.send(batch)
+                if staged:
+                    await asyncio.sleep(0.01)
+        for channel in channels:
+            await channel.close()
+        await run
+        return output.result()
+
+    assert _rows(_transport(_bounded(go()))) == expected
+    assert _files(spooled) == []
 
 
 @pytest.mark.parametrize("op", [Join(), SemiJoin(), MergeJoin()], ids=lambda o: repr(o))
@@ -824,10 +894,13 @@ def test_an_endless_input_is_joined_as_it_arrives_once_the_other_has_ended(
             op.async_execute_batches([reader, small.open_channel()], output)
         )
 
+        batches = _batches(endless, 2)
+
         async def produce() -> None:
             while True:
-                for batch in _batches(endless, 2):
+                for batch in batches:
                     await channel.send(batch)
+                    await asyncio.sleep(0)  # also when nobody reads any more
 
         producing = asyncio.create_task(produce())
         rows = 0
@@ -974,3 +1047,74 @@ def test_rejoin_of_three_inputs_is_a_barrier_and_equal(spooled: Path) -> None:
     output = OutputChannel(op(*inputs))
     _bounded(op.async_execute_batches([s.open_channel() for s in inputs], output))
     assert _rows(_transport(output.result())) == _rows(_transport(op(*inputs)))
+
+
+def test_one_old_row_does_not_pin_what_later_rows_cost(spooled: Path) -> None:
+    """Review of #565: a mask numbered from an old row grew with every later one."""
+    left, right = _sorted_source("a", 400), _sorted_source("b", 400)
+    kernel = StreamingJoin(Join(), [left, right])
+    (link,) = kernel._links  # pyright: ignore[reportPrivateUsage]  # what it keeps
+    lefts, rights = _batches(left, 4), _batches(right, 4)
+    _ = kernel.push(0, lefts[0])  # never matched until the end
+    for mine, theirs in zip(lefts[1:], rights[1:]):
+        _ = kernel.push(0, mine)
+        _ = kernel.push(1, theirs)
+        for side in link.sides:
+            assert len(side._alive) <= 32  # pyright: ignore[reportPrivateUsage]  # what it keeps
+            assert len(side._numbers) <= 32  # pyright: ignore[reportPrivateUsage]  # what it keeps
+    assert kernel.held_rows == 4
+    assert sum(b.num_rows for b in kernel.push(1, rights[0])) == 4
+
+
+def test_a_public_read_of_a_channel_gives_text() -> None:
+    """Review of #567: a recipe reached a consumer, which could write it to a file."""
+    source = _data_tagged("a", 5)
+
+    async def read() -> list[list[pa.RecordBatch]]:
+        sent = OutputChannel(source)
+        for batch in _carried_batches:
+            await sent.send(batch)
+        await sent.close()
+        feeds = [source.open_channel, sent.open_reader]
+        return [
+            [await feed().receive() for feed in feeds],
+            [batch for feed in feeds async for batch in feed()],
+            [batch for feed in feeds for batch in await feed().collect()],
+        ]
+
+    _carried_batches = _carried(source).combine_chunks().to_batches()
+    assert source_tokens.derived_columns(_carried_batches[0].schema)
+    for batches in _bounded(read()):
+        assert len(batches) == 2
+        for batch in batches:
+            assert source_tokens.derived_columns(batch.schema) == ()
+            assert pa.Table.from_batches([batch]).to_pylist() == (
+                _transport(source).select(batch.schema.names).to_pylist()
+            )
+
+
+def test_a_channel_reads_a_stream_through_its_own_reader() -> None:
+    """Review of #567: a subclass's ``as_table`` was bypassed."""
+
+    class OneRow(ArrowTableStream):
+        def as_table(self, **kwargs: Any) -> pa.Table:  # pyright: ignore[reportIncompatibleMethodOverride]  # a user's reader
+            return super().as_table(**kwargs).slice(0, 1)
+
+    stream = OneRow(pa.table({"k": [1, 2], "x": [1, 2]}), tag_columns=["k"])
+    batches = _bounded(stream.open_channel().collect())
+    assert sum(batch.num_rows for batch in batches) == 1
+
+
+def test_rows_with_logical_types_are_replayed(spooled: Path) -> None:
+    """A logical type (a ``Path``) among the columns of rows held and replayed."""
+    rows = [
+        {"k": i % 2, "n": i, "p": Path(f"/x/{i}"), "q": [Path("/y")]} for i in range(9)
+    ]
+    left = DictSource(
+        rows, tag_columns=["n", "k"], tag_only_columns=True, source_id="left"
+    )
+    right = _source("b", {"k": [0, 1], "m": [1, 2]})
+    for inputs in ([left, right], [right, left]):
+        _check(_join, Join().static_process, inputs, range(4))
+        _check(_semi, SemiJoin().static_process, inputs, range(4))
+        _check(_merge, MergeJoin().static_process, inputs, range(4))

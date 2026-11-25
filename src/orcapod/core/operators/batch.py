@@ -328,7 +328,7 @@ class Batch(UnaryOperator):
         try:
             waiting: list[pa.RecordBatch] = []
             rows = 0
-            async for batch in channel:
+            async for batch in channel.carried():
                 if not batch.num_rows:
                     continue  # nothing to batch, nothing to hold
                 waiting.append(batch)
