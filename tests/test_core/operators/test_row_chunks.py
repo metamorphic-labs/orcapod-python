@@ -8,6 +8,7 @@ it to the table and streams the row list gave, over several chunks.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from pathlib import Path
 from typing import Any, cast
 
@@ -24,9 +25,10 @@ from orcapod.core.operators.static_output_pod import (
     rows_once,
 )
 from orcapod.core.streams import ArrowTableStream
-from orcapod.databases import DeltaTableDatabase
+from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline import AsyncPipelineOrchestrator
 from orcapod.sources import ArrowTableSource
+from orcapod.utils import arrow_utils
 
 _ROWS = 11
 
@@ -153,7 +155,7 @@ def test_at_most_one_chunk_of_rows_is_held_as_objects(
 
     assert chunks.num_rows == _ROWS
     assert len(chunks._pending) == _ROWS % 4  # pyright: ignore[reportPrivateUsage]  # the bound this class exists for
-    assert [t.num_rows for t in chunks._tag_chunks] == [4, 4]  # pyright: ignore[reportPrivateUsage]  # the bound this class exists for
+    assert [tags.num_rows for tags, _, _ in chunks._chunks] == [4, 4]  # pyright: ignore[reportPrivateUsage]  # the bound this class exists for
 
 
 def test_collecting_a_channel_keeps_its_rows_in_order(chunk_rows: int) -> None:
@@ -373,3 +375,199 @@ def test_a_result_streams_own_iterator_is_never_bypassed() -> None:
     first = next(iter(shadowed.iter_data()))
     shadowed.iter_data = lambda: iter([first])  # pyright: ignore[reportAttributeAccessIssue]  # an instance's own iterator
     assert [t.as_dict()["trial"] for t, _ in rows_once(shadowed)] == [0]
+
+
+class _FailOnce:
+    """A callable that raises ``error`` the first time ``when`` holds, then delegates."""
+
+    def __init__(self, real: Any, error: Exception, when: Any) -> None:
+        self.real, self.error, self.when, self.failures = real, error, when, 0
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        if not self.failures and self.when(*args):
+            self.failures += 1
+            raise self.error
+        return self.real(*args, **kwargs)
+
+
+def _fail_one_allocation(monkeypatch: pytest.MonkeyPatch, step: str) -> _FailOnce:
+    """Make one allocation of a chunk's build fail: of its tags, data or contexts."""
+    error = MemoryError(f"synthetic allocation failure ({step})")
+    if step == "context":
+        real = pa.array
+        fault = _FailOnce(
+            real,
+            error,
+            lambda values, *_: (
+                isinstance(values, list)
+                and bool(values)
+                and str(values[0]).startswith("std:")
+            ),
+        )
+
+        class _Arrow:
+            """``pyarrow`` as ``static_output_pod`` sees it, with the failing ``array``."""
+
+            array = staticmethod(fault)
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(pa, name)
+
+        monkeypatch.setattr(static_output_pod, "pa", _Arrow())
+    else:
+        column = "value" if step == "data" else "subject"
+        fault = _FailOnce(
+            arrow_utils.concat_tables_by_name,
+            error,
+            lambda tables: column in tables[0].column_names,
+        )
+        monkeypatch.setattr(arrow_utils, "concat_tables_by_name", fault)
+    return fault
+
+
+@pytest.mark.parametrize("step", ["tags", "data", "context"])
+def test_a_chunk_that_failed_once_is_never_built_or_given_again(
+    step: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of PR 562, round 2: a retried chunk gave its rows twice."""
+    monkeypatch.setattr(static_output_pod, "ROW_CHUNK_ROWS", 4)
+    rows = _rows(True)
+    fault = _fail_one_allocation(monkeypatch, step)
+    chunks = RowChunks()
+    for tag, data in rows[:3]:
+        chunks.add(tag, data)
+
+    with pytest.raises(MemoryError, match="synthetic"):
+        chunks.add(*rows[3])
+
+    for tag, data in rows[4:]:
+        chunks.add(tag, data)
+    for _ in range(2):
+        with pytest.raises(MemoryError, match="synthetic"):
+            chunks.row_table()
+    assert fault.failures == 1
+
+
+@pytest.mark.parametrize("step", ["tags", "data", "context"])
+@pytest.mark.parametrize("size", [1, 2, 8192])
+def test_a_job_never_succeeds_with_rows_twice_after_a_failed_allocation(
+    step: str, size: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of PR 562, round 2: the job succeeded with ``[3, 4, 3, 4]``."""
+    monkeypatch.setattr(static_output_pod, "ROW_CHUNK_ROWS", size)
+    with PipelineJob(name="one_failure", database=InMemoryArrowDatabase()) as job:
+        _ = ArrowTableSource(
+            pa.table({"subject": [1, 2], "trial": [1, 2], "value": [3, 4]}),
+            tag_columns=["subject", "trial"],
+            tag_only_columns=True,
+        ).map_data({"value": "value"}, label="out", drop_unmapped=True)
+    fault = _fail_one_allocation(monkeypatch, step)
+
+    with contextlib.suppress(MemoryError):
+        _ = job.run(orchestrator=AsyncPipelineOrchestrator())
+
+    assert fault.failures == 1
+    assert job.nodes["out"].as_table().num_rows == 0
+    # Nothing of the failed run is left: the next one gives every row once.
+    _ = job.run(orchestrator=AsyncPipelineOrchestrator())
+    values = job.nodes["out"].as_table()["value"].to_pylist()
+    assert sorted(values) == [3, 4]
+
+
+def test_rows_after_a_chunk_that_cannot_be_built_are_not_kept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Review of PR 562, round 2: after a failed seal the pairs accumulated."""
+    monkeypatch.setattr(static_output_pod, "ROW_CHUNK_ROWS", 3)
+    rows = _rows(False)[:2] + _other_rows() + _rows(False)
+
+    chunks = _chunks(rows)
+
+    assert chunks.num_rows == len(rows)
+    assert chunks._pending == []  # pyright: ignore[reportPrivateUsage]  # the bound on rows held as objects
+    with pytest.raises(pa.ArrowInvalid):
+        _ = chunks.output_stream()
+
+
+class _NoKeys:
+    """A row's data whose keys cannot be looked up."""
+
+    def __init__(self, data: Any) -> None:
+        self._data = data
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._data, name)
+
+    def keys(self, **_: Any) -> Any:
+        raise RuntimeError("synthetic key lookup failure")
+
+
+def test_a_row_is_not_read_when_it_is_added() -> None:
+    """Review of PR 562, round 2: the first row's keys were read as it arrived."""
+    tag, data = _rows(False)[0]
+    chunks = _chunks([(tag, _NoKeys(data))])
+    with pytest.raises(RuntimeError, match="synthetic key lookup"):
+        _ = chunks.row_table()
+
+
+def _barriers() -> list[Any]:
+    """Every barrier that reads two inputs: ``BinaryOperator``'s and the default one."""
+    from orcapod.operators import MergeJoin
+
+    class Default(MergeJoin):
+        async_execute = StaticOutputOperatorPod.async_execute
+
+    return [pytest.param(MergeJoin, id="binary"), pytest.param(Default, id="default")]
+
+
+@pytest.mark.parametrize("operator", _barriers())
+@pytest.mark.parametrize("failing", [0, 1])
+@pytest.mark.parametrize("failure", ["lookup", "memory", "channel", "cancel"])
+def test_a_barrier_leaves_no_reader_behind(
+    operator: Any, failing: int, failure: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review of PR 562, round 2: a sibling reader outlived the barrier's error."""
+    monkeypatch.setattr(static_output_pod, "ROW_CHUNK_ROWS", 1)
+    rows = _rows(False)[:2]
+    pipeline_hash = _source(False).pipeline_hash()
+    if failure == "lookup":
+        rows = [(tag, _NoKeys(data)) for tag, data in rows]
+    elif failure == "memory":
+        _ = _fail_one_allocation(monkeypatch, "data")
+
+    class Broken:
+        def __aiter__(self) -> Any:
+            return self
+
+        async def __anext__(self) -> Any:
+            raise OSError("synthetic channel failure")
+
+    async def run() -> None:
+        inputs: list[Any] = [None, None]
+        inputs[failing] = Broken() if failure == "channel" else await _closed(rows)
+        waiting: Channel[tuple[Any, Any]] = Channel(buffer_size=1)
+        inputs[1 - failing] = waiting.reader
+        output: Channel[tuple[Any, Any]] = Channel(buffer_size=4)
+        before = asyncio.all_tasks()
+        task = asyncio.create_task(
+            operator().async_execute(
+                inputs, output.writer, input_pipeline_hashes=[pipeline_hash] * 2
+            )
+        )
+        for _ in range(20):
+            await asyncio.sleep(0)
+        if failure == "cancel":
+            _ = task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        elif failure == "lookup":
+            # The row is never read: the other input turns out empty.
+            await waiting.writer.close()
+            await task
+        else:
+            with pytest.raises((MemoryError, OSError), match="synthetic"):
+                await task
+        assert await output.reader.collect() == []
+        assert asyncio.all_tasks() - before == set()
+
+    asyncio.run(run())

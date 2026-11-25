@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from abc import abstractmethod
 from collections.abc import Collection, Sequence
 from typing import TYPE_CHECKING, Any
@@ -14,6 +13,7 @@ from orcapod.core.data_tags import data_tags_first
 from orcapod.core.operators.arrow_keys import part_without_rule
 from orcapod.core.operators.static_output_pod import (
     StaticOutputOperatorPod,
+    collect_all_row_chunks,
     collect_row_chunks,
     rows_once,
 )
@@ -347,9 +347,7 @@ class BinaryOperator(StaticOutputOperatorPod):
                     f"must match inputs length ({len(inputs)})"
                 )
             left_hash, right_hash = input_pipeline_hashes
-            left_rows, right_rows = await asyncio.gather(
-                collect_row_chunks(inputs[0]), collect_row_chunks(inputs[1])
-            )
+            left_rows, right_rows = await collect_all_row_chunks(inputs)
             if not left_rows.num_rows or not right_rows.num_rows:
                 # The one barrier binary operator, MergeJoin, is an inner join: an
                 # input with no rows gives no rows, as on the sync path. The typed
