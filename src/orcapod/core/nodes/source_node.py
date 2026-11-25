@@ -37,9 +37,11 @@ from orcapod.core.datagrams import Data, Tag
 from orcapod.core.operators.drop_nulls import _without_none  # pyright: ignore[reportPrivateUsage]  # DropNulls' rule for removing None from a type, shared, never copied
 from orcapod.core.job_edges import BatchWriter, off_the_loop, send_batch
 from orcapod.core.operators.static_output_pod import (
+    KEPT_ROWS_MEMORY_BYTES,
     ROW_CHUNK_ROWS,
     StaticOutputOperatorPod,
 )
+from orcapod.core.row_spool import RowSpool
 from orcapod.core.sources.base import table_is_rows
 from orcapod.core.streams.carried import carried_table
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
@@ -1599,6 +1601,28 @@ class SourceNode(SourceNodeBase):
         return node
 
 
+def _source_table(source: StreamProtocol) -> pa.Table:
+    """``source``'s rows as a node hands them on (``carried_table``).
+
+    A source that reads its table in batches is read one batch at a time into a
+    ``RowSpool``: the same table, on local disk when large (ITL-1464).
+    """
+    if not reads_in_batches(source):
+        return carried_table(source, ZERO_ROW_INPUT_COLUMNS)
+    with (
+        contextlib.closing(batch_streams_of(source)) as streams,
+        RowSpool(memory_bytes=KEPT_ROWS_MEMORY_BYTES) as spool,
+    ):
+        empty: pa.Table | None = None
+        for stream in streams:
+            table = carried_table(stream, ZERO_ROW_INPUT_COLUMNS)
+            if empty is None:
+                empty = table.slice(0, 0)
+            spool.append(table)
+        assert empty is not None  # at least one batch, with no row when there is none
+        return spool.table() if spool.size else empty
+
+
 class SourceJobNode(ProvenanceMethods, SourceNodeBase):
     """Execution-ready source node wrapping an optional concrete stream.
 
@@ -1961,7 +1985,7 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
             # one whose rows report another data context than the node's: its rows,
             # as main iterated them (the edge table is built in the node's context).
             return None
-        table = carried_table(self._bound_source, ZERO_ROW_INPUT_COLUMNS)
+        table = _source_table(self._bound_source)
         if not system_tags_as_rows_give(table):
             # System tags the rows would type otherwise (a narrow integer, a
             # nullable field): the rows decide, as on main.
