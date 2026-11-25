@@ -447,11 +447,53 @@ def test_no_metaclass_property_runs() -> None:
     assert found is not None and found.source_id == "dict_v1:left"
 
 
+class _Parts(tuple[str, str]):
+    """Names whose iteration and length run user code."""
+
+    def __iter__(self) -> Any:
+        raise SystemExit("iterated")
+
+    def __len__(self) -> int:
+        raise SystemExit("measured")
+
+
+class _Name(str):
+    """A name whose hash runs user code."""
+
+    def __hash__(self) -> int:
+        raise SystemExit("hashed")
+
+
+@pytest.mark.parametrize(
+    "parts",
+    [
+        _Parts(("_dataset", "_project_id")),
+        (_Name("_dataset"), "_project_id"),
+        ("_dataset", _Name("_project_id")),
+        ("_dataset",),
+        ["_dataset", "_project_id"],
+        1,
+    ],
+    ids=["tuple subclass", "str first", "str second", "one", "list", "int"],
+)
+def test_display_parts_that_are_not_plain_names_are_ignored(
+    monkeypatch: pytest.MonkeyPatch, parts: Any
+) -> None:
+    monkeypatch.setattr(DictSource, "DISPLAY_PARTS", parts)
+    found = labelled_source(_left())
+    assert found is not None
+    assert (found.label, found.parts) == ("units", ("", "", "", "left", "dict_v1:left"))
+
+
 def test_a_label_that_cannot_be_read_falls_back(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     job = _job(_left(), _right(None))
-    monkeypatch.setattr(DictSource, "DISPLAY_PARTS", 1)
+
+    def fail(*given: Any) -> str:
+        raise RuntimeError("no id")
+
+    monkeypatch.setattr("orcapod.core.sources.source_ids.build_source_id", fail)
     assert "  left (source · DictSource · bound)" in str(job.diagram()).splitlines()
     html: Any = job.nodes["left"]._repr_html_()
     assert "SourceJobNode[left]" in html

@@ -121,7 +121,15 @@ def _labelled_source(stream: Any) -> LabelledSource | None:
         _class_value(source, "SOURCE_VERSION"),
         name,
     )
-    near, far = _class_value(source, "DISPLAY_PARTS")
+    declared = _class_value(source, "DISPLAY_PARTS")
+    # Only a plain tuple of two plain names is used, so reading it runs no code.
+    if (
+        type(declared) is not tuple
+        or len(declared) != 2
+        or not all(type(part) is str for part in declared)
+    ):
+        declared = ("", "")
+    near, far = declared
     dataset, project = _stored_text(source, near), _stored_text(source, far)
     both = f"{project}.{dataset}" if dataset and project else ""
     parts = (dataset, project, both, name, source_id)
