@@ -13,26 +13,32 @@ call). Cases:
   shank they share: five output rows per spike.
 - ``many_open``: two inputs of ``rows`` rows in step, neither unique on the session and
   burst they share: five output rows per row, and both sides' keys held to the end.
+- ``rejoin``: one stream of ``rows`` rows split in two branches and rejoined, in step;
+- ``semi_late``: ``semi``, the units arriving after every spike;
 - ``semi``: ``rows`` spikes kept by the units that exist (300).
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import resource
 import sys
 import time
 import warnings
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pyarrow as pa
 
-from orcapod.core.operators import Join, SemiJoin
+from orcapod.core.operators import Join, Rejoin, SemiJoin
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.record_batch_channels import OutputChannel
+from orcapod.core import row_spool
 from orcapod.core.sources import ArrowTableSource
+from orcapod.core.streams.carried import carried_table
 from orcapod.protocols.core_protocols import StreamProtocol
 
 BATCH = 8_192
@@ -122,32 +128,44 @@ class Input:
         rows: int,
         tags: list[str],
         key: list[str],
+        columns: list[str] | None = None,
     ):
         self.make, self.rows, self.key, self.name = make, rows, key, name
         self.tags = tags
+        self.columns = columns
         self.stream = self.source(0, 4)
 
-    def source(self, start: int, n: int) -> ArrowTableSource:
-        return ArrowTableSource(
+    def source(self, start: int, n: int) -> StreamProtocol:
+        source = ArrowTableSource(
             self.make(start, n),
             tag_columns=self.tags,
             record_id_columns=self.key,
             tag_only_columns=True,
             source_id=self.name,
         )
+        return source.select_data_columns(self.columns) if self.columns else source
 
     def batches(self) -> Iterator[pa.RecordBatch]:
         for start in range(0, self.rows, BATCH):
             stream: StreamProtocol = self.source(start, min(BATCH, self.rows - start))
             zero = StaticOutputOperatorPod._materialize_upstream([], self.stream)
             names = zero.as_table(columns={"source": True, "system_tags": True})
-            table = getattr(stream, "as_carried_table", stream.as_table)(
-                columns={"source": True, "system_tags": True}
-            )
+            table = carried_table(stream, {"source": True, "system_tags": True})
             yield from table.select(names.column_names).combine_chunks().to_batches()
 
 
-async def run(case: str, rows: int, barrier: bool) -> tuple[int, float]:
+def on_disk() -> int:
+    """The bytes of this process's spool files now."""
+    held = row_spool._directories._held.values()  # pyright: ignore[reportPrivateUsage]  # where they are
+    files = [f for directory, _ in held for f in Path(directory).rglob("*.arrow")]
+    total = 0
+    for file in files:
+        with contextlib.suppress(FileNotFoundError):
+            total += file.stat().st_size
+    return total
+
+
+async def run(case: str, rows: int, barrier: bool) -> tuple[int, float, int]:
     tags = {"many": "shank", "many_open": "burst"}.get(case, "unit")
     big = Input(
         "spikes",
@@ -158,7 +176,12 @@ async def run(case: str, rows: int, barrier: bool) -> tuple[int, float]:
         if case.startswith("many")
         else ["session", "unit", "spike"],
     )
-    if case.startswith("one_to_one"):
+    if case == "rejoin":
+        big, other = (
+            Input("spikes", spikes, rows, big.tags, big.key, columns)
+            for columns in (["time"], ["amplitude", "shank"])
+        )
+    elif case.startswith("one_to_one"):
         other = Input(
             "second",
             second,
@@ -176,7 +199,13 @@ async def run(case: str, rows: int, barrier: bool) -> tuple[int, float]:
         )
     else:
         other = Input("units", units, 300, ["unit", "session"], ["session", "unit"])
-    op = SemiJoin() if case == "semi" else Join()
+    op = (
+        SemiJoin()
+        if case.startswith("semi")
+        else Rejoin()
+        if case == "rejoin"
+        else Join()
+    )
     result = op(big.stream, other.stream)
     output = OutputChannel(result, retain=False, buffer_size=2)
     reader = output.open_reader()
@@ -205,18 +234,29 @@ async def run(case: str, rows: int, barrier: bool) -> tuple[int, float]:
 
     async def consume() -> None:
         nonlocal count
-        async for batch in reader:
+        async for batch in reader.carried():
             count += batch.num_rows
 
     if barrier:
         execute = StaticOutputOperatorPod.async_execute_batches(op, readers, output)
     else:
         execute = op.async_execute_batches(readers, output)
+    disk = 0
+
+    async def watch() -> None:
+        nonlocal disk
+        while True:
+            disk = max(disk, on_disk())
+            await asyncio.sleep(0.2)
+
+    watching = asyncio.create_task(watch())
     began = time.perf_counter()
     await asyncio.gather(
         produce(0, big, waits[0]), produce(1, other, waits[1]), consume(), execute
     )
-    return count, time.perf_counter() - began
+    seconds = time.perf_counter() - began
+    _ = watching.cancel()
+    return count, seconds, disk
 
 
 if __name__ == "__main__":
@@ -224,7 +264,7 @@ if __name__ == "__main__":
     case, rows = sys.argv[1], int(sys.argv[2])
     barrier = "barrier" in sys.argv
     base = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    count, seconds = asyncio.run(run(case, rows, barrier))
+    count, seconds, disk = asyncio.run(run(case, rows, barrier))
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     unit = 2**20 if sys.platform == "darwin" else 2**10
     print(
@@ -232,4 +272,5 @@ if __name__ == "__main__":
         + f" out={count:>11,} {seconds:7.1f} s"
         + f" peak={peak / unit:8.0f} MiB (import {base / unit:.0f})"
         + f" arrow_peak={(pa.default_memory_pool().max_memory() or 0) / 2**20:8.0f} MiB"
+        + f" disk={disk / 2**20:7.0f} MiB"
     )

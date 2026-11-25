@@ -11,23 +11,19 @@ through ``as_table`` and gives text.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
+
+import pyarrow as pa
 
 from orcapod.core.exact_class import reads_as_its_class
-from orcapod.types import ColumnConfig
-
-if TYPE_CHECKING:
-    import pyarrow as pa
-
-    from orcapod.protocols.core_protocols import StreamProtocol
 
 CARRIED_TABLE = "_carried_table"
 """The method a library class declares when its table may hold derived columns."""
 
 
 def carried_table(
-    stream: StreamProtocol,
-    columns: ColumnConfig | dict[str, Any],  # pyright: ignore[reportExplicitAny]  # as as_table
+    stream: Any,  # pyright: ignore[reportExplicitAny]  # a stream (the protocol would make an import cycle)
+    columns: Any,  # pyright: ignore[reportExplicitAny]  # as as_table
 ) -> pa.Table:
     """``stream.as_table(columns=columns)``, derived token columns as they are.
 
@@ -43,4 +39,4 @@ def carried_table(
     read: Any = vars(kind).get(CARRIED_TABLE)  # pyright: ignore[reportExplicitAny]  # a method
     if read is None or not reads_as_its_class(stream, kind):
         return stream.as_table(columns=columns)
-    return read(stream, ColumnConfig.handle_config(columns))
+    return read(stream, columns)

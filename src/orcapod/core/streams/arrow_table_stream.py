@@ -382,8 +382,9 @@ class ArrowTableStream(StreamBase):
         columns_config = ColumnConfig.handle_config(columns, all_info=all_info)
         return self._assemble_table(columns_config, limit=None)
 
-    def _carried_table(self, config: ColumnConfig) -> "pa.Table":
+    def _carried_table(self, columns: ColumnConfig | dict[str, Any]) -> "pa.Table":
         """The table with its derived token columns as they are (``carried_table``)."""
+        config = ColumnConfig.handle_config(columns)
         return self._assemble_table(config, limit=None, carried=config.system_tags)
 
     def head(

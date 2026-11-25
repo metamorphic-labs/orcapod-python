@@ -1193,7 +1193,7 @@ class StaticOutputOperatorPod(TraceableBase):
                 # cannot make one table with the earlier ones is refused, as the sync
                 # path refuses the whole input, never processed alone.
                 settled: dict[str, pa.DataType] = {}
-                async for batch in channel:
+                async for batch in channel.carried():
                     settled = settle_token_types(batch, settled)
                     await self._send_processed([batch], channel.stream, output)
             else:
@@ -1822,7 +1822,7 @@ async def stream_of_channel(channel: RecordBatchInput) -> StreamProtocol:
     """
     spool = BatchSpool()
     try:
-        async for batch in channel:
+        async for batch in channel.carried():
             spool.add(batch)
         return _stream_of_rows(channel.stream, spool.table())
     finally:

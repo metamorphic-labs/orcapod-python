@@ -26,6 +26,8 @@ from typing import Any, ClassVar
 import polars as pl
 import pyarrow as pa
 
+from orcapod.core.exact_class import reads_as_its_class
+from orcapod.protocols.core_protocols.streams import RecordBatchInput, RecordBatchOutput
 from orcapod.core.unique_keys import UniqueKeys, certificate
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.data_tags import data_tag_names, data_tags_first
@@ -654,6 +656,28 @@ class Rejoin(Join):
         return self._shared_key_nullability(
             table, left.schema, right.schema, shared_tags
         )
+
+    async def async_execute_batches(
+        self, inputs: Sequence[RecordBatchInput], output: RecordBatchOutput
+    ) -> None:
+        """Run over input channels of Arrow record batches.
+
+        Two inputs: ``streaming_joins.StreamingRejoin``, which holds the rows not matched
+        yet, their shared columns in memory and the rows spooled. One input, or three or
+        more: every input is read first, then the sync call (with three or more, which
+        repeats of an origin row are matched follows the whole inputs).
+
+        Args:
+            inputs: One input channel per input stream, in the operator's order.
+            output: The channel the result's record batches are sent into.
+        """
+        if len(inputs) != 2 or not reads_as_its_class(self, Rejoin):
+            await super().async_execute_batches(inputs, output)
+            return
+        # The kernels are built on this module's rejoin rules.
+        from orcapod.core.operators.streaming_joins import StreamingRejoin, run_kernel
+
+        await run_kernel(lambda streams: StreamingRejoin(self, streams), inputs, output)
 
     async def async_execute(
         self,

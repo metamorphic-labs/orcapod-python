@@ -684,6 +684,14 @@ class RecordBatchInput(Protocol):
         """Iterate over the remaining record batches, in arrival order."""
         ...
 
+    def carried(self) -> AsyncIterator[pa.RecordBatch]:
+        """Iterate over the remaining record batches as they travel, for an operator.
+
+        Their source-info columns may be derived (``utils/source_tokens.py``): internal.
+        Every other read gives their text.
+        """
+        ...
+
     async def collect(self) -> list[pa.RecordBatch]:
         """Read to the end and return every remaining record batch, in arrival order."""
         ...
