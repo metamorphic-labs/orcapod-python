@@ -169,8 +169,9 @@ for tag, data in subjects.batch(batch_size=3):
 Use `batch` for everything at once or for chunks of a fixed size, such as a grand mean over all
 rows or mini-batches for a model.
 
-If you need both `group_by` and `batch`, use them in that order. The tags of a batched stream
-are lists, and `group_by` cannot use those.
+If you need both `group_by` and `batch`, use them in that order. `batch` then gathers the
+grouped rows: here sessions, whose lists of units stay whole. The tags of a batched stream are
+lists, and `group_by` cannot use those.
 
 ## Key points
 

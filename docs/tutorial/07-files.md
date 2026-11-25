@@ -218,9 +218,11 @@ print(len(list(out_dir.iterdir())))
 
 - **Give every different input its own output file.** Build the output name from the inputs, as
   above. Rows whose files have the same content share one stored result, and so one output
-  file. When an input file is edited, its new result overwrites the output file of the same
-  name, and the stored result of the old content still points to that file. To keep both
-  outputs, include a hash of the file's content in the output name.
+  file. The names above do not change when an input file is edited, so the new result
+  overwrites the old output file, and the stored result of the old content still points to
+  it. If the edit is then undone, Orcapod returns that stored path, which now holds the
+  wrong output. For input files that may change, include a hash of the file's content in the
+  output name.
 - **The database stores the path, even if the file is deleted.** If you delete
   `spike_summaries/` and run again, Orcapod calls nothing and returns paths to files that no
   longer exist. Keep or delete output files together with the database.
