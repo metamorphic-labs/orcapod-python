@@ -94,7 +94,7 @@ LOCATION_KEYS = [
 
 
 def _constant(value: Any, kind: pa.DataType, rows: int) -> pa.Array[Any]:
-    return pa.repeat(pa.scalar(value, kind), rows)
+    return pa.array([value] * rows, kind)
 
 
 def gaze_table(rows: int) -> pa.Table:
@@ -214,17 +214,11 @@ def _raw(name: str) -> pa.Table:
     return store.read(found["id"], 1)
 
 
-Result = "tuple[pa.Table | None, list[pa.Table], Any]"
-
-
 def step_raw_copy() -> tuple[int, int, Any]:
     """The rows alone, copied into process memory: the floor every step stands on."""
     raw = _raw(GAZE)
-    copy = pa.concat_tables([raw]).combine_chunks()
-    copy = pa.Table.from_arrays(
-        [pa.concat_arrays([c.chunk(0), c.chunk(0).slice(0, 0)]) for c in copy.columns],
-        schema=copy.schema,
-    )
+    # ``take`` writes new buffers: the rows as private memory of this process.
+    copy = raw.take(np.arange(raw.num_rows))
     return raw.nbytes, copy.nbytes, copy
 
 

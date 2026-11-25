@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 MEASURE = Path(__file__).with_name("measure.py")
 
@@ -47,7 +48,9 @@ def _rss_bytes(pid: int) -> int:
     return int(found) * 1024 if found else 0
 
 
-def run_step(step: str, store: Path, guard_bytes: int, extra: list[str]) -> dict:
+def run_step(
+    step: str, store: Path, guard_bytes: int, extra: list[str]
+) -> dict[str, Any]:
     """Run one step; kill it when its resident memory passes the guard."""
     process = subprocess.Popen(
         [sys.executable, str(MEASURE), step, "--store", str(store), *extra],
