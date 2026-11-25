@@ -10,8 +10,10 @@ A source certifies its key columns when it checks them on every read, and they a
 tags. Every other stream derives its certificate from its inputs' by the rule its pod's
 class declares, at the time it is asked: nothing is stored on a stream, and nothing here
 enters a hash, an identity, a config, a stored row or equality. A rule is read from the
-pod's exact class: a subclass, which may change the rows, certifies nothing unless it
-declares a rule itself.
+pod's exact class, and only for a pod and a stream that are exactly their classes, with
+no member replaced on the instance (``reads_as_its_class``): a subclass or a customized
+instance may give other rows, so it certifies nothing. A stream class takes part by
+declaring ``DERIVES_UNIQUE_KEYS`` itself.
 """
 
 from __future__ import annotations
@@ -19,6 +21,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from typing import Protocol
+
+from orcapod.core.exact_class import reads_as_its_class
 
 UniqueKeys = frozenset[frozenset[str]]
 
@@ -92,6 +96,18 @@ def joined_keys(
     return certificate(keys)
 
 
+def derives_unique_keys(stream: object) -> bool:
+    """Whether a stream's class takes part, and the stream is exactly of it.
+
+    Args:
+        stream: A stream.
+    """
+    kind = type(stream)
+    if vars(kind).get("DERIVES_UNIQUE_KEYS") is not True:
+        return False
+    return reads_as_its_class(stream, kind)
+
+
 class _HasKeys(Protocol):
     """What the certificate needs of the stream it is of."""
 
@@ -103,8 +119,9 @@ def derived_keys(
 ) -> UniqueKeys:
     """The certificate of ``stream``, the result of ``pod`` over ``upstreams``.
 
-    The pod's class declares its rule as a method ``derive_unique_keys(*upstreams)``;
-    without one on the exact class, nothing is certified.
+    The pod's class declares its rule as a method ``derive_unique_keys(*upstreams)``.
+    Nothing is certified without one on the exact class, or when the pod or the stream is
+    not exactly its class (module docstring).
 
     Args:
         pod: The producing pod.
@@ -112,7 +129,9 @@ def derived_keys(
         stream: Its result, whose tags the keys must be among.
     """
     rule = vars(type(pod)).get("derive_unique_keys")
-    if rule is None:
+    if rule is None or not reads_as_its_class(pod, type(pod)):
+        return NO_UNIQUE_KEYS
+    if not derives_unique_keys(stream):
         return NO_UNIQUE_KEYS
     memo = _MEMO.get()
     token = None

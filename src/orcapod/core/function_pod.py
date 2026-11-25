@@ -7,7 +7,7 @@ import logging
 from abc import abstractmethod
 from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
 from functools import update_wrapper, wraps
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+from typing import ClassVar, TYPE_CHECKING, Any, Literal, Protocol, cast
 
 import pyarrow as pa
 
@@ -1142,6 +1142,8 @@ def _no_content_hashes() -> pa.Array[Any]:
 
 class FunctionPodStream(StreamBase):
     """Recomputable stream wrapping a data function."""
+
+    DERIVES_UNIQUE_KEYS: ClassVar[bool] = True
 
     def __init__(
         self, function_pod: FunctionPodProtocol, input_stream: StreamProtocol, **kwargs

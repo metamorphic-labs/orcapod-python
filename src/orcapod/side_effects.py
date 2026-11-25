@@ -13,7 +13,7 @@ import dataclasses
 import datetime
 import logging
 from collections.abc import Callable, Collection, Iterator, Sequence
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import ClassVar, TYPE_CHECKING, Any, Literal, cast
 
 import pyarrow as pa
 from typing_extensions import override
@@ -129,6 +129,8 @@ class SideEffectPodStream(StreamBase):
     Iterates the upstream stream and calls the side-effect function per row.
     No invocation log is written in standalone mode (``pipeline_run_id=None``).
     """
+
+    DERIVES_UNIQUE_KEYS: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -918,6 +920,8 @@ class SideEffectNode(StreamBase):
         label: Optional display label.
     """
 
+    DERIVES_UNIQUE_KEYS: ClassVar[bool] = True
+
     node_type = "side_effect"
 
     def __init__(
@@ -1100,6 +1104,8 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         input_stream: The upstream stream at compile time.
         label: Optional display label.
     """
+
+    DERIVES_UNIQUE_KEYS: ClassVar[bool] = True
 
     def __init__(
         self,

@@ -27,7 +27,7 @@ from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import datetime, timezone
 from functools import partial
-from typing import Any, Literal, NamedTuple, cast
+from typing import ClassVar, Any, Literal, NamedTuple, cast
 
 import polars as pl
 import pyarrow as pa
@@ -1024,6 +1024,8 @@ class FunctionNode(FunctionNodeBase):
     and serialized to disk via ``Pipeline.save()``.
     """
 
+    DERIVES_UNIQUE_KEYS: ClassVar[bool] = True
+
     def __init__(
         self,
         function_pod: FunctionPodProtocol,
@@ -1415,6 +1417,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
     wrapping, pipeline records, and two-phase ``iter_data()`` / async
     execution.
     """
+
+    DERIVES_UNIQUE_KEYS: ClassVar[bool] = True
 
     # Set once a read has reported the stored rows it skipped (rows of another data
     # context); a class default so nodes rebuilt from a saved descriptor start unset.

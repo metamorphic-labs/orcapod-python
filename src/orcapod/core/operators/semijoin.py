@@ -9,6 +9,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from orcapod.protocols.core_protocols.streams import RecordBatchInput, RecordBatchOutput
+from orcapod.core.exact_class import reads_as_its_class
 from orcapod.core.unique_keys import UniqueKeys
 from orcapod.types.explanation import plain_repr
 from orcapod.channels import ChannelClosed, ReadableChannel, WritableChannel
@@ -344,8 +345,9 @@ class SemiJoin(BinaryOperator):
             inputs: One input channel per input stream, in the operator's order.
             output: The channel the result's record batches are sent into.
         """
-        if type(self) is not SemiJoin:
-            # A subclass may compute other rows: its own sync call over all of its inputs.
+        if not reads_as_its_class(self, SemiJoin):
+            # A subclass, or an instance with a member replaced, may compute other rows:
+            # its own sync call over all of its inputs.
             await super().async_execute_batches(inputs, output)
             return
         # The kernels are built on this module's join rules.

@@ -299,3 +299,66 @@ def test_the_algebra() -> None:
     assert joined_keys(a, _keys(("a",)), ["a"]) == _keys(("a",))
     assert joined_keys(a, b, []) == _keys(("a", "b"))
     assert joined_keys(a, frozenset(), ["a"]) == frozenset()
+
+
+# ---------------------------------------------------------------------------
+# A customized instance certifies nothing: its rows may be other rows
+# ---------------------------------------------------------------------------
+
+
+def _replaced(obj: Any, name: str) -> Any:
+    """``obj`` with a method replaced on the instance (by an equal one)."""
+    original = getattr(obj, name)
+    setattr(obj, name, lambda *args, **kwargs: original(*args, **kwargs))
+    return obj
+
+
+@pytest.mark.parametrize("name", ["as_table", "iter_data", "open_channel", "keys"])
+def test_a_source_with_a_replaced_reader_certifies_nothing(name: str) -> None:
+    source = _replaced(_source(), name)
+    assert source.unique_keys == frozenset()
+    assert source.drop_nulls("x").unique_keys == frozenset()
+    assert SourceJobNode.from_stream(source).unique_keys == frozenset()
+
+
+OPERATORS: list[Callable[[Any], Any]] = [
+    lambda s: DropNulls("x"),
+    lambda s: s.filter(side="l").producer,
+    lambda s: s.group_by(["side"]).producer,
+    lambda s: s.map_tags(trial="t").producer,
+    lambda s: s.add_tags(k=1).producer,
+    lambda s: s.select_data_columns(["x"]).producer,
+]
+
+
+@pytest.mark.parametrize("make", OPERATORS)
+@pytest.mark.parametrize("name", ["unary_static_process", "static_process"])
+def test_an_operator_with_a_replaced_body_certifies_nothing(
+    make: Callable[[Any], Any], name: str
+) -> None:
+    assert make(_source())(_source()).unique_keys != frozenset()
+    assert _replaced(make(_source()), name)(_source()).unique_keys == frozenset()
+
+
+def test_a_stream_or_node_with_a_replaced_reader_certifies_nothing() -> None:
+    assert _replaced(_source().drop_nulls("x"), "as_table").unique_keys == frozenset()
+    node = OperatorJobNode(DropNulls("x"), (SourceJobNode.from_stream(_source()),))
+    assert node.unique_keys == _keys(KEY)
+    assert _replaced(node, "iter_data").unique_keys == frozenset()
+    slot = SourceJobNode.from_stream(_source())
+    assert _replaced(slot, "as_table").unique_keys == frozenset()
+
+    class MyNode(OperatorJobNode):
+        pass
+
+    own = MyNode(DropNulls("x"), (SourceJobNode.from_stream(_source()),))
+    assert own.unique_keys == frozenset()
+
+
+def test_a_function_pod_with_a_replaced_call_certifies_nothing() -> None:
+    @function_pod(output_keys="total")
+    def add(x: float | None, y: int | None) -> float:
+        return (x or 0.0) + (y or 0)
+
+    assert add.pod(_source()).unique_keys == _keys(KEY)
+    assert _replaced(add.pod, "process_data")(_source()).unique_keys == frozenset()

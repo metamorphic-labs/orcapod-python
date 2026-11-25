@@ -323,8 +323,10 @@ class _Side:
         self._constant_key: bool = constant_key
         self._frames: list[pl.DataFrame] = []
         self._spool: RowSpool = RowSpool()
-        # Whether each row is still held, by its number (grown by doubling).
+        # Whether each row is still held, by its number less ``_base`` (grown by
+        # doubling); no row numbered below ``_base`` is held.
         self._alive: npt.NDArray[np.bool_] = np.ones(0, dtype=np.bool_)
+        self._base: int = 0
         self._removed_count: int = 0
 
     def key_frame(self, table: pa.Table) -> pl.DataFrame:
@@ -341,14 +343,15 @@ class _Side:
         self._frames.append(frame.with_columns(pl.col(self.row) + self._spool.size))
         self._spool.append(table)
         self.rows += table.num_rows
-        if self._spool.size > len(self._alive):
-            grown = np.ones(2 * self._spool.size, dtype=np.bool_)
+        numbered = self._spool.size - self._base
+        if numbered > len(self._alive):
+            grown = np.ones(2 * numbered, dtype=np.bool_)
             grown[: len(self._alive)] = self._alive
             self._alive = grown
 
     def held(self, rows: npt.NDArray[np.int64]) -> npt.NDArray[np.int64]:
         """Those of ``rows`` that were not removed."""
-        return rows[self._alive[rows]]
+        return rows[self._alive[rows - self._base]]
 
     def take(self, rows: npt.NDArray[np.int64]) -> pa.Table:
         """The held rows with these numbers, in this order."""
@@ -369,23 +372,32 @@ class _Side:
             return
         self._spool.discard(rows)
         self.rows -= len(rows)
-        self._alive[rows] = False
+        self._alive[rows - self._base] = False
         self._removed_count += len(rows)
-        if self._removed_count >= max(self.rows, _COMPACT_ROWS):
+        if not self.rows or self._removed_count >= max(self.rows, _COMPACT_ROWS):
             self._compact()
 
     def _compact(self) -> None:
-        """Drop the removed rows from the key frame."""
+        """Drop the removed rows from the key frame, and the numbers below the rest."""
+        self._removed_count = 0
+        if not self.rows:
+            self._frames, self._base = [], self._spool.size
+            self._alive = np.ones(0, dtype=np.bool_)
+            return
         frame = self.frame()
         rows = frame.get_column(self.row).to_numpy()
-        self._frames = [frame.filter(pl.Series(self._alive[rows]))]
-        self._removed_count = 0
+        kept = frame.filter(pl.Series(self._alive[rows - self._base]))
+        self._frames = [kept]
+        # The frame's rows are in the order of their numbers.
+        base = int(kept.get_column(self.row)[0])
+        self._alive = self._alive[base - self._base :].copy()
+        self._base = base
 
     def clear(self) -> None:
         """Drop every row held, and their files."""
         self._frames = []
         self._alive = np.ones(0, dtype=np.bool_)
-        self._removed_count = 0
+        self._removed_count, self._base = 0, 0
         self._spool.close()
         self._spool = RowSpool()
         self.rows = 0
@@ -1797,7 +1809,8 @@ async def run_kernel(
 
     Every input is read at once and to its end, whatever the others do: the inputs may
     be two readers of one upstream, which a wait would block, and an input's read error
-    must be met. Each input reads ahead at most ``PUSH_ROWS`` rows and waits, and the
+    must be met. Each input reads ahead until it holds ``PUSH_ROWS`` rows
+    (its producer's last batch whole, whatever its size) and waits, and the
     output's batches are sent one at a time, so a slow reader of the output holds the
     join back.
 
@@ -1869,7 +1882,7 @@ class _ReadAhead:
         self._ended: bool = False
 
     async def fill(self, channel: RecordBatchInput, claim: object) -> None:
-        """Read ``channel`` to its end, waiting while ``PUSH_ROWS`` rows are unread."""
+        """Read ``channel`` to its end, waiting while ``PUSH_ROWS`` rows or more are unread."""
         try:
             _ = channel.reserve(claim)
             async for batch in channel:
