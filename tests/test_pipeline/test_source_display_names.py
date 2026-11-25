@@ -93,33 +93,26 @@ def test_the_node_preview_shows_the_label() -> None:
     assert "units" not in plain and "left" in plain
 
 
-def test_explain_and_trace_name_the_label_and_the_id_once() -> None:
-    job = _job(_left(), _right())
-    job.run()
-    text = job.nodes["sum"].explain().text()
-    assert "source 'units' (DictSource, dict_v1:left)" in text
-    assert "rows without a match in 'scales' are dropped" in text
-    assert text.count("dict_v1:left") == text.count("dict_v1:right") == 1
-    readings = job.nodes["sum"].explain().sources
-    assert [r.name for r in readings] == ["dict_v1:left", "dict_v1:right"]
-    trace = job.nodes["sum"].trace({"k": 1}, "z")
-    assert "units row_1 x = 1" in trace.text()
-    assert trace.text().splitlines()[-2:] == [
-        "source scales: dict_v1:right",
-        "source units: dict_v1:left",
+def test_explain_and_trace_values_are_those_without_a_label() -> None:
+    jobs = [_job(_left(), _right()), _job(_left(None), _right(None))]
+    for job in jobs:
+        job.run()
+    labelled, plain = (job.nodes["sum"] for job in jobs)
+    assert labelled.explain() == plain.explain()
+    assert labelled.explain().text() == plain.explain().text()
+    ours, theirs = (n.trace({"k": 1}, "z") for n in (labelled, plain))
+    assert ours.source_cells() == theirs.source_cells()
+    assert [c.text() for c in ours.source_cells()] == [
+        c.text() for c in theirs.source_cells()
     ]
-    plain_job = _job(_left(None), _right(None))
-    plain_job.run()
-    plain = plain_job.nodes["sum"].trace({"k": 1}, "z")
-    assert plain.source_cells() == trace.source_cells()
-    assert plain.highlight() == trace.highlight()
+    assert ours.highlight() == theirs.highlight()
 
 
-def test_one_table_under_two_labels_is_explained_by_its_id() -> None:
-    joined = _left("a").join(_right("b")).semi_join(_left("other"))
-    text = joined.explain().text()
-    assert "source 'dict_v1:left' (DictSource)" in text
-    assert "source 'b' (DictSource, dict_v1:right)" in text
+def test_a_line_break_in_a_label_stays_on_one_line() -> None:
+    job = _job(_left("a\nb\u2028c"), _right())
+    lines = str(job.diagram()).splitlines()
+    assert "  a\\nb\\u2028c (source · DictSource · bound)" in lines
+    assert len(lines) == 1 + len(job.nodes)
 
 
 @pytest.mark.parametrize("swap", [False, True])
@@ -165,8 +158,6 @@ def test_without_a_label_the_texts_are_unchanged() -> None:
     )
     assert all("text" not in n for n in job.diagram().to_dict()["nodes"])
     assert "source id" not in job.diagram().to_html().split("<script>")[0]
-    assert "source 'dict_v1:left' (DictSource)\n" in job.nodes["sum"].explain().text()
-    assert "\nsource " not in job.nodes["sum"].trace({"k": 1}, "z").text()
 
 
 def test_a_loaded_job_shows_the_slot_names(tmp_path: Path) -> None:
@@ -358,3 +349,58 @@ def test_a_cache_over_an_object_without_a_dict_has_no_shown_name(
     )
     vars(cached)["_source"] = _Slotted()
     assert labelled_source(cached) is None
+
+
+class _HookedMeta(type(DictSource)):
+    """A metaclass whose attribute access runs user code while ``armed``."""
+
+    armed = False
+
+    def __getattribute__(cls, name: str) -> Any:
+        if _HookedMeta.armed and name in (
+            "__mro__",
+            "__dict__",
+            "SOURCE_KIND",
+            "SOURCE_VERSION",
+            "DISPLAY_PARTS",
+        ):
+            raise RuntimeError(f"read {name}")
+        return super().__getattribute__(name)
+
+
+class _MetaHooked(DictSource, metaclass=_HookedMeta):
+    """A source with that metaclass."""
+
+
+@pytest.mark.parametrize("label", [None, "units"])
+def test_no_metaclass_hook_runs(
+    monkeypatch: pytest.MonkeyPatch, label: str | None
+) -> None:
+    source = _MetaHooked(
+        [{"g": 0, "k": 1, "x": 1, "x2": 2}],
+        tag_columns=["g", "k"],
+        tag_only_columns=True,
+        source_id="left",
+        label=label,
+    )
+    job = PipelineJob(name="j", database=InMemoryArrowDatabase())
+    with job:
+        source.select_data_columns(["x"], label="selected")
+    monkeypatch.setattr(_HookedMeta, "armed", True)
+    found = labelled_source(source)
+    trace = job.nodes["left"].trace({"k": 1}, "x")
+    monkeypatch.setattr(_HookedMeta, "armed", False)
+    assert trace.status == "unavailable"
+    assert (found and (found.label, found.source_id)) == (
+        ("units", "dict_v1:left") if label else None
+    )
+
+
+def test_a_label_that_cannot_be_read_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job = _job(_left(), _right(None))
+    monkeypatch.setattr(DictSource, "DISPLAY_PARTS", 1)
+    assert "  left (source · DictSource · bound)" in str(job.diagram()).splitlines()
+    html: Any = job.nodes["left"]._repr_html_()
+    assert "SourceJobNode[left]" in html

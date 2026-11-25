@@ -149,8 +149,6 @@ class SourceCell:
             JSON).
         column: The source's column.
         value: The value, as the row that carried the token holds it.
-        shown: The name the text shows for a source with an assigned label (the text of
-            a ``Trace`` gives the source id once, at the end); ``""`` for the source id.
     """
 
     node: str
@@ -158,11 +156,10 @@ class SourceCell:
     record_id: str
     column: str
     value: Any
-    shown: str = field(default="", compare=False)
 
     def text(self) -> str:
         """Return the cell as one phrase: ``units row_40 n_spikes = 575``."""
-        return f"{self.shown or self.source_id} {self.record_id} {self.column} = {_value_text(self.value)}"
+        return f"{self.source_id} {self.record_id} {self.column} = {_value_text(self.value)}"
 
 
 @dataclass(frozen=True)
@@ -478,8 +475,6 @@ class Trace:
         lines = [self.header()]
         for root in self.roots:
             lines.extend(root.lines())
-        named = {(c.shown, c.source_id) for c in self.source_cells() if c.shown}
-        lines.extend(f"source {shown}: {full}" for shown, full in sorted(named))
         return "\n".join(lines)
 
     def __str__(self) -> str:

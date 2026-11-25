@@ -30,13 +30,32 @@ class LabelledSource:
     parts: tuple[str, ...]
 
 
+def _class_dicts(cls: type) -> list[Mapping[str, Any]]:
+    """Return the dictionaries of a class and its bases, read past any metaclass hook."""
+    mro: tuple[type, ...] = type.__getattribute__(cls, "__mro__")
+    return [type.__getattribute__(base, "__dict__") for base in mro]
+
+
+def _is_a(source: object, cls: type) -> bool:
+    """Whether ``source`` is an instance of ``cls`` by its real type."""
+    return any(b is cls for b in type.__getattribute__(type(source), "__mro__"))
+
+
 def _stored(source: object) -> Mapping[str, Any]:
     """Return an object's instance dictionary, read past any hook its class defines."""
-    for cls in type(source).__mro__:
-        found = cls.__dict__.get("__dict__")
-        if isinstance(found, GetSetDescriptorType):
+    for namespace in _class_dicts(type(source)):
+        found = namespace.get("__dict__")
+        if type(found) is GetSetDescriptorType:
             return found.__get__(source)
     return {}
+
+
+def _class_value(source: object, name: str) -> Any:
+    """Return what the class of ``source`` or its nearest base declares as ``name``."""
+    return next(d[name] for d in _class_dicts(type(source)) if name in d)
+
+
+_LINE_BREAKS = "\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"
 
 
 def _stored_text(source: object, name: str) -> str:
@@ -45,43 +64,58 @@ def _stored_text(source: object, name: str) -> str:
     return str.__str__(value) if isinstance(value, str) else ""
 
 
+def _one_line(text: str) -> str:
+    """Return ``text`` with its line breaks written as escapes."""
+    return "".join(ascii(c)[1:-1] if c in _LINE_BREAKS else c for c in text)
+
+
 def labelled_source(stream: Any) -> LabelledSource | None:
     """Return the source as a display names it, or ``None`` when it has no label.
 
     ``None`` for a stream that is no source, a source with no assigned label and a
     proxy of a source that could not be rebuilt. A ``CachedSource`` is named by its own
-    label and the id of the source it wraps.
+    label and the id of the source it wraps. Never raises: a source whose label cannot
+    be read is shown as one without a label.
 
     Args:
         stream: The source, or any stream bound to a slot.
     """
+    try:
+        return _labelled_source(stream)
+    except Exception:  # noqa: BLE001  # a display never changes an outcome
+        return None
+
+
+def _labelled_source(stream: Any) -> LabelledSource | None:
     from orcapod.core.sources.base import RootSource
     from orcapod.core.sources.cached_source import CachedSource
     from orcapod.core.sources.source_ids import build_source_id
     from orcapod.core.sources.source_proxy import SourceProxy
 
-    if not issubclass(type(stream), RootSource):
+    if not _is_a(stream, RootSource) or _is_a(stream, SourceProxy):
         return None
-    label = _stored_text(stream, "_label")
-    if not label or issubclass(type(stream), SourceProxy):
+    label = _one_line(_stored_text(stream, "_label"))
+    if not label:
         return None
     source: Any = stream
     while type(source) is CachedSource:
         source = _stored(source).get("_source")
     # A cache accepts any source-like object; only a root source holds a name to show.
-    if not issubclass(type(source), RootSource) or issubclass(
-        type(source), SourceProxy
-    ):
+    if not _is_a(source, RootSource) or _is_a(source, SourceProxy):
         return None
     name = _stored_text(source, "_source_name")
     if not name:
         return None
-    kind, version = type(source).SOURCE_KIND, type(source).SOURCE_VERSION
-    near, far = type(source).DISPLAY_PARTS
+    source_id = build_source_id(
+        _class_value(source, "SOURCE_KIND"),
+        _class_value(source, "SOURCE_VERSION"),
+        name,
+    )
+    near, far = _class_value(source, "DISPLAY_PARTS")
     dataset, project = _stored_text(source, near), _stored_text(source, far)
     both = f"{project}.{dataset}" if dataset and project else ""
-    source_id = build_source_id(kind, version, name)
-    return LabelledSource(label, source_id, (dataset, project, both, name, source_id))
+    parts = (dataset, project, both, name, source_id)
+    return LabelledSource(label, source_id, tuple(_one_line(p) for p in parts))
 
 
 def display_names(

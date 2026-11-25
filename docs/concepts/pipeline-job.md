@@ -430,9 +430,9 @@ function of a function pod, the class of a bound source), and for a job its stat
 A selected node also shows the row counts of the job's last run (`job.last_run`).
 
 A source bound with a label (`DictSource(..., label="mice")`, `SpiralDBTableSource(...,
-label="units")`) is shown in a job's diagram, in its node's preview, and in the text of
-`explain()`, `trace()` and `RestrictedAggregationWarning` by that label; the diagram's
-details (`source id`) and the texts give its full source id once. Two sources with one
+label="units")`) is shown in a job's diagram, in its node's preview, and in
+`RestrictedAggregationWarning` by that label; the diagram's details (`source id`) and the
+warning give its full source id. `explain()` and `trace()` name it by its id. Two sources with one
 label, or a label that is another node's name, are shown as `label (part)`: a SpiralDB
 table's dataset, else its project, else the source's name. This is display only: the slot
 keeps its name, the one `job.nodes[...]` and `bind` take. A source without a label is shown

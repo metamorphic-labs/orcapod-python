@@ -44,7 +44,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 
-from orcapod.core.sources.display_names import node_display_names
 from orcapod.errors import ProvenanceInconsistencyError
 from orcapod.system_constants import constants
 from orcapod.types.explanation import Step, plain_repr
@@ -1155,11 +1154,9 @@ def _merged_key(node: Any, column: str) -> bool:
 
 
 class _Tracer:
-    def __init__(self, display_names: Mapping[str, tuple[str, str]]) -> None:
+    def __init__(self) -> None:
         self.reader = _Reader()
         self.edges: set[tuple[str, str]] = set()
-        # How labelled source nodes are shown: node label to (text, source id).
-        self.display_names = display_names
 
     def unread(
         self, node: Any, column: str, member: int | None, status: str
@@ -1255,16 +1252,7 @@ class _Tracer:
         elif not held:
             status = "unavailable"
             value = None
-        # A row of another id than the bound source's is named by its own id.
-        shown, shown_id = self.display_names.get(source_node.label, ("", ""))
-        cell = SourceCell(
-            source_node.label,
-            source_id,
-            record_id,
-            source_column,
-            value,
-            shown=shown if source_id == shown_id else "",
-        )
+        cell = SourceCell(source_node.label, source_id, record_id, source_column, value)
         return TraceStep(
             source_node.label,
             "source",
@@ -2033,7 +2021,7 @@ def trace(node: Any, row: Mapping[str, Any], column: str) -> Trace:
         ProvenanceInconsistencyError: If a link cannot be proven from what the job
             holds and stores, or is ambiguous.
     """
-    tracer = _Tracer(node_display_names(_ancestry(node).values()))
+    tracer = _Tracer()
     # A snapshot, as given: shown in the header and matched by value, so a caller
     # changing its list afterwards changes neither the match nor the header.
     row = {name: _snapshot(value) for name, value in row.items()}
