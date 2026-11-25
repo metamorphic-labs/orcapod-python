@@ -27,23 +27,27 @@ Async:
 
 | Step | 25% | 50% | 100% |
 |---|---|---|---|
-| events semi-joined with the kept items | 0.4 / 1.1, 15 s | 0.5 / 1.8, 32 s | 0.7 / 3.3, 73 s |
-| then filtered by time | 0.5 / 1.6, 15 s | 0.7 / 2.9, 32 s | 0.8 / 5.3, 75 s |
-| then joined with a lookup table | 0.6 / 2.8, 17 s | 0.8 / 5.2, 34 s | 1.0 / 10.0, 76 s |
-| filtered events grouped by item | 2.1 / 3.5, 27 s | 3.9 / 6.8, 55 s | 7.2 / 13.2, 122 s |
-| series filtered, grouped, one function | 1.4 / 2.1, 8 s | 2.6 / 3.7, 15 s | 5.0 / 7.1, 32 s |
-| the whole job | 3.0 / 4.4, 38 s | 5.3 / 8.2, 78 s | 9.8 / 16.6, 159 s |
+| events semi-joined with the kept items | 0.4 / 1.1, 15 s | 0.5 / 1.8, 32 s | 0.7 / 3.2, 66 s |
+| then filtered by time | 0.5 / 1.6, 15 s | 0.7 / 2.9, 32 s | 0.8 / 5.3, 68 s |
+| then joined with a lookup table | 0.6 / 2.8, 17 s | 0.8 / 5.2, 34 s | 1.0 / 10.0, 85 s |
+| filtered events grouped by item | 2.1 / 3.5, 27 s | 3.9 / 6.8, 55 s | 4.6 / 9.4, 115 s |
+| series filtered, grouped, one function | 1.4 / 2.1, 8 s | 2.6 / 3.7, 15 s | 4.5 / 8.2, 33 s |
+| the whole job | 3.0 / 4.4, 38 s | 5.3 / 8.2, 78 s | 7.4 / 20.0, 164 s |
 
-Sync (not run at 100%: the 50% job is above 8 GB):
+The 100% column includes the aggregation step that sorts text by rank and spools token
+lists (#573); the 25% and 50% columns were measured before it. It lowers the footprint and
+raises resident memory (mapped pages).
 
-| Step | 25% | 50% |
-|---|---|---|
-| semi-join | 1.8 / 2.6, 14 s | 3.2 / 4.6, 32 s |
-| filter | 1.8 / 3.0, 15 s | 3.2 / 5.5, 33 s |
-| lookup join | 2.3 / 5.0, 15 s | 4.2 / 9.3, 32 s |
-| group by | 2.5 / 4.2, 25 s | 4.4 / 7.8, 55 s |
-| series and function | 1.9 / 2.7, 7 s | 3.9 / 5.0, 14 s |
-| the whole job | 4.8 / 7.1, 37 s | 8.7 / 13.3, 77 s |
+Sync:
+
+| Step | 25% | 50% | 100% |
+|---|---|---|---|
+| semi-join | 1.8 / 2.6, 14 s | 3.2 / 4.6, 32 s | 6.0 / 8.9, 67 s |
+| filter | 1.8 / 3.0, 15 s | 3.2 / 5.5, 33 s | 6.0 / 10.6, 69 s |
+| lookup join | 2.3 / 5.0, 15 s | 4.2 / 9.3, 32 s | 7.5 / 18.6, 72 s |
+| group by | 2.5 / 4.2, 25 s | 4.4 / 7.8, 55 s | 6.0 / 12.0, 115 s |
+| series and function | 1.9 / 2.7, 7 s | 3.9 / 5.0, 14 s | 5.8 / 10.8, 30 s |
+| the whole job | 4.8 / 7.1, 37 s | 8.7 / 13.3, 71 s | above 24 GB, killed |
 
 `main` at 25%: the semi-join takes 10.7 / 10.9, 12 s on sync; the semi-join on async, and
 the lookup join and the whole job on both paths, pass 24 GB and are killed.
@@ -59,17 +63,16 @@ Whether a container that counts mapped pages drops them in time is not tested.
 
 Not bounded, in the order of their cost in the whole job at 100%:
 
-1. Writing a function node's stored rows (the peak, 10 GB): a row holds the source-info text
+1. Writing a function node's stored rows (the peak of the whole job when profiled, before #573): a row holds the source-info text
    of its inputs' token lists, millions of tokens in one row, and the Delta writer holds
    copies. The stored layout decides the text.
-2. `GroupBy`'s member order (7 to 9 GB): one sort frame of every key and tag string and of
-   the record ids, about 1.1 GB for each million member rows. The members' data it then keeps
-   is 64 MB and their ids 1.2 GB, one copy for all token columns.
+2. `GroupBy` over its whole input (4.6 GB for 5.7 million member rows): the sort of its members
+   and the copies of what it takes. The members' data it keeps is 64 MB; the rest is ids.
 3. A function's input row that is one large group: its token text, then Python lists.
 4. On sync, each operator's own whole result while it is moved to local disk.
 
 ## Gates
 
 The ITL-1347 differential against `main` (both fixtures, all modes, one and default Polars
-threads): sync exact and async as sets, all equal. Every operator node's rows, system tags
+threads): sync exact and async as sets, all equal. At the final head: equal, and 24,560 tests pass. Every operator node's rows, system tags
 and tokens in the job above, at 0.5%, have `main`'s digests on both paths.
