@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import math
+import zoneinfo
 from pathlib import Path
 from typing import Any
 
@@ -61,12 +62,38 @@ def _table() -> pa.Table:
     )
 
 
+_LOW = dt.datetime(1677, 9, 21, 0, 12, 43, 145225, tzinfo=_UTC)
+_HIGH = dt.datetime(2262, 4, 11, 23, 47, 16, 854775, tzinfo=_UTC)
+_NS_ZONES = ("America/New_York", "Europe/Paris")
+
+
+def _ns_count(instant: dt.datetime) -> int:
+    """Return the nanoseconds since the epoch of a UTC ``instant``."""
+    since = instant - dt.datetime(1970, 1, 1, tzinfo=_UTC)
+    return (since // dt.timedelta(microseconds=1)) * 1000
+
+
+def _nanos() -> pa.Table:
+    """Return nanosecond timestamps at both ends of the 64-bit count, in two zones."""
+    counts = [-(2**63), _ns_count(_LOW), 0, _ns_count(_HIGH), 2**63 - 1]
+    columns: dict[str, Any] = {
+        "id": pa.array(range(len(counts)), pa.int64()),
+        "lab": pa.array(["a"] * len(counts), pa.large_string()),
+    }
+    for number, zone in enumerate(_NS_ZONES):
+        columns[f"ns{number}"] = pa.array(counts, pa.int64()).view(
+            pa.timestamp("ns", tz=zone)
+        )
+    return pa.table(columns)
+
+
 @pytest.fixture()
 def project(tmp_path: Path):
     """Provide a fake project holding the ``edges`` table."""
     with fake_spiral_sdk.install(tmp_path / "spiral"):
         project = fake_spiral_sdk.ExternalProject(_PROJECT)
         project.create_table("default.edges", key_schema=_KEYS).write(_table())
+        project.create_table("default.nanos", key_schema=_KEYS).write(_nanos())
         fake_spiral_sdk.scan_log.clear()
         yield project
         fake_spiral_sdk.scan_log.clear()
@@ -192,6 +219,51 @@ class TestTimestampBoundsAtTheEndsOfTheCalendar:
 
         with pytest.raises(TypeError, match="beyond the range of a 64-bit count of ns"):
             check_restriction(condition, schema)
+
+
+class TestNanosecondBoundsAtTheEndsOfTheCount:
+    @pytest.mark.parametrize("number", range(len(_NS_ZONES)), ids=list(_NS_ZONES))
+    @pytest.mark.parametrize(
+        ("instant", "op"),
+        [(_LOW, ">="), (_LOW, ">"), (_HIGH, "<="), (_HIGH, "<")],
+        ids=["low >=", "low >", "high <=", "high <"],
+    )
+    def test_a_zoned_bound_at_the_edge_reads_pyarrows_rows(
+        self, project, number, instant, op
+    ):
+        """Bounds a ``timestamp[ns]`` column holds at the ends of its 64-bit count,
+        given in the column's zone, read the rows pyarrow selects (sync and async)."""
+        column = f"ns{number}"
+        bound = instant.astimezone(zoneinfo.ZoneInfo(_NS_ZONES[number]))
+        table = _nanos()
+        compare = {
+            ">=": pc.greater_equal,
+            ">": pc.greater,
+            "<=": pc.less_equal,
+            "<": pc.less,
+        }[op]
+        # pyarrow drops the seconds of an offset (New York's 1677 offset is -4:56:02),
+        # so the expected rows compare the integer counts.
+        count = _ns_count(instant)
+        expected = table.filter(
+            compare(table[column].cast(pa.int64()), pa.scalar(count, pa.int64()))
+        )["id"].to_pylist()
+        build = {
+            ">=": lambda c: c >= bound,
+            ">": lambda c: c > bound,
+            "<=": lambda c: c <= bound,
+            "<": lambda c: c < bound,
+        }[op]
+
+        source = SpiralDBTableSource(_PROJECT, "nanos", tag_only_columns=True).where(
+            build(col(column))
+        )
+
+        assert expected == {">=": [1, 2, 3, 4], ">": [2, 3, 4], "<=": [0, 1, 2, 3]}.get(
+            op, [0, 1, 2]
+        )
+        assert _ids(source) == expected
+        assert _async_ids(source) == expected
 
 
 class TestSpecialFloatsBeforeMerging:

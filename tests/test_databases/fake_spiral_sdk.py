@@ -558,12 +558,12 @@ def literal(value: Any, type: Any = None) -> _Literal:
     if type is None or pa.types.is_large_string(type) or pa.types.is_large_binary(type):
         raise TypeError(f"unsupported literal Arrow type {type}")
     scalar = pa.scalar(value, type)
-    try:
-        return _Literal(scalar.as_py(), type)
-    except OverflowError:
-        # A timestamp whose instant has no Python datetime in its zone (year 1 east
-        # of UTC): kept as its count, which the scan reads as the same type.
+    if pa.types.is_timestamp(type):
+        # Kept as its integer count, never a Python value: an instant at either end of
+        # a count (year 1 east of UTC, the ends of timestamp[ns]) has no datetime or
+        # pandas Timestamp in its zone. The scan reads the count as the same type.
         return _Literal(scalar.value, type)
+    return _Literal(scalar.as_py(), type)
 
 
 def eq(left: _Column, right: _Literal) -> FakePredicate:
