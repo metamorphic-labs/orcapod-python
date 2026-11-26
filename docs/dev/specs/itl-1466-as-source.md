@@ -11,6 +11,9 @@ modes (section 3), a derived source over a plain origin reads it as the origin r
 **Round 6**: the store is a complete record, and a derived source's record id is the store's
 row key; **section 13 supersedes the earlier sections where they differ** (the function
 record id of section 4, P1, P2, D4/D5, D12).
+**Round 7** (evening): three nested ids, entry, input and record; **section 14 supersedes
+section 13 where they differ** (the passage id is the instance id, computed through the entry id;
+the entry id drops the fixed recomputation index column, so `tdb_v2`).
 Evidence: **[ran]** a script in `itl-1466/` on `0d1e017c`; **[proto]** `probe_round2` or
 `probe_tokens` on the prototype (they fail on the library as it is); **[read]** the code;
 **[inferred]** none of these. Round 3's own script is `probe_entries` [proto]. Section 12: what is decided, what is open, and **what the
@@ -654,3 +657,116 @@ its passage id is its entry; and the default view can show a row whose result is
   passage id instead) and 6 table-path entries move; nothing else.
 - `first` / `latest` need a recorded time: the pipeline table has `__recorded_at`; the operator
   cache gets one (decided), and keeps the time of a row's first insertion.
+
+## 14. Round 7: three nested ids
+
+Developer, 2026-11-25 (evening); **this section supersedes section 13 where they differ**.
+Evidence: **[proto7]** `probe_round7` on the round 7 prototype (local branch
+`scratch/itl-1466-prototype`, not in this pull request).
+
+### 14.1 The model
+
+| Id | Hash of | Used by | Stored |
+|---|---|---|---|
+| **entry id** | user tags, system tags, the labelled input data hash: an entry of the pipeline table | side effects and functions that take the invocation context only: hit or miss, `invocation_hash` | the side-effect log (its row key and `record_id_hash`); in the pipeline table not stored (below). Its name there would be `__pipeline_entry_id`, a new meaning under `pdb_v2`: today's column of that name (base id plus index) goes away |
+| **instance id** | the entry id (labelled), the input's source-info tokens in name order: one instance of the entry arriving, with its provenance | the run's lookup "is this instance stored?"; the golden pin | the pipeline table's plain lookup column, `__pipeline_instance_id` |
+| **record id** | the instance id (labelled), the result id (`__data_id`) | the pipeline table's row key; a derived source's record id | the pipeline table's row key, `__pipeline_record_id` |
+
+Names decided by the developer (same evening). Side effects are keyed by the entry only; an option to key them by the instance id is not offered
+for now. The configurable options (the serving mode of section 13.1 item 4, a side-effect
+caching mode) come after the defaults.
+
+The preimages, exactly as prototyped (each a one-row Arrow table hashed by the data context's
+Arrow hasher, `arrow_v1`, and fed onward as `to_prefixed_digest()`, so each nested id carries
+its label):
+
+- entry: `tag.as_table(columns={"system_tags": True})` plus `__input_data_hash`
+  (`large_binary`, labelled digest): `_build_record_id_preimage` as it is today, **without** the
+  fixed `__pipeline_recomputation_index = 0` column that side effects and `ctx` append today.
+- instance: `__pipeline_entry_id` (`large_binary`) then the `_source_*` columns in name order. An `EmptyData`
+  input (a gone ephemeral result flowing through) has no readable tokens: its preimage is the
+  entry id alone (open point of section 13.3, unchanged).
+- record: `__pipeline_instance_id` (`large_binary`) and `__data_id` (`large_binary`, the result
+  UUID's bytes).
+
+The column names inside a preimage are part of its recipe: `__pipeline_entry_id` enters the
+instance id (pinned, below), `__pipeline_instance_id` only the record id (not pinned).
+
+**The entry id is not stored in the pipeline table.** Nothing needs it there: the run's lookup is by
+instance id (a stored entry with other tokens is a new instance, recorded without computing); the
+mode of section 13.1 groups by served content, not by entry; and the entry id can be recomputed
+from columns the row already holds (user tags, system tags, `__input_data_hash`), checked
+[proto7 1]. If a later need appears (grouping a large table's instances by entry without hashing),
+a plain `__pipeline_entry_id` column can be added under the same `pdb_v2` bump before the release.
+
+### 14.2 What changes from section 13
+
+- **The entry id loses the fixed recomputation index column.** Section 13 kept it, so that no
+  invocation hash would move; the developer's entry is the three things only. So every
+  `invocation_hash` and every side-effect log key changes, and the side-effect log layout moves,
+  **`tdb_v1` to `tdb_v2`**: a `tdb_v1` log read under the new keys would match nothing and every
+  completed delivery would be made again. With the bump, the stale-table rule
+  (`account_for_stale_tables`) refuses a side-effecting node that has a `tdb_v1` log beside it,
+  before any delivery: checked [proto7 4], `SideEffectLogDataContextError`, 0 deliveries. The log's
+  columns are unchanged; `record_id_hash` now holds the entry id under the new recipe (renaming it
+  `entry_id` would ride on the same bump, optional).
+- **Section 13's passage id is the instance id**, with the same content (entry plus tokens), now
+  computed through the entry id; its values differ. The record id is computed through the input
+  id. The flat preimages of section 13 are gone from the prototype.
+- Unchanged from section 13: the recomputation index is not needed, the default serves everything
+  stored, the operator cache's `__recorded_at` and `odb_v2`, a token-only change records new input
+  ids without computing and fires nothing.
+
+Checked [proto7]:
+
+- g's pipeline table: id columns `__data_id`, `__pipeline_instance_id`, `__pipeline_run_id` and the row key
+  read as `__pipeline_record_id`; no `__pipeline_entry_id` column. Recomputed from each stored row: instance id =
+  hash(entry id, tokens) 2/2 rows; record id = hash(instance id, result id) 2/2 rows.
+- The side-effect log (`tdb_v2`): its keys equal the entry ids of `tell`'s input rows, computed by
+  the one helper (`entry_id`) that `FunctionPod._build_invocation_context` also calls.
+- `f`'s results lost, a new job: `f` 4 calls, `g` 2 (none again), `tell` 2 (none again); g's table
+  2 rows to 4, 4 distinct instance ids.
+- `probe_round6` still gives section 13.3's results on the round 7 prototype (ids are new values).
+
+### 14.3 What moves in the golden list
+
+The same 12 entries as section 13.2; only what replaces the record-id pins changes:
+
+| Entry | Round 7 |
+|---|---|
+| `*.table[.../pdb_v1].record_ids`, 6 entries: `pipeline:job`, `pipeline:drop_nulls_job` (frozen file `pipeline-02`); `filter_job`, `polars_filter_expr_job`, `rejoin_job`, `rejoin_job_async` (provisional) | **removed**: the record id holds a random result id. Replaced by 6 **new** entries `*.table[.../pdb_v2].instance_ids` (the golden cases pin `__pipeline_instance_id` for a pipeline table, as they pin `__input_data_hash` for a result table) |
+| `*.table_paths` of the same 6 cases | **move**: `pdb_v1` to `pdb_v2` only |
+| everything else | none |
+
+The new instance-id values are computed through the entry id, so they are not what a section-13
+passage-id pin would have held (never pinned, so nothing to undo). They are deterministic: two
+processes with different hash seeds (`PYTHONHASHSEED` 1 and 2) give the same instance ids for
+`pipeline:job` and `pipeline:drop_nulls_job`. No golden entry pins an invocation hash, a side-effect
+log key or a `tdb` or `odb` path, so `tdb_v2` and `odb_v2` move none. Golden run on the round 7
+prototype: 2756 pass, 18 fail, the same 18 as round 6 (the 12 entries and the 6 tests that check
+them).
+
+Awaiting the developer: the layout bumps `pdb_v2`, `odb_v2`, `tdb_v2`; the
+exact golden list above (6 removed, 6 added, 6 moved).
+
+### 14.4 Tests on the round 7 prototype
+
+Prototype commit `e29ef8df` (names as decided). Golden: 2756 pass, 18 fail, as above. Side-effect,
+`ctx` and source tests: no new failure from the entry recipe or `tdb_v2` (195 side-effect and `ctx`
+tests pass; no test pins an invocation hash). The directories of section 13.3, run before the
+renaming (one process): 11,064 pass, 614 fail, 4 errors. The 14 failures more than round 6 all
+name `tdb_v1` (stored data context 13, hash step 1): the "names a layout" row of section 13.3 is
+now 102. After the renaming, 2 more tests in `test_provenance_review` fail
+(`test_two_entries_for_one_input_and_result_are_refused`): they inject a duplicate entry under the
+old column name `__pipeline_entry_id`, the "reads the old columns" row. No failure points at a
+design problem.
+
+### 14.5 Open, for the developer
+
+- The layout bumps `pdb_v2`, `odb_v2`, `tdb_v2`.
+- The exact golden list of section 14.3: 6 record-id entries removed, 6 instance-id entries added,
+  6 table-path entries moved.
+- Whether the side-effect log's `record_id_hash` column is renamed to the entry id with `tdb_v2`
+  (optional).
+- The options after the defaults: the serving mode and a side-effect caching mode.
+- An `EmptyData` input's instance id is the hash of its entry id alone (no readable tokens).
