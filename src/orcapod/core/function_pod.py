@@ -647,12 +647,22 @@ class _FunctionPodBase(TraceableBase):
         if len(streams) == 0:
             raise ValueError("At least one input stream is required")
         elif len(streams) > 1:
-            # The pod's identity covers its inputs as the set its join forms: one
-            # stream twice is refused here, naming the function (ITL-1419).
-            _ = self.argument_symmetry(streams)
             # TODO: simplify the multi-stream handling logic
+            from orcapod.core.operators.repeated_operands import (
+                RepeatedOperandError,
+            )
+
             multi_stream_handler = self.multi_stream_handler()
-            joined_stream = multi_stream_handler.process(*streams)
+            try:
+                joined_stream = multi_stream_handler.process(*streams)
+            except RepeatedOperandError as err:
+                # Recording the join forms its identity: the join is named, this
+                # function added as context (ITL-1419). Nothing is formed here that
+                # would not be formed anyway.
+                err.add_context(
+                    f"the inputs of the function pod of {self.canonical_function_name!r}"
+                )
+                raise
             return joined_stream
         return streams[0]
 
@@ -869,19 +879,18 @@ class _FunctionPodBase(TraceableBase):
         """The symmetry of the join the pod puts its inputs through.
 
         Raises:
-            RepeatedOperandError: If two inputs have one identity (ITL-1419), naming
-                the function.
+            RepeatedOperandError: If two inputs have one identity (ITL-1419): the join
+                that formed the set is named, and this function added as context.
         """
         from orcapod.core.operators.repeated_operands import RepeatedOperandError
 
         try:
             return self.multi_stream_handler().argument_symmetry(streams)
         except RepeatedOperandError as err:
-            raise RepeatedOperandError(
-                err.reason,
-                pod=f"the function pod of {self.canonical_function_name!r}, which joins "
-                "its inputs",
-            ) from None
+            err.add_context(
+                f"the inputs of the function pod of {self.canonical_function_name!r}"
+            )
+            raise
 
     def output_schema(
         self,

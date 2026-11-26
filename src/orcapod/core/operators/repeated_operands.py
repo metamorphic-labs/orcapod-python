@@ -26,15 +26,45 @@ from orcapod.protocols.core_protocols import StreamProtocol
 class RepeatedOperandError(InputValidationError):
     """Two operands of a commutative pod have one identity.
 
+    The message names the pod that got the repeated operand, set once by the pod whose
+    own operands repeat (``named``) and never replaced. A pod further down, or a function
+    pod whose join got the operands, can only add context (``add_context``): what the
+    repeated operand is part of.
+
     Args:
         reason: What is repeated and what to do instead.
-        pod: The operator or function the operands are given to, as the message names
-            it, or ``None`` before a caller adds it.
+        pod: The operator or function that got the repeated operand, or ``None`` until
+            that pod names itself.
     """
 
     def __init__(self, reason: str, pod: str | None = None) -> None:
         self.reason: str = reason
-        super().__init__(f"{pod}: {reason}" if pod else reason)
+        self.pod: str | None = pod
+        self.context: list[str] = []
+        super().__init__(self._message())
+
+    def _message(self) -> str:
+        message = f"{self.pod}: {self.reason}" if self.pod else self.reason
+        if self.context:
+            message += f" (in {'; '.join(self.context)})"
+        return message
+
+    def named(self, pod: str) -> RepeatedOperandError:
+        """This error, naming ``pod`` as the one that got the repeated operand, unless
+        a pod is already named (the error then comes from upstream and is returned as
+        it is)."""
+        if self.pod is not None:
+            return self
+        named = RepeatedOperandError(self.reason, pod=pod)
+        named.context = list(self.context)
+        named.args = (named._message(),)
+        return named
+
+    def add_context(self, context: str) -> None:
+        """Say what the repeated operand is part of (``"the inputs of ..."``); the named
+        pod is kept."""
+        self.context.append(context)
+        self.args = (self._message(),)
 
 
 def operand_set(streams: Collection[StreamProtocol]) -> frozenset[StreamProtocol]:
@@ -48,8 +78,9 @@ def operand_set(streams: Collection[StreamProtocol]) -> frozenset[StreamProtocol
 
     Raises:
         RepeatedOperandError: If two operands have one identity (they are equal, as a
-            set compares them), one object or two. The caller names its pod
-            (``RepeatedOperandError(err.reason, pod=...)``).
+            set compares them), one object or two, unnamed: the caller names its pod
+            (``err.named(...)``). An error met while hashing an operand (raised by a
+            pod upstream) is already named and passes through.
     """
     seen: dict[StreamProtocol, StreamProtocol] = {}
     for stream in streams:

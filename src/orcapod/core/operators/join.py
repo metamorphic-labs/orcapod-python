@@ -229,7 +229,8 @@ class Join(NonZeroInputOperator):
         try:
             return operand_set(streams)
         except RepeatedOperandError as err:
-            raise RepeatedOperandError(err.reason, pod=type(self).__name__) from None
+            # Named here only when this join's own operands repeat (ITL-1419).
+            raise err.named(type(self).__name__) from None
 
     def output_schema(
         self,

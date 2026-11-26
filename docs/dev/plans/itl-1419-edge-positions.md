@@ -32,9 +32,11 @@ from the operands as a set. `core/operators/repeated_operands.operand_set` build
 and raises `RepeatedOperandError` (an `InputValidationError`) when two operands have one
 identity (they are equal as the set compares them). `Join.argument_symmetry` (so also
 `Rejoin`), the commutative branch of `BinaryOperator.argument_symmetry` and the function
-pod's `argument_symmetry` call it and name the operator or the function. Whatever forms the
-identity meets the refusal: hashing, recording, compiling; a function pod forms it when
-called with several inputs. No separate check remains. An operand whose identity cannot be
+pod's `argument_symmetry` call it. The error names the operator whose own operands repeat
+(`RepeatedOperandError.named`, set once); a pod downstream, and a function pod whose join
+got the operands, add context (`add_context`) and never replace that name (verification
+of the third head). Whatever forms the identity meets the refusal: hashing, recording,
+compiling; a function pod never forms it on the row path. No separate check remains. An operand whose identity cannot be
 computed raises what hashing it raises. Rows computed without forming the identity
 (standalone `as_table()`) are computed as before.
 

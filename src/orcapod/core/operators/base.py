@@ -318,9 +318,8 @@ class BinaryOperator(StaticOutputOperatorPod):
             try:
                 return operand_set(streams)
             except RepeatedOperandError as err:
-                raise RepeatedOperandError(
-                    err.reason, pod=type(self).__name__
-                ) from None
+                # Named here only when this operator's own operands repeat.
+                raise err.named(type(self).__name__) from None
         else:
             # return as ordered group
             return tuple(streams)

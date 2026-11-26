@@ -340,9 +340,12 @@ REPEATS = {
 REFUSAL = r"same stream.*more than once.*MergeJoin"
 
 
-def _who(pod: str) -> str:
-    """What the refusal names: the operator, or the function of a function pod."""
-    return "_identity" if pod == "function_pod" else pod
+def _refusal(pod: str) -> str:
+    """The refusal: it names the operator that formed the set (a function pod's join),
+    and a function pod adds its function as context."""
+    if pod == "function_pod":
+        return rf"Join: the {REFUSAL}.*in the inputs of the function pod of '_identity'"
+    return rf"{pod}: the {REFUSAL}"
 
 
 @pytest.mark.parametrize("repeat", sorted(REPEATS))
@@ -358,13 +361,9 @@ def test_a_repeated_operand_is_refused_where_the_identity_is_formed(
     naming the operator or function and the stream."""
     first, second = REPEATS[repeat](INPUTS[inputs])
     assert first.content_hash() == second.content_hash()
-    # With data columns besides the data-tags, the operator's own check refuses the
-    # overlapping columns first, when the step is built (as before ITL-1419).
-    refusal = (
-        rf"{_who(pod)}.*{REFUSAL}"
-        if inputs == "data_tags_only" or pod == "function_pod"
-        else "overlapping"
-    )
+    # With data columns besides the data-tags, the operator's own check (a function
+    # pod's join's) refuses the overlapping columns first, when the step is built.
+    refusal = _refusal(pod) if inputs == "data_tags_only" else "overlapping"
     with pytest.raises(InputValidationError, match=refusal):
         COMMUTATIVE[pod](first, second).content_hash()
 
@@ -395,7 +394,7 @@ def test_a_repeated_operand_is_refused_when_recorded_in_either_order(
     with job:
         if not repeated_first:
             COMMUTATIVE[pod](first, label="once")
-        with pytest.raises(InputValidationError, match=rf"{_who(pod)}.*{REFUSAL}"):
+        with pytest.raises(InputValidationError, match=_refusal(pod)):
             COMMUTATIVE[pod](first, second, label="twice")
         if repeated_first:
             COMMUTATIVE[pod](first, label="once")
@@ -544,3 +543,57 @@ def test_the_saved_edge_list_is_the_one_main_wrote(
     saved = json.loads((tmp_path / "pipeline.json").read_text())
     main_edges = sorted(pipeline._hash_graph.edges())  # pyright: ignore[reportPrivateUsage]
     assert saved["edges"] == [list(edge) for edge in main_edges]
+
+
+def test_a_function_pod_over_two_inputs_computes_rows_without_an_identity() -> None:
+    """Verification of 79e86762 (P2): a function pod forms its operand set only where
+    its identity is formed. Its rows over two distinct inputs, one a raw stream with an
+    unused map column, are computed as before; asking its identity raises the existing
+    hashing error, as hashing that raw stream does."""
+    raw = _raw_with_map([1, 2])
+    other = _data_tags_only()
+    out = _identity.pod(raw, other)
+    assert out.as_table().num_rows == 3
+    with pytest.raises(ValueError) as own:
+        raw.content_hash()
+    with pytest.raises(type(own.value)) as formed:
+        out.content_hash()
+    assert str(formed.value) == str(own.value)
+
+
+def test_a_downstream_pod_keeps_the_name_of_the_pod_given_the_repeat() -> None:
+    """Verification of 79e86762 (P3): the refusal names the operator that got the
+    repeated operand; a pod downstream of it adds no name of its own in its place."""
+    d, d2 = _data_tags_only(), _data_tags_only()
+    w = _data_tags_and_data()
+    downstream = {
+        "Join over Rejoin": (
+            lambda: Join()(Rejoin()(d, d2), w.select_data_columns(["x"])),
+            "Rejoin",
+            "Join",
+        ),
+        "function pod over Rejoin": (
+            lambda: _identity.pod(Rejoin()(d, d2)),
+            "Rejoin",
+            "Join",
+        ),
+        "Rejoin over Join": (lambda: Rejoin()(Join()(d, d2)), "Join", "Rejoin"),
+    }
+    for build, given, downstream_name in downstream.values():
+        with pytest.raises(InputValidationError) as err:
+            build().content_hash()
+        message = str(err.value)
+        assert f"{given}: the same stream" in message
+        assert f"{downstream_name}: the same stream" not in message
+
+
+def test_a_function_pod_given_one_stream_twice_names_the_function_and_its_join() -> (
+    None
+):
+    """The function pod's own inputs repeat: the message names the function as context
+    and keeps the name of the join that formed the set."""
+    d, d2 = _data_tags_only(), _data_tags_only()
+    with pytest.raises(InputValidationError) as err:
+        _identity.pod(d, d2).content_hash()
+    assert "'_identity'" in str(err.value)
+    assert "Join: the same stream" in str(err.value)
