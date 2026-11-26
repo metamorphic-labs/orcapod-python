@@ -62,16 +62,15 @@ def _arrow_schema_to_column_infos(schema: pa.Schema) -> list[ColumnInfo]:
 
 
 def _with_live_logical_types(records: pa.Table) -> pa.Table:
-    """Return ``records`` with every logical type given in storage form made live.
+    """Return ``records`` with every registered logical type given in storage form live.
 
     A column in storage form carries its identifier as ``ARROW:extension:*`` field
-    metadata; the default data context's type converter wraps it as its live type, the
-    form a database reads back, so one column is compared in one form.
+    metadata. When the default data context's type converter has the type registered,
+    the column is wrapped as that live type, the form a database reads back, so one
+    column is compared in one form. Any other column, an identifier no type is
+    registered for included, is kept exactly as given: nothing is registered here.
     """
-    if not any(b"ARROW:extension:name" in (f.metadata or {}) for f in records.schema):
-        return records
     from orcapod.contexts import get_default_context
-    from orcapod.logical_types.database_hooks import register_discovered_logical_types
 
     # The context's converter implements the logical-type side of
     # ``logical_types.protocols.TypeConverterProtocol`` (as Delta's read uses it).
@@ -79,17 +78,27 @@ def _with_live_logical_types(records: pa.Table) -> pa.Table:
         "LogicalTypeConverterProtocol",
         cast(object, get_default_context().type_converter),
     )
-    register_discovered_logical_types(converter, records.schema)
-    live = converter.apply_logical_types(records)
-    # A wrapped column states its identifier in its type: not in metadata too.
-    fields = []
-    for field in live.schema:
+    known = [
+        i
+        for i, field in enumerate(records.schema)
+        if (name := (field.metadata or {}).get(b"ARROW:extension:name")) is not None
+        and converter.get_logical_type_by_arrow_extension_name(name.decode())
+        is not None
+    ]
+    if not known:
+        return records
+    wrapped = converter.apply_logical_types(records.select(known))
+    for i, position in enumerate(known):
+        field = wrapped.schema.field(i)
         metadata = dict(field.metadata or {})
         if isinstance(field.type, pa.BaseExtensionType):
+            # A wrapped column states its identifier in its type: not in metadata too.
             _ = metadata.pop(b"ARROW:extension:name", None)
             _ = metadata.pop(b"ARROW:extension:metadata", None)
-        fields.append(field.with_metadata(cast(Any, metadata)))
-    return live.cast(pa.schema(fields, metadata=cast(Any, live.schema.metadata)))
+        records = records.set_column(
+            position, field.with_metadata(cast(Any, metadata)), wrapped.column(i)
+        )
+    return records
 
 
 def _alike(parts: list[pa.Table]) -> list[pa.Table]:

@@ -432,3 +432,72 @@ def test_a_logical_type_live_or_in_storage_form_is_one_column(first_live: bool) 
         RESULT, record_id_column="__record_id"
     )
     assert got is not None and got.num_rows == 2
+
+
+# ------------------------------------- verification of PR 595 (0a4189c3)
+
+
+def _interleaved(first_rows: pa.Table, second_rows: pa.Table) -> tuple[Any, Any]:
+    """Writer 1 judges the table absent; writer 2 then creates and fills it; then
+    writer 1 goes on. Returns the two databases."""
+    first, second = store(), store()
+    db1, db2 = ConnectorArrowDatabase(first), ConnectorArrowDatabase(second)
+    store1 = first._store  # pyright: ignore[reportPrivateUsage]
+    assert store1 is not None
+    create_or_open = store1._create_or_open  # pyright: ignore[reportPrivateUsage]
+
+    def the_other_writer_first(table_name: str) -> Any:
+        db2.add_records(RESULT, second_rows, record_id_column="__record_id", flush=True)
+        return create_or_open(table_name)
+
+    store1._create_or_open = the_other_writer_first  # pyright: ignore[reportPrivateUsage]
+    db1.add_records(RESULT, first_rows, record_id_column="__record_id")
+    return db1, db2
+
+
+@pytest.mark.usefixtures("root")
+def test_a_writer_never_overwrites_another_writers_manifest() -> None:
+    """P1 (N45): a manifest is written only where there is none, or the same one."""
+    other_schema = rows(["b0"]).drop_columns(["s"])
+    db1, _ = _interleaved(rows(["a0"]), other_schema)
+    with pytest.raises(SpiralStoreTableCollisionError):
+        db1.flush()
+    got = ConnectorArrowDatabase(store()).get_all_records(
+        RESULT, record_id_column="__record_id"
+    )
+    assert got is not None and by_id(got).equals(by_id(other_schema))
+
+
+@pytest.mark.usefixtures("root")
+def test_a_writer_of_the_same_manifest_appends_beside_another() -> None:
+    db1, _ = _interleaved(rows(["a0"]), rows(["b0"]))
+    db1.flush()
+    got = ConnectorArrowDatabase(store()).get_all_records(
+        RESULT, record_id_column="__record_id"
+    )
+    assert got is not None
+    assert set(got["__record_id"].to_pylist()) == {b"a0", b"b0"}
+
+
+@pytest.mark.usefixtures("root")
+def test_a_storage_form_identifier_no_type_is_registered_for_is_kept_as_given() -> None:
+    """P2: only a registered logical type is made live; any other identifier is kept in
+    its storage form, as before."""
+    field = pa.field(
+        "u",
+        pa.large_string(),
+        metadata={
+            b"ARROW:extension:name": b"test.unregistered.kind",
+            b"ARROW:extension:metadata": b'{"version":1}',
+        },
+    )
+    table = rows(["r0"]).append_column(field, pa.array(["x"], pa.large_string()))
+    db = ConnectorArrowDatabase(store())
+    db.add_records(RESULT, table, record_id_column="__record_id", flush=True)
+    got = ConnectorArrowDatabase(store()).get_all_records(
+        RESULT, record_id_column="__record_id"
+    )
+    assert got is not None
+    assert got.schema.field("u").type == pa.large_string()
+    assert got.schema.field("u").metadata == field.metadata
+    assert got["u"].to_pylist() == ["x"]

@@ -128,6 +128,9 @@ class StoreTables:
         self._paths: dict[str, tuple[str, ...]] = {}
         self._found: dict[str, _Found] = {}
         self._records_by_id: dict[str, names.StoreTableRecord] = {}
+        # The manifest header each table had when it was last judged new (``None``:
+        # absent or without one): a first write may record a table only as it was then.
+        self._judged: dict[str, bytes | None] = {}
 
     key_column: str = codec.KEY_COLUMN
     """The key column of every store table."""
@@ -195,6 +198,7 @@ class StoreTables:
         path = self._path_of(table_name)
         table = self._open_table(table_name)
         if table is None:
+            self._judged[table_name] = None
             return None
         self._require_key(table, table_name)
         with self._service_call(f"read the metadata of {table_name}"):
@@ -208,7 +212,9 @@ class StoreTables:
                 str(exc), table=self._qualified(table_name)
             ) from exc
         if not self._holds_rows(table):
-            return None  # new: its first write records it
+            # New: its first write records it, unless what it saw here changed.
+            self._judged[table_name] = metadata.get(codec.MANIFEST_KEY)
+            return None
         try:
             manifest = None if record is None else codec.read_manifest(metadata, path)
         except codec.ManifestError as exc:
@@ -362,16 +368,51 @@ class StoreTables:
         except sp.SpiralError as exc:
             if "status 409" not in str(exc):
                 raise
-            # Made meanwhile: judged as any table found under the name.
-            if self._judge(table_name) is not None:
-                raise SpiralStoreTableCollisionError(
-                    "it was written by another writer meanwhile",
-                    table=self._qualified(table_name),
-                ) from exc
+            # Made meanwhile: the caller compares it with what it judged (N45).
         table = self._open_table(table_name)
         if table is None:
             raise KeyError(f"no store table {self._qualified(table_name)}")
         return table
+
+    def _unchanged_since_judged(self, table: _KeyedTable, seen: bytes | None) -> bool:
+        """Whether a table opened to be recorded is still as it was judged new: the same
+        manifest header (or none) and no rows."""
+        with self._service_call("read the metadata of a store table"):
+            header = table.get_metadata().get(codec.MANIFEST_KEY)
+        return header == seen and not self._holds_rows(table)
+
+    def _require_same_manifest(
+        self,
+        table: _KeyedTable,
+        table_name: str,
+        path: tuple[str, ...],
+        manifest: codec.StoreManifest,
+    ) -> None:
+        """Refuse a table another writer recorded since it was judged, unless it records
+        the same manifest (N45): another writer's record is never overwritten.
+
+        Raises:
+            SpiralStoreTableCollisionError: If it records another path or manifest, or
+                holds rows without one.
+        """
+        with self._service_call(f"read the metadata of {table_name}"):
+            metadata = table.get_metadata()
+        try:
+            record = names.read_store_table_metadata(metadata)
+            if record is not None:
+                names.require_store_table_path(record, path)
+            current = None if record is None else codec.read_manifest(metadata, path)
+        except (SpiralStoreTableCollisionError, codec.ManifestError) as exc:
+            raise SpiralStoreTableCollisionError(
+                str(exc), table=self._qualified(table_name)
+            ) from exc
+        if current is None or codec.manifest_bytes(current) != codec.manifest_bytes(
+            manifest
+        ):
+            raise SpiralStoreTableCollisionError(
+                "another writer recorded it since it was judged, with another manifest",
+                table=self._qualified(table_name),
+            )
 
     def write(self, table_name: str, records: pa.Table, skip_existing: bool) -> None:
         """Upsert rows; the first write creates the table and records its identity and
@@ -397,10 +438,14 @@ class StoreTables:
             encoded = _encoded(records)
             if encoded.num_rows == 0:
                 return  # nothing to write, so nothing is created
+            seen = self._judged.pop(table_name, None)
             table = self._create_or_open(table_name)
             self._require_key(table, table_name)
-            with self._service_call(f"record {table_name}"):
-                table.set_metadata(metadata)
+            if self._unchanged_since_judged(table, seen):
+                with self._service_call(f"record {table_name}"):
+                    table.set_metadata(metadata)
+            else:
+                self._require_same_manifest(table, table_name, path, manifest)
             with self._service_call(f"write {table_name}"):
                 _ = table.append(encoded)
             self._found[table_name] = _Found(
