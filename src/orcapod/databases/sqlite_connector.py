@@ -252,8 +252,8 @@ class SQLiteConnector:
                 raise ValueError(
                     "A saved SQLite source requires an existing database file"
                 )
-            # Encode the literal filename before adding SQLite's read-only option.
-            location = f"{Path(location).absolute().as_uri()}?mode=ro"
+            # The source has pinned the absolute filename without normalising it.
+            location = f"{Path(location).as_uri()}?mode=ro"
         self._conn: sqlite3.Connection | None = sqlite3.connect(
             location,
             uri=_read_only,

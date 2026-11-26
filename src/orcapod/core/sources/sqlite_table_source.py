@@ -50,9 +50,11 @@ def _access_path(db_path: str | os.PathLike[str]) -> str:
     SQLite's empty and in-memory database names are kept as given.
     """
     text = os.fspath(db_path)
-    if text in {"", ":memory:"}:
+    if text in {"", ":memory:"} or os.path.isabs(text):
         return text
-    return os.path.abspath(text)
+    # Resolve relative names against this directory without changing how the
+    # filesystem follows a symlink before processing a following '..'.
+    return os.path.join(os.getcwd(), text)
 
 
 class SQLiteTableSource(DBTableSource):

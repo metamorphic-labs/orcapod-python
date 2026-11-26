@@ -497,8 +497,9 @@ An existing SQLite source opens read-only. A missing SQLite database file stays
 absent and its source slot stays unbound. SQLite may create its own `-wal` and
 `-shm` working files while reading an existing WAL database.
 SQLite paths are literal filenames. A relative path is resolved in the working
-directory when the source is built or loaded. The source keeps using that file
-if the working directory changes before a refresh.
+directory when the source is built or loaded. SQLite follows symlinks as it opens
+the filename, including when a symlink is followed by `..`. The source keeps
+using that path if the working directory changes before a refresh.
 
 The file records each node's own Arrow types, so saving types
 every node from its inputs' types, as previewing an empty job does, and costs what that

@@ -4,6 +4,7 @@ import json
 import sqlite3
 import sys
 import tempfile
+from collections.abc import Sequence
 from contextlib import closing
 from inspect import signature
 from pathlib import Path
@@ -23,7 +24,7 @@ from orcapod.pipeline.run_summary import RunSummary
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.side_effects import SideEffectPod
-from orcapod.sources import CSVSource, DictSource, SQLiteTableSource
+from orcapod.sources import CSVSource, DerivedSource, DictSource, SQLiteTableSource
 
 SOURCE_ORDERS = pytest.mark.parametrize(
     "memory_first", [False, True], ids=["file-first", "memory-first"]
@@ -525,6 +526,79 @@ def test_relative_sqlite_source_pins_its_file_at_construction_and_load(
     assert restored.check_for_new_data() is False
     assert restored.as_table().column("x").to_pylist() == [99] * 3
     assert "uri" not in signature(SQLiteTableSource).parameters
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="directory symlinks need privileges"
+)
+def test_sqlite_source_keeps_dot_dot_after_a_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SQLite follows the symlink before stepping back to the parent."""
+    monkeypatch.chdir(tmp_path)
+    physical = tmp_path / "physical"
+    child = physical / "child"
+    child.mkdir(parents=True)
+    (tmp_path / "alias").symlink_to(child, target_is_directory=True)
+    write_sqlite_input(physical / "data.db", 2)
+    write_sqlite_input(tmp_path / "data.db", 99)
+    source = SQLiteTableSource(
+        "alias/../data.db",
+        "samples",
+        tag_columns=["id", "group"],
+        tag_only_columns=True,
+        source_id="file",
+    )
+    path = save_job(DeltaTableDatabase("store"), file_source=source)
+    loaded = PipelineJob.load(path)
+    assert source.as_table().column("x").to_pylist() == [2] * 3
+    assert loaded.nodes["file"].as_table().column("x").to_pylist() == [2] * 3
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+async def test_load_only_empty_derived_source_does_not_replace_full_run_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, asynchronous: bool
+) -> None:
+    """A load-only view of an absent cache is independent of full-run state."""
+    monkeypatch.chdir(tmp_path)
+    _ = Path("rows.csv").write_text("id,group,x,y\n1,a,7,3\n")
+    csv = CSVSource(
+        "rows.csv",
+        tag_columns=["id", "group"],
+        tag_only_columns=True,
+        source_id="file",
+    )
+    root = Path("cache")
+    cached = csv.cached(cache_database=DeltaTableDatabase(root))
+    derived = DerivedSource(
+        cached, tags_as_data={"group": "group_copy"}, source_id="derived"
+    )
+    job = PipelineJob(name="small", database=DeltaTableDatabase("store"))
+    with job:
+        _ = total.pod(derived, label="total")
+
+    async def run(*, stored: bool = False) -> Sequence[object]:
+        if asynchronous:
+            _ = await job.run_async(load_only=stored)
+        else:
+            _ = job.run(load_only=stored)
+        node = job.nodes["total"]
+        assert isinstance(node, FunctionJobNode)
+        return node.as_table().column("total").to_pylist()
+
+    first = await run()
+    full_times = (cached.last_modified, derived.last_modified)
+    moved = root.rename("moved")
+    temporary_view = await run(stored=True)
+    assert not root.exists()
+    after_load_only = (cached.last_modified, derived.last_modified)
+    _ = moved.rename(root)
+    recovered = await run()
+    held = await run()
+    assert [first, temporary_view, recovered, held] == [[10], [], [10], [10]]
+    assert after_load_only == full_times
 
 
 @pytest.mark.parametrize("binding", ["database", "result_database", "cache"])

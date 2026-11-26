@@ -673,6 +673,8 @@ operators run on the rows that reach them, each function node takes the stored r
 its inputs and skips the inputs that have none, no side effect is delivered and nothing is
 written to the database. A cached source checks its store on each run and reads only the
 rows already there. If it has no stored rows, it warns and supplies an empty input.
+These cache snapshots, including those read through a derived source, leave the source's
+full-run rows and modification time intact.
 The summary counts what each node loaded and skipped:
 
 ```python
