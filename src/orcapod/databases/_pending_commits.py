@@ -15,7 +15,7 @@ class RejectedWriteRow:
 
 
 class PendingCommit:
-    """The outcome of the current attempt to commit a table's pending rows."""
+    """The outcome of an attempt to commit pending results."""
 
     def __init__(self) -> None:
         self.committed = False
@@ -49,7 +49,7 @@ class PendingCommits:
         self._batches = batches
         self._ids = ids
         self._on_empty = on_empty
-        self._attempts: dict[str, PendingCommit] = {}
+        self._attempts: dict[str, dict[bytes | None, PendingCommit]] = {}
         self._guards: dict[str, dict[bytes, PendingCommit]] = {}
         self._schema_checks: dict[str, Callable[[pa.Schema], None]] = {}
 
@@ -69,18 +69,30 @@ class PendingCommits:
         """Get the check for a batch being committed."""
         return self._schema_checks.get(key)
 
-    def attempt(self, key: str) -> PendingCommit:
-        """Get the attempt shared by all rows currently pending for a table."""
-        attempt = self._attempts.get(key)
+    def attempt(self, key: str, record_id: bytes | None = None) -> PendingCommit:
+        """Get a commit dependency for a row or for a table committed as a unit."""
+        attempts = self._attempts.setdefault(key, {})
+        attempt = attempts.get(record_id)
         if attempt is None:
-            attempt = self._attempts[key] = PendingCommit()
+            attempt = attempts[record_id] = PendingCommit()
         return attempt
 
     def finish(self, key: str, *, committed: bool) -> None:
-        """Resolve an attempt before another flush can consider its dependents."""
-        attempt = self._attempts.pop(key, None)
-        if attempt is not None:
+        """Resolve all dependencies on this table's current commit attempt."""
+        for attempt in self._attempts.pop(key, {}).values():
             attempt.finish(committed=committed)
+
+    def finish_rows(
+        self, key: str, attempted: set[bytes], committed: set[bytes]
+    ) -> None:
+        """Release dependents of durable rows and withdraw those of failed rows."""
+        attempts = self._attempts.get(key)
+        if attempts is None:
+            return
+        for record_id in attempts.keys() & attempted:
+            attempts.pop(record_id).finish(committed=record_id in committed)
+        if not attempts:
+            self._attempts.pop(key)
 
     @contextmanager
     def guard(

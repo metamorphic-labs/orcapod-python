@@ -24,7 +24,7 @@ from typing import Any
 import pyarrow as pa
 
 from orcapod.databases._pending_commits import RejectedWriteRow
-from orcapod.databases._sql_writes import write_with_savepoints
+from orcapod.databases._sql_writes import RowIsolation
 from orcapod.databases.utils import is_direct_projection
 from orcapod.types import ColumnInfo
 
@@ -478,7 +478,7 @@ class SQLiteConnector:
             skip_existing: If True, skip rows whose id already exists
                 (INSERT OR IGNORE). If False, overwrite (INSERT OR REPLACE).
         """
-        self._upsert_records(table_name, records, skip_existing, isolate=False)
+        self._upsert_records(table_name, records, skip_existing)
 
     def isolate_refused_rows(
         self,
@@ -487,14 +487,21 @@ class SQLiteConnector:
         id_column: str,
         skip_existing: bool,
         error: Exception,
-    ) -> dict[int, str] | None:
+        progress: RowIsolation,
+    ) -> bool:
         if not _is_row_refusal(error):
-            return None
-        return self._upsert_records(table_name, records, skip_existing, isolate=True)
+            return False
+        self._upsert_records(table_name, records, skip_existing, progress=progress)
+        return True
 
     def _upsert_records(
-        self, table_name: str, records: pa.Table, skip_existing: bool, *, isolate: bool
-    ) -> dict[int, str]:
+        self,
+        table_name: str,
+        records: pa.Table,
+        skip_existing: bool,
+        *,
+        progress: RowIsolation | None = None,
+    ) -> None:
         with self._lock:
             conn = self._require_open()
             self._validate_table_name(table_name)
@@ -510,25 +517,36 @@ class SQLiteConnector:
                 for row_index, row in enumerate(records.to_pylist()):
                     yield tuple(row[c] for c in cols)
 
+            if progress is not None:
+                # RAISE(ROLLBACK) ends the transaction, and a deferred foreign key
+                # is checked only at commit. Each row therefore owns a transaction.
+                for values in rows():
+                    conn.execute("BEGIN")
+                    try:
+                        conn.execute(sql, values)
+                        conn.commit()
+                    except BaseException as error:
+                        if conn.in_transaction:
+                            conn.rollback()
+                        if not isinstance(error, Exception) or not _is_row_refusal(
+                            error
+                        ):
+                            raise
+                        progress.refused[row_index] = str(error)
+                    progress.settled.add(row_index)
+                return
+
             conn.execute("BEGIN")
             try:
-                if isolate:
-                    refused = write_with_savepoints(
-                        conn.execute, sql, rows(), _is_row_refusal
-                    )
-                else:
-                    conn.executemany(sql, rows())
-                    refused = {}
+                conn.executemany(sql, rows())
                 row_index = -1  # Commit-time failures have no individual row.
                 conn.commit()
-                return refused
             except BaseException as error:
                 conn.rollback()
                 # sqlite3 steps each row before asking the iterator for the next one.
                 # These two constraints diagnose the row being stepped.
                 if (
-                    not isolate
-                    and isinstance(error, sqlite3.IntegrityError)
+                    isinstance(error, sqlite3.IntegrityError)
                     and row_index >= 0
                     and error.sqlite_errorcode
                     in (

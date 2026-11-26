@@ -32,7 +32,7 @@ from orcapod.databases._pending_commits import (
     PendingCommits,
     RejectedWriteRow,
 )
-from orcapod.databases._sql_writes import IsolatesRefusedRows
+from orcapod.databases._sql_writes import IsolatesRefusedRows, RowIsolation
 from orcapod.databases.utils import (
     coerce_record_id,
     declared_null_path,
@@ -761,7 +761,7 @@ class ConnectorArrowDatabase:
         """Return a commit dependency for a buffered result, or verify it is stored."""
         key = self._get_record_key(record_path)
         if record_id in self._pending_record_ids.get(key, ()):
-            return self._pending_commits.attempt(key)
+            return self._pending_commits.attempt(key, record_id)
         if self.get_record_by_id(record_path, record_id) is None:
             raise ValueError("The referenced result is neither stored nor pending.")
         return None
@@ -824,6 +824,7 @@ class ConnectorArrowDatabase:
         records: pa.Table,
         skip_existing: bool,
         retry_ids: set[bytes],
+        committed_ids: set[bytes],
     ) -> None:
         """Write the batch or isolate an unlocated data refusal once."""
         write = self._connector.upsert_records
@@ -833,42 +834,50 @@ class ConnectorArrowDatabase:
         except Exception as error:
             if isinstance(error, RejectedWriteRow):
                 raise
-            refused: dict[int, str] | None = None
-            if isinstance(self._connector, IsolatesRefusedRows):
-                refused = self._connector.isolate_refused_rows(
-                    table_name, records, id_column, skip_existing, error
+            progress = RowIsolation()
+            try:
+                isolated = isinstance(
+                    self._connector, IsolatesRefusedRows
+                ) and self._connector.isolate_refused_rows(
+                    table_name, records, id_column, skip_existing, error, progress
                 )
-            if refused is not None:
-                retry_ids.clear()
-            elif isinstance(error, (InputValidationError, UnsupportedValueError)):
-                # Connectors without SQL savepoints can isolate a known refusal
-                # with their existing atomic upsert, once per row.
-                refused = {}
-                for index, key in enumerate(records[id_column].to_pylist()):
-                    try:
-                        write(
-                            table_name,
-                            records.slice(index, 1),
-                            id_column,
-                            skip_existing=skip_existing,
-                        )
-                    except (InputValidationError, UnsupportedValueError) as refused_row:
-                        refused[index] = str(refused_row)
-                    except BaseException as interrupted:
-                        if refused:
-                            interrupted.add_note(
-                                self._refused_rows_message(table_name, records, refused)
-                            )
+                if not isolated:
+                    if not isinstance(
+                        error, (InputValidationError, UnsupportedValueError)
+                    ):
                         raise
-                    retry_ids.remove(cast(bytes, key))
-            else:
+                    # Use one atomic upsert per row for connectors without their own
+                    # refusal isolation.
+                    for index in range(records.num_rows):
+                        try:
+                            write(
+                                table_name,
+                                records.slice(index, 1),
+                                id_column,
+                                skip_existing=skip_existing,
+                            )
+                        except (InputValidationError, UnsupportedValueError) as refused:
+                            progress.refused[index] = str(refused)
+                        progress.settled.add(index)
+            except BaseException as interrupted:
+                if progress.refused:
+                    interrupted.add_note(
+                        self._refused_rows_message(
+                            table_name, records, progress.refused
+                        )
+                    )
                 raise
-            if refused:
+            finally:
+                keys = records[id_column]
+                for index in progress.settled:
+                    key = cast(bytes, keys[index].as_py())
+                    retry_ids.remove(key)
+                    if index not in progress.refused:
+                        committed_ids.add(key)
+            if progress.refused:
                 raise InputValidationError(
-                    self._refused_rows_message(table_name, records, refused)
+                    self._refused_rows_message(table_name, records, progress.refused)
                 ) from error
-        else:
-            retry_ids.clear()
 
     def _refused_rows_message(
         self, table_name: str, records: pa.Table, refused: dict[int, str]
@@ -886,6 +895,7 @@ class ConnectorArrowDatabase:
             return
         batch, ids = ready
         retry_ids = ids.copy()
+        committed_ids: set[bytes] = set()
         pending = batch
         record_path = tuple(record_key.split("/"))
         table_name = self._path_to_table_name(record_path)
@@ -956,7 +966,9 @@ class ConnectorArrowDatabase:
             self._connector.create_table_if_not_exists(
                 table_name, columns, pk_column=self.RECORD_ID_COLUMN
             )
-            self._write_pending_rows(table_name, pending, skip_existing, retry_ids)
+            self._write_pending_rows(
+                table_name, pending, skip_existing, retry_ids, committed_ids
+            )
         except BaseException as error:
             if isinstance(error, RejectedWriteRow) and error.row_index is not None:
                 index = error.row_index
@@ -972,11 +984,11 @@ class ConnectorArrowDatabase:
                         )
                     )
                 self._pending_commits.restore(record_key, batch, retry_ids)
-            self._pending_commits.finish(record_key, committed=False)
+            self._pending_commits.finish_rows(record_key, ids, committed_ids)
             self._pending_commits.forget(record_key, ids - retry_ids)
             raise
         else:
-            self._pending_commits.finish(record_key, committed=True)
+            self._pending_commits.finish_rows(record_key, ids, ids)
             self._pending_commits.forget(record_key, ids)
         finally:
             if record_key not in self._pending_batches:

@@ -39,6 +39,7 @@ from orcapod.errors import (
     InputValidationError,
     NullInNonNullableColumnError,
     UnstorableColumnError,
+    UnsupportedValueError,
 )
 from tests.test_databases.test_connector_arrow_database import MockDBConnector
 from tests.test_databases.type_matrix import open_database
@@ -1288,16 +1289,27 @@ def test_connector_writes_to_the_same_key_follow_flush_order(
 
 @pytest.mark.parametrize("bad_first", [False, True])
 @pytest.mark.parametrize("on_event_loop", [False, True])
-def test_sqlite_trigger_refusal_commits_valid_rows_and_names_rejected_keys(
-    tmp_path: Path, bad_first: bool, on_event_loop: bool
+@pytest.mark.parametrize("refusal", ["ABORT", "ROLLBACK", "deferred foreign key"])
+def test_sqlite_refusal_isolation_commits_valid_rows_and_names_rejected_keys(
+    tmp_path: Path, bad_first: bool, on_event_loop: bool, refusal: str
 ) -> None:
     db_file = str(tmp_path / "store.db")
     with closing(sqlite3.connect(db_file)) as sql:
-        sql.execute('CREATE TABLE t ("__record_id" BLOB PRIMARY KEY, v INTEGER)')
-        sql.execute(
-            """CREATE TRIGGER positive BEFORE INSERT ON t WHEN NEW.v < 0
-               BEGIN SELECT RAISE(ABORT, 'must be positive'); END"""
-        )
+        if refusal == "deferred foreign key":
+            sql.executescript(
+                """
+                CREATE TABLE parents (v INTEGER PRIMARY KEY);
+                INSERT INTO parents VALUES (1), (2), (3);
+                CREATE TABLE t ("__record_id" BLOB PRIMARY KEY,
+                    v INTEGER REFERENCES parents(v) DEFERRABLE INITIALLY DEFERRED);
+                """
+            )
+        else:
+            sql.execute('CREATE TABLE t ("__record_id" BLOB PRIMARY KEY, v INTEGER)')
+            sql.execute(
+                f"""CREATE TRIGGER positive BEFORE INSERT ON t WHEN NEW.v < 0
+                    BEGIN SELECT RAISE({refusal}, 'must be positive'); END"""
+            )
     with (
         SQLiteConnector(db_file) as writer_connector,
         SQLiteConnector(db_file) as reader_connector,
@@ -1306,14 +1318,16 @@ def test_sqlite_trigger_refusal_commits_valid_rows_and_names_rejected_keys(
         reader = ConnectorArrowDatabase(reader_connector)
 
         def check() -> None:
+            message = "must be positive"
+            if refusal == "deferred foreign key":
+                list(writer_connector.iter_batches("PRAGMA foreign_keys=ON"))
+                message = "FOREIGN KEY constraint failed"
             _add(reader, _nullable_values([(b"seed", 1)]), flush=True)
             left = _nullable_values([(b"bad-1", -1), (b"good-1", 2)])
             right = _nullable_values([(b"good-2", 3), (b"bad-2", -2)]).select(["v", ID])
             for batch in (left, right) if bad_first else (right, left):
                 _add(writer, batch)
-            with pytest.raises(
-                InputValidationError, match="must be positive"
-            ) as refused:
+            with pytest.raises(InputValidationError, match=message) as refused:
                 writer.flush()
             expected = [
                 {ID: b"good-1", "v": 2},
@@ -1332,6 +1346,83 @@ def test_sqlite_trigger_refusal_commits_valid_rows_and_names_rejected_keys(
             asyncio.run(on_loop())
         else:
             check()
+
+
+@pytest.mark.parametrize("bad_first", [False, True])
+def test_partial_result_commit_preserves_records_guarded_by_committed_results(
+    tmp_path: Path, bad_first: bool
+) -> None:
+    db_file = str(tmp_path / "store.db")
+    with closing(sqlite3.connect(db_file)) as sql:
+        sql.executescript(
+            """
+            CREATE TABLE t ("__record_id" BLOB PRIMARY KEY, v INTEGER);
+            CREATE TRIGGER positive BEFORE INSERT ON t WHEN NEW.v < 0
+                BEGIN SELECT RAISE(ABORT, 'must be positive'); END;
+            """
+        )
+    with (
+        SQLiteConnector(db_file) as result_connector,
+        SQLiteConnector(db_file) as record_connector,
+    ):
+        results = ConnectorArrowDatabase(result_connector)
+        records = ConnectorArrowDatabase(record_connector)
+        dependent_path = ("dependents",)
+        accepted = [(b"good-1", 1), (b"good-2", 2)]
+        refused = [(b"bad-1", -1), (b"bad-2", -2)]
+        for batch in (refused, accepted) if bad_first else (accepted, refused):
+            _add(results, _nullable_values(batch))
+            for result_id, value in batch:
+                dependency = results.pending_result(PATH, result_id)
+                assert dependency is not None
+                record_id = b"record-" + result_id
+                with records.guard_record(dependent_path, record_id, dependency):
+                    records.add_records(
+                        dependent_path,
+                        _nullable_values([(record_id, value)]),
+                        record_id_column=ID,
+                    )
+        records.flush()
+        assert results.get_all_records(dependent_path, record_id_column=ID) is None
+
+        with pytest.raises(InputValidationError, match="must be positive"):
+            results.flush_result_batch(PATH, publish_records=True)
+        results.fail_pending_result(PATH)
+        assert _read_values(results).to_pylist() == [
+            {ID: key, "v": value} for key, value in accepted
+        ]
+        records.flush()
+        assert _read_values(results, dependent_path).to_pylist() == [
+            {ID: b"record-" + key, "v": value} for key, value in accepted
+        ]
+
+
+@pytest.mark.parametrize("bad_first", [False, True])
+def test_postgresql_refuses_nul_text_at_enqueue(
+    tmp_path: Path, bad_first: bool
+) -> None:
+    good = pa.table(
+        {
+            ID: [b"first", b"second"],
+            "description": ["a", None],
+            "payload": [b"\x00", b"data"],
+        }
+    )
+    bad = pa.table(
+        {
+            ID: [b"bad-1", b"bad-2"],
+            "description": ["a\x00b", "other"],
+            "payload": [b"data", b"\x00"],
+        }
+    ).select(["payload", ID, "description"])
+    with open_database("PostgreSQL", tmp_path) as database:
+        for batch in (bad, good) if bad_first else (good, bad):
+            if batch is bad:
+                with pytest.raises(UnsupportedValueError, match="'description'.*NUL"):
+                    _add(database, batch)
+            else:
+                _add(database, batch)
+        assert _read_values(database).to_pylist() == good.to_pylist()
 
 
 def _int_list(values: list[int | None], *, declared: bool) -> Any:

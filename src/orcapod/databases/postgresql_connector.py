@@ -23,10 +23,11 @@ from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
+import pyarrow.compute as pc
 
-from orcapod.databases._sql_writes import write_with_savepoints
+from orcapod.databases._sql_writes import RowIsolation, write_with_savepoints
 from orcapod.databases.utils import is_direct_projection
-from orcapod.errors import UnstorableTableNameError
+from orcapod.errors import UnstorableTableNameError, UnsupportedValueError
 from orcapod.types import ColumnInfo
 from orcapod.utils.lazy_module import LazyModule
 
@@ -687,12 +688,16 @@ class PostgreSQLConnector:
         id_column: str,
         skip_existing: bool,
         error: Exception,
-    ) -> dict[int, str] | None:
+        progress: RowIsolation,
+    ) -> bool:
         if not _is_row_refusal(error):
-            return None
-        return self._upsert_records(
+            return False
+        refused = self._upsert_records(
             table_name, records, id_column, skip_existing, isolate=True
         )
+        progress.refused.update(refused)
+        progress.settled.update(range(records.num_rows))
+        return True
 
     def _upsert_records(
         self,
@@ -817,7 +822,7 @@ class PostgreSQLConnector:
             )
 
     def validate_records(self, records: pa.Table) -> None:
-        """Reject tables carrying any Arrow field or schema metadata.
+        """Reject Arrow metadata and text containing a NUL character.
 
         ``PostgreSQLConnector`` does not preserve Arrow field or schema metadata
         across read/write cycles — any metadata present would be silently lost.
@@ -830,7 +835,8 @@ class PostgreSQLConnector:
 
         Raises:
             ValueError: If any field (or any nested child field) carries
-                metadata, or if the schema itself carries metadata.
+                metadata, if the schema itself carries metadata, or if a text
+                value contains a NUL character.
         """
         problem_fields = [f.name for f in records.schema if _field_has_metadata(f)]
         has_schema_meta = bool(records.schema.metadata)
@@ -845,6 +851,15 @@ class PostgreSQLConnector:
                 f"PostgreSQLConnector does not preserve Arrow metadata "
                 f"({', '.join(parts)})."
             )
+        for field, column in zip(records.schema, records.columns, strict=True):
+            if pa.types.is_string_view(field.type):
+                column = column.cast(pa.large_string())
+            if pa.types.is_string(column.type) or pa.types.is_large_string(column.type):
+                if pc.any(pc.match_substring(column, pattern="\x00")).as_py():
+                    raise UnsupportedValueError(
+                        f"Column {field.name!r} contains a NUL character (U+0000), "
+                        "which PostgreSQL text cannot store."
+                    )
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
 

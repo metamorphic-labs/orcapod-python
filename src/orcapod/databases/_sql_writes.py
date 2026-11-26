@@ -3,9 +3,18 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
 import pyarrow as pa
+
+
+@dataclass
+class RowIsolation:
+    """Positions that became durable or were definitively refused."""
+
+    settled: set[int] = field(default_factory=set)
+    refused: dict[int, str] = field(default_factory=dict)
 
 
 @runtime_checkable
@@ -17,11 +26,12 @@ class IsolatesRefusedRows(Protocol):
         id_column: str,
         skip_existing: bool,
         error: Exception,
-    ) -> dict[int, str] | None:
-        """After a refusal, commit other rows and return the rejected positions.
+        progress: RowIsolation,
+    ) -> bool:
+        """After a refusal, commit other rows and record each settled position.
 
-        Return None for an error that is not a data refusal. A failure in isolation
-        itself must roll back all writes in the isolation transaction.
+        Return False for an error that is not a data refusal. If isolation is
+        interrupted, retain any positions already settled.
         """
         ...
 

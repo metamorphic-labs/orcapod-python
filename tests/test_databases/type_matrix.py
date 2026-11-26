@@ -1136,10 +1136,13 @@ if another handle has written that key in the meantime. Use
 `skip_duplicates=True` to keep an already stored key.
 
 SQLite and PostgreSQL roll back a failed bulk upsert. If the backend refuses the
-data without identifying the row, the flush tries each row once in order, using a
-savepoint per row. It commits valid rows and reports each dropped row's key and the
-backend's reason. Other tables can still commit. A transaction-wide failure leaves
-the uncommitted rows queued for retry.
+data without identifying the row, the flush tries each row once in order. SQLite
+uses a transaction per row so that a rollback trigger or a deferred foreign key can
+reject that row without losing earlier commits. PostgreSQL uses a savepoint per
+row. The flush reports each dropped row's key and the backend's reason. Other
+tables can still commit, and records guarded by committed results remain eligible
+to write. An interruption leaves unsettled rows queued for retry. PostgreSQL
+refuses text containing NUL at enqueue.
 """
 
 
