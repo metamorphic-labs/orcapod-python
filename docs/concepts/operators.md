@@ -770,10 +770,35 @@ The conditions are:
 | two columns | `col(a) < col(b)` and the other comparisons | two columns of one Arrow type |
 | combined | several arguments and keywords (all hold), `a & b`, `a \| b`, `~a` | |
 
-Write `&`, `|` and `~`, never `and`, `or` and `not`, and put each comparison in parentheses
-when you combine it, as in Polars. Python cannot refuse `and` between two conditions:
-`(col("t") > 1.0) and (col("t") < 2.0)` silently keeps only the second. A list given as a keyword value is
-refused: membership is `col(c).is_in([...])`.
+A condition has no Python truth value. Testing it with `if`, `not` or `bool()` raises
+`TypeError`, as does a chained comparison such as `1.0 <= col("t") <= 2.0` or using a
+condition as the left operand of `and` or `or`. Expressions such as `True and c` and
+`False or c` return `c` directly. To combine conditions, use `&`, `|` and `~` with each
+comparison in parentheses, or pass separate conditions to `filter()` to require all of
+them. Use `col("t").between(1.0, 2.0)` for a range that includes both ends.
+
+```python
+try:
+    recorded.filter(1.0 <= col("t") <= 2.0)
+except TypeError as error:
+    print(str(error).split(".")[0])
+# Condition has no truth value
+
+bounds = (col("t") >= 1.0) & (col("t") <= 2.0)
+assert kept(recorded.filter(bounds)) == kept(recorded.filter(col("t").between(1.0, 2.0)))
+assert kept(recorded.filter(bounds)) == kept(recorded.filter(col("t") >= 1.0, col("t") <= 2.0))
+print(kept(recorded.filter(bounds)))
+# [('s1', 7), ('s1', 9)]
+
+either_session = (col("session") == "s1") | (col("session") == "s2")
+print(kept(recorded.filter(either_session & ~(col("unit") == 9))))
+# [('s1', 3), ('s1', 7), ('s2', 3), ('s2', 7)]
+
+assert (True and bounds) is bounds
+assert (False or bounds) is bounds
+```
+
+Use `col(c).is_in([...])` to test membership in a list.
 
 A condition that no row can satisfy is kept as written and keeps zero rows: Orcapod does not
 try to tell a contradiction (there is no general way). Naming one column twice in one call
