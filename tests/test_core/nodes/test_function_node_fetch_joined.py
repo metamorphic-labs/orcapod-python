@@ -77,7 +77,7 @@ class TestFetchJoinedRecords:
         assert node_with_empty_db._fetch_joined_records() is None
 
     def test_returned_table_includes_pipeline_entry_id_column(self, executed_node):
-        """The returned table always contains __pipeline_entry_id."""
+        """The returned table always contains __pipeline_record_id."""
         result = executed_node._fetch_joined_records()
         assert result is not None
         assert RECORD_ID_COL in result.table.column_names
