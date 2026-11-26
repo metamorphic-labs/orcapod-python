@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 import re
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -41,6 +41,7 @@ from orcapod.protocols.db_connector_protocol import DBConnectorProtocol
 from orcapod.types import ColumnInfo
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.databases import ConnectorArrowDatabase
+from orcapod.databases.sqlite_connector import SQLiteConnector
 
 
 # ---------------------------------------------------------------------------
@@ -879,6 +880,91 @@ class TestFlushBehaviour:
         )
         assert stored is not None
         assert stored.to_pylist() == [{"id": b"old", "v": 99}]
+
+    @staticmethod
+    def _stored_values(
+        connector: DBConnectorProtocol, path: tuple[str, ...]
+    ) -> dict[bytes, int]:
+        rows = ConnectorArrowDatabase(connector).get_all_records(
+            path, record_id_column="id"
+        )
+        assert rows is not None
+        return {row["id"]: row["v"] for row in rows.to_pylist()}
+
+    @pytest.mark.parametrize("skip_first", [False, True])
+    def test_a_skip_batch_does_not_change_the_policy_of_an_ordinary_write(
+        self, skip_first: bool
+    ) -> None:
+        """Batches of different write policies are never written as one: the
+        ordinary overwrite of a stored key is not dropped (ITL-1381, round 5)."""
+        with SQLiteConnector(":memory:") as connector:
+            db = ConnectorArrowDatabase(connector)
+            db.add_record(self.PATH, b"existing", make_table(v=[1]), flush=True)
+            db.add_record(self.PATH, b"kept", make_table(v=[5]), flush=True)
+            writes = [
+                lambda: db.add_record(self.PATH, b"existing", make_table(v=[2])),
+                lambda: db.add_records(
+                    self.PATH,
+                    pa.table(
+                        {
+                            "id": pa.array([b"kept", b"new"], type=pa.large_binary()),
+                            "v": pa.array([6, 3], type=pa.int64()),
+                        }
+                    ),
+                    record_id_column="id",
+                    skip_duplicates=True,
+                ),
+            ]
+            for write in reversed(writes) if skip_first else writes:
+                write()
+            db.flush()
+            assert self._stored_values(connector, self.PATH) == {
+                b"existing": 2,
+                b"kept": 5,
+                b"new": 3,
+            }
+
+    def test_a_flush_interrupted_after_its_commit_is_never_replayed(self) -> None:
+        """A BaseException during a flush removes the attempted batch as a
+        failure does, names its keys, and propagates (ITL-1381, round 5)."""
+
+        class InterruptedAfterCommit(SQLiteConnector):
+            def __init__(self) -> None:
+                super().__init__(":memory:")
+                self.written: list[int] = []
+                self.interrupt = True
+
+            def upsert_records(
+                self, table_name, records, id_column, skip_existing=False
+            ):
+                super().upsert_records(
+                    table_name, records, id_column, skip_existing=skip_existing
+                )
+                self.written.extend(cast(list[int], records["v"].to_pylist()))
+                if self.interrupt:
+                    self.interrupt = False
+                    raise KeyboardInterrupt
+
+        connector = InterruptedAfterCommit()
+        try:
+            db = ConnectorArrowDatabase(connector)
+            db.add_record(self.PATH, b"key", make_table(v=[1]))
+            with pytest.raises(KeyboardInterrupt) as raised:
+                db.flush()
+            assert any(
+                "flush/v1" in note and repr(b"key") in note
+                for note in getattr(raised.value, "__notes__", [])
+            )
+            assert db.get_all_records(self.PATH) is not None
+            assert db._get_record_key(self.PATH) not in db._pending_batches
+            ConnectorArrowDatabase(connector).add_record(
+                self.PATH, b"key", make_table(v=[77]), flush=True
+            )
+            db.flush()
+            assert connector.written == [1, 77]
+            assert self._stored_values(connector, self.PATH) == {b"key": 77}
+        finally:
+            connector.close()
 
     def test_second_flush_on_existing_table_upserts(self, db):
         """Flushing the same path twice should not duplicate rows."""

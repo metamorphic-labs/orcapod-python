@@ -132,7 +132,7 @@ class ConnectorArrowDatabase:
         _path_prefix: tuple[str, ...] = (),
         _shared_pending_batches: dict[str, pa.Table] | None = None,
         _shared_pending_record_ids: dict[str, set[bytes]] | None = None,
-        _shared_pending_skip_existing: dict[str, bool] | None = None,
+        _shared_pending_skip_existing: dict[str, set[bytes]] | None = None,
         _root: ConnectorArrowDatabase | None = None,
         _scoped_path: tuple[str, ...] = (),
     ) -> None:
@@ -152,10 +152,12 @@ class ConnectorArrowDatabase:
         # The schema each stored table was read with, for the append check
         # (``_refuse_changed_columns``).
         self._stored_schemas: dict[str, pa.Schema] = {}
-        # Per-batch flag: True when the batch was added with skip_duplicates=True,
-        # so flush() can pass skip_existing=True to the connector and let it use
-        # native INSERT-OR-IGNORE semantics rather than Python-side prefiltering.
-        self._pending_skip_existing: dict[str, bool] = (
+        # The ids of the queued rows added with skip_duplicates=True, per table:
+        # flush() writes them with skip_existing=True (the connector's
+        # ``ON CONFLICT (<id>) DO NOTHING``) and the other queued rows of the
+        # table as a separate batch, so one write policy never leaks to rows
+        # queued with the other (ITL-1381).
+        self._pending_skip_existing: dict[str, set[bytes]] = (
             _shared_pending_skip_existing
             if _shared_pending_skip_existing is not None
             else {}
@@ -521,8 +523,8 @@ class ConnectorArrowDatabase:
         if skip_duplicates:
             # Only filter records that conflict with the in-flight pending batch.
             # Committed duplicates are handled at flush time via
-            # upsert_records(skip_existing=True), which lets the connector use
-            # native INSERT-OR-IGNORE semantics — no full-table read needed here.
+            # upsert_records(skip_existing=True), which lets the connector skip
+            # stored ids natively — no full-table read needed here.
             pending_conflicts = input_ids & self._pending_record_ids[record_key]
             if pending_conflicts:
                 mask = pc.invert(
@@ -562,12 +564,15 @@ class ConnectorArrowDatabase:
             self._pending_batches[record_key] = pa.concat_tables(
                 _alike([existing_pending, records])
             )
+        queued_ids = cast(list[bytes], records[self.RECORD_ID_COLUMN].to_pylist())
+        # Each row keeps the write policy it was queued with: flush() writes the
+        # rows of each policy as their own batch (ITL-1381).
+        skipped = self._pending_skip_existing.setdefault(record_key, set())
         if skip_duplicates:
-            # Mark this pending slot so flush() uses skip_existing=True.
-            self._pending_skip_existing[record_key] = True
-        self._pending_record_ids[record_key].update(
-            cast(list[bytes], records[self.RECORD_ID_COLUMN].to_pylist())
-        )
+            skipped.update(queued_ids)
+        else:
+            skipped.difference_update(queued_ids)
+        self._pending_record_ids[record_key].update(queued_ids)
 
         if flush:
             self.flush()
@@ -815,16 +820,91 @@ class ConnectorArrowDatabase:
         self._flush_by_key(self._get_record_key(record_path))
 
     def _flush_by_key(self, record_key: str) -> None:
-        """Commit the ready records at a key shared by all views."""
+        """Commit the ready records at a key shared by all views.
+
+        Rows queued with ``skip_duplicates`` and rows queued without it are written
+        as two batches, each with its own write policy, never as one (ITL-1381).
+        Each batch commits or leaves the queue on its own; the first failure is
+        raised after both were tried.
+        """
         ready = self._pending_commits.take_ready(record_key)
         if ready is None:
             return
         batch, ids = ready
-        pending = batch
+        skipped = self._pending_skip_existing.get(record_key, set())
+        groups = [
+            (group_ids, skip_existing)
+            for group_ids, skip_existing in (
+                (ids - skipped, False),
+                (ids & skipped, True),
+            )
+            if group_ids
+        ]
+        first_error: Exception | None = None
+        try:
+            for index, (group_ids, skip_existing) in enumerate(groups):
+                group = (
+                    batch
+                    if len(groups) == 1
+                    else batch.filter(
+                        pc.is_in(
+                            batch[self.RECORD_ID_COLUMN],
+                            pa.array(
+                                list(group_ids), type=batch[self.RECORD_ID_COLUMN].type
+                            ),
+                        )
+                    )
+                )
+                try:
+                    self._commit_batch(record_key, group, group_ids, skip_existing)
+                except Exception as error:
+                    if first_error is None:
+                        first_error = error
+                    else:
+                        first_error.add_note(f"The second batch also failed: {error}")
+                except BaseException:
+                    # Batches not yet tried were never sent: they stay queued.
+                    for untried_ids, _ in groups[index + 1 :]:
+                        self._pending_commits.restore(
+                            record_key,
+                            batch.filter(
+                                pc.is_in(
+                                    batch[self.RECORD_ID_COLUMN],
+                                    pa.array(
+                                        list(untried_ids),
+                                        type=batch[self.RECORD_ID_COLUMN].type,
+                                    ),
+                                )
+                            ),
+                            untried_ids,
+                        )
+                    raise
+        finally:
+            remaining = self._pending_record_ids.get(record_key)
+            if remaining:
+                skipped.intersection_update(remaining)
+            else:
+                self._pending_skip_existing.pop(record_key, None)
+        if first_error is not None:
+            raise first_error
+
+    def _commit_batch(
+        self,
+        record_key: str,
+        pending: pa.Table,
+        ids: set[bytes],
+        skip_existing: bool,
+    ) -> None:
+        """Write one batch taken from the queue with one write policy.
+
+        The batch leaves the queue whatever happens: committed, or refused with
+        its keys, and the records guarded by them, removed and named (N32). A
+        ``BaseException`` (``KeyboardInterrupt``) is treated as a refusal, since
+        the write may have committed: the batch is never written again, the
+        removed keys are named in a note, and the exception propagates.
+        """
         record_path = tuple(record_key.split("/"))
         table_name = self._path_to_table_name(record_path)
-        skip_existing = self._pending_skip_existing.get(record_key, False)
-
         try:
             self._require_table_name(table_name)
             columns = _arrow_schema_to_column_infos(pending.schema)
@@ -883,24 +963,37 @@ class ConnectorArrowDatabase:
                 skip_existing=skip_existing,
             )
         except Exception as error:
-            discarded = {record_key: ids.copy()}
-            self._pending_commits.finish_rows(
-                record_key, ids, committed=False, discarded=discarded
-            )
-            self._pending_commits.forget(record_key, ids)
+            discarded = self._discard_attempted(record_key, ids)
             raise OrcapodDatabaseWriteError(
                 record_path, flush=True, table_flush=True, discarded_records=discarded
             ) from error
-        except BaseException:
-            self._pending_commits.restore(record_key, batch, ids)
-            self._pending_commits.finish_rows(record_key, ids, committed=False)
+        except BaseException as error:
+            discarded = self._discard_attempted(record_key, ids)
+            error.add_note(
+                f"Interrupted while committing pending writes to table {record_key!r}: "
+                "the write may have committed, so it is not tried again."
+                + "".join(
+                    f"\nRemoved queued records from table {table!r} with keys "
+                    + ", ".join(map(repr, sorted(keys)))
+                    for table, keys in discarded.items()
+                )
+            )
             raise
         else:
             self._pending_commits.finish_rows(record_key, ids, committed=True)
             self._pending_commits.forget(record_key, ids)
-        finally:
-            if record_key not in self._pending_batches:
-                self._pending_skip_existing.pop(record_key, None)
+
+    def _discard_attempted(
+        self, record_key: str, ids: set[bytes]
+    ) -> dict[str, set[bytes]]:
+        """Withdraw an attempted batch's keys and the records they guard; return
+        every removed key, by table."""
+        discarded = {record_key: ids.copy()}
+        self._pending_commits.finish_rows(
+            record_key, ids, committed=False, discarded=discarded
+        )
+        self._pending_commits.forget(record_key, ids)
+        return discarded
 
     # ── Read methods ──────────────────────────────────────────────────────────
 
