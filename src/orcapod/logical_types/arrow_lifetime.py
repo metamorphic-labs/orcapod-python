@@ -18,7 +18,7 @@ def keep_for_process(extension_type: pa.ExtensionType) -> pa.ExtensionType:
     stops the worker inside the destructor: the process aborts on Linux (Python 3.11 and
     3.12) or hangs at exit. A type that is never destroyed cannot do either.
 
-    The reference added here is never given back, on purpose: one held in a module or a
+    The reference added here is never given back for a type in use, on purpose: one held in a module or a
     class would be given back during finalization, which is when it is needed. Use it for
     an instance shared by every use of the type, never for one made per read.
 
@@ -36,9 +36,9 @@ class KeptInstances(type):
     """Metaclass of an extension class whose instances live until the process ends.
 
     Calling the class returns a kept instance: the first one made of that concrete
-    class with that Arrow extension name, storage type and serialized metadata
-    (``__arrow_ext_serialize__()``). Every instance a call returns is kept with
-    ``keep_for_process``.
+    class with that Arrow extension name, storage type (with the metadata of every
+    nested field) and serialized metadata (``__arrow_ext_serialize__()``). Every
+    instance a call returns is kept with ``keep_for_process``.
 
     That key is what Arrow tells types apart by when it reads a column: two instances
     Arrow cannot tell apart on read are one type, and anything Arrow can tell apart is
@@ -63,7 +63,12 @@ class KeptInstances(type):
     constructor runs, so a constructor may build other types, on its own thread or on
     another one it waits for. An instance that is not the first of its key is never
     returned: the thread that made it discards it, holding the GIL, before the call
-    returns.
+    returns. An instance is kept for the process before it is stored, so no caller is
+    ever handed one that is not yet kept.
+
+    The key is read from Arrow's own description of the instance (``_arrow_identity``),
+    which holds the metadata Arrow serialized when the type was built: the serializer
+    runs once for each construction.
     """
 
     _kept: dict[tuple[Any, ...], pa.ExtensionType] = {}
@@ -72,14 +77,22 @@ class KeptInstances(type):
         """Return the kept instance of ``cls`` that these arguments describe."""
         # Constructed with no lock held: user code runs here.
         made = super().__call__(*args, **kwargs)
-        key = (
-            cls,
-            made.extension_name,
-            made.storage_type,
-            made.__arrow_ext_serialize__(),
-        )
+        key = (cls, _arrow_identity(made))
+        # Kept before it is stored: whoever reads it from the store gets a kept type.
+        keep_for_process(made)
         # ``setdefault`` is atomic: every caller gets the first instance stored.
         kept = KeptInstances._kept.setdefault(key, made)
-        if kept is made:
-            keep_for_process(made)
+        if kept is not made:
+            # Never stored and never returned: give back the reference just added.
+            ctypes.pythonapi.Py_DecRef(ctypes.py_object(made))
         return kept
+
+
+def _arrow_identity(extension_type: pa.ExtensionType) -> bytes:
+    """Everything Arrow tells ``extension_type`` apart by when it reads a column.
+
+    The serialized schema of one field of the type: its extension name, its serialized
+    metadata as Arrow holds it, and its storage type with the metadata of every nested
+    field, which the equality of two ``pa.DataType`` objects does not compare.
+    """
+    return pa.schema([pa.field("", extension_type)]).serialize().to_pybytes()

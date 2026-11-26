@@ -28,7 +28,8 @@ import pyarrow.parquet as pq
 import pytest
 
 import orcapod.contexts as contexts
-from orcapod.logical_types import make_arrow_extension_type
+from orcapod.logical_types import arrow_lifetime, make_arrow_extension_type
+from orcapod.logical_types.arrow_lifetime import KeptInstances
 from orcapod.logical_types.ignore_list import _ExtensionFamily
 from orcapod.semantic_types.universal_converter import UniversalTypeConverter
 
@@ -706,6 +707,164 @@ def test_threads_constructing_cold_subclasses_at_once_get_one_instance_each() ->
     del raced, mine, together
     gc.collect()
     assert all(ref() is not None for ref in alive)
+
+
+def _measured(name: str) -> type[Any]:
+    """A subclass whose unit is held only by its storage type's nested field metadata."""
+    made = _made(name)
+
+    class Measured(made):
+        def __init__(self, unit: str) -> None:
+            self.unit = unit
+            reading = pa.field("reading", pa.int64(), metadata={"unit": unit})
+            inner = pa.field("inner", pa.struct([reading]))
+            pa.ExtensionType.__init__(self, pa.struct([inner]), name)
+
+        def __arrow_ext_serialize__(self) -> bytes:
+            return b"measured"
+
+        @classmethod
+        def __arrow_ext_deserialize__(
+            cls, storage_type: pa.DataType, serialized: bytes
+        ) -> pa.ExtensionType:
+            metadata = storage_type.field(0).type.field(0).metadata
+            return cls(metadata[b"unit"].decode())
+
+    return Measured
+
+
+@pytest.mark.parametrize("order", [("m", "s", "kg"), ("kg", "s", "m")])
+@pytest.mark.parametrize("file_format", ["ipc", "parquet"])
+def test_storage_types_differing_in_nested_field_metadata_are_different_types(
+    tmp_path: Path,
+    registered: Callable[[Any], Any],
+    order: tuple[str, ...],
+    file_format: str,
+) -> None:
+    """Arrow hands a read the storage type with its nested field metadata.
+
+    Two storage types Arrow's own equality calls equal, and that differ in the metadata
+    of a nested field, are two types: a column is read as the type it was written as,
+    whichever was made first.
+    """
+    measured = _measured(f"test.lifetime.nested.{file_format}.{'_'.join(order)}")
+    types = {unit: measured(unit) for unit in order}
+    assert len({id(t) for t in types.values()}) == 3
+    assert [t.unit for t in types.values()] == list(order)
+    # pyarrow's equality of the storage types does not see the difference.
+    assert types["m"].storage_type == types["s"].storage_type
+    for unit in order[::-1]:
+        assert measured(unit) is types[unit]
+
+    registered(types[order[0]])
+    rows = [{"inner": {"reading": 1}}, {"inner": {"reading": 2}}, None]
+    table = pa.table({unit: _array(types[unit], rows) for unit in order})
+    path = tmp_path / f"nested.{file_format}"
+    if file_format == "ipc":
+        with pa.OSFile(str(path), "wb") as sink:
+            with pa.ipc.new_file(sink, table.schema) as writer:
+                writer.write_table(table)
+        read = pa_ds.dataset(path, format="ipc").to_table(use_threads=True)
+    else:
+        pq.write_table(table, path)
+        read = pa_ds.dataset(path).to_table(use_threads=True)
+    for unit in order:
+        column = read.column(unit)
+        assert column.type is types[unit], unit
+        assert column.type.unit == unit
+        assert column.to_pylist() == rows
+
+
+def test_an_instance_is_kept_before_any_caller_can_get_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The permanent reference is added before the instance is published.
+
+    Otherwise a competing caller could be handed a type that is not yet kept. About
+    ``KeptInstances`` itself: it reads the order of its two steps.
+    """
+    published_when_kept: list[bool] = []
+    keep = arrow_lifetime.keep_for_process
+
+    def watched(extension_type: pa.ExtensionType) -> pa.ExtensionType:
+        published_when_kept.append(
+            any(kept is extension_type for kept in KeptInstances._kept.values())
+        )
+        return keep(extension_type)
+
+    monkeypatch.setattr(arrow_lifetime, "keep_for_process", watched)
+    made = _made("test.lifetime.kept_first")
+
+    class Custom(made):
+        pass
+
+    first = made()  # pyright: ignore[reportCallIssue]  # the synthesized class takes no arguments
+    custom = Custom()  # pyright: ignore[reportCallIssue]  # the synthesized class takes no arguments
+    assert published_when_kept[:2] == [False, False]
+    assert not any(published_when_kept)
+    assert any(kept is first for kept in KeptInstances._kept.values())
+    assert any(kept is custom for kept in KeptInstances._kept.values())
+
+
+@pytest.mark.parametrize("depth", [1, 3])
+def test_an_instance_that_is_not_the_first_of_its_key_is_not_kept(depth: int) -> None:
+    """A constructor that makes its own type again: the first stored is the one kept.
+
+    Every call returns that instance, and the others, which no caller gets, do not
+    stay alive.
+    """
+    name = f"test.lifetime.loser.{depth}"
+    made = _made(name)
+    constructed: list[weakref.ref[Any]] = []
+    inner: list[Any] = []
+
+    class Nested(made):
+        def __init__(self) -> None:
+            constructed.append(weakref.ref(self))
+            level = len(constructed)
+            pa.ExtensionType.__init__(self, pa.int64(), name)
+            if level <= depth:
+                # The same key, made and stored before this instance is.
+                inner.append(Nested())
+
+    outer = Nested()
+    assert len(constructed) == depth + 1
+    assert all(t is outer for t in inner)
+    # The innermost call stored first: its instance is the type.
+    assert constructed[-1]() is outer
+    again = Nested()
+    assert again is outer
+    del again, inner[:]
+    gc.collect()
+    alive = [ref() is not None for ref in constructed]
+    assert alive[: depth + 1] == [False] * depth + [True]
+    assert not any(alive[depth + 1 :])
+    del outer
+    gc.collect()
+    assert constructed[depth]() is not None
+
+
+def test_the_metadata_is_serialized_once_for_each_construction() -> None:
+    """Finding an instance's key does not call the serializer again."""
+    name = "test.lifetime.serialized_once"
+    made = _made(name)
+    calls: list[str] = []
+
+    class Counted(made):
+        def __init__(self, unit: str) -> None:
+            self.unit = unit
+            pa.ExtensionType.__init__(self, pa.int64(), name)
+
+        def __arrow_ext_serialize__(self) -> bytes:
+            calls.append(self.unit)
+            return self.unit.encode()
+
+    units = ["m", "s", "m", "kg", "s", "m"]
+    types = [Counted(unit) for unit in units]
+    assert calls == units
+    assert [t.unit for t in types] == units
+    assert len({id(t) for t in types}) == 3
+    assert all(t is types[units.index(u)] for t, u in zip(types, units))
 
 
 def test_a_subclass_instance_outlives_every_python_reference() -> None:
