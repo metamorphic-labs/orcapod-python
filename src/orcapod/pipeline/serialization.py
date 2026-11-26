@@ -407,7 +407,10 @@ def _ensure_registries() -> None:
 
 
 def resolve_database_from_config(
-    config: dict[str, Any], db_registry: dict | None = None
+    config: dict[str, Any],
+    db_registry: dict[str, dict[str, Any]] | None = None,
+    *,
+    create_base_path: bool = True,
 ) -> Any:
     """Reconstruct a database instance from a config dict.
 
@@ -418,6 +421,7 @@ def resolve_database_from_config(
         db_registry: Optional plain dict mapping ``"db_<key>"`` → config dict
             (the output of ``DatabaseRegistry.to_dict()``).  Required when
             ``config["type"] == "scoped"``; ignored otherwise.
+        create_base_path: Whether a Delta database may create a missing local root.
 
     Returns:
         A new database instance constructed from the config.
@@ -437,7 +441,9 @@ def resolve_database_from_config(
                 f"Registry key {ref!r} not found; available keys: {sorted(db_registry.keys())}"
             )
         root_config = db_registry[ref]
-        root_db = resolve_database_from_config(root_config)
+        root_db = resolve_database_from_config(
+            root_config, create_base_path=create_base_path
+        )
         return root_db.at(*config["path"])
     if db_type not in DATABASE_REGISTRY:
         raise ValueError(
@@ -450,6 +456,8 @@ def resolve_database_from_config(
             "original run is not available — nodes will have UNAVAILABLE status."
         )
     cls = DATABASE_REGISTRY[db_type]
+    if db_type == "delta_table" and not create_base_path:
+        return cls.from_config(config, create_base_path=False)
     return cls.from_config(config)
 
 

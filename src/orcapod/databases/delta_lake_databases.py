@@ -1760,6 +1760,7 @@ class DeltaTableDatabase:
         self._path_prefix = _path_prefix
         self._root = _root
         self._scoped_path = _scoped_path
+        self._create_base_path = create_base_path
         self.batch_size = batch_size
         self.max_hierarchy_depth = max_hierarchy_depth
         self.allow_schema_evolution = allow_schema_evolution
@@ -3407,12 +3408,19 @@ class DeltaTableDatabase:
         return config
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "DeltaTableDatabase":
+    def from_config(
+        cls, config: dict[str, Any], *, create_base_path: bool = True
+    ) -> "DeltaTableDatabase":
         """Reconstruct a DeltaTableDatabase from a config dict.
 
         Supports both the current format (``"root_uri"`` for the storage root,
         ``"base_path"`` as a list for the scoping prefix) and the legacy format
         produced before ENG-341 (``"base_path"`` as a URI string, no prefix).
+
+        Args:
+            config: The saved database configuration.
+            create_base_path: Create a missing local root when true. When false,
+                a missing local root raises. Remote roots are opened lazily.
         """
         if "root_uri" in config:
             # Current format (post-ENG-341)
@@ -3428,7 +3436,7 @@ class DeltaTableDatabase:
         return cls(
             base_path=root_uri,
             storage_options=config.get("storage_options"),
-            create_base_path=True,
+            create_base_path=create_base_path,
             batch_size=config.get("batch_size", 1000),
             max_hierarchy_depth=config.get("max_hierarchy_depth", 10),
             allow_schema_evolution=config.get("allow_schema_evolution", True),
@@ -4281,6 +4289,7 @@ class DeltaTableDatabase:
         return DeltaTableDatabase(
             base_path=self._root_uri,
             storage_options=self._storage_options,
+            create_base_path=self._create_base_path,
             batch_size=self.batch_size,
             max_hierarchy_depth=self.max_hierarchy_depth,
             allow_schema_evolution=self.allow_schema_evolution,

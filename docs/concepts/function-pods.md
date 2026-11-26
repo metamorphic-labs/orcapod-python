@@ -699,6 +699,10 @@ incomplete: a group formed after it may lack members, and the result stored for 
 group by an earlier run may then be loaded for it. `run_async(load_only=True)` does the same
 on the asynchronous orchestrator.
 
+A run skips unbound source slots and every node that depends on them. The summary lists those
+nodes and the slots blocking each one in `summary.skipped_unbound_sources`. Bind the missing
+sources with `job.bind(sources=...)` to include those nodes on the next run.
+
 A load-only run reads only job nodes, sources and streams that neither compute nor deliver.
 A pod's stream built outside the job (a function pod's, which computes when it is read, or a
 side-effect pod's, which delivers) is refused with a `ValueError` before anything is read,
@@ -1023,6 +1027,12 @@ file saved by an earlier release (format `0.1.0` to `0.3.0`) is refused, with a 
 saying so. Rebuild the pipeline from code and save it again; taking older files to the
 current format is the work of a separate migration tool, not of `load`.
 
+For a saved local Delta database, `load()` opens the existing root directory. When the
+directory is missing, loading warns and leaves that database unbound. Use
+`PipelineJob.load(path, database=...)` to give the job a moved store, or
+`PipelineJob.load(path, result_database=...)` for a moved separate result store.
+For a remote Delta database, the connection is deferred until the store is accessed.
+
 For example:
 
 ```python
@@ -1057,7 +1067,7 @@ loaded job cannot compute: function pods are not saved with it, so `loaded.run()
 `loaded.run(load_only=True)` fills its nodes from the database instead, as for any job (see
 *Loading without computing* above): the sources are read (an in-memory source must be bound
 first, since its data is not saved), the rebuilt operators run, and each function node takes
-the results stored for those inputs. Nodes below a source that is not available stay empty.
+the results stored for those inputs. The run summary lists the nodes skipped for unbound sources.
 `node.run(load_only=True)` does the same for one node and what it depends on.
 
 ```python

@@ -50,6 +50,7 @@ from orcapod.types import NodeConfig
 from orcapod.utils.database_errors import database_write_path, flush_best_effort
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
     from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
@@ -92,6 +93,7 @@ class _PreparedRun:
         plan: What the run runs and holds (``plan_run``, ITL-1095).
         unchecked_sources: The sources the start-of-run check could not check
             (``check_sources``, ITL-1102).
+        skipped_unbound_sources: Excluded node labels and the source slots blocking them.
     """
 
     exec_dag: OrcaDAG[Any]
@@ -101,6 +103,7 @@ class _PreparedRun:
     result_db: "ArrowDatabaseProtocol"
     plan: "RunPlan"
     unchecked_sources: tuple[str, ...]
+    skipped_unbound_sources: Mapping[str, set[str]]
 
 
 def _with_counter(
@@ -980,9 +983,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         """Execute the resolvable subgraph of this job in place.
 
         Nodes whose upstream includes an unbound source (and all their
-        dependents) are excluded from execution. Partial execution is a
-        first-class outcome — ``unbound_sources`` reports which source
-        slots were excluded.
+        dependents) are excluded from execution. The summary's
+        ``skipped_unbound_sources`` names those nodes and the slots that block them.
 
         After a successful run, ``job.nodes`` returns the execution-ready
         nodes with populated database caches.
@@ -1304,28 +1306,31 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             if node_hash not in hash_dag:
                 hash_dag.add_node(node_hash)
 
-        # Walk topologically; exclude unbound sources and all their dependents.
-        excluded_hashes: set[str] = set()
+        # Keep the causes of exclusion through every saved node, even one the
+        # loader did not restore, so the nodes below it also report their blockers.
+        blocked_by: dict[str, set[str]] = {}
+        skipped_unbound_sources: dict[str, set[str]] = {}
         for node_hash in hash_dag.topological_sort():
-            if node_hash not in self._persistent_node_map:
-                # A node a loaded job did not restore (a kind PipelineJob.load does
-                # not know): below an unbound source it is left out too, so the nodes
-                # below it are as well.
-                if any(p in excluded_hashes for p in hash_dag.predecessors(node_hash)):
-                    excluded_hashes.add(node_hash)
-                continue
-            node = self._persistent_node_map[node_hash]
+            node = self._persistent_node_map.get(node_hash)
+            slots = {
+                slot
+                for parent_hash in hash_dag.predecessors(node_hash)
+                for slot in blocked_by.get(parent_hash, ())
+            }
             if isinstance(node, SourceJobNode) and node.bound_source is None:
-                excluded_hashes.add(node_hash)
-            elif any(p in excluded_hashes for p in hash_dag.predecessors(node_hash)):
-                excluded_hashes.add(node_hash)
+                slots.add(node.name)
+            if not slots:
+                continue
+            blocked_by[node_hash] = slots
+            if node is not None:
+                skipped_unbound_sources[node.label] = slots
 
         # A loaded job whose graph lost a node (the file records a node of a kind
         # PipelineJob.load does not restore) cannot feed the nodes below it: every
         # saved input of a node must be a restored node.
         if self._loaded:
             for node_hash, node in self._persistent_node_map.items():
-                if node_hash in excluded_hashes:
+                if node_hash in blocked_by:
                     continue  # below an unbound source: not part of this run
                 if not isinstance(node, (FunctionJobNode, OperatorJobNode)):
                     continue
@@ -1348,12 +1353,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # --- Build execution OrcaDAG from existing node objects (no cloning) ---
         exec_dag: OrcaDAG = OrcaDAG()
         for node_hash, node in self._persistent_node_map.items():
-            if node_hash not in excluded_hashes:
+            if node_hash not in blocked_by:
                 exec_dag.add_node(node)
         for u_hash, v_hash in self._graph_edges:
             if (
-                u_hash not in excluded_hashes
-                and v_hash not in excluded_hashes
+                u_hash not in blocked_by
+                and v_hash not in blocked_by
                 and u_hash in self._persistent_node_map
                 and v_hash in self._persistent_node_map
             ):
@@ -1425,6 +1430,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             result_db=result_db,
             plan=plan,
             unchecked_sources=unchecked,
+            skipped_unbound_sources=skipped_unbound_sources,
         )
 
     @contextlib.contextmanager
@@ -1562,6 +1568,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             ran_nothing=not plan.to_run,
             restricted_sources=restrictions_in_force(prepared.exec_dag.nodes()),
             asynchronous=asynchronous,
+            skipped_unbound_sources=prepared.skipped_unbound_sources,
         )
         return self._last_run
 
@@ -1738,6 +1745,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         cannot be rebuilt for another reason (a moved file) is logged as a
         warning. Neither affects reading the other nodes.
 
+        A saved local Delta store must already have a root directory. A missing
+        root is logged as a warning and the corresponding database is left
+        unbound. Remote Delta stores are opened on access.
+
         Args:
             path: Path to the JSON file produced by ``save()``.
             database: Optional database override. When provided, takes precedence
@@ -1897,7 +1908,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                         resolve_database_from_config,
                     )
 
-                    effective_database = resolve_database_from_config(store_config)
+                    effective_database = resolve_database_from_config(
+                        store_config, create_base_path=False
+                    )
                 except Exception as exc:
                     logger.warning(
                         "Could not reconstruct the database from its saved config: %s. "
@@ -1934,7 +1947,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     )
 
                     effective_result_database = resolve_database_from_config(
-                        result_config
+                        result_config, create_base_path=False
                     )
                 except Exception as exc:
                     unresolved_result_database = result_config
