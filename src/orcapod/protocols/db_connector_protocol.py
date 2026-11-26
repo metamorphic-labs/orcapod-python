@@ -224,7 +224,7 @@ class DBConnectorProtocol(Protocol):
         """
         ...
 
-    def validate_records(self, records: pa.Table) -> None:
+    def validate_records(self, records: pa.Table, *, table_name: str | None) -> None:
         """Validate that ``records`` are safe to write through this connector.
 
         Implementations should raise ``ValueError`` if ``records`` contain
@@ -236,6 +236,11 @@ class DBConnectorProtocol(Protocol):
 
         Args:
             records: Arrow table to validate before writing.
+            table_name: The table (a name from ``table_name(path)``) the rows are for,
+                so a connector that records something per table (a SpiralDB store,
+                its data context) checks the rows against it before they are
+                buffered; ``None`` when the rows are checked for no table in
+                particular.
 
         Raises:
             ValueError: If any column is incompatible with this connector.

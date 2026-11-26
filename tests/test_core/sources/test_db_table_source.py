@@ -120,7 +120,7 @@ class MockDBConnector:
     ) -> str | None:
         return None  # not used by DBTableSource
 
-    def validate_records(self, records: Any) -> None:
+    def validate_records(self, records: Any, *, table_name: str | None) -> None:
         pass  # not used by DBTableSource
 
     def close(self) -> None:

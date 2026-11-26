@@ -35,7 +35,7 @@ import pyarrow.compute as pc
 
 import orcapod.databases.spiral_store as codec
 import orcapod.databases.spiral_store_names as names
-from orcapod.errors import SpiralStoreTableCollisionError
+from orcapod.errors import InputValidationError, SpiralStoreTableCollisionError
 from orcapod.logical_types.canonical_form import declaration_form_schema
 from orcapod.types import ColumnInfo
 from orcapod.utils import arrow_utils
@@ -191,11 +191,22 @@ class StoreTables:
             return str(exc)
         return None
 
-    def validate(self, records: pa.Table) -> None:
-        """Run the codec on rows to buffer: the last row of each key, as kept."""
+    def validate(self, records: pa.Table, table_name: str | None) -> None:
+        """Check rows to buffer: their one data context, the one the table at
+        ``table_name`` records when it exists (``None``: no table in particular), and
+        the codec on the last row of each key, as kept.
+
+        Raises:
+            InputValidationError: If the data context is not one this Orcapod has,
+                or not the table's.
+        """
         if records.num_rows == 0:
             return
-        _ = _one_data_context(records)
+        context = _one_data_context(records)
+        if table_name is not None:
+            found = self._judge(table_name)
+            if found is not None:
+                _require_data_context(found, context)
         _ = codec.encode_rows(_last_of_each_key(records))
 
     # ── one run ──────────────────────────────────────────────────────────────
@@ -627,9 +638,11 @@ class StoreTables:
 
         Raises:
             ValueError: If the rows hold no ``__data_context`` column, or several data
-                contexts, or another than the table records, their path cannot be
-                recorded, or their columns are not the table's.
+                contexts, their path cannot be recorded, or their columns are not the
+                table's.
             UnstorableInSpiralError: If the codec refuses the rows.
+            InputValidationError: If their data context is not one this Orcapod has,
+                or not the one the table records (checked when they are buffered too).
             SpiralStoreTableCollisionError: If the table under the name is not this
                 path's store table.
         """
@@ -731,10 +744,14 @@ def _encoded(records: pa.Table) -> pa.Table:
 
 
 def _one_data_context(records: pa.Table) -> str:
-    """The one data context of rows to store (ITL-1359: one per datagram).
+    """The one data context of rows to store (ITL-1359: one per datagram), a key this
+    Orcapod resolves: a table recording another could never be read back (its logical
+    types are made live with that context's converter, ``_live``).
 
     Raises:
         ValueError: If there is no data context column, a null in it, or two values.
+        InputValidationError: If the key is not one of a data context this Orcapod
+            has (an unknown or a short key), naming it.
     """
     if DATA_CONTEXT_COLUMN not in records.column_names:
         raise ValueError(
@@ -745,7 +762,23 @@ def _one_data_context(records: pa.Table) -> str:
         raise ValueError(
             f"rows of one write to a SpiralDB store hold one data context, not {values}"
         )
-    return values[0]
+    key = values[0]
+    from orcapod.contexts import resolve_context
+    from orcapod.contexts.core import ContextResolutionError
+
+    try:
+        resolved = resolve_context(key).context_key
+    except ContextResolutionError as exc:
+        raise InputValidationError(
+            f"the rows' data context {key!r} is not one this Orcapod has: a table "
+            "recording it could not be read"
+        ) from exc
+    if resolved != key:
+        raise InputValidationError(
+            f"the rows' data context {key!r} is not a full data context key "
+            f"({resolved!r} is)"
+        )
+    return key
 
 
 def _require_data_context(found: _Found, context: str) -> None:
@@ -753,13 +786,12 @@ def _require_data_context(found: _Found, context: str) -> None:
     types are read back with its data context's type converter (``_live``).
 
     Raises:
-        ValueError: If ``context`` is not the table's.
+        InputValidationError: If ``context`` is not the table's, naming both keys
+            (``contexts.stored.require_same_data_context``).
     """
-    if context != found.record.data_context_key:
-        raise ValueError(
-            f"the rows are of data context {context!r}; the table records "
-            f"{found.record.data_context_key!r}"
-        )
+    from orcapod.contexts.stored import require_same_data_context
+
+    require_same_data_context(context, found.record.data_context_key)
 
 
 def _live(schema: pa.Schema, data_context: str) -> pa.Schema:

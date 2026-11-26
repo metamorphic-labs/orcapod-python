@@ -322,7 +322,7 @@ def test_a_plain_connector_still_writes_nothing() -> None:
     connector = SpiralDBConnector("p", "d")
     assert connector.table_name(("a", "b")) == "a__b"
     with pytest.raises(SpiralDBWriteNotSupportedError):
-        connector.validate_records(rows(["r0"]))
+        connector.validate_records(rows(["r0"]), table_name=None)
 
 
 # ---------------------------------------- review of PR 595 (fe4145c7), round 1
@@ -358,14 +358,18 @@ def test_a_path_too_long_to_record_is_refused_before_any_table_is_made() -> None
 def test_two_data_contexts_buffered_for_one_table_are_refused_before_it_is_made() -> (
     None
 ):
-    """P2: two batches, each of one data context, buffered for one first write."""
+    """P2: two batches, each of one data context, for one first write. This Orcapod
+    has one data context, so the second (an unknown key) is refused as it is added,
+    before anything is buffered or made (r6); the flush-time refusal of two contexts
+    stays as a backstop."""
+    from orcapod.errors import InputValidationError
+
     db = ConnectorArrowDatabase(store())
     db.add_records(RESULT, rows(["r0"]), record_id_column="__record_id")
-    db.add_records(
-        RESULT, rows(["r1"], context="std:v2:other"), record_id_column="__record_id"
-    )
-    with pytest.raises(ValueError, match="data context"):
-        db.flush()
+    with pytest.raises(InputValidationError, match="data context"):
+        db.add_records(
+            RESULT, rows(["r1"], context="std:v2:other"), record_id_column="__record_id"
+        )
     assert _tables() == []
 
 
@@ -1263,8 +1267,8 @@ def test_an_existing_empty_table_is_read_as_no_rows() -> None:
 def test_logical_types_are_read_with_the_data_context_the_table_records(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The converter of the table's recorded data context makes logical types live,
-    and rows of another data context are refused for that table."""
+    """The converter of the table's recorded data context makes logical types live
+    (rows of another data context: the next test)."""
     import orcapod.contexts as contexts
 
     db = ConnectorArrowDatabase(store())
@@ -1280,13 +1284,6 @@ def test_logical_types_are_read_with_the_data_context_the_table_records(
     fresh = ConnectorArrowDatabase(store())
     assert fresh.get_all_records(RESULT, record_id_column="__record_id") is not None
     assert CONTEXT in asked
-    with pytest.raises(ValueError, match="data context"):
-        fresh.add_records(
-            RESULT,
-            rows(["r1"], context="std:v9:other"),
-            record_id_column="__record_id",
-            flush=True,
-        )
 
 
 @pytest.mark.usefixtures("root")
@@ -1301,7 +1298,7 @@ def test_a_closed_store_connector_refuses_every_call_and_releases_its_tables() -
         lambda: connector.table_name(RESULT),
         lambda: connector.has_table(name),
         lambda: connector.get_table_names(),
-        lambda: connector.validate_records(rows(["r0"])),
+        lambda: connector.validate_records(rows(["r0"]), table_name=None),
         lambda: connector.unstorable_column_reason("a", pa.int64(), primary_key=False),
         lambda: connector.run_scope(),
         lambda: connector.read_candidates(name, keys=[b"r0"]),
@@ -1353,3 +1350,70 @@ def test_a_retry_after_a_failed_first_append_in_one_run_records_again(
     )
     assert got is not None and got.column_names == other.column_names
     assert got["__record_id"].to_pylist() == [b"b0"]
+
+
+# ------------------------------------- verification r6 of PRs 595 and 599 (f9bb2aa9)
+
+
+@pytest.mark.usefixtures("root")
+@pytest.mark.parametrize("context", ["std:v999:default", "v1", "not a key"])
+def test_a_data_context_this_orcapod_cannot_resolve_is_refused_before_anything(
+    context: str,
+) -> None:
+    """A table recording a data context key no reader can resolve would be unreadable:
+    such rows (an unknown key, or a short one) are refused when they are added,
+    before they are buffered, and by a write that reaches the store directly, before
+    any table is created."""
+    from orcapod.errors import InputValidationError
+
+    db = ConnectorArrowDatabase(store())
+    with pytest.raises(InputValidationError, match="data context"):
+        db.add_records(
+            RESULT, rows(["r0"], context=context), record_id_column="__record_id"
+        )
+    assert not db.table_exists(RESULT)
+    assert db.get_record_by_id(RESULT, b"r0", record_id_column="__record_id") is None
+    db.flush()
+    connector = store()
+    name = connector.table_name(RESULT)
+    with pytest.raises(InputValidationError, match="data context"):
+        connector.upsert_records(
+            name, rows(["r0"], context=context), id_column="__record_id"
+        )
+    assert _tables() == []
+
+
+@pytest.mark.usefixtures("root")
+def test_rows_of_another_data_context_are_refused_before_they_are_buffered() -> None:
+    """Rows of another data context than the table records are refused when they are
+    added (``InputValidationError`` naming both keys), before they are buffered: a
+    lookup never sees them, and a flush asked for with them writes nothing, not even
+    another table's pending batch."""
+    from orcapod.errors import InputValidationError
+
+    ConnectorArrowDatabase(store()).add_records(
+        RESULT, rows(["old"]), record_id_column="__record_id", flush=True
+    )
+    # The table now records another data context than the rows below are of.
+    recorded = "std:v0:legacy"
+    _table(names.store_table_name(RESULT)).set_metadata(
+        names.store_table_metadata(RESULT, recorded)
+    )
+    other = (*RESULT[:-1], "rdb_v9")
+    db = ConnectorArrowDatabase(store())
+    db.add_records(other, rows(["valid"]), record_id_column="__record_id")
+    with pytest.raises(InputValidationError) as raised:
+        db.add_records(
+            RESULT, rows(["bad"]), record_id_column="__record_id", flush=True
+        )
+    assert recorded in str(raised.value) and CONTEXT in str(raised.value)
+    # Nothing was flushed: the other table's batch is still only pending.
+    assert not ConnectorArrowDatabase(store()).table_exists(other)
+    assert db.table_exists(other)
+    # ``bad`` was never buffered: a later flush writes the other batch and nothing
+    # else (the table recording a context this Orcapod lacks is read raw here).
+    db.flush()
+    assert ConnectorArrowDatabase(store()).table_exists(other)
+    stored = _client().keyed_table("p", "d", names.store_table_name(RESULT))
+    keys = stored.scan(["__record_id"]).to_table()["__record_id"].to_pylist()
+    assert keys == [b"old"]

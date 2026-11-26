@@ -557,7 +557,7 @@ class SQLiteConnector:
             return "SQLite reserves table names that start with 'sqlite_'"
         return None
 
-    def validate_records(self, records: pa.Table) -> None:
+    def validate_records(self, records: pa.Table, *, table_name: str | None) -> None:
         """Reject tables carrying any Arrow field or schema metadata.
 
         ``SQLiteConnector`` does not preserve Arrow field or schema metadata
@@ -568,6 +568,7 @@ class SQLiteConnector:
 
         Args:
             records: Arrow table to validate.
+            table_name: Ignored: the check does not depend on the table.
 
         Raises:
             UnstorableColumnError: If a ``double`` column holds a NaN or ``-0.0``,

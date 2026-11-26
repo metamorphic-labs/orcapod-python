@@ -497,7 +497,7 @@ class TestValidateRecords:
                 "v": pa.array([1]),
             }
         )
-        c.validate_records(table)  # must not raise
+        c.validate_records(table, table_name=None)  # must not raise
 
     def test_rejects_field_with_metadata(self, c):
         field = pa.field("v", pa.int64(), metadata={b"unit": b"meters"})
@@ -509,7 +509,7 @@ class TestValidateRecords:
             schema=pa.schema([pa.field("id", pa.large_binary()), field]),
         )
         with pytest.raises(ValueError, match="metadata"):
-            c.validate_records(table)
+            c.validate_records(table, table_name=None)
 
     def test_rejects_schema_metadata(self, c):
         schema = pa.schema(
@@ -524,7 +524,7 @@ class TestValidateRecords:
             schema=schema,
         )
         with pytest.raises(ValueError, match="metadata"):
-            c.validate_records(table)
+            c.validate_records(table, table_name=None)
 
     def test_rejects_nested_struct_child_metadata(self, c):
         inner = pa.field("val", pa.float64(), metadata={b"k": b"v"})
@@ -541,7 +541,7 @@ class TestValidateRecords:
             schema=schema,
         )
         with pytest.raises(ValueError, match="metadata"):
-            c.validate_records(table)
+            c.validate_records(table, table_name=None)
 
     def test_rejects_nested_list_value_field_metadata(self, c):
         vf = pa.field("item", pa.int32(), metadata={b"k": b"v"})
@@ -555,7 +555,7 @@ class TestValidateRecords:
             schema=schema,
         )
         with pytest.raises(ValueError, match="metadata"):
-            c.validate_records(table)
+            c.validate_records(table, table_name=None)
 
 
 @pytest.mark.parametrize("arrow_type", [pa.int64(), pa.large_string()])
