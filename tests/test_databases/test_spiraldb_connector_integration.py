@@ -408,3 +408,37 @@ def test_the_fake_keeps_concurrent_upserts_of_different_keys(tmp_path: Path) -> 
             for w in writers:
                 w.join()
         assert made.get_metadata() == {"a": b"1", "b": b"1"}
+
+
+def test_the_fake_never_shows_a_half_written_metadata_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CodeRabbit on PR 589: a reader during a metadata write sees a whole mapping.
+
+    Every file write is made to call a reader after it has truncated its file and before
+    it has written anything.
+    """
+    with fake.install(tmp_path):
+        key = pa.schema([pa.field("k", pa.large_string(), False)])
+        table = fake.FakeClient().project("p").create_keyed_table("d", "t", key)
+        table.set_metadata({"a": b"1"})
+        seen: list[dict[str, bytes]] = []
+        original = Path.write_text
+
+        def write_text_with_a_reader(
+            self: Path, data: str, *args: Any, **kw: Any
+        ) -> int:
+            with self.open("w") as handle:
+                handle.flush()
+                seen.append(
+                    fake.FakeClient()
+                    .keyed_table_by_id(table.resource_id)
+                    .get_metadata()
+                )
+            return original(self, data, *args, **kw)
+
+        monkeypatch.setattr(Path, "write_text", write_text_with_a_reader)
+        table.set_metadata({"b": b"2"})
+        monkeypatch.undo()
+        assert seen == [{"a": b"1"}]
+        assert table.get_metadata() == {"a": b"1", "b": b"2"}

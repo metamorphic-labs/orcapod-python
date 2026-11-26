@@ -216,7 +216,7 @@ def read_store_table_metadata(metadata: Mapping[str, bytes]) -> StoreTableRecord
         path: object = json.loads(metadata[PATH_KEY].decode())  # pyright: ignore[reportAny]  # checked below
         layout = metadata[LAYOUT_KEY].decode()
         data_context_key = metadata[DATA_CONTEXT_KEY].decode()
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except (ValueError, RecursionError) as exc:  # JSON, UTF-8, the integer limit, depth
         raise SpiralStoreTableCollisionError(
             f"its record cannot be read: {exc}"
         ) from exc
