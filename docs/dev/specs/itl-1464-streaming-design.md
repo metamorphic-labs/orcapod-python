@@ -313,9 +313,12 @@ For each batch of matches the join fetches the matched rows of the other side fr
 cache by reference (one `take` per input per batch of pairs), builds the output batch
 with the sync path's column work, sends it, and lets the rows go.
 
-Cost per indexed row: the key's own size plus 8 bytes. For the measured tables the
-prepared key is 60 to 90 bytes (two short strings, a timestamp, two integers), against
-4.2 KiB for the tokenized row today and 120 bytes for the bare row. **OPEN (J1)**: index
+Cost per indexed row: the key's own size plus 8 bytes, and for an input that is not
+certified unique up to as much again for its per-key counts (one count per distinct key:
+nothing more when every row shares one key, the same again when every key is distinct).
+For the measured tables the prepared key is 60 to 90 bytes (two short strings, a
+timestamp, two integers), so a row costs 70 to 100 bytes, or up to 140 to 200 with
+counts, against 4.2 KiB for the tokenized row today and 120 bytes for the bare row. **OPEN (J1)**: index
 a 128-bit hash of the key instead of the key (24 bytes per row whatever the key's
 width); matches are then confirmed on the fetched rows, so a hash collision costs a
 fetch, never a wrong row. Proposed: start with the key itself (it is the present code),
@@ -432,10 +435,14 @@ much again); rows themselves are in the cache, on disk.
 | Any case, a side whose other side has closed | nothing more is kept for it (the kernels' present rule) | |
 | Any case, while one range of pairs is matched | the pairs of that range (two row references each) and its output batch | 16 bytes × pair budget + one output batch, whatever the keys hold |
 
-In every case the memory is keys only, so it is below the full size of one input by the
-ratio of row size to key size (here 120 bytes against 70 to 100, without tokens; 4.2 KiB
-against 70 to 100 with today's tokens). The developer's worst case, "linear in the size
-of one input", holds with room: the worst case is linear in the *keys* of both.
+In every case the memory is keys and counts only, so it compares with the size of an
+input by the ratio of row size to index cost. With today's tokens that is 4.2 KiB a row
+against 70 to 100 bytes (140 to 200 with per-key counts): far below one input. Without
+tokens the measured rows are 120 bytes, so the index of a wide key is of the size of the
+rows themselves, and with counts it can pass them; the hashed index of J1 (24 bytes a
+row, 48 with counts) is what brings it back below. The developer's worst case, "linear
+in the size of one input", holds as linear in the *keys* of both inputs; it is below one
+input's own size only while rows are wider than the index cost above.
 
 **Key-ordered inputs.** Two inputs sorted by their tags can be merged holding only the
 rows between the two read positions. That needs a second certificate, "in tag order",
@@ -535,7 +542,7 @@ With sections 2 to 7 in place, for a job run by the async orchestrator:
 | A view | the rows shown |
 
 **The bound to state to users**: peak memory of an async job is
-`(batches in flight) × (batch bytes) + (key bytes + 8) × (rows indexed by joins and groupings) + 16 × (rows of verified sources) + 16 × (pair budget) × (joins matching at once) + (segment size) × (streams being written to the cache at once) + (small results kept in memory) + the largest single row`.
+`(batches in flight) × (batch bytes) + (key bytes + 8) × (rows indexed by joins and groupings) + (key bytes + 8) × (distinct keys of join inputs not certified unique) + 16 × (rows of verified sources) + 16 × (pair budget) × (joins matching at once) + (segment size) × (streams being written to the cache at once) + (small results kept in memory) + the largest single row`.
 For the measured session (2.2 million rows of 120 bytes, one grouping, one function
 pod) that is under 0.5 GiB, against about 210 GiB today.
 
