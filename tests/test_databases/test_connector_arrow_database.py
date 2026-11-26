@@ -973,10 +973,11 @@ class TestFlushBehaviour:
     def test_an_interrupt_between_any_two_lines_of_a_flush_loses_no_row(
         self,
     ) -> None:
-        """A KeyboardInterrupt injected (by a line trace) before any line of the
-        queue bookkeeping or of a table's flush leaves each queued table's rows and
-        ids consistent; every row is then stored once, or named as removed
-        (ITL-1381, round 5)."""
+        """A KeyboardInterrupt injected (by a line trace) between any two statements
+        of the queue bookkeeping or of a table's flush leaves each queued table's
+        rows and ids consistent; every row is then stored once, or named as removed
+        (ITL-1381, round 5). A batch leaves the queue before its write is tried, so
+        none is ever written twice."""
         import sys
         from pathlib import Path
 
@@ -1017,6 +1018,7 @@ class TestFlushBehaviour:
                 self._mixed_policies(db, self.PATH)
                 db.add_record(("other", "v1"), b"o", make_table(v=[3]))
                 lines = 0
+                last_line: dict[int, int] = {}
 
                 def trace(frame: Any, event: str, arg: Any) -> Any:
                     nonlocal lines
@@ -1026,7 +1028,12 @@ class TestFlushBehaviour:
                         and code.co_name not in traced_functions
                     ):
                         return None
-                    if event == "line":
+                    # Between statements only: a repeated line event of one line
+                    # is inside a statement (a comprehension's loop), out of
+                    # scope (N58), and there an exception a trace function raises
+                    # skips the frame's handlers on Python 3.12.
+                    if event == "line" and last_line.get(id(frame)) != frame.f_lineno:
+                        last_line[id(frame)] = frame.f_lineno
                         lines += 1
                         if lines == position:
                             raise KeyboardInterrupt
@@ -1082,6 +1089,67 @@ class TestFlushBehaviour:
                 getattr(raised.value, "__notes__", [])
             )
             assert ConnectorArrowDatabase(connector).get_all_records(self.PATH) is None
+
+    def test_an_interrupt_in_the_cleanup_of_a_failed_commit_never_replays_it(
+        self,
+    ) -> None:
+        """A connector that commits and then raises, and a KeyboardInterrupt at the
+        start of the failure cleanup: the batch already left the queue before its
+        write was tried, so it is never written again (ITL-1381, round 5, N32)."""
+        import sys
+
+        from orcapod.databases import connector_arrow_database as module
+
+        class CommitsThenRaises(SQLiteConnector):
+            def __init__(self) -> None:
+                super().__init__(":memory:")
+                self.written: list[int] = []
+                self.fail = True
+
+            def upsert_records(
+                self,
+                table_name: str,
+                records: pa.Table,
+                id_column: str,
+                skip_existing: bool = False,
+            ) -> None:
+                super().upsert_records(
+                    table_name, records, id_column, skip_existing=skip_existing
+                )
+                self.written.extend(cast(list[int], records["v"].to_pylist()))
+                if self.fail:
+                    self.fail = False
+                    raise RuntimeError("refused after commit")
+
+        # The failure cleanup's first line.
+        cleanup = {"_discard_attempted"}
+
+        def trace(frame: Any, event: str, arg: Any) -> Any:
+            code = frame.f_code
+            if code.co_filename == module.__file__ and code.co_name in cleanup:
+                if event == "line":
+                    raise KeyboardInterrupt
+                return trace
+            return None
+
+        connector = CommitsThenRaises()
+        try:
+            db = ConnectorArrowDatabase(connector)
+            db.add_record(self.PATH, b"key", make_table(v=[1]))
+            sys.settrace(trace)
+            try:
+                with pytest.raises(KeyboardInterrupt):
+                    db.flush()
+            finally:
+                sys.settrace(None)
+            ConnectorArrowDatabase(connector).add_record(
+                self.PATH, b"key", make_table(v=[77]), flush=True
+            )
+            db.flush()
+            assert connector.written == [1, 77]
+            assert self._stored_values(connector, self.PATH) == {b"key": 77}
+        finally:
+            connector.close()
 
     def test_a_flush_interrupted_after_its_commit_is_never_replayed(self) -> None:
         """A BaseException during a flush removes the attempted batch as a

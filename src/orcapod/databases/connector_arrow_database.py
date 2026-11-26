@@ -19,7 +19,7 @@ Example::
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Mapping, Set
 from contextlib import AbstractContextManager
 from typing import Any, cast
 
@@ -820,25 +820,20 @@ class ConnectorArrowDatabase:
 
         Rows queued with ``skip_duplicates`` and rows queued without it are written
         as two batches, each with its own write policy, never as one (ITL-1381).
-        Each batch stays in the queue until its write is tried (``_commit_batch``
-        takes it out, in one step), so a batch not yet sent stays queued, whatever
-        interrupts the flush, and the table's schema guard stays with it and checks
-        its write too. Each batch commits or leaves
+        Each batch leaves the queue, in one step, just before its write is tried
+        (``_commit_batch``): a batch not yet taken stays queued, with the table's
+        schema guard, whatever interrupts the flush, and a batch taken is never
+        written again. Each batch commits or leaves
         the queue on its own; the first failure is raised after both were tried.
         """
         first_error: Exception | None = None
         try:
             for skip_existing in (False, True):
                 skipped = self._pending_skip_existing.get(record_key, set())
-                queued = self._pending_record_ids.get(record_key, set())
+                queued = self._pending_record_ids.get(record_key, frozenset[bytes]())
                 among = queued & skipped if skip_existing else queued - skipped
-                # Left in the queue until its write is tried (``_commit_batch``).
-                ready = self._pending_commits.peek_ready(record_key, among)
-                if ready is None:
-                    continue
-                batch, ids = ready
                 try:
-                    self._commit_batch(record_key, batch, ids, skip_existing)
+                    self._commit_batch(record_key, among, skip_existing)
                 except Exception as error:
                     if first_error is None:
                         first_error = error
@@ -857,21 +852,35 @@ class ConnectorArrowDatabase:
     def _commit_batch(
         self,
         record_key: str,
-        pending: pa.Table,
-        ids: set[bytes],
+        among: Set[bytes],
         skip_existing: bool,
     ) -> None:
-        """Write one batch taken from the queue with one write policy.
+        """Take one write policy's ready rows out of the queue and write them.
 
-        The batch leaves the queue whatever happens: committed, or refused with
-        its keys, and the records guarded by them, removed and named (N32). A
-        ``BaseException`` (``KeyboardInterrupt``) is treated as a refusal, since
-        the write may have committed: the batch is never written again, the
-        removed keys are named in a note, and the exception propagates.
+        The rows leave the queue before their write is tried, so no interruption
+        can make them be written twice; the worst case is a batch removed (and
+        reported) but not written (N32, N49). Their ids are recorded as attempted
+        before the queue changes, so a failure or ``BaseException`` (a
+        ``KeyboardInterrupt``) at any later point reports them, and the records
+        guarded by them, as removed: a failure raises ``OrcapodDatabaseWriteError``;
+        a ``BaseException`` gets a note naming them and propagates.
+
+        Args:
+            record_key: The table's key.
+            among: The ids of the queued rows of this write policy.
+            skip_existing: Whether these rows were queued with ``skip_duplicates``.
         """
+        attempted: set[bytes] = set()
         record_path = tuple(record_key.split("/"))
         table_name = self._path_to_table_name(record_path)
         try:
+            ready = self._pending_commits.peek_ready(record_key, among)
+            if ready is None:
+                return
+            pending, ids = ready
+            attempted.update(ids)
+            # Out of the queue before the write is tried: never written twice.
+            self._pending_commits.remove(record_key, ids)
             self._require_table_name(table_name)
             columns = _arrow_schema_to_column_infos(pending.schema)
 
@@ -928,16 +937,17 @@ class ConnectorArrowDatabase:
                 id_column=self.RECORD_ID_COLUMN,
                 skip_existing=skip_existing,
             )
-            # Inside the try: an interruption after the write still takes the rows
-            # out of the queue (below), so they are never written again.
-            self._pending_commits.remove(record_key, ids)
         except Exception as error:
-            discarded = self._discard_attempted(record_key, ids)
+            if not attempted:
+                raise
+            discarded = self._discard_attempted(record_key, attempted)
             raise OrcapodDatabaseWriteError(
                 record_path, flush=True, table_flush=True, discarded_records=discarded
             ) from error
         except BaseException as error:
-            discarded = self._discard_attempted(record_key, ids)
+            if not attempted:
+                raise  # Nothing was taken from the queue.
+            discarded = self._discard_attempted(record_key, attempted)
             error.add_note(
                 f"Interrupted while committing pending writes to table {record_key!r}: "
                 "the write may have committed, so it is not tried again."
@@ -949,14 +959,15 @@ class ConnectorArrowDatabase:
             )
             raise
         else:
-            self._pending_commits.finish_rows(record_key, ids, committed=True)
-            self._pending_commits.forget(record_key, ids)
+            self._pending_commits.finish_rows(record_key, attempted, committed=True)
+            self._pending_commits.forget(record_key, attempted)
 
     def _discard_attempted(
         self, record_key: str, ids: set[bytes]
     ) -> dict[str, set[bytes]]:
         """Withdraw an attempted batch's keys and the records they guard; return
-        every removed key, by table."""
+        every removed key, by table. The keys may still be queued only when an
+        interruption came between recording and removing them."""
         self._pending_commits.remove(record_key, ids)
         discarded = {record_key: ids.copy()}
         self._pending_commits.finish_rows(
