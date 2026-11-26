@@ -786,19 +786,25 @@ class Data(Datagram):
         Only the tokens of the columns this row holds are carried over: a token
         held for a name the row had no column of (given earlier through
         ``with_source_info``) is dropped, so it never stands in for the token of
-        the column renamed to that name.
+        the column renamed to that name. An empty mapping changes nothing and
+        returns this row itself.
         """
+        if not column_mapping:
+            return self
         new_p = super().rename(column_mapping)
+        held = self._names_with_tokens()
         new_p._source_info = {
             column_mapping.get(k, k): self._source_info[k]
-            for k in Datagram.keys(self)
+            for k in held
             if k in self._source_info
         }
         new_p._source_info_table = None
-        self._keep_typed_tokens(
-            new_p, {column_mapping.get(k, k): k for k in Datagram.keys(self)}
-        )
+        self._keep_typed_tokens(new_p, {column_mapping.get(k, k): k for k in held})
         return new_p
+
+    def _names_with_tokens(self) -> tuple[str, ...]:
+        """The names whose tokens are this row's own: its data columns, in order."""
+        return Datagram.keys(self)
 
     def with_columns(
         self,
@@ -1055,6 +1061,10 @@ class EmptyData(Data):
         from orcapod.errors import EmptyDataAccessError
 
         raise EmptyDataAccessError(self, "arrow_schema")
+
+    def _names_with_tokens(self) -> tuple[str, ...]:
+        """The names of the tokens: a placeholder holds no column, only tokens."""
+        return tuple(self._source_info)
 
     # ------------------------------------------------------------------
     # Copy — preserves EmptyData-specific fields
