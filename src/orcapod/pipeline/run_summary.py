@@ -157,7 +157,7 @@ class RunSummary:
         self.conditions: Mapping[str, Condition] = {
             slot: condition
             for slot, (_, condition, _) in restricted.items()
-            if condition
+            if not condition.is_empty
         }
         self.limits: Mapping[str, int] = {
             slot: limit
