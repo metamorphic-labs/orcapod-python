@@ -251,7 +251,7 @@ is attached to them, before anything runs:
 - every function node, on SQLite and PostgreSQL;
 - every side-effect node, on SQLite;
 - every operator node with caching on (`CacheMode.LOG` or `REPLAY`), on SQLite: the SQLite
-  connector has no column type for a timestamp;
+  connector has no column type for a timestamp (adding one is ITL-1482);
 - every node that stores anything, on SpiralDB.
 
 An operator cache or cached source on a SQL connector is also refused when it is written, before
