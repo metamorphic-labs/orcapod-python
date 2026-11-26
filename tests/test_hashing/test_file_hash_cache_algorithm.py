@@ -375,3 +375,30 @@ def test_sqlite_read_with_an_invalid_label_is_a_miss(
     with SqliteHashCacher(db_path, match_mtime=match_mtime) as c:
         _insert_raw(db_path, label.encode("utf-8") + b":" + b"\x07" * 32)
         assert c.get(_key(label)) is None
+
+
+@pytest.mark.parametrize("kind", ["in_memory", "sqlite"])
+def test_any_refusal_of_hashlib_is_value_error_on_put_and_a_miss_on_read(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kind: str
+):
+    """A hashlib backend may refuse a name with another exception (RuntimeError)."""
+    import hashlib
+
+    real_new = hashlib.new
+
+    def refusing_new(name: str, *args: object, **kwargs: object) -> object:
+        if name == "refused_algo":
+            raise RuntimeError("backend refuses this algorithm")
+        return real_new(name, *args, **kwargs)  # pyright: ignore[reportArgumentType] -- passes the caller's arguments through
+
+    db_path = tmp_path / "c.db"
+    c: Cacher = (
+        InMemoryHashCacher() if kind == "in_memory" else SqliteHashCacher(db_path)
+    )
+    if isinstance(c, SqliteHashCacher):
+        _insert_raw(db_path, b"refused_algo:" + b"\x07" * 32)
+    monkeypatch.setattr(hashlib, "new", refusing_new)
+
+    with pytest.raises(ValueError):
+        c.put(_key("refused_algo"), ContentHash("refused_algo", b"\x01" * 32))
+    assert c.get(_key("refused_algo")) is None

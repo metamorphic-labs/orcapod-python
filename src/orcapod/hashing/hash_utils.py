@@ -136,13 +136,16 @@ def file_hash_digest_size(algorithm: str) -> int:
 
     Raises:
         ValueError: If ``hash_file`` has no fixed-length digest for ``algorithm``,
-            including any name ``hashlib`` refuses (an embedded NUL included).
+            including any name ``hashlib`` refuses, whatever it raises (an
+            embedded NUL, a backend's own error).
     """
     if algorithm in _FIXED_DIGEST_SIZES:
         return _FIXED_DIGEST_SIZES[algorithm]
     try:
         size = hashlib.new(algorithm).digest_size
-    except (ValueError, TypeError):  # TypeError: a name with an embedded NUL
+    except (
+        Exception
+    ):  # any refusal: ValueError, TypeError (embedded NUL), a backend's own error
         raise ValueError(f"No file hash algorithm named {algorithm!r}") from None
     if size == 0:  # an extendable-output function (shake_*): no fixed length
         raise ValueError(
