@@ -321,3 +321,114 @@ def test_a_plain_connector_still_writes_nothing() -> None:
     assert connector.table_name(("a", "b")) == "a__b"
     with pytest.raises(SpiralDBWriteNotSupportedError):
         connector.validate_records(rows(["r0"]))
+
+
+# ---------------------------------------- review of PR 595 (fe4145c7), round 1
+
+
+def _tables() -> list[dict[str, Any]]:
+    return fake.FakeClient()._store.tables()  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.usefixtures("root")
+def test_an_empty_table_whose_key_is_of_another_type_is_refused_untouched() -> None:
+    """P1: ``__record_id`` typed text is not the store's key; nothing is recorded on it."""
+    key = pa.schema([pa.field("__record_id", pa.large_string(), nullable=False)])
+    name = names.store_table_name(RESULT)
+    _ = _client().project("p").create_keyed_table("d", name, key)
+    db = ConnectorArrowDatabase(store())
+    with pytest.raises(SpiralStoreTableCollisionError, match="key"):
+        db.add_records(RESULT, rows(["r0"]), record_id_column="__record_id", flush=True)
+    assert _table(name).get_metadata() == {}
+
+
+@pytest.mark.usefixtures("root")
+def test_a_path_too_long_to_record_is_refused_before_any_table_is_made() -> None:
+    """P2: every check runs before the table is created."""
+    path = ("x" * 9000, "rdb_v1")
+    db = ConnectorArrowDatabase(store())
+    with pytest.raises(ValueError, match="path"):
+        db.add_records(path, rows(["r0"]), record_id_column="__record_id", flush=True)
+    assert _tables() == []
+
+
+@pytest.mark.usefixtures("root")
+def test_two_data_contexts_buffered_for_one_table_are_refused_before_it_is_made() -> (
+    None
+):
+    """P2: two batches, each of one data context, buffered for one first write."""
+    db = ConnectorArrowDatabase(store())
+    db.add_records(RESULT, rows(["r0"]), record_id_column="__record_id")
+    db.add_records(
+        RESULT, rows(["r1"], context="std:v2:other"), record_id_column="__record_id"
+    )
+    with pytest.raises(ValueError, match="data context"):
+        db.flush()
+    assert _tables() == []
+
+
+@pytest.mark.usefixtures("root")
+def test_a_recorded_table_with_no_rows_is_new_to_any_first_writer() -> None:
+    """P2 (spec 2.5): a first write that failed after its metadata leaves a table any
+    first writer may record again, with another schema too."""
+    other = rows(["r0"]).drop_columns(["s"])
+    manifest = codec.new_manifest(RESULT, "rdb_v1", other.schema)
+    _make_table(
+        names.store_table_name(RESULT),
+        {
+            **names.store_table_metadata(RESULT, CONTEXT),
+            **codec.manifest_entries(manifest),
+        },
+        with_rows=False,
+    )
+    db = ConnectorArrowDatabase(store())
+    assert not db.table_exists(RESULT)
+    written = rows(["r0", "r1"])
+    db.add_records(RESULT, written, record_id_column="__record_id", flush=True)
+    got = ConnectorArrowDatabase(store()).get_all_records(
+        RESULT, record_id_column="__record_id"
+    )
+    assert got is not None and by_id(got).equals(by_id(written))
+
+
+@pytest.mark.usefixtures("root")
+def test_a_table_listed_before_its_record_is_listed_after_it() -> None:
+    """P2: a missing record is never cached."""
+    _make_table(names.store_table_name(RESULT), {}, with_rows=False)
+    db = ConnectorArrowDatabase(store())
+    assert db.list_table_paths(("my_fn",)) == []
+    db.add_records(RESULT, rows(["r0"]), record_id_column="__record_id", flush=True)
+    assert db.list_table_paths(("my_fn",)) == [RESULT]
+
+
+def _with_path_column(table: pa.Table, *, live: bool) -> pa.Table:
+    from pathlib import Path as PathValue
+
+    from orcapod.contexts import get_default_context
+    from orcapod.logical_types.canonical_form import storage_form_schema
+
+    converter = get_default_context().type_converter
+    paths = converter.python_dicts_to_arrow_table(
+        [{"p": PathValue(f"a/{i}")} for i in range(table.num_rows)],
+        python_schema={"p": PathValue},
+    )
+    if not live:
+        schema = storage_form_schema(paths.schema)
+        live: Any = paths.column("p").combine_chunks()  # an extension array
+        paths = pa.Table.from_arrays([live.storage], schema=schema)
+    return table.append_column(paths.schema.field("p"), paths.column("p"))
+
+
+@pytest.mark.usefixtures("root")
+@pytest.mark.parametrize("first_live", [True, False])
+def test_a_logical_type_live_or_in_storage_form_is_one_column(first_live: bool) -> None:
+    """P2: compared by its identifier, whatever form it is given in."""
+    db = ConnectorArrowDatabase(store())
+    first = _with_path_column(rows(["r0"]), live=first_live)
+    second = _with_path_column(rows(["r1"]), live=not first_live)
+    db.add_records(RESULT, first, record_id_column="__record_id", flush=True)
+    db.add_records(RESULT, second, record_id_column="__record_id", flush=True)
+    got = ConnectorArrowDatabase(store()).get_all_records(
+        RESULT, record_id_column="__record_id"
+    )
+    assert got is not None and got.num_rows == 2

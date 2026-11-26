@@ -21,7 +21,7 @@ from __future__ import annotations
 from collections import defaultdict
 from collections.abc import Callable, Collection, Mapping
 from contextlib import AbstractContextManager
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -47,6 +47,11 @@ from orcapod.utils.arrow_utils import (
     normalize_to_large_types,
 )
 
+if TYPE_CHECKING:
+    from orcapod.logical_types.protocols import (
+        TypeConverterProtocol as LogicalTypeConverterProtocol,
+    )
+
 
 def _arrow_schema_to_column_infos(schema: pa.Schema) -> list[ColumnInfo]:
     """Convert a PyArrow schema to a list of ColumnInfo."""
@@ -54,6 +59,37 @@ def _arrow_schema_to_column_infos(schema: pa.Schema) -> list[ColumnInfo]:
         ColumnInfo(name=field.name, arrow_type=field.type, nullable=field.nullable)
         for field in schema
     ]
+
+
+def _with_live_logical_types(records: pa.Table) -> pa.Table:
+    """Return ``records`` with every logical type given in storage form made live.
+
+    A column in storage form carries its identifier as ``ARROW:extension:*`` field
+    metadata; the default data context's type converter wraps it as its live type, the
+    form a database reads back, so one column is compared in one form.
+    """
+    if not any(b"ARROW:extension:name" in (f.metadata or {}) for f in records.schema):
+        return records
+    from orcapod.contexts import get_default_context
+    from orcapod.logical_types.database_hooks import register_discovered_logical_types
+
+    # The context's converter implements the logical-type side of
+    # ``logical_types.protocols.TypeConverterProtocol`` (as Delta's read uses it).
+    converter = cast(
+        "LogicalTypeConverterProtocol",
+        cast(object, get_default_context().type_converter),
+    )
+    register_discovered_logical_types(converter, records.schema)
+    live = converter.apply_logical_types(records)
+    # A wrapped column states its identifier in its type: not in metadata too.
+    fields = []
+    for field in live.schema:
+        metadata = dict(field.metadata or {})
+        if isinstance(field.type, pa.BaseExtensionType):
+            _ = metadata.pop(b"ARROW:extension:name", None)
+            _ = metadata.pop(b"ARROW:extension:metadata", None)
+        fields.append(field.with_metadata(cast(Any, metadata)))
+    return live.cast(pa.schema(fields, metadata=cast(Any, live.schema.metadata)))
 
 
 def _alike(parts: list[pa.Table]) -> list[pa.Table]:
@@ -446,6 +482,10 @@ class ConnectorArrowDatabase:
             self._path_to_table_name(self._path_prefix + record_path)
         )
         records = normalize_table_to_large_types(records, keep_null=True)
+        if self.keeps_field_metadata:
+            # A logical type given in its storage form is the same column as one given
+            # live: compared, buffered and stored in one form (ITL-1498).
+            records = _with_live_logical_types(records)
         self._connector.validate_records(records)
 
         record_key = self._get_record_key(record_path)

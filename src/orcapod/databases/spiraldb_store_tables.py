@@ -62,6 +62,8 @@ class _KeyedTable(Protocol):
     @property
     def key_columns(self) -> tuple[str, ...]: ...
 
+    def schema(self) -> pa.Schema: ...
+
     def get_metadata(self) -> dict[str, bytes]: ...
 
     def set_metadata(self, metadata: dict[str, bytes]) -> None: ...
@@ -127,7 +129,7 @@ class StoreTables:
         self._service_call: Callable[[str], AbstractContextManager[None]] = service_call
         self._paths: dict[str, tuple[str, ...]] = {}
         self._found: dict[str, _Found] = {}
-        self._records_by_id: dict[str, names.StoreTableRecord | None] = {}
+        self._records_by_id: dict[str, names.StoreTableRecord] = {}
 
     key_column: str = codec.KEY_COLUMN
     """The key column of every store table."""
@@ -181,12 +183,13 @@ class StoreTables:
     # ── finding a table ──────────────────────────────────────────────────────
 
     def _judge(self, table_name: str) -> _Found | None:
-        """Return the table at a name if it holds rows of this path, ``None`` if it is
-        absent or a table to adopt (no record and no rows, or a record and no rows).
+        """Return the table at a name if it holds rows of this path; ``None`` if it is
+        absent or new: no rows yet, with or without a record (spec 2.5: any first
+        writer records it again). Only a found table is kept.
 
         Raises:
-            SpiralStoreTableCollisionError: If the table is another path's, of another
-                format, or holds rows without a manifest.
+            SpiralStoreTableCollisionError: If the table's key is not the store's, it
+                records another path or format, or it holds rows without a manifest.
         """
         found = self._found.get(table_name)
         if found is not None:
@@ -195,26 +198,30 @@ class StoreTables:
         table = self._open_table(table_name)
         if table is None:
             return None
+        self._require_key(table, table_name)
         with self._service_call(f"read the metadata of {table_name}"):
             metadata = table.get_metadata()
         try:
             record = names.read_store_table_metadata(metadata)
             if record is not None:
                 names.require_store_table_path(record, path)
-            manifest = None if record is None else codec.read_manifest(metadata, path)
-        except (SpiralStoreTableCollisionError, codec.ManifestError) as exc:
+        except SpiralStoreTableCollisionError as exc:
             raise SpiralStoreTableCollisionError(
                 str(exc), table=self._qualified(table_name)
             ) from exc
-        if manifest is None:
-            self._require_key(table, table_name)
-            if self._holds_rows(table):
-                raise SpiralStoreTableCollisionError(
-                    "it holds rows but no store manifest",
-                    table=self._qualified(table_name),
-                )
-            return None
-        assert record is not None
+        if not self._holds_rows(table):
+            return None  # new: its first write records it
+        try:
+            manifest = None if record is None else codec.read_manifest(metadata, path)
+        except codec.ManifestError as exc:
+            raise SpiralStoreTableCollisionError(
+                str(exc), table=self._qualified(table_name)
+            ) from exc
+        if record is None or manifest is None:
+            raise SpiralStoreTableCollisionError(
+                "it holds rows but no store manifest",
+                table=self._qualified(table_name),
+            )
         found = _Found(str(table.resource_id), record, manifest)
         self._found[table_name] = found
         return found
@@ -230,13 +237,25 @@ class StoreTables:
         return keys.num_rows > 0
 
     def _require_key(self, table: _KeyedTable, table_name: str) -> None:
-        """Refuse a table to adopt whose key is not the store's."""
-        if tuple(table.key_columns) != (codec.KEY_COLUMN,):
+        """Refuse a table whose key is not the store's: ``__record_id``, binary."""
+        key_type = None
+        if tuple(table.key_columns) == (codec.KEY_COLUMN,):
+            with self._service_call(f"read the schema of {table_name}"):
+                key_type = table.schema().field(codec.KEY_COLUMN).type
+        if key_type is not None and (
+            pa.types.is_binary(key_type) or pa.types.is_large_binary(key_type)
+        ):
+            return
+        if tuple(table.key_columns) == (codec.KEY_COLUMN,):
             raise SpiralStoreTableCollisionError(
-                f"its key columns are {list(table.key_columns)}, "
-                + f"not [{codec.KEY_COLUMN!r}]",
+                f"its key {codec.KEY_COLUMN!r} is {key_type}, not binary",
                 table=self._qualified(table_name),
             )
+        raise SpiralStoreTableCollisionError(
+            f"its key columns are {list(table.key_columns)}, "
+            + f"not [{codec.KEY_COLUMN!r}]",
+            table=self._qualified(table_name),
+        )
 
     def _qualified(self, table_name: str) -> str:
         return f"{self._project_id}/{self._dataset}/{table_name}"
@@ -283,6 +302,8 @@ class StoreTables:
                     f"it records path {list(record.path)}, whose table has another name",
                     table=self._qualified(table_name),
                 )
+            if record is None:
+                return None  # never kept: its record may be written later
             self._records_by_id[table_id] = record
         return self._records_by_id[table_id]
 
@@ -326,11 +347,15 @@ class StoreTables:
     # ── writing ──────────────────────────────────────────────────────────────
 
     def create(self, table_name: str) -> None:
-        """Create the table at a computed name, unless it exists or is to be adopted."""
-        if self._judge(table_name) is not None:
-            return
-        if self._open_table(table_name) is not None:
-            return  # to adopt: its first write records it
+        """Nothing yet: a store table is created by its first write, after every check
+        of the rows has passed, so a refusal leaves no table behind."""
+        _ = self._path_of(table_name)
+
+    def _create_or_open(self, table_name: str) -> _KeyedTable:
+        """The table at a computed name, created now if absent."""
+        table = self._open_table(table_name)
+        if table is not None:
+            return table
         key = pa.schema([pa.field(codec.KEY_COLUMN, pa.large_binary(), nullable=False)])
         project = self._client.project(self._project_id)
         try:
@@ -340,49 +365,64 @@ class StoreTables:
             if "status 409" not in str(exc):
                 raise
             # Made meanwhile: judged as any table found under the name.
-            _ = self._judge(table_name)
+            if self._judge(table_name) is not None:
+                raise SpiralStoreTableCollisionError(
+                    "it was written by another writer meanwhile",
+                    table=self._qualified(table_name),
+                ) from exc
+        table = self._open_table(table_name)
+        if table is None:
+            raise KeyError(f"no store table {self._qualified(table_name)}")
+        return table
 
     def write(self, table_name: str, records: pa.Table, skip_existing: bool) -> None:
-        """Upsert rows; the first write records the table's identity and manifest.
+        """Upsert rows; the first write creates the table and records its identity and
+        manifest. Every check runs before anything is created or written.
 
         Raises:
             ValueError: If the rows hold no ``__data_context`` column, or several data
-                contexts, or columns other than the manifest's.
+                contexts, their path cannot be recorded, or their columns are not the
+                table's.
             UnstorableInSpiralError: If the codec refuses the rows.
+            SpiralStoreTableCollisionError: If the table under the name is not this
+                path's store table.
         """
         path = self._path_of(table_name)
         context = _one_data_context(records)
         found = self._judge(table_name)
-        table = self._open_table(table_name)
-        if table is None:
-            raise KeyError(f"no store table {self._qualified(table_name)}")
         if found is None:
             manifest = codec.new_manifest(path, path[-1], records.schema)
-            encoded = _encoded(records)
             metadata = {
                 **names.store_table_metadata(path, context),
                 **codec.manifest_entries(manifest),
             }
+            encoded = _encoded(records)
+            if encoded.num_rows == 0:
+                return  # nothing to write, so nothing is created
+            table = self._create_or_open(table_name)
+            self._require_key(table, table_name)
             with self._service_call(f"record {table_name}"):
                 table.set_metadata(metadata)
-            found = _Found(
+            with self._service_call(f"write {table_name}"):
+                _ = table.append(encoded)
+            self._found[table_name] = _Found(
                 str(table.resource_id),
                 names.StoreTableRecord(path, path[-1], context),
                 manifest,
             )
-            self._found[table_name] = found
-        else:
-            difference = codec.schema_difference(found.manifest.schema, records.schema)
-            if difference is not None:
-                raise ValueError(
-                    f"the rows are not of the table's schema ({difference}): "
-                    + "schema evolution is not supported"
-                )
-            if skip_existing:
-                records = self._without_stored_keys(found, records)
-            encoded = _encoded(records)
+            return
+        difference = codec.schema_difference(found.manifest.schema, records.schema)
+        if difference is not None:
+            raise ValueError(
+                f"the rows are not of the table's schema ({difference}): "
+                + "schema evolution is not supported"
+            )
+        if skip_existing:
+            records = self._without_stored_keys(found, records)
+        encoded = _encoded(records)
         if encoded.num_rows == 0:
             return  # a write of no rows is never sent
+        table = self._client.keyed_table_by_id(found.table_id)
         with self._service_call(f"write {table_name}"):
             _ = table.append(encoded)
 
