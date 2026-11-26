@@ -639,3 +639,46 @@ def test_a_null_under_a_non_null_column_is_refused_whatever_its_names(
     )
     with pytest.raises(Exception):  # noqa: B017, PT011  # the SDK's error type differs from the fake's
         _ = table.append(rows)
+
+
+def _encoded(array: Any, how: str) -> Any:
+    """``array`` (of two equal values) dictionary-encoded or run-end encoded, built
+    from parts, as pyarrow encodes no struct itself."""
+    one = array.slice(0, 1)
+    if how == "dictionary":
+        return pa.DictionaryArray.from_arrays(pa.array([0, 0], pa.int32()), one)
+    return pa.RunEndEncodedArray.from_arrays(pa.array([2], pa.int32()), one)
+
+
+@pytest.mark.parametrize("how", ["dictionary"])
+def test_the_fake_refuses_an_encoded_time_outside_a_day(
+    tmp_path: Path, how: str
+) -> None:
+    """CodeRabbit on PR 590: the time rule holds inside encoded arrays too. (pyarrow
+    refuses to build a run-end-encoded array of such a time, so only a dictionary can
+    carry one.)"""
+    with fake.install(tmp_path):
+        key = pa.schema([pa.field("k", pa.large_string(), False)])
+        table = fake.FakeClient().project("p").create_keyed_table("d", "t", key)
+        times = pa.array([-1, -1], pa.int64()).view(pa.time64("ns"))
+        rows = pa.table(
+            {"k": pa.array(["a", "b"], pa.large_string()), "t": _encoded(times, how)}
+        )
+        with pytest.raises(fake.SpiralError, match="time"):
+            _ = table.append(rows)
+
+
+@pytest.mark.parametrize("how", ["dictionary", "run_end"])
+def test_the_fake_cuts_nul_in_names_inside_encoded_arrays(
+    tmp_path: Path, how: str
+) -> None:
+    """CodeRabbit on PR 590: the NUL rule holds inside encoded arrays too."""
+    with fake.install(tmp_path):
+        key = pa.schema([pa.field("k", pa.large_string(), False)])
+        table = fake.FakeClient().project("p").create_keyed_table("d", "t", key)
+        values = pa.array([{"x\0y": 1}, {"x\0y": 1}], pa.struct([("x\0y", pa.int8())]))
+        rows = pa.table(
+            {"k": pa.array(["a", "b"], pa.large_string()), "s": _encoded(values, how)}
+        )
+        stored = table.append(rows).scan().to_table()
+        assert stored.column("s").to_pylist() == [{"x": 1}, {"x": 1}]

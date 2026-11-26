@@ -219,10 +219,29 @@ def _reserved(name: str) -> str | None:
 _DAY = {"s": 86_400, "ms": 86_400_000, "us": 86_400_000_000, "ns": 86_400_000_000_000}
 
 
-def _time_outside_a_day(array: Any) -> bool:
-    """Whether a time value outside one day is in ``array``, at any depth (``time-of-day``)."""
+def _decoded(array: Any) -> Any:
+    """``array`` with every dictionary and run-end encoding at its top undone, as the
+    service stores it (``types``); a run-end-encoded struct included, which pyarrow
+    cannot decode itself."""
     if isinstance(array, pa.ExtensionArray):
         array = array.storage
+    if pa.types.is_dictionary(array.type):
+        return _decoded(array.dictionary_decode())
+    if pa.types.is_run_end_encoded(array.type):
+        ends = array.run_ends.to_pylist()
+        runs = [
+            i
+            for i, end in enumerate(ends)
+            for _ in range(end - (ends[i - 1] if i else 0))
+        ]
+        logical = runs[array.offset : array.offset + len(array)]
+        return _decoded(array.values.take(pa.array(logical, pa.int64())))
+    return array
+
+
+def _time_outside_a_day(array: Any) -> bool:
+    """Whether a time value outside one day is in ``array``, at any depth (``time-of-day``)."""
+    array = _decoded(array)
     t = array.type
     if pa.types.is_time(t):
         ticks = array.view(pa.int32() if pa.types.is_time32(t) else pa.int64())
@@ -254,10 +273,7 @@ def _stored_array(array: pa.Array[Any], target: pa.DataType) -> pa.Array[Any]:
     a: Any = array
     if isinstance(a, pa.ExtensionArray):
         a = a.storage
-    if pa.types.is_dictionary(a.type):
-        a = a.dictionary_decode()
-    if pa.types.is_run_end_encoded(a.type):
-        a = cast(Any, pc).run_end_decode(a)
+    a = _decoded(a)
     if a.type == target:
         return a
     t: Any = target
@@ -497,6 +513,13 @@ def _staged(rows: pa.Table, keys: list[str], stored: pa.Schema) -> pa.Table:
     names = [name.split("\0")[0] for name in rows.column_names]  # nul
     rows = rows.rename_columns(names)
     for i, field in enumerate(rows.schema):  # nul, at every depth
+        if pa.types.is_dictionary(field.type) or pa.types.is_run_end_encoded(
+            field.type
+        ):
+            # Stored as its values (``types``): decoded first, so its names are cut.
+            decoded = pa.chunked_array([_decoded(c) for c in rows.column(i).chunks])
+            rows = rows.set_column(i, field.with_type(decoded.type), decoded)
+            field = rows.schema.field(i)
         cut = _names_cut_at_nul(field.type)
         if cut != field.type:
             column = rows.column(i)

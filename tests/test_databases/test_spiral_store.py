@@ -1416,3 +1416,25 @@ def test_a_record_id_repeated_in_one_write_is_refused() -> None:
         rows.column_names.index(KEY), KEY, pa.array([b"x", b"x"], pa.large_binary())
     )
     refused(rows, "repeated")
+
+
+# --------------------------------------- CodeRabbit on PR 590 (b433047e)
+
+
+def test_a_schema_override_that_is_not_a_store_schema_is_a_manifest_error() -> None:
+    """``decode_rows`` raises its documented ``ManifestError``, also for a schema that
+    is no store schema at all (no key column)."""
+    table = keyed({"a": pa.array([1])})
+    manifest = new(table.schema)
+    without_key = table.schema.remove(table.schema.get_field_index(KEY))
+    with pytest.raises(store.ManifestError):
+        _ = store.decode_rows(_stored(table), manifest, without_key)
+
+
+@pytest.mark.parametrize("where", ["schema", "physical"])
+def test_a_recorded_name_that_is_not_utf8_is_a_manifest_error(where: str) -> None:
+    """``read_manifest`` raises only ``ManifestError``, also for a name of bytes."""
+    bad: Any = pa.field(cast(Any, b"a\xff"), pa.int8())
+    recorded = _payload(**{where: _ipc(schema_of([bad, (KEY, pa.large_binary())]))})
+    with pytest.raises(store.ManifestError):
+        _ = store.read_manifest(recorded, PATH)
