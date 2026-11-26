@@ -1162,6 +1162,7 @@ class SpiralDBConnector:
         Raises:
             SpiralDBWriteNotSupportedError: On a plain connector (ITL-1186).
             UnstorableInSpiralError: If the store codec refuses the rows.
+            InputValidationError: If their data context is not one this Orcapod has.
         """
         if (store := self._store_tables()) is None:
             raise SpiralDBWriteNotSupportedError(_NO_WRITES)

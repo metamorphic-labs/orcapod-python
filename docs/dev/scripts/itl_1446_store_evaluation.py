@@ -55,6 +55,7 @@ def make_rate(version: str) -> Any:
 
     @function_pod(output_keys="rate_hz", version=version)
     def firing_rate(n_spikes: int, duration_s: float) -> float:
+        """Spikes per second of one unit (counted)."""
         CALLS["firing_rate"] += 1
         return n_spikes / duration_s
 
@@ -221,6 +222,7 @@ class IdMap:
         reference: dict[tuple[str, ...], pa.Table],
         other: dict[tuple[str, ...], pa.Table],
     ) -> None:
+        """Match ``other``'s result ids to ``reference``'s by input hash."""
         self.ids: dict[bytes, bytes] = {}
         for path in set(reference) & set(other):
             if not path[-1].startswith("rdb_"):
@@ -336,6 +338,7 @@ class Calls:
     """Counts the SDK calls of a store-mode connector, per table name."""
 
     def __init__(self, connector: SpiralDBConnector) -> None:
+        """Wrap ``connector``'s store so every SDK call it makes is counted."""
         self.counts: Counter[tuple[str, str]] = Counter()
         store = connector._store  # pyright: ignore[reportPrivateUsage]
         assert store is not None
@@ -384,6 +387,7 @@ class _Client:
     def __init__(
         self, client: Any, counts: Counter[tuple[str, str]], names_by_id: dict[str, str]
     ) -> None:
+        """Wrap ``client``; count into ``counts``, naming tables by ``names_by_id``."""
         self._client, self._c, self._names = client, counts, names_by_id
 
     def project(self, id: str) -> Any:
@@ -401,6 +405,7 @@ class _Project:
     """A project whose creates are counted."""
 
     def __init__(self, project: Any, counts: Counter[tuple[str, str]]) -> None:
+        """Wrap ``project``; count into ``counts``."""
         self._p, self._c = project, counts
 
     def create_keyed_table(self, dataset: str, name: str, key: Any, **kw: Any) -> Any:
@@ -415,9 +420,11 @@ class _Table:
     """A keyed table whose calls are counted."""
 
     def __init__(self, table: Any, name: str, counts: Counter[tuple[str, str]]) -> None:
+        """Wrap ``table`` (named ``name``); count into ``counts``."""
         self._t, self._n, self._c = table, name, counts
 
     def __getattr__(self, attr: str) -> Any:
+        """Every other attribute is the wrapped table's."""
         return getattr(self._t, attr)
 
     def get_metadata(self) -> Any:

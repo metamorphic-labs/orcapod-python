@@ -820,3 +820,34 @@ def test_a_closed_store_connector_refuses_every_call_and_releases_its_tables() -
     # the connector sharing its client keeps its own reference
     assert shared.get_pk_columns(name) == ["__record_id"]
     assert not shared.has_table(name)
+
+
+# ------------------------------------- verification r6 of PRs 595 and 599 (f9bb2aa9)
+
+
+@pytest.mark.usefixtures("root")
+@pytest.mark.parametrize("context", ["std:v999:default", "v1", "not a key"])
+def test_a_data_context_this_orcapod_cannot_resolve_is_refused_before_anything(
+    context: str,
+) -> None:
+    """A table recording a data context key no reader can resolve would be unreadable:
+    such rows (an unknown key, or a short one) are refused when they are added,
+    before they are buffered, and by a write that reaches the store directly, before
+    any table is created."""
+    from orcapod.errors import InputValidationError
+
+    db = ConnectorArrowDatabase(store())
+    with pytest.raises(InputValidationError, match="data context"):
+        db.add_records(
+            RESULT, rows(["r0"], context=context), record_id_column="__record_id"
+        )
+    assert not db.table_exists(RESULT)
+    assert db.get_record_by_id(RESULT, b"r0", record_id_column="__record_id") is None
+    db.flush()
+    connector = store()
+    name = connector.table_name(RESULT)
+    with pytest.raises(InputValidationError, match="data context"):
+        connector.upsert_records(
+            name, rows(["r0"], context=context), id_column="__record_id"
+        )
+    assert _tables() == []

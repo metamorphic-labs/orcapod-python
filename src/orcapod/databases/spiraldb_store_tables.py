@@ -35,7 +35,7 @@ import pyarrow.compute as pc
 
 import orcapod.databases.spiral_store as codec
 import orcapod.databases.spiral_store_names as names
-from orcapod.errors import SpiralStoreTableCollisionError
+from orcapod.errors import InputValidationError, SpiralStoreTableCollisionError
 from orcapod.logical_types.canonical_form import declaration_form_schema
 from orcapod.types import ColumnInfo
 from orcapod.utils.lazy_module import LazyModule
@@ -471,6 +471,7 @@ class StoreTables:
                 contexts, or another than the table records, their path cannot be
                 recorded, or their columns are not the table's.
             UnstorableInSpiralError: If the codec refuses the rows.
+            InputValidationError: If their data context is not one this Orcapod has.
             SpiralStoreTableCollisionError: If the table under the name is not this
                 path's store table.
         """
@@ -560,10 +561,14 @@ def _encoded(records: pa.Table) -> pa.Table:
 
 
 def _one_data_context(records: pa.Table) -> str:
-    """The one data context of rows to store (ITL-1359: one per datagram).
+    """The one data context of rows to store (ITL-1359: one per datagram), a key this
+    Orcapod resolves: a table recording another could never be read back (its logical
+    types are made live with that context's converter, ``_live``).
 
     Raises:
         ValueError: If there is no data context column, a null in it, or two values.
+        InputValidationError: If the key is not one of a data context this Orcapod
+            has (an unknown or a short key), naming it.
     """
     if DATA_CONTEXT_COLUMN not in records.column_names:
         raise ValueError(
@@ -574,7 +579,23 @@ def _one_data_context(records: pa.Table) -> str:
         raise ValueError(
             f"rows of one write to a SpiralDB store hold one data context, not {values}"
         )
-    return values[0]
+    key = values[0]
+    from orcapod.contexts import resolve_context
+    from orcapod.contexts.core import ContextResolutionError
+
+    try:
+        resolved = resolve_context(key).context_key
+    except ContextResolutionError as exc:
+        raise InputValidationError(
+            f"the rows' data context {key!r} is not one this Orcapod has: a table "
+            "recording it could not be read"
+        ) from exc
+    if resolved != key:
+        raise InputValidationError(
+            f"the rows' data context {key!r} is not a full data context key "
+            f"({resolved!r} is)"
+        )
+    return key
 
 
 def _require_data_context(found: _Found, context: str) -> None:
