@@ -53,9 +53,14 @@ def _access_path(db_path: str | os.PathLike[str]) -> str:
     text = os.fspath(db_path)
     if text in {"", ":memory:"} or PurePath(text).is_absolute():
         return text
-    # Resolve relative names against this directory without changing how the
-    # filesystem follows a symlink before processing a following '..'.
-    return os.path.join(os.getcwd(), text)
+    # Pin the directory without normalizing the filename. The filesystem must
+    # still follow a symlink before processing a following '..'.
+    pinned = os.path.join(os.getcwd(), text)
+    if PurePath(pinned).is_absolute():
+        return pinned
+    # A relative Windows filename on another drive uses that drive's current
+    # directory. Resolve only the bare drive before appending the original name.
+    return os.path.join(os.path.abspath(PurePath(text).drive), text)
 
 
 class SQLiteTableSource(DBTableSource):

@@ -573,6 +573,30 @@ def test_sqlite_source_pins_rooted_windows_filename_to_the_working_drive(
     assert PureWindowsPath(path).as_uri() == "file:///C:/input.sqlite"
 
 
+def test_sqlite_source_pins_a_relative_filename_on_another_windows_drive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolve the drive's current directory while preserving the filename."""
+
+    def drive_directory(drive: str) -> str:
+        assert drive == "C:"
+        return r"C:\source"
+
+    monkeypatch.setattr(
+        sqlite_table_source,
+        "os",
+        SimpleNamespace(
+            path=SimpleNamespace(join=ntpath.join, abspath=drive_directory),
+            fspath=os.fspath,
+            getcwd=lambda: r"D:\work",
+        ),
+    )
+    monkeypatch.setattr(sqlite_table_source, "PurePath", PureWindowsPath)
+    path = sqlite_table_source._access_path(r"C:alias\..\input.sqlite")  # pyright: ignore[reportPrivateUsage]  # exercise Windows path semantics on any test host
+    assert path == r"C:\source\alias\..\input.sqlite"
+    assert PureWindowsPath(path).as_uri() == "file:///C:/source/alias/../input.sqlite"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
 async def test_load_only_invalidates_full_operator_after_cache_returns_to_empty(
