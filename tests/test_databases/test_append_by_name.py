@@ -18,7 +18,7 @@ import asyncio
 import os
 import sqlite3
 import uuid
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import ExitStack, closing, contextmanager
 from pathlib import Path
 from typing import Any, cast
@@ -1141,7 +1141,7 @@ def test_a_refused_batch_leaves_the_queued_rows_to_be_flushed(
 
 
 def _nullable_values(
-    rows: list[tuple[bytes, int | None]], *, nullable: bool = True
+    rows: Sequence[tuple[bytes, int | None]], *, nullable: bool = True
 ) -> pa.Table:
     return pa.Table.from_arrays(
         [
@@ -1249,6 +1249,89 @@ def test_sqlite_check_failure_drops_only_the_rejected_row(
         assert _read_values(writer).to_pylist() == expected
         writer.flush()
         assert _read_values(reader).to_pylist() == expected
+
+
+@pytest.mark.parametrize("bad_first", [False, True])
+@pytest.mark.parametrize("shared_first", [False, True])
+def test_connector_writes_to_the_same_key_follow_flush_order(
+    tmp_path: Path, bad_first: bool, shared_first: bool
+) -> None:
+    db_file = str(tmp_path / "store.db")
+    with closing(sqlite3.connect(db_file)) as sql:
+        sql.execute(
+            'CREATE TABLE t ("__record_id" BLOB PRIMARY KEY, v INTEGER CHECK (v > 0))'
+        )
+    with (
+        SQLiteConnector(db_file) as connector_a,
+        SQLiteConnector(db_file) as connector_b,
+    ):
+        writer_a = ConnectorArrowDatabase(connector_a)
+        writer_b = ConnectorArrowDatabase(connector_b)
+        _add(writer_b, _nullable_values([(b"shared", 1)]), flush=True)
+        good = [(b"shared", 10), (b"also-good", 20)]
+        valid = _nullable_values(good if shared_first else good[::-1])
+        refused = _nullable_values([(b"bad", -1)])
+        for batch in (refused, valid) if bad_first else (valid, refused):
+            _add(writer_a, batch)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            writer_a.flush()
+        assert _read_values(writer_b).to_pylist() == [{ID: b"shared", "v": 1}]
+
+        _add(writer_b, _nullable_values([(b"shared", 99)]), flush=True)
+        assert _read_values(writer_b).to_pylist() == [{ID: b"shared", "v": 99}]
+        writer_a.flush()
+        assert _read_values(writer_b).to_pylist() == [
+            {ID: b"also-good", "v": 20},
+            {ID: b"shared", "v": 10},
+        ]
+
+
+@pytest.mark.parametrize("bad_first", [False, True])
+@pytest.mark.parametrize("on_event_loop", [False, True])
+def test_sqlite_trigger_refusal_commits_valid_rows_and_names_rejected_keys(
+    tmp_path: Path, bad_first: bool, on_event_loop: bool
+) -> None:
+    db_file = str(tmp_path / "store.db")
+    with closing(sqlite3.connect(db_file)) as sql:
+        sql.execute('CREATE TABLE t ("__record_id" BLOB PRIMARY KEY, v INTEGER)')
+        sql.execute(
+            """CREATE TRIGGER positive BEFORE INSERT ON t WHEN NEW.v < 0
+               BEGIN SELECT RAISE(ABORT, 'must be positive'); END"""
+        )
+    with (
+        SQLiteConnector(db_file) as writer_connector,
+        SQLiteConnector(db_file) as reader_connector,
+    ):
+        writer = ConnectorArrowDatabase(writer_connector)
+        reader = ConnectorArrowDatabase(reader_connector)
+
+        def check() -> None:
+            _add(reader, _nullable_values([(b"seed", 1)]), flush=True)
+            left = _nullable_values([(b"bad-1", -1), (b"good-1", 2)])
+            right = _nullable_values([(b"good-2", 3), (b"bad-2", -2)]).select(["v", ID])
+            for batch in (left, right) if bad_first else (right, left):
+                _add(writer, batch)
+            with pytest.raises(
+                InputValidationError, match="must be positive"
+            ) as refused:
+                writer.flush()
+            expected = [
+                {ID: b"good-1", "v": 2},
+                {ID: b"good-2", "v": 3},
+                {ID: b"seed", "v": 1},
+            ]
+            assert _read_values(reader).to_pylist() == expected
+            assert "bad-1" in str(refused.value) and "bad-2" in str(refused.value)
+            assert _read_values(writer).to_pylist() == expected
+            writer.flush()
+
+        async def on_loop() -> None:
+            check()
+
+        if on_event_loop:
+            asyncio.run(on_loop())
+        else:
+            check()
 
 
 def _int_list(values: list[int | None], *, declared: bool) -> Any:

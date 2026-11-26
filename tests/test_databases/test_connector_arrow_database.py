@@ -860,11 +860,11 @@ class TestFlushBehaviour:
         db.add_record(path, b"second", make_table(v=[3]))
 
         def refuse_write(*args: Any, **kwargs: Any) -> None:
-            raise UnsupportedValueError("write refused by the store")
+            raise OSError("store temporarily unavailable")
 
         with monkeypatch.context() as patch:
             patch.setattr(connector, "upsert_records", refuse_write)
-            with pytest.raises(UnsupportedValueError, match="write refused"):
+            with pytest.raises(OSError, match="store temporarily unavailable"):
                 db.flush()
 
         pending_and_stored = db.get_all_records(path, record_id_column="id")
@@ -879,6 +879,51 @@ class TestFlushBehaviour:
             {"id": b"first", "v": 2},
             {"id": b"old", "v": 1},
             {"id": b"second", "v": 3},
+        ]
+
+    def test_non_sql_isolation_does_not_replay_rows_settled_before_an_interruption(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        connector = MockDBConnector()
+        db = ConnectorArrowDatabase(connector)
+        other_handle = ConnectorArrowDatabase(connector)
+        upsert = connector.upsert_records
+        path = self.PATH
+        db.add_records(
+            path,
+            pa.table({"id": [b"good", b"bad", b"later"], "v": [10, -1, 20]}),
+            record_id_column="id",
+        )
+
+        def reject_or_interrupt(
+            table_name: str,
+            records: pa.Table,
+            id_column: str,
+            skip_existing: bool = False,
+        ) -> None:
+            values = records["v"].to_pylist()
+            if -1 in values:
+                raise UnsupportedValueError("negative values are refused")
+            if 20 in values:
+                raise OSError("store temporarily unavailable")
+            upsert(table_name, records, id_column, skip_existing=skip_existing)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(connector, "upsert_records", reject_or_interrupt)
+            with pytest.raises(
+                OSError, match="store temporarily unavailable"
+            ) as raised:
+                db.flush()
+        assert "b'bad' — negative values are refused" in "\n".join(
+            raised.value.__notes__
+        )
+        other_handle.add_record(path, b"good", make_table(v=[99]), flush=True)
+        db.flush()
+        stored = other_handle.get_all_records(path, record_id_column="id")
+        assert stored is not None
+        assert stored.sort_by("id").to_pylist() == [
+            {"id": b"good", "v": 99},
+            {"id": b"later", "v": 20},
         ]
 
     def test_second_flush_on_existing_table_upserts(self, db):

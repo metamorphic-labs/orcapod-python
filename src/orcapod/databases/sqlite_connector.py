@@ -24,6 +24,7 @@ from typing import Any
 import pyarrow as pa
 
 from orcapod.databases._pending_commits import RejectedWriteRow
+from orcapod.databases._sql_writes import write_with_savepoints
 from orcapod.databases.utils import is_direct_projection
 from orcapod.types import ColumnInfo
 
@@ -32,6 +33,10 @@ logger = logging.getLogger(__name__)
 
 class _SQLiteRejectedWriteRow(sqlite3.IntegrityError, RejectedWriteRow):
     """A native SQLite integrity error with the index of the rejected row."""
+
+
+def _is_row_refusal(error: Exception) -> bool:
+    return isinstance(error, (sqlite3.IntegrityError, sqlite3.DataError))
 
 
 # ---------------------------------------------------------------------------
@@ -473,6 +478,23 @@ class SQLiteConnector:
             skip_existing: If True, skip rows whose id already exists
                 (INSERT OR IGNORE). If False, overwrite (INSERT OR REPLACE).
         """
+        self._upsert_records(table_name, records, skip_existing, isolate=False)
+
+    def isolate_refused_rows(
+        self,
+        table_name: str,
+        records: pa.Table,
+        id_column: str,
+        skip_existing: bool,
+        error: Exception,
+    ) -> dict[int, str] | None:
+        if not _is_row_refusal(error):
+            return None
+        return self._upsert_records(table_name, records, skip_existing, isolate=True)
+
+    def _upsert_records(
+        self, table_name: str, records: pa.Table, skip_existing: bool, *, isolate: bool
+    ) -> dict[int, str]:
         with self._lock:
             conn = self._require_open()
             self._validate_table_name(table_name)
@@ -490,15 +512,23 @@ class SQLiteConnector:
 
             conn.execute("BEGIN")
             try:
-                conn.executemany(sql, rows())
+                if isolate:
+                    refused = write_with_savepoints(
+                        conn.execute, sql, rows(), _is_row_refusal
+                    )
+                else:
+                    conn.executemany(sql, rows())
+                    refused = {}
                 row_index = -1  # Commit-time failures have no individual row.
                 conn.commit()
+                return refused
             except BaseException as error:
                 conn.rollback()
                 # sqlite3 steps each row before asking the iterator for the next one.
                 # These two constraints diagnose the row being stepped.
                 if (
-                    isinstance(error, sqlite3.IntegrityError)
+                    not isolate
+                    and isinstance(error, sqlite3.IntegrityError)
                     and row_index >= 0
                     and error.sqlite_errorcode
                     in (

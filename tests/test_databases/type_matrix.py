@@ -1129,6 +1129,17 @@ table as it is then, by exact name and type (a column with field metadata stays 
 queued order at a flush). A table keeps the column order of its first write. An append that also
 adds, omits or retypes a column keeps each database's own rule. The order of a struct's
 fields is not covered: a struct whose fields are in another order is another type here.
+
+When two connector database handles write the same record key, the last flush to
+commit that key wins. That includes a flush of a row retained after a failure, even
+if another handle has written that key in the meantime. Use
+`skip_duplicates=True` to keep an already stored key.
+
+SQLite and PostgreSQL roll back a failed bulk upsert. If the backend refuses the
+data without identifying the row, the flush tries each row once in order, using a
+savepoint per row. It commits valid rows and reports each dropped row's key and the
+backend's reason. Other tables can still commit. A transaction-wide failure leaves
+the uncommitted rows queued for retry.
 """
 
 
