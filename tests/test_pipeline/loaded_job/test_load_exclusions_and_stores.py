@@ -1,6 +1,9 @@
 """Report skipped nodes and reopen saved stores without creating directories."""
 
 import json
+import sqlite3
+import tempfile
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -17,7 +20,7 @@ from orcapod.errors import OrcapodDatabaseContentWarning
 from orcapod.pipeline.run_summary import RunSummary
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
-from orcapod.sources import CSVSource, DictSource
+from orcapod.sources import CSVSource, DictSource, SQLiteTableSource
 
 SOURCE_ORDERS = pytest.mark.parametrize(
     "memory_first", [False, True], ids=["file-first", "memory-first"]
@@ -36,6 +39,7 @@ def save_job(
     result_database: ArrowDatabaseProtocol | None = None,
     cache_database: ArrowDatabaseProtocol | None = None,
     memory_first: bool = False,
+    file_source: StreamProtocol | None = None,
 ) -> Path:
     """Save a job whose file-backed source can be restored independently."""
     _ = Path("rows.csv").write_text("id,group,x,y\n1,a,5,6\n2,b,7,8\n3,c,9,10\n")
@@ -55,7 +59,9 @@ def save_job(
         tag_only_columns=True,
         source_id="memory",
     )
-    file = csv if cache_database is None else csv.cached(cache_database=cache_database)
+    file = file_source if file_source is not None else csv
+    if cache_database is not None:
+        file = csv.cached(cache_database=cache_database)
     recorded = PipelineJob(name="small")
     with recorded:
         calculated = total.pod(memory, label="memory_total")
@@ -290,3 +296,147 @@ def test_loading_a_non_filesystem_store_leaves_the_working_directory_alone(
     loaded = PipelineJob.load(path)
     assert isinstance(loaded.database, store_type)
     assert set(tmp_path.iterdir()) == before
+
+
+@pytest.mark.parametrize("binding", ["database", "result_database", "cache"])
+@pytest.mark.parametrize("absolute", [False, True], ids=["relative", "absolute"])
+@SOURCE_ORDERS
+def test_loading_a_scoped_delta_store_requires_a_directory_at_the_scope(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    binding: str,
+    absolute: bool,
+    memory_first: bool,
+) -> None:
+    """The stored prefix must name a directory even when the root is present."""
+    monkeypatch.chdir(tmp_path)
+    root = tmp_path / "root" if absolute else Path("root")
+    scoped = DeltaTableDatabase(root).at("scope")
+    path = save_job(
+        scoped if binding == "database" else DeltaTableDatabase("store"),
+        result_database=scoped if binding == "result_database" else None,
+        cache_database=scoped if binding == "cache" else None,
+        memory_first=memory_first,
+    )
+    _ = (root / "scope").rename(root / "moved")
+    _ = (root / "scope").write_text("regular file")
+
+    loaded = PipelineJob.load(path)
+    if binding == "cache":
+        assert "file" in loaded.unbound_sources
+    elif binding == "database":
+        assert loaded.database is None
+    else:
+        assert loaded.result_database is None
+    assert "not an existing directory" in caplog.text
+    assert (root / "scope").read_text() == "regular file"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("binding", ["database", "result_database", "cache", "all"])
+@SOURCE_ORDERS
+async def test_resaving_a_job_preserves_the_location_of_an_unavailable_delta_store(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    binding: str,
+    asynchronous: bool,
+    memory_first: bool,
+) -> None:
+    """A resaved job can use each saved binding when its store returns."""
+    monkeypatch.chdir(tmp_path)
+    unavailable = (
+        {"database", "result_database", "cache"} if binding == "all" else {binding}
+    )
+    targets = {name: DeltaTableDatabase(name) for name in sorted(unavailable)}
+    path = save_job(
+        targets["database"] if "database" in targets else DeltaTableDatabase("store"),
+        result_database=targets.get("result_database"),
+        cache_database=targets.get("cache"),
+        memory_first=memory_first,
+    )
+    moved = {name: Path(name).rename(f"{name}-moved") for name in targets}
+    loaded = PipelineJob.load(path)
+    copy_path = Path("copy.json")
+    loaded.save(copy_path)
+
+    saved_bindings = json.loads(path.read_text())["bindings"]
+    copied_bindings = json.loads(copy_path.read_text())["bindings"]
+    if "cache" in targets:
+        assert copied_bindings["sources"]["file"] == saved_bindings["sources"]["file"]
+    for name in ("database", "result_database"):
+        if name in targets:
+            assert copied_bindings[name] == saved_bindings[name]
+    for name, moved_path in moved.items():
+        assert not Path(name).exists()
+        _ = moved_path.rename(name)
+    restored = PipelineJob.load(copy_path)
+    summary = await load_only(restored, asynchronous=asynchronous)
+    assert summary.nodes["file_total"].reused == 3
+    assert restored.unbound_sources == ["memory"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("absolute", [False, True], ids=["relative", "absolute"])
+@pytest.mark.parametrize("journal_mode", ["delete", "wal"])
+@SOURCE_ORDERS
+async def test_loading_a_sqlite_source_reads_existing_rows_without_creating_a_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    asynchronous: bool,
+    absolute: bool,
+    journal_mode: str,
+    memory_first: bool,
+) -> None:
+    """Read an existing SQLite input in either journal mode; never recreate it."""
+    monkeypatch.chdir(tmp_path)
+    original = Path("input #.sqlite")
+    with closing(sqlite3.connect(original)) as connection:
+        assert connection.execute(f"PRAGMA journal_mode={journal_mode}").fetchone() == (
+            journal_mode,
+        )
+        _ = connection.execute(
+            'CREATE TABLE samples (id INTEGER PRIMARY KEY, "group" TEXT NOT NULL, '
+            "x INTEGER NOT NULL, y INTEGER NOT NULL)"
+        )
+        _ = connection.executemany(
+            "INSERT INTO samples VALUES (?, ?, ?, ?)",
+            [(1, "a", 4, 5), (2, "b", 6, 7), (3, "c", 8, 9)],
+        )
+        connection.commit()
+    source = SQLiteTableSource(
+        original.absolute() if absolute else original,
+        "samples",
+        tag_columns=["id", "group"],
+        tag_only_columns=True,
+        source_id="file",
+    )
+    path = save_job(
+        DeltaTableDatabase("store"), memory_first=memory_first, file_source=source
+    )
+    present = PipelineJob.load(path)
+    summary = await load_only(present, asynchronous=asynchronous)
+    assert summary.nodes["file_total"].reused == 3
+
+    _ = original.rename("moved.sqlite")
+    missing = PipelineJob.load(path)
+    assert not original.exists()
+    assert set(missing.unbound_sources) == {"file", "memory"}
+    summary = await load_only(missing, asynchronous=asynchronous)
+    assert summary.skipped_unbound_sources["file_total"] == ("file",)
+
+
+def test_loading_a_job_does_not_create_a_temporary_blueprint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A job's embedded blueprint can be read directly from the saved file."""
+    monkeypatch.chdir(tmp_path)
+    path = save_job(DeltaTableDatabase("store"))
+
+    def refuse_tempfile(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("load tried to create a temporary file")
+
+    monkeypatch.setattr(tempfile, "NamedTemporaryFile", refuse_tempfile)
+    assert PipelineJob.load(path).unbound_sources == ["memory"]

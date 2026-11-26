@@ -3421,7 +3421,8 @@ class DeltaTableDatabase:
         Args:
             config: The saved database configuration.
             create_base_path: Create a missing local root when true. When false,
-                require an existing directory. Remote roots are opened lazily.
+                require existing directories for the root and the saved scope.
+                Remote stores are opened lazily.
         """
         if "root_uri" in config:
             # Current format (post-ENG-341)
@@ -3434,7 +3435,7 @@ class DeltaTableDatabase:
             # Legacy format (pre-ENG-341): "base_path" was the root URI string
             root_uri = config["base_path"]
             _path_prefix = ()
-        return cls(
+        database = cls(
             base_path=root_uri,
             storage_options=config.get("storage_options"),
             create_base_path=create_base_path,
@@ -3443,6 +3444,17 @@ class DeltaTableDatabase:
             allow_schema_evolution=config.get("allow_schema_evolution", True),
             _path_prefix=_path_prefix,
         )
+        if not create_base_path:
+            database._require_existing_scope()
+        return database
+
+    def _require_existing_scope(self) -> None:
+        """Validate a saved local scope without creating it."""
+        if self._is_cloud or not self._path_prefix:
+            return
+        scope = self._local_root.joinpath(*self._path_prefix)
+        if not scope.is_dir():
+            raise ValueError(f"Delta store scope {scope} is not an existing directory")
 
     @property
     def keeps_field_metadata(self) -> bool:

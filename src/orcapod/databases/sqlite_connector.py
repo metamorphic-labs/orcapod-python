@@ -19,7 +19,9 @@ import os
 import sqlite3
 import threading
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlencode
 
 import pyarrow as pa
 
@@ -27,6 +29,24 @@ from orcapod.databases.utils import is_direct_projection
 from orcapod.types import ColumnInfo
 
 logger = logging.getLogger(__name__)
+
+
+def _read_only_uri(db_path: str) -> str:
+    """Open an existing file without changing its configured SQLite URI options."""
+    if db_path.startswith("file:"):
+        location, _, query = db_path.partition("#")[0].partition("?")
+        options = parse_qsl(query, keep_blank_values=True)
+    else:
+        location = Path(db_path).absolute().as_uri() if db_path else "file:"
+        options = []
+    if (
+        db_path == ":memory:"
+        or location in {"file:", "file::memory:"}
+        or ("mode", "memory") in options
+    ):
+        raise ValueError("A saved SQLite source requires an existing database file")
+    options = [(key, value) for key, value in options if key != "mode"]
+    return f"{location}?{urlencode([*options, ('mode', 'ro')])}"
 
 
 # ---------------------------------------------------------------------------
@@ -238,10 +258,13 @@ class SQLiteConnector:
             in-process in-memory database. Defaults to ":memory:".
     """
 
-    def __init__(self, db_path: str | os.PathLike = ":memory:") -> None:
+    def __init__(
+        self, db_path: str | os.PathLike[str] = ":memory:", *, _read_only: bool = False
+    ) -> None:
         self._db_path = db_path
+        location = _read_only_uri(str(db_path)) if _read_only else str(db_path)
         self._conn: sqlite3.Connection | None = sqlite3.connect(
-            str(db_path), check_same_thread=False, isolation_level=None
+            location, uri=_read_only, check_same_thread=False, isolation_level=None
         )
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.RLock()

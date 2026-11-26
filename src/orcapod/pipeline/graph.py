@@ -324,6 +324,15 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 writes (an earlier format is refused, never migrated).
         """
         import json as _json
+
+        path = Path(path)
+        with open(path) as f:
+            data = _json.load(f)
+        return cls._from_saved_data(data, path)
+
+    @classmethod
+    def _from_saved_data(cls, data: dict[str, Any], path: Path) -> "Pipeline":
+        """Build a blueprint already decoded from a pipeline or job file."""
         from orcapod.pipeline.serialization import (
             FALL_THROUGH_TAGS_KEY,
             OPERATOR_INPUTS_KEY,
@@ -338,10 +347,6 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         from orcapod.core.nodes import FunctionNode, OperatorNode
         from orcapod.core.nodes.source_node import SourceNode as SourceNodeClass
         from orcapod.types import Schema
-
-        path = Path(path)
-        with open(path) as f:
-            data = _json.load(f)
 
         try:
             require_current_format(

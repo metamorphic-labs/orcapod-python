@@ -179,6 +179,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
     ) -> None:
         super().__init__(name=name, tracker_manager=tracker_manager)
         self._database = database
+        self._unresolved_database: dict[str, Any] | None = None
         self._result_database: "ArrowDatabaseProtocol | None" = result_database
         # For a loaded job whose file names a separate result database that is not
         # available (it could not be rebuilt, or it was in memory) and none was given:
@@ -190,6 +191,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         self._auto_compile = auto_compile
         # name → bound concrete source (user-facing API: job.sources).
         self._sources: dict[str, cp.StreamProtocol] = {}
+        self._unresolved_sources: dict[str, dict[str, Any]] = {}
         # hash → bound concrete source, keyed by the same hash as
         # _persistent_node_map.  Used by bind() for O(1) lookup by content
         # hash; avoids name collisions when multiple concrete sources share
@@ -538,6 +540,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # the job as it was, its database included (ITL-1112).
         self._database = new_database
         self._result_database = new_result_database
+        if database is not None:
+            self._unresolved_database = None
         if result_database_given:
             self._unresolved_result_database = None
 
@@ -551,6 +555,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     schema_hash = job_node.as_node().content_hash().to_string()
                     self._sources_by_hash[schema_hash] = sources[job_node.name]
             self._sources.update(sources)
+            for source_name in sources:
+                self._unresolved_sources.pop(source_name, None)
             # Every node predicts its schema again (ITL-1111). Since ITL-1112 a bind
             # should never change a prediction: ``validate`` refuses a source of other
             # column names or types, and the slot gives the declared schema, so this
@@ -1591,6 +1597,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         Saves topology (via the embedded Pipeline) plus bindings metadata and
         run state. The format covers both "template" (pre-run) and
         "completed" (post-run) states — distinguished by ``run.status``.
+        Recorded configurations for unavailable bindings are saved until replaced.
 
         Args:
             path: File path to write JSON output to.
@@ -1628,9 +1635,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         finally:
             os.unlink(tmp_path)
 
-        # Serialize source configs (best-effort — skip non-reconstructable sources)
-        sources_block: dict[str, Any] = {}
-        for spec_name, source in sorted(self._sources.items()):
+        # Unavailable sources keep their saved config until replaced by a binding.
+        sources_block: dict[str, Any] = dict(self._unresolved_sources)
+        for spec_name, source in self._sources.items():
             if hasattr(source, "to_config"):
                 try:
                     # ``hasattr`` checked it: every source declares it.
@@ -1647,7 +1654,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 sources_block[spec_name] = {"source_type": "unknown"}
 
         # Database config (best-effort)
-        database_block = None
+        database_block = self._unresolved_database
         if self._database is not None and hasattr(self._database, "to_config"):
             database_block = self._database.to_config()
         # A separate result database (ITL-1408), saved by the same rule; ``None`` when
@@ -1710,7 +1717,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             },
             "pipeline": pipeline_data,
             "bindings": {
-                "sources": sources_block,
+                "sources": dict(sorted(sources_block.items())),
                 "database": database_block,
                 "result_database": result_database_block,
             },
@@ -1745,10 +1752,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         cannot be rebuilt for another reason (a moved file) is logged as a
         warning. Neither affects reading the other nodes.
 
-        A saved local Delta store must already have a root directory. If its
-        path is missing or is a file, loading warns and leaves the corresponding
-        database or cached source unbound. An existing directory can hold zero
-        tables. Remote Delta stores are opened on access.
+        A saved local Delta store must already have directories for its root and
+        any saved scope. If either path is missing or is a file, loading warns
+        and leaves the corresponding database or cached source unbound. Remote
+        Delta stores are opened on access. SQLite inputs open existing files
+        read-only. SQLite may create its own WAL working files while reading.
 
         Args:
             path: Path to the JSON file produced by ``save()``.
@@ -1776,8 +1784,6 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 such a file then loads.
         """
         import json as _json
-        import os
-        import tempfile
         from pathlib import Path as _Path
 
         from orcapod.core.nodes.source_node import SourceNodeBase
@@ -1804,20 +1810,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             exc.add_note(f"Loading the job file {path}")
             raise
 
-        # Reconstruct pipeline from embedded blueprint data
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as tmp:
-            tmp_path = tmp.name
-            _json.dump(data["pipeline"], tmp)
-        try:
-            pipeline = Pipeline.load(tmp_path)
-        except ValueError as exc:
-            # The embedded pipeline was read from a temporary file: name the job file.
-            message = str(exc)
-            if tmp_path in message:
-                exc.args = (message.replace(tmp_path, str(path)),)
-            raise
-        finally:
-            os.unlink(tmp_path)
+        pipeline = Pipeline._from_saved_data(data["pipeline"], path)  # pyright: ignore[reportPrivateUsage]  # the job embeds a pipeline blueprint
 
         # Reconstruct sources (best-effort)
         slots = {
@@ -1826,9 +1819,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             if isinstance(node, SourceNodeBase)
         }
         sources: dict[str, cp.StreamProtocol] = {}
-        for spec_name, src_config in (
-            data.get("bindings", {}).get("sources", {}).items()
-        ):
+        bindings = data.get("bindings", {})
+        saved_sources: dict[str, dict[str, Any]] = bindings.get("sources", {})
+        for spec_name, src_config in saved_sources.items():
             source_type = src_config.get("source_type")
             # Every source states its plain tags (ITL-1019): a refusal is the file's
             # error, not a source that could not be rebuilt.
@@ -1890,8 +1883,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         # Reconstruct database
         effective_database = database
+        unresolved_database: dict[str, Any] | None = None
         if effective_database is None:
-            bindings = data.get("bindings", {})
             if bindings.get("store") and "database" not in bindings:
                 # A file saved before ITL-1082 renamed the key. It is not read under
                 # the old name: the job would load without its database, silently.
@@ -1913,6 +1906,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                         store_config, create_base_path=False
                     )
                 except Exception as exc:
+                    unresolved_database = store_config
                     logger.warning(
                         "Could not reconstruct the database from its saved config: %s. "
                         "Node results cannot be read until a database is given: "
@@ -1929,7 +1923,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         effective_result_database = result_database
         unresolved_result_database: dict[str, Any] | None = None
         if effective_result_database is None:
-            result_config = data.get("bindings", {}).get("result_database")
+            result_config = bindings.get("result_database")
             if result_config and result_config.get("type") == "in_memory":
                 # An in-memory database holds nothing once its process ended: a new
                 # one would be empty, so it is not available, as a connector is not.
@@ -1967,6 +1961,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             result_database=effective_result_database,
         )
         job._unresolved_result_database = unresolved_result_database
+        job._unresolved_database = unresolved_database
+        job._unresolved_sources = {
+            name: config
+            for name, config in saved_sources.items()
+            if name not in sources
+        }
         job._loaded = True
         job._compiled_pipeline = pipeline
         # Mark compiled so save() / compiled_pipeline can be accessed.

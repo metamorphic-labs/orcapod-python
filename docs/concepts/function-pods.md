@@ -1027,13 +1027,19 @@ file saved by an earlier release (format `0.1.0` to `0.3.0`) is refused, with a 
 saying so. Rebuild the pipeline from code and save it again; taking older files to the
 current format is the work of a separate migration tool, not of `load`.
 
-For a saved local Delta database, `load()` opens the existing root directory, even if
-it has no Delta tables. If the root path is missing or is a file, loading warns and
+For a saved local Delta database, `load()` requires directories for its saved root
+and any saved scope. A directory can hold zero Delta tables. If either path is
+missing or is a file, loading warns and
 leaves the database unbound. Use
 `PipelineJob.load(path, database=...)` to give the job a moved store, or
 `PipelineJob.load(path, result_database=...)` for a moved separate result store.
 If a cached source's Delta cache cannot be opened, its source slot stays unbound.
 For a remote Delta database, the connection is deferred until the store is accessed.
+Saving the loaded job retains unavailable store and source cache locations.
+
+An existing SQLite source is opened read-only. When its database file is missing,
+the source slot stays unbound and the file stays absent. SQLite may create its own
+`-wal` and `-shm` working files when reading an existing WAL database.
 
 For example:
 

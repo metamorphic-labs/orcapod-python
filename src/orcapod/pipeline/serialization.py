@@ -422,7 +422,7 @@ def resolve_database_from_config(
             (the output of ``DatabaseRegistry.to_dict()``).  Required when
             ``config["type"] == "scoped"``; ignored otherwise.
         create_base_path: Whether a Delta database may create a missing local root.
-            If false, a local Delta root must already be a directory.
+            If false, a local Delta root and saved scope must be directories.
 
     Returns:
         A new database instance constructed from the config.
@@ -445,7 +445,13 @@ def resolve_database_from_config(
         root_db = resolve_database_from_config(
             root_config, create_base_path=create_base_path
         )
-        return root_db.at(*config["path"])
+        scoped_db = root_db.at(*config["path"])
+        if not create_base_path:
+            from orcapod.databases.delta_lake_databases import DeltaTableDatabase
+
+            if isinstance(scoped_db, DeltaTableDatabase):
+                scoped_db._require_existing_scope()  # pyright: ignore[reportPrivateUsage]  # validate the saved registry scope
+        return scoped_db
     if db_type not in DATABASE_REGISTRY:
         raise ValueError(
             f"Unknown database type: {db_type!r}. "

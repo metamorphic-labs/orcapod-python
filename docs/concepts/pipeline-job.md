@@ -482,13 +482,20 @@ the **Nodes** table below the picture for each node's columns and status.
 result database's, when one was given) and how each source was configured.
 `PipelineJob.load(path)` reads it back, for example in a later Python session. Pass the
 original `InMemoryArrowDatabase` again to read its rows in the same process. For a
-local Delta store, loading requires the saved path to be an existing directory.
+local Delta store, loading requires existing directories for the saved root and
+any saved scope under it.
 If the path is missing or is a file, loading warns and leaves the database unbound.
 This also applies to a source's Delta cache, in which case the source slot stays
 unbound. Open a moved store by passing `database=...` or `result_database=...` to
 `PipelineJob.load()`. Bind a cached source with `job.bind(sources=...)` after giving
 it the cache's new location. An existing directory opens even if it holds no Delta
 tables. A remote Delta store's location is checked when it is accessed.
+
+Saving a loaded job keeps the recorded locations of databases and source caches
+that could not be opened, so a later load can find them when they return.
+An existing SQLite source opens read-only. A missing SQLite database file stays
+absent and its source slot stays unbound. SQLite may create its own `-wal` and
+`-shm` working files while reading an existing WAL database.
 
 The file records each node's own Arrow types, so saving types
 every node from its inputs' types, as previewing an empty job does, and costs what that

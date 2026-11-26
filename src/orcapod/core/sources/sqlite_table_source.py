@@ -119,12 +119,14 @@ class SQLiteTableSource(DBTableSource):
         config: "OrcapodConfig | None" = None,
         *,
         tag_only_columns: TagOnlyColumns = (),
+        _read_only: bool = False,
     ) -> None:
         self._db_path = db_path
         # A check (ITL-1102) reopens the database found now, whatever the working
         # directory is then; an in-memory database or a URI is kept as given.
         self._access_path: str | os.PathLike[str] = _access_path(db_path)
-        connector = SQLiteConnector(db_path)
+        self._read_only = _read_only
+        connector = SQLiteConnector(db_path, _read_only=_read_only)
 
         try:
             # A missing table is reported as missing, not as a table without a key.
@@ -210,7 +212,7 @@ class SQLiteTableSource(DBTableSource):
 
         The connector the source was built with was closed once the table was read.
         """
-        connector = SQLiteConnector(self._access_path)
+        connector = SQLiteConnector(self._access_path, _read_only=self._read_only)
         try:
             yield connector
         finally:
@@ -234,9 +236,12 @@ class SQLiteTableSource(DBTableSource):
         Returns:
             A new ``SQLiteTableSource`` instance.
 
-        Note:
-            ``:memory:`` sources cannot be reconstructed — the new in-memory
-            database will be empty and ``ValueError`` will be raised.
+        The database file must already exist. SQLite opens it read-only and may
+        create its own WAL working files while reading an existing WAL database.
+
+        Raises:
+            ValueError: If the saved source was in memory.
+            sqlite3.OperationalError: If the database file cannot be opened.
         """
         return cls._from_saved_name(
             config,
@@ -250,5 +255,6 @@ class SQLiteTableSource(DBTableSource):
                 source_id=name,
                 label=config.get("label"),
                 data_context=config.get("data_context"),
+                _read_only=True,
             ),
         )
