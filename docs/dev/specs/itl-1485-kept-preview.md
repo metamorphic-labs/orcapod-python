@@ -68,7 +68,10 @@ Approved as recommended by the coordinator on the developer's behalf (November 2
   buffers of the kept table, every column group); a larger `head(n)` is read and shown,
   not kept. The default preview is 10 rows. Rows can be wide (a list, binary or library
   value column holds any number of bytes per row), so the row bound alone does not bound
-  memory: 10,000 rows of a 1 MB array column are 10 GB. The byte bound does.
+  memory: 10,000 rows of a 1 MB array column are 10 GB. The byte bound does. It counts
+  every buffer the kept table references (`get_total_buffer_size`), not its values'
+  bytes: a scan's limit slices a batch, and a slice keeps the whole batch's buffers, so
+  rows that hold more than their values are first copied out (review of af670090).
 - **D4. A closed source keeps nothing.** `close()` drops the record, so a closed source's
   `head()` raises as on `main`. Recommended.
 - **D5. A table dropped and created again, or a schema-table change, is not seen by a kept
@@ -81,8 +84,19 @@ Approved as recommended by the coordinator on the developer's behalf (November 2
   Recommended: they keep `main`'s "every read scans again"; a run's rows are a job's
   business. The computed `preview(n)` of ITL-1464 (#571, not merged) can answer a source's
   preview from the record later.
-- **D7. The total.** Reused from the record when the counted bound is the same (every
-  `n` up to 100,000); otherwise counted as on `main`.
+- **D7. The total is kept with the rows** (amended after the review of af670090; decided
+  on the developer's behalf: "a repeated preview of an unchanged source takes no time").
+  The read that fills the record also counts the table's keys whenever a preview answered
+  from it shows the table's row count (its rows are not every row the source reads, or a
+  condition chose them), at the same version and through the same handle, to the largest
+  bound such a preview counts to. Every preview the record answers then makes no call,
+  its total included. The one call `main` does not make: a preview whose condition
+  returned every matching row also counts, once per version (the connector remembers it).
+- **One version, one read, a closed source** (review of af670090). The pinned version
+  is read once per preview: the rows, the count and the record's key are all of it, so a
+  source check that moves the version during a preview neither mixes versions nor keeps
+  rows under the new one. A source closed during a preview keeps nothing, and a closed
+  source's preview raises before it looks at a record.
 
 ## Tests (fake SpiralDB, by SDK call counts)
 

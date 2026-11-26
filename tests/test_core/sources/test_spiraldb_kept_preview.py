@@ -378,10 +378,127 @@ def test_every_kept_view_is_the_view_a_fresh_read_gives(
     for n in (first, 7, 3, 0):
         calls.clear()
         kept = source.head(n)
-        # Only a condition's table count may be counted, once per bound.
-        assert set(calls) <= ({"lookup", "open_schemas", "schema", "count"}), n
-        assert "scan" not in calls
+        # Every preview the kept record answers makes no call, its total included.
+        assert calls == {}, n
         _same_view(kept, _fresh(tag_only_columns=True, **_OPTIONS[options]).head(n))
         calls.clear()
         _ = source.head(n)
         assert calls == {}, n
+
+
+@pytest.mark.parametrize(
+    ("options", "first", "then"),
+    [
+        # The cap below both previews: each counts to its own bound on main.
+        ({"max_rows": 5}, {"n": 10}, {"n": 7, "columns": {"sort_by_tags": True}}),
+        # A condition read whole: the table's count is shown by the smaller preview.
+        ({"where": {"subject": "s1"}}, {"n": 40}, {"n": 10}),
+    ],
+    ids=["small_cap_sorted", "where_whole_then_fewer"],
+)
+def test_a_smaller_preview_makes_no_call(
+    calls: collections.Counter[str],
+    options: dict[str, Any],  # pyright: ignore[reportExplicitAny]
+    first: dict[str, Any],  # pyright: ignore[reportExplicitAny]
+    then: dict[str, Any],  # pyright: ignore[reportExplicitAny]
+) -> None:
+    """Codex review of af670090, finding 5: the total is kept with the rows."""
+    source = _source(tag_only_columns=True, **options)
+    _ = source.head(**first)
+    calls.clear()
+    kept = source.head(**then)
+    assert calls == {}
+    _same_view(kept, _fresh(tag_only_columns=True, **options).head(**then))
+
+
+@pytest.fixture
+def after_the_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[Callable[[], None]], None]:
+    """Run an action once, when the next scan of rows has handed out its last batch:
+    a preview paused after reading, before it keeps anything."""
+    action: list[Callable[[], None]] = []
+    original = fake_spiral_sdk.FakeReader.read_next_batch
+
+    def read_next_batch(self: fake_spiral_sdk.FakeReader) -> pa.RecordBatch:
+        try:
+            return original(self)
+        except StopIteration:
+            record = self._record  # pyright: ignore[reportPrivateUsage]  # the fake's
+            if (
+                action
+                and record.columns is None
+                and SCHEMA_TABLE not in (record.identifier)
+            ):
+                action.pop()()
+            raise
+
+    monkeypatch.setattr(fake_spiral_sdk.FakeReader, "read_next_batch", read_next_batch)
+    return action.append
+
+
+def test_a_source_closed_during_a_preview_keeps_and_serves_nothing(
+    calls: collections.Counter[str],
+    after_the_read: Callable[[Callable[[], None]], None],
+) -> None:
+    """Codex review of af670090, finding 3."""
+    source = _source(tag_only_columns=True)
+    after_the_read(source.close)
+    _ = source.head(40)
+    with pytest.raises(RuntimeError, match="closed"):
+        _ = source.head(40)
+    with pytest.raises(RuntimeError, match="closed"):
+        _ = source.head(5)
+
+
+def test_a_check_during_a_preview_does_not_mix_versions(
+    calls: collections.Counter[str],
+    after_the_read: Callable[[Callable[[], None]], None],
+) -> None:
+    """Codex review of af670090, finding 4: rows, total and key of one version."""
+    source = _source(tag_only_columns=True)
+
+    def new_first_key_and_check() -> None:
+        _table().write(_rows([-2]))
+        assert source.check_for_new_data()
+
+    after_the_read(new_first_key_and_check)
+    during = source.head(10, columns={"sort_by_tags": True})
+    # The rows and the total are those of the version the preview read.
+    assert -2 not in during.table["k"].to_pylist()
+    assert during.total_rows == 30
+    # Nothing of the old version answers for the new one.
+    calls.clear()
+    after = source.head(10, columns={"sort_by_tags": True})
+    assert calls["scan"] == 1
+    assert -2 in after.table["k"].to_pylist()
+    assert after.total_rows == 31
+
+
+def test_the_memory_bound_counts_what_the_kept_rows_hold(
+    calls: collections.Counter[str],
+) -> None:
+    """Codex review of af670090, finding 2: a small row sliced out of a batch with a
+    65 MiB row beside it keeps only its own bytes."""
+    huge = "z" * (65 * 2**20)
+    project = fake_spiral_sdk.ExternalProject(_PROJECT)
+    wide = project.create_table("default.wide", key_schema=_KEYS)
+    rows = _rows([0, 1])
+    rows = rows.set_column(3, "y", pa.array(["small", huge], pa.large_string()))
+    wide.write(rows)
+    wide.record(_SCHEMA)
+    source = SpiralDBTableSource(_PROJECT, "wide", tag_only_columns=True)
+    first = source.head(1)
+    assert first.table["y"].to_pylist() == ["small"]
+    kept = source._kept_preview  # pyright: ignore[reportPrivateUsage]  # the bound's subject
+    assert kept is not None and kept.rows is not None
+    assert kept.rows.get_total_buffer_size() < 2**20
+    calls.clear()
+    _same_view(source.head(1), first)
+    assert calls == {}
+    # A preview that holds the huge row itself is shown, not kept.
+    both = source.head(2)
+    assert both.table.num_rows == 2
+    calls.clear()
+    _ = source.head(2)
+    assert calls["scan"] == 1
