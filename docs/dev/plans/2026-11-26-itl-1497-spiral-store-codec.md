@@ -9,12 +9,12 @@ coordinator on the developer's behalf (decision 4). It stacks on PR 589 (ITL-149
 `src/orcapod/databases/spiral_store.py` and `tests/test_databases/test_spiral_store.py`, from
 PR 545's branch, with these changes:
 
-- **The manifest is one record**, `manifest_bytes` / `read_manifest`, for the `schema` cell of
-  the table's row in the dataset's schema table (`__orcapod_schemas__`); that cell has no size
-  limit, so the chunks, the header, the digest and the 1,024-entry limit are gone. A table's
-  own metadata holds only its identity (`spiral_store_names`, PR 589). Writing the row is
-  stage 3. The format stays a draft (`orcapod.spiral_store.draft`, version 0) until stage 3
-  fixes it as version 1.
+- **The manifest is one payload**, `manifest_bytes` / `read_manifest`. Where it is kept is
+  stage 3's: decision 4 was revised on 2026-11-26 (ITL-1498), and stage 3 keeps it in the
+  table's own metadata, in chunks of at most 8 KiB (a key and its value together), beside the
+  identity record (`spiral_store_names`, PR 589). It is not kept in the dataset's schema table,
+  which is all or nothing under one completion marker. The format stays a draft
+  (`orcapod.spiral_store.draft`, version 0) until stage 3 fixes it as version 1.
 - **Timestamps are written as they are**, not as integers.
 - **A null fixed-size list of structs is kept**, no longer refused.
 - Everything else is unchanged: names, types, nullability, refusals before anything is written,
@@ -39,5 +39,8 @@ PR 545's branch, with these changes:
 
 The fake (`tests/test_databases/fake_spiral_sdk.py`) now refuses the empty name, `*` and times
 outside a day as the service does. The conformance tests (`test_spiraldb_connector_integration.py`)
-run the codec through spiral-sdk on the fake and live: the rows written are the rows read, and
-each name or value the codec avoids is refused by the service.
+run the codec through spiral-sdk on the fake and live: the rows written are the rows read. They
+also check that the service refuses each name and value listed in the refusal test
+(`test_what_the_store_codec_avoids_is_refused`). Not every value the codec avoids is refused by
+the service: the codec also refuses what the service keeps but the codec cannot yet carry back
+(a null struct item inside a list).

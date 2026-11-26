@@ -665,7 +665,10 @@ def decode_rows(
         ManifestError: If ``schema`` is not the manifest's.
     """
     target = manifest.schema if schema is None else schema
-    difference = schema_difference(manifest.schema, target)
+    try:
+        difference = schema_difference(manifest.schema, target)
+    except UnstorableInSpiralError as exc:
+        raise ManifestError(f"not the recorded schema: {exc}") from exc
     if difference is not None or target.names != manifest.schema.names:
         raise ManifestError(f"not the recorded schema: {difference or 'column order'}")
     require_stored_schema(rows.schema, manifest)
@@ -836,9 +839,13 @@ def new_manifest(
 
 
 def manifest_bytes(manifest: StoreManifest) -> bytes:
-    """Return the payload that records ``manifest``; equal manifests give equal bytes.
+    """Return the payload that records ``manifest``.
 
-    ``manifest_entries`` cuts it into a table's metadata entries.
+    ``manifest_entries`` cuts it into a table's metadata entries. Writing the same
+    manifest again gives the same bytes. Two manifests whose schemas are equivalent but
+    represented differently (field metadata in another insertion order) can give
+    different bytes, because the Arrow IPC inside is not canonical: compare schemas with
+    ``schema_difference``, never by these bytes.
 
     Args:
         manifest: The manifest.
@@ -917,22 +924,28 @@ def read_manifest_bytes(recorded: bytes, record_path: tuple[str, ...]) -> StoreM
         raise ManifestError(
             f"the table is recorded as {path}, not as {list(record_path)}"
         )
-    schema = _map_metadata(_schema_of(fields.get("schema")), _unmark)
-    physical = _schema_of(fields.get("physical"))
     try:
+        schema = _map_metadata(_schema_of(fields.get("schema")), _unmark)
+        physical = _schema_of(fields.get("physical"))
         usable = logical_schema(schema)
         expected = physical_schema(schema)
     except UnstorableInSpiralError as exc:
         raise ManifestError(
             f"the recorded schema is not a store schema: {exc}"
         ) from exc
+    except UnicodeDecodeError as exc:
+        # pyarrow holds a name of any bytes, and fails where it is read as text.
+        raise ManifestError(f"a recorded name is not UTF-8 text ({exc})") from exc
     # The stored names are read from the manifest, never recomputed; its shape and types
     # must be the ones the logical schema is kept in.
     if _without_names(physical) != _without_names(expected) or (
         usable.names.index(KEY_COLUMN) != physical.get_field_index(KEY_COLUMN)
     ):
         raise ManifestError("the recorded stored schema is not the logical one's")
-    _require_distinct(physical)
+    try:
+        _require_distinct(physical)
+    except UnicodeDecodeError as exc:
+        raise ManifestError(f"a recorded name is not UTF-8 text ({exc})") from exc
     return StoreManifest(record_path, kind, usable, physical)
 
 
