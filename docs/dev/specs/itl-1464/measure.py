@@ -26,6 +26,7 @@ import argparse
 import gc
 import json
 import resource
+import shutil
 import sys
 import time
 import tracemalloc
@@ -333,18 +334,29 @@ def step_function_pod() -> tuple[int, int, Any]:
     return _raw(SERIES).nbytes, table.nbytes, table
 
 
-def _job(store: Path) -> Any:
+def _fresh_results(store: Path, step: str) -> str:
+    """Return a result location no other step uses, emptied of any earlier run.
+
+    A job step that found another step's (or its own earlier run's) stored function
+    results would skip that work, and its figures would not compare with the others'.
+    """
+    results = store / f"results_{step}"
+    shutil.rmtree(results, ignore_errors=True)
+    return str(results)
+
+
+def _job(store: Path, step: str) -> Any:
     from orcapod import PipelineJob
     from orcapod.databases import DeltaTableDatabase
 
-    database = DeltaTableDatabase(str(store / "results"))
+    database = DeltaTableDatabase(_fresh_results(store, step))
     with PipelineJob(name="chain", database=database) as job:
         _onsets_pod().pod(_grouped_series(), label="onsets")
     return job
 
 
 def step_job_run(store: Path) -> tuple[int, int, Any]:
-    job = _job(store)
+    job = _job(store, "job_run")
     job.run()
     return _raw(SERIES).nbytes, 0, job
 
@@ -352,7 +364,7 @@ def step_job_run(store: Path) -> tuple[int, int, Any]:
 def step_job_run_async_unkept(store: Path) -> tuple[int, int, Any]:
     from orcapod.pipeline import AsyncPipelineOrchestrator
 
-    job = _job(store)
+    job = _job(store, "job_run_async_unkept")
     job.run(orchestrator=AsyncPipelineOrchestrator(), materialize_results=False)
     return _raw(SERIES).nbytes, 0, job
 
@@ -360,7 +372,7 @@ def step_job_run_async_unkept(store: Path) -> tuple[int, int, Any]:
 def step_job_run_async(store: Path) -> tuple[int, int, Any]:
     from orcapod.pipeline import AsyncPipelineOrchestrator
 
-    job = _job(store)
+    job = _job(store, "job_run_async")
     job.run(orchestrator=AsyncPipelineOrchestrator())
     return _raw(SERIES).nbytes, 0, job
 
@@ -385,7 +397,9 @@ def _operator_job(chain: str, orchestrator: str) -> Callable[[Path], Any]:
         from orcapod.databases import DeltaTableDatabase
         from orcapod.pipeline import AsyncPipelineOrchestrator
 
-        database = DeltaTableDatabase(str(store / f"results_{chain}_{orchestrator}"))
+        database = DeltaTableDatabase(
+            _fresh_results(store, f"job_{chain}_{orchestrator}")
+        )
         with PipelineJob(name=f"only_{chain}", database=database) as job:
             _operator_chains()[chain]()
         if orchestrator == "async":

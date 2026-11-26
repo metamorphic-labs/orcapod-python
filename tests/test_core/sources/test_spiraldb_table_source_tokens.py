@@ -15,7 +15,10 @@ from typing import Any
 import pyarrow as pa
 import pytest
 
+from orcapod import PipelineJob
 from orcapod.core.sources import spiraldb_table_source as source_module
+from orcapod.databases import InMemoryArrowDatabase
+from orcapod.pipeline import AsyncPipelineOrchestrator
 from orcapod.sources import SpiralDBTableSource
 from orcapod.utils import arrow_utils
 from tests.test_databases import fake_spiral_sdk
@@ -199,6 +202,47 @@ def test_an_operator_over_the_source_still_reads_its_tokens(
             .as_table(all_info=True)
         )
     assert table.equals(expected)
+
+
+def _job_rows(tag_columns: list[str], tag_only: bool, orchestrator: Any) -> pa.Table:
+    """Run ``drop_nulls`` over the source as a job's only node; return its rows."""
+    source = SpiralDBTableSource(
+        _PROJECT, "event", tag_columns=tag_columns, tag_only_columns=tag_only
+    )
+    with PipelineJob(name="tokens", database=InMemoryArrowDatabase()) as job:
+        source.drop_nulls(["quality", "amplitude"], label="kept")
+    job.run(orchestrator=orchestrator)
+    return job.nodes["kept"].as_table(all_info=True)
+
+
+def _row_set(table: pa.Table) -> set[tuple[tuple[str, Any], ...]]:
+    return {tuple(sorted(row.items())) for row in table.to_pylist()}
+
+
+@pytest.mark.parametrize("tag_only", [False, True], ids=["data_tags", "tag_only"])
+@pytest.mark.parametrize(
+    "tag_columns", [["subject_id", "timestamp"], ["timestamp", "subject_id"]]
+)
+def test_an_operator_in_a_job_reads_the_tokens_on_both_paths(
+    project: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tag_columns: list[str],
+    tag_only: bool,
+) -> None:
+    sync = _job_rows(tag_columns, tag_only, None)
+    on_async = _job_rows(tag_columns, tag_only, AsyncPipelineOrchestrator())
+
+    assert sync.num_rows == _ROWS - 1
+    assert sync.column("_source_quality").null_count == 0
+    assert sync.column("_source_amplitude").null_count == 0
+    with monkeypatch.context() as patched:
+        _with_tokens_always(patched)
+        expected = _job_rows(tag_columns, tag_only, None)
+    # Sync is exact; async rows are compared as a set, never by order.
+    assert sync.schema.equals(expected.schema, check_metadata=True)
+    assert sync.equals(expected)
+    assert on_async.schema.equals(expected.schema, check_metadata=True)
+    assert _row_set(on_async) == _row_set(expected)
 
 
 def test_iteration_still_gives_each_row_its_tokens(project: Any) -> None:
