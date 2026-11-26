@@ -598,8 +598,9 @@ print(Condition.of(day=day, started=started, recorded=recorded))
   table version, `limit`, `max_rows`, the tags and data-tags, `tags_as_data`, the key
   columns, the source id and the label. The original source is not changed.
 - **Exact values.** An integer column takes a Python `int`, a float column takes a Python
-  `float` or `int`, a date column takes a `datetime.date`, and a timestamp column takes a
-  `datetime.datetime`. A timestamp column with a time zone takes an aware `datetime`.
+  `float`, a date column takes a `datetime.date`, and a timestamp column takes a
+  `datetime.datetime`. A float column without a logical type also takes a Python `int`.
+  A timestamp column with a time zone takes an aware `datetime`.
   A timestamp column without a zone takes a naive `datetime`. To use a NumPy scalar,
   call `.item()` first. The column's Arrow type must hold the value exactly. For example,
   `where(x=0.5)` is valid on a `float32` column, and `where(x=0.1)` raises `TypeError`

@@ -264,7 +264,7 @@ class SpiralDBTableSource(RootSource):
         TypeError: If a ``where`` value has the wrong Python type or cannot be held
             exactly by the column's Arrow type, or ``where`` holds anything but
             equalities and ranges of integer, timestamp and date columns. Float
-            columns also take exactly representable Python ints.
+            columns without a logical type also take exactly representable Python ints.
         InputValidationError: If ``tags_as_data`` names a column that is not a tag
             column or not a key column, or a new name that is already a column, is
             given twice, or is reserved for system columns.
@@ -532,7 +532,7 @@ class SpiralDBTableSource(RootSource):
         (``is_in``, a null test, ``!=``, two columns, ``|``, ``~``) is refused too.
 
         An equality value must fit its column's Arrow type exactly. For example,
-        a float32 column accepts ``0.5`` and ``1`` and refuses ``0.1`` (ITL-1480).
+        a plain float32 column accepts ``0.5`` and ``1`` and refuses ``0.1`` (ITL-1480).
         An equality sent to SpiralDB uses the service's own comparison. For a float column,
         ``0.0`` does not select the ``-0.0`` rows. An equality to ``-0.0`` or a NaN is
         refused (``TypeError``): SpiralDB matches them by their bits, while Orcapod

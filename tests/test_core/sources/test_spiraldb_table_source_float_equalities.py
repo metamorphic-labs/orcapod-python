@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import math
 import struct
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,10 @@ from typing import Any
 import pyarrow as pa
 import pytest
 
+from orcapod.logical_types.canonical_form import (
+    EXTENSION_METADATA_KEY,
+    EXTENSION_NAME_KEY,
+)
 from orcapod.sources import SpiralDBTableSource
 from orcapod.types import Condition, col
 from tests.test_databases import fake_spiral_sdk
@@ -234,6 +239,68 @@ def test_exact_float_column_equalities_select_rows(
         restricted = source.where(equalities)
         assert _ids(restricted) == [row]
         assert _async_ids(restricted) == [row]
+
+
+@pytest.fixture()
+def logical_float_source(
+    project: fake_spiral_sdk.ExternalProject,
+) -> SpiralDBTableSource:
+    """Read a logical column whose float storage carries its extension identity."""
+    schema = pa.schema(
+        [
+            pa.field("id", pa.int64()),
+            pa.field(
+                "v",
+                pa.float32(),
+                metadata={
+                    EXTENSION_NAME_KEY: b"test.measurement",
+                    EXTENSION_METADATA_KEY: b"v1",
+                },
+            ),
+        ]
+    )
+    table = project.create_table("default.logical", key_schema=[("id", pa.int64())])
+    table.write(pa.table({"id": [0, 1], "v": [0.1, 1.0]}, schema=schema))
+    table.record(schema)
+    return SpiralDBTableSource(_PROJECT, "logical", tag_only_columns=True)
+
+
+def test_logical_float_equality_refuses_integer(
+    logical_float_source: SpiralDBTableSource,
+):
+    """The logical column retains its existing Python float requirement."""
+    with pytest.raises(TypeError, match=r"column 'v'.*value 1 is a int"):
+        logical_float_source.where(v=1)
+    assert fake_spiral_sdk.scan_log == []
+
+
+def test_logical_float_equality_accepts_exact_float(
+    logical_float_source: SpiralDBTableSource,
+):
+    """An exact Python float can still select a row by its stored value."""
+    assert _ids(logical_float_source.where(v=1.0)) == [1]
+
+
+def test_logical_float_equality_refuses_inexact_float(
+    logical_float_source: SpiralDBTableSource,
+):
+    """A logical float column also requires exact representation."""
+    with pytest.raises(TypeError, match=r"column 'v'.*cannot hold 0\.1 exactly"):
+        logical_float_source.where(v=0.1)
+    assert fake_spiral_sdk.scan_log == []
+
+
+def test_huge_integer_equality_is_refused(project: fake_spiral_sdk.ExternalProject):
+    """A value outside the float range reports a column error even with a digit limit."""
+    source = _source()
+    original_limit = sys.get_int_max_str_digits()
+    try:
+        sys.set_int_max_str_digits(4300)
+        with pytest.raises(TypeError, match=r"column 'v'.*cannot hold .* exactly"):
+            source.where(v=10**5000)
+    finally:
+        sys.set_int_max_str_digits(original_limit)
+    assert fake_spiral_sdk.scan_log == []
 
 
 @pytest.mark.parametrize(
