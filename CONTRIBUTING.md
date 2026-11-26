@@ -92,8 +92,9 @@ uv run pytest tests/test_docs/
   with no ReST markup. The API reference is generated from them.
 - How to write a page is in
   [docs/dev/documentation-style.md](docs/dev/documentation-style.md).
-- The published site is built from `docs/`, and its build fails on a broken link. How to
-  build and preview it is in [site/README.md](site/README.md).
+- The published site is built from `docs/`, and its build fails on a broken internal link
+  (a link to another page, file or anchor of the documentation). Links to other sites are
+  not checked. How to build and preview it is in [site/README.md](site/README.md).
 
 ## Golden hashes
 
