@@ -15,6 +15,7 @@ spiral-sdk itself, never through Orcapod, which only reads.
 from __future__ import annotations
 
 import datetime as dt
+import decimal
 import math
 import os
 import uuid
@@ -408,3 +409,134 @@ def test_the_fake_keeps_concurrent_upserts_of_different_keys(tmp_path: Path) -> 
             for w in writers:
                 w.join()
         assert made.get_metadata() == {"a": b"1", "b": b"1"}
+
+
+# ------------------------------------------------ the store codec (ITL-1497)
+
+
+map_of: Any = pa.map_  # the stubs lack keys_sorted
+
+
+def _codec_rows() -> pa.Table:
+    """Rows of a store table: names the codec escapes, and every kept kind of value."""
+    from orcapod.databases import spiral_store
+
+    utc = dt.timezone.utc
+    inner = pa.struct([pa.field("a.b", pa.int8(), False), pa.field("__c", pa.int8())])
+    keys = [b"r0", b"r1", b"r2"]
+    columns: dict[str, Any] = {  # pyarrow arrays of several types
+        spiral_store.KEY_COLUMN: pa.array(keys, pa.large_binary()),
+        "__data_context": pa.array(["std:v1:default"] * 3, pa.large_string()),
+        "a.b": pa.array([1, 2, None], pa.int64()),
+        "$x": pa.array([True, None, False]),
+        "*": pa.array([b"", b"\x00", None], pa.large_binary()),
+        "ok$*;": pa.array([0, 2**64 - 1, None], pa.uint64()),
+        "ts_utc": pa.array(
+            [
+                dt.datetime.max.replace(tzinfo=utc),
+                dt.datetime.min.replace(tzinfo=utc),
+                None,
+            ],
+            pa.timestamp("us", tz="UTC"),
+        ),
+        "ts_ns": pa.array([2**63 - 1, -(2**63), 0], pa.int64()).view(
+            pa.timestamp("ns", tz="-03:30")
+        ),
+        "time": pa.array([-1, 86_400_000_000, None], pa.int64()).view(pa.time64("us")),
+        "f32": pa.array([0x7FC00001, 0x80000000, 0xFF800001], pa.uint32()).view(
+            pa.float32()
+        ),
+        "d32": pa.array(
+            [decimal.Decimal("1.23"), None, decimal.Decimal("-0.01")],
+            pa.decimal32(5, 2),
+        ),
+        "d64": pa.array([86_400_000 + 1, 0, None], pa.int64()).view(pa.date64()),
+        "s": pa.array([{"a.b": 1, "__c": None}] * 3, inner),
+        "ls": pa.array(
+            [[{"a.b": 1, "__c": 2}, {"a.b": 2, "__c": None}], None, []],
+            pa.large_list(inner),
+        ),
+        "fl": pa.array(
+            [[{"a.b": 1, "__c": 2}], None, [{"a.b": 3, "__c": None}]],
+            pa.list_(inner, 1),
+        ),
+        "m": pa.array(
+            [[("b", 1), ("a", 2)], None, []],
+            map_of(pa.large_string(), pa.int64(), keys_sorted=True),
+        ),
+        "n": pa.array([None, None, None], pa.null()),
+    }
+    return pa.table(columns)
+
+
+def test_the_store_codec_round_trips(place: _Place) -> None:
+    """Encoded rows written through spiral-sdk and decoded back are the rows, exactly.
+
+    A fixed table and fixed rows, so a live run writes the same rows each time.
+    """
+    from orcapod.databases import spiral_store
+
+    rows = _codec_rows()
+    manifest = spiral_store.new_manifest(("conformance", "rdb_v1"), "test", rows.schema)
+    encoded = spiral_store.encode_rows(rows)
+    key = pa.schema([pa.field(spiral_store.KEY_COLUMN, pa.large_binary(), False)])
+    client = _client(place)
+    table = client.project(place.project).create_keyed_table(
+        place.dataset, "store_codec", key, exist_ok=True
+    )
+    table = table.append(encoded)
+    read_back = client.keyed_table_by_id(table.resource_id).scan().to_table()
+    decoded = spiral_store.decode_rows(read_back, manifest)
+    order = pa.array(
+        sorted(
+            range(decoded.num_rows),
+            key=lambda i: decoded[spiral_store.KEY_COLUMN][i].as_py(),
+        ),
+        pa.int64(),
+    )
+    got = decoded.take(order)
+    want = rows.cast(spiral_store.logical_schema(rows.schema))
+    assert got.schema.equals(want.schema, check_metadata=True)
+    for name in want.column_names:
+        a, b = got.column(name).combine_chunks(), want.column(name).combine_chunks()
+        if pa.types.is_floating(a.type):
+            assert a.view(pa.uint32()).equals(b.view(pa.uint32())), name
+        else:
+            assert a.equals(b), name
+
+
+@pytest.mark.parametrize(
+    "column",
+    [
+        pa.table({"*": pa.array([1])}),
+        pa.table({"": pa.array([1])}),
+        pa.table({"__x": pa.array([1])}),
+        pa.table({"$x": pa.array([1])}),
+        pa.table({"a.b": pa.array([1])}),
+        pa.table({"s": pa.array([{"a.b": 1}], pa.struct([("a.b", pa.int8())]))}),
+        pa.table({"t": pa.array([86_400], pa.int32()).view(pa.time32("s"))}),
+        pa.table({"t": pa.array([-1], pa.int64()).view(pa.time64("ns"))}),
+        pa.table({"b": pa.array([b"ab"], pa.binary(2))}),
+        pa.table({"d": pa.array([1], pa.duration("s"))}),
+        pa.table({"s": pa.array([{"a": 1}, None], pa.struct([("a", pa.int8())]))}),
+        pa.table({"s": pa.array([{}], pa.struct([]))}),
+    ],
+    ids=lambda t: f"{t.schema.names[0]!r}: {t.schema.types[0]}",
+)
+def test_what_the_store_codec_avoids_is_refused(
+    place: _Place, column: pa.Table
+) -> None:
+    """The service refuses each name and value the codec never writes; nothing is written."""
+    client = _client(place)
+    key = pa.schema([pa.field("k", pa.large_string(), False)])
+    table = client.project(place.project).create_keyed_table(
+        place.dataset, "store_codec_refusals", key, exist_ok=True
+    )
+    n = column.num_rows
+    rows = column.add_column(
+        0, "k", pa.array([f"r{i}" for i in range(n)], pa.large_string())
+    )
+    with pytest.raises(Exception):  # noqa: B017, PT011  # the SDK's error type differs from the fake's
+        _ = table.append(rows)
+    again = client.keyed_table_by_id(table.resource_id)
+    assert again.version_id == table.version_id

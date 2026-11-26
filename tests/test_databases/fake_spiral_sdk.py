@@ -61,7 +61,10 @@ RULES = {
     "null-key": "a null key is refused",
     "key-only": "a write without a value column is refused",
     "no-key": "a write without a key column is refused",
-    "reserved": "a value column starting with '__' or '$', or any with '.', is refused",
+    "reserved": "a value column or struct field starting with '__' or '$', any with '.', "
+    "and one named '' or '*' (spiral-sdk 0.16.78, November 26, 2026) is refused",
+    "time-of-day": "spiral-sdk 0.16.78 (November 26, 2026): a time32 or time64 value outside "
+    "one day, at any depth, refuses the whole write",
     "nul": "a column name is cut at a NUL character",
     "type-conflict": "a column of another type than stored is refused",
     "unsupported": "duration, interval, fixed-size binary, union, an empty struct and a "
@@ -207,9 +210,34 @@ def _refused_type(t: pa.DataType) -> str | None:
 
 def _reserved(name: str) -> str | None:
     """Return the refusal of a reserved column name (``reserved``)."""
-    if name.startswith(("__", "$")) or "." in name:
+    if name.startswith(("__", "$")) or "." in name or name in ("", "*"):
         return f'Column name "{name}" is reserved'
     return None
+
+
+_DAY = {"s": 86_400, "ms": 86_400_000, "us": 86_400_000_000, "ns": 86_400_000_000_000}
+
+
+def _time_outside_a_day(array: Any) -> bool:
+    """Whether a time value outside one day is in ``array``, at any depth (``time-of-day``)."""
+    if isinstance(array, pa.ExtensionArray):
+        array = array.storage
+    t = array.type
+    if pa.types.is_time(t):
+        ticks = array.view(pa.int32() if pa.types.is_time32(t) else pa.int64())
+        day = _DAY[t.unit]
+        return any(v is not None and not 0 <= v < day for v in ticks.to_pylist())
+    if pa.types.is_struct(t):
+        return any(_time_outside_a_day(array.field(i)) for i in range(t.num_fields))
+    if pa.types.is_map(t):
+        return _time_outside_a_day(array.keys) or _time_outside_a_day(array.items)
+    if (
+        pa.types.is_list(t)
+        or pa.types.is_large_list(t)
+        or pa.types.is_fixed_size_list(t)
+    ):
+        return _time_outside_a_day(array.flatten())
+    return False
 
 
 def _stored_array(array: pa.Array[Any], target: pa.DataType) -> pa.Array[Any]:
@@ -443,6 +471,11 @@ def _staged(rows: pa.Table, keys: list[str], stored: pa.Schema) -> pa.Table:
             rows.column(field.name).chunks or [pa.array([], field.type)]
         )
         _check_nulls(array, field, in_list=False)
+        if _time_outside_a_day(array):
+            raise SpiralError(
+                "Scandal:Internal (message: Vortex error: Invalid time scalar: adding "
+                "duration to time overflowed)"
+            )
         target = _stored_type(field.type)
         if field.name in stored.names:
             kept = stored.field(field.name).type
