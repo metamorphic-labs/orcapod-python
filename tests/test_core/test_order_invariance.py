@@ -1271,11 +1271,11 @@ def test_identical_invocations_keep_the_smallest_explicit_label(
 
 def _restricted_job_run(root: Path, names: Sequence[str]) -> None:
     """Print the node labels, summary lines and warning for one job in a child process."""
-    from tests.test_databases import fake_pyspiral
+    from tests.test_databases import fake_spiral_sdk
 
     keys = pa.schema([pa.field("subject", pa.string())])
-    with fake_pyspiral.install(root):
-        project = fake_pyspiral.FakeSpiral().project("synthetic")
+    with fake_spiral_sdk.install(root):
+        project = fake_spiral_sdk.ExternalProject("synthetic")
         for value, name in enumerate(sorted(names)):
             # Distinct readings avoid competing for the same cache entry in async.
             rows = pa.table({"subject": ["a", "b"], "reading": [value, value + 1]})

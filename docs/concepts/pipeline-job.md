@@ -58,8 +58,8 @@ The three stages:
    and failed; see
    [Reading the run summary](function-pods.md#reading-the-run-summary).
 
-Among `job.run()`'s optional arguments, the tutorial's
-[Part 9](../tutorial/09-when-things-go-wrong.md) demonstrates `orchestrator=` (for example
+Among `job.run()`'s optional arguments, the tutorial
+[Handling errors](../tutorial/handling-errors.md) demonstrates `orchestrator=` (for example
 `SyncPipelineOrchestrator(error_policy="fail_fast")` to stop at the first failing row; the
 default policy skips failed rows and continues) and `observer=` (`StatusObserver`,
 `LoggingObserver`) to record what happened during the run. An observer only watches: one
@@ -236,11 +236,9 @@ A non-null column is created `NOT NULL` and reads back non-null. SQLite refuses 
 other type (lists,
 structs, dates or timestamps on SQLite, narrower integers and floats, logical types) is
 refused. PostgreSQL also refuses a column name or a table name longer than
-63 bytes, which it would truncate (`UnstorableTableNameError` for a table). `SpiralDBConnector` stores other types as written, except a
-timestamp with a time zone (SpiralDB drops the zone), a logical (extension) type such as
-`File`, `Path`, `UUID`, a user class or `set[int]` (SpiralDB drops the field metadata that
-names it), and a null struct; SpiralDB reserves the `__` prefix on
-value columns (the `__record_id` key is allowed) and `.` in any column name. The full list,
+63 bytes, which it would truncate (`UnstorableTableNameError` for a table). A database on
+`SpiralDBConnector` refuses every write for now (`SpiralDBWriteNotSupportedError`): Orcapod
+reads SpiralDB only. The full list,
 type by type, is [Data types per database](../reference/database-types.md).
 
 Orcapod's own stored tables hold such columns. A function node's result table holds
@@ -248,9 +246,9 @@ list-valued executor columns and `__`-prefixed columns. A side-effect node's log
 timestamp and `__data_context`, and an operator cache and a cached source hold
 `__data_context` too. So a job refuses these nodes when it is built, before anything runs:
 
-- every function node, on all three connectors;
-- every side-effect node, on SQLite and SpiralDB;
-- every operator cache (an operator node with caching on) and cached source, on SpiralDB.
+- every function node, on SQLite and PostgreSQL;
+- every side-effect node, on SQLite;
+- every node that stores anything, on SpiralDB.
 
 An operator cache or cached source on a SQL connector is refused when it is written, before
 anything is stored, if one of its columns has a type or name the connector does not store. On
@@ -431,6 +429,17 @@ function of a function pod, the class of a bound source), and for a job its stat
 
 A selected node also shows the row counts of the job's last run (`job.last_run`).
 
+A source bound with a label (`DictSource(..., label="mice")`, `SpiralDBTableSource(...,
+label="units")`) is shown in a job's diagram, in its node's preview, and in
+`RestrictedAggregationWarning` by that label; the diagram's details (`source id`) and the
+warning give its full source id. `explain()` and `trace()` name it by its id. Two sources with one
+label, or a label that is another node's name, are shown as `label (part)`: a SpiralDB
+table's dataset, else its project, else the source's name. A single node's preview shows the label
+alone. This is display only: the slot
+keeps its name, the one `job.nodes[...]` and `bind` take. In a diagram, a source without a label is shown
+by its slot's name, as is every source of a `Pipeline` (which binds none) and of a loaded
+job (a source's label is not saved).
+
 The options:
 
 - `direction="TB"` lays the graph out top to bottom instead of left to right.
@@ -446,6 +455,13 @@ appears only when there is something to fold). `direction=` and `collapse=` set 
 shown first, and the one shown where scripts do not run. A selected node stays selected
 when it is in the new layout. The checkboxes appear for graphs of up to 100 nodes: a larger
 diagram carries only the layout its arguments ask for, which keeps a notebook small.
+
+An input that only decides which rows of another input pass (the right input of a
+`SemiJoin`) is drawn as a dashed edge that enters the box from the side (from above or below
+when the graph runs left to right); the data input enters as every other edge does. The node's
+details give the tags the rows match on, and the text form lists such an input after the
+others: `<- spikes; constrained by units`. `collapse=True` never hides it: folded steps on its
+way are drawn dash-dotted.
 
 In each node, the kind line under the name (kind, what it is, status) is wrapped onto
 short lines, so a node is about as wide as its name.
