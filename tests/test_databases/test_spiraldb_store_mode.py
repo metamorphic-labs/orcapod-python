@@ -1303,6 +1303,8 @@ def test_a_closed_store_connector_refuses_every_call_and_releases_its_tables() -
         lambda: connector.get_table_names(),
         lambda: connector.validate_records(rows(["r0"])),
         lambda: connector.unstorable_column_reason("a", pa.int64(), primary_key=False),
+        lambda: connector.run_scope(),
+        lambda: connector.read_candidates(name, keys=[b"r0"]),
     ):
         with pytest.raises(RuntimeError, match="closed"):
             _ = call()

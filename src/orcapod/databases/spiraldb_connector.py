@@ -742,9 +742,13 @@ class SpiralDBConnector:
 
     def run_scope(self) -> AbstractContextManager[None]:
         """The scope of one run: a store holds one existence answer per table and one
-        listing in it (``StoreTables.run_scope``); a plain connector holds nothing."""
-        if self._store is not None:
-            return self._store.run_scope()
+        listing in it (``StoreTables.run_scope``); a plain connector holds nothing.
+
+        Raises:
+            RuntimeError: If this is a store-mode connector and it has been closed.
+        """
+        if (store := self._store_tables()) is not None:
+            return store.run_scope()
         return nullcontext()
 
     def read_candidates(
@@ -760,8 +764,8 @@ class SpiralDBConnector:
         (``StoreTables.read_candidates``); a plain connector reads the whole table.
         """
         self._require_open()
-        if self._store is not None:
-            return self._store.read_candidates(table_name, keys=keys, equal=equal)
+        if (store := self._store_tables()) is not None:
+            return store.read_candidates(table_name, keys=keys, equal=equal)
         return whole_table(self.iter_batches(f'SELECT * FROM "{table_name}"'))
 
     def _refuse_in_store_mode(self, what: str) -> None:
