@@ -180,7 +180,7 @@ class MockDBConnector:
         """Store every column: this in-memory mock keeps Arrow tables as they are."""
         return None
 
-    def validate_records(self, records: pa.Table) -> None:
+    def validate_records(self, records: pa.Table, *, table_name: str | None) -> None:
         """Reject any Arrow field or schema metadata — mirrors real SQL connectors."""
         problem_fields = [f.name for f in records.schema if _field_has_metadata(f)]
         has_schema_meta = bool(records.schema.metadata)
@@ -1139,7 +1139,9 @@ class TestMetadataWriteGuard:
         """A connector with a permissive validate_records lets metadata through."""
 
         class PermissiveConnector(MockDBConnector):
-            def validate_records(self, records: pa.Table) -> None:
+            def validate_records(
+                self, records: pa.Table, *, table_name: str | None
+            ) -> None:
                 pass  # no-op — this connector supports metadata
 
         db = ConnectorArrowDatabase(PermissiveConnector())

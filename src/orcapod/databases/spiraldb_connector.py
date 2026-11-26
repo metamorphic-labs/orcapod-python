@@ -1150,23 +1150,27 @@ class SpiralDBConnector:
         """
         return None
 
-    def validate_records(self, records: pa.Table) -> None:
+    def validate_records(self, records: pa.Table, *, table_name: str | None) -> None:
         """Check rows before a database buffers them; refuse them on a plain connector.
 
         A store runs the store codec on them (the last row of each key, as the database
-        keeps), so a row it cannot keep is refused before anything is written.
+        keeps), so a row it cannot keep is refused before anything is written, and
+        checks their data context against the one ``table_name``'s table records.
 
         Args:
             records: The rows.
+            table_name: The table they are for (computed by ``table_name(path)``), or
+                ``None`` for no table in particular.
 
         Raises:
             SpiralDBWriteNotSupportedError: On a plain connector (ITL-1186).
             UnstorableInSpiralError: If the store codec refuses the rows.
-            InputValidationError: If their data context is not one this Orcapod has.
+            InputValidationError: If their data context is not one this Orcapod has,
+                or not the one the table records.
         """
         if (store := self._store_tables()) is None:
             raise SpiralDBWriteNotSupportedError(_NO_WRITES)
-        store.validate(records)
+        store.validate(records, table_name)
 
     def close(self) -> None:
         """Close this connector and release its SDK client. Idempotent."""

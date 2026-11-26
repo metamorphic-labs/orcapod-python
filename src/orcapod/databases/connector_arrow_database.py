@@ -449,7 +449,7 @@ class ConnectorArrowDatabase:
         Args:
             records: The rows (any number, none included) to check.
         """
-        self._connector.validate_records(records)
+        self._connector.validate_records(records, table_name=None)
 
     def add_records(
         self,
@@ -494,15 +494,14 @@ class ConnectorArrowDatabase:
         self.require_storable(
             normalize_schema_to_large_types(records.schema, keep_null=True)
         )
-        self._require_table_name(
-            self._path_to_table_name(self._path_prefix + record_path)
-        )
+        table_name = self._path_to_table_name(self._path_prefix + record_path)
+        self._require_table_name(table_name)
         records = normalize_table_to_large_types(records, keep_null=True)
         if self.keeps_field_metadata:
             # A logical type given in its storage form is the same column as one given
             # live: compared, buffered and stored in one form (ITL-1498).
             records = _with_live_logical_types(records)
-        self._connector.validate_records(records)
+        self._connector.validate_records(records, table_name=table_name)
 
         record_key = self._get_record_key(record_path)
         # Columns match by name: rows with the held columns in another order are

@@ -788,7 +788,7 @@ class PostgreSQLConnector:
                 database_kind=type(self).__name__, table_name=table_name, reason=reason
             )
 
-    def validate_records(self, records: pa.Table) -> None:
+    def validate_records(self, records: pa.Table, *, table_name: str | None) -> None:
         """Reject tables carrying any Arrow field or schema metadata.
 
         ``PostgreSQLConnector`` does not preserve Arrow field or schema metadata
@@ -799,6 +799,7 @@ class PostgreSQLConnector:
 
         Args:
             records: Arrow table to validate.
+            table_name: Ignored: the check does not depend on the table.
 
         Raises:
             ValueError: If any field (or any nested child field) carries
