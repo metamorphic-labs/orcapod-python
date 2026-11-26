@@ -3180,14 +3180,11 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             data_record_id,
         ).to_prefixed_digest()
 
-        # Extract source columns only (no data columns) from the input data
-        input_table_with_source = input_data.as_table(columns={"source": True})
-        source_col_names = [
-            c
-            for c in input_table_with_source.column_names
-            if c.startswith(constants.SOURCE_PREFIX)
-        ]
-        input_source_table = input_table_with_source.select(source_col_names)
+        # The input's source-info columns, exactly as the instance id read them
+        # (``row_ids.instance_id_preimage`` takes the same table): a stored row
+        # gives its instance id again from its own columns, whatever their types
+        # (ITL-1471). Never typed again from the token values.
+        input_source_table = input_data.source_info_table()
 
         # Build the meta columns table.
         meta_table = pa.Table.from_pydict(
