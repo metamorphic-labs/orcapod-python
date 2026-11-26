@@ -402,3 +402,28 @@ def test_any_refusal_of_hashlib_is_value_error_on_put_and_a_miss_on_read(
     with pytest.raises(ValueError):
         c.put(_key("refused_algo"), ContentHash("refused_algo", b"\x01" * 32))
     assert c.get(_key("refused_algo")) is None
+
+
+class _CustomLabelHasher:
+    """A hasher whose label names no ``hashlib`` algorithm."""
+
+    def __init__(self) -> None:
+        self.calls: int = 0
+
+    @property
+    def hash_label(self) -> str:
+        return "app-sha256-v1"
+
+    def hash_file(self, file_path: PathLike) -> ContentHash:
+        _ = file_path
+        self.calls += 1
+        return ContentHash("app-sha256-v1", b"\x00" * 32)
+
+
+def test_cached_file_hasher_refuses_a_label_no_cache_can_store(cacher: Cacher):
+    """CodeRabbit on #594: a label a cache cannot store is refused when the
+    ``CachedFileHasher`` is built, not after every file has been hashed."""
+    inner = _CustomLabelHasher()
+    with pytest.raises(ValueError, match="app-sha256-v1"):
+        _ = CachedFileHasher(inner, cacher)
+    assert inner.calls == 0

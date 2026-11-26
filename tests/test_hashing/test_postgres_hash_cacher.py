@@ -670,17 +670,22 @@ class TestPostgresHashCacherStrictStore:
         barrier = threading.Barrier(8)
 
         def write(label: str) -> None:
-            c = PostgresHashCacher(pg_conninfo)
+            # A worker that fails, also while connecting, aborts the barrier so
+            # the others stop waiting and the error is reported (CodeRabbit, #594).
+            c: PostgresHashCacher | None = None
             try:
+                c = PostgresHashCacher(pg_conninfo)
                 barrier.wait()
                 for _ in range(20):
                     c.put(_key_with_label(label), values[label])
                     got = c.get(_key_with_label(label))
                     assert got is None or got == values[label]
             except Exception as exc:
+                barrier.abort()
                 errors.append(exc)
             finally:
-                c.close()
+                if c is not None:
+                    c.close()
 
         threads = [
             threading.Thread(target=write, args=(label,))

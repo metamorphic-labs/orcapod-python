@@ -163,10 +163,19 @@ class CachedFileHasher:
     ``FileContentHasherProtocol`` — callers do not need to know which they
     have.
 
+    The inner hasher's label must name an algorithm a cache can store: a
+    ``hashlib`` algorithm with a fixed digest length, or ``hash_path``, ``xxh64``
+    or ``crc32`` (every algorithm ``FileHasher`` can hash with qualifies). Any
+    other label is refused here, before a file is hashed.
+
     Args:
         file_hasher: Inner hasher that performs the actual content hashing.
         cacher: Cache backend implementing
             ``CacherProtocol[FileHashKey, ContentHash]``.
+
+    Raises:
+        ValueError: If ``file_hasher.hash_label`` names no algorithm with a fixed
+            digest length.
     """
 
     def __init__(
@@ -174,6 +183,7 @@ class CachedFileHasher:
         file_hasher: FileContentHasherProtocol,
         cacher: "CacherProtocol[FileHashKey, ContentHash]",
     ) -> None:
+        _ = file_hash_digest_size(file_hasher.hash_label)
         self.file_hasher = file_hasher
         self.cacher = cacher
 

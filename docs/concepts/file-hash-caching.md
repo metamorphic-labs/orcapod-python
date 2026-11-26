@@ -44,6 +44,11 @@ under another algorithm's key. A stored value is read only when it is exactly
 the key's label, a `:` and a digest of that algorithm's length; any other value
 is a miss, and the file is hashed again.
 
+The label must name an algorithm whose digest length is fixed: a `hashlib`
+algorithm such as `sha256` or `md5`, or `hash_path`, `xxh64` or `crc32`. Every algorithm
+`FileHasher` can hash with qualifies. `CachedFileHasher` refuses (`ValueError`) an
+inner hasher with any other label when it is built.
+
 `CachedFileHasher` wraps a `FileHasher` with any `HashCacher`. When you call
 `hash_file(path)` on it, it first constructs the key from the file's current
 metadata and queries the cacher. On a cache hit, it returns the stored digest
