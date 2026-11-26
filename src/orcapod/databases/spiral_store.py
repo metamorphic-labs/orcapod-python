@@ -787,8 +787,9 @@ def _decode(array: Any, field: pa.Field[Any], physical: pa.Field[Any]) -> Any:
 
 # ---------------------------------------------------------------------- the manifest
 
-# A draft: no table may be written with it outside tests. The persisted format is fixed
-# with the creation rules (stage 3 of the design), as version 1.
+# A draft, written only while store mode is private (N57): the persisted format and
+# version are fixed when the store is switched on (stage 5 of the design), with a
+# decision then on reading the tables written in this draft format.
 MANIFEST_FORMAT = "orcapod.spiral_store.draft"
 MANIFEST_VERSION = 0
 # In the recorded Arrow schema an ``ARROW:extension:*`` key is written behind this

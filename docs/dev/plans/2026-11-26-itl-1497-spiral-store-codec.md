@@ -17,7 +17,9 @@ PR 545's branch, with these changes:
   table's own metadata, in chunks of at most 8 KiB (a key and its value together), beside the
   identity record (`spiral_store_names`, PR 589). It is not kept in the dataset's schema table,
   which is all or nothing under one completion marker. The format stays a draft
-  (`orcapod.spiral_store.draft`, version 0) until stage 3 fixes it as version 1.
+  (`orcapod.spiral_store.draft`, version 0) while store mode is private: the format and
+  version are fixed when the store is switched on (stage 5), with a decision then on reading
+  draft tables (N57).
 - **Timestamps are written as they are**, not as integers.
 - **A null fixed-size list of structs is kept**, no longer refused.
 - Everything else is unchanged: names, types, nullability, refusals before anything is written,
