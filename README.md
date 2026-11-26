@@ -99,9 +99,10 @@ session.
 
 - [Getting Started](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/getting-started.md):
   sources, streams and function pods, step by step.
-- [Tutorial](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/tutorial/index.md):
-  a self-paced course in eleven short parts, from a first stream to a stored, re-runnable
-  pipeline over files, with exercises.
+- [Tutorials](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/tutorial/index.md):
+  a self-paced core course in seven parts, from a first stream to a stored, re-runnable
+  pipeline, and short tutorials on files, inspecting results, tracing a value, chaining
+  pipelines and handling errors, with exercises.
 - [Concepts](https://github.com/metamorphic-labs/orcapod-python/tree/main/docs/concepts): sources,
   streams, function pods, operators, pipelines and jobs, identity and hashing, file types,
   arrays and your own data types.

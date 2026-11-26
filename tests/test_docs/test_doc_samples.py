@@ -267,10 +267,12 @@ def test_doc_pages_are_discovered():
         "docs/tutorial/04-many-rows-into-one.md",
         "docs/tutorial/05-pipeline-job.md",
         "docs/tutorial/06-reruns-and-caching.md",
-        "docs/tutorial/07-files.md",
-        "docs/tutorial/08-inspecting-and-tracing.md",
-        "docs/tutorial/09-when-things-go-wrong.md",
-        "docs/tutorial/10-where-next.md",
+        "docs/tutorial/files.md",
+        "docs/tutorial/inspecting-results.md",
+        "docs/tutorial/tracing-a-value.md",
+        "docs/tutorial/chaining-pipelines.md",
+        "docs/tutorial/handling-errors.md",
+        "docs/tutorial/where-next.md",
     ):
         assert expected in DOC_PAGES
 

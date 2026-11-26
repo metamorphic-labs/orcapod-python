@@ -196,8 +196,8 @@ same (`Run of job '...': 1 row failed.`).
 **Fix.** The message says how to see the full traceback:
 `job.last_run.print_traceback("label")`. While developing, run with
 `job.run(orchestrator=SyncPipelineOrchestrator(error_policy="fail_fast"))` (from
-`orcapod.pipeline`) so that the first failure stops the run and raises. See the tutorial,
-[Part 9](tutorial/09-when-things-go-wrong.md).
+`orcapod.pipeline`) so that the first failure stops the run and raises. See the tutorial
+[Handling errors](tutorial/handling-errors.md).
 
 ### `TypeError: ...() got an unexpected keyword argument 'ctx'` from a `sink_pod`
 
