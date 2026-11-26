@@ -780,9 +780,18 @@ class Data(Datagram):
         return new_p
 
     def rename(self, column_mapping: "Mapping[str, str]") -> Self:
+        """Return a copy with data columns renamed, each token moving with its column.
+
+        Only the tokens of the columns this row holds are carried over: a token
+        held for a name the row had no column of (given earlier through
+        ``with_source_info``) is dropped, so it never stands in for the token of
+        the column renamed to that name.
+        """
         new_p = super().rename(column_mapping)
         new_p._source_info = {
-            column_mapping.get(k, k): v for k, v in self._source_info.items()
+            column_mapping.get(k, k): self._source_info[k]
+            for k in Datagram.keys(self)
+            if k in self._source_info
         }
         new_p._source_info_table = None
         self._keep_typed_tokens(
