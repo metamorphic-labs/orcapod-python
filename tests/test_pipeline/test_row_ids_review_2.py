@@ -477,3 +477,171 @@ def test_a_placeholder_without_a_result_stops_the_run_under_fail_fast(
         assert error.subgroup(EphemeralResultMissingError) is not None
     assert ("crash:EphemeralResultMissingError", "m1", 2) in observer.events
     assert calls == Counter()
+
+
+# ---------------------------------------------------------------------------
+# 4. One canonical type per token value
+# ---------------------------------------------------------------------------
+
+_LIST = pa.large_list(pa.large_string())
+# Token columns ``_source_a`` of three rows, by kind.
+TOKEN_KINDS: dict[str, "pa.Array[Any]"] = {
+    "null_typed_list": pa.array([None, None, None], _LIST),
+    "null_typed_string": pa.array([None, None, None], pa.large_string()),
+    "strings": pa.array(["s::r0::a", "s::r1::a", "s::r2::a"], pa.large_string()),
+    "lists": pa.array([["s::r0::a"], ["s::r1::a", "t::r1::a"], ["s::r2::a"]], _LIST),
+    "null_and_lists": pa.array([None, ["s::r1::a"], None], _LIST),
+}
+
+
+def _token_stream(kind: str, session: str = "first") -> ArrowTableStream:
+    """``_session_stream`` with a token column ``_source_a`` of the given kind."""
+    table = _session_stream(session).as_table()
+    return ArrowTableStream(
+        table.append_column(
+            pa.field("_source_a", TOKEN_KINDS[kind].type), TOKEN_KINDS[kind]
+        ),
+        tag_columns=["subject", "session"],
+    )
+
+
+def _pipeline_table(database: InMemoryArrowDatabase) -> pa.Table:
+    database.flush()
+    (path,) = [p for p in database.list_table_paths() if p[-1] == "pdb_v2"]
+    table = database.get_all_records(path)
+    assert table is not None
+    return table
+
+
+@PATH
+@pytest.mark.parametrize(
+    "kinds",
+    [
+        ("null_typed_list", "null_typed_string"),
+        ("null_typed_string", "null_typed_list"),
+        ("null_typed_list", "strings"),
+        ("strings", "null_typed_list"),
+    ],
+)
+def test_sessions_whose_null_tokens_are_typed_differently_share_a_table(
+    path: str, kinds: tuple[str, str]
+) -> None:
+    """A null token is a ``large_string`` null, whatever type its column declares.
+
+    Two sessions over one pipeline table, in both orders: a token column that holds
+    only nulls, declared as a list in one session and as a string in the other (or
+    holding strings in the other). Both complete and the table keeps one column
+    type (review of PR #583: hashed and stored with the declared type, the second
+    session failed with ``ArrowInvalid``; ``main`` completed both).
+    """
+    database = InMemoryArrowDatabase()
+    pod = combine.pod
+    assert isinstance(pod, FunctionPod)
+    for kind, session in zip(kinds, ("first", "second")):
+        stream = _token_stream(kind, session)
+        node = FunctionJobNode(pod, stream, pipeline_database=database)
+        assert _run_node(node, stream, path) == TOTALS[session]
+        stored = node.get_all_records()
+        assert stored is not None
+        assert sorted(_values(stored, "total")) == TOTALS[session]
+    table = _pipeline_table(database)
+    assert table.num_rows == 6
+    assert table.schema.field("_source_a").type == pa.large_string()
+
+
+@pytest.mark.parametrize("tokens", ["null_typed_list", "null_typed_string"])
+def test_a_null_tokens_instance_id_does_not_follow_its_columns_type(
+    tokens: str,
+) -> None:
+    """The id is a function of the row alone: its tags, its data and its tokens."""
+    ids = {}
+    for kind in ("null_typed_list", "null_typed_string"):
+        stream = _token_stream(kind)
+        ids[kind] = [
+            row_ids.instance_id(HASHER, tag, data) for tag, data in stream.iter_data()
+        ]
+        for tag, data in stream.iter_data():
+            preimage = row_ids.instance_id_preimage(
+                row_ids.entry_id(HASHER, tag, data), data
+            )
+            assert preimage.schema.field("_source_a").type == pa.large_string()
+            assert preimage.column("_source_a").to_pylist() == [None]
+    assert ids["null_typed_list"] == ids["null_typed_string"]
+    assert len(set(ids[tokens])) == 3
+
+
+def test_a_non_null_token_keeps_the_type_of_its_column() -> None:
+    """Rows of a list-typed column: a list token is a list, a null a string null."""
+    types = [
+        str(data.source_info_table().schema.field("_source_a").type)
+        for _, data in _token_stream("null_and_lists").iter_data()
+    ]
+    assert types == ["large_string", str(_LIST), "large_string"]
+    assert [
+        str(data.source_info_table().schema.field("_source_a").type)
+        for _, data in _token_stream("lists").iter_data()
+    ] == [str(_LIST)] * 3
+
+
+def _refusal(error: BaseException) -> str:
+    """The text of the clear refusal behind a failed write, with its cause."""
+    from orcapod.errors import InputValidationError, OrcapodDatabaseWriteError
+
+    if isinstance(error, ExceptionGroup):
+        (error,) = OrcapodDatabaseWriteError.in_group(error)
+    assert isinstance(error, OrcapodDatabaseWriteError), repr(error)
+    assert isinstance(error.__cause__, InputValidationError), repr(error.__cause__)
+    return str(error.__cause__)
+
+
+@PATH
+@pytest.mark.parametrize("kinds", [("lists", "strings"), ("strings", "lists")])
+def test_sessions_whose_tokens_differ_in_type_are_refused_naming_the_column(
+    path: str, kinds: tuple[str, str]
+) -> None:
+    """List tokens against string tokens in one table: refused, clearly, in any order.
+
+    The first session's rows stay as they are. (``main`` fails here too, with an
+    ``ArrowInvalid`` about schemas.)
+    """
+    from orcapod.errors import OrcapodDatabaseWriteError
+
+    database = InMemoryArrowDatabase()
+    pod = combine.pod
+    assert isinstance(pod, FunctionPod)
+    first = _token_stream(kinds[0], "first")
+    node = FunctionJobNode(pod, first, pipeline_database=database)
+    assert _run_node(node, first, path) == TOTALS["first"]
+    before = _pipeline_table(database)
+
+    second = _token_stream(kinds[1], "second")
+    later = FunctionJobNode(pod, second, pipeline_database=database)
+    with pytest.raises((OrcapodDatabaseWriteError, ExceptionGroup)) as raised:
+        _run_node(later, second, path)
+    message = _refusal(raised.value)
+    assert "_source_a" in message
+    assert "large_string" in message and "large_list<" in message
+    assert _pipeline_table(database).equals(before)
+
+
+@PATH
+def test_a_session_mixing_null_and_list_tokens_in_one_column_is_refused(
+    path: str,
+) -> None:
+    """A null token is a string null and a list token a list: two types, one column.
+
+    As on ``main``, where the rows were stored with those two types and the write
+    failed; the refusal now names the column and both types.
+    """
+    from orcapod.errors import OrcapodDatabaseWriteError
+
+    database = InMemoryArrowDatabase()
+    pod = combine.pod
+    assert isinstance(pod, FunctionPod)
+    stream = _token_stream("null_and_lists")
+    node = FunctionJobNode(pod, stream, pipeline_database=database)
+    with pytest.raises((OrcapodDatabaseWriteError, ExceptionGroup)) as raised:
+        _run_node(node, stream, path)
+    message = _refusal(raised.value)
+    assert "_source_a" in message
+    assert "large_string" in message and "large_list<" in message
