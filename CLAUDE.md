@@ -1136,8 +1136,11 @@ are defined in one module, `core/row_ids.py`; never build one of these preimages
   of November 26, 2026): a null token is a `large_string` null whatever type its column
   declares; a non-null token of a row read from an Arrow table (a stream's row) keeps the
   type that table gives it, with a nullable field, never typed again from the value (a
-  nested token column would not survive it); a row built from Python values, or changed
-  since it was read, has its tokens typed from their values. Ids are a function of the row
+  nested token column would not survive it); a change of the row keeps the typed column of every
+  token it keeps (a selection, a drop, a rename, added columns, columns taken from another
+  row); only a token given as a Python value is typed from its value. There is one column
+  per data column: a data column with no token has a null token, so a row built from values
+  and the same row read from a table have one instance id. Ids are a function of the row
   alone, never of the order sessions ran in. A pipeline table keeps one type per token
   column: a row whose token column has another type than the rows recorded (a list token
   beside a string or null token) is refused, naming the column and both types

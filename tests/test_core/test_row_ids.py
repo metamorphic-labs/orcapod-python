@@ -476,13 +476,15 @@ class TestTokensOfBuiltAndChangedRows:
     ) -> None:
         tokens = {name: TOKENS[name] for name in told}
         built = Data({name: DATA_VALUES[name] for name in order}, source_info=tokens)
-        table = pa.table(
-            {name: [DATA_VALUES[name]] for name in order}
-            | {
-                f"_source_{name}": pa.array([tokens.get(name)], pa.large_string())
-                for name in order
-            }
-        )
+        # The data fields as a row built from values has them (not null), so the
+        # two rows have one data hash and differ only in how they were built.
+        values = Data({name: DATA_VALUES[name] for name in order}).as_table()
+        table = values
+        for name in order:
+            table = table.append_column(
+                pa.field(f"_source_{name}", pa.large_string()),
+                pa.array([tokens.get(name)], pa.large_string()),
+            )
         read = Data(table)
         (streamed,) = Data.rows_of(table, get_default_context())
         expected = [f"_source_{name}" for name in order]

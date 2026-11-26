@@ -68,17 +68,20 @@ invocation_hashes: list[str] = []
 
 @function_pod(output_keys=["y", "v"])
 def inc(x: int, w: int) -> tuple[int, int]:
+    """Return ``x + 1`` and ``w + 1``, counting the call."""
     calls["f"] += 1
     return x + 1, w + 1
 
 
 @function_pod(output_keys="z")
 def add(y: int, v: int) -> int:
+    """Return ``y + v``, counting the call."""
     calls["g"] += 1
     return y + v
 
 
 def _tell(z: int, ctx: Any) -> None:
+    """Record the delivered value and the invocation hash it was delivered under."""
     delivered.append(z)
     invocation_hashes.append(ctx.invocation_hash)
 
@@ -88,18 +91,21 @@ tell = SideEffectPod(_tell)
 
 @function_pod(output_keys="sent", ctx_arg="ctx")
 def notify(y: int, v: int, ctx: Any) -> int:
+    """Return ``y + v``, recording the invocation hash of the call."""
     invocation_hashes.append(ctx.invocation_hash)
     return y + v
 
 
 @pytest.fixture(autouse=True)
 def _reset() -> None:
+    """Clear the call counts, the delivered values and the invocation hashes."""
     calls.clear()
     delivered.clear()
     invocation_hashes.clear()
 
 
 def _source(arrangement: str) -> ArrowTableSource:
+    """The three rows as a source named ``rows``, laid out as ``arrangement`` says."""
     tags, data = ARRANGEMENTS[arrangement]
     names = [*tags, *data]
     schema = pa.schema(pa.field(n, COLUMNS[n].type, nullable=False) for n in names)
@@ -122,11 +128,12 @@ def _job(
         g: Any = add.pod(inc.pod(_source(arrangement), label="f"), label="g")
         tell.process(g, label="tell")
     job.set_ephemeral_database(ephemeral)
-    job.nodes["f"].node_config = NodeConfig(is_result_ephemeral=True)  # pyright: ignore[reportAttributeAccessIssue]
+    job.nodes["f"].node_config = NodeConfig(is_result_ephemeral=True)  # pyright: ignore[reportAttributeAccessIssue]  # job.nodes is typed by the node protocol; "f" is a function node
     return job
 
 
 def _run(job: PipelineJob, orchestrator: str) -> None:
+    """Run ``job`` once on the named orchestrator."""
     _ = job.run(orchestrator=ORCHESTRATORS[orchestrator]())
 
 
@@ -139,6 +146,7 @@ def _table(database: InMemoryArrowDatabase, *parts: str) -> pa.Table:
 
 
 def _user_and_system_tags(row: pa.Table) -> list[str]:
+    """The names of a stored row's user tag and system tag columns."""
     return [
         name
         for name in row.column_names
@@ -180,6 +188,7 @@ def _values(table: pa.Table, column: str) -> list[Any]:
 
 
 def _rows(table: pa.Table) -> list[pa.Table]:
+    """The rows of ``table``, each as a one-row table."""
     return [table.slice(i, 1) for i in range(table.num_rows)]
 
 
@@ -253,12 +262,13 @@ def test_the_stored_instance_ids_are_those_of_the_rows_the_node_was_given(
     assert len(given) == 3
 
 
-def test_the_two_arrangements_store_the_same_instance_ids() -> None:
+@ORCHESTRATOR
+def test_the_two_arrangements_store_the_same_instance_ids(orchestrator: str) -> None:
     """Neither the tag order nor the order of the token columns counts."""
     seen = []
     for arrangement in ARRANGEMENTS:
         database = InMemoryArrowDatabase()
-        _run(_job(database, InMemoryArrowDatabase(), arrangement), "sync")
+        _run(_job(database, InMemoryArrowDatabase(), arrangement), orchestrator)
         seen.append(
             sorted(_values(_table(database, "inc", "pdb_v2"), "__pipeline_instance_id"))
         )
@@ -341,6 +351,12 @@ def test_the_invocation_hash_of_a_function_with_ctx_ends_in_the_entry_id(
 def test_a_token_only_change_records_new_instances_and_computes_and_delivers_nothing(
     orchestrator: str, arrangement: str
 ) -> None:
+    """A second job run after ``f``'s ephemeral results are gone, sync and async.
+
+    ``f`` computes again, so ``g`` and ``tell`` are given the same values with new
+    tokens: ``g`` records three new instances from its stored results, calls
+    nothing, and ``tell`` delivers nothing again.
+    """
     database = InMemoryArrowDatabase()
     _run(_job(database, InMemoryArrowDatabase(), arrangement), orchestrator)
     assert (calls["f"], calls["g"], len(delivered)) == (3, 3, 3)
@@ -448,7 +464,7 @@ def _operator_job(database: InMemoryArrowDatabase, arrangement: str) -> Pipeline
     with job:
         f: Any = inc.pod(_source(arrangement), label="f")
         SelectDataColumns(["v", "y"])(f, label="sel")
-    job.nodes["sel"].attach_databases(  # pyright: ignore[reportAttributeAccessIssue]
+    job.nodes["sel"].attach_databases(  # pyright: ignore[reportAttributeAccessIssue]  # job.nodes is typed by the node protocol; "sel" is an operator node
         pipeline_database=database.at("ops"), cache_mode=CacheMode.LOG
     )
     return job
@@ -459,6 +475,7 @@ def _operator_job(database: InMemoryArrowDatabase, arrangement: str) -> Pipeline
 def test_the_operator_cache_stores_the_entry_id_of_every_row(
     orchestrator: str, arrangement: str
 ) -> None:
+    """A logging operator node's stored table, in both arrangements, sync and async."""
     database = InMemoryArrowDatabase()
     job = _operator_job(database, arrangement)
     _run(job, orchestrator)
@@ -500,13 +517,14 @@ def test_neither_stored_column_is_part_of_the_row_key(orchestrator: str) -> None
 
 @ORCHESTRATOR
 def test_a_row_passed_again_keeps_its_first_insertion_time(orchestrator: str) -> None:
+    """A second run of a logging operator node over the same rows, sync and async."""
     database = InMemoryArrowDatabase()
     job = _operator_job(database, "as_declared")
     _run(job, orchestrator)
     first = _table(database, "odb_v2").sort_by(KEY)
     # The same job runs again over the same rows (cleared, or nothing would run).
     for label in ("f", "sel"):
-        job.nodes[label].clear_cache()  # pyright: ignore[reportAttributeAccessIssue]
+        job.nodes[label].clear_cache()  # pyright: ignore[reportAttributeAccessIssue]  # job.nodes is typed by the node protocol; every job node has clear_cache
     _run(job, orchestrator)
     assert _table(database, "odb_v2").sort_by(KEY).equals(first)
     assert calls["f"] == 3
@@ -516,6 +534,7 @@ def test_a_row_passed_again_keeps_its_first_insertion_time(orchestrator: str) ->
 def test_no_read_of_the_operator_node_shows_the_stored_only_columns(
     orchestrator: str,
 ) -> None:
+    """Every read of a logging operator node after a job run, sync and async."""
     database = InMemoryArrowDatabase()
     job = _operator_job(database, "as_declared")
     _run(job, orchestrator)
@@ -566,6 +585,7 @@ def _placeholders(job: PipelineJob) -> list[tuple[Any, Any]]:
 def test_a_placeholder_carries_a_real_outputs_tokens_with_the_sentinel(
     arrangement: str,
 ) -> None:
+    """The rows ``f`` gives in a later session, once its ephemeral results are gone."""
     database = InMemoryArrowDatabase()
     first = _job(database, InMemoryArrowDatabase(), arrangement)
     _run(first, "sync")
@@ -574,7 +594,7 @@ def test_a_placeholder_carries_a_real_outputs_tokens_with_the_sentinel(
     later = _job(database, InMemoryArrowDatabase(), arrangement)
     placeholders = _placeholders(later)
     assert len(placeholders) == 3
-    uri = ":".join(later.nodes["f"].node_uri)  # pyright: ignore[reportAttributeAccessIssue]
+    uri = ":".join(later.nodes["f"].node_uri)  # pyright: ignore[reportAttributeAccessIssue]  # job.nodes is typed by the node protocol; "f" is a function node
     for _, data in placeholders:
         assert isinstance(data, EmptyData)
         assert data.source_info() == {
@@ -639,6 +659,7 @@ def _through_channels(
     """Feed ``rows`` to ``node.async_execute`` through channels; return what it sends."""
 
     async def run() -> list[tuple[Any, Any]]:
+        """Send every row through the node's async route and collect what it emits."""
         incoming: Channel[Any] = Channel()
         outgoing: Channel[Any] = Channel()
         for row in rows:
@@ -816,6 +837,7 @@ TOKEN_COLUMNS: dict[str, tuple["pa.Array[Any]", "pa.Array[Any]"]] = {
 
 @function_pod(output_keys=["total", "scaled"])
 def combine(a: int, b: float) -> tuple[float, float]:
+    """Return ``a + b`` and ``a * b``, counting the call."""
     calls["combine"] += 1
     return a + b, a * b
 
@@ -921,6 +943,7 @@ def _ordinary_streams() -> dict[str, Any]:
     from orcapod.core.operators import Batch, GroupBy, Join, MergeJoin
 
     def source(data: tuple[str, ...], source_id: str, data_tags: bool = False) -> Any:
+        """A source over the three rows with the given data columns and source id."""
         names = ["subject", "session", *data]
         columns = {**COLUMNS, "u": COLUMNS["x"], "v2": COLUMNS["w"]}
         schema = pa.schema(pa.field(n, columns[n].type, nullable=False) for n in names)
@@ -989,13 +1012,14 @@ def test_an_ordinary_rows_stored_token_columns_are_what_they_were(kind: str) -> 
 
 
 @pytest.mark.parametrize("path", ["sync", "async"])
-def test_rows_with_no_token_store_no_token_column_and_recompute_their_ids(
+def test_rows_with_no_token_store_null_tokens_and_recompute_their_ids(
     path: str,
 ) -> None:
-    """Rows built from Python values with no source info: nothing to store for them.
+    """Rows built from Python values with no source info have a null token per column.
 
-    The instance id of such a row is the hash of its entry id alone, and the stored
-    row has no ``_source_*`` column, as before; its ids are recomputed all the same.
+    A data column with no token has a null token, as the same row read from an
+    Arrow table has (review of PR #583): the stored row has one ``large_string``
+    null ``_source_*`` column per data column, and its ids are recomputed from them.
     """
     from orcapod.core.datagrams import Data, Tag
 
@@ -1016,11 +1040,25 @@ def test_rows_with_no_token_store_no_token_column_and_recompute_their_ids(
     database.flush()
     stored = _table(database, "combine", "pdb_v2")
     assert stored.num_rows == 3
-    assert not [n for n in stored.column_names if n.startswith("_source_")]
-    for row in _rows(stored):
+    tokens = [n for n in stored.column_names if n.startswith("_source_")]
+    assert tokens == ["_source_a", "_source_b"]
+    for name in tokens:
+        assert stored.schema.field(name).type == pa.large_string()
+        assert stored.column(name).null_count == 3
+    for row, (tag, data) in zip(_rows(stored), rows):
         assert (
             _instance_id_of_stored_row(row).to_prefixed_digest()
             == (_values(row, "__pipeline_instance_id")[0])
+        )
+        # The same row read from an Arrow table has the same instance id.
+        table = data.as_table()
+        for name in tokens:
+            table = table.append_column(
+                pa.field(name, pa.large_string()), pa.nulls(1, pa.large_string())
+            )
+        assert (
+            row_ids.instance_id(HASHER, tag, Data(table)).to_prefixed_digest()
+            == _values(row, "__pipeline_instance_id")[0]
         )
         assert (
             _record_id_of_stored_row(row).to_prefixed_digest()
