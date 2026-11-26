@@ -206,6 +206,8 @@ class CachedSource(RootSource):
         ``SourceProxy`` preserving the original source's identity.  The
         CachedSource can still serve data from its cache database.
 
+        A saved local Delta cache must already have a root directory.
+
         Args:
             config: Dict as produced by ``to_config``.
             db_registry: Optional registry. When ``cache_database`` is a
@@ -215,6 +217,10 @@ class CachedSource(RootSource):
 
         Returns:
             A new CachedSource constructed from the config.
+
+        Raises:
+            ValueError: If a registry reference cannot be resolved without a
+                registry, or if a local Delta cache has no root directory.
         """
         from orcapod.pipeline.serialization import (
             resolve_database_from_config,
@@ -228,9 +234,10 @@ class CachedSource(RootSource):
                     f"cache_database is a registry key {cache_db_ref!r} but no "
                     "db_registry was provided."
                 )
-            cache_db = resolve_database_from_config(db_registry.resolve(cache_db_ref))
+            cache_config = db_registry.resolve(cache_db_ref)
         else:
-            cache_db = resolve_database_from_config(cache_db_ref)
+            cache_config = cache_db_ref
+        cache_db = resolve_database_from_config(cache_config, create_base_path=False)
 
         # All sources accept db_registry — always forward it so nested
         # CachedSources can resolve their own cache database references.

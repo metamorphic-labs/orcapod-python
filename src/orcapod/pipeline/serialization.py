@@ -422,6 +422,7 @@ def resolve_database_from_config(
             (the output of ``DatabaseRegistry.to_dict()``).  Required when
             ``config["type"] == "scoped"``; ignored otherwise.
         create_base_path: Whether a Delta database may create a missing local root.
+            If false, a local Delta root must already be a directory.
 
     Returns:
         A new database instance constructed from the config.

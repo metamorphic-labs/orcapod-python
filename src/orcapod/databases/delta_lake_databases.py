@@ -1771,9 +1771,10 @@ class DeltaTableDatabase:
             self._local_root = Path(self._root_uri)
             if create_base_path:
                 self._local_root.mkdir(parents=True, exist_ok=True)
-            elif not self._local_root.exists():
+            elif not self._local_root.is_dir():
                 raise ValueError(
-                    f"Base path {self._local_root} does not exist and create_base_path=False"
+                    f"Base path {self._local_root} is not an existing directory "
+                    "and create_base_path=False"
                 )
         # For cloud paths: create_base_path is silently ignored (no directory needed).
 
@@ -3420,7 +3421,7 @@ class DeltaTableDatabase:
         Args:
             config: The saved database configuration.
             create_base_path: Create a missing local root when true. When false,
-                a missing local root raises. Remote roots are opened lazily.
+                require an existing directory. Remote roots are opened lazily.
         """
         if "root_uri" in config:
             # Current format (post-ENG-341)

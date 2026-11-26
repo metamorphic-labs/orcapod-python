@@ -1745,9 +1745,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         cannot be rebuilt for another reason (a moved file) is logged as a
         warning. Neither affects reading the other nodes.
 
-        A saved local Delta store must already have a root directory. A missing
-        root is logged as a warning and the corresponding database is left
-        unbound. Remote Delta stores are opened on access.
+        A saved local Delta store must already have a root directory. If its
+        path is missing or is a file, loading warns and leaves the corresponding
+        database or cached source unbound. An existing directory can hold zero
+        tables. Remote Delta stores are opened on access.
 
         Args:
             path: Path to the JSON file produced by ``save()``.
