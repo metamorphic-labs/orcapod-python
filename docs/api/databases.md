@@ -6,10 +6,19 @@ introduction. Every signature and docstring on the published page comes from the
 code. See site/README.md.
 -->
 
-Database backends for persistent storage of pipeline computation results.
+Database backends store pipeline results. The SQLite and PostgreSQL connectors support
+reads and writes through `ConnectorArrowDatabase`. The SpiralDB connector is read-only.
 
 ::: orcapod.databases.DeltaTableDatabase
 
 ::: orcapod.databases.InMemoryArrowDatabase
 
 ::: orcapod.databases.NoOpArrowDatabase
+
+::: orcapod.databases.ConnectorArrowDatabase
+
+::: orcapod.databases.SQLiteConnector
+
+::: orcapod.databases.PostgreSQLConnector
+
+::: orcapod.databases.SpiralDBConnector

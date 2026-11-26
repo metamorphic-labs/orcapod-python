@@ -37,3 +37,31 @@ Core type definitions used throughout Orcapod.
 ::: orcapod.types.Absence
 
 ::: orcapod.types.Highlight
+
+## Files and directories
+
+::: orcapod.File
+
+::: orcapod.Directory
+
+::: orcapod.enable_file_hash_caching
+
+## Custom types and extensions
+
+::: orcapod.dataclass
+
+::: orcapod.OrcapodExtension
+
+::: orcapod.register_extension
+
+## Configuration
+
+::: orcapod.OrcapodConfig
+
+::: orcapod.DisplayConfig
+
+::: orcapod.HashingConfig
+
+::: orcapod.DEFAULT_CONFIG
+
+::: orcapod.load_config
