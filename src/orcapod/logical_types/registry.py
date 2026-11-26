@@ -15,7 +15,7 @@ import polars as pl
 import pyarrow as pa
 
 from orcapod.errors import MissingOptionalDependencyError
-from orcapod.logical_types.arrow_lifetime import keep_for_process
+from orcapod.logical_types.arrow_lifetime import KeptInstances
 from orcapod.logical_types.identifier import LogicalTypeIdentifierError
 from orcapod.logical_types.identifier import LogicalTypeIdentifier
 from orcapod.logical_types.provisional import warn_provisional
@@ -106,7 +106,10 @@ def make_arrow_extension_type(
         the instance suitable for passing to ``pa.register_extension_type`` or
         returning from ``get_arrow_extension_type()``. Every call, and every column
         read, gives the one instance of the class, which lives until the process ends
-        (``keep_for_process``; ITL-1422).
+        (``KeptInstances``; ITL-1422). A subclass is a type of its own: it has its own
+        instance, one for each set of (hashable) construction arguments when it
+        defines an ``__init__`` that takes any, with its own Arrow hooks, kept the
+        same way.
     """
     _name, _storage, _metadata = extension_name, storage_type, metadata or b""
     _readable = (_metadata, *(m for m in also_reads if m != _metadata))
@@ -149,30 +152,18 @@ def make_arrow_extension_type(
             )
         return cls()
 
-    shared: pa.ExtensionType | None = None
-
-    def _new(cls: type[pa.ExtensionType]) -> pa.ExtensionType:
-        return pa.ExtensionType.__new__(cls) if shared is None else shared
-
-    def _init(self: pa.ExtensionType) -> None:
-        # Python calls it again on the shared instance: never build its type twice.
-        if shared is None:
-            pa.ExtensionType.__init__(self, _storage, _name)
-
-    extension_class = type(
+    # One instance per concrete class and construction arguments, each kept until the
+    # process ends (``KeptInstances``): a subclass keeps its own identity and hooks.
+    return KeptInstances(
         f"_ArrowExt_{_sanitize(extension_name)}",
         (pa.ExtensionType,),
         {
-            "__new__": _new,
-            "__init__": _init,
+            "__init__": lambda self: pa.ExtensionType.__init__(self, _storage, _name),
             "__arrow_ext_serialize__": lambda self: _metadata,
             "__arrow_ext_deserialize__": classmethod(_deserialize),
             "readable_metadata": _readable,
         },
     )
-    # Built here, before any other thread can see the class.
-    shared = keep_for_process(extension_class())  # pyright: ignore[reportCallIssue]  # the synthesized class takes no arguments
-    return extension_class
 
 
 def make_polars_extension_type(
