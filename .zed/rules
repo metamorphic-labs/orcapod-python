@@ -1099,7 +1099,10 @@ these preimages anywhere else.
   from an Arrow table (a stream's row) the typed columns that table has, with nullable fields,
   never typed again from the token values (a nested token column would not survive it); for a
   row built from Python values, or changed since it was read, the columns typed from its
-  tokens. A lookup must never fail on a row its stream holds as valid Arrow.
+  tokens. A lookup must never fail on a row its stream holds as valid Arrow. The pipeline row
+  stores that same table (_add_pipeline_record), never the columns of
+  as_table(columns={"source": True}): every stored row gives its instance and record id again
+  from its own columns.
 - A trace resolves a held row by its instance: among the entries with the row's system tags,
   result and input hash, the one whose stored input tokens are the input row's
   (provenance._token_mismatch). Another job's record of the same entry, with other tokens, is

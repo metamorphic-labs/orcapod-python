@@ -1253,7 +1253,7 @@ preimage = tag.as_table(columns={"system_tags": True})
 
 | Field | Value |
 |---|---|
-| **Inputs** | `__pipeline_entry_id` (the entry id's labelled digest, `pa.large_binary()`), then the `_source_*` columns of the input data in name order (`data.source_info_table()`): for a row read from an Arrow table, the columns that table has, with their Arrow types and nullable fields, never typed again from the token values; for a row built from Python values, the columns typed from its tokens |
+| **Inputs** | `__pipeline_entry_id` (the entry id's labelled digest, `pa.large_binary()`), then the `_source_*` columns of the input data in name order (`data.source_info_table()`): for a row read from an Arrow table, the columns that table has, with their Arrow types and nullable fields, never typed again from the token values; for a row built from Python values, the columns typed from its tokens. The pipeline row stores this same table (`FunctionJobNode._add_pipeline_record`), so a stored row gives its instance id again from its own columns |
 | **Algorithm** | `StarfixArrowHasher.hash_table(preimage)` |
 | **Output format** | `ContentHash`; stored in `__pipeline_instance_id` as `b"{method}:{digest}"` |
 | **Uniqueness guarantee** | Unique per `(entry, source-info tokens)`; the in-memory cache key and the lookup column of the pipeline table |

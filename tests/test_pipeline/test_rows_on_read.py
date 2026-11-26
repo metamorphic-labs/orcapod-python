@@ -1312,9 +1312,16 @@ def test_held_rows_that_cannot_make_one_table_raise_at_the_successors_edge() -> 
 
 def test_held_rows_that_cannot_make_one_table_are_sent_on_async() -> None:
     """Async: the held rows are sent on as the plan took them, never built into one
-    table first: the function node after the held node starts every row and ends,
-    and the run raises the rows' ``ArrowTypeError``. ``main`` ca1c35d6 gives the same
-    events and error."""
+    table first: the function node after the held node starts every row and ends.
+
+    The rows are valid Arrow: their token column is a nested list whose values
+    cannot be typed again from Python values. The node records each row with the
+    typed token column it carries (ITL-1471: the stored columns are the ones the
+    instance id was made from), so the run completes and both rows are stored. On
+    ``main`` ca1c35d6 the events are the same and the run then raised the rows'
+    ``ArrowTypeError``, when the record typed the tokens again. The sync
+    orchestrator still builds the held rows into one table at the successor's edge
+    and raises there (the test above)."""
     from orcapod.pipeline import AsyncPipelineOrchestrator
 
     held, after, _ = _held_job()
@@ -1327,14 +1334,20 @@ def test_held_rows_that_cannot_make_one_table_are_sent_on_async() -> None:
             self.events.append(("data", node_label))
 
     observer = DataStarts()
-    with pytest.raises(pa.ArrowTypeError, match="Expected bytes"):
-        AsyncPipelineOrchestrator().run(dag, observer=observer, held_rows={held: rows})
+    AsyncPipelineOrchestrator().run(dag, observer=observer, held_rows={held: rows})
     assert observer.events == [
         ("start", "after"),
         ("data", "after"),
         ("data", "after"),
         ("end", "after"),
     ]
+    database = after._pipeline_database  # pyright: ignore[reportPrivateUsage]  # the stored rows
+    database.flush()
+    (path,) = [p for p in database.list_table_paths() if p[-1] == "pdb_v2"]
+    stored = database.get_all_records(path)
+    assert stored is not None and stored.num_rows == 2
+    assert stored.schema.field("_source_x").type == _UNCONVERTIBLE
+    assert stored.column("_source_x").to_pylist() == [[None, [[]]], [None, [[]]]]
 
 
 @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])

@@ -849,7 +849,9 @@ def test_a_stored_row_keeps_the_token_columns_its_instance_id_was_made_from(
         out = list(node.execute(stream).iter_data())
     else:
         out = _through_channels(node, rows)
-    assert sorted(data.as_dict()["total"] for _, data in out) == [10.5, 21.5, 32.5]
+    assert sorted(
+        cast("list[float]", [data.as_dict()["total"] for _, data in out])
+    ) == [10.5, 21.5, 32.5]
     assert calls["combine"] == 3
     database.flush()
 
@@ -884,7 +886,81 @@ def test_a_stored_row_keeps_the_token_columns_its_instance_id_was_made_from(
         reread = list(again.execute(stream).iter_data())
     else:
         reread = _through_channels(again, rows)
-    assert sorted(data.as_dict()["total"] for _, data in reread) == [10.5, 21.5, 32.5]
+    assert sorted(
+        cast("list[float]", [data.as_dict()["total"] for _, data in reread])
+    ) == [10.5, 21.5, 32.5]
     assert calls == Counter()
     database.flush()
     assert _table(database, "combine", "pdb_v2").num_rows == 3
+
+
+def _ordinary_streams() -> dict[str, Any]:
+    """Streams of ordinary rows: every kind of token column a pipeline makes."""
+    from orcapod.core.operators import Batch, GroupBy, Join, MergeJoin
+
+    def source(data: tuple[str, ...], source_id: str, data_tags: bool = False) -> Any:
+        names = ["subject", "session", *data]
+        columns = {**COLUMNS, "u": COLUMNS["x"], "v2": COLUMNS["w"]}
+        schema = pa.schema(pa.field(n, columns[n].type, nullable=False) for n in names)
+        return ArrowTableSource(
+            pa.Table.from_arrays([columns[n] for n in names], schema=schema),
+            tag_columns=["subject", "session"],
+            tag_only_columns=[] if data_tags else True,
+            source_id=source_id,
+        )
+
+    left, right = source(("x", "w"), "left"), source(("u", "v2"), "right")
+    computed: Any = inc.pod(source(("x", "w"), "left"))
+    return {
+        "source": left,
+        "source_with_data_tags": source(("x", "w"), "tagged", data_tags=True),
+        "join": Join()(left, right),
+        "merge_join": MergeJoin()(left, source(("x", "w"), "other")),
+        "group_by": GroupBy(by=["subject"])(left),
+        "batch": Batch(batch_size=2)(left),
+        "batch_of_merge_join": Batch(batch_size=2)(
+            MergeJoin()(left, source(("x", "w"), "other"))
+        ),
+        "function_output": computed,
+        "select_of_function_output": SelectDataColumns(["v", "y"])(computed),
+    }
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
+@pytest.mark.parametrize("kind", list(_ordinary_streams()))
+def test_an_ordinary_rows_stored_token_columns_are_what_they_were(kind: str) -> None:
+    """For ordinary rows the typed token columns are the ones a row's table gives.
+
+    A pipeline row used to store the token columns of
+    ``as_table(columns={"source": True})``; it now stores ``source_info_table()``.
+    For every row a pipeline makes (a source's, with and without data-tags, a
+    join's, the token lists of ``MergeJoin``, ``GroupBy`` and ``Batch``, nested
+    lists, a function's output) the two are the same table: names, order, Arrow
+    types, nullable fields and values. So no stored column type and no instance id
+    of an ordinary row moves.
+    """
+    rows = list(_ordinary_streams()[kind].iter_data())
+    assert len(rows) >= 2
+    for tag, data in rows:
+        as_stored_before = data.as_table(columns={"source": True})
+        as_stored_before = as_stored_before.select(
+            [n for n in as_stored_before.column_names if n.startswith("_source_")]
+        )
+        now = data.source_info_table()
+        assert now.num_columns >= 2
+        assert now.schema.equals(as_stored_before.schema, check_metadata=True), kind
+        assert now.equals(as_stored_before), kind
+        # And so the instance id is the one the row's own table gives.
+        entry = row_ids.entry_id(HASHER, tag, data)
+        by_hand = pa.table(
+            {
+                "__pipeline_entry_id": pa.array(
+                    [entry.to_prefixed_digest()], pa.large_binary()
+                )
+            }
+        )
+        for name in sorted(as_stored_before.column_names):
+            by_hand = by_hand.append_column(
+                as_stored_before.schema.field(name), as_stored_before.column(name)
+            )
+        assert row_ids.instance_id(HASHER, tag, data) == HASHER.hash_table(by_hand)
