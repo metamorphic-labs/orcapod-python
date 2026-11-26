@@ -1292,7 +1292,15 @@ def _held_job() -> tuple[Any, Any, Any]:
 def test_held_rows_that_cannot_make_one_table_raise_at_the_successors_edge() -> None:
     """Sync: a held node whose rows cannot make one table (source-info tokens of two
     shapes) is built where its successor reads it, after an independent node has run,
-    and raises the rows' ``ArrowTypeError``, as ``main`` rebuilt the rows there."""
+    and raises the rows' ``ArrowTypeError``, as ``main`` rebuilt the rows there.
+
+    Known difference (ITL-1491): this asserts today's behaviour. The async
+    orchestrator sends the same held rows on as they are, and the function node
+    records them (the test below), so the two paths differ on this route. The
+    build here types each token again from its value
+    (``StaticOutputOperatorPod._rows_to_table``); ITL-1491 makes it read the typed
+    token columns the rows carry, after which this run completes as the async one
+    does. On ``main`` the two paths differed for these rows too."""
     from orcapod.core.operators.static_output_pod import rows_on_read
 
     held, after, independent = _held_job()
@@ -1319,9 +1327,11 @@ def test_held_rows_that_cannot_make_one_table_are_sent_on_async() -> None:
     typed token column it carries (ITL-1471: the stored columns are the ones the
     instance id was made from), so the run completes and both rows are stored. On
     ``main`` ca1c35d6 the events are the same and the run then raised the rows'
-    ``ArrowTypeError``, when the record typed the tokens again. The sync
-    orchestrator still builds the held rows into one table at the successor's edge
-    and raises there (the test above)."""
+    ``ArrowTypeError``, when the record typed the tokens again.
+
+    Known difference (ITL-1491): the sync orchestrator still builds the held rows
+    into one table at the successor's edge and raises there (the test above).
+    ITL-1491 makes that build read the typed token columns too."""
     from orcapod.pipeline import AsyncPipelineOrchestrator
 
     held, after, _ = _held_job()
