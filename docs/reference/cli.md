@@ -17,6 +17,13 @@ it hashed, found in the cache, skipped by size, or could not process.
 | `--dry-run` | Count files that would be hashed. The scan runs serially and writes no hash entries. Opening the database can initialize a new cache file. |
 | `--force` | Hash eligible files again, even when they already have a cache entry. With `--dry-run`, include those files in the count. |
 
+!!! warning "Use one hash algorithm per cache"
+    The cache keys entries by path, modification time, and size. A matching entry
+    can return a digest from a different algorithm (ITL-1488). Use the same
+    algorithm in `warm-cache` and in every pipeline that uses that cache. The
+    default file hasher uses `sha256`. When changing algorithms, clear the
+    cache before using it again or use a new cache file.
+
 To preview and then warm the same cache, run:
 
 ```sh

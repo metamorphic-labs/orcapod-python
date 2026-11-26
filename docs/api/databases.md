@@ -17,6 +17,8 @@ reads and writes through `ConnectorArrowDatabase`. The SpiralDB connector is rea
 
 ::: orcapod.databases.ConnectorArrowDatabase
 
+::: orcapod.databases.ExtensionAwareDatabase
+
 ::: orcapod.databases.SQLiteConnector
 
 ::: orcapod.databases.PostgreSQLConnector

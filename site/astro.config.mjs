@@ -189,6 +189,7 @@ export default defineConfig({
 						page('Nodes', 'api/nodes'),
 						page('Pipeline', 'api/pipeline'),
 						page('Types', 'api/types'),
+						page('Errors', 'api/errors'),
 					],
 				},
 				{
@@ -198,6 +199,7 @@ export default defineConfig({
 						page('Golden hashes', 'reference/golden-hashes'),
 						page('Data function types', 'reference/data-function-types'),
 						page('Data types per database', 'reference/database-types'),
+						page('Command-line reference', 'reference/cli'),
 					],
 				},
 				page('Troubleshooting', 'troubleshooting'),

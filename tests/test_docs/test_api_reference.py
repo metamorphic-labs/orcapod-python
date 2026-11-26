@@ -28,7 +28,7 @@ PUBLIC_MODULES = (
 # to their nested modules.
 EXCLUDED_NAMESPACES = {
     "orcapod._version": "Generated build metadata.",
-    "orcapod.contexts": "Data context internals and concept documentation.",
+    "orcapod.contexts": "Public API documented in concept pages. A dedicated reference page will follow separately.",
     "orcapod.core": "Implementation modules behind the public re-exports.",
     "orcapod.extensions": "Implementation namespace for the top-level extension API.",
     "orcapod.hashing": "Hashing internals and dedicated hashing documentation.",
@@ -52,7 +52,6 @@ EXCLUDED_EXPORTS = {
     "orcapod.sources": "Package link in the API overview.",
     "orcapod.streams": "Package link in the API overview.",
     "orcapod.types": "Package link in the API overview.",
-    "orcapod.databases.ExtensionAwareDatabase": "Internal base for database implementations.",
     "orcapod.nodes.FunctionNodeBase": "Internal base shared by function node implementations.",
     "orcapod.nodes.GraphNode": "Internal base for nodes in a pipeline graph.",
     "orcapod.nodes.JobNode": "Internal base for nodes bound to a job.",
@@ -110,6 +109,10 @@ def test_public_exports_have_api_reference_entries() -> None:
     for module_name in PUBLIC_MODULES:
         module = import_module(module_name)
         members = cast("dict[str, object]", vars(module))
+        if module_name != "orcapod.errors":
+            assert "__all__" in members, (
+                f"{module_name} must declare its public exports"
+            )
         names = cast("Sequence[str]", members.get("__all__", ()))
         exports.update(f"{module_name}.{name}" for name in names)
         if module_name == "orcapod.errors":
