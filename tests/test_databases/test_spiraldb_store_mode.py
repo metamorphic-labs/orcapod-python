@@ -535,3 +535,57 @@ def test_a_storage_form_name_that_is_not_utf8_is_kept_as_given() -> None:
     assert got is not None
     assert got.schema.field("u").metadata == metadata
     assert got["u"].to_pylist() == ["x"]
+
+
+# ------------------------------------- review r4 of PR 595 (7a50c9d8)
+
+
+def _reordered(table: pa.Table) -> pa.Table:
+    """The same columns in another order (order never counts)."""
+    return table.select(list(reversed(table.column_names)))
+
+
+@pytest.mark.usefixtures("root")
+def test_a_writer_appends_beside_a_manifest_of_reordered_columns() -> None:
+    """At the re-open: the other writer's columns in another order are one manifest."""
+    db1, _ = _interleaved(rows(["a0"]), _reordered(rows(["b0"])))
+    db1.flush()
+    got = ConnectorArrowDatabase(store()).get_all_records(
+        RESULT, record_id_column="__record_id"
+    )
+    assert got is not None
+    assert set(got["__record_id"].to_pylist()) == {b"a0", b"b0"}
+
+
+@pytest.mark.usefixtures("root")
+def test_a_table_judged_new_stays_new_beside_an_equivalent_record() -> None:
+    """At the judged-empty check: a recorded table with no rows, whose manifest another
+    writer records again with its columns in another order (other bytes, equivalent)
+    before this write, is still new to this writer."""
+    name = names.store_table_name(RESULT)
+
+    def recorded(table: pa.Table) -> dict[str, bytes]:
+        manifest = codec.new_manifest(RESULT, "rdb_v1", table.schema)
+        return {
+            **names.store_table_metadata(RESULT, CONTEXT),
+            **codec.manifest_entries(manifest),
+        }
+
+    _make_table(name, recorded(rows(["x"])), with_rows=False)
+    connector = store()
+    db = ConnectorArrowDatabase(connector)
+    db.add_records(RESULT, rows(["a0"]), record_id_column="__record_id")
+    tables = connector._store  # pyright: ignore[reportPrivateUsage]
+    assert tables is not None
+    create_or_open = tables._create_or_open  # pyright: ignore[reportPrivateUsage]
+
+    def rerecorded_first(table_name: str) -> Any:
+        _table(table_name).set_metadata(recorded(_reordered(rows(["x"]))))
+        return create_or_open(table_name)
+
+    tables._create_or_open = rerecorded_first  # pyright: ignore[reportPrivateUsage]
+    db.flush()
+    got = ConnectorArrowDatabase(store()).get_all_records(
+        RESULT, record_id_column="__record_id"
+    )
+    assert got is not None and got["__record_id"].to_pylist() == [b"a0"]
