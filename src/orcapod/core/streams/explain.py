@@ -255,7 +255,7 @@ def preview_line(stream: StreamProtocol) -> str | None:
     after = producer.condition.canonical_text()
     if not found.known:
         return f"applied by the source: not known for this source kind; after reading: {after}"
-    if not found.condition and found.limit is None:
+    if found.condition.is_empty and found.limit is None:
         return (
             f"applied by the source: nothing; after reading: {after} "
             "(the whole table is read)"

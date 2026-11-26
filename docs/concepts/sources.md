@@ -559,14 +559,31 @@ print(summary.restricted_source_ids)
 (This sample needs a SpiralDB project, so it is not run with the documentation; `job` is a
 job built over `events`, whose slot is named by the source id.)
 
+To restrict on two columns, pass separate equality keywords such as
+`events.where(unit_id=106, session_index=2)`. Combining comparisons as
+`(col("unit_id") == 106) and (col("session_index") == 2)` raises `TypeError`.
+When building a `Condition` to pass to `where()`, combine parenthesized equalities with `&`.
+
+```python
+from orcapod import col
+from orcapod.types import Condition
+
+try:
+    Condition.of((col("unit_id") == 106) and (col("session_index") == 2))
+except TypeError as error:
+    print(str(error).split(".")[0])
+# Condition has no truth value
+
+both = (col("unit_id") == 106) & (col("session_index") == 2)
+assert both == Condition.of(unit_id=106, session_index=2)
+```
+
 A date or a time written as text is converted explicitly, with the function of its column's
 type: `date.fromisoformat` for a date column, `datetime.fromisoformat` for a timestamp
 column, with an offset (an aware value) for a column with a time zone.
 
 ```python
 import datetime as dt
-
-from orcapod.types import Condition
 
 day = dt.date.fromisoformat("2026-11-20")  # a date column
 started = dt.datetime.fromisoformat("2026-11-20T09:30:00")  # a timestamp, no zone
