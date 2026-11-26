@@ -1,6 +1,6 @@
-# Part 10: Where next
+# Where next
 
-This part is optional. It is a short tour of features the tutorial did not need. The sections
+This page is optional. It is a short tour of features the tutorials did not need. The sections
 are independent.
 
 ```python
