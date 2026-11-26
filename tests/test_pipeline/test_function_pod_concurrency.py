@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from typing import TYPE_CHECKING, cast
 
 import pytest
@@ -58,15 +59,19 @@ class _Calls:
 
 
 @pytest.mark.parametrize("reverse", [False, True])
-def test_async_job_bounds_calls_and_preserves_sync_results(reverse: bool) -> None:
+@pytest.mark.parametrize(("cpu_count", "default_peak"), [(4, 4), (64, 16)])
+def test_async_job_bounds_calls_and_preserves_sync_results(
+    monkeypatch: pytest.MonkeyPatch, reverse: bool, cpu_count: int, default_peak: int
+) -> None:
     """Exercise default, numeric and unlimited dispatch through a real job."""
+    monkeypatch.setattr(os, "process_cpu_count", lambda: cpu_count, raising=False)
     expected_rows = [
         {"group": f"g{i % 3}", "row": i, "total": 3 * i + 1} for i in range(ROW_COUNT)
     ]
     for config, expected_peak in [
         (PodConfig(max_concurrency=3), 3),
         (PodConfig(max_concurrency=None), ROW_COUNT),
-        (None, 16),
+        (None, default_peak),
     ]:
         calls = _Calls()
         pod = FunctionPod.from_fn(calls.add, output_keys="total", pod_config=config)

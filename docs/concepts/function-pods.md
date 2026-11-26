@@ -598,9 +598,16 @@ print(job.nodes["bmi"].as_table().num_rows)
 
 ### Limiting in-flight calls
 
-An async run allows up to 16 in-flight calls per function pod by default. Different pods
-can run concurrently. Choose a smaller limit when each call holds substantial memory or
-talks to a service with a concurrency limit.
+An async function pod's default limit is the usable CPU count, up to 16 in-flight
+calls and with a minimum of one. Different pods can run concurrently. Choose a smaller
+limit when each call holds substantial memory or talks to a service with a concurrency
+limit.
+
+Orcapod counts CPUs the same way as CPython's default thread pool. It uses
+`os.process_cpu_count()` when available (Python 3.13 and later) and `os.cpu_count()`
+otherwise. If that function returns no count, the limit is one. `PipelineConfig()`
+computes the default when constructed. Async jobs create that default config when the
+pod runs.
 
 ```python
 from orcapod.core.function_pod import FunctionPod
@@ -620,7 +627,7 @@ The two settings resolve as follows.
 
 | `PodConfig.max_concurrency` | `PipelineConfig.default_max_concurrency` | Effective limit |
 | --- | --- | --- |
-| Omitted or `"inherit"` | Omitted | 16 |
+| Omitted or `"inherit"` | Omitted | Usable CPU count, clamped to 1–16 |
 | Omitted or `"inherit"` | Positive integer | Pipeline limit |
 | Omitted or `"inherit"` | `None` | Unlimited |
 | Positive integer | Any | Pod limit |
@@ -630,9 +637,9 @@ Local coroutine functions run on the event loop. Local synchronous functions in 
 async job use the event loop's thread pool. CPython's default pool has up to
 `min(32, (cpu_count or 1) + 4)` workers. For Python 3.11 and 3.12 this uses
 `os.cpu_count()`, and for Python 3.13 and later it uses `os.process_cpu_count()`.
-For example, a reported count of 18 yields 22 default workers. A pod with the default
-limit can occupy at most 16 of those workers at once. If fewer workers are available, the
-pool runs fewer calls and queues the rest. The pool is shared across pods on the loop.
+For example, a reported count of 18 yields 22 default workers and a per-pod limit of 16.
+If fewer workers are available than the pod's limit, the pool runs fewer calls and queues
+the rest. The pool is shared across pods on the loop.
 
 ### Reading the run summary
 

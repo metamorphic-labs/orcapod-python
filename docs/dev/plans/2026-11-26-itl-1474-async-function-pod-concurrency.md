@@ -1,14 +1,14 @@
 # ITL-1474 — Bound async function pod concurrency by default
 
-## Proposed default
+## Default
 
-Use 16 in-flight calls per function pod during async execution, matching the existing
-side-effect pod default. The limit applies to each pod execution, including the compute
-phase of an async job, and controls how far the pod reads ahead. The pod acquires its
-semaphore before creating a row task and holds the permit through invocation and output
-delivery. The async job orchestrator starts nodes concurrently and bounds each edge's
-queue separately. A bounded channel alone cannot bound calls because an unrestricted pod
-can drain it into tasks.
+The developer chose a default of the usable CPU count clamped to 1–16 on November 26,
+2026. The limit applies to each pod execution, including the compute phase of an async
+job, and controls how far the pod reads ahead. The pod acquires its semaphore before
+creating a row task and holds the permit through invocation and output delivery. The
+async job orchestrator starts nodes concurrently and bounds each edge's queue separately.
+A bounded channel alone cannot bound calls because an unrestricted pod can drain it into
+tasks.
 
 The local executor awaits coroutine functions on the job's event loop. It submits
 synchronous functions to that loop's default thread pool, which already caps active
@@ -21,11 +21,11 @@ and task resource options. There is no local process pool for function invocatio
 CPython's default thread pool uses up to `min(32, (cpu_count or 1) + 4)` workers. In
 Python 3.11 and 3.12, it uses `os.cpu_count()`. Since 3.13, it uses
 `os.process_cpu_count()`. A machine count of 18 thus yields a pool of 22 under the
-corresponding default. With the proposed cap, one pod on that loop can submit at most
+corresponding default. With the chosen cap, one pod on that loop can submit at most
 16 calls at once. Where the pool has fewer available workers, fewer calls run and the
 rest wait in the pool. The pool is shared by the loop, while the semaphore is per pod.
 
-- **Constant (recommended).** Sixteen bounds waiting row tasks and executor submissions
+- **Constant.** Sixteen bounds waiting row tasks and executor submissions
   on every host while allowing overlap for I/O. Different workloads can override it.
 - **Host logical CPUs (`os.cpu_count()`).** Easy to obtain, but can count CPUs the process
   cannot use. It says little about coroutine I/O or capacity on a remote Ray cluster.
@@ -36,11 +36,15 @@ rest wait in the pool. The pool is shared by the loop, while the semaphore is pe
 - **Container quota.** Reading platform-specific quotas would estimate local CPU-time
   capacity. It adds platform logic and still cannot predict I/O capacity or remote worker
   resources. Local CPU-heavy work can choose an explicit limit based on its executor.
+- **Usable CPU count with a ceiling of 16 (chosen).** Use the same CPU-count API as
+  CPython's default thread pool on the running Python version. Use one when the count
+  is unavailable and clamp the result to 1–16. This reduces default fan-out on small
+  hosts and caps it on larger hosts.
 
 ## Configuration and storage
 
-Compute the default for `PipelineConfig.default_max_concurrency` with a dedicated
-default factory so there is one place to select the limit. Use the distinct
+Compute the default for `PipelineConfig.default_max_concurrency` at config construction
+with a dedicated default factory. Use the distinct
 `"inherit"` default for `PodConfig.max_concurrency`. An
 explicit positive integer or `None` on the pod wins over the pipeline config. `None` means
 unlimited pod dispatch at either level. If the pod setting is omitted, the resolver uses
@@ -49,7 +53,7 @@ existing validation of the effective positive limit.
 
 | Pod setting | Pipeline setting | Effective limit |
 | --- | --- | --- |
-| Omitted or `"inherit"` | Omitted | Built-in default |
+| Omitted or `"inherit"` | Omitted | Usable CPU count, clamped to 1–16 |
 | Omitted or `"inherit"` | Positive integer | Pipeline integer |
 | Omitted or `"inherit"` | Explicit `None` | Unlimited |
 | Positive integer | Any | Pod integer |

@@ -69,9 +69,10 @@ from what is already stored and computes nothing; see
 [Loading without computing](function-pods.md#loading-without-computing-runload_onlytrue).
 
 Use `await job.run_async()` or pass an `AsyncPipelineOrchestrator` to `job.run()` to
-execute nodes concurrently. Each function pod allows up to 16 in-flight calls by default
-during an async run. The [function pod concurrency settings](function-pods.md#limiting-in-flight-calls)
-show how to choose a limit for a particular pod.
+execute nodes concurrently. Each function pod defaults to a limit based on the usable
+CPU count, clamped to 1–16 in-flight calls during an async run. The
+[function pod concurrency settings](function-pods.md#limiting-in-flight-calls) show how
+to choose a limit for a particular pod.
 
 ## Nodes
 

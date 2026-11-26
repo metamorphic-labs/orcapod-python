@@ -21,12 +21,12 @@ from __future__ import annotations
 import logging
 import os
 import uuid
-from collections.abc import Collection, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from enum import Enum
 from types import UnionType
-from typing import TYPE_CHECKING, Any, Generic, Literal, Self, TypeAlias, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, Self, TypeAlias, TypeVar, cast
 
 import pyarrow as pa
 from typing_extensions import override
@@ -343,7 +343,10 @@ class OrchestratorType(Enum):
 
 def _default_function_pod_concurrency() -> int:
     """Return the default number of in-flight calls per async function pod."""
-    return 16
+    cpu_count = cast(
+        Callable[[], int | None], getattr(os, "process_cpu_count", os.cpu_count)
+    )
+    return min(16, max(1, cpu_count() or 1))
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,7 +357,8 @@ class PipelineConfig:
         orchestrator: Which orchestrator strategy to use.
         channel_buffer_size: Max items buffered per channel edge.
         default_max_concurrency: Limit for async function pods that inherit
-            from this config. Defaults to 16. ``None`` means unlimited.
+            from this config. When omitted, computed at construction as the
+            usable CPU count clamped to 1–16. ``None`` means unlimited.
         execution_engine: Optional data-function executor applied to all
             function nodes (e.g. ``RayExecutor``).  ``None`` means in-process
             execution.

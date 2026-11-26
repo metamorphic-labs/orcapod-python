@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from orcapod.types import NodeConfig, PipelineConfig, PodConfig, resolve_concurrency
@@ -65,6 +67,30 @@ class TestNodeConfig:
 
 
 class TestResolveConcurrency:
+    @pytest.mark.parametrize("has_process_count", [True, False])
+    @pytest.mark.parametrize(
+        ("cpu_count", "expected"), [(1, 1), (4, 4), (16, 16), (64, 16), (None, 1)]
+    )
+    def test_default_concurrency_uses_usable_cpus(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        has_process_count: bool,
+        cpu_count: int | None,
+        expected: int,
+    ) -> None:
+        if has_process_count:
+            monkeypatch.setattr(os, "cpu_count", lambda: 8)
+            monkeypatch.setattr(
+                os, "process_cpu_count", lambda: cpu_count, raising=False
+            )
+        else:
+            monkeypatch.delattr(os, "process_cpu_count", raising=False)
+            monkeypatch.setattr(os, "cpu_count", lambda: cpu_count)
+
+        pipeline = PipelineConfig()
+        assert pipeline.default_max_concurrency == expected
+        assert resolve_concurrency(PodConfig(), pipeline) == expected
+
     def test_pod_config_wins_over_pipeline(self):
         pod = PodConfig(max_concurrency=4)
         pipeline = PipelineConfig(default_max_concurrency=2)
