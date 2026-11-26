@@ -1,8 +1,9 @@
 # ITL-1472: a restriction belongs to an edge
 
 Status: proposal, no library code. Round 2 (2026-11-26): this replaces the twin-node design of the first
-round. The model (section 1) is the developer's and is not reopened; section 13 lists what is still open,
-D1 to D11, each with a recommendation.
+round. The model (section 1) is the developer's and is not reopened. Section 13 lists the decisions D1 to D11,
+each **decided on the developer's behalf, 2026-11-26, revertible**, and the one question still open, O34 (the
+automatic select as the first shared node). The implementation plan is `docs/dev/plans/itl-1472-plan.md`.
 
 Evidence marks: **[read]** read on `main` (5eb327ad); **[ran N]**
 `docs/dev/scripts/itl_1472/collapse_on_main.py`, heading N, on `main` as it is; **[proto N]**
@@ -79,7 +80,7 @@ constructor's `where=` and `limit=` are the same statement.
 restriction the given source object itself states is lifted: one inside a `SourceProxy`'s delegate, or beneath
 a stream bound to a slot, stays inside that stream (what a slot's binding reads is the binding's own matter).
 
-**The conflict rule** lives where an edge's restriction is set from sugar, one function for capture and bind:
+**The conflict rule** lives where an edge's restriction is set from sugar, at capture:
 an edge already written with a different restriction (or with none) raises `EdgeRestrictionConflictError`
 (a `ValueError`), naming the edge, both restrictions sorted by their text, and the filter remedy. Restrictions
 are compared by `Condition` equality and the limit.
@@ -88,22 +89,27 @@ are compared by `Condition` equality and the limit.
 |---|---|
 | Capture | Every input edge of the invocation, before anything is recorded [proto 2] |
 | Compile | Nothing new: the edges were checked as written; compile only renames keys to node names |
-| `bind` | D5, before anything is bound |
+| `bind` | A source that states a restriction is refused (D5), before anything is bound |
 | Run | Nothing: an edge holds one restriction by construction and no bound source holds one |
 
 **Order-free (ITL-1271).** The check is symmetric: each of the conflicts is refused with the same message in
 both recording orders, and an accepted job has the same nodes, rows and scans in both [proto 1, 2]. Nothing is
 "first": `main`'s first-recorded-wins [ran 3] cannot occur, because no restriction is kept on a shared object.
 
-**The first shared node decides.** `op(A_x) -> f` and `op(A_y) -> g` conflict on `A -> op(A)` [proto 2]. A
-consequence to know: a function pod called on a table with columns it does not take adds an automatic
+**The first shared node decides.** `op(A_x) -> f` and `op(A_y) -> g` conflict on `A -> op(A)` [proto 2].
+
+**Open, O34: the automatic select.** A function pod called on a table with columns it does not take adds an automatic
 `SelectDataColumns`, so `f(A_x)` and `h(A_y)` conflict whenever `f` and `h` take the same columns (one
-select node), and do not when the table has no other column or they take different ones [proto 1, 2]. With
-`A.filter(x)` and `A.filter(y)` there is no conflict: seven nodes with the selects, one full scan [proto 3].
+select node), and do not when the table has no other column or they take different ones [proto 1, 2]. The
+user wrote two different pods and no shared step. The options are in section 13; until it is answered the
+design is (a), the refusal.
+
+With `A.filter(x)` and `A.filter(y)` there is no conflict: seven nodes with the selects, one full scan
+[proto 3].
 
 **Leaf streams (D8).** A stream built before the `with` block is one leaf [ran 7]; two such streams of one
 identity over different restrictions would be one slot again, bound to whichever came first. Until a stream
-brings its steps into the pipeline (ITL-1387), that pair is refused by the present walk
+brings its steps into the pipeline (ITL-1387, PR 500), that pair is refused by the present walk
 (`restrictions_beneath`), narrowed to leaves that share a key.
 
 ## 5. Reading
@@ -111,8 +117,8 @@ brings its steps into the pipeline (ITL-1387), that pair is refused by the prese
 A node's input is the stream of its edge (section 6), in both orchestrators, through one function.
 
 - **Edges out of a source node:** each distinct restriction among them is one pushed-down read of the bound
-  source, `bound_source.restricted(condition, limit)` (a new required member; **D7** for a source that cannot
-  push down). Edges with one restriction share the read [proto 5]; `MergeJoin(A, A)` is one scan [proto 4].
+  source, `bound_source.restricted(condition, limit)` (a new required member; a source that cannot push down
+  is refused, **D7**). Edges with one restriction share the read [proto 5]; `MergeJoin(A, A)` is one scan [proto 4].
 - **Scans in a run:** per source node, one per distinct restriction on its edges into nodes that run, plus
   one full read only if such an edge has no restriction. `f(A_x)`, `g(A_y)`: two scans, both with a predicate,
   none full [proto 1].
@@ -154,10 +160,19 @@ and appends to the node's log; `REPLAY` serves everything logged, whatever restr
 `refuse_restricted_operator_cache(s)` go. **D6**: one warning per run when a `REPLAY` node is below a
 restricted edge, since the restriction then chooses nothing.
 
-**Bind.** One slot per source node, as today. A bind of a source that states no restriction leaves every
-edge as it is. A bound source is checked, before anything is bound, to be able to apply each restriction on
-the slot's edges (column known, exact type: the source's own check). A source that states a restriction is
-**D5**.
+**Bind.** One slot per source node, as today. The binding carries no restriction. Before anything is bound,
+all or nothing:
+
+- A source that states a restriction of its own is **refused** (D5): the error says to bind the source
+  without it; the restriction belongs to the edges. The cost: on a built job a restriction cannot be changed
+  (a moved window) without building the job again, until `job.restrict` exists (section 9); `main` allows
+  that rebind today. A blueprint over declared slots likewise gets its restrictions from `restrict`.
+- A source bound to a slot with a restricted edge must be able to push the restriction down and to apply it
+  (column known, exact type: the source's own check). One that cannot push down (an in-memory source, a
+  `CachedSource`) is **refused** until ITL-1219 (D7): a pushed-down condition follows the table system's
+  equality and a local filter Orcapod's, and they differ (NaN, signed zero), so one restriction could select
+  different rows depending on what is bound.
+- A source that states none leaves every edge as it is.
 
 ## 8. `restrictions.py`, visibility, save and load
 
@@ -165,7 +180,7 @@ the slot's edges (column known, exact type: the source's own check). A source th
 |---|---|
 | `require_one_restriction`, `sources_read`, their calls at capture, compile, bind and run | **Go**: "one restriction per table" becomes "one per edge" (section 4). A narrow form stays for D8 |
 | `refuse_restricted_operator_cache(s)`, `refuse_restriction_conflicts`, `Rebinding` and their calls | **Go** |
-| `refuse_restricted_cache_input`, `refuse_restricted_cache_config` (a `CachedSource` over a restricted source) | **Stay**: a standalone object, kept under the table's identity. A `CachedSource` as a node with a restricted edge is D7 |
+| `refuse_restricted_cache_input`, `refuse_restricted_cache_config` (a `CachedSource` over a restricted source) | **Stay**: a standalone object, kept under the table's identity. A `CachedSource` as a node with a restricted edge is refused (D7) |
 | `warn_restricted_aggregation` | **Stays**, reading edges; names each edge and step |
 | `restrictions_in_force` | Stays for restrictions inside a stream bound to a slot (**D11**); edges are reported from `job.edges` |
 | `restriction_of`, `restriction_text`, `restrictions_text`, `source_name`, `restrictions_beneath` | Stay |
@@ -204,6 +219,8 @@ included: the first round's D8).
 - **Any edge:** on an edge whose upstream is not a source, the restriction is applied to the upstream node's
   rows where they are handed to the target, by the code the filter operator uses
   (`core/operators/filter_mask.filter_table`), with no node and no identity. The edge view is the same stream.
+  That equality is Orcapod's; whether an edge out of a source that cannot push down may use it too is D7's
+  question again, with ITL-1219.
 
 **What the first stages must already do so nothing is redone:**
 
@@ -211,7 +228,7 @@ included: the first round's D8).
    assumes a restricted edge leaves a source.
 2. One function gives "the stream of an edge" (upstream stream, condition, limit), used by both orchestrators
    and by `edge_stream`; the pushed-down read is its case for a source upstream.
-3. One function sets an edge's restriction; sugar (capture, bind) and later `restrict` both call it. The
+3. One function sets an edge's restriction; sugar (capture) and later `restrict` both call it. The
    conflict rule is the sugar's, not the setter's.
 4. The staleness rule asks an edge for its modified time through one place (constant until `restrict`).
 
@@ -268,11 +285,14 @@ hit or computed should travel with the row, and that the async tap sees record b
 
 ## 12. Stages and tests
 
+The stages, each one pull request against `main`, are in `docs/dev/plans/itl-1472-plan.md`:
+
 | Stage | Content |
 |---|---|
-| 1 | Edges with positions as the pipeline's and the run's structure: `job.edges`, `job.edge`, the `Edge` record, the saved records (no restriction yet), orchestrators reading per edge through one function; `MergeJoin(A, A)` runs. No behaviour change otherwise. After the ITL-1464 integration merge (same orchestrator lines) |
-| 2 | The restriction on the edge: `unrestricted()`, `restricted()`, the sugar at capture, the conflict rule and error, reads per distinct restriction, bind (D5, D7), save and load of `where` and `limit` |
-| 3 | The old rules go (section 8); cached operators (D6); `edge_stream`; `diagram()`, `explain()`, `RunSummary.restricted_edges`; docs (`concepts/sources.md`, `concepts/identity.md`, `CLAUDE.md` and `.zed/rules`) |
+| 1 (ITL-1483) | Graph edges carry their input position; `MergeJoin(A, A)` and `SemiJoin(A, A)` run |
+| 2 | Edges as the public and saved structure: `job.edges`, `job.edge`, the `Edge` record, saved records |
+| 3 | The restriction on the edge: the sugar, the conflict rule, reads per restriction, bind (D5, D7) |
+| 4 | The old rules go; cached operators (D6); `edge_stream`; diagram, `explain()`, run summary; docs |
 | later | `restrict` / `unrestrict` on any edge (section 9); filter push-down |
 
 **Tests** (public interface; inputs with two or more tag and two or more data columns; sync and async):
@@ -292,22 +312,37 @@ hit or computed should travel with the row, and that the async tap sees record b
    (tracked, untracked, a pod taking `ctx`).
 7. Cached operators: `OFF`, `LOG`, `REPLAY` below a restricted edge, for `GroupBy`, `Batch`, `Join`; the warning.
 8. Save and load: byte-equal files in every recording order, restrictions kept, an earlier format refused, a
-   repeated or dangling edge refused. Bind: a rebind keeps the edges, D5 and D7 all-or-nothing.
+   repeated or dangling edge refused. Bind: a rebind keeps the edges, D5 and D7 refuse all-or-nothing.
 9. `test_order_invariance.py`: every permutation of the recording order gives the same edges, file and rows.
 10. Golden: unchanged; one provisional case pins that a restricted edge moves no value.
 
-## 13. Open decisions
+## 13. Decisions
 
-| # | Question | Options | Recommendation |
+D1 to D11 were **decided on the developer's behalf, 2026-11-26, revertible** (the coordinator, authorized by
+the developer). The edge view (section 6, points 1 and 2) was confirmed by the developer the same day.
+
+| # | Question | Decided |
+|---|---|---|
+| D1 | What names an edge's nodes | The node names (`job.nodes` keys) in the API, the file's node keys in the file. A name, not a hash |
+| D2 | One node feeding a commutative operator twice | One edge; two different restrictions refused. No operator reaches it today [ran 5] |
+| D3 | Public names | Approved provisionally: `job.edges`, `job.edge(source, target, position=None)`, `Edge(source, target, position, condition, limit)`, `job.edge_stream(edge)`, `EdgeRestrictionConflictError`, `RunSummary.restricted_edges`; `SourceProtocol.unrestricted()` and `.restricted(condition, limit)` |
+| D4 | The later call on a built pipeline | `job.restrict(edge, ...)` / `job.unrestrict(edge)` on the pipeline, `Edge` a plain value; replaces; makes the target and below stale. Not implemented now |
+| D5 | `bind` of a source that states its own restriction | **Refused.** The binding does not carry the restriction, and when in doubt, refuse. Cost: moving a window needs a rebuilt job until `job.restrict` |
+| D6 | A `REPLAY` operator below a restricted edge | Serves everything, one warning per run |
+| D7 | A restricted edge whose source cannot push down | **Refused** until ITL-1219: the table system's equality and Orcapod's differ, so one restriction could select different rows depending on the bound source |
+| D8 | Two leaf streams of one identity over different restrictions | Refused (the present walk, narrowed) until ITL-1387 (PR 500) |
+| D9 | What a limit promises | The count and the condition; which rows only where the upstream's order is defined |
+| D10 | Saved format | Edges as records, node keys unchanged, both format versions raised |
+| D11 | `RunSummary.conditions`, `limits`, `restricted_source_ids` | Kept, for a restriction inside a stream bound to a slot; edges in `restricted_edges` |
+
+**Open, for the developer.**
+
+| # | Question | Options | Coordinator's recommendation |
 |---|---|---|---|
-| D1 | What names an edge's nodes | (a) the node names (`job.nodes` keys) in the API, the file's node keys in the file. (b) a labelled hash of the triple | **(a)**: both survive save and load already; a hash identifies nothing more |
-| D2 | One node feeding a commutative operator twice | (a) one edge, two different restrictions refused. (b) a multiset of restrictions on it | **(a)**: no operator reaches it today [ran 5] |
-| D3 | Public names | `job.edges`, `job.edge(source, target, position=None)`, `Edge(source, target, position, condition, limit)`, `job.edge_stream(edge)`, `EdgeRestrictionConflictError`, `RunSummary.restricted_edges`; `SourceProtocol.unrestricted()` and `.restricted(condition, limit)` | approve, or rename |
-| D4 | The later call on a built pipeline | (a) `job.restrict(edge, ...)` / `job.unrestrict(edge)` on the pipeline, `Edge` a plain value; replaces; makes the target and below stale. (b) a bound edge object: `job.edge(...).where(...)` | **(a)**: one owner of changes (the job, as `bind`), and `Edge` stays a value the summary and the file can hold |
-| D5 | `bind` of a source that states its own restriction | (a) it states that restriction for every edge leaving the slot: set where an edge has none or the same, refused (the conflict error, nothing bound) where an edge has another. (b) refuse always. (c) replace every edge's restriction, as `main`'s slot does | **(a)**: sugar means the same at a pod's input and at a bind, and never replaces; a blueprint over declared slots can still be restricted. Cost: moving a window on a built job needs a rebuilt job until `restrict` exists; `main` allows it today |
-| D6 | A `REPLAY` operator below a restricted edge | (a) serve everything, one warning per run. (b) silently. (c) refuse | **(a)** |
-| D7 | A restricted edge whose source cannot push down (an in-memory stand-in, a `CachedSource`) | (a) apply the restriction in Orcapod (`filter_table`, the limit as the first rows), as section 9 does for any edge. (b) refuse until ITL-1219 | **(a)**: it is the edge view's definition and what a stand-in for a table needs; documented: the equality is then Orcapod's (NaN, signed zero), not the table system's |
-| D8 | Two leaf streams of one identity over different restrictions | (a) refuse (the present walk, narrowed). (b) nothing until ITL-1387 | **(a)**: otherwise the first recorded wins [ran 3, 7] |
-| D9 | What a limit promises in a view and a run | (a) the count and the condition; which rows only where the upstream's order is defined. (b) require an order for a limit | **(a)** |
-| D10 | Saved format | (a) edges as records, node keys unchanged, versions raised. (b) keep the pairs, add a separate section for restrictions and positions | **(a)**: one list says what an edge is |
-| D11 | `RunSummary.conditions`, `limits`, `restricted_source_ids` (by slot) | (a) keep, for a restriction inside a stream bound to a slot; edges in `restricted_edges`. (b) remove, and report such a stream's restriction nowhere | **(a)** |
+| O34 | A function pod's automatic `SelectDataColumns` is the first shared node, so `f(A_x)` and `h(A_y)` conflict when `f` and `h` take the same columns (section 4) | (a) keep the refusal. (b) a restriction on an automatic select's input passes to the edge after it (select to pod), so the two pods' edges differ. (c) a select node per pod | **(b)** |
+
+Note on (b), for whoever decides: the select node is then fed by an unrestricted edge and shared, and each
+edge after it carries a restriction on a non-source upstream. Carried out literally that is a full read of
+the table and a local filter (section 9, with Orcapod's equality, which D7 refuses for now); to stay a
+pushed-down read, the run must push the restriction back through the select to the source read. (c) changes
+node identity or count and so stored paths or names; (a) changes nothing.
