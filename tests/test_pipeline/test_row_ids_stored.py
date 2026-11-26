@@ -1045,20 +1045,24 @@ def test_rows_with_no_token_store_null_tokens_and_recompute_their_ids(
     for name in tokens:
         assert stored.schema.field(name).type == pa.large_string()
         assert stored.column(name).null_count == 3
-    for row, (tag, data) in zip(_rows(stored), rows):
-        assert (
-            _instance_id_of_stored_row(row).to_prefixed_digest()
-            == (_values(row, "__pipeline_instance_id")[0])
-        )
-        # The same row read from an Arrow table has the same instance id.
+    # The same rows read from Arrow tables have the same instance ids (stored
+    # rows are a set: the async route promises no order).
+    read_from_tables = set()
+    for tag, data in rows:
         table = data.as_table()
         for name in tokens:
             table = table.append_column(
                 pa.field(name, pa.large_string()), pa.nulls(1, pa.large_string())
             )
-        assert (
+        read_from_tables.add(
             row_ids.instance_id(HASHER, tag, Data(table)).to_prefixed_digest()
-            == _values(row, "__pipeline_instance_id")[0]
+        )
+    assert len(read_from_tables) == 3
+    assert set(_values(stored, "__pipeline_instance_id")) == read_from_tables
+    for row in _rows(stored):
+        assert (
+            _instance_id_of_stored_row(row).to_prefixed_digest()
+            == (_values(row, "__pipeline_instance_id")[0])
         )
         assert (
             _record_id_of_stored_row(row).to_prefixed_digest()
