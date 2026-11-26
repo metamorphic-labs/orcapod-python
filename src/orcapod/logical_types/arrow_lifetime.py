@@ -14,6 +14,8 @@ _REFERENCE_TO = ctypes.py_object
 
 # Held only to compare and publish prepared entries. Reentrant so same-thread
 # interruptions can also use the table.
+# A signal handler that interrupts the main thread while it holds this lock can
+# deadlock if it waits for another thread to construct an extension type.
 _LOCK = threading.RLock()
 
 
