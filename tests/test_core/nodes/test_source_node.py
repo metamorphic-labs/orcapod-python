@@ -515,9 +515,10 @@ class TestFromStreamNonRootSource:
 
     Both ``SourceNode.from_stream()`` and ``SourceJobNode.from_stream()`` fall
     through to the ``else`` branch when the stream is neither a ``SourceNode``
-    nor a ``RootSource``.  The slot name must be built as
-    ``"{stream.label}:{stream.content_hash().to_hex()}"`` where
-    ``to_hex()`` returns the **full** bare digest (no truncation).
+    nor a ``RootSource``. For a stream with no producer the slot name is built as
+    ``"{stream.label}:{stream.content_hash().to_hex()}"`` where ``to_hex()``
+    returns the **full** bare digest (no truncation); a stream made by a pod needs
+    an explicit name (ITL-1387).
     """
 
     def _make_arrow_stream(self):
@@ -541,8 +542,10 @@ class TestFromStreamNonRootSource:
         # Confirm the hash is full-length — SHA-256 produces a 64-character hex digest.
         assert len(stream.content_hash().to_hex()) == 64
 
-    def test_source_job_node_from_stream_slot_name_uses_full_hash(self):
-        """SourceJobNode.from_stream(non-RootSource) builds name as label + full content hash."""
+    def test_source_job_node_from_a_pod_stream_needs_a_name(self):
+        """SourceJobNode.from_stream(a stream made by a pod) is an explicit cut: it needs
+        a name, used as given (ITL-1387). A pipeline never makes such a slot itself: a
+        stream given to it comes in with its steps."""
         from orcapod.core.nodes.source_node import SourceJobNode
 
         # A stream derived from a source: not a RootSource, and it carries the one
@@ -554,9 +557,6 @@ class TestFromStreamNonRootSource:
             [{"id": 1, "value": 1.0}], tag_columns=["id"], tag_only_columns=True
         )
         stream = MapData({"value": "v"})(source)
-        job_node = SourceJobNode.from_stream(stream)
-
-        expected_name = f"{stream.label}:{stream.content_hash().to_hex()}"
-        assert job_node.name == expected_name
-        # Confirm the hash is full-length — SHA-256 produces a 64-character hex digest.
-        assert len(stream.content_hash().to_hex()) == 64
+        with pytest.raises(ValueError, match="only when you name the slot"):
+            SourceJobNode.from_stream(stream)
+        assert SourceJobNode.from_stream(stream, name="cut").name == "cut"
