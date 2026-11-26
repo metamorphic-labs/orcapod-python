@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import functools
+
 import itertools
 import logging
-from collections.abc import Collection, Iterator
+from collections.abc import Collection, Generator, Iterator
 from typing import Any
 
 import pyarrow as pa
@@ -14,6 +16,12 @@ from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
     StreamBase,
     check_head_size,
+)
+from orcapod.core.streams.preview import (
+    PreviewRequest,
+    is_exact_library_instance,
+    refuse_without_compute_all,
+    slices_of,
 )
 from orcapod.core.streams.view import StreamView
 from orcapod.protocols.core_protocols import PodProtocol, StreamProtocol, TagProtocol
@@ -379,6 +387,20 @@ class ArrowTableStream(StreamBase):
             total_rows=self._table.num_rows,
         )
 
+    def _preview_batches(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """Slices of the rows this stream holds (``preview_batches``).
+
+        A subclass of your own may compute its rows in ``as_table``: it is read in
+        full, only with ``compute_all`` (N55).
+        """
+        if not is_exact_library_instance(self, previewable_streams()):
+            refuse_without_compute_all(
+                self, request, "is a subclass that reads its rows its own way"
+            )
+        yield from slices_of(self, request)
+
     def _typed_zero_row_table(self) -> "pa.Table":
         """This stream's table cut to no rows: its own Arrow types, no row assembled."""
         return self._assemble_table(ZERO_ROW_INPUT_COLUMNS, limit=0)
@@ -496,3 +518,14 @@ class ArrowTableStream(StreamBase):
             f"{self.__class__.__name__}(table={self._table.column_names}, "
             f"tag_columns={self._tag_columns}{refs})"
         )
+
+
+@functools.cache
+def previewable_streams() -> frozenset[type]:
+    """The library's raw stream classes whose ``as_table`` computes nothing: a preview
+    slices their rows (N55)."""
+    from orcapod.core.operators.static_output_pod import (
+        _RowsOfStream,  # pyright: ignore[reportPrivateUsage]  # the library's stand-in
+    )
+
+    return frozenset({ArrowTableStream, _RowsOfStream})

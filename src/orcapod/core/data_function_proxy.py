@@ -171,6 +171,37 @@ class DataFunctionProxy(DataFunctionBase):
             return await self._bound_function.direct_async_call(data)
         self._raise_unavailable()
 
+    # ==================== Preview ====================
+
+    def require_preview(self) -> None:
+        """The bound function's answer (``DataFunctionProtocol.require_preview``).
+
+        Unbound, nothing is refused here: ``preview_call`` raises
+        ``DataFunctionUnavailableError``, as ``call`` does.
+
+        Raises:
+            PreviewRefusedError: If the bound function has no read-only call.
+        """
+        if self._bound_function is not None:
+            self._bound_function.require_preview()
+
+    @property
+    def bound_function(self) -> DataFunctionProtocol | None:
+        """The function bound to this proxy, or ``None``."""
+        return self._bound_function
+
+    def preview_call(self, data: DataProtocol) -> DataProtocol | None:
+        """The bound function's ``preview_call``; unbound, raises as ``call`` does.
+
+        Raises:
+            DataFunctionUnavailableError: If no function is bound.
+            PreviewRefusedError: As ``require_preview``.
+        """
+        self.require_preview()
+        if self._bound_function is not None:
+            return self._bound_function.preview_call(data)
+        self._raise_unavailable()
+
     # ==================== Variation / execution data ====================
 
     def get_function_variation_data(self) -> dict[str, Any]:

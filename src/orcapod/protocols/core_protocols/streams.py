@@ -292,6 +292,19 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
         """
         ...
 
+    def preview(
+        self, n: int = 10, *, compute_all: bool = False
+    ) -> "StreamViewProtocol":
+        """Compute the first ``n`` rows and only what they need, keeping nothing.
+
+        User functions are called; nothing is stored and nothing has an effect. A step
+        that needs its whole input is refused unless ``compute_all`` (ITL-1464).
+
+        Returns:
+            StreamView: The first ``n`` rows of ``as_table()``.
+        """
+        ...
+
     def head(
         self,
         n: int = 10,

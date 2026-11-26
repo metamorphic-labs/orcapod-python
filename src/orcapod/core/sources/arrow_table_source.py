@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Generator
+from orcapod.core.sources.base import held_table_batches
+from orcapod.core.streams.preview import PreviewRequest
+from orcapod.protocols.core_protocols import StreamProtocol
+
 import logging
 from collections.abc import Collection
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -171,3 +176,9 @@ class ArrowTableSource(RootSource):
     def table(self) -> "pa.Table":
         """Return the enriched table (with source-info and system tags)."""
         return self._stream.as_table(columns={"source": True, "system_tags": True})
+
+    def _preview_batches(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """Slices of the table it holds, for exactly this class (``held_table_batches``)."""
+        yield from held_table_batches(self, ArrowTableSource, request)

@@ -12,6 +12,11 @@ Example::
 
 from __future__ import annotations
 
+from collections.abc import Generator
+from orcapod.core.sources.base import held_table_batches
+from orcapod.core.streams.preview import PreviewRequest
+from orcapod.protocols.core_protocols import StreamProtocol
+
 import ipaddress
 import re
 from collections.abc import Collection, Iterator
@@ -307,3 +312,9 @@ class PostgreSQLTableSource(DBTableSource):
                 data_context=config.get("data_context"),
             ),
         )
+
+    def _preview_batches(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """Slices of the table it holds, for exactly this class (``held_table_batches``)."""
+        yield from held_table_batches(self, PostgreSQLTableSource, request)

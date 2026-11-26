@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import copy
 import dataclasses
-from collections.abc import Collection, Mapping
+from contextlib import closing
+from collections.abc import Collection, Generator, Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -15,6 +17,7 @@ from orcapod.core.data_tags import (
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
+from orcapod.core.sources.held_sources import HELD_LIBRARY_SOURCES
 from orcapod.core.sources.provisional import warn_provisional_source
 from orcapod.core.sources.reload import same_rows
 from orcapod.core.sources.source_ids import hash_source_name
@@ -33,6 +36,14 @@ from orcapod.core.streams.base import (
     typed_arrow_schemas,
     typed_zero_row_table,
 )
+from orcapod.core.streams.preview import (
+    PreviewRequest,
+    preview_batches,
+    is_exact_library_instance,
+    refuse_without_compute_all,
+    refused,
+    slices_of,
+)
 from orcapod.errors import InputValidationError
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
@@ -40,6 +51,7 @@ from orcapod.utils import schema_utils
 from orcapod.utils.provisional import provisional_class_name
 
 if TYPE_CHECKING:
+    from orcapod.protocols.core_protocols import StreamProtocol
     from orcapod.core.nodes.function_node import FunctionJobNode
     from orcapod.core.nodes.operator_node import OperatorJobNode
 
@@ -589,13 +601,22 @@ class DerivedSource(RootSource):
         return self._derive_from(table, tags_as_data), has_rows
 
     def _derive_from(
-        self, table: "pa.Table", tags_as_data: Mapping[str, str]
+        self,
+        table: "pa.Table",
+        tags_as_data: Mapping[str, str],
+        *,
+        first_row: int = 0,
+        seen_keys: dict[str, int] | None = None,
     ) -> ArrowTableStream:
         """Append the tag copies to the origin rows ``table`` and enrich it as a source.
 
         Args:
             table: Rows of the origin.
             tags_as_data: Maps a tag column of the origin to the name of its copy.
+            first_row: The position of the first row of ``table`` among the origin's
+                rows, when it is a later batch of them.
+            seen_keys: The keys of the earlier batches' rows
+                (``SourceStreamBuilder.build``); ``None`` for all the rows.
         """
         for tag, name in tags_as_data.items():
             # The copy is the tag's own Arrow column under a renamed field, so its
@@ -611,6 +632,8 @@ class DerivedSource(RootSource):
             source_name=self.source_name,
             kind_part=self.kind_part(),
             record_id_columns=self._record_id_columns or (),
+            first_row=first_row,
+            seen_keys=seen_keys,
         )
         return result.stream
 
@@ -792,6 +815,79 @@ class DerivedSource(RootSource):
             head.for_stream(self, origin="stored"), total_rows=records.num_rows
         )
 
+    def _preview_of_its_read(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """A subclass's preview: its own ``as_table()``, in full, then the first rows.
+
+        The reading above is written for this class; a subclass may read or derive
+        its rows another way (developer decision N55, review of PR 571), so its rows
+        are its own full read, only with ``compute_all``. The read is made on a copy
+        whose origins are copies too (``_origin_read_keeping_nothing``), so neither
+        this source nor any origin keeps what it read; an origin that cannot be read
+        that way is refused.
+
+        Raises:
+            PreviewRefusedError: Without ``compute_all``, or if an origin is refused.
+        """
+        refuse_without_compute_all(
+            self, request, "is a subclass that reads its rows its own way"
+        )
+        twin = copy.copy(self)
+        twin._origin = _origin_read_keeping_nothing(
+            self._origin, read_by_this_class=False
+        )
+        yield from slices_of(twin, request)
+
+    @override
+    def _preview_batches(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """This source's first rows (``preview_batches``), read without keeping them.
+
+        The rows it holds are sliced. Otherwise an origin source gives its rows through
+        its own preview, which refuses a source that would poll or write its cache
+        when read, so nothing is polled or written; each of its batches is derived as
+        it comes, so the origin reads no further than the rows a step above takes. An origin job node's stored
+        rows are read whole, only with ``compute_all``. Nothing read here is kept by
+        this source.
+
+        A subclass takes the general path (``_preview_of_its_read``): its own read in
+        full, then the first rows.
+        """
+        self._note_provisional_identity_use()
+        if not is_exact_library_instance(self, frozenset({DerivedSource})):
+            yield from self._preview_of_its_read(request)
+            return
+        if self._tags_as_data is not None and self._cached_stream is not None:
+            yield from slices_of(self._cached_stream, request)
+            return
+        if self._tags_as_data is None and self._cached_table is not None:
+            yield from slices_of(self._stream_over(self._cached_table), request)
+            return
+        if isinstance(self._origin, RootSource) and self._tags_as_data is not None:
+            # The derived rows are the origin's, one for one and in order: each batch
+            # the origin gives is derived as it comes, its positional record ids
+            # continuing from the rows before it and its keys checked against
+            # theirs, so a step above that stops reading stops the origin too.
+            first_row = 0
+            seen_keys: dict[str, int] = {}
+            with closing(preview_batches(self._origin, request)) as batches:
+                for batch in batches:
+                    rows = batch.as_table()
+                    yield self._derive_from(
+                        rows,
+                        self._tags_as_data,
+                        first_row=first_row,
+                        seen_keys=seen_keys,
+                    )
+                    first_row += rows.num_rows
+            return
+        refuse_without_compute_all(self, request, "reads its origin's rows whole")
+        records = self._origin_records()
+        rows = self._empty_origin_table() if records is None else records
+        yield from slices_of(self._stream_over(rows), request)
+
     def _stream_over(self, table: "pa.Table") -> ArrowTableStream:
         """Return this source's stream over the origin rows ``table``."""
         if self._tags_as_data is not None:
@@ -812,3 +908,55 @@ class DerivedSource(RootSource):
         all_info: bool = False,
     ) -> "pa.Table":
         return self._get_stream().as_table(columns=columns, all_info=all_info)
+
+
+def _origin_read_keeping_nothing(origin: Any, *, read_by_this_class: bool) -> Any:
+    """An origin that a full read of a ``DerivedSource`` subclass may read: nothing it
+    reads stays on ``origin`` or beneath it (review of PR 571, round 3).
+
+    A ``DerivedSource`` of exactly this class is copied, with its own origin taken the
+    same way, so the rows it keeps stay on the copy; a subclass of it may keep rows
+    where a copy shares them, and is refused. A source of the library that holds its rows
+    (``_stream``) or reads them on demand without keeping them (``SpiralDBTableSource``)
+    is read as it is. A job node is read as it is only by ``DerivedSource``'s own
+    code, which reads its stored rows (``get_all_records``) and keeps nothing; a
+    subclass reading one directly could do anything with it. Anything else (a
+    ``CachedSource``, a ``PollingSource``, a ``SourceProxy``, a source of your own)
+    is refused: when in doubt, refuse.
+
+    Args:
+        origin: The origin to read.
+        read_by_this_class: Whether ``DerivedSource``'s own code reads it.
+
+    Raises:
+        PreviewRefusedError: If the origin cannot be read without keeping rows.
+    """
+    from orcapod.core.sources.spiraldb_table_source import SpiralDBTableSource
+
+    if is_exact_library_instance(origin, frozenset({DerivedSource})):
+        # Exactly this class: its state is known, so a copy keeps what it reads.
+        twin = copy.copy(origin)
+        twin._origin = _origin_read_keeping_nothing(  # pyright: ignore[reportPrivateUsage]  # the copy's own origin
+            origin._origin,  # pyright: ignore[reportPrivateUsage]  # as above
+            read_by_this_class=True,
+        )
+        return twin
+    if isinstance(origin, DerivedSource):
+        # A subclass may hold what it reads where a copy shares it (N55).
+        raise refused(
+            origin,
+            "is a DerivedSource subclass: a DerivedSource subclass above it would "
+            "read it in full, and it may keep what is read",
+        )
+    if isinstance(origin, RootSource):
+        if is_exact_library_instance(
+            origin, HELD_LIBRARY_SOURCES | {SpiralDBTableSource}
+        ):
+            return origin
+    elif read_by_this_class:
+        return origin
+    raise refused(
+        origin,
+        "a DerivedSource subclass above it would read in full, and it may keep or "
+        "write what is read",
+    )

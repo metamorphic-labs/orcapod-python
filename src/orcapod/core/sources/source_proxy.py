@@ -11,12 +11,14 @@ unless a live source has been bound via `bind`.
 from __future__ import annotations
 
 from datetime import datetime
+from collections.abc import Generator
 from typing import TYPE_CHECKING, Any
 
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.source_ids import parse_source_id
+from orcapod.core.streams.preview import PreviewRequest, preview_batches
 from orcapod.core.streams.view import (
     ViewStatus,
     StreamView,
@@ -35,7 +37,11 @@ if TYPE_CHECKING:
 
     import pyarrow as pa
 
-    from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
+    from orcapod.protocols.core_protocols import (
+        DataProtocol,
+        StreamProtocol,
+        TagProtocol,
+    )
 
 
 class SourceProxy(RootSource):
@@ -263,6 +269,12 @@ class SourceProxy(RootSource):
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         return self._require_delegate().iter_data()
+
+    def _preview_batches(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """The bound source's (``preview_batches``)."""
+        yield from preview_batches(self._require_delegate(), request)
 
     def as_table(
         self,

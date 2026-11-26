@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 import inspect
 import io
 import logging
@@ -30,6 +31,7 @@ from orcapod.hashing.semantic_hashing.builtin_handlers import (
 from orcapod.core.result_cache import ResultCache
 from orcapod.errors import (
     NoOutputsDeclaredError,
+    PreviewRefusedError,
     OutputTypeError,
     UnstorableDatetimeError,
 )
@@ -417,6 +419,34 @@ class DataFunctionBase(TraceableBase, Generic[E]):
     ) -> DataProtocol | None:
         """Asynchronous counterpart of ``direct_call``."""
         ...
+
+    # ==================== Preview ====================
+
+    def require_preview(self) -> None:
+        """Refuse a preview: this kind of data function has no read-only call.
+
+        Only the library's kinds with one (``data_function_preview``) answer otherwise;
+        a caller checks that every layer is exactly one of them
+        (``require_previewable_function``) before it calls this or ``preview_call``,
+        so a subclass's own methods are never called (N55).
+
+        Raises:
+            PreviewRefusedError: Always, for a kind with no read-only call.
+        """
+        raise PreviewRefusedError(
+            f"its data function {type(self).__name__} has no read-only call"
+        )
+
+    def preview_call(self, data: DataProtocol) -> DataProtocol | None:
+        """Refused: this kind of data function has no read-only call.
+
+        Raises:
+            PreviewRefusedError: Always (``require_preview``).
+        """
+        self.require_preview()
+        raise PreviewRefusedError(
+            f"its data function {type(self).__name__} has no read-only call"
+        )
 
 
 FUNCTION_SIGNATURE_HASH_LABEL = "function_signature_v1"
@@ -1305,6 +1335,14 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             version=inner.get("version", "v0.0"),
         )
 
+    def require_preview(self) -> None:
+        """Nothing refused: calling the function stores nothing
+        (``DataFunctionProtocol.require_preview``)."""
+
+    def preview_call(self, data: DataProtocol) -> DataProtocol | None:
+        """Call the function (``DataFunctionProtocol.preview_call``): it stores nothing."""
+        return self.call(data)
+
 
 class DataFunctionWrapper(DataFunctionBase[E]):
     """Wrapper around a DataFunctionProtocol to modify or extend its behavior.
@@ -1459,6 +1497,25 @@ class DataFunctionWrapper(DataFunctionBase[E]):
     ) -> DataProtocol | None:
         return await self._data_function.direct_async_call(data, **kwargs)
 
+    @property
+    def wrapped(self) -> DataFunctionProtocol:
+        """The data function this wrapper wraps."""
+        return self._data_function
+
+    def require_preview(self) -> None:
+        """The wrapped function's answer: a wrapper adds nothing to a call that a
+        preview cannot do (``CachedDataFunction`` reads its store and writes none)."""
+        self._data_function.require_preview()
+
+    def preview_call(self, data: DataProtocol) -> DataProtocol | None:
+        """The wrapped function's ``preview_call``.
+
+        Raises:
+            PreviewRefusedError: As ``require_preview``.
+        """
+        self.require_preview()
+        return self._data_function.preview_call(data)
+
 
 class CachedDataFunction(DataFunctionWrapper):
     """Wrapper around a DataFunctionProtocol that caches results for identical input data.
@@ -1566,6 +1623,25 @@ class CachedDataFunction(DataFunctionWrapper):
                 **{self.RESULT_COMPUTED_FLAG: True}
             )
         return output_data
+
+    def preview_call(self, data: DataProtocol) -> DataProtocol | None:
+        """The stored result, else the wrapped function's ``preview_call``; nothing is
+        stored and no table created, at this layer or any beneath it (ITL-1464).
+
+        Raises:
+            InputValidationError: If ``data`` is of another data context than this
+                function's.
+            PreviewRefusedError: As ``require_preview``.
+        """
+        self.require_preview()
+        require_same_data_context(data.data_context_key, self.data_context_key)
+        stored = self._cache.lookup(data, data_context_key=self.data_context_key)
+        if stored is not None:
+            return stored
+        output = self._data_function.preview_call(data)
+        if output is None:
+            return None
+        return output.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: True})
 
     async def async_call(
         self,

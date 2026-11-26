@@ -186,6 +186,34 @@ class DataFunctionProtocol(
         """Asynchronous counterpart of ``direct_call``."""
         ...
 
+    # ==================== Preview ====================
+
+    def require_preview(self) -> None:
+        """Refuse a preview of this function before it is called (ITL-1464).
+
+        Raises:
+            PreviewRefusedError: If this function, or one it wraps, cannot be called
+                read-only (``preview_call``).
+        """
+        ...
+
+    def preview_call(self, data: DataProtocol) -> DataProtocol | None:
+        """Process a single data for a preview: read-only at every layer (ITL-1464).
+
+        A layer that keeps results reads them and stores none, and creates no table;
+        it hands a miss to the function it wraps, read-only too.
+
+        Args:
+            data: The data payload to process.
+
+        Returns:
+            The output data, or ``None`` when the function filters the data out.
+
+        Raises:
+            PreviewRefusedError: As ``require_preview``.
+        """
+        ...
+
     # ==================== Serialization ====================
 
     def to_config(self) -> dict[str, Any]:

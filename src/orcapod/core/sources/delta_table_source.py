@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Generator
+from orcapod.core.sources.base import held_table_batches
+from orcapod.core.streams.preview import PreviewRequest
+from orcapod.protocols.core_protocols import StreamProtocol
+
 import os
 
 from collections.abc import Collection
@@ -196,3 +201,9 @@ class DeltaTableSource(RootSource):
                 source_id=name,
             ),
         )
+
+    def _preview_batches(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """Slices of the table it holds, for exactly this class (``held_table_batches``)."""
+        yield from held_table_batches(self, DeltaTableSource, request)

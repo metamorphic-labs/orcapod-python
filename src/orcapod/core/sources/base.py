@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Generator
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from orcapod import contexts
@@ -13,6 +14,12 @@ from orcapod.core.streams.base import (
     typed_zero_row_table,
 )
 from orcapod.errors import SourceNameWarning, SourceVersionWarning
+from orcapod.core.streams.preview import (
+    PreviewRequest,
+    is_exact_library_instance,
+    refuse_without_compute_all,
+    slices_of,
+)
 from orcapod.core.streams.view import StreamView
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.types import ColumnConfig, Condition, ContentHash, Schema
@@ -587,6 +594,16 @@ class RootSource(StreamBase):
         # The header names the class already; the name is the part that is the user's.
         return self.source_name
 
+    def _preview_batches(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """A source's whole read, sliced (``preview_batches``): the general path,
+        only with ``compute_all``. A library source that holds its table slices it
+        without asking, for exactly its own class (``held_table_batches``; N55).
+        """
+        refuse_without_compute_all(self, request, "reads its rows whole")
+        yield from slices_of(self, request)
+
     def head(
         self,
         n: int = 10,
@@ -637,3 +654,20 @@ class RootSource(StreamBase):
             cache_path_prefix=cache_path_prefix,
             **kwargs,
         )
+
+
+def held_table_batches(
+    source: RootSource, own_class: type, request: PreviewRequest
+) -> Generator[StreamProtocol, None, None]:
+    """The preview of a library source that holds its whole table once built: slices
+    of it, which computes and keeps nothing, for exactly ``own_class`` (N55); a
+    subclass of it takes the general path (``RootSource._preview_batches``).
+
+    Args:
+        source: The source.
+        own_class: The library class the source's override was written for.
+        request: What is asked of it.
+    """
+    if not is_exact_library_instance(source, frozenset({own_class})):
+        refuse_without_compute_all(source, request, "reads its rows whole")
+    yield from slices_of(source, request)

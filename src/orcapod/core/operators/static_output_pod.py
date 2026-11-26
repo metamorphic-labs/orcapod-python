@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import functools
+
 import asyncio
 import dataclasses
 import logging
@@ -56,6 +58,13 @@ from orcapod.core.streams.base import (
     typed_zero_row_input,
     typed_zero_row_table,
     row_built_columns,
+)
+from orcapod.core.streams.preview import (
+    PREVIEW_COLUMNS,
+    PreviewRequest,
+    preview_batches,
+    is_exact_library_instance,
+    refuse_without_compute_all,
 )
 from orcapod.core.streams.view import (
     BoundedStreamView,
@@ -790,6 +799,19 @@ class StaticOutputOperatorPod(TraceableBase):
         Returns:
             A phrase (``t >= 1.0``; ``rows without a match in 'probes' are dropped``),
             or ``None``.
+        """
+        return None
+
+    def input_given_back(self, inputs: Sequence[StreamProtocol]) -> int | None:
+        """The position of the input this operator gives back unchanged over
+        ``inputs``, or ``None`` (the default): it computes its result.
+
+        Decided from the inputs' schemas only: nothing is computed or read. A preview
+        then reads only that input, as the full read does (``SemiJoin`` without a
+        shared tag gives back its left input and never reads its right one).
+
+        Args:
+            inputs: The operator's inputs, in order.
         """
         return None
 
@@ -1762,6 +1784,8 @@ class _RowsOfStream(ArrowTableStream):
         pipeline_hash: The pipeline hash of the stream the rows came from.
         upstreams: The upstreams of the stream the rows came from, if any.
         data_context: The rows' data context; ``None`` for the default.
+        producer: The producer of the stream the rows came from, if any (a preview's
+            whole input, which an operator may read as the full read gives it).
     """
 
     def __init__(
@@ -1773,11 +1797,13 @@ class _RowsOfStream(ArrowTableStream):
         data_tags: Collection[str] = (),
         upstreams: tuple[StreamProtocol, ...] = (),
         data_context: DataContext | None = None,
+        producer: PodProtocol | None = None,
     ) -> None:
         super().__init__(
             table,
             tag_columns=tag_columns,
             data_tags=data_tags,
+            producer=producer,
             upstreams=upstreams,
             data_context=data_context,
         )
@@ -2058,7 +2084,7 @@ class DynamicPodStream(StreamBase):
         """Whether the operator is applied batch by batch, over an input read so."""
         return (
             reads_as_its_class(self, DynamicPodStream)
-            and type(self._pod).__dict__.get("BATCHES_GIVE_THE_WHOLE") is True
+            and applied_by_batch(self._pod)
             and len(self._upstreams) == 1
             and reads_in_batches(self._upstreams[0])
         )
@@ -2108,6 +2134,76 @@ class DynamicPodStream(StreamBase):
             self._cached_time = datetime.now(timezone.utc)
             self._kept_states = kept_states
             self._run_window = None
+
+    def _preview_batches(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """The operator over its input's batches, or over its whole inputs.
+
+        A kept current result is read as it is; nothing is computed, and nothing is
+        kept of what is computed here.
+        """
+        self._pod._note_provisional_identity_use()
+        self._update_cache_status()
+        if self._cached_stream is not None and self._cached_time is not None:
+            yield from preview_batches(self._cached_stream, request)
+            return
+        pod = cast(StaticOutputOperatorPod, self._pod)
+        # A shortcut of the library holds for its own classes only (N55); an operator
+        # of your own that declares it still takes it in run().
+        if (
+            len(self._upstreams) == 1
+            and applied_by_batch(pod)
+            and is_exact_library_instance(pod, library_batch_operators())
+        ):
+            keeps_every_row = pod.rows_dropped_text(0, (), self._upstreams) is None
+            wanted = request if keeps_every_row else request.without_limit()
+            with closing(preview_batches(self._upstreams[0], wanted)) as batches:
+                for batch in batches:
+                    yield pod.static_process(batch)
+            return
+        given_back = (
+            pod.input_given_back(self._upstreams)
+            if is_exact_library_instance(pod, operators_giving_back_an_input())
+            else None
+        )
+        if given_back is not None:
+            # The result is that input as it is: no other input is read, as in the
+            # full read.
+            from orcapod.core.operators.meta_columns import without_input_meta
+
+            # Without the input's meta columns, as the full read (static_process).
+            with closing(
+                preview_batches(self._upstreams[given_back], request)
+            ) as batches:
+                for batch in batches:
+                    yield without_input_meta(batch, (batch,))
+            return
+        refuse_without_compute_all(self, request, "needs every row of its input")
+        result = pod.static_process(
+            *(
+                self._whole_input(upstream, request.of_every_row())
+                for upstream in self._upstreams
+            )
+        )
+        yield from preview_batches(result, request)
+
+    @staticmethod
+    def _whole_input(
+        upstream: StreamProtocol, request: PreviewRequest
+    ) -> StreamProtocol:
+        """Every row of ``upstream``, computed for a preview, with its pipeline hash."""
+        rows = joined_batches(list(preview_batches(upstream, request)))
+        return _RowsOfStream(
+            rows.as_table(columns=PREVIEW_COLUMNS),
+            tag_columns=rows.keys()[0],
+            pipeline_hash=upstream.pipeline_hash(),
+            # The upstream as the full read gives it to the operator: its producer too.
+            producer=upstream.producer,
+            data_tags=stream_data_tags(rows),
+            upstreams=upstream.upstreams,
+            data_context=StaticOutputOperatorPod._upstream_context(upstream),  # pyright: ignore[reportPrivateUsage]  # the one place that resolves an upstream's context
+        )
 
     def run(self) -> StreamView:
         """Compute every row and return a ``StreamView`` (``StreamBase.run``).
@@ -2265,6 +2361,60 @@ class DynamicPodStream(StreamBase):
             f"{self.__class__.__name__}(label={self.label!r}, kernel={self.producer}, "
             f"upstreams=({upstreams}))"
         )
+
+
+@functools.cache
+def library_batch_operators() -> frozenset[type]:
+    """The library's operators a preview applies batch by batch: each declares
+    ``BATCHES_GIVE_THE_WHOLE`` for exactly its own class (N55)."""
+    from orcapod.core.operators.add_tags import AddTags
+    from orcapod.core.operators.column_selection import (
+        DropColumns,
+        DropDataColumns,
+        DropTagColumns,
+        SelectColumns,
+        SelectDataColumns,
+        SelectTagColumns,
+    )
+    from orcapod.core.operators.drop_nulls import DropNulls
+    from orcapod.core.operators.filter import Filter
+    from orcapod.core.operators.mappers import MapColumns, MapData, MapTags
+
+    return frozenset(
+        {
+            AddTags,
+            DropColumns,
+            DropDataColumns,
+            DropTagColumns,
+            DropNulls,
+            Filter,
+            MapColumns,
+            MapData,
+            MapTags,
+            SelectColumns,
+            SelectDataColumns,
+            SelectTagColumns,
+        }
+    )
+
+
+@functools.cache
+def operators_giving_back_an_input() -> frozenset[type]:
+    """The library's operators whose ``input_given_back`` a preview follows (N55)."""
+    from orcapod.core.operators.semijoin import SemiJoin
+
+    return frozenset({SemiJoin})
+
+
+def applied_by_batch(pod: object) -> bool:
+    """Whether an operator may be applied batch by batch (``run()``, ``preview()``).
+
+    Its own class declares ``BATCHES_GIVE_THE_WHOLE``, and no member is replaced on the
+    instance: what the class declares says nothing of another ``static_process``.
+    """
+    return type(pod).__dict__.get(
+        "BATCHES_GIVE_THE_WHOLE"
+    ) is True and reads_as_its_class(pod, type(pod))
 
 
 def joined_batches(batches: Sequence[StreamProtocol]) -> StreamProtocol:
