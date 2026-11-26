@@ -32,8 +32,11 @@ from orcapod.channels import Channel
 from orcapod.contexts import get_default_context
 from orcapod.core import row_ids
 from orcapod.core.datagrams import EmptyData
+from orcapod.core.function_pod import FunctionPod
+from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.operators import SelectDataColumns
 from orcapod.core.sources import ArrowTableSource
+from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import EphemeralResultMissingError
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
@@ -767,3 +770,121 @@ def test_each_jobs_trace_finds_its_own_record_after_a_token_only_rerun(
     for job in (first, second):
         (root,) = job.nodes["g"].trace(selector, "z").roots
         assert root.value == 222
+
+
+# ---------------------------------------------------------------------------
+# The stored token columns are the ones the instance id was made from
+# ---------------------------------------------------------------------------
+
+_NESTED_TOKEN = pa.large_list(pa.large_list(pa.large_list(pa.large_string())))
+# Token columns whose Arrow type is not the type their values would be given if it
+# were worked out again: a list column holding nulls (a null alone reads as a
+# string), and a nested list column whose values cannot be typed again at all.
+TOKEN_COLUMNS: dict[str, tuple["pa.Array[Any]", "pa.Array[Any]"]] = {
+    "null_in_a_list_column": (
+        pa.array([None, ["s::row_1::a"], None], pa.large_list(pa.large_string())),
+        pa.array(["s::row_0::b", None, "s::row_2::b"], pa.large_string()),
+    ),
+    "nested": (
+        pa.array([[None, [[]]], [None, [[]]], [[["s::row_2::a"]]]], _NESTED_TOKEN),
+        pa.array(
+            [["s::row_0::b"], None, ["s::row_2::b", None]],
+            pa.large_list(pa.large_string()),
+        ),
+    ),
+}
+
+
+@function_pod(output_keys=["total", "scaled"])
+def combine(a: int, b: float) -> tuple[float, float]:
+    calls["combine"] += 1
+    return a + b, a * b
+
+
+def _typed_token_stream(tokens: str, arrangement: str) -> ArrowTableStream:
+    """Three rows, two tags, two data columns, each with a typed token column."""
+    tags, _ = ARRANGEMENTS[arrangement]
+    token_a, token_b = TOKEN_COLUMNS[tokens]
+    columns: dict[str, tuple["pa.Array[Any]", bool]] = {
+        **{name: (COLUMNS[name], False) for name in tags},
+        "a": (pa.array([10, 20, 30], pa.int64()), False),
+        "b": (pa.array([0.5, 1.5, 2.5], pa.float64()), False),
+        "_source_a": (token_a, True),
+        "_source_b": (token_b, True),
+    }
+    if arrangement == "reversed":
+        columns = dict(reversed(columns.items()))
+    schema = pa.schema(
+        pa.field(name, array.type, nullable=nullable)
+        for name, (array, nullable) in columns.items()
+    )
+    return ArrowTableStream(
+        pa.Table.from_arrays([array for array, _ in columns.values()], schema=schema),
+        tag_columns=list(tags),
+    )
+
+
+@pytest.mark.parametrize("path", ["sync", "async"])
+@pytest.mark.parametrize("tokens", list(TOKEN_COLUMNS))
+@ARRANGEMENT
+def test_a_stored_row_keeps_the_token_columns_its_instance_id_was_made_from(
+    path: str, tokens: str, arrangement: str
+) -> None:
+    """Every stored row gives its instance and record id again, whatever its tokens.
+
+    The instance id is made from the typed token columns the row carries. The
+    pipeline row stores those same columns (one helper builds both), so the ids are
+    recomputed from the stored row alone, also when a token column's type is not
+    the type its values would be given again: a list column holding a null, or a
+    nested list. Before, the row stored the columns typed again from the values:
+    another type for the first, an ``ArrowTypeError`` for the second.
+    """
+    stream = _typed_token_stream(tokens, arrangement)
+    database = InMemoryArrowDatabase()
+    pod = combine.pod
+    assert isinstance(pod, FunctionPod)
+    node = FunctionJobNode(pod, stream, pipeline_database=database)
+    rows = list(stream.iter_data())
+    if path == "sync":
+        out = list(node.execute(stream).iter_data())
+    else:
+        out = _through_channels(node, rows)
+    assert sorted(data.as_dict()["total"] for _, data in out) == [10.5, 21.5, 32.5]
+    assert calls["combine"] == 3
+    database.flush()
+
+    stored = _table(database, "combine", "pdb_v2")
+    assert stored.num_rows == 3
+    # The stored token columns have the stream's types, in every row.
+    token_a, token_b = TOKEN_COLUMNS[tokens]
+    assert stored.schema.field("_source_a").type == token_a.type
+    assert stored.schema.field("_source_b").type == token_b.type
+    assert sorted(map(repr, _values(stored, "_source_a"))) == sorted(
+        map(repr, token_a.to_pylist())
+    )
+    assert sorted(map(repr, _values(stored, "_source_b"))) == sorted(
+        map(repr, token_b.to_pylist())
+    )
+    given = {node.compute_instance_id(tag, data) for tag, data in rows}
+    assert set(_values(stored, "__pipeline_instance_id")) == given
+    assert len(given) == 3
+    for row in _rows(stored):
+        assert (
+            _instance_id_of_stored_row(row).to_prefixed_digest()
+            == (_values(row, "__pipeline_instance_id")[0])
+        )
+        assert (
+            _record_id_of_stored_row(row).to_prefixed_digest() == (_values(row, KEY)[0])
+        )
+
+    # Read back by a new node over the same store: every row is a hit, 0 calls.
+    calls.clear()
+    again = FunctionJobNode(pod, stream, pipeline_database=database)
+    if path == "sync":
+        reread = list(again.execute(stream).iter_data())
+    else:
+        reread = _through_channels(again, rows)
+    assert sorted(data.as_dict()["total"] for _, data in reread) == [10.5, 21.5, 32.5]
+    assert calls == Counter()
+    database.flush()
+    assert _table(database, "combine", "pdb_v2").num_rows == 3
