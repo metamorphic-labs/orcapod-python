@@ -589,3 +589,32 @@ def test_a_table_judged_new_stays_new_beside_an_equivalent_record() -> None:
         RESULT, record_id_column="__record_id"
     )
     assert got is not None and got["__record_id"].to_pylist() == [b"a0"]
+
+
+# ------------------------------------- verification r5 of PR 595 (c047e640)
+
+
+@pytest.mark.usefixtures("root")
+def test_a_recorded_empty_table_with_a_corrupt_manifest_is_refused() -> None:
+    """When in doubt, refuse: metadata that cannot be decoded never equals anything, so
+    a table whose manifest chunk is corrupt (its header unchanged) is never recorded
+    over."""
+    manifest = codec.new_manifest(RESULT, "rdb_v1", rows(["x"]).schema)
+    entries = codec.manifest_entries(manifest)
+    corrupt = {
+        **entries,
+        f"{codec.MANIFEST_KEY}/0": entries[f"{codec.MANIFEST_KEY}/0"] + b" ",
+    }
+    name = names.store_table_name(RESULT)
+    _make_table(
+        name,
+        {**names.store_table_metadata(RESULT, CONTEXT), **corrupt},
+        with_rows=False,
+    )
+    db = ConnectorArrowDatabase(store())
+    with pytest.raises(SpiralStoreTableCollisionError):
+        db.add_records(RESULT, rows(["a0"]), record_id_column="__record_id", flush=True)
+    assert (
+        _table(name).get_metadata()[f"{codec.MANIFEST_KEY}/0"]
+        == corrupt[f"{codec.MANIFEST_KEY}/0"]
+    )

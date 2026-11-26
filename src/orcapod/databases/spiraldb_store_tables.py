@@ -555,7 +555,8 @@ def _by_name(schema: pa.Schema) -> dict[str, pa.Field[Any]]:
 
 _Seen = tuple[str, object]
 """What a table recorded when judged: ``("none", None)``, ``("manifest", manifest)``, or
-``("unreadable", header bytes)`` for a manifest that cannot be decoded."""
+``("unreadable", header bytes)`` for a manifest that cannot be decoded (never equal to
+anything: ``_same_seen``)."""
 
 
 def _seen_manifest(metadata: Mapping[str, bytes], path: tuple[str, ...]) -> _Seen:
@@ -568,8 +569,13 @@ def _seen_manifest(metadata: Mapping[str, bytes], path: tuple[str, ...]) -> _See
 
 
 def _same_seen(one: _Seen, other: _Seen) -> bool:
-    """Whether two readings record the same: equivalent manifests compared by name; a
-    manifest that cannot be decoded only as its raw header, the one form it has."""
+    """Whether two readings record the same: equivalent manifests compared by name.
+
+    A manifest that cannot be decoded never equals anything, itself included (when in
+    doubt, refuse): the write then goes through ``_require_same_manifest``, which
+    refuses it."""
+    if one[0] == "unreadable" or other[0] == "unreadable":
+        return False
     if one[0] != other[0]:
         return False
     if one[0] == "manifest":
