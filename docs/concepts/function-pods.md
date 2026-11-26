@@ -596,6 +596,44 @@ print(job.nodes["bmi"].as_table().num_rows)
 # 3
 ```
 
+### Limiting in-flight calls
+
+An async run allows up to 16 in-flight calls per function pod by default. Different pods
+can run concurrently. Choose a smaller limit when each call holds substantial memory or
+talks to a service with a concurrency limit.
+
+```python
+from orcapod.core.function_pod import FunctionPod
+from orcapod.types import PodConfig
+
+limited_bmi = FunctionPod.from_fn(
+    compute_bmi, output_keys="bmi", pod_config=PodConfig(max_concurrency=4)
+)
+```
+
+Apply `limited_bmi(source, label="bmi")` when recording a job. Set
+`PodConfig(max_concurrency=None)` to allow unlimited dispatch or use `1` to process
+one row at a time.
+
+When calling `FunctionPod.async_execute` directly, you can also supply a `PipelineConfig`.
+The two settings resolve as follows.
+
+| `PodConfig.max_concurrency` | `PipelineConfig.default_max_concurrency` | Effective limit |
+| --- | --- | --- |
+| Omitted or `"inherit"` | Omitted | 16 |
+| Omitted or `"inherit"` | Positive integer | Pipeline limit |
+| Omitted or `"inherit"` | `None` | Unlimited |
+| Positive integer | Any | Pod limit |
+| `None` | Any | Unlimited |
+
+Local coroutine functions run on the event loop. Local synchronous functions in an
+async job use the event loop's thread pool. CPython's default pool has up to
+`min(32, (cpu_count or 1) + 4)` workers. For Python 3.11 and 3.12 this uses
+`os.cpu_count()`, and for Python 3.13 and later it uses `os.process_cpu_count()`.
+For example, a reported count of 18 yields 22 default workers. A pod with the default
+limit can occupy at most 16 of those workers at once. If fewer workers are available, the
+pool runs fewer calls and queues the rest. The pool is shared across pods on the loop.
+
 ### Reading the run summary
 
 `job.run()` (and `await job.run_async()`) returns a `RunSummary`: for each function node, how

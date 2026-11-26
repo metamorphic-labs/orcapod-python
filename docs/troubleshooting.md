@@ -167,6 +167,12 @@ for a text listing, or `job.diagram().save("pipeline.html")` for a page; the sam
 
 ## Errors when running a job
 
+### An async function pod uses too much memory
+
+Lower the pod's `max_concurrency` if several simultaneous calls hold more memory than the
+run can spare. For example, use `PodConfig(max_concurrency=1)` to allow one call at a time
+for that pod. See [Limiting in-flight calls](concepts/function-pods.md#limiting-in-flight-calls).
+
 ### `ValueError: PipelineJob.run() requires a database.`
 
 **Cause.** The job was created without `database=`.

@@ -6,7 +6,7 @@ from orcapod.types import NodeConfig, PipelineConfig, PodConfig, resolve_concurr
 class TestPodConfig:
     def test_defaults(self):
         config = PodConfig()
-        assert config.max_concurrency is None
+        assert config.max_concurrency == "inherit"
 
     def test_max_concurrency(self):
         config = PodConfig(max_concurrency=4)
@@ -70,13 +70,13 @@ class TestResolveConcurrency:
         pipeline = PipelineConfig(default_max_concurrency=2)
         assert resolve_concurrency(pod, pipeline) == 4
 
-    def test_falls_back_to_pipeline_when_pod_is_none(self):
-        pod = PodConfig(max_concurrency=None)
+    def test_falls_back_to_pipeline_when_pod_inherits(self):
+        pod = PodConfig()
         pipeline = PipelineConfig(default_max_concurrency=2)
         assert resolve_concurrency(pod, pipeline) == 2
 
-    def test_both_none_returns_none(self):
-        pod = PodConfig(max_concurrency=None)
+    def test_inherits_unlimited_pipeline_config(self):
+        pod = PodConfig()
         pipeline = PipelineConfig(default_max_concurrency=None)
         assert resolve_concurrency(pod, pipeline) is None
 
