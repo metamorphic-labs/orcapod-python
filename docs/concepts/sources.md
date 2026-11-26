@@ -393,7 +393,8 @@ print(first.row_count_estimate)  # rows in the whole table; reads every key to c
 
 - `limit=n` reads the first `n` rows in key order.
 - `where={column: value, ...}` reads the rows in which every named column equals its value
-  (`source.where(...)` adds conditions to a built source; see
+  (`source.where(...)` adds conditions to a built source, and also takes ranges of integer,
+  timestamp and date columns, such as a window of time; see
   [Restricting a source versus filtering in the pipeline](#restricting-a-source-versus-filtering-in-the-pipeline)).
 - `asof=` reads the table as of an earlier version, and keeps reading it. Without it, a
   source reads the version the table had when the source was built, in every read, until a
@@ -444,8 +445,38 @@ same rows. The conditions are a `Condition` (`orcapod.types`): `where(...)` buil
 given instead (`events.where(Condition.of(unit_id=106, session_index=2))`). A source
 restricted by a condition, a `limit=`, or both is **restricted**. Every source states its
 restriction through two read-only properties: `condition` (the empty `Condition` when it
-reads every row) and `row_limit` (`None` without a limit). A restriction is not an
-operator:
+reads every row) and `row_limit` (`None` without a limit).
+
+**Ranges.** `where` also takes a range of an integer, timestamp or date column, written with
+`col` as in `filter`. Write a window half-open, `>= start` and `< stop`: adjacent windows then
+neither overlap nor leave a gap. `col(c).between(a, b)` includes both ends.
+
+<!-- docs-test: skip -->
+```python
+from orcapod import col
+
+hour = 3_600_000_000  # the timestamp column counts microseconds
+first_hour = events.where(col("timestamp") >= 0, col("timestamp") < hour)
+second_hour = events.where(col("timestamp") >= hour, col("timestamp") < 2 * hour)
+one_unit = first_hour.where(unit_id=106)  # a range and an equality
+```
+
+Ranges and equalities all must hold, on one column or several, given in one call or across
+chained calls in any order: the order never changes the rows, the condition or how it is
+saved. Ranges that cannot all hold are kept and read no row. A null meets no range. SpiralDB
+applies a range in the scan, so only the window's rows are transferred, and the row cap
+counts them. A bound is checked as an equality value is: exactly of the column's Python type
+(`int`, `datetime`, `date`), held exactly by its Arrow type (`-1` is refused for an unsigned
+column, a microsecond for `timestamp[s]`, a naive `datetime` for a zoned column), never
+converted, rounded or clamped. A range of any other column is refused, pointing to
+`filter`: a float column, because SpiralDB orders floats by IEEE 754 total order (a NaN beyond
+the infinities, `-0.0` below `0.0`) while Orcapod puts a NaN in no range and takes `-0.0` as
+`0.0` (a float range applied by SpiralDB the way Orcapod compares is planned, ITL-1477); a
+string or binary column (their order is the table system's collation); a boolean; and the
+types no condition takes. So is any other condition (`is_in`, a null test, `!=`, two columns,
+`|`, `~`).
+
+A restriction is not an operator:
 
 - An operator (`Filter`, `SemiJoin`, `PolarsFilter`) is a step of the pipeline. It is a node of the
   graph and part of the pipeline's identity: a pipeline with a filter computes something
@@ -467,7 +498,9 @@ column is allowed.
 
 `where` and `stream.filter` take the same equalities, written the same way, and keep the same
 rows (for a float column, `where` uses the table system's own equality for NaN and `-0.0`,
-`filter` Orcapod's: see [Filter](operators.md#filter)). One spelling differs: `filter` takes
+`filter` Orcapod's: see [Filter](operators.md#filter). SpiralDB's equality tells the two zeros
+apart and a NaN by its bits, so `where(x=0.0)` does not read a row holding `-0.0`, and
+`where(x=float("nan"))` reads only the NaNs with the bits of Python's `nan`). One spelling differs: `filter` takes
 `label=` (the step's label, as every stream method does), so a column named `label` is written
 `filter({"label": "x"})` or `filter(col("label") == "x")`, while `where(label="x")` restricts
 that column. Neither takes `None` as a value: both raise `ValueError` and point to

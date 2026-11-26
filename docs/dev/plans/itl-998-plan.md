@@ -55,11 +55,13 @@ ITL-1477, stays an isolated addition: one gate, one function and their tests, li
 
 ### `src/orcapod/databases/spiraldb_connector.py`
 
-- `scan_batches(..., terms=...)` replaces `where=`. One loop builds the predicate: an equality as today
-  (`_literal`; a `float16` or inexact `float32` equality still compared locally, as today); a comparison
-  through one new function, `_range_predicate(column, operator, value, stored_type)`, which builds
-  `sp.lt`/`lte`/`gt`/`gte` on `_literal(value, stored_type)` and refuses (`ValueError`) a stored type that is
-  not `is_range_type`. It never reads and filters a range locally.
+- `scan_batches(where=...)` takes the source's `Condition` (its terms are the one list of `(column, operator,
+  value)`) instead of a mapping; done this way rather than a new `terms=` argument, since `Condition` is the one
+  restriction class. One loop builds the predicate: an equality as today (`_literal`; a `float16` equality still
+  compared locally, an inexact `float32` one still reads no row, as today); a comparison through one new
+  function, `_range_predicate(column, operator, value, stored_type)`, which builds `sp.lt`/`lte`/`gt`/`gte` on
+  `_literal(value, stored_type)` and refuses (`ValueError`) a stored type that is not `is_range_type`. It never
+  reads and filters a range locally. Callers that passed a mapping wrap it in `Condition.of(...)`.
 - Every caller of `scan_batches` and `_read_batches` passes the terms; `limit` counts matching rows, as today.
 
 ## Tests (offline, on the fake)

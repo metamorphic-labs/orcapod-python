@@ -1,6 +1,6 @@
 # ITL-998: restrict a SpiralDB read to a range of a column
 
-Status: design, no code. Every decision, D1 to D14, is decided (section 8). The plan is `docs/dev/plans/itl-998-plan.md`. Depends on
+Status: decided and implemented on this branch. Every decision, D1 to D14, is decided (section 8). The plan is `docs/dev/plans/itl-998-plan.md`. Depends on
 ITL-1465 (D2).
 
 `SpiralDBTableSource` restricts a read by equality (`where`) and `limit=`. A long table needs a window too,
@@ -161,16 +161,22 @@ So a float range is refused (D14, option A), with the pointer to `filter`, where
 and comparing locally (B) gives up what a range is for, bounding the read. Pushing down a rewritten range that
 equals the stance (C: add `col >= -inf` and `col <= +inf`, which excludes every NaN, and send a zero bound as
 `+0.0` for `>` and `<=`, `-0.0` for `<` and `>=`) depends on the service's order staying as observed; it is the
-follow-up ITL-1477. D6 would apply to such a bound (`0.1` is refused on a `float32` column). One exception case
-for D6, found here: a float **equality** today is rounded to a narrower column's precision, not refused
-(`check_value_for_column`; the connector then compares it locally when the `float32` literal is not exact). A
-float range under ITL-1477 would refuse what an equality on the same column accepts.
+follow-up ITL-1477. D6 would apply to such a bound (`0.1` is refused on a `float32` column).
 
-**Finding: float equality in `where` follows the service** (unchanged by this change, and documented as "the
-table system's own equality"): the scan's equality (above, [live] on `float64`, through the SDK) does not
-match `-0.0` to `0.0`, and matches a NaN to the same bit pattern only; `where` sends a `float64` value as such a
-literal, so `where(x=0.0)` does not read a row holding `-0.0`, and `where(x=nan)` reads only the NaNs with the bits of Python's `nan` (the quiet NaN). `filter` follows Orcapod's rule
-(`-0.0` equals `0.0`, every NaN equals NaN).
+**Findings (existing behaviour, not changed here):**
+
+- *A float equality value a narrower column cannot hold is accepted, not refused.* `check_value_for_column` takes
+  `0.1` for a `float32` column (it refuses only a finite value beyond the type's range), and the connector then
+  reads no row, since no `float32` equals `0.1` exactly: `where(f=0.1)` returns nothing, silently. This is the
+  one exception case to D6 found so far: a float range under ITL-1477 would refuse the value that an equality
+  on the same column accepts.
+- *Float equality in `where` follows the service* (documented as "the table system's own equality"): the scan's
+  equality ([live] on `float64`, through the SDK) does not match `-0.0` to `0.0`, and matches a NaN to the same
+  bit pattern only, so `where(x=0.0)` does not read a row holding `-0.0`, and `where(x=nan)` reads only the NaNs
+  with the bits of Python's `nan` (the quiet NaN). `filter` follows Orcapod's rule (`-0.0` equals `0.0`, every
+  NaN equals NaN).
+- *The test fake's `float-eq` rule says NaN equals NaN*, any NaN; the probe saw the service match a NaN by bit
+  pattern only. The fake's comparison reads Python floats, so it cannot tell NaN payloads apart.
 
 **How it is pushed down.** The scan's `filter`, not `key_ranges=`: a filter works on any column and combines
 with equalities. [live] the scan returned only the window's rows. How much the service scans to find them could
