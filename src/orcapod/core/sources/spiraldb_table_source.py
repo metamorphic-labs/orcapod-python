@@ -85,6 +85,11 @@ DEFAULT_MAX_ROWS = 100_000
 DEFAULT_BATCH_ROWS = 8_192
 # The most rows a notebook display of the source reads.
 PREVIEW_ROWS = 10
+# A preview's rows are kept for the next preview when they are at most this many rows and
+# bytes (the Arrow buffers of every column group): rows can be wide (a list, a binary or a
+# library value), so the row bound alone does not bound the memory kept (ITL-1485).
+PREVIEW_KEPT_ROWS = 10_000
+PREVIEW_KEPT_BYTES = 64 * 2**20
 
 
 def _is_positive_int(value: object) -> bool:
@@ -194,6 +199,33 @@ def spiraldb_table_address(
     return address
 
 
+@dataclasses.dataclass(frozen=True)
+class _KeptPreview:
+    """The rows of a source's last preview, kept for the next one (ITL-1485).
+
+    A source reads one pinned version, moved only by its source check, so these rows are
+    its preview for as long as it reads under ``key``.
+
+    Attributes:
+        key: The pinned version, condition and limit the rows were read under.
+        rows: The rows read, with their system tags and source info; ``None`` for none.
+        asked: The most rows the read asked for.
+        complete: Whether the read returned every row the source reads.
+        totals: The table's row count for a preview, by the bound counted to: what
+            ``_bounded_count`` returned for that bound.
+    """
+
+    key: tuple[int | None, Condition, int | None]
+    rows: "pa.Table | None"
+    asked: int
+    complete: bool
+    totals: dict[int, int | None] = dataclasses.field(default_factory=dict)
+
+    def answers(self, key: tuple[int | None, Condition, int | None], n: int) -> bool:
+        """Whether a preview of ``n`` rows under ``key`` is these rows' first ``n``."""
+        return key == self.key and (self.complete or n <= self.asked)
+
+
 class SpiralDBTableSource(RootSource):
     """A read-only Source over a table in a SpiralDB dataset, read in batches.
 
@@ -207,12 +239,16 @@ class SpiralDBTableSource(RootSource):
     sends it in batches whose sizes follow its stored fragments (they cannot be
     chosen); the source hands each on in slices of at most ``batch_rows`` rows, so
     iterating holds one SpiralDB batch, and the slice being processed, at a time.
-    ``as_table`` and the dataframe methods hold every row they return. Nothing is
-    cached: every read scans again.
+    ``as_table`` and the dataframe methods hold every row they return. They keep
+    nothing: every read scans again.
 
     Display. ``head(n)`` and the notebook display (its ``head()``) read only the first
     ``n`` rows (``PREVIEW_ROWS``, 10, by default), in one scan to which ``max_rows`` does
-    not apply, and the header says how many rows the table has.
+    not apply, and the header says how many rows the table has. The source keeps the
+    rows of its last preview (at most ``PREVIEW_KEPT_ROWS`` rows and
+    ``PREVIEW_KEPT_BYTES`` bytes) and answers a preview of no more rows, of any columns,
+    from them without a call to SpiralDB, until a source check moves the version it
+    reads (ITL-1485): a preview shows the version the source last checked.
 
     Identity. The source is identified by where the table is, never by its rows. The
     default ``source_id`` is ``spiraldb_table_v1:<project_id>.<dataset>.<table_name>@<table
@@ -359,6 +395,7 @@ class SpiralDBTableSource(RootSource):
         self._batch_rows = batch_rows
         self._given_asof = asof
         self._tags_as_data: dict[str, str] = dict(tags_as_data) if tags_as_data else {}
+        self._kept_preview: _KeptPreview | None = None
         location = f"SpiralDB project {project_id!r}, dataset {dataset!r}"
 
         try:
@@ -589,7 +626,8 @@ class SpiralDBTableSource(RootSource):
         the data context and config, the condition (immutable) and limit, the tuples of
         tag, data-tag and key columns and the pinned version. Copied: the
         ``tags_as_data`` and ``overrides`` mappings. Reset: the content and pipeline
-        hash caches (they are recomputed, equal, on first use). Each source owns
+        hash caches (they are recomputed, equal, on first use) and the kept preview.
+        Each source owns
         a connector that holds the same SDK client and can be closed independently.
         The modified time is carried over until ``_apply_restriction`` moves it.
         A SpiralDB source holds no rows it read.
@@ -608,6 +646,8 @@ class SpiralDBTableSource(RootSource):
         duplicate._connection_lock = Lock()
         duplicate._content_hash_cache = {}
         duplicate._pipeline_hash_cache = {}
+        # A copy is restricted further: the rows this source kept are not its preview.
+        duplicate._kept_preview = None
         return duplicate
 
     def _apply_restriction(self, condition: Condition) -> None:
@@ -711,6 +751,7 @@ class SpiralDBTableSource(RootSource):
         require_same_process(self._pid)  # before a lock inherited by a fork
         with self._connection_lock:
             self._closed = True
+            self._kept_preview = None
             if self._connection is not None:
                 self._connection.close()
                 self._connection = None
@@ -971,14 +1012,30 @@ class SpiralDBTableSource(RootSource):
         all_info: bool,
     ) -> "pa.Table":
         """Return the rows of ``streams`` (batches of one read) as one table."""
-        # One stream over all the rows, so that a whole-table option (sorting by
-        # tags) applies across batches.
+        return self._shown(self._read_rows(streams), columns=columns, all_info=all_info)
+
+    @staticmethod
+    def _read_rows(streams: Iterator["ArrowTableStream"]) -> "pa.Table | None":
+        """Return the rows of ``streams`` (batches of one read), with their system tags
+        and source info, as one table; ``None`` when no batch came."""
         enriched = {"source": True, "system_tags": True}
         tables = [stream.as_table(columns=enriched) for stream in streams]
-        if not tables:
+        return pa.concat_tables(tables) if tables else None
+
+    def _shown(
+        self,
+        rows: "pa.Table | None",
+        *,
+        columns: ColumnConfig | dict[str, Any] | None,
+        all_info: bool,
+    ) -> "pa.Table":
+        """Return ``rows`` (as ``_read_rows`` returns them) with ``columns``."""
+        if rows is None:
             return self._stream.as_table(columns=columns, all_info=all_info)
+        # One stream over all the rows, so that a whole-table option (sorting by
+        # tags) applies across batches.
         whole = ArrowTableStream(
-            table=pa.concat_tables(tables),
+            table=rows,
             tag_columns=self._tag_columns,
             system_tag_columns=self._system_tag_columns,
             data_tags=self._data_tags,
@@ -1000,6 +1057,11 @@ class SpiralDBTableSource(RootSource):
         size is the table's row count, counted from its keys up to ``max_rows`` (at most
         100,000) rows; above that it is unknown.
 
+        The rows of the last preview are kept (ITL-1485): a preview under the same
+        pinned version, condition and limit, of no more rows than were read (or of any
+        number when every row was read), is answered from them, and so is its size
+        when it was counted to the same bound, without a call to SpiralDB.
+
         Args:
             n: The most rows to read.
             columns: Column configuration, as for ``as_table``.
@@ -1012,19 +1074,57 @@ class SpiralDBTableSource(RootSource):
         limit = self._limit
         head_limit = n if limit is None else min(n, limit)
         asof = self._asof
-        table = self._lookup_table()
-        rows = self._whole_table(
-            self._read_batches(table, asof=asof, limit=head_limit, max_rows=None),
-            columns=columns,
-            all_info=all_info,
-        )
+        key = (asof, self._condition, limit)
+        kept = self._kept_preview
+        table: SpiralDBTable | None = None
+        if kept is None or not kept.answers(key, head_limit):
+            table = self._lookup_table()
+            read = self._read_rows(
+                self._read_batches(table, asof=asof, limit=head_limit, max_rows=None)
+            )
+            count = 0 if read is None else read.num_rows
+            kept = _KeptPreview(
+                key=key,
+                rows=read,
+                asked=head_limit,
+                complete=count < head_limit or head_limit == limit,
+            )
+            if count <= PREVIEW_KEPT_ROWS and (
+                read is None or read.nbytes <= PREVIEW_KEPT_BYTES
+            ):
+                self._kept_preview = kept
+        first = kept.rows
+        if first is not None and first.num_rows > head_limit:
+            first = first.slice(0, head_limit)
+        rows = self._shown(first, columns=columns, all_info=all_info)
         if rows.num_rows < head_limit or head_limit == limit:
             return _Head(rows, True, rows.num_rows, False)
-        bound, total = self._bounded_count(n, table)
+        bound = self._count_bound(n)
+        if bound is None:
+            bound, total = n, None
+        elif bound in kept.totals:
+            total = kept.totals[bound]
+        elif kept.complete and not self._condition:
+            # Every row the source reads was read, and with no condition they are the
+            # table's first rows: all of them when fewer than the limit came back.
+            whole = 0 if kept.rows is None else kept.rows.num_rows
+            every_row = limit is None or whole < limit
+            total = whole if every_row and whole <= bound else None
+        else:
+            bound, total = self._bounded_count(n, table)
+            kept.totals[bound] = total
         if limit is not None and not self._condition:
             total = limit if total is None and limit <= bound else total
             total = None if total is None else min(limit, total)
         return _Head(rows, True, total, True, bound)
+
+    def _count_bound(self, shown: int) -> int | None:
+        """Return how far a preview showing ``shown`` rows counts the table's rows, or
+        ``None`` when it counts none (``_bounded_count``)."""
+        if shown > DEFAULT_MAX_ROWS:
+            return None
+        allowed = min(self._max_rows or DEFAULT_MAX_ROWS, DEFAULT_MAX_ROWS)
+        return max(allowed, shown)
 
     def _bounded_count(
         self, shown: int, table: SpiralDBTable | None = None
@@ -1039,10 +1139,9 @@ class SpiralDBTableSource(RootSource):
             shown: The rows the preview shows.
             table: The handle resolved for this read; looked up when not given.
         """
-        if shown > DEFAULT_MAX_ROWS:
+        bound = self._count_bound(shown)
+        if bound is None:
             return shown, None
-        allowed = min(self._max_rows or DEFAULT_MAX_ROWS, DEFAULT_MAX_ROWS)
-        bound = max(allowed, shown)
         handle = self._lookup_table() if table is None else table
         total = handle.count_rows(asof=self._asof, at_most=bound + 1)
         return bound, (None if total > bound else total)

@@ -424,6 +424,17 @@ by tags` when the source reads no more than that, or `10 matching rows read, sor
 says `first 10 rows of about 63,349`. Tag columns come first, and the line above the table
 names them. To see more rows, use `as_df()` with a `limit=` or `where=` source.
 
+**A preview is kept.** The source keeps the rows of its last preview, so looking at it again
+makes no call to SpiralDB: `head()` again, `head(5)` after `head(10)`, other columns
+(`all_info=True`) or the sorted order are shown from the rows already read. It reads again
+only when you ask for more rows than it read (it then reads them from the start), or when the
+version it reads has moved. A source reads one version of its table, the one it had when the
+source was built (or the `asof=` you gave), and only a source check moves it: running a job
+over the source, or `check_for_new_data()`. So a preview shows the version the source last
+checked; run the job (or check the source) to see newer rows. A preview of more than 10,000
+rows, or 64 MiB, is shown but not kept; `as_table()`, `as_df()` and `run()` read the table
+every time, as before.
+
 **Restrictions are not part of identity.** `where`, `limit` and `asof` choose rows of the
 same table, so two sources on one table have the same `source_id` and `content_hash`
 whatever their restrictions, and a row's result is computed once and shared. One
