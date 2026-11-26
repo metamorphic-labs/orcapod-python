@@ -277,7 +277,8 @@ Sort them whenever the order matters, as the samples here do.
 ## Exercises
 
 **1.** Run a pipeline, quit Python, and run it again. Put the script below in a file
-`run_pipeline.py` and run `python run_pipeline.py` twice. What does each run print?
+`run_pipeline.py` and run `uv run python run_pipeline.py` twice (with `pip`, in the activated
+environment: `python run_pipeline.py`). What does each run print?
 
 ```python
 from workshop_data import make_dataset

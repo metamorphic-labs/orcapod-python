@@ -1,8 +1,8 @@
 # Operators
 
-Operators are structural transforms that reshape [streams](streams.md) without inspecting or
-synthesizing data values. They join, filter, batch, group, rename, select columns and add tags --
-operations that affect the *structure* of the data (which rows exist, which columns are
+Operators are structural transforms that reshape [streams](streams.md). They never compute a
+data value; only the filters read data values. They join, filter, batch, group, rename, select
+columns and add tags -- operations that affect the *structure* of the data (which rows exist, which columns are
 present, how columns are named) but never compute new values from data content. This is the
 key distinction from [function pods](function-pods.md), which do the opposite: they transform
 data values but never touch tags or stream structure.
@@ -124,7 +124,7 @@ measurements = DictSource(
 )
 
 join = Join()
-joined = join.process(subjects, measurements)
+joined = join(subjects, measurements)
 print(joined.as_table().to_pandas())
 #   subject_id  weight  age
 # 0   mouse_01    25.3   12
@@ -409,7 +409,7 @@ source = DictSource(
 )
 
 batch = Batch()
-batched = batch.process(source)
+batched = batch(source)
 for tag, data in batched:
     print("Tags:", tag.as_dict())
     # Tags: {'subject_id': ['mouse_01', 'mouse_02']}
@@ -606,7 +606,7 @@ source = DictSource(
 )
 
 select = SelectDataColumns(columns=["weight"])
-result = select.process(source)
+result = select(source)
 print(result.keys()[1])  # ('weight',)
 ```
 
@@ -905,7 +905,7 @@ import polars as pl
 from orcapod.operators import PolarsFilter
 
 filt = PolarsFilter(predicates=[pl.col("age") > 10])
-filtered = filt.process(source)
+filtered = filt(source)
 for tag, pkt in filtered:
     print(f"{tag.as_dict()} -> {pkt.as_dict()}")
 # {'subject_id': 'mouse_01'} -> {'age': 12, 'weight': 25.3}
@@ -1154,6 +1154,33 @@ one operator.
 On a stream with [data-tags](data-tags.md), the data-tags stay data-tags and the new tags are
 plain: a constant tag is never a data value.
 
+### TagBy
+
+!!! warning "Provisional"
+    `TagBy` is a [provisional operator](#provisional-operators): its identity is not frozen
+    with data context v1 and may change in a later release. Building one issues
+    `ProvisionalHashWarning` once per process.
+
+`TagBy` gives data columns the tag role, so that a later step can join, group or order by
+them. Streams offer it as `tag_by`. `group_by` takes tags only, so this is how you group by a
+data column:
+
+```python
+by_age = sessions.tag_by("age", "weight")
+print(by_age.keys())
+# (('subject_id', 'session', 'age', 'weight'), ('age', 'weight'))
+
+grouped = sessions.tag_by("age").group_by(["age"])
+print(grouped.keys())
+# (('age',), ('age', 'weight'))
+```
+
+No value changes. Each named column is now a tag and is still a data column: a
+[data-tag](data-tags.md). The names are a set: `tag_by("weight", "age")` is the same
+operator. A column that is already a tag, a column that may hold nulls and a column whose
+type cannot be a tag (a list, a struct, your own class) are refused. The full rules are in
+[Adding the tag role](data-tags.md#adding-the-tag-role-tag_by).
+
 ### Pick and Index
 
 `Pick(column, key)` extracts one entry from a struct- or dict-typed data column, and
@@ -1304,19 +1331,22 @@ print(merged.as_table().schema.field("subject_id").type)
 
 ## Using operators
 
-All operators follow the same interface. Call `.process()` with one or more input streams:
+All operators follow the same interface. Build the operator, then call it with one or more
+input streams:
 
 ```python
 operator = Join()
-result_stream = operator.process(subjects, measurements)
+result_stream = operator(subjects, measurements)
 ```
 
-All standard operators also support `__call__` as a shorthand for `.process()`, so you can
-write:
+Or in one line:
 
 ```python
 result_stream = Join()(subjects, measurements)
 ```
+
+Calling an operator is the same as calling its `.process()` method:
+`operator.process(subjects, measurements)` gives the same stream.
 
 The result is a new [stream](streams.md) that you can inspect, iterate, or pass to further
 operators or function pods.
@@ -1326,7 +1356,8 @@ operators or function pods.
 Every stream also exposes the operators as methods, which reads well when chaining:
 `join`, `semi_join`, `batch`, `group_by`, `select_tag_columns`, `select_data_columns`,
 `drop_tag_columns`, `drop_data_columns`, `select_columns`, `drop_columns`, `map_tags`,
-`map_data`, `map_columns`, `add_tags`, `filter`, `polars_filter`, `drop_nulls`, `pick` and `index`.
+`map_data`, `map_columns`, `add_tags`, `tag_by`, `filter`, `polars_filter`, `drop_nulls`, `pick`,
+`index` and `rejoin`.
 
 ```python
 adults = subjects.join(measurements).filter(col("age") > 10)

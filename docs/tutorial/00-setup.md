@@ -101,8 +101,10 @@ curl -fO https://raw.githubusercontent.com/metamorphic-labs/orcapod-python/main/
 Then run it:
 
 ```bash
-python workshop_data.py
+uv run python workshop_data.py
 ```
+
+With `pip`, in the activated environment: `python workshop_data.py`.
 
 It prints `Wrote 27 files (... kB) to .../workshop_data` and creates the `workshop_data/`
 directory described on the [tutorial front page](index.md#the-dataset). The data is the same

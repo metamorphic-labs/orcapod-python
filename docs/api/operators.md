@@ -6,7 +6,7 @@ introduction. Every signature and docstring on the published page comes from the
 code. See site/README.md.
 -->
 
-Operators perform structural transformations on streams without inspecting or synthesizing data values. An operator may add a tag (`AddTags`), never data.
+Operators perform structural transformations on streams. They never compute a data value; only the filters (`Filter`, `PolarsFilter`, `DropNulls`) read data values. An operator may add a tag (`AddTags`), never data.
 
 ::: orcapod.core.operators.Join
 

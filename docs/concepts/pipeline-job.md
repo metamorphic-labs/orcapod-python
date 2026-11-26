@@ -87,13 +87,15 @@ print(sorted(job.nodes))
 The order in which `job.nodes` lists its names is not meaningful and can differ between
 Python sessions; look nodes up by name.
 
-A node is a stream: `output_schema()`, `keys()`, `iter_data()`, `as_table()` and
-`as_pandas_df()` work on it, and show the rows of the job's **current run** in this Python
-process. Read nodes after `run()`: before it, every node other than a source is empty
+The node of a function pod or an operator is a stream: `output_schema()`, `keys()`,
+`iter_data()`, `as_table()` and `as_pandas_df()` work on it, and show the rows of the job's
+**current run** in this Python process. The node of a source has `output_schema()`, `keys()`,
+`iter_data()` and `as_table()`, but no `for` loop and no DataFrame methods. Read nodes after
+`run()`: before it, every node other than a source is empty
 (`as_table()` returns no rows; `head()` and the notebook preview say the node has not run).
 A run fills a node also when every result is read from the database and nothing is computed.
 
-Three more things a job node offers:
+Three more things a job node offers (the node of a source has only the last):
 
 - **`get_all_records()`** returns every record this step of the job has stored, including
   rows computed by earlier runs of the same job over the same source with other inputs.

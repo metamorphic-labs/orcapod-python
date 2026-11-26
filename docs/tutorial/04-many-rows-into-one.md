@@ -140,8 +140,26 @@ except InputValidationError as err:
 # GroupBy: ['rate_hz'] are not tag columns of the input stream. Available tag columns: ['subject_id', 'session', 'probe', 'unit']. (Data columns cannot be grouping keys: ['rate_hz'])
 ```
 
-`genotype` is a data column of `subjects`, so you cannot group by it, also not after a join.
-This is the main consequence of the choice of tags. Exercise 3 shows what you can do.
+`genotype` and `sex` are data columns of `subjects`, and they stay data columns after a join.
+To group by a data column, give it the tag role first, with `tag_by`:
+
+```python
+with_subject = session_means.join(subjects.select_data_columns(["genotype", "sex"]))
+by_group = with_subject.tag_by("genotype", "sex").group_by(["genotype", "sex"])
+
+print(by_group.output_schema())
+# (Schema({'genotype': str, 'sex': str}), Schema({'genotype': str, 'sex': str, 'mean_rate_hz': list[float]}))
+print(by_group.as_table().num_rows)
+# 4
+```
+
+`tag_by` changes no value. Each column you name is now a tag and is still a data column, so
+it shows in both schemas. The same works for a column that a function pod computed. A tag
+holds one value per row and no missing value, so `tag_by` refuses a list column and a column
+that may hold nulls; see [Adding the tag role](../concepts/data-tags.md#adding-the-tag-role-tag_by).
+
+If you know from the start that you will group or match by a column, make it a tag in the
+source, in `tag_columns`. Exercise 3 uses `tag_by`.
 
 ## Batch
 
@@ -178,7 +196,8 @@ lists, and `group_by` cannot use those.
 - `group_by([...tags])` turns the rows sharing those tag values into one row of lists.
   `batch()` does the same by count.
 - A function pod with `list[...]` parameters computes over the lists.
-- You can only group by tag columns.
+- `group_by` takes tag columns only. To group by a data column, give it the tag role first:
+  `stream.tag_by("column")`.
 - `group_by` keeps only the tags you group by; the other tags are dropped. `batch` keeps
   every tag, as a list.
 - The members of a group are ordered by the dropped tags in name order, or by the tags you
@@ -225,9 +244,8 @@ values: the number of units, the mean rate, and the highest rate. Apply it per s
     ```
 
 **3.** Compute one number for each genotype: the mean of the session means of its animals.
-`genotype` is a data column, so you cannot group by it. Instead, for each genotype, keep
-that genotype's sessions and `batch` them. (Hint: `session_means.join(...)`, an equality
-filter, then narrow, then `batch()`.)
+`genotype` is a data column of `subjects`. (Hint: `session_means.join(...)`, then `tag_by`,
+then `group_by`.)
 
 ??? success "Solution"
     ```python
@@ -236,20 +254,21 @@ filter, then narrow, then `batch()`.)
         return sum(mean_rate_hz) / len(mean_rate_hz)
 
 
-    with_genotype = session_means.join(subjects.select_data_columns(["genotype"]))
-
-    for genotype in ["wildtype", "knockout"]:
-        one_genotype = (
-            with_genotype.filter(genotype=genotype)
-            .select_data_columns(["mean_rate_hz"])
-            .batch()
-        )
-        for _, data in mean_of_means.pod(one_genotype):
-            print(genotype, round(data.as_dict()["genotype_mean_hz"], 3))
-    # wildtype 6.545
+    genotype_means = mean_of_means.pod(
+        session_means.join(subjects.select_data_columns(["genotype"]))
+        .tag_by("genotype")
+        .group_by(["genotype"])
+    )
+    for tag, data in genotype_means:
+        print(tag.as_dict()["genotype"], round(data.as_dict()["genotype_mean_hz"], 3))
     # knockout 5.058
+    # wildtype 6.545
     ```
 
-    With `genotype` as a tag, the loop is not needed: load the subjects table with
-    `tag_columns=["subject_id", "genotype"]`, and one `group_by(["genotype"])` replaces it.
-    In your own sources, make a column a tag if you expect to group or match by it.
+    The join brings `genotype` in as a data column, `tag_by` makes it a tag, and `group_by`
+    gathers the four session means of each genotype into one list.
+
+    With `genotype` as a tag of the source, `tag_by` is not needed: load the subjects table
+    with `tag_columns=["subject_id", "genotype"]`, and `group_by(["genotype"])` works right
+    after the join. In your own sources, make a column a tag if you expect to group or match
+    by it.

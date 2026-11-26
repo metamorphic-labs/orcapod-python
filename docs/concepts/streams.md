@@ -21,7 +21,8 @@ columns as function inputs and write new data columns as outputs.
 
 This separation is enforced throughout the framework:
 
-- Operators inspect and restructure tags but never look inside data
+- Operators inspect and restructure tags and never compute a data value; only the filters
+  read data values
 - Function pods inspect and transform data but never look at tags
 
 ## Key classes

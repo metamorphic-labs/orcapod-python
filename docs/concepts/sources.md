@@ -520,7 +520,7 @@ summary = job.run()
 print(summary.conditions)
 # {'spikes': Condition.of({'unit_id': 106})}
 print(summary.restricted_source_ids)
-# {'spikes': 'spikes'}
+# {'spikes': 'spiraldb_table_v1:spikes'}
 ```
 
 (This sample needs a SpiralDB project, so it is not run with the documentation; `job` is a
@@ -808,9 +808,13 @@ before. Things to know:
   (ITL-1313); `as_source(tags_as_data=..., source_id=...)` takes it too. The source is
   identified by that name and the mapping, like any named source: the mapping is part of its
   `content_hash`, so two mappings never share one.
-- A saved job reloads a derived source whenever its origin can be reloaded (a CSV file, a
-  Delta table, a database table). Over an in-memory source it is saved but not reloaded, like
-  the in-memory source itself.
+- A saved job reloads a derived source over a source whenever that source can be reloaded
+  (a CSV file, a Delta table, a database table). Over an in-memory source it is saved but not
+  reloaded, like the in-memory source itself. Over a job node (`as_source()`, with or without
+  `tags_as_data`) it is saved but not reloaded either: the loaded job lists its slot in
+  `loaded.unbound_sources`. Build the source again from the job it came from and bind it:
+  `loaded.bind(sources={slot: other_job.nodes["bmi"].as_source(...)})`, with `slot` taken
+  from `loaded.unbound_sources`.
 
 ```python
 print(with_start.upstreams)
@@ -855,7 +859,7 @@ per source kind per process; filter its class to silence it, as for
 ## What a source does at a run
 
 A job node that has run holds its rows until it is stale, and staleness comes from modified
-times only (see [Running one node](function-pods.md)). So every run (`job.run()`,
+times only (see [Running again: what a run runs](function-pods.md#running-again-what-a-run-runs)). So every run (`job.run()`,
 `run_async()`, a job node's `run()`, a load-only run too) first asks each source feeding it,
 once, whether its data changed: `source.check_for_new_data()` (developer, November 14, 2026,
 ITL-1102). A source that finds new data takes it in and moves its modified time to that
@@ -1002,8 +1006,8 @@ print(len({s.source_id for s in as_given}))
 # 3
 ```
 
-A source given a `source_id` is an address: its content hash is built from its class, schema,
-`source_id` and key columns, never from its rows, so changing the rows changes it only when the
+A source given a `source_id` is an address: its content hash is built from its `source_id`
+(kind, version and name), schema and key columns, never from its rows, so changing the rows changes it only when the
 schema changes (a column of another type). This holds for `ListSource` too (developer,
 November 21, 2026, ITL-1272): its elements and its tag function enter its identity only through
 its default `source_id` and its output schema.
