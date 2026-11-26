@@ -125,7 +125,11 @@ def _job_over(chain: Callable[[], Any], built: str, mode: str) -> dict[str, Any]
         if node.node_type != "source"
     }
     paths = sorted(database.list_table_paths(()))
-    stored = {path: database.get_all_records(path) for path in paths}
+    stored: dict[tuple[str, ...], pa.Table] = {}
+    for path in paths:
+        records = database.get_all_records(path)
+        assert records is not None, f"no records at listed path {path}"
+        stored[path] = records
     return {
         "node names": sorted(job.nodes),
         "node types": {label: node.node_type for label, node in job.nodes.items()},
