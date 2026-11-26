@@ -83,11 +83,10 @@ column. See [Arrow types of a source](concepts/sources.md#arrow-types-of-a-sourc
 
 ### `TypeError: 'PosixPath' object is not iterable` from `CSVSource`
 
-**Cause.** `CSVSource` was given a `pathlib.Path` and no `source_id`. The file path is
-typed as a string; without a `source_id` it is used to build the default one, which fails
-for a `Path`. This is a known defect.
-
-**Fix.** `CSVSource(str(path), ...)`.
+Current Orcapod accepts `str` or `os.PathLike[str]`, including `pathlib.Path`, in
+`CSVSource`, `DeltaTableSource`, and `SQLiteTableSource`. Saved jobs store the paths as
+JSON strings. If you see this error on an older version, upgrade Orcapod or pass
+`str(path)` to `CSVSource`.
 
 ### `ValueError: Parameter 'x' has no type annotation and is not specified in input_types.`
 

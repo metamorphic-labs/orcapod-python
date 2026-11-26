@@ -30,8 +30,12 @@ hashing) and produces the final immutable stream.
 | `DictSource` | `list[dict]` | Each dict becomes one (Tag, Data) pair |
 | `ListSource` | `list[Any]` | Each element stored under the data column given by `name`; the tag defaults to `element_index` |
 | `DataFrameSource` | Pandas or Polars `DataFrame` | Converts via Arrow |
-| `CSVSource` | File path (string) | Reads CSV into Arrow |
-| `DeltaTableSource` | Directory path | Reads Delta Lake table |
+| `CSVSource` | CSV file path | Reads CSV into Arrow |
+| `DeltaTableSource` | Table directory path | Reads Delta Lake table |
+
+`CSVSource`, `DeltaTableSource`, and `SQLiteTableSource` accept `str` or
+`os.PathLike[str]`, including `pathlib.Path`. Saved job configurations store these paths
+as JSON strings.
 
 `orcapod.sources` also provides database-backed sources (`SQLiteTableSource`,
 `PostgreSQLTableSource`, `SpiralDBTableSource`) and `PollingSource` for data that arrives over
