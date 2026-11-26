@@ -95,8 +95,9 @@ never computes.
   `preview(n, compute_all=True)` computes that step in full. An operator that gives one
   input back unchanged, decided from the schemas (`input_given_back`: `SemiJoin` without a
   shared tag), is previewed as that input, and its other inputs are not read.
-- A `DerivedSource` takes its origin's preview (a source origin; refused where the origin
-  would poll or write its cache) or, with `compute_all`, a job node's stored rows; it keeps
+- A `DerivedSource` takes its origin's preview batch by batch (a source origin; refused
+  where the origin would poll or write its cache; positional record ids continue across
+  batches and a key repeated in a later batch is refused when reached) or, with `compute_all`, a job node's stored rows; it keeps
   nothing.
 - A side-effect pod, or a function that takes the invocation context, is refused: a
   preview has no effects.
