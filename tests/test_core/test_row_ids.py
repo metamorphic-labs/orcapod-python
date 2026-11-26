@@ -456,3 +456,112 @@ class TestTokensAreReadAsTheRowCarriesThem:
         assert row_ids.instance_id(HASHER, _tag(), retold) != row_ids.instance_id(
             HASHER, _tag(), data
         )
+
+
+class TestTokensOfBuiltAndChangedRows:
+    """A missing token is a null token, and a kept token keeps its type (review of PR #583).
+
+    A row built from Python values and the same row read from an Arrow table give
+    the same token columns, so one instance id. A change of the row (a selection,
+    a drop, a rename, added columns, one replaced token) keeps the typed column of
+    every token it does not replace.
+    """
+
+    NESTED = TestTokensAreReadAsTheRowCarriesThem.NESTED
+
+    @pytest.mark.parametrize("order", DATA_ORDERS)
+    @pytest.mark.parametrize("told", [(), ("length",), ("note", "weight")])
+    def test_a_built_row_and_the_row_read_from_a_table_have_one_instance_id(
+        self, order: tuple[str, ...], told: tuple[str, ...]
+    ) -> None:
+        tokens = {name: TOKENS[name] for name in told}
+        built = Data({name: DATA_VALUES[name] for name in order}, source_info=tokens)
+        table = pa.table(
+            {name: [DATA_VALUES[name]] for name in order}
+            | {
+                f"_source_{name}": pa.array([tokens.get(name)], pa.large_string())
+                for name in order
+            }
+        )
+        read = Data(table)
+        (streamed,) = Data.rows_of(table, get_default_context())
+        expected = [f"_source_{name}" for name in order]
+        ids = set()
+        for data in (built, read, streamed):
+            tokens_table = data.source_info_table()
+            assert tokens_table.column_names == expected
+            assert tokens_table.num_rows == 1
+            assert all(
+                field.type == pa.large_string() and field.nullable
+                for field in tokens_table.schema
+            )
+            assert tokens_table.to_pylist() == [
+                {f"_source_{name}": tokens.get(name) for name in order}
+            ]
+            ids.add(row_ids.instance_id(HASHER, _tag(), data))
+        assert len(ids) == 1
+        # The order of the data columns does not count either.
+        other = Data(
+            {name: DATA_VALUES[name] for name in reversed(order)}, source_info=tokens
+        )
+        assert row_ids.instance_id(HASHER, _tag(), other) in ids
+
+    def _nested_rows(self) -> list[Any]:
+        stream = TestTokensAreReadAsTheRowCarriesThem()._stream(nested=True)
+        return [data for _, data in stream.iter_data()]
+
+    @pytest.mark.parametrize(
+        ("change", "columns"),
+        [
+            (lambda d: d.select("a"), {"a": "a"}),
+            (lambda d: d.select("b", "a"), {"a": "a", "b": "b"}),
+            (lambda d: d.select("a", "b"), {"a": "a", "b": "b"}),
+            (lambda d: d.drop("b"), {"a": "a"}),
+            (lambda d: d.rename({"a": "c"}), {"c": "a", "b": "b"}),
+            (lambda d: d.rename({"b": "e", "a": "c"}), {"c": "a", "e": "b"}),
+            (lambda d: d.with_columns(extra=1, more="m"), {"a": "a", "b": "b"}),
+            (lambda d: d.with_source_info(b="other::row_9::b"), {"a": "a"}),
+            (lambda d: d.select("a").copy(), {"a": "a"}),
+        ],
+    )
+    def test_a_change_keeps_the_typed_column_of_every_token_it_keeps(
+        self, change: Any, columns: dict[str, str]
+    ) -> None:
+        ids = set()
+        for data in self._nested_rows():
+            before = data.source_info_table()
+            changed = change(data)
+            after = changed.source_info_table()
+            assert after.column_names == [f"_source_{name}" for name in changed.keys()]
+            for new, old in columns.items():
+                assert after.column(f"_source_{new}").equals(
+                    before.column(f"_source_{old}")
+                )
+            if "a" in columns.values():
+                kept = next(new for new, old in columns.items() if old == "a")
+                if before.column("_source_a").null_count == 0:
+                    assert after.schema.field(f"_source_{kept}").type == self.NESTED
+            for name in set(changed.keys()) - set(columns):
+                token = changed.source_info()[name]
+                assert after.column(f"_source_{name}").to_pylist() == [token]
+            ids.add(row_ids.instance_id(HASHER, _tag(), changed))
+        assert len(ids) == 3
+
+    def test_columns_taken_from_another_row_keep_its_typed_tokens(self) -> None:
+        for other in self._nested_rows():
+            own = Data({"y": 1, "z": "t"}, source_info={"y": "f::r::y", "z": "f::r::z"})
+            joined = own.with_columns_of(other, ["b", "a"])
+            tokens = joined.source_info_table()
+            assert tokens.column_names == [
+                "_source_b",
+                "_source_a",
+                "_source_y",
+                "_source_z",
+            ]
+            theirs = other.source_info_table()
+            for name in ("_source_a", "_source_b"):
+                assert tokens.column(name).equals(theirs.column(name))
+            assert tokens.select(["_source_y", "_source_z"]).to_pylist() == [
+                {"_source_y": "f::r::y", "_source_z": "f::r::z"}
+            ]
+            assert row_ids.instance_id(HASHER, _tag(), joined)
