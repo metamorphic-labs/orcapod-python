@@ -40,8 +40,18 @@ uv run pytest tests/
   changed, for example `uv run pytest tests/test_docs/`. On a pull request CI runs the suite
   on Python 3.13, and on `main` on 3.11, 3.12 and 3.13.
 
-The PostgreSQL integration tests are skipped unless asked for and need a running server; see
-[the workflow that runs them](.github/workflows/run-postgres-tests.yml).
+Two more commands were not run while writing this page:
+
+- **Parallel tests.** CI runs the tests in parallel (pytest-xdist), and locally they run
+  serially. `uv run pytest -n 4 tests/` runs them on four workers. Each worker holds its own
+  copy of the suite's memory, so use it only on a machine with cores and memory to spare,
+  and not beside another heavy process.
+- **PostgreSQL integration tests.** They are skipped unless asked for:
+  `uv run pytest -m postgres --postgres`. They need a running PostgreSQL server, reached
+  through the standard `PG*` environment variables (`PGHOST`, `PGPORT`, `PGUSER`,
+  `PGPASSWORD`, `PGDATABASE`);
+  [the workflow that runs them](.github/workflows/run-postgres-tests.yml) shows a working
+  setup.
 
 Tests drive the library through its public interface: call an operator on a stream and read
 the result through the stream's public methods.
