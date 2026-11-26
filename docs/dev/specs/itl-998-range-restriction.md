@@ -1,7 +1,7 @@
 # ITL-998: restrict a SpiralDB read to a range of a column
 
-Status: proposal, no code. Section 8 says which of the decisions D1 to D13 are approved. Depends on ITL-1465
-(D2).
+Status: design, no code. Every decision, D1 to D14, is decided (section 8). The plan is `docs/dev/plans/itl-998-plan.md`. Depends on
+ITL-1465 (D2).
 
 `SpiralDBTableSource` restricts a read by equality (`where`) and `limit=`. A long table needs a window too,
 applied by SpiralDB before rows are transferred. A range is a restriction: it chooses rows of the same data and
@@ -45,12 +45,12 @@ Cases (each is a test):
   of rows.
 - **Order**: `where(a, b)`, `where(b, a)`, `where(b & a)` and `.where(b).where(a)` are equal conditions with one
   hash and one canonical form [code]. [live] the two bounds sent in either order returned identical tables. The
-  text and saved form list terms in the order given (as today; section 3).
+  saved form lists terms in canonical order, the text in the order given (section 3).
 - **Refused, with a pointer to `filter`**: `|`, `~`, `!=`, `is_in`, null tests, struct fields, a column against
   a column. Any of these in the tree refuses the whole condition; nothing is applied in part.
 - **Contradictions**: two equalities with different values stay refused (as today). Ranges that cannot hold
   together, or a range that excludes an equality, are kept and read zero rows; the source does not reason about
-  satisfiability. **D3.**
+  satisfiability. **D3, approved.**
 
 **D2: the chained comparison.** `where(start <= col("t") < stop)` is how a window is written in mathematics.
 Python evaluates it as `(start <= col("t")) and (col("t") < stop)`, and a non-empty `Condition` is true, so the
@@ -64,13 +64,18 @@ error. ITL-998 depends on it and does not contain it: ranges ship after it.
 **Operators.** `<`, `<=`, `>`, `>=` exactly as written. The documented way to write a window is half-open, `>=
 start` and `< stop`: adjacent windows neither overlap nor leave a gap. `col(c).between(a, b)` keeps the meaning
 `Condition` gave it (ITL-1374): both ends included, equal to `>= a` and `<= b`; `a > b` is refused. A half-open
-`between` would give one name two meanings. **D4.** A null meets no comparison, as in SQL and in `filter`.
+`between` would give one name two meanings. **D4, approved.** A null meets no comparison, as in SQL and in
+`filter`.
 
-**Column types (D5).** Unsigned and signed integers of every width; timestamps of every unit, with or without a
-zone; `date32` and `date64`. Refused in a source's range: floats (NaN and signed-zero order is the service's),
-strings and binary (collation is the service's), booleans, and every type a value condition does not support
-(decimals, times, durations, lists, structs, logical types). Equalities accept what they accept today. A refused
-range points to `filter`, where Orcapod's own rules apply.
+**Column types (D5, approved).** Unsigned and signed integers of every width; timestamps of every unit, with or
+without a zone; `date32` and `date64`. Refused in a source's range: strings and binary (collation is the
+service's), booleans, and every type a value condition does not support (decimals, times, durations, lists,
+structs, logical types), and floats (**D14**): they were to be allowed (`float32`, `float64`) under
+Orcapod's stance (ITL-1251: every NaN is one value and unordered, so a NaN meets no range comparison and a NaN
+bound is refused; `-0.0` equals `0.0`), but the service orders floats otherwise ("Floats", below), so a float
+range stays refused. Pushing down a rewritten float range that equals the stance is a follow-up, ITL-1477.
+Equalities accept what they accept today. A refused range points to `filter`, where Orcapod's own rules
+apply.
 
 The check is on the column as Orcapod reads it (`_table_schema`), so a logical type stored as an integer is
 refused. The literal takes the type SpiralDB stores (`reading.found`); the connector refuses a comparison on a
@@ -89,8 +94,8 @@ condition meets the source, before any scan:
 | `timestamp[ns]` | microsecond precision (Python's) | outside the years ns can hold |
 | `date32`, `date64` | `date` | a `datetime` |
 
-A bound outside the type's range is refused, not read as "always" or "never" (**D6**): `col("t") < 2**64` is
-more likely a unit mistake. `date64` values that are not midnight compare as stored; a bound is midnight. Error
+A bound outside the type's range is refused, not read as "always" or "never" (**D6, approved**): `col("t") <
+2**64` is more likely a unit mistake. `date64` values that are not midnight compare as stored; a bound is midnight. Error
 wording: `SpiralDB table '<project>/<dataset>.<table>': column 't' holds uint64, which cannot hold -1 ...`.
 
 **The SDK still needs a literal of the column's own type.** [live] An untyped Python `int` and an `int64`
@@ -123,6 +128,50 @@ naive `timestamp[us]` key gave the expected counts, but it held one value (Spira
 so the probe's were data columns), a `ns` bound between two microseconds through Orcapod (Python
 has none), and how much the service scans. Nothing differed from D5 or D6, so neither changes.
 
+**Floats (D14).** [live] A second probe, on throwaway tables dropped afterwards, stored one keyed table per
+float type with: a quiet NaN, two signalling NaNs, a negative NaN, `+0.0` and `-0.0`, both infinities, the
+smallest subnormal of each sign, the smallest normal, the largest and smallest finite values, ordinary values,
+repeats, and a null. Every type stored and read back bit for bit, NaN payloads included. Then the SDK alone, with
+each stored value as the bound: `<`, `<=`, `>`, `>=`, `==`, and `between` (as `>=` and `<=`) of every pair of
+non-NaN bounds, each answer compared with pyarrow's on the same rows and with the stance.
+
+The service orders floats by IEEE 754 total order, as stored bits: `-NaN < -inf < ... < -0.0 < +0.0 < ... <
++inf < signalling NaN < quiet NaN` (NaNs ordered by payload). `float64`:
+
+| Case | The service returns | The stance (and pyarrow, except for NaN bounds) |
+|---|---|---|
+| `col > x`, `col >= x`, any non-NaN `x` (also `x = +inf`) | also every positive NaN | no NaN |
+| `col < x`, `col <= x`, any non-NaN `x` (also `x = -inf`) | also the negative NaN | no NaN |
+| `col < 0.0`, `col >= -0.0` | `-0.0` below `0.0`: `col < 0.0` holds `-0.0`, `col <= -0.0` lacks `0.0` | `-0.0` equals `0.0` |
+| `between(a, b)` with `a = +0.0` or `b = -0.0` | misses the other zero (14 of 169 pairs) | both zeros |
+| `between(a, b)`, other non-NaN bounds | the same rows (155 of 169) | |
+| `col == 0.0`, `col == -0.0` | the zero of that sign only | both zeros |
+| a NaN bound | ordered: `col == NaN` holds that bit pattern only; `col < quiet NaN` holds every number and the lower NaNs | refused (stance); pyarrow: no row |
+| a null | meets nothing | meets nothing |
+
+Of 254 answers, 86 differ from pyarrow's; of the 234 with a bound the stance accepts, 68 differ from it, all of
+them cases of this table. `float32`, the same rows and bounds: the same order and the same cases, 80 of 254 answers differ from pyarrow's
+and 68 of 234 from the stance (every comparison with a non-NaN bound returns a NaN row, as for `float64`). The
+SDK takes a `float32` literal only as a Python float, so a signalling NaN bound arrives quieted (it then sorts
+above the stored quiet NaN); a bound the stance accepts is not affected. The rewrite of option C (below) was also
+sent for every non-NaN bound and the four operators: 52 of 52 equal the stance. `float16`: stored, but the SDK has no `float16` literal, so
+no comparison can be sent at all.
+
+So a float range is refused (D14, option A), with the pointer to `filter`, where Orcapod's rules apply. Reading
+and comparing locally (B) gives up what a range is for, bounding the read. Pushing down a rewritten range that
+equals the stance (C: add `col >= -inf` and `col <= +inf`, which excludes every NaN, and send a zero bound as
+`+0.0` for `>` and `<=`, `-0.0` for `<` and `>=`) depends on the service's order staying as observed; it is the
+follow-up ITL-1477. D6 would apply to such a bound (`0.1` is refused on a `float32` column). One exception case
+for D6, found here: a float **equality** today is rounded to a narrower column's precision, not refused
+(`check_value_for_column`; the connector then compares it locally when the `float32` literal is not exact). A
+float range under ITL-1477 would refuse what an equality on the same column accepts.
+
+**Finding: float equality in `where` follows the service** (unchanged by this change, and documented as "the
+table system's own equality"): the scan's equality (above, [live] on `float64`, through the SDK) does not
+match `-0.0` to `0.0`, and matches a NaN to the same bit pattern only; `where` sends a `float64` value as such a
+literal, so `where(x=0.0)` does not read a row holding `-0.0`, and `where(x=nan)` reads only the NaNs with the bits of Python's `nan` (the quiet NaN). `filter` follows Orcapod's rule
+(`-0.0` equals `0.0`, every NaN equals NaN).
+
 **How it is pushed down.** The scan's `filter`, not `key_ranges=`: a filter works on any column and combines
 with equalities. [live] the scan returned only the window's rows. How much the service scans to find them could
 not be measured: this keyed scan reported no splits and no counters. The docs promise only which rows are
@@ -138,12 +187,26 @@ returned.
   node over a restriction), the aggregation warning, `RunSummary.conditions`.
 - **Canonical form.** `Condition` equality, hash and `canonical_form()` are order-free and unchanged. They
   compare statements, not row sets: `t >= 3` and `t > 2` are two restrictions on an integer column, so one table
-  read under both in a pipeline is refused. Redundant bounds are kept, never simplified. **D7.**
-- **Saved.** `to_config` already writes `{":condition": {"all": [...]}}` for a condition that is not only
-  equalities, with tagged values for datetimes and dates, and `from_config` rebuilds it through the public
-  builders and the source's checks [code]. Equality-only configs stay byte for byte as today. A saved job
-  records it through the source config. Today the saved list follows the order given (equal conditions,
-  different bytes); nothing hashes it. **D8:** leave it.
+  read under both in a pipeline is refused. Redundant bounds are kept, never simplified. **D7, approved.**
+- **Commutative.** Every form a source accepts is a conjunction of terms (equalities and the four comparisons;
+  `between` is two of them), so the condition is the set of its terms. `canonical_form()` flattens every `all`
+  and sorts its children, so the order of arguments, keywords, `&` operands, `combined` and chained `where`
+  calls never counts [code]. Checked: the 120 orders of five parts (two bounds of a datetime column, a
+  `between` of an integer column, an equality, a float comparison), each built with `&` and with `combined`,
+  give one canonical form, one saved form, and load back equal. `|` and `~`, which a source refuses, are
+  order-free in `canonical_form()` too (`any` sorted like `all`, `not` unary).
+- **Saved, in canonical order (D8, approved as changed).** `to_config` writes `{":condition": {"all": [...]}}`
+  for a condition that is not only equalities, with tagged values for datetimes and dates, and `from_config`
+  rebuilds it through the public builders and the source's checks [code]. The earlier draft of this section
+  said the saved list follows the order given; it does not: since ITL-1374 `_node_to_config` writes the
+  children of `all` and `any`, and `is_in` values, in canonical order. So a condition with a range already saves
+  canonically, and needs no change. An equality-only condition is saved as a mapping, column to value, in the
+  order given: `where(b=1, a=2)` and `where(a=2, b=1)` save `{"b": 1, "a": 2}` and `{"a": 2, "b": 1}`. To be
+  canonical it is written in canonical order (the order `canonical_form` sorts the terms, by the JSON text of
+  each term; for column names without spaces or punctuation, name order). That changes the bytes of a saved equality-only `where` only when it has two or
+  more columns given out of that order; one column, or columns given in order, stay byte for byte. Both forms
+  load to equal conditions, and no hash reads a source config (the saved job writes it as JSON; only database
+  configs are hashed, with sorted keys). Saved jobs from before load unchanged.
 - **Printed.** `head()` and the run summary use `condition.text()`, in the order given; display only.
 
 ## 4. Reads
@@ -201,10 +264,12 @@ same 488 passes and 2 failures there as on `main`. Two other drafts of ITL-1457,
 it in `spiraldb_connector.py`; the conflict is with the prototype's scan lines, so whichever lands second is
 rebased.
 
-**D11, merge order.** ITL-1465 first (ITL-998 depends on it). Then 555; 558; **ITL-998**; 559; 562; 566; 570; 560; 571; 567 last, rebuilt on the rest (it
-rewrites `_whole_table`). ITL-998 is independent of the stack and need not wait for it: if 558 is slow, it goes
-first. Reason to place it early: it is small, and it changes what the stack's tests read, so the stack tests a
-window once rather than being retested. If 553 or 554 is chosen over 555, ITL-998 goes after it.
+**D11, merge order (approved).** ITL-1465 (PR 576) first: ITL-998 depends on it. ITL-998 may then merge before
+555 and 558; it is independent of the ITL-1464 stack and need not wait for it. The stack follows, with 567 last,
+rebuilt on the rest (it rewrites `_whole_table`). If 553 or 554 is chosen over 555, the one that lands second
+resolves the conflict in `spiraldb_connector.py`. Checked again on 2026-11-26 against the current heads: the
+prototype merges cleanly with 576, 555, 558, 559, 560, 562, 563, 565, 566, 567, 569, 570 and 571, and
+conflicts with 553 and 554 as before.
 
 ## 6. Test plan
 
@@ -218,7 +283,8 @@ several data columns):
    condition, hash and saved-and-loaded condition. In each role: key column (tag and data-tag, `tags_as_data`),
    non-key data column with nulls, first and last key column.
 3. Types: eight integer widths, four timestamp units naive and zoned (both 01:30 of a daylight-saving overlap),
-   `date32`, `date64`; each refusal of section 2, asserting that no scan ran.
+   `date32`, `date64`; each refusal of section 2, asserting that no scan ran; a range of a `float16`,
+   `float32` and `float64` column refused (D14), while their equalities behave as today.
 4. Refused trees: each form of section 1; `start <= col(c) < stop` given to `where` raises (from ITL-1465).
 5. Identity: hashes, source id, record ids; chained `where` and the constructor are one mechanism; the original
    source is unchanged.
@@ -266,18 +332,23 @@ Change:
 
 ## 8. Decisions
 
-| # | Question | Recommendation | State |
+Decided by the developer on 2026-11-25 and 2026-11-26.
+
+| # | Question | Decision | State |
 |---|---|---|---|
 | D1 | Form | Comparisons in `where()`, as in `filter`; no `window=` | Approved |
 | D2 | `a <= col(c) < b` silently drops `a` | A `Condition`'s truth value is an error; not in this change, which depends on it | Approved, as ITL-1465 |
-| D3 | Ranges that cannot hold together | Kept, zero rows; two different equalities stay refused | Open |
-| D4 | Ends | Operators as written; half-open is the documented window; `between` stays closed | Fair in principle; explicit approval pending |
-| D5 | Column types | Integers, timestamps, dates; refuse floats, strings, binary, booleans and the rest | Fair in principle; explicit approval pending |
-| D6 | A bound the type cannot hold exactly | Refuse with `TypeError`; never round or clamp | Fair in principle; explicit approval pending |
-| D7 | Equality of restrictions | By statement; no simplification, so `t >= 3` and `t > 2` differ | Open |
-| D8 | Order inside the saved config | Leave in the order given (nothing hashes it) | Open |
+| D3 | Ranges that cannot hold together | Kept, zero rows; two different equalities stay refused | Approved |
+| D4 | Ends | Operators as written; half-open is the documented window; `between` includes both ends | Approved |
+| D5 | Column types | Integers, timestamps, dates; floats, strings, binary, booleans and the rest refused | Approved (floats: D14) |
+| D6 | A bound the type cannot hold exactly | Refuse with `TypeError`; never round or clamp; for floats too (`0.1` on a `float32` column) | Approved; to be reconsidered if an exception case turns up (section 2, "Floats") |
+| D7 | Equality of restrictions | By statement; no simplification, so `t >= 3` and `t > 2` differ | Approved |
+| D8 | Order inside the saved config | Canonical order (ITL-1271); `head()` and the run summary keep the order given | Approved as changed; a range already saves canonically, an equality-only mapping changes (section 3) |
 | D9 | Row cap with a range | Today's rule, no pre-count; a clear error naming the window and how to narrow it or raise the cap | Approved |
 | D10 | Size shown by `head` | The table's size, labelled; no count of matches | Approved |
-| D11 | Merge order | ITL-1465 before ITL-998; then 555, 558, ITL-998 and the rest of the stack with 567 last; ITL-998 may go before 555 and 558 | Open |
-| D12 | Live proof of the types | Throwaway tables now; the kept conformance test on the final code before ready | Approved; probe run, section 2 |
-| D13 | Scope | `SpiralDBTableSource` only; other sources stay with ITL-1219 | Open |
+| D11 | Merge order | ITL-1465 (PR 576) first; ITL-998 may merge before 555 and 558; then the rest of the stack with 567 last | Approved |
+| D12 | Live proof of the types | Throwaway tables now; the kept conformance test on the final code before ready | Approved; probes run, section 2 |
+| D13 | Scope | `SpiralDBTableSource` only; other sources stay with ITL-1219 | Approved |
+| D14 | Float ranges, given the service's float order | A: refused, pointing to `filter` (B, read then compare locally, and C, push down a rewritten range equal to the stance, were the other options) | Approved: A; C is ITL-1477 |
+
+One restriction per table in a pipeline stays in force; lifting it is ITL-1472, not this change.
