@@ -20,14 +20,28 @@ _REFERENCE_TO = ctypes.py_object
 _publication_lock = threading.RLock()
 
 
+def _acquire_lock_before_fork() -> None:
+    """Let earlier child callbacks re-enter the forking thread's lock."""
+    _ = _publication_lock.acquire()
+
+
+def _release_lock_after_fork() -> None:
+    """Release the fork acquisition in the parent."""
+    _publication_lock.release()
+
+
 def _reset_lock_after_fork() -> None:
-    """Give a forked child a lock that no vanished parent thread holds."""
+    """Give the child an unlocked lock after earlier child callbacks run."""
     global _publication_lock
     _publication_lock = threading.RLock()
 
 
 if hasattr(os, "register_at_fork"):
-    os.register_at_fork(after_in_child=_reset_lock_after_fork)
+    os.register_at_fork(
+        before=_acquire_lock_before_fork,
+        after_in_parent=_release_lock_after_fork,
+        after_in_child=_reset_lock_after_fork,
+    )
 
 
 def keep_for_process(extension_type: pa.ExtensionType) -> pa.ExtensionType:

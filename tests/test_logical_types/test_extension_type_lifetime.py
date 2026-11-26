@@ -1043,47 +1043,92 @@ def test_a_custom_metaclass_can_join_the_generated_metaclass() -> None:
 
 
 _FORK_WITH_LOCK_HELD = '''
+    import gc
     import os
     import signal
+    import sys
     import threading
 
     import pyarrow as pa
+
+    callback_kind = sys.argv[1]
+    made_in_callback = []
+
+    def on_collection(phase, info):
+        """Construct a type during the collection started by the child hook."""
+        if phase == "start":
+            made_in_callback.append(callback_type())
+
+    def early_child_callback():
+        """Construct before the Orcapod child hook has reset its inherited lock."""
+        signal.alarm(3)
+        if callback_kind == "gc":
+            gc.callbacks.append(on_collection)
+            try:
+                gc.collect()
+            finally:
+                gc.callbacks.remove(on_collection)
+        else:
+            made_in_callback.append(callback_type())
+
+    # Child hooks run in registration order, so this hook runs before Orcapod's.
+    if callback_kind != "none":
+        os.register_at_fork(after_in_child=early_child_callback)
 
     from orcapod.logical_types import arrow_lifetime, make_arrow_extension_type
 
     extension_type = make_arrow_extension_type("test.lifetime.fork", pa.int64())
     winner = extension_type()
+    callback_type = make_arrow_extension_type("test.lifetime.fork_callback", pa.int64())
     locked = threading.Event()
+    starting_fork = threading.Event()
     release = threading.Event()
 
     def hold_publication_lock():
         """Keep the lock held by a thread that will not exist in the child."""
         with arrow_lifetime._publication_lock:
             locked.set()
-            assert release.wait(timeout=10)
+            assert starting_fork.wait(timeout=5)
+            # Begin fork with the lock held and let a waiting before-fork hook proceed.
+            release.wait(timeout=1)
 
     thread = threading.Thread(target=hold_publication_lock)
     thread.start()
     try:
         assert locked.wait(timeout=5)
+        starting_fork.set()
         child = os.fork()
         if child == 0:
             signal.alarm(3)
-            os._exit(0 if extension_type() is winner else 1)
+            assert extension_type() is winner
+            if callback_kind != "none":
+                assert len(made_in_callback) == 1
+                assert callback_type() is made_in_callback[0]
+            os._exit(0)
         _, status = os.waitpid(child, 0)
         assert os.waitstatus_to_exitcode(status) == 0, status
     finally:
         release.set()
         thread.join(timeout=5)
-    assert extension_type() is winner
+
+    parent_result = []
+    parent_reader = threading.Thread(
+        target=lambda: parent_result.append(extension_type()), daemon=True
+    )
+    parent_reader.start()
+    parent_reader.join(timeout=3)
+    assert len(parent_result) == 1 and parent_result[0] is winner
 '''
 
 
 @pytest.mark.skipif(not hasattr(os, "fork"), reason="fork requires POSIX")
-def test_a_child_can_construct_a_type_after_fork_with_the_lock_held() -> None:
-    """The child inherits the kept instance and gets a usable publication lock."""
+@pytest.mark.parametrize("callback_kind", ["none", "at_fork", "gc"])
+def test_a_child_can_construct_a_type_after_fork_with_the_lock_held(
+    callback_kind: str,
+) -> None:
+    """The child can publish even in a callback preceding Orcapod's fork hook."""
     process = subprocess.run(
-        [sys.executable, "-c", textwrap.dedent(_FORK_WITH_LOCK_HELD)],
+        [sys.executable, "-c", textwrap.dedent(_FORK_WITH_LOCK_HELD), callback_kind],
         capture_output=True,
         text=True,
         timeout=20,
