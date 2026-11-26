@@ -85,7 +85,7 @@ def test_listings_are_the_old_rule(seed: int) -> None:
                     path_prefix + prefix,
                 )
             ]
-            assert sorted(set(full)) == _old_list_table_paths(
+            assert full == _old_list_table_paths(
                 stored, pending, path_prefix, prefix
             )
 

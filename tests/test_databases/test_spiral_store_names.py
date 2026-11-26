@@ -178,7 +178,10 @@ def test_a_record_that_is_not_this_store_s_is_refused(change: dict[str, bytes]) 
         _ = names.read_store_table_metadata(record)
 
 
-@pytest.mark.parametrize("missing", ["orcapod.store", "orcapod.path", "orcapod.layout"])
+@pytest.mark.parametrize(
+    "missing",
+    ["orcapod.store", "orcapod.path", "orcapod.layout", "orcapod.data_context"],
+)
 def test_a_partial_record_is_refused(missing: str) -> None:
     """A record lacking one of its entries is refused."""
     record = names.store_table_metadata(PIPELINE, "std:v1:default")

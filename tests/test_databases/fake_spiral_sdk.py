@@ -228,15 +228,24 @@ def _decoded(array: Any) -> Any:
     if pa.types.is_dictionary(array.type):
         return _decoded(array.dictionary_decode())
     if pa.types.is_run_end_encoded(array.type):
-        ends = array.run_ends.to_pylist()
-        runs = [
-            i
-            for i, end in enumerate(ends)
-            for _ in range(end - (ends[i - 1] if i else 0))
-        ]
-        logical = runs[array.offset : array.offset + len(array)]
-        return _decoded(array.values.take(pa.array(logical, pa.int64())))
+        return _decoded(array.values.take(pa.array(_run_indices(array), pa.int64())))
     return array
+
+
+def _run_indices(array: Any) -> list[int]:
+    """The run of each row of a run-end-encoded array (a slice of one included): only
+    the runs that overlap the slice are expanded, and only where they overlap it."""
+    start, stop = array.offset, array.offset + len(array)
+    indices: list[int] = []
+    begin = 0
+    for run, end in enumerate(array.run_ends.to_pylist()):
+        low, high = max(begin, start), min(end, stop)
+        if low < high:
+            indices.extend([run] * (high - low))
+        if end >= stop:
+            break
+        begin = end
+    return indices
 
 
 def _needs_decoding(t: Any, *, in_extension: bool = False) -> bool:
@@ -278,6 +287,15 @@ def _deep_decoded(array: Any) -> Any:
         size = t.list_size
         values = _deep_decoded(a.values.slice(a.offset * size, len(a) * size))
         target = pa.list_(t.value_field.with_type(values.type), size)
+        if size == 0:  # no values to count the rows by: from buffers
+            valid = pc.is_valid(a).buffers()[1] if a.null_count else None
+            return pa.Array.from_buffers(
+                target,
+                len(a),
+                cast(Any, [valid]),  # the stubs take no None for an absent buffer
+                null_count=a.null_count,
+                children=[values],
+            )
         return cast(Any, pa.FixedSizeListArray).from_arrays(
             values, type=target, mask=mask
         )

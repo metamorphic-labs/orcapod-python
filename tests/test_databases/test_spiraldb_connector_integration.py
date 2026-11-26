@@ -507,27 +507,42 @@ def test_the_store_codec_round_trips(place: _Place) -> None:
 
 
 @pytest.mark.parametrize(
-    "column",
+    ("column", "diagnostic"),
     [
-        pa.table({"*": pa.array([1])}),
-        pa.table({"": pa.array([1])}),
-        pa.table({"__x": pa.array([1])}),
-        pa.table({"$x": pa.array([1])}),
-        pa.table({"a.b": pa.array([1])}),
-        pa.table({"s": pa.array([{"a.b": 1}], pa.struct([("a.b", pa.int8())]))}),
-        pa.table({"t": pa.array([86_400], pa.int32()).view(pa.time32("s"))}),
-        pa.table({"t": pa.array([-1], pa.int64()).view(pa.time64("ns"))}),
-        pa.table({"b": pa.array([b"ab"], pa.binary(2))}),
-        pa.table({"d": pa.array([1], pa.duration("s"))}),
-        pa.table({"s": pa.array([{"a": 1}, None], pa.struct([("a", pa.int8())]))}),
-        pa.table({"s": pa.array([{}], pa.struct([]))}),
+        (pa.table({"*": pa.array([1])}), "reserved"),
+        (pa.table({"": pa.array([1])}), "reserved"),
+        (pa.table({"__x": pa.array([1])}), "reserved"),
+        (pa.table({"$x": pa.array([1])}), "reserved"),
+        (pa.table({"a.b": pa.array([1])}), "reserved"),
+        (
+            pa.table({"s": pa.array([{"a.b": 1}], pa.struct([("a.b", pa.int8())]))}),
+            "reserved",
+        ),
+        (
+            pa.table({"t": pa.array([86_400], pa.int32()).view(pa.time32("s"))}),
+            "time",
+        ),
+        (
+            pa.table({"t": pa.array([-1], pa.int64()).view(pa.time64("ns"))}),
+            "time",
+        ),
+        (pa.table({"b": pa.array([b"ab"], pa.binary(2))}), "not implemented"),
+        (pa.table({"d": pa.array([1], pa.duration("s"))}), "not implemented"),
+        (
+            pa.table({"s": pa.array([{"a": 1}, None], pa.struct([("a", pa.int8())]))}),
+            "null rows",
+        ),
+        (pa.table({"s": pa.array([{}], pa.struct([]))}), "empty"),
     ],
-    ids=lambda t: f"{t.schema.names[0]!r}: {t.schema.types[0]}",
+    ids=lambda v: (
+        f"{v.schema.names[0]!r}: {v.schema.types[0]}" if isinstance(v, pa.Table) else v
+    ),
 )
 def test_what_the_store_codec_avoids_is_refused(
-    place: _Place, column: pa.Table
+    place: _Place, column: pa.Table, diagnostic: str
 ) -> None:
-    """The service refuses each name and value the codec never writes; nothing is written."""
+    """The service refuses each name and value the codec never writes, for its own
+    reason (each one's diagnostic, not a transport failure); nothing is written."""
     client = _client(place)
     key = pa.schema([pa.field("k", pa.large_string(), False)])
     table = client.project(place.project).create_keyed_table(
@@ -537,7 +552,7 @@ def test_what_the_store_codec_avoids_is_refused(
     rows = column.add_column(
         0, "k", pa.array([f"r{i}" for i in range(n)], pa.large_string())
     )
-    with pytest.raises(Exception):  # noqa: B017, PT011  # the SDK's error type differs from the fake's
+    with pytest.raises(Exception, match=f"(?i){diagnostic}"):  # noqa: B017, PT011  # the SDK's error type differs from the fake's
         _ = table.append(rows)
     again = client.keyed_table_by_id(table.resource_id)
     assert again.version_id == table.version_id
