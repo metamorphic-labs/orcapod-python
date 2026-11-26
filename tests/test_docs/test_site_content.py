@@ -171,7 +171,7 @@ def test_the_home_page_gets_the_hero(tmp_path: Path):
             "icon": "right-arrow",
         },
         {
-            "text": "Tutorial",
+            "text": "Tutorials",
             "link": "/orcapod-python/tutorial/",
             "variant": "secondary",
         },
