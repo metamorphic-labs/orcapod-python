@@ -576,15 +576,16 @@ def _in_table(message: str, table: str | None) -> str:
     return message if table is None else f"table {table}: {message}"
 
 
-class NullabilityRecordError(ValueError):
-    """A table's nullability record cannot be read, or a schema cannot be recorded.
+class TableSchemaError(ValueError):
+    """A SpiralDB table's row in the schema table cannot be read, or disagrees with it.
 
-    The record is the list of non-nullable column paths Orcapod keeps in a SpiralDB
-    table's key-value metadata (ITL-936). An unknown format or version, a missing chunk, a
-    digest mismatch or a path the table does not have is an error, never ignored.
+    A dataset's schema table holds, for each table Orcapod wrote, the schema it is read
+    with (ITL-1186). An unknown format or version, a row of another table id, or columns
+    the table does not have (or has beyond the row's) are errors, never ignored. Also
+    raised for a schema that cannot be recorded.
 
     Attributes:
-        reason: What is wrong with the record.
+        reason: What is wrong.
         table: The table, as ``"<project>/<dataset>/<table>"``, added by the caller that
             knows it; ``None`` otherwise.
     """
@@ -592,17 +593,45 @@ class NullabilityRecordError(ValueError):
     def __init__(self, reason: str, *, table: str | None = None) -> None:
         self.reason = reason
         self.table = table
-        super().__init__(_in_table(f"nullability record: {reason}", table))
+        super().__init__(_in_table(f"table schema: {reason}", table))
+
+
+class SpiralDBWriteNotSupportedError(NotImplementedError):
+    """Orcapod does not write SpiralDB through spiral-sdk yet (ITL-1186): it reads it.
+
+    Raised by every write of ``SpiralDBConnector`` (creating or deleting a table, storing
+    rows), so also by a job whose database is a ``ConnectorArrowDatabase`` on one. Nothing
+    is written. Writing is a follow-up of ITL-1186.
+    """
+
+
+class SpiralDBSignInError(RuntimeError):
+    """SpiralDB cannot be reached without a person signing in; the message says how.
+
+    Raised before spiral-sdk would start a device sign-in inside a source or a job.
+    """
+
+
+class UnrecordedTableSchemaWarning(UserWarning):
+    """A SpiralDB table that holds rows has no row in its dataset's schema table.
+
+    Its columns are read as SpiralDB reports them: every column and struct field
+    nullable, with no Arrow metadata. A table written by an Orcapod release on pyspiral
+    reads this way until its dataset is migrated
+    (``scripts/migrate_spiral_schemas.py``), so its schema and its hashes differ from
+    what they were. Usually issued once per table and process: threads reading the
+    table at the same time may each issue it.
+    """
 
 
 class NullabilityRecordMismatchError(ValueError):
-    """A write declares different non-nullable columns than the table's record.
+    """A write declares different non-nullable columns than the table's recorded schema.
 
-    The record is never widened, narrowed or rewritten by a write.
+    The recorded flags are never widened, narrowed or rewritten by a write.
 
     Attributes:
-        only_in_record: Paths the record lists that the write declares nullable.
-        only_in_write: Paths the write declares non-nullable that the record does not list.
+        only_in_record: Paths the recorded schema lists that the write declares nullable.
+        only_in_write: Paths the write declares non-nullable that it does not list.
         table: The table, added by the caller; ``None`` otherwise.
     """
 
@@ -625,8 +654,8 @@ class NullabilityRecordMismatchError(ValueError):
             parts.append(f"non-nullable in the write but not recorded: {only_in_write}")
         super().__init__(
             _in_table(
-                "the write's nullability differs from the table's nullability "
-                "record (" + "; ".join(parts) + ")",
+                "the write's nullability differs from the table's recorded "
+                "schema (" + "; ".join(parts) + ")",
                 table,
             )
         )

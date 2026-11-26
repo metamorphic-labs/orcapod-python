@@ -22,10 +22,11 @@ from orcapod.databases import (
     ConnectorArrowDatabase,
     DeltaTableDatabase,
     InMemoryArrowDatabase,
+    SpiralDBConnector,
     SQLiteConnector,
 )
 from orcapod.errors import InputValidationError
-from tests.test_databases.type_matrix import open_database
+from tests.test_databases import fake_spiral_sdk
 
 PATH = ("t",)
 
@@ -277,10 +278,12 @@ def test_a_rename_between_the_flush_check_and_the_write_is_as_on_main(
 def test_a_column_with_field_metadata_is_stored_by_name_on_spiraldb(
     tmp_path: Path,
 ) -> None:
-    """Declined: a connector flush compares the connector's column info, which carries
-    no field metadata, so a column with field metadata is not reordered there;
-    SpiralDB matches the write by name itself. Pinned: every value under its name
-    (PR 491 CodeRabbit, connector_arrow_database.py:488)."""
+    """SpiralDB matches external writes by name and Orcapod restores field metadata.
+
+    This covers the PR 491 CodeRabbit finding at connector_arrow_database.py:488
+    using an external writer, since the Orcapod connector is read-only.
+    """
+    record_id = ConnectorArrowDatabase.RECORD_ID_COLUMN
     field = pa.field("a", pa.int64(), metadata={"unit": "m"})
 
     def rows(n: int, order: tuple[str, ...]) -> pa.Table:
@@ -291,20 +294,27 @@ def test_a_column_with_field_metadata_is_stored_by_name_on_spiraldb(
                 pa.array([100 * n]),
             ],
             schema=pa.schema(
-                [pa.field("rid", pa.large_binary()), field, pa.field("b", pa.int64())]
+                [
+                    pa.field(record_id, pa.large_binary()),
+                    field,
+                    pa.field("b", pa.int64()),
+                ]
             ),
         )
         return table.select(list(order))
 
-    with open_database("SpiralDB", tmp_path) as db:
-        db.add_records(
-            PATH, rows(1, ("rid", "a", "b")), record_id_column="rid", flush=True
+    with fake_spiral_sdk.install(tmp_path):
+        first = rows(1, (record_id, "a", "b"))
+        external = fake_spiral_sdk.ExternalProject("p").create_table(
+            "default.t", key_schema=[first.schema.field(record_id)]
         )
-        db.add_records(
-            PATH, rows(2, ("b", "rid", "a")), record_id_column="rid", flush=True
-        )
+        external.write(first)
+        external.write(rows(2, ("b", record_id, "a")))
+        external.record(first.schema)
+        db = ConnectorArrowDatabase(SpiralDBConnector("p"))
         table = db.get_all_records(PATH, record_id_column="rid")
         assert table is not None
+        assert table.schema.field("a").metadata == field.metadata
         got = sorted(table.select(["rid", "a", "b"]).to_pylist(), key=str)
         assert got == [
             {"rid": bytes([1]), "a": 10, "b": 100},

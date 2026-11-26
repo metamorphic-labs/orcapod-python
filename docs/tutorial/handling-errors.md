@@ -1,15 +1,16 @@
-# Part 9: When things go wrong
+# Handling errors
 
-Two kinds of things go wrong. Some mistakes Orcapod catches before any data is touched: a
-misspelt column, a function that does not fit its input. Others happen in the middle of a
-run: one file out of a thousand is corrupt and your function raises. This part shows how
-each kind appears and what to do about it.
+Orcapod catches some mistakes before any function runs: a misspelt column, or a function that
+does not fit its input. Others happen in the middle of a run: one file out of a thousand is
+corrupt, and your function raises. This tutorial shows what to do about both.
+
+**Before you start:** Parts 0 to 6 of the [core course](index.md#core-course).
 
 You will:
 
 - recognise the errors Orcapod raises while a pipeline is being built
 - see what a job does when a function raises for some rows
-- choose between "carry on" and "stop at the first failure"
+- choose whether a run continues or stops at the first failure
 - find out which rows failed, and why, after a run
 
 ```python
@@ -34,31 +35,30 @@ sessions = CSVSource(
 
 ## Errors while building
 
-Most mistakes are caught at the line that makes them, because Orcapod checks column names
-and types as soon as you connect two things. You have met these already:
+Orcapod checks column names and types as soon as you connect two steps, so most mistakes raise
+at the line that makes them:
 
 | You did | Raised | Where you saw it |
 |---|---|---|
-| Named a tag column that does not exist | `ValueError: tag_columns not found in table` | Part 1 |
-| Made every column a tag | `ValueError: No data columns found in the table` | Part 1 |
-| Left out a type annotation | `ValueError: Parameter '...' has no type annotation` | Part 2 |
-| Gave a pod a stream with a missing or differently typed column | `ValueError: Incoming data schema ... is not compatible with expected input schema ...: ...` | Part 2 |
-| Joined streams that share a data column | `InputValidationError: ... should not have overlapping keys` | Part 3 |
-| Grouped by a data column | `InputValidationError: GroupBy: ... are not tag columns` | Part 4 |
-| Ran a job without a database | `ValueError: PipelineJob.run() requires a database` | Part 5 |
+| Named a tag column that does not exist | `ValueError: tag_columns not found in table` | [Part 1](01-first-stream.md) |
+| Made every column a tag | `ValueError: No data columns found in the table` | [Part 1](01-first-stream.md) |
+| Left out a type annotation | `ValueError: Parameter '...' has no type annotation` | [Part 2](02-function-pods.md) |
+| Gave a pod a stream with a missing or differently typed column | `ValueError: Incoming data schema ... is not compatible with expected input schema ...: ...` | [Part 2](02-function-pods.md) |
+| Joined streams that share a data column | `InputValidationError: ... should not have overlapping keys` | [Part 3](03-operators.md) |
+| Grouped by a data column | `InputValidationError: GroupBy: ... are not tag columns` | [Part 4](04-many-rows-into-one.md) |
+| Ran a job without a database | `ValueError: PipelineJob.run() requires a database` | [Part 5](05-pipeline-job.md) |
 
-The end of a pod's message names the problem, with the column and both types:
+The end of a pod's message names the problem:
 `required parameter 'duration_s' has no matching column`, or
-`column 'duration_s' has type float, the function expects int`. Data columns the function
-does not take are not a problem: the pod drops them.
+`column 'duration_s' has type float, the function expects int`. The pod drops the data columns
+it does not take.
 
-The habit that makes these quick to fix: when a pod or operator refuses a stream, print
-`stream.keys()` or `stream.output_schema()` for the stream you passed, and compare it with
-what the step expects.
+When a pod or operator refuses a stream, print `stream.keys()` or `stream.output_schema()` for
+the stream you passed, and compare it with what the step expects.
 
-The [Troubleshooting](../troubleshooting.md) page lists every one of these with its cause
-and fix, together with the problems that give **no** error, such as stale results after
-editing a function (Part 6).
+[Troubleshooting](../troubleshooting.md) lists these errors with their causes and fixes, and
+the problems that give **no** error, such as old results after editing a function
+([Part 6](06-reruns-and-caching.md)).
 
 ## A function that fails for some rows
 
@@ -89,8 +89,7 @@ def build_job(database):
 
 Three of the 64 units have more than 1200 spikes.
 
-**Without a job**, the exception simply propagates, as it would from any Python function.
-The stream cannot be produced:
+**Without a job**, the exception propagates and the stream is not produced:
 
 ```python
 in_memory = firing_rate.pod(
@@ -104,7 +103,7 @@ except ValueError as err:
 # implausible spike count: 1221
 ```
 
-**Inside a job**, the default is different. The run carries on:
+**Inside a job**, the run continues by default:
 
 ```python
 database = InMemoryArrowDatabase()
@@ -122,25 +121,22 @@ print(job.nodes["rates"].as_table().num_rows)
 # 61
 ```
 
-`run()` did not raise. It skipped the three failing rows, computed and stored the other 61,
-and at the end issued one `RowFailuresWarning` and returned a **run summary** (the job also
-keeps it as `job.last_run`). `job.last_run.print_traceback("rates")` prints the full
-traceback of the first failure. (Why "1 from store" in a first run? Two units have the same
-spike count and the same session duration. Their inputs are identical, so the second one
-reuses the result computed for the first.)
+`run()` did not raise. It skipped the three failing rows, stored the results of the other 61,
+issued one `RowFailuresWarning` and returned a **run summary**, which the job keeps as
+`job.last_run`. `job.last_run.print_traceback("rates")` prints the full traceback of the first
+failure. One row is "from store" because two units have the same inputs (Part 5).
 
-This default suits long runs: one bad file should not throw away a night of computation.
-It also means that **a job that finishes is not a job in which everything succeeded**.
-Read the warning and the summary; in a script, check `summary.ok`, which is `False` when
-any row failed.
+In a long run, one bad file should not discard a night of computation. As a result, **a job can
+finish with failed rows**. Read the warning and the summary. In a script, check `summary.ok`,
+which is `False` when any row failed.
 
 A row also fails when the function returns a value of a different type than it declares,
 for example a `float` from a function annotated `-> int`. That raises an `OutputTypeError`
-(from `orcapod.errors`) naming the function, the output and both types; Orcapod does not
-convert the value for you. Inside a job it is skipped and reported like any other failure.
+(from `orcapod.errors`) naming the function, the output and both types. Inside a job the row is
+skipped and reported like any other failure.
 
-Failures are not stored. Run again and the failed rows are tried again, and only those. Expect
-the same warning again, 3 of 64 rows failed, from this run:
+Failures are not stored. The next run tries the failed rows again, and here they fail again
+with the same warning:
 
 ```python
 calls.clear()
@@ -152,8 +148,8 @@ print(len(calls))
 
 ## Stop at the first failure
 
-While developing, you usually want the opposite: stop immediately and show me the error.
-Pass an orchestrator with `error_policy="fail_fast"`:
+While developing, you usually want the first error to stop the run. Pass an orchestrator with
+`error_policy="fail_fast"`:
 
 ```python
 from orcapod.pipeline import SyncPipelineOrchestrator
@@ -166,16 +162,14 @@ except ValueError as err:
 # implausible spike count: 1221
 ```
 
-The **orchestrator** is the part of Orcapod that walks through the nodes of a job and
-executes them. You have been using the default one all along. `"fail_fast"` re-raises the
-first exception a function raises; `"continue"`, the default, skips the row.
+The **orchestrator** is the part of Orcapod that executes the nodes of a job. `"fail_fast"`
+re-raises the first exception a function raises. The default is `"continue"`.
 
-## Which rows failed, and why?
+## Finding the failed rows
 
-Reading tracebacks off the screen does not scale. An **observer** records what happens
-during a run in a table you can query afterwards. `StatusObserver` records the state of
-every row; `LoggingObserver` records the traceback and captured output of failures.
-`CompositeObserver` lets you use both. Expect the same 3-of-64 warning again here:
+An **observer** records what happens during a run in a table you can query afterwards.
+`StatusObserver` records the state of every row, and `LoggingObserver` the traceback and
+captured output of each function call. `CompositeObserver` combines them:
 
 ```python
 import polars as pl
@@ -226,9 +220,8 @@ record of every run is kept on disk next to your results.
 
 ## Fix and re-run
 
-Once you know what went wrong, fix the function, or the data, and run again. Here the limit
-was wrong, so the check is removed. Only the three rows that never got a result are
-computed:
+Once you know what went wrong, fix it and run again. Here the limit was wrong, so the check is
+removed. Only the three rows without a result are computed:
 
 ```python
 @function_pod(output_keys="rate_hz")
@@ -244,16 +237,17 @@ print(job.nodes["rates"].as_table().num_rows, len(calls))
 # 64 3
 ```
 
-The 61 results stored earlier were reused, although the function body changed. In this case
-that is what you want, since the calculation for those rows is the same. If your fix changes
-what the function returns for rows that had succeeded, bump the major version (Part 6).
+The 61 results stored earlier were reused, although the function body changed. If your fix
+changes what the function returns for rows that had succeeded, bump the major version
+([Part 6](06-reruns-and-caching.md)).
 
-## What to remember
+## Key points
 
 - Mistakes in how a pipeline is put together raise at the line that makes them. Print the
   stream's `keys()` and compare.
 - Inside a job, a function that raises loses that row and the run continues. At the end a
-  `RowFailuresWarning` and the run summary say how many rows failed. **Read them.**
+  `RowFailuresWarning` and the run summary say how many rows failed. **Read them.** In a
+  script, check `summary.ok`.
 - `SyncPipelineOrchestrator(error_policy="fail_fast")` stops at the first failure. Use it
   while developing.
 - `StatusObserver` and `LoggingObserver` tell you which rows failed and why.
@@ -291,14 +285,12 @@ one.
     # c: Input streams are not compatible: Datas should not have overlapping keys
     ```
 
-    (a) The column is called `subject_id`. (b) `n_spikes` is in `units`, not `sessions`:
-    pass both, `firing_rate.pod(units, sessions)`. (c) Both sides have the same data
-    columns; a stream joined with itself is rarely what you want, but if two tables really
-    share a column name, rename one side or use `MergeJoin` (Part 3).
+    (a) The column is called `subject_id`. (b) `n_spikes` is in `units`:
+    pass both, `firing_rate.pod(units, sessions)`. (c) Both sides have the same data columns.
+    If two tables share a column name, rename one side or use `MergeJoin` (Part 3).
 
 **2.** Run the failing version of `firing_rate` (the one with the 1200 limit) in a job with
-only a `StatusObserver`, and print how many rows ended in each state. (Expect the same
-3-of-64 warning again.)
+only a `StatusObserver`, and print how many rows ended in each state.
 
 ??? success "Solution"
     ```python
@@ -323,12 +315,10 @@ fails for one unit under the default policy, what does the session mean of that 
 session contain?
 
 ??? success "Solution"
-    The mean of the units that succeeded. The failed row is absent from `rates`, so
-    `group_by` gathers seven units for that session where there should be eight, and the
-    mean is computed over seven. `job.run()` reports failed rows in its warning and its
-    summary, but raises no exception, and nothing in the mean's row says that a unit is
-    missing. (The same 3-of-64 warning appears again, and `group_by` prints a
-    `ProvisionalHashWarning`: see [Messages you can ignore](00-setup.md#messages-you-can-ignore).)
+    The mean of the units that succeeded. The failed row is absent from `rates`, so the mean
+    is computed over seven units where there should be eight. `job.run()` reports failed rows
+    in its warning and its summary, but raises no exception, and nothing in the mean's row
+    says that a unit is missing.
 
     ```python
     @function_pod(output_keys=["n_units", "mean_rate_hz"])
@@ -362,8 +352,5 @@ session contain?
     # 7   mouse_04      s2        8
     ```
 
-    This is the strongest reason to look at the status table after a run, or to use
-    `fail_fast`: a partial failure upstream becomes a plausible-looking number downstream.
-    Returning the group size next to the summary, as here, is a cheap safeguard.
-
-Next: [Part 10: Where next](10-where-next.md).
+    A partial failure upstream gives a plausible number downstream. Check the run summary or
+    use `fail_fast`, and return the group size next to the summary value, as here.

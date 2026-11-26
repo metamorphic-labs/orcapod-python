@@ -10,9 +10,8 @@ of its first write) and today. Nothing that identifies anything moves (content a
 pipeline hashes, stored paths, record ids), and every reader presents the two stores
 identically.
 
-The connector databases (SQLite, PostgreSQL, SpiralDB) cannot hold Orcapod's own
-stored tables yet (ITL-1162); their canonical order is tested on plain tables in
-``test_append_by_name.py``.
+The SQLite and PostgreSQL connectors cannot hold Orcapod's own stored tables yet
+(ITL-1162). Their canonical order is tested on plain tables in ``test_append_by_name.py``.
 """
 
 from __future__ import annotations

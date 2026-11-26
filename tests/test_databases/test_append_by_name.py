@@ -38,8 +38,10 @@ from orcapod.databases import (
 from orcapod.databases.utils import in_held_column_order
 from orcapod.errors import (
     InputValidationError,
+    UnrecordedTableSchemaWarning,
     UnstorableColumnError,
 )
+from tests.test_databases import fake_spiral_sdk
 from tests.test_databases.type_matrix import open_database
 
 PATH = ("t",)
@@ -59,8 +61,8 @@ SECOND_ORDERS = {
     "id c a b": [ID, "c", "a", "b"],
     "b id a c": ["b", ID, "a", "c"],
 }
-DATABASES = ("in-memory", "Delta", "SQLite", "SpiralDB")
-DURABLE = ("Delta", "SQLite", "SpiralDB")
+DATABASES = ("in-memory", "Delta", "SQLite")
+DURABLE = ("Delta", "SQLite")
 
 
 def _row(n: int) -> dict[str, Any]:
@@ -92,20 +94,15 @@ def _first_write(generation: str) -> Any:
     )
 
 
-def _given_order(
-    database: str, first: list[str], generation: str = "canonical", stored: bool = True
-) -> list[str]:
+def _given_order(first: list[str], generation: str = "canonical") -> list[str]:
     """The order a database gives a table first written in ``first``.
 
     A new table is written in the canonical order, the record id then every other
     column by name (ITL-1370); a table written before ITL-1370 keeps the order of its
-    first write. SpiralDB stores and reads every table in its own order, the key
-    columns then the value columns by name, whatever the order written (observed
-    live, ITL-1367; its fake does the same): the canonical order.
+    first write.
     """
-    canonical = [ID, *sorted(n for n in first if n != ID)]
-    if generation == "canonical" or (database == "SpiralDB" and stored):
-        return canonical
+    if generation == "canonical":
+        return [ID, *sorted(n for n in first if n != ID)]
     return first
 
 
@@ -138,9 +135,7 @@ def test_an_append_in_another_order_is_matched_by_name(
         # Before the flush: the pending rows (and the stored ones) read by name.
         _check(
             db.get_all_records(PATH, record_id_column=ID),
-            _given_order(
-                database, first_order, generation, stored=when == "after a flush"
-            ),
+            _given_order(first_order, generation),
             [1, 2, 3, 4],
         )
         # Delta creates the table at the flush: as before ITL-1370 in that generation.
@@ -150,7 +145,7 @@ def test_an_append_in_another_order_is_matched_by_name(
             db.flush()
         _check(
             db.get_all_records(PATH, record_id_column=ID),
-            _given_order(database, first_order, generation),
+            _given_order(first_order, generation),
             [1, 2, 3, 4],
         )
 
@@ -174,7 +169,7 @@ def test_an_append_in_another_order_after_reopening_is_matched_by_name(
     with open_database(database, tmp_path) as db:
         _check(
             db.get_all_records(PATH, record_id_column=ID),
-            _given_order(database, first_order, generation),
+            _given_order(first_order, generation),
             [1, 2, 3, 4, 5],
         )
 
@@ -184,14 +179,14 @@ def test_a_new_table_is_written_in_the_canonical_order(
     tmp_path: Path, database: str
 ) -> None:
     """A new table is the record id, then every other column by name (ITL-1370),
-    whatever order its first write has, in every database."""
+    whatever order its first write has, in every writable database."""
     with open_database(database, tmp_path) as db:
         for n, order in enumerate([["c", "b", "a", ID], [ID, "a", "b", "c"]]):
             path = (f"t{n}",)
             db.add_records(path, _rows(order, [1]), record_id_column=ID, flush=True)
             table = db.get_all_records(path, record_id_column=ID)
             assert table is not None
-            assert table.column_names == _given_order(database, order)
+            assert table.column_names == _given_order(order)
 
 
 # Today's verdict for an append that is reordered AND retypes ``a`` (``int32`` where
@@ -205,8 +200,6 @@ RETYPE_VERDICTS: dict[tuple[str, str], tuple[str, type[BaseException]]] = {
     ("Delta", "same pending batch"): ("add", ValueError),
     ("SQLite", "after a flush"): ("add", UnstorableColumnError),
     ("SQLite", "same pending batch"): ("add", UnstorableColumnError),
-    ("SpiralDB", "after a flush"): ("flush", ValueError),
-    ("SpiralDB", "same pending batch"): ("add", pa.ArrowInvalid),
 }
 
 
@@ -288,18 +281,33 @@ def test_rows_queued_before_a_table_is_created_again_are_read_with_it_by_name(
 def test_a_spiraldb_table_deleted_and_created_again_in_another_order(
     tmp_path: Path,
 ) -> None:
-    with open_database("SpiralDB", tmp_path) as db:
-        _add(db, _rows([ID, "a", "c", "b"], [1]), flush=True)
-        db._connector.delete_table("t")  # the connector's own drop
-        other_db = ConnectorArrowDatabase(SpiralDBConnector("p"))
-        with _first_write("before ITL-1370"):  # created again, another order
-            _add(other_db, _rows(["b", ID, "c", "a"], [3]), flush=True)
-        _add(db, _rows([ID, "a", "c", "b"], [4]), flush=True)
-        _check(
-            db.get_all_records(PATH, record_id_column=ID),
-            _given_order("SpiralDB", ["b", ID, "c", "a"]),
-            [3, 4],
+    """The same reader sees the replacement after an external writer recreates it."""
+    stored_id = ConnectorArrowDatabase.RECORD_ID_COLUMN
+    key_schema = [(stored_id, pa.large_binary())]
+    with fake_spiral_sdk.install(tmp_path):
+        project = fake_spiral_sdk.ExternalProject("append-order")
+        given = _rows([ID, "a", "c", "b"], [1]).rename_columns(
+            [stored_id, "a", "c", "b"]
         )
+        table = project.create_table("default.t", key_schema=key_schema)
+        table.write(given)
+        table.record(given.schema)
+        db = ConnectorArrowDatabase(SpiralDBConnector("append-order"))
+        _check(db.get_all_records(PATH, record_id_column=ID), [ID, "a", "b", "c"], [1])
+
+        project.drop_table("default.t")
+        replacement = project.create_table("default.t", key_schema=key_schema)
+        given = _rows(["b", ID, "c", "a"], [3]).rename_columns(
+            ["b", stored_id, "c", "a"]
+        )
+        replacement.write(given)
+        replacement.write(
+            _rows([ID, "a", "c", "b"], [4]).rename_columns([stored_id, "a", "c", "b"])
+        )
+        replacement.record(given.schema)
+        with pytest.warns(UnrecordedTableSchemaWarning, match="no longer holds"):
+            rows = db.get_all_records(PATH, record_id_column=ID)
+        _check(rows, [ID, "a", "b", "c"], [3, 4])
 
 
 # ── The shared step ────────────────────────────────────────────────────────────
@@ -782,7 +790,7 @@ def test_a_queued_row_is_read_from_memory(tmp_path: Path) -> None:
     """A point lookup of a queued row answers from memory, in the order the row is
     queued, with no lookup of the stored table (as main): the stored table is not
     even listed. Presentation order is a reader's business (ITL-1370)."""
-    with open_database("SpiralDB", tmp_path) as db:
+    with open_database("SQLite", tmp_path) as db:
         rows = pa.table(
             {
                 "rid": pa.array([bytes([1])], pa.large_binary()),
@@ -1295,7 +1303,7 @@ def test_postgresql_matches_an_append_in_another_order_by_name(
     first_order, second_order = FIRST_ORDERS[first], SECOND_ORDERS[second]
     _add(db, _rows(first_order, [1, 2]), flush=when == "after a flush")
     _add(db, _rows(second_order, [3, 4]))
-    expected = _given_order("PostgreSQL", first_order)  # canonical (ITL-1370)
+    expected = _given_order(first_order)  # canonical (ITL-1370)
     _check(db.get_all_records(PATH, record_id_column=ID), expected, [1, 2, 3, 4])
     db.flush()
     _check(db.get_all_records(PATH, record_id_column=ID), expected, [1, 2, 3, 4])

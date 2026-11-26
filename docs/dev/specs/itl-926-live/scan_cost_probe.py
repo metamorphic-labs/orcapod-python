@@ -24,7 +24,7 @@ def main() -> None:
     import spiral  # pyright: ignore[reportMissingImports]  (spiraldb extra, absent in the type-check job)
 
     project_id, tables = sys.argv[1], sys.argv[2:]
-    sp = spiral.Spiral()
+    sp = spiral.Spiral()  # pyright: ignore[reportAttributeAccessIssue]  # historical: measured with pyspiral, removed in ITL-1186
     project = sp.project(project_id)
     for name in tables:
         table = project.table(f"default.{name}")

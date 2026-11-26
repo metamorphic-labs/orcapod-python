@@ -57,7 +57,7 @@ def test_a_picture_is_self_contained_and_on_its_own_background(name: str) -> Non
 
 @pytest.mark.parametrize(
     "page",
-    ["docs/tutorial/08-inspecting-and-tracing.md", "docs/concepts/provenance.md"],
+    ["docs/tutorial/tracing-a-value.md", "docs/concepts/provenance.md"],
 )
 def test_the_pages_show_the_pictures(page: str) -> None:
     text = (REPOSITORY / page).read_text(encoding="utf-8")

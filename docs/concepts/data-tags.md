@@ -351,7 +351,7 @@ the stores keep it on every write (first write, append, merge, schema evolution;
 memory and on Delta). A database states whether it keeps
 field metadata with `keeps_field_metadata`
 (`orcapod.protocols.database_protocols.FieldMetadataKeepingDatabaseProtocol`): the
-in-memory, Delta and SpiralDB databases do; the SQLite and PostgreSQL databases keep no
+in-memory and Delta databases do; the SQLite and PostgreSQL databases keep no
 Arrow metadata at all. A node that would store a data-tag in a database that does
 not state it (a database without the member included) is refused when its database is
 attached, before anything is written. Use a database that keeps field metadata, or keep
