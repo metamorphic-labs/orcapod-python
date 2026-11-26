@@ -502,3 +502,115 @@ def test_the_memory_bound_counts_what_the_kept_rows_hold(
     calls.clear()
     _ = source.head(2)
     assert calls["scan"] == 1
+
+
+# --------------------------------------------------------------------------------------
+# Round 2 of the review (854bbf94)
+
+
+@pytest.fixture
+def failing_counts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every count of a table's keys fails, as a scan that times out does."""
+    original = fake_spiral_sdk.FakeKeyedTable.scan
+
+    def scan(self: fake_spiral_sdk.FakeKeyedTable, *args: Any, **kwargs: Any) -> Any:  # pyright: ignore[reportExplicitAny]
+        columns = args[0] if args else kwargs.get("columns")
+        if columns and SCHEMA_TABLE not in self._table["name"]:  # pyright: ignore[reportPrivateUsage]  # the fake's
+            raise fake_spiral_sdk.SpiralError("the count timed out")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(fake_spiral_sdk.FakeKeyedTable, "scan", scan)
+
+
+def test_a_failing_count_never_fails_a_preview_that_read_every_row(
+    calls: collections.Counter[str], failing_counts: None
+) -> None:
+    """Round 2, finding 1: the count is for later previews only."""
+    source = _source(tag_only_columns=True, where={"subject": "s1"})
+    seen = source.head(40)
+    assert seen.table.num_rows == 15
+    assert seen.total_rows == 15
+    assert not seen.total_is_estimate
+    # Nothing is kept without its count: the next preview reads again.
+    calls.clear()
+    assert source.head(40).table.num_rows == 15
+    assert calls["scan"] == 1
+
+
+def test_a_source_closed_before_the_count_still_answers_the_preview(
+    calls: collections.Counter[str],
+    after_the_read: Callable[[Callable[[], None]], None],
+) -> None:
+    """Round 2, finding 1: closed after the row scan, before the count."""
+    source = _source(tag_only_columns=True, where={"subject": "s1"})
+    after_the_read(source.close)
+    seen = source.head(40)
+    assert seen.table.num_rows == 15
+    with pytest.raises(RuntimeError, match="closed"):
+        _ = source.head(40)
+
+
+def test_rows_over_the_keep_bound_are_not_counted(
+    calls: collections.Counter[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 2, finding 1: never count for a record that will not be kept."""
+    monkeypatch.setattr(spiral_module, "PREVIEW_KEPT_ROWS", 10)
+    source = _source(tag_only_columns=True, where={"subject": "s1"})
+    calls.clear()
+    seen = source.head(40)
+    assert seen.table.num_rows == 15
+    assert "count" not in calls
+
+
+def test_a_late_preview_of_an_old_version_does_not_replace_a_newer_one(
+    calls: collections.Counter[str],
+    after_the_read: Callable[[Callable[[], None]], None],
+) -> None:
+    """Round 2, finding 2."""
+    source = _source(tag_only_columns=True)
+    newer: list[StreamView] = []
+
+    def move_and_preview() -> None:
+        _table().write(_rows([-2]))
+        assert source.check_for_new_data()
+        newer.append(source.head(10))
+
+    after_the_read(move_and_preview)
+    older = source.head(10)
+    assert -2 not in older.table["k"].to_pylist()
+    assert -2 in newer[0].table["k"].to_pylist()
+    calls.clear()
+    _same_view(source.head(10), newer[0])
+    assert calls == {}
+
+
+def test_rows_over_the_row_bound_are_never_copied(
+    calls: collections.Counter[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Round 2, finding 3: the row bound is checked before any copy."""
+    monkeypatch.setattr(spiral_module, "PREVIEW_KEPT_ROWS", 5)
+    copied: list[int] = []
+    original = spiral_module._compact  # pyright: ignore[reportPrivateUsage]  # the subject
+
+    def compact(rows: pa.Table) -> pa.Table:
+        copied.append(rows.num_rows)
+        return original(rows)
+
+    monkeypatch.setattr(spiral_module, "_compact", compact)
+    _ = _source(tag_only_columns=True).head(6)
+    assert copied == []
+
+
+def test_rows_that_are_not_a_slice_are_not_copied() -> None:
+    """Round 2, finding 3: a whole large-string column (whose last offset ``nbytes``
+    leaves out) is kept as it is; a slice of a larger batch is copied out."""
+    whole = pa.table({"s": pa.array(["a" * 100] * 1000, pa.large_string())})
+    assert whole.get_total_buffer_size() > whole.nbytes
+    assert spiral_module._compact(whole) is whole  # pyright: ignore[reportPrivateUsage]  # the subject
+    sliced = pa.table(
+        {"s": pa.array(["a", "z" * (2 * 2**20)], pa.large_string())}
+    ).slice(0, 1)
+    compacted = spiral_module._compact(sliced)  # pyright: ignore[reportPrivateUsage]  # the subject
+    assert compacted is not sliced
+    assert compacted.equals(sliced)
+    assert compacted.get_total_buffer_size() < 2**10
