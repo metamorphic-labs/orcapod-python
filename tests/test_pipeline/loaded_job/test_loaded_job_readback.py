@@ -346,7 +346,7 @@ def _append_recomputed_record(
     )
     pipeline_db = node._pipeline_database
     table_path = node._versioned_pipeline_path
-    entry_id_col = "__pipeline_record_id"
+    entry_id_col = "__row_key"  # the name the table's row key is read under here
     records = pipeline_db.get_all_records(table_path, record_id_column=entry_id_col)
     # The entry's original record: selected by its tag value and its recording
     # time (the earliest), never by row order.
@@ -377,7 +377,31 @@ def _append_recomputed_record(
     reader.result_database.add_records(
         reader.record_path, result, record_id_column=record_id_col, flush=True
     )
-    record = replaced(record, entry_id_col, [uuid.uuid4().bytes])
+    # The recomputed record: its record id is made from the instance and the new
+    # result id, and its key is the node's content hash with it (ITL-1471).
+    from orcapod.core import row_ids
+    from orcapod.types import ContentHash
+
+    new_record = row_ids.record_id(
+        node.data_context.arrow_hasher,
+        ContentHash.from_prefixed_digest(
+            record.column("__pipeline_instance_id")[0].as_py()
+        ),
+        uuid.UUID(bytes=new_record_id),
+    )
+    record = replaced(record, "__pipeline_record_id", [new_record.to_prefixed_digest()])
+    record = replaced(
+        record,
+        entry_id_col,
+        [
+            row_ids.pipeline_row_key(
+                ContentHash.from_prefixed_digest(
+                    record.column("__node_content_hash")[0].as_py()
+                ),
+                new_record,
+            )
+        ],
+    )
     record = replaced(
         record, time_col, [recorded_at + datetime.timedelta(minutes=minutes_later)]
     )

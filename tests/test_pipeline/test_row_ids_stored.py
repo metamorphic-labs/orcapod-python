@@ -212,8 +212,14 @@ def test_every_pipeline_row_gives_its_instance_and_record_id_again(
     for row in _rows(stored):
         (instance,) = _values(row, "__pipeline_instance_id")
         (key,) = _values(row, KEY)
+        (record,) = _values(row, "__pipeline_record_id")
         assert _instance_id_of_stored_row(row).to_prefixed_digest() == instance
-        assert _record_id_of_stored_row(row).to_prefixed_digest() == key
+        assert _record_id_of_stored_row(row).to_prefixed_digest() == record
+        # The table's key is the node's content hash with the record id.
+        assert key == row_ids.pipeline_row_key(
+            ContentHash.from_prefixed_digest(_values(row, "__node_content_hash")[0]),
+            ContentHash.from_prefixed_digest(record),
+        )
         # The same through the one module, from the stored instance and result ids.
         (result_id,) = _values(row, "__data_id")
         assert (
@@ -222,9 +228,10 @@ def test_every_pipeline_row_gives_its_instance_and_record_id_again(
                 ContentHash.from_prefixed_digest(instance),
                 uuid.UUID(bytes=result_id),
             ).to_prefixed_digest()
-            == key
+            == record
         )
     assert len(set(_values(stored, KEY))) == 3
+    assert len(set(_values(stored, "__pipeline_record_id"))) == 3
     assert len(set(_values(stored, "__pipeline_instance_id"))) == 3
 
 
@@ -626,7 +633,9 @@ def test_a_node_given_a_placeholder_finds_its_result_by_the_input_hash(
     assert _table(database, "add", "pdb_v2").sort_by(KEY).equals(stored_before)
 
 
-def _through_channels(node: Any, rows: list[tuple[Any, Any]]) -> list[tuple[Any, Any]]:
+def _through_channels(
+    node: Any, rows: list[tuple[Any, Any]], **options: Any
+) -> list[tuple[Any, Any]]:
     """Feed ``rows`` to ``node.async_execute`` through channels; return what it sends."""
 
     async def run() -> list[tuple[Any, Any]]:
@@ -635,7 +644,7 @@ def _through_channels(node: Any, rows: list[tuple[Any, Any]]) -> list[tuple[Any,
         for row in rows:
             await incoming.writer.send(row)
         await incoming.writer.close()
-        await node.async_execute(incoming.reader, outgoing.writer)
+        await node.async_execute(incoming.reader, outgoing.writer, **options)
         return await outgoing.reader.collect()
 
     return asyncio.run(run())
@@ -681,7 +690,12 @@ def test_placeholders_fed_through_the_async_route_find_their_results(
 
 @pytest.mark.parametrize("path", ["sync", "async"])
 def test_a_placeholder_whose_result_is_not_stored_is_refused(path: str) -> None:
-    """No stored result for the placeholder's input hash: an error, 0 calls, no row."""
+    """No stored result for the placeholder's input hash: an error, 0 calls, no row.
+
+    Row by row (``execute_data``) the error is raised; through ``async_execute`` it
+    is a failed row under the row failure policy, raised under ``fail_fast`` (the
+    policy itself is tested in ``test_row_ids_review_2.py``).
+    """
     database = InMemoryArrowDatabase()
     _run(_job(database, InMemoryArrowDatabase()), "sync")
     stored_before = _table(database, "add", "pdb_v2").sort_by(KEY)
@@ -700,7 +714,7 @@ def test_a_placeholder_whose_result_is_not_stored_is_refused(path: str) -> None:
             node.execute_data(*unknown[0])
     else:
         with pytest.raises((EphemeralResultMissingError, ExceptionGroup)) as raised:
-            _through_channels(node, unknown)
+            _through_channels(node, unknown, error_policy="fail_fast")
         error = raised.value
         if isinstance(error, ExceptionGroup):
             assert error.subgroup(EphemeralResultMissingError) is not None
@@ -756,7 +770,8 @@ def test_each_jobs_trace_finds_its_own_record_after_a_token_only_rerun(
         assert len(records[name]) == 3, name
     assert records["first"].isdisjoint(records["second"])
     labelled = {
-        ContentHash.from_prefixed_digest(k).to_string() for k in _values(stored, KEY)
+        ContentHash.from_prefixed_digest(k).to_string()
+        for k in _values(stored, "__pipeline_record_id")
     }
     assert records["first"] | records["second"] == labelled
     # The first job's trace is what it was before the second job ran.
@@ -876,7 +891,8 @@ def test_a_stored_row_keeps_the_token_columns_its_instance_id_was_made_from(
             == (_values(row, "__pipeline_instance_id")[0])
         )
         assert (
-            _record_id_of_stored_row(row).to_prefixed_digest() == (_values(row, KEY)[0])
+            _record_id_of_stored_row(row).to_prefixed_digest()
+            == (_values(row, "__pipeline_record_id")[0])
         )
 
     # Read back by a new node over the same store: every row is a hit, 0 calls.
@@ -1001,5 +1017,6 @@ def test_rows_with_no_token_store_no_token_column_and_recompute_their_ids(
             == (_values(row, "__pipeline_instance_id")[0])
         )
         assert (
-            _record_id_of_stored_row(row).to_prefixed_digest() == (_values(row, KEY)[0])
+            _record_id_of_stored_row(row).to_prefixed_digest()
+            == (_values(row, "__pipeline_record_id")[0])
         )

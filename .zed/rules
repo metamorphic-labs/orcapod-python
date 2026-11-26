@@ -1074,9 +1074,14 @@ these preimages anywhere else.
   column of the pipeline table and the key of the node's in-memory cache. A new instance of a
   known entry (same values, other tokens) writes a new row; its result normally comes from the
   result store (same input hash), so nothing is computed.
-- The pipeline table's row key is the record id. A write skips only an identical record id; a
-  recompute has a new result id, so it writes a new row. There is no recomputation index: among
-  the rows of one instance, __recorded_at says which is the latest.
+- A pipeline row stores its record id (__pipeline_record_id). The table's key is the node's
+  content hash with the record id (row_ids.pipeline_row_key; not a hash, never read apart):
+  with the default pipeline-hash scope one table holds the rows of several nodes, told apart by
+  __node_content_hash, and two of them can record one instance with one cached result. Never
+  key the table by the record id alone: the second node's row would be dropped as a duplicate.
+  A write skips only a row this node already stored under that record id; a recompute has a new
+  result id, so it writes a new row. There is no recomputation index: among the rows of one
+  instance, __recorded_at says which is the latest.
 - Only side effects and functions that take the invocation context are keyed by the entry id:
   the side-effect log's row key and its entry_id column, and
   InvocationContext._entry_id_hash_ch (invocation_hash is pipeline_hash :: entry id). A token
@@ -1103,12 +1108,16 @@ these preimages anywhere else.
   stores that same table (_add_pipeline_record), never the columns of
   as_table(columns={"source": True}): every stored row gives its instance and record id again
   from its own columns.
-- A trace resolves a held row by its instance: among the entries with the row's system tags,
-  result and input hash, the one whose stored input tokens are the input row's
-  (provenance._token_mismatch). Another job's record of the same entry, with other tokens, is
-  not that row's; several records of one instance stay an inconsistency.
+- A trace resolves a held row by its instance id, on every branch of a function step (over a
+  source and over another node): a function node says which instance it holds each row under
+  (FunctionJobNode.held_instance_ids), and provenance._entries_for keeps the stored records of
+  that instance. Never select by comparing token values. Another run's record of the same
+  entry, with other tokens, is not that row's; several records of one instance stay an
+  inconsistency.
 - On the async path as on the sync path, a placeholder input goes to _empty_data_cache_hit,
-  never to the function or the pipeline writer.
+  never to the function or the pipeline writer, and under the same row failure policy and
+  events: the row starts before the lookup, and a placeholder with no stored result is one
+  failed row (continue) or stops the run (fail_fast).
 - PostRunPayload.result_id is the result's id (a UUID, not a hash).
 
 ### System tag evolution rules

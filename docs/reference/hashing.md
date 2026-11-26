@@ -29,7 +29,7 @@ appended, because it is a variant of the same system tag mechanism.)
 | 6b | Aggregating operator system tag fold | SHA-256 of the canonical JSON list of member values, after the operation's label, for both system tags | `"<fold label>:<hex>"` `str`, plus a column name suffix | Deterministic per ordered member set; keeps system tags scalar through a many-to-one reduction |
 | 7 | Entry id (`row_ids.entry_id`) | `StarfixArrowHasher.hash_table(tags + system_tags + INPUT_DATA_HASH_COL)` | `ContentHash`; stored as `bytes` (`b"method:digest"`) | Unique per `(tag lineage, input_data content)`: an entry of the pipeline table |
 | 8 | Instance id (`row_ids.instance_id`) | `StarfixArrowHasher.hash_table(entry id + source-info tokens in name order)` | `ContentHash`; stored as `bytes` | Unique per `(entry, provenance of the input)`: one arrival of an entry; the pipeline table's lookup column |
-| 8b | Record id (`row_ids.record_id`) | `StarfixArrowHasher.hash_table(instance id + result id)` | `ContentHash`; stored as `bytes` | Unique per `(instance, result)`: the key of a pipeline table row |
+| 8b | Record id (`row_ids.record_id`) | `StarfixArrowHasher.hash_table(instance id + result id)` | `ContentHash`; stored as `bytes` | Unique per `(instance, result)`: names a pipeline table row; the table's key is the node's content hash with it |
 | 9 | Side-effect log key | the entry id (site 7) of the delivered row | `bytes` | Unique per `(tag lineage, input_data content)`; pod-version scoped via table path (`uri` + `pipeline_hash()`) |
 | 10 | `invocation_hash` | `f"{serialize(pipeline_hash_ch)}::{serialize(entry_id_hash_ch)}"` | `str` | Unique per `(pod topology, tag lineage, input_data content)`; pod-version scoped via table path |
 | 11 | Output schema hash | `SemanticAwarePythonHasher.hash_object((hash_schema(output Arrow schema),)).to_hex()` | `str` (bare hex digest) | Unique per Arrow schema of the declared outputs; embedded in function URI |
@@ -510,7 +510,9 @@ each suffix is the stream's `pipeline_hash()` (sites 1b and 6).
 | 8 | `alice` instance id | `6172726f775f76313a0000025d309ba35bcfa8c47f96f8131b565fe3090f26873513d7aab4022192bd68c45a` |
 | 8 | `bob` instance id | `6172726f775f76313a000002c2f60a9279aed09fcb0cfefd07639efbc231c0acc8dc269d9c47b4420910d774` |
 
-A record id (site 8b) is not shown: it holds the result id, which is new in every run.
+A record id (site 8b) is not shown: it holds the result id. A result computed anew has a new
+id (a UUID), so its record id is new; a warm repeat that reuses the stored result reuses its
+id, and with it the record id.
 
 > The hex prefix `6172726f775f7631` decodes to the ASCII string `arrow_v1` — the
 > `method` portion of the `b"{method}:{digest}"` format described in §3.
@@ -1202,7 +1204,7 @@ next preimage with its label (`to_prefixed_digest()`).
 |---|---|---|---|
 | **entry id** | the row's user tags, its system tags and its labelled input data hash | side effects and functions that take the invocation context: hit or miss, `invocation_hash` | the side-effect log (its row key and its `entry_id` column); the operator cache's `__pipeline_entry_id` column |
 | **instance id** | the entry id and the source-info tokens of the row's data, in name order | a function node's lookup: is this instance stored? | the pipeline table's plain column `__pipeline_instance_id` |
-| **record id** | the instance id and the result id (`__data_id`) | the key of a pipeline table row | the pipeline table's row key, read as `__pipeline_record_id` |
+| **record id** | the instance id and the result id (`__data_id`) | names a pipeline table row | the pipeline table's column `__pipeline_record_id`; the table's key is the node's content hash with it |
 
 An entry is what arrived: tags and data. An instance is an entry arriving with one provenance:
 when an upstream result is computed again, the same values arrive with new tokens, and that
@@ -1212,8 +1214,9 @@ points at.
 - A function node looks a row up by its **instance id**. A new instance of a known entry
   writes a new row; its result normally comes from the result store, which is keyed by the
   input data hash, so nothing is computed.
-- A write skips only a row whose **record id** is already stored. The same instance recorded
-  again with the same result is one row and keeps its first `__recorded_at`. A recompute (the
+- A write skips only a row the same node already stored under that **record id**. The same
+  instance recorded again by that node with the same result is one row and keeps its first
+  `__recorded_at`; another node that shares the table keeps its own row of the same record. A recompute (the
   stored result is gone) has a new result id, so it is a new row; among the rows of one
   instance, the one recorded last is the current one. There is no recomputation index.
 - Side effects and functions that take the invocation context are keyed by the **entry id**
@@ -1279,7 +1282,7 @@ November 26, 2026; to be reconsidered in ITL-1475).
 |---|---|
 | **Inputs** | `__pipeline_instance_id` (the instance id's labelled digest, `pa.large_binary()`) and `__data_id` (the bytes of the result id, `pa.large_binary()`) |
 | **Algorithm** | `StarfixArrowHasher.hash_table(preimage)` |
-| **Output format** | `bytes` in `b"{method}:{digest}"` format: the row key of the pipeline table, read as `__pipeline_record_id` |
+| **Output format** | `bytes` in `b"{method}:{digest}"` format, stored in `__pipeline_record_id`. The table's key is the pair (node content hash, record id), `row_ids.pipeline_row_key`: one table holds the rows of every node with one pipeline hash, and two of them can record one instance with one stored result. The key is not a hash and is never read apart |
 | **Uniqueness guarantee** | Unique per `(instance, result)` |
 | **Known exclusions** | The result id is a random id (a UUIDv7), not a hash: it carries no label, and a record id cannot be pinned as a golden value. The golden cases pin a pipeline table's instance ids instead. |
 

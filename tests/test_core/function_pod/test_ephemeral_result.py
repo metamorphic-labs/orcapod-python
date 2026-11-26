@@ -395,8 +395,9 @@ class TestBulkResolution:
           because the committed row is not in ``_pending_record_ids``
         """
         import pyarrow as pa
-        from orcapod.core.nodes.function_node import RECORD_ID_COL
         from orcapod.system_constants import constants
+
+        RECORD_ID_COL = "__row_key"  # the name the row key is read under here
 
         call_count = {"n": 0}
 
@@ -897,7 +898,7 @@ class TestAsyncEphemeralExecution:
 
 class TestAddPipelineRecordIndexed:
     def test_first_call_writes_one_row_keyed_by_its_record_id(self):
-        """The first row's key is hash(instance id, result id); it has no index column."""
+        """The first row's record id is hash(instance id, result id); no index column."""
         from orcapod.core import row_ids
         from orcapod.types import ContentHash
 
@@ -911,7 +912,7 @@ class TestAddPipelineRecordIndexed:
         pipeline_db.flush()
 
         all_records = pipeline_db.get_all_records(
-            node._versioned_pipeline_path, record_id_column=row_ids.RECORD_ID_COL
+            node._versioned_pipeline_path, record_id_column="__row_key"
         )
         assert all_records is not None
         assert all_records.num_rows == 1
@@ -922,6 +923,12 @@ class TestAddPipelineRecordIndexed:
             result_id,
         ).to_prefixed_digest()
         assert all_records.column(row_ids.RECORD_ID_COL).to_pylist() == [expected]
+        # The table's key is the node's content hash with the record id.
+        assert all_records.column("__row_key").to_pylist() == [
+            row_ids.pipeline_row_key(
+                node.content_hash(), ContentHash.from_prefixed_digest(expected)
+            )
+        ]
 
     def test_second_call_with_a_new_result_writes_a_second_row(self):
         """A recompute (a new result id) for the same instance is a new row."""

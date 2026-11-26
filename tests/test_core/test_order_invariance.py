@@ -1136,7 +1136,12 @@ def _job(
             continue
         volatile = _VOLATILE
         if path[-1] == PIPELINE_DB_SCHEMA_VERSION:
-            volatile = volatile | {PIPELINE_RUN_ID_COL, PIPELINE_RECORDED_AT_COL}
+            # The record id holds the result id, which is random (ITL-1471).
+            volatile = volatile | {
+                PIPELINE_RUN_ID_COL,
+                PIPELINE_RECORDED_AT_COL,
+                "__pipeline_record_id",
+            }
         elif path[-1] == OPERATOR_DB_SCHEMA_VERSION:
             # An operator cache row is stored with its insertion time (ITL-1471).
             volatile = volatile | {OPERATOR_RECORDED_AT_COL}

@@ -28,7 +28,8 @@ from orcapod.system_constants import (
 JOB = "ordered"
 PIPELINE = PIPELINE_DB_SCHEMA_VERSION
 RESULT = RESULT_DB_SCHEMA_VERSION
-ENTRY = "__pipeline_record_id"
+# The name the pipeline table's row key is read under in these tests.
+ENTRY = "__row_key"
 BASE_ENTRY = "__pipeline_instance_id"
 CALLS: list[int] = []
 DELIVERIES: list[int] = []
