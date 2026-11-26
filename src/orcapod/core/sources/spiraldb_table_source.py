@@ -55,6 +55,7 @@ from orcapod.core.sources.base import RootSource, saved_tag_only_columns
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.source_ids import joined_location, location_source_name
 from orcapod.core.sources.derived_source import validate_tags_as_data
+from orcapod.core.sources.seen_keys import SeenKeys
 from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
     key_column_type_allowed,
@@ -111,6 +112,23 @@ class _Head(NamedTuple):
     total_rows: int | None
     total_is_estimate: bool
     counted_to: int = 0
+
+
+def _reads_source_info(config: ColumnConfig) -> bool:
+    """Whether a table with the column groups of ``config`` needs source-info tokens.
+
+    The tokens are one string per row and data column, many times the size of the
+    rows they describe (ITL-1464), so a read builds them only when its result shows
+    them (``source``) or hashes each row (``content_hash``: a row's hash is computed
+    from the row as the stream holds it).
+
+    Args:
+        config: The normalized column configuration of the read.
+
+    Returns:
+        True when the tokens must be built.
+    """
+    return bool(config.source or config.content_hash)
 
 
 def _schema_difference(found: "pa.Schema", expected: "pa.Schema") -> str:
@@ -825,10 +843,15 @@ class SpiralDBTableSource(RootSource):
                 f"SpiralDB table {self._qualified!r}: {exc}"
             ) from exc
 
-    def _batch_streams(self) -> Generator["ArrowTableStream", None, None]:
+    def _batch_streams(
+        self, *, with_source_info: bool = True
+    ) -> Generator["ArrowTableStream", None, None]:
         """Scan the table once and yield its rows as streams of at most ``batch_rows`` rows.
 
         Each SpiralDB batch is held while its slices are yielded.
+
+        Args:
+            with_source_info: As for ``_read_batches``.
 
         Raises:
             SourceTooLargeError: If the read would return, or returns, more than
@@ -839,7 +862,11 @@ class SpiralDBTableSource(RootSource):
         asof = self._asof
         table = self._lookup_table()
         yield from self._read_batches(
-            table, asof=asof, limit=self._limit, max_rows=self._max_rows
+            table,
+            asof=asof,
+            limit=self._limit,
+            max_rows=self._max_rows,
+            with_source_info=with_source_info,
         )
 
     def _read_batches(
@@ -849,6 +876,7 @@ class SpiralDBTableSource(RootSource):
         asof: int | None,
         limit: int | None,
         max_rows: int | None,
+        with_source_info: bool = True,
     ) -> Generator["ArrowTableStream", None, None]:
         """Scan the table once, reading at most ``limit`` rows, in streams of ``batch_rows``.
 
@@ -859,6 +887,9 @@ class SpiralDBTableSource(RootSource):
             asof: The pinned version for both the count and the scan.
             limit: Read at most this many rows, the first in key order.
             max_rows: Raise when the read would return more rows; ``None`` for no cap.
+            with_source_info: Whether each stream holds its rows' source-info tokens.
+                ``False`` only where the caller returns no source-info column and
+                hashes no row (``_whole_table``): the streams then hold null tokens.
 
         Raises:
             SourceTooLargeError: If the read would return, or returns, more than
@@ -882,7 +913,7 @@ class SpiralDBTableSource(RootSource):
                 )
         seen = 0
         # Keys must be unique across the whole read, not only within a slice.
-        identifiers: set[str] = set()
+        identifiers = SeenKeys()
         for batch in table.scan_batches(
             where=dict(self._condition.equalities) or None,
             limit=limit,
@@ -907,14 +938,13 @@ class SpiralDBTableSource(RootSource):
                 # Tokens first: they refuse a null key before it is copied into
                 # a non-nullable column.
                 tokens = self._key_tokens(rows)
-                repeated = identifiers.intersection(tokens)
+                repeated = identifiers.add(tokens)
                 if repeated:
                     raise RowIdentifierError(
                         f"SpiralDB table {self._qualified!r}: key "
-                        f"{sorted(repeated)[0]} appears in two rows; key values "
+                        f"{repeated[0]} appears in two rows; key values "
                         "must be unique, so each row has its own identifier"
                     )
-                identifiers.update(tokens)
                 yield self._builder.attach_provenance(
                     self._with_tag_copies(rows),
                     tag_columns=self._tag_columns,
@@ -923,6 +953,7 @@ class SpiralDBTableSource(RootSource):
                     source_id=self.source_id,
                     row_identifiers=tokens,
                     data_tags=self._data_tags,
+                    with_source_info=with_source_info,
                 )
 
     def iter_data(self) -> Iterator["tuple[TagProtocol, DataProtocol]"]:
@@ -959,8 +990,11 @@ class SpiralDBTableSource(RootSource):
         all_info: bool = False,
     ) -> "pa.Table":
         """Scan the table and return its rows as one PyArrow table (all held in memory)."""
+        config = ColumnConfig.handle_config(columns, all_info=all_info)
         return self._whole_table(
-            self._batch_streams(), columns=columns, all_info=all_info
+            self._batch_streams(with_source_info=_reads_source_info(config)),
+            columns=columns,
+            all_info=all_info,
         )
 
     def _whole_table(
@@ -972,8 +1006,10 @@ class SpiralDBTableSource(RootSource):
     ) -> "pa.Table":
         """Return the rows of ``streams`` (batches of one read) as one table."""
         # One stream over all the rows, so that a whole-table option (sorting by
-        # tags) applies across batches.
-        enriched = {"source": True, "system_tags": True}
+        # tags) applies across batches. The source-info tokens are carried only for
+        # a result that shows or hashes them (ITL-1464).
+        config = ColumnConfig.handle_config(columns, all_info=all_info)
+        enriched = {"source": _reads_source_info(config), "system_tags": True}
         tables = [stream.as_table(columns=enriched) for stream in streams]
         if not tables:
             return self._stream.as_table(columns=columns, all_info=all_info)
