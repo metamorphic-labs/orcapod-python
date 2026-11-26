@@ -657,6 +657,7 @@ class CachedSource(RootSource):
         """Snapshot stored cache rows for this run without ingesting live data."""
         if id(self) in snapshots:
             return snapshots[id(self)]
+        self._cache_database.refresh_table(self.cache_path)
         records = self._read_cached_records_with_hashes()
         hashes = self._record_hashes(records)
         stream = self._stream_from_records(records)

@@ -2,8 +2,10 @@
 
 import json
 import sqlite3
+import sys
 import tempfile
 from contextlib import closing
+from inspect import signature
 from pathlib import Path
 
 import pytest
@@ -452,40 +454,124 @@ def test_loading_a_job_does_not_create_a_temporary_blueprint(
     assert PipelineJob.load(path).unbound_sources == ["memory"]
 
 
-@pytest.mark.parametrize("uri", [False, True], ids=["literal", "uri"])
+def write_sqlite_input(path: Path, value: int) -> None:
+    """Create three rows with a value that identifies this database."""
+    with closing(sqlite3.connect(path)) as connection:
+        _ = connection.execute(
+            'CREATE TABLE samples (id INTEGER PRIMARY KEY, "group" TEXT NOT NULL, '
+            '"x" INTEGER NOT NULL, y INTEGER NOT NULL)'
+        )
+        _ = connection.executemany(
+            "INSERT INTO samples VALUES (?, ?, ?, ?)",
+            [(1, "a", value, 5), (2, "b", value, 7), (3, "c", value, 9)],
+        )
+        connection.commit()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="colon in filename")
 def test_sqlite_source_load_preserves_filename_interpretation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, uri: bool
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A file: string can name a literal path or a URI selected by the caller."""
+    """The file: prefix is part of the filename."""
     monkeypatch.chdir(tmp_path)
-    for name, value in (("file:input.sqlite", 2), ("input.sqlite", 99)):
-        with closing(sqlite3.connect(tmp_path / name)) as connection:
-            _ = connection.execute(
-                'CREATE TABLE samples (id INTEGER PRIMARY KEY, "group" TEXT NOT NULL, '
-                "x INTEGER NOT NULL, y INTEGER NOT NULL)"
-            )
-            _ = connection.executemany(
-                "INSERT INTO samples VALUES (?, ?, ?, ?)",
-                [(1, "a", value, 5), (2, "b", value, 7), (3, "c", value, 9)],
-            )
-            connection.commit()
+    write_sqlite_input(tmp_path / "file:input.sqlite", 2)
+    write_sqlite_input(tmp_path / "input.sqlite", 99)
     source = SQLiteTableSource(
         "file:input.sqlite",
         "samples",
         tag_columns=["id", "group"],
         tag_only_columns=True,
         source_id="file",
-        uri=uri,
     )
-    expected = [99 if uri else 2] * 3
+    expected = [2] * 3
     assert source.as_table().column("x").to_pylist() == expected
     path = save_job(DeltaTableDatabase("store"), file_source=source)
     loaded = PipelineJob.load(path)
     assert loaded.nodes["file"].as_table().column("x").to_pylist() == expected
-    if not uri:
-        Path("input.sqlite").unlink()
-        loaded = PipelineJob.load(path)
-        assert loaded.nodes["file"].as_table().column("x").to_pylist() == expected
+    Path("input.sqlite").unlink()
+    loaded = PipelineJob.load(path)
+    assert loaded.nodes["file"].as_table().column("x").to_pylist() == expected
+
+
+def test_relative_sqlite_source_pins_its_file_at_construction_and_load(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refresh resolves the same file after chdir, for live and restored sources."""
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    write_sqlite_input(first / "input.sqlite", 2)
+    write_sqlite_input(second / "input.sqlite", 99)
+    monkeypatch.chdir(first)
+    source = SQLiteTableSource("input.sqlite", "samples")
+    assert source.source_id == "sqlite_table_v1:input.sqlite:main.samples"
+    named = SQLiteTableSource(
+        "input.sqlite",
+        "samples",
+        tag_columns=["id", "group"],
+        tag_only_columns=True,
+        source_id="file",
+    )
+    path = first / save_job(DeltaTableDatabase(first / "store"), file_source=named)
+    monkeypatch.chdir(second)
+    assert source.check_for_new_data() is False
+    assert source.as_table().column("x").to_pylist() == [2] * 3
+    loaded = PipelineJob.load(path)
+    restored = loaded.sources["file"]
+    assert isinstance(restored, SQLiteTableSource)
+    assert restored.as_table().column("x").to_pylist() == [99] * 3
+    monkeypatch.chdir(first)
+    assert restored.check_for_new_data() is False
+    assert restored.as_table().column("x").to_pylist() == [99] * 3
+    assert "uri" not in signature(SQLiteTableSource).parameters
+
+
+@pytest.mark.parametrize("binding", ["database", "result_database", "cache"])
+def test_loading_a_delta_scope_uses_the_same_path_mapping_as_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, binding: str
+) -> None:
+    """Simulate Windows's colon mapping while accessing a real store."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        DeltaTableDatabase,
+        "_sanitize_path_component",
+        staticmethod(lambda component: component.replace(":", "!")),
+    )
+    scoped = DeltaTableDatabase("root").at("experiment:one")
+    path = save_job(
+        scoped if binding == "database" else DeltaTableDatabase("store"),
+        result_database=scoped if binding == "result_database" else None,
+        cache_database=scoped if binding == "cache" else None,
+    )
+    assert (Path("root") / "experiment!one").is_dir()
+    loaded = PipelineJob.load(path)
+    assert loaded.unbound_sources == ["memory"]
+    summary = loaded.run(load_only=True)
+    assert summary.nodes["file_total"].reused == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+async def test_load_only_rechecks_a_source_cache_that_reappears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, asynchronous: bool
+) -> None:
+    """A missing cache on the first run cannot hide restored rows on the second."""
+    monkeypatch.chdir(tmp_path)
+    root = Path("cache")
+    path = save_job(
+        DeltaTableDatabase("store"), cache_database=DeltaTableDatabase(root)
+    )
+    loaded = PipelineJob.load(path)
+    moved = root.rename("moved")
+    empty = await load_only(loaded, asynchronous=asynchronous)
+    assert empty.nodes["file_total"].rows == 0
+    assert not root.exists()
+
+    _ = moved.rename(root)
+    restored = await load_only(loaded, asynchronous=asynchronous)
+    assert restored.ran_nothing is False
+    assert restored.nodes["file_total"].reused == 3
 
 
 @pytest.mark.asyncio

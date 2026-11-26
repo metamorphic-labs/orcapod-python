@@ -3452,7 +3452,7 @@ class DeltaTableDatabase:
         """Validate a saved local scope without creating it."""
         if self._is_cloud or not self._path_prefix:
             return
-        scope = self._local_root.joinpath(*self._path_prefix)
+        scope = Path(self._get_table_uri(()))
         if not scope.is_dir():
             raise ValueError(f"Delta store scope {scope} is not an existing directory")
 

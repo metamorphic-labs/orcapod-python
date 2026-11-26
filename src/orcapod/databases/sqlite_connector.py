@@ -21,7 +21,6 @@ import threading
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlencode
 
 import pyarrow as pa
 
@@ -29,24 +28,6 @@ from orcapod.databases.utils import is_direct_projection
 from orcapod.types import ColumnInfo
 
 logger = logging.getLogger(__name__)
-
-
-def _read_only_uri(db_path: str, *, uri: bool) -> str:
-    """Open an existing file using the caller's original path interpretation."""
-    if uri and db_path.startswith("file:"):
-        location, _, query = db_path.partition("#")[0].partition("?")
-        options = parse_qsl(query, keep_blank_values=True)
-    else:
-        location = Path(db_path).absolute().as_uri() if db_path else "file:"
-        options = []
-    if (
-        db_path == ":memory:"
-        or location in {"file:", "file::memory:"}
-        or ("mode", "memory") in options
-    ):
-        raise ValueError("A saved SQLite source requires an existing database file")
-    options = [(key, value) for key, value in options if key != "mode"]
-    return f"{location}?{urlencode([*options, ('mode', 'ro')])}"
 
 
 # ---------------------------------------------------------------------------
@@ -263,19 +244,19 @@ class SQLiteConnector:
         db_path: str | os.PathLike[str] = ":memory:",
         *,
         _read_only: bool = False,
-        _uri: bool = False,
     ) -> None:
         self._db_path = db_path
         location = str(db_path)
         if _read_only:
-            location = _read_only_uri(location, uri=_uri)
-        elif not _uri and location.startswith("file:"):
-            # Make a literal filename unambiguous even when SQLite was built with
-            # URI filenames enabled by default.
-            location = os.path.abspath(location)
+            if location in {"", ":memory:"}:
+                raise ValueError(
+                    "A saved SQLite source requires an existing database file"
+                )
+            # Encode the literal filename before adding SQLite's read-only option.
+            location = f"{Path(location).absolute().as_uri()}?mode=ro"
         self._conn: sqlite3.Connection | None = sqlite3.connect(
             location,
-            uri=_read_only or _uri,
+            uri=_read_only,
             check_same_thread=False,
             isolation_level=None,
         )
