@@ -12,6 +12,18 @@ it is.
 
 These are raised at the line that makes the mistake, before any data is processed.
 
+### `TypeError: Condition has no truth value`
+
+**Cause.** A comparison built from `col()` describes which rows to keep. Python
+asks for a single Boolean in a chained comparison such as `1 <= col("t") <= 5`, in
+`and`, `or` and `not`, and in `if condition` or `bool(condition)`.
+
+**Fix.** Use `stream.filter(col("t").between(1, 5))` for an inclusive range or
+`stream.filter(col("t") >= 1, col("t") <= 5)` for separate comparisons. To combine
+comparisons explicitly, parenthesize each and use `&`, `|` or `~`. For a source's
+`where()`, pass separate equality keywords. To check whether a condition has any
+requirements, use `condition.is_empty`.
+
 ### `ValueError: tag_columns not found in table: {...}. Available columns: [...]`
 
 **Cause.** A name in `tag_columns` is not a column of the data.
