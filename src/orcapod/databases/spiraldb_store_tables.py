@@ -38,6 +38,7 @@ import orcapod.databases.spiral_store_names as names
 from orcapod.errors import SpiralStoreTableCollisionError
 from orcapod.logical_types.canonical_form import declaration_form_schema
 from orcapod.types import ColumnInfo
+from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
 
 # Only ``SpiralError`` is read, at run time; the optional extra is never needed to
@@ -103,6 +104,8 @@ class _Run:
 
     Attributes:
         absent: Tables found absent in this run and not created by it since.
+        new: Tables found with no rows in this run (new: their first write records them),
+            not written by it since.
         listing: The dataset's tables, names by table id, listed once in this run and
             extended by the tables this run created; ``None`` until first listed.
         handles: The latest snapshot of each table this run opened by id or wrote, by
@@ -111,6 +114,7 @@ class _Run:
 
     absent: set[str]
     listing: dict[str, str] | None = None
+    new: set[str] | None = None
     handles: dict[str, Any] | None = None
 
 
@@ -212,7 +216,7 @@ class StoreTables:
         rest of that run.
         """
         if self._run_depth == 0:
-            self._run = _Run(absent=set(), handles={})
+            self._run = _Run(absent=set(), handles={}, new=set())
         self._run_depth += 1
         try:
             yield
@@ -287,8 +291,11 @@ class StoreTables:
         if found is not None:
             return found
         path = self._path_of(table_name)
-        if self._run is not None and table_name in self._run.absent:
-            return None  # found absent in this run, and not created by it since
+        if self._run is not None and (
+            table_name in self._run.absent
+            or (self._run.new is not None and table_name in self._run.new)
+        ):
+            return None  # found absent or new in this run, and not written since
         table = self._open_table(table_name)
         if table is None:
             self._judged[table_name] = ("none", None)
@@ -309,6 +316,8 @@ class StoreTables:
         if not self._holds_rows(table):
             # New: its first write records it, unless what it saw here changed.
             self._judged[table_name] = _seen_manifest(metadata, path)
+            if self._run is not None and self._run.new is not None:
+                self._run.new.add(table_name)
             return None
         try:
             manifest = None if record is None else codec.read_manifest(metadata, path)
@@ -388,7 +397,7 @@ class StoreTables:
         """The record of a listed table, read once per id; ``None`` without one."""
         if table_id not in self._records_by_id:
             with self._service_call(f"read the metadata of {table_name}"):
-                metadata = self._client.keyed_table_by_id(table_id).get_metadata()
+                metadata = self._by_id(table_id).get_metadata()
             try:
                 record = names.read_store_table_metadata(metadata)
             except SpiralStoreTableCollisionError as exc:
@@ -464,9 +473,10 @@ class StoreTables:
         for column, value in (equal or {}).items():
             if column == codec.KEY_COLUMN or column not in found.manifest.schema.names:
                 continue
-            stored: pa.Field[pa.DataType] = found.manifest.physical.field(
-                found.manifest.schema.get_field_index(column)
-            )
+            index = found.manifest.schema.get_field_index(column)
+            stored: pa.Field[pa.DataType] = found.manifest.physical.field(index)
+            if not _stored_as_given(found.manifest.schema.field(index), stored):
+                continue  # its stored form is not its value (a time, a logical type)
             literal = _pushed_literal(cast(object, value), stored.type)
             if literal is None:
                 continue
@@ -590,7 +600,7 @@ class StoreTables:
             encoded = _encoded(records)
             if encoded.num_rows == 0:
                 return  # nothing to write, so nothing is created
-            seen = self._judged.pop(table_name, ("none", None))
+            seen = self._judged.get(table_name, ("none", None))
             table, created = self._create_or_open(table_name)
             if not created:
                 self._require_key(table, table_name)
@@ -607,6 +617,10 @@ class StoreTables:
                 names.StoreTableRecord(path, path[-1], context),
                 manifest,
             )
+            # Recorded and written: no longer new.
+            _ = self._judged.pop(table_name, None)
+            if self._run is not None and self._run.new is not None:
+                self._run.new.discard(table_name)
             return
         difference = codec.schema_difference(found.manifest.schema, records.schema)
         if difference is not None:
@@ -775,3 +789,13 @@ def _same_seen(one: _Seen, other: _Seen) -> bool:
             cast(codec.StoreManifest, one[1]), cast(codec.StoreManifest, other[1])
         )
     return one[1] == other[1]
+
+
+def _stored_as_given(logical: pa.Field[Any], stored: pa.Field[Any]) -> bool:
+    """Whether a column is stored as its values are given: the same type (in its large
+    variant), and no logical type identifier. Only then is equality pushed down."""
+    if codec.EXTENSION_NAME_KEY in (logical.metadata or {}):
+        return False
+    return arrow_utils.normalize_to_large_types(
+        logical.type, keep_null=True
+    ) == arrow_utils.normalize_to_large_types(stored.type, keep_null=True)

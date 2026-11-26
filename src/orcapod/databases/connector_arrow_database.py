@@ -895,7 +895,11 @@ class ConnectorArrowDatabase:
         parts: list[pa.Table] = []
 
         committed = self._get_committed_table(record_path, keys=keys, equal=equal)
-        if committed is not None and committed.num_rows > 0:
+        # A narrowed read stands for the whole stored table, which has rows: its
+        # candidates take part even when none is left, so the pending rows are merged
+        # and the exact filter applied as over the whole table (ITL-1502).
+        narrowed = keys is not None or bool(equal)
+        if committed is not None and (committed.num_rows > 0 or narrowed):
             parts.append(committed)
         pending = self._pending_batches.get(record_key)
         if pending is not None and pending.num_rows > 0:

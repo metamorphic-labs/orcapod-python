@@ -882,3 +882,140 @@ def test_a_table_judged_new_stays_new_beside_an_equivalent_record() -> None:
         RESULT, record_id_column="__record_id"
     )
     assert got is not None and got["__record_id"].to_pylist() == [b"a0"]
+
+
+# ------------------------------------- review r4 of PR 599 (a6a06638)
+
+
+def _outcome(call: Any) -> Any:
+    """What a lookup gives: its rows and schema, or the type of what it raised."""
+    try:
+        got = call()
+    except Exception as exc:  # noqa: BLE001  # the error itself is the outcome compared
+        return ("raised", type(exc).__name__)
+    if got is None:
+        return None
+    return (got.schema, got.to_pylist())
+
+
+def _as_with_whole_reads(
+    monkeypatch: pytest.MonkeyPatch, connector: SpiralDBConnector, call: Any
+) -> tuple[Any, Any]:
+    """The lookup's outcome narrowed, and as PR 595 gives it (a whole-table read)."""
+    narrowed = _outcome(call)
+    whole_read = type(connector).read_candidates
+
+    def whole(table_name: str, *, keys: Any = None, equal: Any = None) -> Any:
+        return whole_read(connector, table_name)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(connector, "read_candidates", whole)
+        whole_outcome = _outcome(call)
+    return narrowed, whole_outcome
+
+
+def _store_with_rows(
+    table: pa.Table,
+) -> tuple[SpiralDBConnector, ConnectorArrowDatabase]:
+    connector = store()
+    db = ConnectorArrowDatabase(connector)
+    db.add_records(RESULT, table, record_id_column="__record_id", flush=True)
+    return connector, db
+
+
+@pytest.mark.usefixtures("root")
+def test_a_pending_row_is_merged_with_the_stored_schema_as_before(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pending row looked up alone keeps the stored rows' merged (nullable) schema."""
+    connector, db = _store_with_rows(rows(["r0"]))
+    pending = rows(["r9"])
+    pending = pending.cast(
+        pa.schema(
+            [f.with_nullable(False) if f.name == "a.b" else f for f in pending.schema]
+        )
+    )
+    db.add_records(RESULT, pending, record_id_column="__record_id")
+    for call in (
+        lambda: db.get_records_by_ids(RESULT, [b"r9"], record_id_column="__record_id"),
+        lambda: db.get_record_by_id(RESULT, b"r9", record_id_column="__record_id"),
+        lambda: db.get_records_with_column_value(
+            RESULT, {"__record_id": b"r9"}, record_id_column="__record_id"
+        ),
+    ):
+        narrowed, whole = _as_with_whole_reads(monkeypatch, connector, call)
+        assert narrowed == whole
+
+
+@pytest.mark.usefixtures("root")
+@pytest.mark.parametrize(
+    "constraints",
+    [{"a.b": 99, "absent": 1}, {"absent": 1}, {"a.b": 99}, {"a.b": 0}],
+    ids=str,
+)
+def test_a_lookup_by_value_gives_what_a_whole_read_gives_errors_included(
+    monkeypatch: pytest.MonkeyPatch, constraints: dict[str, Any]
+) -> None:
+    connector, db = _store_with_rows(rows(["r0", "r1"]))
+    narrowed, whole = _as_with_whole_reads(
+        monkeypatch,
+        connector,
+        lambda: db.get_records_with_column_value(
+            RESULT, constraints, record_id_column="__record_id"
+        ),
+    )
+    assert narrowed == whole
+
+
+@pytest.mark.usefixtures("root")
+@pytest.mark.parametrize("value", [5, 999])
+def test_a_time_column_stored_as_integers_is_not_pushed_down(
+    monkeypatch: pytest.MonkeyPatch, value: int
+) -> None:
+    """A time is stored as an integer: equality on it is left to the exact filter."""
+    table = rows(["r0"]).append_column(
+        "t", pa.array([5], pa.int32()).view(pa.time32("s"))
+    )
+    connector, db = _store_with_rows(table)
+    calls = _Calls(monkeypatch)
+    narrowed, whole = _as_with_whole_reads(
+        monkeypatch,
+        connector,
+        lambda: db.get_records_with_column_value(
+            RESULT, {"t": value}, record_id_column="__record_id"
+        ),
+    )
+    assert narrowed == whole
+    assert all(s.get("filter") is None for s in calls.scans)
+
+
+@pytest.mark.usefixtures("root")
+def test_a_listing_and_a_lookup_open_a_table_by_id_once_per_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _stored_db(["r0"])
+    opens: list[str] = []
+    by_id = fake.FakeClient.keyed_table_by_id
+
+    def counted(client: Any, table_id: str, **kw: Any) -> Any:
+        opens.append(table_id)
+        return by_id(client, table_id, **kw)
+
+    monkeypatch.setattr(fake.FakeClient, "keyed_table_by_id", counted)
+    with db.run_scope():
+        assert db.list_table_paths(("my_fn",)) == [RESULT]
+        assert db.get_record_by_id(RESULT, b"r0") is not None
+    assert len(opens) == 1
+
+
+@pytest.mark.usefixtures("root")
+def test_an_existing_empty_table_is_opened_by_name_once_per_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _make_table(names.store_table_name(RESULT), {}, with_rows=False)
+    db = ConnectorArrowDatabase(store())
+    calls = _Calls(monkeypatch)
+    with db.run_scope():
+        for _ in range(3):
+            assert not db.table_exists(RESULT)
+    assert calls.opens == 1
