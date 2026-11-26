@@ -1253,7 +1253,7 @@ preimage = tag.as_table(columns={"system_tags": True})
 
 | Field | Value |
 |---|---|
-| **Inputs** | `__pipeline_entry_id` (the entry id's labelled digest, `pa.large_binary()`), then the `_source_*` columns of the input data in name order, with the Arrow types the row gives them |
+| **Inputs** | `__pipeline_entry_id` (the entry id's labelled digest, `pa.large_binary()`), then the `_source_*` columns of the input data in name order (`data.source_info_table()`): for a row read from an Arrow table, the columns that table has, with their Arrow types and nullable fields, never typed again from the token values; for a row built from Python values, the columns typed from its tokens |
 | **Algorithm** | `StarfixArrowHasher.hash_table(preimage)` |
 | **Output format** | `ContentHash`; stored in `__pipeline_instance_id` as `b"{method}:{digest}"` |
 | **Uniqueness guarantee** | Unique per `(entry, source-info tokens)`; the in-memory cache key and the lookup column of the pipeline table |
@@ -1742,7 +1742,8 @@ What a schema must therefore agree on to be one identity:
 ## 9. Arrow Table Hash (`arrow_v1`)
 
 Every Arrow-derived hash in the sites above (row data hashes, `record_id`s built from a
-default `source_id`, base and pipeline entry ids, operator and cached-source record hashes,
+default `source_id`, the entry, instance and record ids of §3, operator and cached-source
+record hashes,
 datagram and stream hashes) comes from `StarfixArrowHasher.hash_table`, which returns
 `ContentHash(method="arrow_v1", digest=D)` (a pyarrow table given as a value takes
 `hash_table_strict` instead, below). `D` is 35 bytes: the starfix hash format number

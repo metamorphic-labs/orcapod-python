@@ -1095,6 +1095,17 @@ these preimages anywhere else.
   in the result store by the input hash, calls nothing and writes no pipeline row (developer,
   November 26, 2026; FunctionJobNode._empty_data_cache_hit is the one place that holds that
   choice, to be reconsidered in ITL-1475).
+- The instance id reads a row's tokens through DataProtocol.source_info_table(): for a row read
+  from an Arrow table (a stream's row) the typed columns that table has, with nullable fields,
+  never typed again from the token values (a nested token column would not survive it); for a
+  row built from Python values, or changed since it was read, the columns typed from its
+  tokens. A lookup must never fail on a row its stream holds as valid Arrow.
+- A trace resolves a held row by its instance: among the entries with the row's system tags,
+  result and input hash, the one whose stored input tokens are the input row's
+  (provenance._token_mismatch). Another job's record of the same entry, with other tokens, is
+  not that row's; several records of one instance stay an inconsistency.
+- On the async path as on the sync path, a placeholder input goes to _empty_data_cache_hit,
+  never to the function or the pipeline writer.
 - PostRunPayload.result_id is the result's id (a UUID, not a hash).
 
 ### System tag evolution rules
