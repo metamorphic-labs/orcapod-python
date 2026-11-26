@@ -770,3 +770,17 @@ design problem.
   (optional).
 - The options after the defaults: the serving mode and a side-effect caching mode.
 - An `EmptyData` input's instance id is the hash of its entry id alone (no readable tokens).
+
+### 14.6 Approved; the exact golden list and the plan
+
+Developer, 2026-11-25:
+- Approved option A: the clean entry id, so every `invocation_hash` and side-effect log key moves
+  once.
+- Approved `pdb_v2`, `odb_v2` and `tdb_v2`.
+- Approved renaming the log's `record_id_hash` to `entry_id`, and `InvocationContext`'s
+  `_record_id_hash_ch` with it.
+
+The exact golden list, with every value before and after, is
+`docs/dev/specs/itl-1466/golden-changes.md`. A trial on a copy of the golden tree shows the
+generator writes exactly that list and nothing else. It awaits the developer's approval of the
+values. The staged implementation plan, defaults first, is `docs/dev/plans/itl-1466-plan.md`.
