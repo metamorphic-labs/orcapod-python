@@ -1,0 +1,172 @@
+# pyright: reportImportCycles=false
+# The existing cycle core_protocols -> side_effect_pod -> side_effects, which this module's
+# type-only import of the protocols brings into pyright's view because side_effects imports
+# it (a file-level diagnostic: no line-level ignore reaches it; as for core/data_tags.py).
+# Breaking it is ITL-1206.
+"""The three nested ids of a row that passes through a node (ITL-1466, ITL-1471).
+
+Each id is the hash of a one-row Arrow table, its preimage, made by the data
+context's Arrow hasher, and each is built from the one before:
+
+- The **entry id** names an entry of the pipeline table: the row's user tags,
+  its system tags and the hash of its data. Side effects and functions that take
+  the invocation context are keyed by it, and the operator cache stores it.
+- The **instance id** names one arrival of an entry, with its provenance: the
+  entry id and the source-info tokens of the row's data. A function node looks a
+  row up by it.
+- The **record id** names one stored row of a function node's pipeline table:
+  the instance id and the id of the result the row points at.
+
+Every preimage is built here and nowhere else. The column names inside a
+preimage are part of its recipe: changing one moves every id made from it.
+
+A nested id enters the next preimage as its labelled digest
+(``ContentHash.to_prefixed_digest()``): a hash fed into another hash carries the
+name of the algorithm that produced it.
+"""
+
+from __future__ import annotations
+
+import uuid
+from typing import TYPE_CHECKING
+
+import pyarrow as pa
+
+from orcapod.system_constants import constants
+
+if TYPE_CHECKING:
+    from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
+    from orcapod.protocols.hashing_protocols import ArrowHasherProtocol
+    from orcapod.types import ContentHash
+
+# The entry id's column: in the instance id's preimage, and in the operator cache.
+ENTRY_ID_COL = "__pipeline_entry_id"
+
+# The instance id's column: the pipeline table's lookup column, and in the record
+# id's preimage.
+INSTANCE_ID_COL = "__pipeline_instance_id"
+
+# The record id's column: the name the pipeline table's row key is read under.
+RECORD_ID_COL = "__pipeline_record_id"
+
+# What stands in a source-info token where the result id would be, when the token
+# belongs to the placeholder of an ephemeral result that is gone (``EmptyData``).
+# A result id is 32 hexadecimal characters, so this text names no row of any
+# result table; it holds no ``::``, so the token still splits into its three parts.
+EPHEMERAL_RESULT_GONE = "EPHEMERAL_RESULT_GONE"
+
+
+def entry_id_preimage(tag: "TagProtocol", data: "DataProtocol") -> "pa.Table":
+    """Build the preimage of a row's entry id.
+
+    Args:
+        tag: The row's tag.
+        data: The row's data. Only its content hash is read, so a placeholder
+            (``EmptyData``) is accepted.
+
+    Returns:
+        A one-row table: the user tag and system tag columns, then
+        ``__input_data_hash`` (``large_binary``), the labelled digest of the
+        data's content hash.
+    """
+    return tag.as_table(columns={"system_tags": True}).append_column(
+        constants.INPUT_DATA_HASH_COL,
+        pa.array([data.content_hash().to_prefixed_digest()], type=pa.large_binary()),
+    )
+
+
+def entry_id(
+    hasher: "ArrowHasherProtocol", tag: "TagProtocol", data: "DataProtocol"
+) -> "ContentHash":
+    """Return a row's entry id: the hash of its tags, system tags and data hash.
+
+    Args:
+        hasher: The Arrow hasher of the row's data context.
+        tag: The row's tag.
+        data: The row's data.
+
+    Returns:
+        The entry id.
+    """
+    return hasher.hash_table(entry_id_preimage(tag, data))
+
+
+def instance_id_preimage(entry: "ContentHash", data: "DataProtocol") -> "pa.Table":
+    """Build the preimage of a row's instance id.
+
+    Args:
+        entry: The row's entry id.
+        data: The row's data, whose source-info tokens are read.
+
+    Returns:
+        A one-row table: ``__pipeline_entry_id`` (``large_binary``, the labelled
+        digest of the entry id), then the source-info columns of the data in name
+        order. A placeholder that carries no token gives the entry id alone.
+    """
+    preimage = pa.table(
+        {ENTRY_ID_COL: pa.array([entry.to_prefixed_digest()], type=pa.large_binary())}
+    )
+    # A placeholder (``EmptyData``) gives the tokens it carries here, and no column
+    # when it carries none.
+    tokens = data.source_info_table()
+    for name in sorted(tokens.column_names):
+        preimage = preimage.append_column(
+            tokens.schema.field(name), tokens.column(name)
+        )
+    return preimage
+
+
+def instance_id(
+    hasher: "ArrowHasherProtocol", tag: "TagProtocol", data: "DataProtocol"
+) -> "ContentHash":
+    """Return a row's instance id: the hash of its entry id and its tokens.
+
+    Args:
+        hasher: The Arrow hasher of the row's data context.
+        tag: The row's tag.
+        data: The row's data.
+
+    Returns:
+        The instance id.
+    """
+    return hasher.hash_table(instance_id_preimage(entry_id(hasher, tag, data), data))
+
+
+def record_id_preimage(instance: "ContentHash", result_id: uuid.UUID) -> "pa.Table":
+    """Build the preimage of a stored row's record id.
+
+    Args:
+        instance: The row's instance id.
+        result_id: The id of the result the row points at.
+
+    Returns:
+        A one-row table: ``__pipeline_instance_id`` (``large_binary``, the
+        labelled digest of the instance id), then ``__data_id``
+        (``large_binary``, the bytes of the result id).
+    """
+    return pa.table(
+        {
+            INSTANCE_ID_COL: pa.array(
+                [instance.to_prefixed_digest()], type=pa.large_binary()
+            ),
+            constants.DATA_RECORD_ID: pa.array(
+                [result_id.bytes], type=pa.large_binary()
+            ),
+        }
+    )
+
+
+def record_id(
+    hasher: "ArrowHasherProtocol", instance: "ContentHash", result_id: uuid.UUID
+) -> "ContentHash":
+    """Return a stored row's record id: the hash of its instance id and result id.
+
+    Args:
+        hasher: The Arrow hasher of the row's data context.
+        instance: The row's instance id.
+        result_id: The id of the result the row points at.
+
+    Returns:
+        The record id.
+    """
+    return hasher.hash_table(record_id_preimage(instance, result_id))

@@ -560,6 +560,18 @@ class Data(Datagram):
         """Return source info for all data-column keys (None for unknown)."""
         return {k: self._source_info.get(k) for k in self.keys()}
 
+    def source_info_table(self) -> "pa.Table":
+        """Return the source-info tokens as a one-row table.
+
+        The columns ``as_table(columns={"source": True})`` appends to the data
+        columns: one ``_source_<column>`` per data column, in their order.
+
+        Returns:
+            The one-row table, or a table with no column when no data column has
+            a token.
+        """
+        return self._ensure_source_info_table()
+
     def with_source_info(self, **source_info: "SourceInfoValue") -> Self:
         """Create a copy with updated source-information entries."""
         current = dict(self._source_info)
@@ -792,18 +804,20 @@ class EmptyData(Data):
     pipeline DB row lacking the stored hash column), ``content_hash()`` raises
     ``EmptyDataHashMissingError`` loudly.
 
-    ``empty_source_info`` is an optional provenance field for the future
-    tag-row reconstruction follow-up. This release defines the field; the write
-    logic is deferred.
+    A placeholder carries source-info tokens (ITL-1471): one for each data column
+    of the result that is gone, built as that result's would be, with the sentinel
+    ``EPHEMERAL_RESULT_GONE`` (``core/row_ids.py``) where the result id would
+    stand. A node that receives the placeholder computes the row's instance id
+    from them. ``source_info()`` and ``source_info_table()`` return them; they
+    are the only part of the placeholder that reads like a row.
 
     Args:
         cached_content_hash: The content hash of the missing data payload this
             token represents — typically the upstream node's output hash, which
             equals the downstream node's input hash. ``None`` for old-format
             rows lacking the stored hash column.
-        empty_source_info: Optional provenance dict for tag-row reconstruction
-            (follow-up). Keys match tag-row source columns; ``record_id`` may
-            be ``None``.
+        source_info: The source-info tokens of the missing result, by data column
+            name. ``None`` or empty when none is known.
         python_schema: Optional schema hint (passed to parent).
         data_context: Data context key or instance (passed to parent).
         record_uuid: Optional explicit UUID for this token.
@@ -812,7 +826,7 @@ class EmptyData(Data):
     def __init__(
         self,
         cached_content_hash: ContentHash | None = None,
-        empty_source_info: dict[str, str | None] | None = None,
+        source_info: "Mapping[str, SourceInfoValue] | None" = None,
         python_schema: SchemaLike | None = None,
         data_context: str | contexts.DataContext | None = None,
         record_uuid: uuid.UUID | None = None,
@@ -825,7 +839,7 @@ class EmptyData(Data):
             record_uuid=record_uuid,
         )
         self._cached_content_hash: ContentHash | None = cached_content_hash
-        self._empty_source_info: dict[str, str | None] | None = empty_source_info
+        self._source_info = dict(source_info or {})
 
     # ------------------------------------------------------------------
     # Content identity
@@ -923,10 +937,10 @@ class EmptyData(Data):
     def copy(self, include_cache: bool = True, preserve_id: bool = True) -> Self:
         """Return a shallow copy of this token, preserving EmptyData-specific fields.
 
-        Overrides ``Datagram.copy()`` so that ``_cached_content_hash`` and
-        ``_empty_source_info`` are carried across (the base implementation uses
-        ``object.__new__`` and only copies ``Datagram`` fields, which would
-        silently drop our extra attributes).
+        Overrides ``Datagram.copy()`` so that ``_cached_content_hash`` is carried
+        across (the base implementation uses ``object.__new__`` and only copies
+        ``Datagram`` fields, which would silently drop the extra attribute). The
+        tokens are copied by ``Data.copy``.
 
         Args:
             include_cache: Forwarded to ``super().copy()``.
@@ -937,7 +951,6 @@ class EmptyData(Data):
         """
         new_p = super().copy(include_cache=include_cache, preserve_id=preserve_id)
         new_p._cached_content_hash = self._cached_content_hash
-        new_p._empty_source_info = self._empty_source_info
         return new_p
 
     # ------------------------------------------------------------------
@@ -949,7 +962,26 @@ class EmptyData(Data):
         """The stored content hash, or ``None`` if absent (old-format row)."""
         return self._cached_content_hash
 
-    @property
-    def empty_source_info(self) -> dict[str, str | None] | None:
-        """Optional provenance dict for future tag-row reconstruction."""
-        return self._empty_source_info
+    def source_info(self) -> "dict[str, SourceInfoValue]":
+        """Return the tokens the placeholder carries, by data column name."""
+        return dict(self._source_info)
+
+    def source_info_table(self) -> pa.Table:
+        """Return the tokens as a one-row table of source-info columns.
+
+        The columns are typed as a row's own source-info columns are
+        (``_source_info_field``), in the order the tokens were given.
+
+        Returns:
+            The one-row table, or a table with no column when the placeholder
+            carries no token.
+        """
+        if not self._source_info:
+            return pa.table({})
+        prefixed = {
+            f"{constants.SOURCE_PREFIX}{k}": v for k, v in self._source_info.items()
+        }
+        return pa.Table.from_pylist(
+            [prefixed],
+            schema=pa.schema([_source_info_field(k, v) for k, v in prefixed.items()]),
+        )
