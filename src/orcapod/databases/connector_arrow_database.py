@@ -780,6 +780,11 @@ class ConnectorArrowDatabase:
             # names and Arrow types match before writing.  Schema evolution is
             # intentionally out of scope; a clear ValueError is preferable to a
             # cryptic DB-level error or a silent partial write.
+            # The connector's check of the rows against the table as it is now (a
+            # table may have appeared since they were buffered: a store refuses rows
+            # of another data context than it records), before the stored table's
+            # columns are read in that table's terms.
+            self._connector.validate_records(pending, table_name=table_name)
             # Looked up now, as the check needs: nothing about the stored table is
             # trusted from an earlier call (ITL-1367).
             existing = self._stored_columns(table_name)

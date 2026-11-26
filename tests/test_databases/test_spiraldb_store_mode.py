@@ -823,7 +823,7 @@ def test_a_closed_store_connector_refuses_every_call_and_releases_its_tables() -
 
 
 @pytest.mark.usefixtures("root")
-@pytest.mark.parametrize("context", ["std:v999:default", "v1", "not a key"])
+@pytest.mark.parametrize("context", ["std:v999:default", "v1", "not a key", ""])
 def test_a_data_context_this_orcapod_cannot_resolve_is_refused_before_anything(
     context: str,
 ) -> None:
@@ -881,6 +881,36 @@ def test_rows_of_another_data_context_are_refused_before_they_are_buffered() -> 
     # else (the table recording a context this Orcapod lacks is read raw here).
     db.flush()
     assert ConnectorArrowDatabase(store()).table_exists(other)
+    stored = _client().keyed_table("p", "d", names.store_table_name(RESULT))
+    keys = stored.scan(["__record_id"]).to_table()["__record_id"].to_pylist()
+    assert keys == [b"old"]
+
+
+# ------------------------------------- verification r7 of PRs 595 and 599 (80a58d04)
+
+
+@pytest.mark.usefixtures("root")
+def test_a_table_of_another_data_context_made_after_buffering_is_refused_at_flush() -> (
+    None
+):
+    """Rows buffered for an absent table; meanwhile the table is made, recording a
+    data context this Orcapod lacks (an older one). The flush raises the backstop's
+    ``InputValidationError`` naming both keys (not the reader's
+    ``ContextResolutionError``), and appends nothing."""
+    from orcapod.errors import InputValidationError
+
+    db = ConnectorArrowDatabase(store())
+    db.add_records(RESULT, rows(["mine"]), record_id_column="__record_id")
+    ConnectorArrowDatabase(store()).add_records(
+        RESULT, rows(["old"]), record_id_column="__record_id", flush=True
+    )
+    recorded = "std:v0:legacy"
+    _table(names.store_table_name(RESULT)).set_metadata(
+        names.store_table_metadata(RESULT, recorded)
+    )
+    with pytest.raises(InputValidationError) as raised:
+        db.flush()
+    assert recorded in str(raised.value) and CONTEXT in str(raised.value)
     stored = _client().keyed_table("p", "d", names.store_table_name(RESULT))
     keys = stored.scan(["__record_id"]).to_table()["__record_id"].to_pylist()
     assert keys == [b"old"]
