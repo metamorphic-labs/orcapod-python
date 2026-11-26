@@ -15,6 +15,7 @@ import textwrap
 import weakref
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
 import pyarrow.dataset as pa_ds
@@ -82,26 +83,28 @@ class _TaggedScalar(pa.ExtensionScalar):
         return f"{type(self.type).__name__}:{stored.as_py()}"
 
 
-class _TaggedArray(pa.ExtensionArray):
+class _TaggedArray(pa.ExtensionArray):  # pyright: ignore[reportMissingTypeArgument]  # not generic at run time
     """An array class of its own, to tell a subclass's array hook apart."""
 
 
-def _read_back(
-    extension: pa.ExtensionType, values: list, path: Path
-) -> pa.ChunkedArray:
-    """Write a column of ``extension`` to a Parquet file and scan it with threads."""
+def _array(extension: pa.ExtensionType, values: list[Any]) -> Any:
+    """An array of ``extension`` over ``values``, of the class its hook names."""
     storage = pa.array(values, extension.storage_type)
-    table = pa.table({"column": pa.ExtensionArray.from_storage(extension, storage)})
-    pq.write_table(table, path)
+    return pa.ExtensionArray.from_storage(extension, storage)
+
+
+def _read_back(extension: pa.ExtensionType, values: list[Any], path: Path) -> Any:
+    """Write a column of ``extension`` to a Parquet file and scan it with threads."""
+    pq.write_table(pa.table({"column": _array(extension, values)}), path)
     return pa_ds.dataset(path).to_table(use_threads=True).column("column")
 
 
 @pytest.fixture
-def registered() -> Iterator[Callable[[pa.ExtensionType], pa.ExtensionType]]:
+def registered() -> Iterator[Callable[[Any], Any]]:
     """Register extension types with Arrow for one test."""
     names: list[str] = []
 
-    def register(extension: pa.ExtensionType) -> pa.ExtensionType:
+    def register(extension: Any) -> Any:
         pa.register_extension_type(extension)
         names.append(extension.extension_name)
         return extension
@@ -117,7 +120,7 @@ def _made(name: str) -> type[pa.ExtensionType]:
 
 def test_a_subclass_keeps_its_class_and_its_hooks(
     tmp_path: Path,
-    registered: Callable[[pa.ExtensionType], pa.ExtensionType],
+    registered: Callable[[Any], Any],
 ) -> None:
     """A subclass of a made class is its own type: its scalar and array classes are used."""
     made = _made("test.lifetime.subclass")
@@ -126,7 +129,7 @@ def test_a_subclass_keeps_its_class_and_its_hooks(
         def __arrow_ext_scalar_class__(self) -> type[pa.ExtensionScalar]:
             return _TaggedScalar
 
-        def __arrow_ext_class__(self) -> type[pa.ExtensionArray]:
+        def __arrow_ext_class__(self) -> type[pa.ExtensionArray[Any]]:
             return _TaggedArray
 
     custom = Custom()  # pyright: ignore[reportCallIssue]  # the synthesized class takes no arguments
@@ -143,10 +146,10 @@ def test_a_subclass_keeps_its_class_and_its_hooks(
     assert custom.__arrow_ext_serialize__() == base.__arrow_ext_serialize__() == b"1"
     assert custom.storage_type == pa.int64()
 
-    in_memory = pa.ExtensionArray.from_storage(custom, pa.array([1, 2, None]))
-    assert type(in_memory) is _TaggedArray
+    in_memory = _array(custom, [1, 2, None])
     assert in_memory.to_pylist() == ["Custom:1", "Custom:2", None]
-    assert pa.ExtensionArray.from_storage(base, pa.array([1, 2, None])).to_pylist() == [
+    assert type(in_memory) is _TaggedArray
+    assert _array(base, [1, 2, None]).to_pylist() == [
         1,
         2,
         None,
@@ -179,21 +182,20 @@ def test_two_subclasses_of_one_made_class_are_two_types() -> None:
     assert len({id(first), id(second), id(base)}) == 3
     assert First() is first  # pyright: ignore[reportCallIssue]  # the synthesized class takes no arguments
     assert Second() is second  # pyright: ignore[reportCallIssue]  # the synthesized class takes no arguments
-    storage = pa.array([7, 8])
-    assert pa.ExtensionArray.from_storage(first, storage).to_pylist() == [
+    assert _array(first, [7, 8]).to_pylist() == [
         "First:7",
         "First:8",
     ]
-    assert pa.ExtensionArray.from_storage(second, storage).to_pylist() == [
+    assert _array(second, [7, 8]).to_pylist() == [
         "Second:7",
         "Second:8",
     ]
-    assert pa.ExtensionArray.from_storage(base, storage).to_pylist() == [7, 8]
+    assert _array(base, [7, 8]).to_pylist() == [7, 8]
 
 
 def test_a_subclass_of_a_subclass_is_its_own_type(
     tmp_path: Path,
-    registered: Callable[[pa.ExtensionType], pa.ExtensionType],
+    registered: Callable[[Any], Any],
 ) -> None:
     """A second level of subclassing keeps the inherited hook and its own identity."""
     made = _made("test.lifetime.grandchild")
@@ -203,7 +205,7 @@ def test_a_subclass_of_a_subclass_is_its_own_type(
             return _TaggedScalar
 
     class Grandchild(Child):
-        def __arrow_ext_class__(self) -> type[pa.ExtensionArray]:
+        def __arrow_ext_class__(self) -> type[pa.ExtensionArray[Any]]:
             return _TaggedArray
 
     child = Child()  # pyright: ignore[reportCallIssue]  # the synthesized class takes no arguments
@@ -213,7 +215,7 @@ def test_a_subclass_of_a_subclass_is_its_own_type(
     assert Grandchild.__arrow_ext_deserialize__(pa.int64(), b"1") is grandchild
     assert Child.__arrow_ext_deserialize__(pa.int64(), b"1") is child
 
-    of_child = pa.ExtensionArray.from_storage(child, pa.array([3, 4]))
+    of_child = _array(child, [3, 4])
     assert type(of_child) is not _TaggedArray
     assert of_child.to_pylist() == ["Child:3", "Child:4"]
 
@@ -226,7 +228,7 @@ def test_a_subclass_of_a_subclass_is_its_own_type(
 
 def test_a_subclass_made_with_arguments_has_one_instance_for_each(
     tmp_path: Path,
-    registered: Callable[[pa.ExtensionType], pa.ExtensionType],
+    registered: Callable[[Any], Any],
 ) -> None:
     """Different construction arguments give different types, equal ones the same one."""
     made = _made("test.lifetime.arguments")

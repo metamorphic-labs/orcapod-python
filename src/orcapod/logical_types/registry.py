@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
-from typing import Any, Iterable
+from typing import Any, Iterable, cast
 
 import polars as pl
 import pyarrow as pa
@@ -154,7 +154,7 @@ def make_arrow_extension_type(
 
     # One instance per concrete class and construction arguments, each kept until the
     # process ends (``KeptInstances``): a subclass keeps its own identity and hooks.
-    return KeptInstances(
+    extension_class = KeptInstances(
         f"_ArrowExt_{_sanitize(extension_name)}",
         (pa.ExtensionType,),
         {
@@ -164,6 +164,7 @@ def make_arrow_extension_type(
             "readable_metadata": _readable,
         },
     )
+    return cast("type[pa.ExtensionType]", extension_class)
 
 
 def make_polars_extension_type(
