@@ -501,6 +501,7 @@ class SpiralDBTableSource(RootSource):
 
     def where(
         self,
+        /,
         *conditions: "Mapping[str, object] | Condition | None",
         **columns: object,
     ) -> "SpiralDBTableSource":
@@ -566,12 +567,13 @@ class SpiralDBTableSource(RootSource):
                 condition holds anything but equalities and ranges (filter the stream
                 instead), or a column is to equal ``-0.0`` or a NaN (ITL-1480).
         """
-        condition = Condition.of(*conditions, **columns)
         try:
-            # As given: merging may have kept 0.0 of 0.0 and -0.0 (ITL-1480).
+            # As given, before merging: merging may keep 0.0 of 0.0 and -0.0, or
+            # refuse -0.0 beside another value as two values (ITL-1480).
             check_float_equalities(*conditions, **columns)
         except TypeError as exc:
             raise TypeError(f"SpiralDB table {self._qualified!r}: {exc}") from exc
+        condition = Condition.of(*conditions, **columns)
         restricted = self._copy()
         try:
             restricted._apply_restriction(condition)

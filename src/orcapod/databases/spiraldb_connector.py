@@ -59,6 +59,7 @@ from orcapod.types.condition import (
     Condition,
     Term,
     is_range_type,
+    timestamp_count,
 )
 from orcapod.utils import arrow_utils
 from orcapod.utils.warning_utils import outside_orcapod_stacklevel
@@ -372,7 +373,7 @@ def _literal(value: Any, arrow_type: pa.DataType) -> Any:
         return sp.literal(value, arrow_type)
     if pa.types.is_timestamp(arrow_type):
         # As a count of the unit: the SDK takes no datetime between two of them.
-        return sp.literal(pa.scalar(value, type=arrow_type).value, arrow_type)
+        return sp.literal(timestamp_count(value, arrow_type), arrow_type)
     if (
         pa.types.is_string(arrow_type)
         or pa.types.is_binary(arrow_type)

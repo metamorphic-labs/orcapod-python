@@ -557,7 +557,13 @@ def literal(value: Any, type: Any = None) -> _Literal:
     """Stand in for ``spiral.literal`` (``literal``): an explicit scalar type."""
     if type is None or pa.types.is_large_string(type) or pa.types.is_large_binary(type):
         raise TypeError(f"unsupported literal Arrow type {type}")
-    return _Literal(pa.scalar(value, type).as_py(), type)
+    scalar = pa.scalar(value, type)
+    try:
+        return _Literal(scalar.as_py(), type)
+    except OverflowError:
+        # A timestamp whose instant has no Python datetime in its zone (year 1 east
+        # of UTC): kept as its count, which the scan reads as the same type.
+        return _Literal(scalar.value, type)
 
 
 def eq(left: _Column, right: _Literal) -> FakePredicate:

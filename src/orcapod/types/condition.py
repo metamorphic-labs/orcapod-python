@@ -396,6 +396,47 @@ def is_ordered_type(arrow_type: pa.DataType) -> bool:
     return expected is not None and expected is not bool
 
 
+_EPOCH_MICROSECONDS = instant_microseconds(datetime(1970, 1, 1, tzinfo=timezone.utc))
+_MICROSECONDS_PER_COUNT = {"s": 1_000_000, "ms": 1_000, "us": 1}
+
+
+def timestamp_count(value: datetime, arrow_type: pa.TimestampType) -> int:
+    """Return the count of ``arrow_type``'s unit since the epoch that is ``value``.
+
+    Computed from the value's instant (an aware value) or wall time (a naive one) in
+    integers, never through a ``datetime`` in the column's zone, so an instant with no
+    Python ``datetime`` in that zone (year 1 east of UTC, year 9999 west of it) is held
+    when the column's type holds it, and a fraction of a second in an offset counts.
+
+    Args:
+        value: The value; its kind (aware or naive) is already checked against the
+            column's zone.
+        arrow_type: The column's timestamp type.
+
+    Raises:
+        TypeError: If no count of the unit is the value exactly (a microsecond for
+            ``timestamp[s]``), or the count is beyond the type's 64-bit range
+            (``timestamp[ns]`` reaches years 1677 to 2262).
+    """
+    micros = instant_microseconds(value)
+    if micros is None:
+        micros = instant_microseconds(value.replace(tzinfo=timezone.utc))
+    assert micros is not None and _EPOCH_MICROSECONDS is not None
+    since_epoch = micros - _EPOCH_MICROSECONDS
+    if arrow_type.unit == "ns":
+        count, rest = since_epoch * 1_000, 0
+    else:
+        count, rest = divmod(since_epoch, _MICROSECONDS_PER_COUNT[arrow_type.unit])
+    if rest:
+        raise TypeError(f"holds {arrow_type}, which cannot hold {value!r} exactly")
+    if not -(2**63) <= count < 2**63:
+        raise TypeError(
+            f"holds {arrow_type}, which cannot hold {value!r}: the instant is beyond "
+            f"the range of a 64-bit count of {arrow_type.unit}"
+        )
+    return count
+
+
 def check_value_for_column(value: object, arrow_type: pa.DataType) -> None:
     """Check one condition value against the Arrow type of its column; convert nothing.
 
@@ -436,6 +477,10 @@ def check_value_for_column(value: object, arrow_type: pa.DataType) -> None:
                 f"holds {arrow_type}, so the value must be "
                 f"{'an aware' if zoned else 'a naive'} datetime; got {value!r}"
             )
+    if isinstance(value, datetime) and pa.types.is_timestamp(arrow_type):
+        assert isinstance(arrow_type, pa.TimestampType)
+        timestamp_count(value, arrow_type)
+        return
     if isinstance(value, float):
         # Rounding to the column's precision is how a float column stores any
         # value, so it is not refused; a finite value beyond its range is.
@@ -1162,6 +1207,7 @@ class Condition:
     @classmethod
     def of(
         cls,
+        /,
         *conditions: Mapping[str, object] | Condition | None,
         **columns: object,
     ) -> Condition:
