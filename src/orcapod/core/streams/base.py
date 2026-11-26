@@ -1689,6 +1689,14 @@ class StreamBase(TraceableBase):
         context (it would act), a source whose read polls or writes a cache, and a node
         of a pipeline or job (``run()`` it, or ``head()`` it after a run).
 
+        Every shortcut and read-only path is written for one class of the library and
+        applies only to an object of exactly that class (an operator, a data function,
+        a cached pod, a ``DerivedSource``). A subclass of your own takes the general
+        path: an operator or source subclass is computed in full (only with
+        ``compute_all``) and its first ``n`` rows are taken, which is correct and may be
+        slower; a pod or data function subclass, which could write or act, is refused
+        before any function is called.
+
         Args:
             n: The most rows to compute; at least 1.
             compute_all: Allow steps that need their whole input.

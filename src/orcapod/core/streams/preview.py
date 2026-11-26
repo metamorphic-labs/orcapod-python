@@ -11,7 +11,6 @@ delivered.
 from __future__ import annotations
 
 import dataclasses
-import inspect
 from collections.abc import Generator
 from contextlib import closing
 from typing import TYPE_CHECKING, Any
@@ -115,40 +114,27 @@ def slices_of(
             return
 
 
-def written_for_its_processing(
-    obj: object, shortcut: str, processing: tuple[str, ...]
-) -> bool:
-    """Whether ``obj``'s ``shortcut`` was written for the processing ``obj`` does.
+def exactly_its_class(obj: object, shortcut: str) -> bool:
+    """Whether ``obj`` is exactly the library class its ``shortcut`` was written for.
 
-    A shortcut (an operator's ``input_given_back``, a pod's ``preview_data``, a data
-    function's ``preview_call``) is written for the processing methods of the class
-    that defines it. It holds for ``obj`` only when every one of ``processing``
-    resolves on ``type(obj)`` to the very member it is on that class (no subclass
-    overrides one without also writing the shortcut again), and ``obj`` replaces
-    neither on the instance. Otherwise the shortcut says nothing of what ``obj``
-    computes (review of PR 571).
+    A preview shortcut or read-only path (an operator's ``input_given_back``, a pod's
+    ``preview_data``, a data function's ``preview_call``) is written for one class of
+    the library. It holds only for an object of exactly that class, with no member
+    replaced on the instance (``reads_as_its_class``): a subclass, however small, can
+    compute or act in a way the shortcut does not know (developer decision N55,
+    review of PR 571).
 
     Args:
         obj: The operator, pod or data function.
         shortcut: The name of the shortcut method.
-        processing: The names of the methods that compute what the shortcut stands
-            for.
 
     Returns:
         Whether the shortcut may be taken for ``obj``.
     """
-    cls = type(obj)
-    definer = next((c for c in cls.__mro__ if shortcut in vars(c)), None)
-    if definer is None:
-        return False
-    missing = object()
-    for name in processing:
-        if inspect.getattr_static(cls, name, missing) is not inspect.getattr_static(
-            definer, name, missing
-        ):
-            return False
-    own = getattr(obj, "__dict__", None) or {}
-    return not any(name in own for name in (shortcut, *processing))
+    from orcapod.core.streams.base import reads_as_its_class
+
+    definer = next((c for c in type(obj).__mro__ if shortcut in vars(c)), None)
+    return definer is not None and reads_as_its_class(obj, definer)
 
 
 def refused(stream: Any, why: str) -> PreviewRefusedError:

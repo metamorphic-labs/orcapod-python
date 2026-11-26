@@ -996,16 +996,12 @@ def test_a_data_function_overriding_call_is_refused_before_any_call(
 
 
 def test_a_plain_wrapper_is_previewed_through(source: Any) -> None:
-    """A ``DataFunctionWrapper`` subclass that keeps its class's ``call`` is read-only
-    when what it wraps is."""
+    """A ``DataFunctionWrapper`` is read-only when what it wraps is."""
     from orcapod.core.data_function import DataFunctionWrapper
-
-    class _Plain(DataFunctionWrapper[Any]):
-        pass
 
     calls = _Calls()
     store = InMemoryArrowDatabase()
-    function = _Plain(
+    function = DataFunctionWrapper[Any](
         CachedDataFunction(calls.pod.data_function, result_database=store)
     )
     stream = FunctionPod(function).process(
@@ -1098,7 +1094,165 @@ def test_a_pod_subclass_with_its_own_processing_is_refused(
         pod = _FilteringCachedPod(calls.pod, result_database=store)
     stream = pod.process(_with_time(source).select_data_columns(["timestamp", "x"]))
     for compute_all in (False, True):
-        with pytest.raises(PreviewRefusedError, match="its own way"):
+        with pytest.raises(PreviewRefusedError, match="subclass of a pod"):
             stream.preview(2, compute_all=compute_all)
     assert calls.seen == []
     _untouched(store)
+
+
+# ---------------------------------------------------------------------------
+# Review of 82a3a6e0: shortcuts for exactly their class (N55)
+# ---------------------------------------------------------------------------
+
+
+def test_a_data_function_with_its_own_output_builder_is_refused(source: Any) -> None:
+    """Review of 82a3a6e0, finding 1: a subclass's ``_build_output_data`` ran (an
+    effect) beneath a cached layer. A data function subclass is refused before any
+    call."""
+    built: list[Any] = []
+
+    class _Recording(PythonDataFunction):
+        def _build_output_data(self, values: Any) -> Any:
+            output = super()._build_output_data(values)
+            built.append(output)
+            return output
+
+    calls = _Calls()
+    inner: Any = calls.pod.data_function
+    store = InMemoryArrowDatabase()
+    leaf: Any = _Recording(inner._function, output_keys="y")
+    function = CachedDataFunction(leaf, result_database=store)
+    stream = FunctionPod(function).process(
+        _with_time(source).select_data_columns(["timestamp", "x"])
+    )
+    for compute_all in (False, True):
+        with pytest.raises(PreviewRefusedError, match="no read-only call"):
+            stream.preview(2, compute_all=compute_all)
+    assert calls.seen == []
+    assert built == []
+    _untouched(store)
+
+
+def test_a_cached_pod_with_its_own_lookup_is_refused(source: Any) -> None:
+    """Review of 82a3a6e0, finding 2: a subclass's ``lookup_cached_data`` gave rows the
+    full read does not. A cached pod subclass is refused before any call."""
+
+    class _Synthetic(CachedFunctionPod):
+        def lookup_cached_data(self, data: Any) -> Any:
+            return None
+
+    calls = _Calls()
+    store = InMemoryArrowDatabase()
+    stream = _Synthetic(calls.pod, result_database=store).process(
+        _with_time(source).select_data_columns(["timestamp", "x"])
+    )
+    with pytest.raises(PreviewRefusedError, match="subclass of a pod"):
+        stream.preview(2)
+    assert calls.seen == []
+    _untouched(store)
+
+
+class _WrappedSemiJoin(SemiJoin):
+    """A SemiJoin whose ``static_process`` is wrapped by ``__getattribute__`` to drop
+    the first row: no member of the class is overridden."""
+
+    def __getattribute__(self, name: str) -> Any:
+        member = super().__getattribute__(name)
+        if name != "static_process":
+            return member
+
+        def dropping(*streams: Any) -> Any:
+            result = member(*streams)
+            table = result.as_table(columns={"source": True, "system_tags": True})
+            return ArrowTableStream(
+                table.slice(1),
+                tag_columns=result.keys()[0],
+                data_context=result.data_context_key,
+            )
+
+        return dropping
+
+
+def test_a_semi_join_with_dynamic_dispatch_runs_the_full_operation(
+    source: Any,
+) -> None:
+    """Review of 82a3a6e0, finding 3: the shortcut held for a subclass that wraps its
+    processing dynamically. A subclass runs the full operation."""
+
+    def joined() -> Any:
+        return _WrappedSemiJoin()(source(), _unrelated())
+
+    whole = joined().as_table()
+    assert whole.column("timestamp").to_pylist()[:2] == [1, 2]
+    with pytest.raises(PreviewRefusedError, match="compute_all"):
+        joined().preview(2)
+    _same(joined().preview(2, compute_all=True).as_table(), whole[:2])
+
+
+_PROXIED_CALLS: list[int] = []
+
+
+def _shifted(timestamp: int) -> int:
+    """A plain function, saved by name in a proxy's config."""
+    _PROXIED_CALLS.append(timestamp)
+    return timestamp + 100
+
+
+def test_a_bound_proxy_previews_its_function(source: Any) -> None:
+    """Review of 82a3a6e0, finding 4 (a regression): a ``DataFunctionProxy`` bound to
+    a plain function previews as at 342d8bb0, through the bound function."""
+    from orcapod.core.data_function_proxy import DataFunctionProxy
+
+    function = PythonDataFunction(_shifted, output_keys="y", version="v1.0")
+    proxy = DataFunctionProxy(
+        config=function.to_config(),
+        content_hash_str=function.content_hash().to_string(),
+        pipeline_hash_str=function.pipeline_hash().to_string(),
+    )
+    proxy.bind(function)  # pyright: ignore[reportArgumentType]  # conforms at runtime
+
+    def stream() -> Any:
+        return FunctionPod(proxy).process(  # pyright: ignore[reportArgumentType]  # conforms at runtime
+            _with_time(source).select_data_columns(["timestamp"]).drop_nulls()
+        )
+
+    _PROXIED_CALLS.clear()
+    shown = stream().preview(2).as_table()
+    assert _PROXIED_CALLS == [0, 1]
+    whole = stream().as_table()
+    _same(shown, whole.select(shown.column_names).slice(0, 2))
+
+
+class _DroppingDerived(DerivedSource):
+    """A DerivedSource whose ``as_table`` drops the first row."""
+
+    def as_table(self, *args: Any, **kwargs: Any) -> Any:
+        return super().as_table(*args, **kwargs).slice(1)
+
+
+class _DescendingDerived(DerivedSource):
+    """A DerivedSource that derives its rows in descending timestamp order."""
+
+    def _derive_from(self, table: Any, *args: Any, **kwargs: Any) -> Any:
+        return super()._derive_from(
+            table.sort_by([("timestamp", "descending")]), *args, **kwargs
+        )
+
+
+@pytest.mark.parametrize("kind", [_DroppingDerived, _DescendingDerived])
+def test_a_derived_source_subclass_previews_its_own_read(
+    source: Any, kind: type[DerivedSource]
+) -> None:
+    """Review of 82a3a6e0, finding 5: a subclass's preview diverged from its read.
+    A subclass is read in full, only with ``compute_all``, and keeps nothing."""
+
+    def derived() -> Any:
+        return kind(source(), tags_as_data={"timestamp": "t"}, source_id="d")
+
+    whole = derived().as_table()
+    previewed = derived()
+    with pytest.raises(PreviewRefusedError, match="compute_all"):
+        previewed.preview(2)
+    for n in (1, 2, 41):
+        _same(previewed.preview(n, compute_all=True).as_table(), whole[:n])
+    assert previewed._held_rows() is None  # pyright: ignore[reportPrivateUsage]

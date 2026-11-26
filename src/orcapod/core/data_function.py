@@ -28,7 +28,7 @@ from orcapod.hashing.semantic_hashing.builtin_handlers import (
     hash_default_value,
 )
 from orcapod.core.result_cache import ResultCache
-from orcapod.core.streams.preview import written_for_its_processing
+from orcapod.core.streams.preview import exactly_its_class
 from orcapod.errors import (
     NoOutputsDeclaredError,
     PreviewRefusedError,
@@ -126,11 +126,6 @@ def parse_function_outputs(
 
 
 E = TypeVar("E", bound=DataFunctionExecutorProtocol)
-
-
-DATA_FUNCTION_PROCESSING = ("call", "direct_call")
-"""The methods that compute a data function's output: a ``preview_call`` written for a
-class holds for a subclass only when it overrides neither (``written_for_its_processing``)."""
 
 
 class DataFunctionBase(TraceableBase, Generic[E]):
@@ -431,18 +426,16 @@ class DataFunctionBase(TraceableBase, Generic[E]):
         """Refuse a preview unless this function's ``preview_call`` is read-only.
 
         A kind with a read-only call (``PythonDataFunction``, ``DataFunctionWrapper``,
-        ``CachedDataFunction``) writes ``preview_call`` for its own ``call`` and
-        ``direct_call``: a subclass that overrides either without writing
-        ``preview_call`` again is refused, since what it does when called is not known
-        (review of PR 571). Any other kind has none.
+        ``CachedDataFunction``, a bound ``DataFunctionProxy``) has it for an object of
+        exactly that class (``exactly_its_class``): a subclass is refused, since what it
+        does when called (an output builder, a store) is not known (review of PR 571).
+        Any other kind has none.
 
         Raises:
             PreviewRefusedError: If this function has no read-only call.
         """
         definer = next(c for c in type(self).__mro__ if "preview_call" in vars(c))
-        if definer is DataFunctionBase or not written_for_its_processing(
-            self, "preview_call", DATA_FUNCTION_PROCESSING
-        ):
+        if definer is DataFunctionBase or not exactly_its_class(self, "preview_call"):
             raise PreviewRefusedError(
                 f"its data function {type(self).__name__} has no read-only call"
             )

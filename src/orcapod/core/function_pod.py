@@ -43,7 +43,7 @@ from orcapod.core.streams.preview import (
     preview_batches,
     refused,
     slices_of,
-    written_for_its_processing,
+    exactly_its_class,
 )
 from orcapod.core.streams.view import (
     SCHEMA_NEEDS_POLL_NOTE,
@@ -101,11 +101,6 @@ def _executor_supports_concurrent(
     """Return True if the data function's executor supports concurrent execution."""
     executor = data_function.executor
     return executor is not None and executor.supports_concurrent_execution
-
-
-POD_PROCESSING = ("process_data", "_invoke_with_hooks")
-"""The methods that compute a function pod's rows: a ``preview_data`` written for a
-class holds for a subclass only when it overrides neither (``written_for_its_processing``)."""
 
 
 class _FunctionPodBase(TraceableBase):
@@ -414,20 +409,17 @@ class _FunctionPodBase(TraceableBase):
         raise PreviewRefusedError(f"{type(self).__name__} has no preview")
 
     def _require_own_processing(self) -> None:
-        """Refuse a pod whose ``preview_data`` was not written for its processing.
-
-        A kind's ``preview_data`` stands for its ``process_data`` and
-        ``_invoke_with_hooks``; a subclass that overrides either without writing
-        ``preview_data`` again computes in a way the preview does not know (review of
-        PR 571).
+        """Refuse a pod that is not exactly the class its ``preview_data`` was written
+        for: a subclass may compute, look up or act in a way the preview does not know
+        (``exactly_its_class``; review of PR 571).
 
         Raises:
             PreviewRefusedError: If so.
         """
-        if not written_for_its_processing(self, "preview_data", POD_PROCESSING):
+        if not exactly_its_class(self, "preview_data"):
             raise PreviewRefusedError(
-                f"{type(self).__name__} computes its rows in its own way "
-                "(process_data): its preview is not known"
+                f"{type(self).__name__} is a subclass of a pod of the library: "
+                "its preview is not known"
             )
 
     async def async_process_data(

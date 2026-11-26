@@ -262,10 +262,10 @@ own needs every row of its input, so `preview` refuses it (`PreviewRefusedError`
 step). `preview(n, compute_all=True)` computes that step and everything beneath it in full,
 functions included, and keeps none of it. A side-effect pod, a function that takes the
 invocation context, a `CachedSource`, a `PollingSource` and a node of a pipeline or job are
-refused always: a preview never acts. So is a function pod or data function of your own
-class that overrides how its class computes a row (`process_data`, `call`): what it does is
-not known. A subclass of an operator that overrides how it computes its result is treated as
-an operator of your own. A `semi_join` whose inputs share no tag keeps every row
+refused always: a preview never acts. Every shortcut is written for one class of the library
+and applies only to an object of exactly that class: a subclass of an operator or a source is
+computed in full (only with `compute_all=True`) and its first rows taken, and a subclass of a
+function pod or data function, which could write or act, is refused before any call. A `semi_join` whose inputs share no tag keeps every row
 of its left input and never reads its right one, so `preview` reads only the left input, as
 the full read does. A `DerivedSource` over a source shows its origin's first rows through
 the origin's own `preview` (refused for a `CachedSource` or `PollingSource` origin); over a

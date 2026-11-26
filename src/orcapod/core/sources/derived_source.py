@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import dataclasses
 from contextlib import closing
 from collections.abc import Collection, Generator, Mapping
@@ -32,6 +33,7 @@ from orcapod.core.streams.base import (
     check_head_size,
     schema_requires_io,
     typed_arrow_schemas,
+    reads_as_its_class,
     typed_zero_row_table,
 )
 from orcapod.core.streams.preview import (
@@ -811,6 +813,32 @@ class DerivedSource(RootSource):
             head.for_stream(self, origin="stored"), total_rows=records.num_rows
         )
 
+    def _preview_of_its_read(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """A subclass's preview: its own ``as_table()``, in full, then the first rows.
+
+        The reading above is written for this class; a subclass may read or derive
+        its rows another way (developer decision N55, review of PR 571), so its rows
+        are its own full read, only with ``compute_all``. The read is made on a copy,
+        so this source keeps nothing; an origin source that would poll or write its
+        cache when read is refused first, as by this class's own preview.
+
+        Raises:
+            PreviewRefusedError: Without ``compute_all``, or if the origin is refused.
+        """
+        refuse_without_compute_all(
+            self, request, "is a subclass that reads its rows its own way"
+        )
+        if isinstance(self._origin, RootSource):
+            # Its own preview refuses an origin that polls or writes its cache, and
+            # reads one row of any other.
+            with closing(
+                preview_batches(self._origin, PreviewRequest(limit=1))
+            ) as batches:
+                _ = next(batches, None)
+        yield from slices_of(copy.copy(self), request)
+
     @override
     def _preview_batches(
         self, request: PreviewRequest
@@ -823,8 +851,14 @@ class DerivedSource(RootSource):
         it comes, so the origin reads no further than the rows a step above takes. An origin job node's stored
         rows are read whole, only with ``compute_all``. Nothing read here is kept by
         this source.
+
+        A subclass takes the general path (``_preview_of_its_read``): its own read in
+        full, then the first rows.
         """
         self._note_provisional_identity_use()
+        if not reads_as_its_class(self, DerivedSource):
+            yield from self._preview_of_its_read(request)
+            return
         if self._tags_as_data is not None and self._cached_stream is not None:
             yield from slices_of(self._cached_stream, request)
             return

@@ -61,7 +61,7 @@ from orcapod.core.streams.preview import (
     PREVIEW_COLUMNS,
     PreviewRequest,
     preview_batches,
-    written_for_its_processing,
+    exactly_its_class,
     refuse_without_compute_all,
 )
 from orcapod.core.streams.view import (
@@ -2152,7 +2152,7 @@ class DynamicPodStream(StreamBase):
             return
         given_back = (
             pod.input_given_back(self._upstreams)
-            if written_for_its_processing(pod, "input_given_back", OPERATOR_PROCESSING)
+            if exactly_its_class(pod, "input_given_back")
             else None
         )
         if given_back is not None:
@@ -2340,15 +2340,6 @@ class DynamicPodStream(StreamBase):
             f"{self.__class__.__name__}(label={self.label!r}, kernel={self.producer}, "
             f"upstreams=({upstreams}))"
         )
-
-
-OPERATOR_PROCESSING = (
-    "static_process",
-    "unary_static_process",
-    "binary_static_process",
-)
-"""The methods that compute an operator's result: a shortcut written for a class holds
-for a subclass only when it overrides none of them (``written_for_its_processing``)."""
 
 
 def applied_by_batch(pod: object) -> bool:
