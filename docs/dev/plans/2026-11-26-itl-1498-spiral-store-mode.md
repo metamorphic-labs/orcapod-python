@@ -34,10 +34,11 @@ copies of that machinery can drift.
 **Store mode** (`SpiralDBConnector(project, dataset, _store=True)`):
 
 - `table_name(path)`: `spiral_store_names.store_table_name`. The connector remembers each
-  name's path. A name it has not computed is not resolved from the table's metadata: every
-  other call on a name raises `KeyError` unless `table_name(path)` was called on the same
-  connector first (as `ConnectorArrowDatabase` does), never with a name taken from another
-  connector.
+  name's path. A name it has not computed is not resolved from the table's metadata: the
+  calls that look a table up by name (`has_table`, the column info and schema, reads,
+  `create_table_if_not_exists`, `upsert_records`) raise `KeyError` for a name this
+  connector's `table_name(path)` has not computed. `ConnectorArrowDatabase` always computes
+  the name first. `get_pk_columns` needs no lookup and answers the store's key for any name.
 - `has_table(name)`: opens the table by name, with no listing. Its record is read and checked:
   another path or format raises `SpiralStoreTableCollisionError`.
 - `table_paths(prefix)`: one listing, then the names starting with

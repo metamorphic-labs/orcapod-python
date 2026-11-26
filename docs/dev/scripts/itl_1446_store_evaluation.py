@@ -186,14 +186,17 @@ def node_hashes(job: PipelineJob) -> dict[str, tuple[str, str]]:
 def stored(db: Any, job_name: str) -> dict[tuple[str, ...], pa.Table]:
     """Every stored table this evaluation wrote, by path.
 
-    Only paths under this evaluation's jobs (``job_name`` and its suffixed forms) are
-    kept, and the separate result database (``results``): a live dataset also holds
-    the tables of earlier evaluations. Result tables are not named by job, so in a
-    live dataset ``results`` can still hold earlier evaluations' results.
+    Only paths under this evaluation's jobs (``job_name`` and its suffixed forms) and
+    under this evaluation's separate result database (``results/<run>``, the run being
+    ``job_name`` without its ``eval_`` mark) are kept: a live dataset also holds the
+    tables of earlier evaluations.
     """
+    run = job_name.removeprefix("eval_")
     out = {}
     for path in db.list_table_paths():
-        if not path or not (path[0].startswith(job_name) or path[0] == "results"):
+        if not path or not (
+            path[0].startswith(job_name) or tuple(path[:2]) == ("results", run)
+        ):
             continue
         table = db.get_all_records(path, record_id_column="__record_id")
         if table is not None:
@@ -448,10 +451,10 @@ def open_backend(kind: str, root: Path, resources: ExitStack, run: str) -> Any:
     """Return (database, result database, calls) of one backend."""
     if kind == "control":
         db = DeltaTableDatabase(root / "control")
-        return db, db.at("results"), None
+        return db, db.at("results", run), None
     if kind == "delta":
         db = DeltaTableDatabase(root / "delta")
-        return db, db.at("results"), None
+        return db, db.at("results", run), None
     if kind == "fake":
         from tests.test_databases import fake_spiral_sdk as fake
 
@@ -470,7 +473,7 @@ def open_backend(kind: str, root: Path, resources: ExitStack, run: str) -> Any:
     connector = SpiralDBConnector(project, dataset, overrides, _store=True)
     calls = Calls(connector)
     db = ConnectorArrowDatabase(connector)
-    return db, db.at("results"), calls
+    return db, db.at("results", run), calls
 
 
 def evaluate(kind: str) -> dict[str, Any]:
