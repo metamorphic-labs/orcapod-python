@@ -964,3 +964,42 @@ def test_an_ordinary_rows_stored_token_columns_are_what_they_were(kind: str) -> 
                 as_stored_before.schema.field(name), as_stored_before.column(name)
             )
         assert row_ids.instance_id(HASHER, tag, data) == HASHER.hash_table(by_hand)
+
+
+@pytest.mark.parametrize("path", ["sync", "async"])
+def test_rows_with_no_token_store_no_token_column_and_recompute_their_ids(
+    path: str,
+) -> None:
+    """Rows built from Python values with no source info: nothing to store for them.
+
+    The instance id of such a row is the hash of its entry id alone, and the stored
+    row has no ``_source_*`` column, as before; its ids are recomputed all the same.
+    """
+    from orcapod.core.datagrams import Data, Tag
+
+    rows = [
+        (Tag({"subject": s, "session": n}), Data({"a": a, "b": b}))
+        for s, n, a, b in [("m1", 1, 10, 0.5), ("m1", 2, 20, 1.5), ("m2", 1, 30, 2.5)]
+    ]
+    stream = _typed_token_stream("nested", "as_declared")
+    database = InMemoryArrowDatabase()
+    pod = combine.pod
+    assert isinstance(pod, FunctionPod)
+    node = FunctionJobNode(pod, stream, pipeline_database=database)
+    if path == "sync":
+        out = [node.execute_data(tag, data) for tag, data in rows]
+    else:
+        out = _through_channels(node, rows)
+    assert len(out) == 3 and calls["combine"] == 3
+    database.flush()
+    stored = _table(database, "combine", "pdb_v2")
+    assert stored.num_rows == 3
+    assert not [n for n in stored.column_names if n.startswith("_source_")]
+    for row in _rows(stored):
+        assert (
+            _instance_id_of_stored_row(row).to_prefixed_digest()
+            == (_values(row, "__pipeline_instance_id")[0])
+        )
+        assert (
+            _record_id_of_stored_row(row).to_prefixed_digest() == (_values(row, KEY)[0])
+        )

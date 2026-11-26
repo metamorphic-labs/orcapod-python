@@ -3217,7 +3217,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         combined_record = mark_data_tags(
             arrow_utils.hstack_tables(
                 tag.as_table(columns={"system_tags": True}),
-                input_source_table,
+                # A row with no token has no source-info column to store.
+                *((input_source_table,) if input_source_table.num_columns else ()),
                 meta_table,
             ),
             fall_through_tags(self._function_pod),
