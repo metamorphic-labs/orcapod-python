@@ -13,11 +13,12 @@ import dataclasses
 import datetime
 import logging
 from collections.abc import Callable, Collection, Iterator, Sequence
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import ClassVar, TYPE_CHECKING, Any, Literal, cast
 
 import pyarrow as pa
 from typing_extensions import override
 
+from orcapod.core.unique_keys import UniqueKeys, derived_keys
 from orcapod.core.base import TraceableBase
 from orcapod.core.nodes.staleness import RunHoldingNode
 from orcapod.core.nodes.function_node import (
@@ -129,6 +130,8 @@ class SideEffectPodStream(StreamBase):
     No invocation log is written in standalone mode (``pipeline_run_id=None``).
     """
 
+    DERIVES_UNIQUE_KEYS: ClassVar[bool] = True
+
     def __init__(
         self,
         side_effect_pod: SideEffectPod,
@@ -138,6 +141,11 @@ class SideEffectPodStream(StreamBase):
         self._pod = side_effect_pod
         self._input_stream = input_stream
         super().__init__(**kwargs)
+
+    @property
+    def unique_keys(self) -> UniqueKeys:
+        """The tag sets no two rows agree on, derived from the inputs' (``core/unique_keys``)."""
+        return derived_keys(self.producer, self.upstreams, self)
 
     @property
     def producer(self) -> SideEffectPod:  # type: ignore[override]
@@ -620,6 +628,10 @@ class SideEffectPod(TraceableBase):
         data_context: Optional data context override.
     """
 
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys: each row comes from one input row, its tags kept."""
+        return stream.unique_keys
+
     def __init__(
         self,
         fn: Callable,
@@ -908,6 +920,8 @@ class SideEffectNode(StreamBase):
         label: Optional display label.
     """
 
+    DERIVES_UNIQUE_KEYS: ClassVar[bool] = True
+
     node_type = "side_effect"
 
     def __init__(
@@ -923,6 +937,11 @@ class SideEffectNode(StreamBase):
     # ------------------------------------------------------------------
     # StreamBase interface
     # ------------------------------------------------------------------
+
+    @property
+    def unique_keys(self) -> UniqueKeys:
+        """The tag sets no two rows agree on, derived from the inputs' (``core/unique_keys``)."""
+        return derived_keys(self.producer, self.upstreams, self)
 
     @property
     def producer(self) -> SideEffectPod | None:  # type: ignore[override]
@@ -1085,6 +1104,8 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         input_stream: The upstream stream at compile time.
         label: Optional display label.
     """
+
+    DERIVES_UNIQUE_KEYS: ClassVar[bool] = True
 
     def __init__(
         self,

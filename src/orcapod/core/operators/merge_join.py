@@ -4,6 +4,9 @@ from typing import Any, ClassVar, cast
 import numpy as np
 import pyarrow as pa
 
+from orcapod.protocols.core_protocols.streams import RecordBatchInput, RecordBatchOutput
+from orcapod.core.exact_class import reads_as_its_class
+from orcapod.core.unique_keys import UniqueKeys, joined_keys
 from orcapod.types.explanation import plain_repr
 from orcapod.core.operators.base import (
     BinaryOperator,
@@ -32,7 +35,7 @@ from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
-from orcapod.utils import arrow_utils, schema_utils
+from orcapod.utils import arrow_utils, schema_utils, source_tokens
 
 
 def _output_types(
@@ -156,11 +159,23 @@ class MergeJoin(BinaryOperator):
     merged into a list in argument order, as for plain inputs.
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     # Provisional: its identity is not frozen with data context v1 (ITL-1279).
     PROVISIONAL: ClassVar[bool] = True
 
     # Data-tags (ITL-1023) are handled (ITL-1194).
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
+
+    def derive_unique_keys(self, *streams: StreamProtocol) -> UniqueKeys:
+        """The inputs' unique keys, joined input by input (``joined_keys``)."""
+        keys = streams[0].unique_keys
+        tags = set(streams[0].keys()[0])
+        for stream in streams[1:]:
+            names = set(stream.keys()[0])
+            keys = joined_keys(keys, stream.unique_keys, tags & names)
+            tags |= names
+        return keys
 
     @property
     def kernel_id(self) -> tuple[str, ...]:
@@ -397,11 +412,15 @@ class MergeJoin(BinaryOperator):
         # Tables with source info and system tags, each input's system-tag
         # column names extended with its pipeline hash and argument index.
         left_table = arrow_utils.append_to_system_tags(
-            left_stream.as_table(columns={"source": True, "system_tags": True}),
+            self._input_table(
+                left_stream, columns={"source": True, "system_tags": True}
+            ),
             self._system_tag_suffix(left_stream, 0),
         )
         right_table = arrow_utils.append_to_system_tags(
-            right_stream.as_table(columns={"source": True, "system_tags": True}),
+            self._input_table(
+                right_stream, columns={"source": True, "system_tags": True}
+            ),
             self._system_tag_suffix(right_stream, 1),
         )
 
@@ -428,6 +447,12 @@ class MergeJoin(BinaryOperator):
             right_table = right_table.rename_columns(
                 [right_source.get(c, c) for c in right_table.column_names]
             )
+
+        # A source-info column both inputs have becomes a list of both tokens: text
+        # (ITL-1464). Any other is carried as it is.
+        both = set(left_table.column_names) & set(right_table.column_names)
+        left_table = source_tokens.materialize(left_table, both)
+        right_table = source_tokens.materialize(right_table, both)
 
         # Find colliding data columns (a merged data-tag column is not one)
         colliding_keys = (set(left_data_keys) & set(right_data_keys)) - merged
@@ -496,6 +521,8 @@ class MergeJoin(BinaryOperator):
         for left_name, right_name in right_source.items():
             joined = Join._merge_source_columns(joined, left_name, right_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
             joined = Join._fold_source_column(joined, left_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+            # A merge of derived tokens has a recipe, so a type, of its own (ITL-1464).
+            output_types[left_name] = joined.schema.field(left_name).type
 
         # Use the left stream's type converter — not the default context — so that a
         # MergeJoin over streams built with a non-default DataContext reconstructs the
@@ -581,6 +608,33 @@ class MergeJoin(BinaryOperator):
             joined,
             tag_columns=tuple(tag_cols),
             data_tags=data_tag_names(tag_schema, data_schema),
+        )
+
+    async def async_execute_batches(
+        self, inputs: Sequence[RecordBatchInput], output: RecordBatchOutput
+    ) -> None:
+        """Run over input channels of Arrow record batches, holding keys only.
+
+        ``streaming_joins.StreamingMergeJoin`` gives the rows of the sync path as a set, in memory
+        bounded by its inputs' join keys (``docs/dev/specs/itl-1464-joins.md``).
+
+        Args:
+            inputs: One input channel per input stream, in the operator's order.
+            output: The channel the result's record batches are sent into.
+        """
+        if not reads_as_its_class(self, MergeJoin):
+            # A subclass, or an instance with a member replaced, may compute other rows:
+            # its own sync call over all of its inputs.
+            await super().async_execute_batches(inputs, output)
+            return
+        # The kernels are built on this module's join rules.
+        from orcapod.core.operators.streaming_joins import (
+            StreamingMergeJoin,
+            run_kernel,
+        )
+
+        await run_kernel(
+            lambda streams: StreamingMergeJoin(self, streams), inputs, output
         )
 
     def rows_dropped_text(

@@ -5,13 +5,22 @@ import itertools
 import dataclasses
 import logging
 from abc import abstractmethod
-from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
+from collections.abc import (
+    Callable,
+    Collection,
+    Generator,
+    Iterable,
+    Iterator,
+    Sequence,
+)
+from contextlib import closing
 from functools import update_wrapper, wraps
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+from typing import ClassVar, TYPE_CHECKING, Any, Literal, Protocol, cast
 
 import pyarrow as pa
 
 from orcapod import contexts
+from orcapod.core.unique_keys import UniqueKeys, derived_keys
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
@@ -29,6 +38,13 @@ from orcapod.core.streams.base import (
     schema_requires_io,
     typed_zero_row_input,
 )
+from orcapod.core.streams.preview import (
+    PREVIEW_COLUMNS,
+    PreviewRequest,
+    preview_batches,
+    refused,
+    slices_of,
+)
 from orcapod.core.streams.view import (
     SCHEMA_NEEDS_POLL_NOTE,
     STALE_NOTE,
@@ -36,7 +52,7 @@ from orcapod.core.streams.view import (
     StreamView,
 )
 from orcapod.core.tracker import DEFAULT_TRACKER_MANAGER
-from orcapod.errors import OrcapodDatabaseError, TypeIdentityError
+from orcapod.errors import OrcapodDatabaseError, PreviewRefusedError, TypeIdentityError
 from orcapod.utils.database_errors import keep_database_error, note_callback_failure
 from orcapod.protocols.core_protocols import (
     ArgumentGroup,
@@ -369,6 +385,28 @@ class _FunctionPodBase(TraceableBase):
                 tag, data, run_id=run_id
             )
         return tag, self.data_function.call(data, logger=logger, **extra)
+
+    def preview_data(self, data: DataProtocol) -> DataProtocol | None:
+        """Call the function on one row for a preview: no effect, nothing stored.
+
+        Stored results are read; no hook fires.
+
+        Args:
+            data: The row's data.
+
+        Raises:
+            PreviewRefusedError: If this kind of pod has no preview, or its function
+                takes the invocation context (it performs an external action).
+        """
+        raise PreviewRefusedError(f"{type(self).__name__} has no preview")
+
+    def require_preview(self) -> None:
+        """Refuse a preview of this pod before any function is called.
+
+        Raises:
+            PreviewRefusedError: As ``preview_data`` would.
+        """
+        raise PreviewRefusedError(f"{type(self).__name__} has no preview")
 
     async def async_process_data(
         self,
@@ -885,6 +923,10 @@ class _FunctionPodBase(TraceableBase):
 
 
 class FunctionPod(_FunctionPodBase):
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys: each row comes from one input row, its tags kept."""
+        return stream.unique_keys
+
     def __init__(
         self,
         data_function: DataFunctionProtocol,
@@ -948,6 +990,21 @@ class FunctionPod(_FunctionPodBase):
             label=label,
             **kwargs,
         )
+
+    def require_preview(self) -> None:
+        """See ``_FunctionPodBase.require_preview``."""
+        if self._ctx_arg_name is not None:
+            raise PreviewRefusedError(
+                "its function takes the invocation context: it performs an action"
+            )
+
+    def preview_data(self, data: DataProtocol) -> DataProtocol | None:
+        """See ``_FunctionPodBase.preview_data``."""
+        self.require_preview()
+        function = self.data_function
+        if isinstance(function, CachedDataFunction):
+            return function.call(data, skip_cache_insert=True)
+        return function.call(data)
 
     @property
     def pod_config(self) -> PodConfig:
@@ -1138,6 +1195,8 @@ def _no_content_hashes() -> pa.Array[Any]:
 class FunctionPodStream(StreamBase):
     """Recomputable stream wrapping a data function."""
 
+    DERIVES_UNIQUE_KEYS: ClassVar[bool] = True
+
     def __init__(
         self, function_pod: FunctionPodProtocol, input_stream: StreamProtocol, **kwargs
     ) -> None:
@@ -1171,6 +1230,11 @@ class FunctionPodStream(StreamBase):
         # arrived is compared at the end.
         self._reset_generation = 0
         self._input_state: tuple[object, ...] | None = None
+
+    @property
+    def unique_keys(self) -> UniqueKeys:
+        """The tag sets no two rows agree on, derived from the inputs' (``core/unique_keys``)."""
+        return derived_keys(self.producer, self.upstreams, self)
 
     @property
     def producer(self) -> PodProtocol:
@@ -1770,6 +1834,67 @@ class FunctionPodStream(StreamBase):
                 total += 1
         return shown, total
 
+    def _preview_batches(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """The function's rows, one per batch, each computed only when asked for.
+
+        Results this stream already holds are used, and nothing is kept of the others.
+        """
+        pod = self._pod_base()
+        try:
+            pod.require_preview()
+        except PreviewRefusedError as error:
+            raise refused(self, f"cannot be previewed: {error}") from error
+        current = not self.is_stale
+        if current and self._cached_output_table is not None:
+            yield from slices_of(self, request)
+            return
+        known = dict(self._cached_output_datas) if current else {}
+        function = pod.data_function
+        # An inactive function gives no row; any other gives one per input row.
+        one_per_row = type(function) is PythonDataFunction and function.is_active()
+        wanted = request if one_per_row else request.without_limit()
+        given = False
+        index = 0
+        with closing(preview_batches(self._input_stream, wanted)) as batches:
+            for batch in batches:
+                for tag, data in batch.iter_data():
+                    if index in known:
+                        tag, output = known[index]
+                    else:
+                        output = pod.preview_data(data)
+                    index += 1
+                    if output is not None:
+                        given = True
+                        yield self._preview_batch([(tag, output)])
+        if not given:
+            yield self._preview_batch([])
+
+    def _preview_batch(
+        self, pairs: list[tuple[TagProtocol, DataProtocol]]
+    ) -> StreamProtocol:
+        """``pairs`` as a stream, laid out as ``as_table`` lays out this stream's rows.
+
+        Without the meta columns: a stored row of a cached pod has other ones than a row
+        computed here, and a preview shows none.
+        """
+        from orcapod.core.operators.meta_columns import without_meta_columns
+        from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+
+        tag_keys, data_keys = self.keys()
+        table = self._shape_table(
+            self._table_from_pairs(pairs),
+            ColumnConfig(**PREVIEW_COLUMNS),
+            _no_content_hashes,
+        )
+        return ArrowTableStream(
+            without_meta_columns(table, tag_keys),
+            tag_columns=tag_keys,
+            data_tags=data_tag_names(tag_keys, data_keys),
+            data_context=self.data_context_key,
+        )
+
     def _shape_table(
         self,
         table: pa.Table,
@@ -2132,6 +2257,16 @@ class FallThroughPod(WrappedFunctionPod):
             )
         return output.with_columns_of(
             input_data, self._in_input_order(input_data.keys())
+        )
+
+    def require_preview(self) -> None:
+        """See ``_FunctionPodBase.require_preview``."""
+        self._plain_pod.require_preview()
+
+    def preview_data(self, data: DataProtocol) -> DataProtocol | None:
+        """The plain pod's, then the fall-through columns, as ``process_data``."""
+        return self.with_fall_through(
+            data, self._plain_pod.preview_data(self.function_input(data))
         )
 
     def function_input_schema(self, input_schema: Schema) -> Schema:

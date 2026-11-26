@@ -10,6 +10,7 @@ from typing import Any, ClassVar
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from orcapod.core.unique_keys import UniqueKeys
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
@@ -90,10 +91,17 @@ class DropNulls(UnaryOperator):
         ValueError: If ``columns`` is an empty collection.
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     # Data-tags (ITL-1023): handled.
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
+    BATCHES_GIVE_THE_WHOLE: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys (``core/unique_keys``): rows are only left out."""
+        return stream.unique_keys
 
     def __init__(
         self, columns: str | Collection[str] | None = None, **kwargs: Any
@@ -316,13 +324,14 @@ class DropNulls(UnaryOperator):
             A stream over the surviving rows, in input order, with the named
             columns non-nullable. A result with no rows has the same schema.
         """
-        table = stream.as_table(
+        table = self._input_table(
+            stream,
             columns={
                 "source": True,
                 "system_tags": True,
                 "context": True,
                 "sort_by_tags": False,
-            }
+            },
         )
         tag_columns, data_columns = stream.keys()
         return ArrowTableStream(

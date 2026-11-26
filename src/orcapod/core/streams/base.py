@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import functools
-import inspect
 import logging
 from abc import abstractmethod
 from collections import deque
@@ -9,27 +7,33 @@ from collections.abc import (
     AsyncIterator,
     Callable,
     Collection,
+    Generator,
     Iterable,
     Iterator,
     Mapping,
     Sequence,
 )
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import ClassVar, TYPE_CHECKING, Any, cast
 
 import pandas as pd
 import polars as pl
 import pyarrow as pa
 
+from orcapod.core.streams.carried import carried_table
+from orcapod.core.unique_keys import NO_UNIQUE_KEYS, UniqueKeys
 from orcapod.core.base import TraceableBase
 from orcapod.core.data_tags import data_tag_names
+from orcapod.core.streams.preview import PreviewRequest, preview_batches, refused
 from orcapod.core.streams.record_batch_input import SOURCE_BATCH_ROWS, InputChannel
 from orcapod.core.streams.view import (
     SCHEMA_NEEDS_POLL_NOTE,
+    BoundedStreamView,
     ViewStatus,
     StreamView,
+    WindowOfRows,
     default_note,
     preview_html,
 )
@@ -42,7 +46,7 @@ from orcapod.protocols.core_protocols import (
 from orcapod.protocols.core_protocols.streams import RecordBatchInput
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Condition, Schema
-from orcapod.utils import arrow_utils
+from orcapod.utils import arrow_utils, source_tokens
 
 if TYPE_CHECKING:
     from orcapod.types.explanation import Explanation
@@ -53,35 +57,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def reads_as_its_class(obj: object, cls: type) -> bool:
-    """Whether ``obj`` is exactly ``cls`` and reads only through ``cls``'s own members.
+def reads_in_batches(stream: object) -> bool:
+    """Whether ``run()`` reads ``stream``'s rows batch by batch (ITL-1464).
 
-    Exact, never by inspection of what a subclass overrides: ``type(obj) is cls``, and
-    ``obj`` holds no attribute of its own that shadows a method or a property of
-    ``cls`` (an ``iter_data`` replaced on the instance). A ``functools.cached_property``
-    keeps its value in the instance by design and is not a shadow. A subclass, however
-    small, is never ``cls`` here (ITL-1347).
-
-    Args:
-        obj: The object to check.
-        cls: The class whose reading is proven.
-
-    Returns:
-        Whether ``obj`` reads as ``cls`` does.
+    True for a source that reads its rows on demand and holds none, and for operators
+    applied batch by batch over one; decided by the kind of stream and its operators,
+    never by its rows.
     """
-    if type(obj) is not cls:
-        return False
-    own = getattr(obj, "__dict__", None)
-    if not own:
-        return True
-    missing = object()
-    for name in own:
-        member = inspect.getattr_static(cls, name, missing)
-        if member is missing or isinstance(member, functools.cached_property):
-            continue
-        if callable(member) or hasattr(type(member), "__get__"):
-            return False
-    return True
+    check = getattr(stream, "_reads_in_batches", None)
+    return bool(check()) if callable(check) else False
+
+
+def batch_streams_of(stream: object) -> Generator[StreamProtocol, None, None]:
+    """The rows of a stream that ``reads_in_batches``, in order, one stream per batch: at
+    least one, with no row when there is none."""
+    return cast("StreamBase", stream)._batch_streams_of_rows()  # pyright: ignore[reportPrivateUsage]  # shared by the stream kinds
 
 
 def system_tags_as_rows_give(table: pa.Table) -> bool:
@@ -152,6 +142,11 @@ _ZERO_ROW_MEMO: ContextVar[dict[int, tuple[object, pa.Table | None]] | None] = (
 )
 """The zero-row tables derived during one outermost ``typed_zero_row_table`` call."""
 
+_RUN_ZERO_ROWS: ContextVar[dict[int, tuple[object, pa.Table | None]] | None] = (
+    ContextVar("_RUN_ZERO_ROWS", default=None)
+)
+"""The zero-row tables derived during one async run (``zero_rows_of_one_run``)."""
+
 
 @contextmanager
 def shared_zero_row_memo() -> Iterator[None]:
@@ -209,13 +204,32 @@ def typed_zero_row_table(stream: object) -> pa.Table | None:
             return typed_zero_row_table(stream)
         finally:
             _ZERO_ROW_MEMO.reset(token)
-    known = memo.get(id(stream))
-    if known is not None and known[0] is stream:
-        return known[1]
+    for tables in (memo, _RUN_ZERO_ROWS.get()):
+        known = None if tables is None else tables.get(id(stream))
+        if known is not None and known[0] is stream:
+            return known[1]
     table = _derive_zero_row_table(stream)
     # The stream is held with its table, so its id is not reused during the call.
     memo[id(stream)] = (stream, table)
+    run = _RUN_ZERO_ROWS.get()
+    if run is not None and table is not None:
+        run[id(stream)] = (stream, table)
     return table
+
+
+@contextmanager
+def zero_rows_of_one_run() -> Generator[None, None, None]:
+    """Derive each stream's zero-row table at most once inside this block (ITL-1464).
+
+    For an async run, whose nodes each describe their inputs: without it every node
+    derives everything above it. Bindings and operators do not change during a run. A
+    stream that cannot type itself yet (a source not polled) is asked again.
+    """
+    token = _RUN_ZERO_ROWS.set({})
+    try:
+        yield
+    finally:
+        _RUN_ZERO_ROWS.reset(token)
 
 
 def typed_zero_row_input(stream: object) -> pa.Table | None:
@@ -340,8 +354,18 @@ def row_built_provenance(table: pa.Table) -> pa.Table:
     changed = False
     for field, column in zip(table.schema, table.columns, strict=True):
         if field.name.startswith(constants.SOURCE_PREFIX):
-            kind = _source_info_value_type(field.type)
-            if kind != field.type:
+            # A derived token column stays derived: its text is what the rows give.
+            if isinstance(field.type, source_tokens.MemberTokenType):
+                kind = field.type.with_list_type(
+                    _source_info_value_type(field.type.list_type)
+                )
+                if kind != field.type:
+                    column = source_tokens.retyped(column, kind)
+            elif source_tokens.is_derived(field.type):
+                kind = field.type
+            else:
+                kind = _source_info_value_type(field.type)
+            if kind != column.type:
                 column = column.cast(kind)
             new_field = pa.field(field.name, kind, nullable=field.nullable)
         elif field.name.startswith(constants.SYSTEM_TAG_PREFIX):
@@ -571,7 +595,7 @@ class CompleteStreamFeed:
         retyped as a row retypes it. Only a stream that holds such a column (a raw
         ``ArrowTableStream``) is read that way, and its reads have no effect.
         """
-        table = self._stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
+        table = carried_table(self._stream, ZERO_ROW_INPUT_COLUMNS)
         if not system_tags_as_rows_give(table):
             from orcapod.core.operators.static_output_pod import (
                 StaticOutputOperatorPod,
@@ -1386,6 +1410,19 @@ class StreamBase(TraceableBase):
 
         return Index(column, i, out=out, fail_on_miss=fail_on_miss)(self, label=label)
 
+    DERIVES_UNIQUE_KEYS: ClassVar[bool] = False
+    """Whether ``unique_keys`` is derived for this class: read for the exact class only,
+    each declaring it, and only while no member is replaced on the instance
+    (``core/unique_keys``)."""
+
+    @property
+    def unique_keys(self) -> UniqueKeys:
+        """The tag sets no two rows agree on (``core/unique_keys``).
+
+        None by default: a stream that derives or checks them says so itself.
+        """
+        return NO_UNIQUE_KEYS
+
     def arrow_schema(self) -> pa.Schema:
         """The Arrow schema of the columns this stream passes between job nodes.
 
@@ -1591,11 +1628,16 @@ class StreamBase(TraceableBase):
 
         The one way to compute any stream outside a job (developer, November 13, 2026,
         ITL-1081): ``head()`` and the notebook preview never compute a row (see
-        ``head``). ``run()`` does
-        exactly the work ``as_table()`` does, through the same code path and cache, so
-        a stream already computed is not computed again, and one whose inputs changed is
-        computed again. The view holds every row with the default column configuration;
-        its ``head``, ``tail`` and ``sort_by_tags`` choose what is shown. For other
+        ``head``). ``run()`` computes every row, in the order of ``as_table()``, with
+        every effect, and promises nothing about how the rows are produced or held
+        (developer, November 24, 2026, ITL-1464). A stream that keeps its computed rows
+        is not computed again, and one whose inputs changed is computed again. The view
+        has the default column configuration;
+        its ``head``, ``tail`` and ``sort_by_tags`` choose what is shown. The view holds
+        every row, except over a source that reads its rows on demand
+        (``reads_in_batches``): its rows, and those of operators applied batch by batch
+        over it, are read in batches, and a large result (``RunSize``) gives a
+        ``BoundedStreamView``. For other
         column groups, use ``as_table(columns=...)`` or ``head(columns=...)`` after
         ``run()``. On a stream that keeps its rows (a pod's or operator's output stream,
         a job node, a job's side-effect node included, an in-memory source) they read the
@@ -1605,9 +1647,31 @@ class StreamBase(TraceableBase):
 
         Returns:
             A ``StreamView`` of all the rows ``as_table()`` returns, with status
-            ``ROWS``.
+            ``ROWS``; bounded as said above.
         """
+        if self._reads_in_batches():
+            return self._run_in_batches()
         return self._view_of_rows(self.as_table(), self._RUN_ORIGIN)
+
+    def _reads_in_batches(self) -> bool:
+        """See ``reads_in_batches``; a stream reads its rows whole unless it says."""
+        return False
+
+    def _batch_streams_of_rows(self) -> Generator[StreamProtocol, None, None]:
+        """See ``batch_streams_of``; asked only when ``_reads_in_batches``."""
+        raise NotImplementedError(f"{type(self).__name__} has no rows in batches")
+
+    def _run_in_batches(self) -> StreamView:
+        """The ``run()`` view of rows read batch by batch, in one read."""
+        rows = WindowOfRows()
+        with closing(self._batch_streams_of_rows()) as batches:
+            for batch in batches:
+                rows.add(batch.as_table())
+        complete = rows.complete
+        if complete is not None:
+            return self._view_of_rows(complete, self._RUN_ORIGIN)
+        first = self._view_of_rows(rows.first, self._RUN_ORIGIN)
+        return BoundedStreamView(first, rows.last, rows.total)
 
     def _view_of_rows(self, table: "pa.Table", origin: str) -> StreamView:
         """Return the ``run()`` view of ``table``, every row of this stream."""
@@ -1619,6 +1683,80 @@ class StreamBase(TraceableBase):
             origin=origin,
             display_all_rows=False,
         )
+
+    def preview(self, n: int = 10, *, compute_all: bool = False) -> StreamView:
+        """Compute the first ``n`` rows, and only what they need; keep nothing (ITL-1464).
+
+        ``head()`` never computes; ``preview()`` does. The rows are the first ``n`` of
+        ``as_table()``, without a cached pod's meta columns. A source reads no more than is needed (a limit, or batches until
+        enough rows have passed), an operator applied batch by batch takes batches, and a
+        function is called on one row after another until ``n`` rows have come out, so
+        **your functions run**, once per row they are needed for. Nothing is kept on any
+        stream and nothing is written: a pod with stored results reads them and stores
+        none, no post-run hook fires, and a second ``preview()`` computes again. Results
+        a stream already holds are used.
+
+        A join, ``group_by``, ``batch``, ``polars_filter``, ``tag_by``, ``pick``,
+        ``index`` or an operator of your own needs its whole input. It is refused unless
+        ``compute_all`` is ``True``, which computes that step, and everything beneath it,
+        in full (and calls functions beneath it on every row), and keeps none of it.
+
+        Refused always: a side-effect pod or a function that takes the invocation
+        context (it would act), a source whose read polls or writes a cache, and a node
+        of a pipeline or job (``run()`` it, or ``head()`` it after a run).
+
+        Args:
+            n: The most rows to compute; at least 1.
+            compute_all: Allow steps that need their whole input.
+
+        Returns:
+            A ``StreamView``: ``ROWS`` when these are all the rows of the stream, else
+            ``PARTIAL``.
+
+        Raises:
+            TypeError: If ``n`` is not an ``int``.
+            ValueError: If ``n`` is less than 1.
+            PreviewRefusedError: If a step is refused, as said above; the message names
+                it. Without ``compute_all`` it is raised before any function is called.
+        """
+        if isinstance(n, bool) or not isinstance(n, int):
+            raise TypeError(
+                f"preview() takes an int number of rows, got {type(n).__name__}"
+            )
+        if n < 1:
+            raise ValueError(f"preview() takes at least 1 row, got {n}")
+        request = PreviewRequest(limit=n, compute_all=compute_all)
+        tables: list[pa.Table] = []
+        rows = 0
+        with closing(preview_batches(self, request)) as batches:
+            for batch in batches:
+                tables.append(batch.as_table())
+                rows += tables[-1].num_rows
+                if rows >= n:
+                    break
+        table = pa.concat_tables(tables).slice(0, n)
+        complete = rows < n
+        shown = table.num_rows
+        noun = "row" if shown == 1 else "rows"
+        return StreamView.of_rows(
+            self,
+            table,
+            tag_columns=self.keys()[0],
+            total_rows=shown if complete else None,
+            status=ViewStatus.ROWS if complete else ViewStatus.PARTIAL,
+            origin="computed",
+            description=(
+                f"preview: all {shown:,} {noun}"
+                if complete
+                else f"preview: first {shown:,} {noun} (run() computes every row)"
+            ),
+        )
+
+    def _preview_batches(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """This stream's rows for a preview (``preview_batches``): not given by default."""
+        raise refused(self, "has no preview")
 
     def head(
         self,

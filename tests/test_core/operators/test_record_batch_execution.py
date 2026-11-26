@@ -42,6 +42,7 @@ from orcapod.databases import InMemoryArrowDatabase
 from orcapod.pipeline import SyncPipelineOrchestrator
 from orcapod.pipeline.job import PipelineJob
 from orcapod.system_constants import constants
+from orcapod.utils import source_tokens
 from tests.test_core.operators.test_rejoin import other_context  # noqa: F401  # the fixture
 from orcapod.errors import UpstreamFailedError
 from orcapod.protocols.core_protocols import StreamProtocol
@@ -259,6 +260,7 @@ ROW_BY_ROW = {
     "MapColumns",
     "AddTags",
     "DropNulls",
+    "Filter",
     "Index",
     "Pick",
 }
@@ -322,7 +324,10 @@ def test_a_row_by_row_operator_sends_each_batch_as_it_arrives(case: Case) -> Non
         return received
 
     received = asyncio.run(go())
-    table = pa.Table.from_batches(received) if received else None
+    # A batch may carry derived tokens (ITL-1464): their text is what the rows give.
+    table = (
+        source_tokens.materialize(pa.Table.from_batches(received)) if received else None
+    )
     assert (table.num_rows if table is not None else 0) == expected.num_rows
     if table is not None:
         assert table.to_pylist() == expected.to_pylist()

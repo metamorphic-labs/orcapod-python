@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import itertools
 import logging
-from collections.abc import Collection, Iterator
+from collections.abc import Collection, Generator, Iterator
 from typing import Any
 
 import pyarrow as pa
@@ -15,14 +15,42 @@ from orcapod.core.streams.base import (
     StreamBase,
     check_head_size,
 )
+from orcapod.core.streams.preview import PreviewRequest, slices_of
 from orcapod.core.streams.view import StreamView
 from orcapod.protocols.core_protocols import PodProtocol, StreamProtocol, TagProtocol
 from orcapod.protocols.hashing_protocols import PipelineElementProtocol
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema, SourceInfoValue
-from orcapod.utils import arrow_utils, schema_utils
+from orcapod.utils import arrow_utils, schema_utils, source_tokens
 
 logger = logging.getLogger(__name__)
+
+ROWS_PER_PART = 8192
+"""The rows whose source-info text ``iter_data`` builds at once (ITL-1464)."""
+
+
+def _parts(rows: "pa.Table") -> Iterator[tuple[int, int]]:
+    """The row ranges ``iter_data`` builds at once: all rows, or bounded ones (ITL-1464).
+
+    A table with derived tokens is cut so that a part holds at most ``ROWS_PER_PART``
+    rows and, beyond one row, at most eight times as many tokens in a column of lists.
+    """
+    if not rows.num_rows:
+        return
+    if not source_tokens.derived_columns(rows.schema):
+        yield 0, rows.num_rows
+        return
+    members = source_tokens.members_per_row(rows)
+    ends = None if members is None else members.cumsum()
+    start = 0
+    while start < rows.num_rows:
+        end = min(start + ROWS_PER_PART, rows.num_rows)
+        if ends is not None:
+            before = int(ends[start - 1]) if start else 0
+            fit = int(ends.searchsorted(before + 8 * ROWS_PER_PART, side="right"))
+            end = min(end, max(fit, start + 1))
+        yield start, end
+        start = end
 
 
 class ArrowTableStream(StreamBase):
@@ -90,14 +118,18 @@ class ArrowTableStream(StreamBase):
         # Dictionary-encoded columns are not currently supported (ITL-1264,
         # ITL-1277): every source and operator result becomes a stream here, so this
         # refuses them all, tags and data alike.
-        if found := schema_utils.dictionary_columns(table.schema):
+        # A derived token column is no column of these types: it is text to every reader.
+        shown = pa.schema(
+            [f for f in table.schema if not source_tokens.is_derived(f.type)]
+        )
+        if found := schema_utils.dictionary_columns(shown):
             raise schema_utils.dictionary_columns_error(
                 found, tag_columns, data_tags, system_tag_columns
             )
         # Nor are columns of a type the schema hash rejects (a union, a list view, a
         # run-end-encoded type; developer, November 21, 2026, ITL-640): a stream's
         # identity is its Arrow schema hash, which cannot hold them.
-        if found := schema_utils.schema_hash_rejected_columns(table.schema):
+        if found := schema_utils.schema_hash_rejected_columns(shown):
             raise schema_utils.schema_hash_rejected_columns_error(
                 found, tag_columns, data_tags, system_tag_columns
             )
@@ -351,6 +383,11 @@ class ArrowTableStream(StreamBase):
         columns_config = ColumnConfig.handle_config(columns, all_info=all_info)
         return self._assemble_table(columns_config, limit=None)
 
+    def _carried_table(self, columns: ColumnConfig | dict[str, Any]) -> "pa.Table":
+        """The table with its derived token columns as they are (``carried_table``)."""
+        config = ColumnConfig.handle_config(columns)
+        return self._assemble_table(config, limit=None, carried=config.system_tags)
+
     def head(
         self,
         n: int = 10,
@@ -379,18 +416,64 @@ class ArrowTableStream(StreamBase):
             total_rows=self._table.num_rows,
         )
 
+    @property
+    def num_rows(self) -> int:
+        """How many rows the stream holds; nothing is read or assembled."""
+        return self._table.num_rows
+
+    def read_rows(
+        self,
+        start: int,
+        length: int,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> "pa.Table":
+        """Return rows ``start`` to ``start + length`` of ``as_table(...)``.
+
+        Exactly ``as_table(columns=columns, all_info=all_info).slice(start, length)``,
+        for a reader that shows a page at a time (ITL-1464). The columns are views of
+        the table the stream holds: when that table is memory-mapped, only the pages
+        of the rows read are touched. Two configurations read every row first:
+        ``sort_by_tags`` (the page is of the sorted rows) and ``content_hash`` (a
+        row's hash is computed from the row).
+
+        Args:
+            start: The first row's position.
+            length: How many rows; fewer are returned at the end.
+            columns: Column groups, exactly as for ``as_table``.
+            all_info: As for ``as_table``.
+
+        Returns:
+            The rows, in the order ``as_table`` gives them.
+        """
+        config = ColumnConfig.handle_config(columns, all_info=all_info)
+        return self._assemble_table(config, limit=None).slice(start, length)
+
+    def _preview_batches(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """Slices of the rows this stream holds (``preview_batches``)."""
+        yield from slices_of(self, request)
+
     def _typed_zero_row_table(self) -> "pa.Table":
         """This stream's table cut to no rows: its own Arrow types, no row assembled."""
         return self._assemble_table(ZERO_ROW_INPUT_COLUMNS, limit=0)
 
     def _assemble_table(
-        self, columns_config: ColumnConfig, limit: int | None
+        self,
+        columns_config: ColumnConfig,
+        limit: int | None,
+        *,
+        carried: bool = False,
     ) -> "pa.Table":
         """Return the stream's rows with the column groups of ``columns_config``.
 
         Args:
             columns_config: The column groups to include, and whether to sort by tags.
             limit: Assemble only the first ``limit`` rows; ``None`` for all of them.
+            carried: Leave a derived token column derived (``carried_table``), which
+                needs the system tags in the table; ``False`` gives its text.
         """
         output_table = self._table
         data_context_table = self._data_context_table
@@ -408,8 +491,8 @@ class ArrowTableStream(StreamBase):
                 [str(data.content_hash()) for _, data in rows], type=pa.large_string()
             )
 
-        def shape(carried: "pa.Table") -> "pa.Table":
-            table_stack = (carried,)
+        def shape(rows: "pa.Table") -> "pa.Table":
+            table_stack = (rows,)
             if columns_config.context:
                 table_stack += (data_context_table,)
             if columns_config.source:
@@ -423,6 +506,8 @@ class ArrowTableStream(StreamBase):
                 # the system tags are asked for. The system tags stay in the table
                 # through the sort: they break ties between equal tags.
                 table = arrow_utils.sort_by_tag_columns(table, tuple(self._tag_columns))
+            if not carried:
+                table = source_tokens.materialize(table)
             if not columns_config.system_tags:
                 table = table.drop_columns(list(self._system_tag_columns))
             return table
@@ -454,41 +539,67 @@ class ArrowTableStream(StreamBase):
         # TODO: make it work with table batch stream
         if self._cached_elements is None:
             cached_elements = []
-            tag_columns = list(self._all_tag_columns)
-            # Each row's source info goes to ``Data`` as Arrow columns, so it
-            # keeps the type it has here: re-typing it from Python values
-            # (``to_pylist``) would infer a type the stream already knows.
-            source_columns = list(self._source_info_table.column_names)
-            data_columns = list(self._data_columns) + source_columns
+            for pair in self._build_rows():
+                yield pair
 
-            # The source-info columns go beside the data columns they describe: the
-            # rows of this one table are read together, however each column is
-            # chunked (``rows_of`` reads batch by batch, cut at every column's chunk
-            # boundaries, so no row is dropped or paired with another's).
-            rows = self._table
-            for name in source_columns:
-                rows = rows.append_column(
-                    self._source_info_table.schema.field(name),
-                    self._source_info_table.column(name),
-                )
-            # The table is prepared once for all of its rows (ITL-1348): building
-            # ``Tag(row)`` and ``Data(row)`` from one-row slices normalized every row
-            # three times and split its columns again.
+                cached_elements.append(pair)
+            self._cached_elements = cached_elements
+        else:
+            yield from self._cached_elements
+
+    def iter_data_unkept(self) -> Iterator[tuple[TagProtocol, Data]]:
+        """Iterate the rows as ``iter_data`` does, without keeping the pairs built.
+
+        ``iter_data`` keeps every pair it yields for the stream's life, so a second
+        iteration returns the same objects. A reader that passes each row on once
+        (an operator sending its result downstream) has no second iteration, and the
+        kept pairs are the whole result held as objects (ITL-1464). Pairs an earlier
+        ``iter_data`` kept are yielded as they are.
+
+        Yields:
+            A ``(Tag, Data)`` tuple for each row, in table order.
+        """
+        if self._cached_elements is not None:
+            yield from self._cached_elements
+        else:
+            yield from self._build_rows()
+
+    def _build_rows(self) -> Iterator[tuple[TagProtocol, Data]]:
+        """Build and yield each row's ``(Tag, Data)`` pair, in table order."""
+        tag_columns = list(self._all_tag_columns)
+        # Each row's source info goes to ``Data`` as Arrow columns, so it
+        # keeps the type it has here: re-typing it from Python values
+        # (``to_pylist``) would infer a type the stream already knows.
+        source_columns = list(self._source_info_table.column_names)
+        data_columns = list(self._data_columns) + source_columns
+
+        # The source-info columns go beside the data columns they describe: the
+        # rows of this one table are read together, however each column is
+        # chunked (``rows_of`` reads batch by batch, cut at every column's chunk
+        # boundaries, so no row is dropped or paired with another's).
+        rows = self._table
+        for name in source_columns:
+            rows = rows.append_column(
+                self._source_info_table.schema.field(name),
+                self._source_info_table.column(name),
+            )
+        # Derived tokens become text a part of the rows at a time (ITL-1464); a
+        # table with none is one part.
+        for start, end in _parts(rows):
+            part = source_tokens.materialize(rows.slice(start, end - start))
+            # The part is prepared once for all of its rows (ITL-1348): building
+            # ``Tag(row)`` and ``Data(row)`` from one-row slices normalized every
+            # row three times and split its columns again.
             tags = (
-                Tag.rows_of(rows.select(tag_columns), self.data_context)
+                Tag.rows_of(part.select(tag_columns), self.data_context)
                 if tag_columns
                 else None
             )
-            for data in Data.rows_of(rows.select(data_columns), self.data_context):
+            for data in Data.rows_of(part.select(data_columns), self.data_context):
                 # A fresh empty tag per row, so rows never share one object.
                 tag = next(tags) if tags is not None else Tag({})
 
                 yield tag, data
-
-                cached_elements.append((tag, data))
-            self._cached_elements = cached_elements
-        else:
-            yield from self._cached_elements
 
     def __repr__(self) -> str:
         refs = f", data_tags={self._data_tags}" if self._data_tags else ""

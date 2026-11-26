@@ -42,7 +42,9 @@ class DictSource(RootSource):
     SOURCE_KIND: ClassVar[str] = "dict"
     # The version of this kind's implementation, in the kind part (ITL-1425).
     SOURCE_VERSION: ClassVar[int] = 1
+    KEY_COLUMNS_CHECKED: ClassVar[bool] = True
     TABLE_IS_ROWS: ClassVar[bool] = True
+    _carried_table = RootSource._carried_from_stream
 
     def __init__(
         self,

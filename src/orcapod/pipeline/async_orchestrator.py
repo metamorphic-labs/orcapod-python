@@ -15,10 +15,13 @@ import threading
 import uuid
 import warnings
 from collections import defaultdict
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncGenerator, Callable, Coroutine
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 
 from orcapod.channels import BroadcastChannel, Channel
+from orcapod.core.job_edges import EDGE_BATCHES, EdgeReader, EdgeWriter
+from orcapod.core.streams.base import zero_rows_of_one_run
+from orcapod.core.unique_keys import unique_keys_of_one_run
 from orcapod.errors import (
     OrcapodDatabaseError,
     OrcapodDatabaseWriteError,
@@ -237,22 +240,27 @@ class AsyncPipelineOrchestrator:
             node_output_channels: dict[Any, Channel | BroadcastChannel] = {}
             edge_readers: dict[tuple[Any, Any], Any] = {}
 
+            def edge_buffer(node: Any) -> int:
+                """Items an edge holds: few when they may be record batches."""
+                batches = is_source_node(node) or is_operator_node(node)
+                return min(buf, EDGE_BATCHES) if batches else buf
+
             for node, downstreams in out_edges.items():
                 if len(downstreams) == 1:
-                    ch = Channel(buffer_size=buf)
+                    ch = Channel(buffer_size=edge_buffer(node))
                     node_output_channels[node] = ch
-                    edge_readers[(node, downstreams[0])] = ch.reader
+                    edge_readers[(node, downstreams[0])] = EdgeReader(ch.reader)
                 else:
-                    bch = BroadcastChannel(buffer_size=buf)
+                    bch = BroadcastChannel(buffer_size=edge_buffer(node))
                     node_output_channels[node] = bch
                     for ds in downstreams:
-                        edge_readers[(node, ds)] = bch.add_reader()
+                        edge_readers[(node, ds)] = EdgeReader(bch.add_reader())
 
             # Terminal nodes need sink channels
             terminal_channels: list[Channel] = []
             for node in topo_order:
                 if node not in node_output_channels:
-                    ch = Channel(buffer_size=buf)
+                    ch = Channel(buffer_size=edge_buffer(node))
                     node_output_channels[node] = ch
                     terminal_channels.append(ch)
 
@@ -263,13 +271,16 @@ class AsyncPipelineOrchestrator:
                     collectors[node] = []
 
             # Launch all nodes concurrently
-            async with asyncio.TaskGroup() as tg:
+            async with _task_group() as tg:
                 for node in topo_order:
                     writer = node_output_channels[node].writer
 
                     if materialize_results:
                         collector = collectors[node]
                         writer = _CollectingWriter(writer, collector)
+                    else:
+                        # Takes a node's rows as record batches too (ITL-1464).
+                        writer = EdgeWriter(writer)
 
                     if held_rows is not None and node in held_rows:
                         # Not run: the rows of its current run feed its successors. Its
@@ -361,9 +372,12 @@ class AsyncPipelineOrchestrator:
                             f"Unknown node type: {getattr(node, 'node_type', None)!r}"
                         )
 
-                # Drain terminal channels concurrently
+                # Drain terminal channels concurrently. The rows are let go as they
+                # are read: nothing reads this task's result, and a list of every
+                # row a terminal node sent is the whole output held as objects
+                # (ITL-1464).
                 for ch in terminal_channels:
-                    tg.create_task(ch.reader.collect())
+                    tg.create_task(_drain(ch.reader))
 
             return OrchestratorResult(
                 node_outputs=(
@@ -657,8 +671,19 @@ class _RowsInFlight:
         return NoOpLogger()
 
 
+@contextlib.asynccontextmanager
+async def _task_group() -> AsyncGenerator[asyncio.TaskGroup, None]:
+    """The run's task group, whose nodes share the descriptions they derive."""
+    with zero_rows_of_one_run(), unique_keys_of_one_run():
+        async with asyncio.TaskGroup() as group:
+            yield group
+
+
 async def _drain(reader: Any) -> None:
     """Read ``reader`` to its end, keeping nothing."""
+    if isinstance(reader, EdgeReader):
+        await reader.discard()
+        return
     async for _ in reader:
         pass
 

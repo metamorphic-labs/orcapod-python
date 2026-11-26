@@ -6,6 +6,7 @@ from typing import Any, ClassVar, cast
 import numpy as np
 import pyarrow as pa
 
+from orcapod.core.streams.carried import carried_batches
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.protocols.core_protocols.streams import (
     RecordBatchInput,
@@ -18,15 +19,17 @@ from orcapod.channels import (
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.operators.static_output_pod import (
     close_inputs,
+    collected_row_chunks,
     concatenate_batches,
     finish_operator,
+    rows_once,
 )
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.streams import ArrowTableStream
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash
-from orcapod.utils import arrow_utils
+from orcapod.utils import arrow_utils, source_tokens
 
 from orcapod.types import Schema
 
@@ -56,6 +59,8 @@ class Batch(UnaryOperator):
         batch_size: Rows per batch; ``0`` puts every row in one batch.
         drop_partial_batch: Drop a last batch with fewer than ``batch_size`` rows.
     """
+
+    CARRIES_TOKENS: ClassVar[bool] = True
 
     # Provisional: its identity is not frozen with data context v1 (ITL-1279).
     PROVISIONAL: ClassVar[bool] = True
@@ -150,7 +155,13 @@ class Batch(UnaryOperator):
         Returns:
             A stream with one row per batch.
         """
-        table = stream.as_table(columns={"source": True, "system_tags": True})
+        table = self._input_table(stream, columns={"source": True, "system_tags": True})
+        # A list of tokens is aggregated as text (ITL-1464).
+        table = source_tokens.materialize(
+            table,
+            set(source_tokens.derived_columns(table.schema))
+            - set(source_tokens.recipe_columns(table.schema)),
+        )
 
         tag_columns, _ = stream.keys()
 
@@ -162,25 +173,36 @@ class Batch(UnaryOperator):
             ),
         )
         kept = table.slice(0, int(offsets[-1].as_py()))
-        bounds = cast(list[int], offsets.to_pylist())
         # Every stream has a data context; StreamProtocol does not declare it.
         type_converter = stream.data_context.type_converter  # pyright: ignore[reportAttributeAccessIssue]
+
+        # The source-info lists of tokens carried as recipes (ITL-1464).
+        recipes = source_tokens.recipe_columns(table.schema)
+        order = pa.array(np.arange(kept.num_rows), pa.int64())
+        token_lists = source_tokens.MemberTokens(kept, order, offsets)
 
         fields: list[pa.Field[Any]] = []
         arrays: list[pa.Array[Any]] = []
         for field in table.schema:
+            if field.name in recipes:
+                tokens = token_lists.column(
+                    recipes[field.name], pa.large_list(pa.large_string())
+                )
+                fields.append(pa.field(field.name, tokens.type, nullable=False))
+                arrays.append(tokens)
+                continue
             column = kept.column(field.name)
             if field.name.startswith(constants.SYSTEM_TAG_PREFIX):
                 # Text values, folded per batch; text loses nothing in Python.
-                values = cast(list[Any], column.to_pylist())
+                members = source_tokens.member_texts(kept, field.name, order, offsets)
                 fields.append(field)
                 arrays.append(
                     pa.array(
                         [
                             arrow_utils.fold_system_tag_values(
-                                values[start:end], label=BATCH_FOLD_LABEL
+                                values, label=BATCH_FOLD_LABEL
                             )
-                            for start, end in zip(bounds[:-1], bounds[1:])
+                            for values in members
                         ],
                         field.type,
                     )
@@ -278,12 +300,12 @@ class Batch(UnaryOperator):
             pipeline_hash = input_pipeline_hashes[0]
             if self.batch_size == 0:
                 # Must collect all rows — barrier fallback
-                rows = await inputs[0].collect()
-                if rows:
-                    stream = self._materialize_input_stream(rows, pipeline_hash)
-                    result = self.unary_static_process(stream)
-                    for tag, data in result.iter_data():
-                        await output.send((tag, data))
+                async with collected_row_chunks(inputs[:1]) as (rows,):
+                    if rows.num_rows:
+                        stream = rows.input_stream(pipeline_hash)
+                        result = self.unary_static_process(stream)
+                        for tag, data in rows_once(result):
+                            await output.send((tag, data))
                 return
 
             batch: list[tuple[TagProtocol, DataProtocol]] = []
@@ -328,7 +350,7 @@ class Batch(UnaryOperator):
         try:
             waiting: list[pa.RecordBatch] = []
             rows = 0
-            async for batch in channel:
+            async for batch in carried_batches(channel):
                 if not batch.num_rows:
                     continue  # nothing to batch, nothing to hold
                 waiting.append(batch)

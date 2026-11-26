@@ -4,8 +4,10 @@ import pyarrow as pa
 import pytest
 
 from orcapod.types import ColumnConfig, SourceInfoValue
+from orcapod.utils import source_tokens
 from orcapod.utils.arrow_utils import (
-    add_source_info,
+    add_source_tokens,
+    add_system_tag_columns,
     apply_column_config,
     column_arrow_type,
     concat_tables_by_name,
@@ -243,65 +245,41 @@ class TestInferSchemaNullable:
         assert not result.metadata
 
 
-# ---------------------------------------------------------------------------
-# add_source_info
-# ---------------------------------------------------------------------------
+class TestAddSourceTokens:
+    """One ``_source_<col>`` column per data column, whose text is
+    ``<source id>::<record id>::<col>`` of the row's own system tags."""
 
-
-class TestAddSourceInfo:
-    """add_source_info must produce one _source_<col> column per data column
-    whose values are exactly '<source_token>::<col>' for every row."""
-
-    def test_single_column_produces_correct_source_token(self):
-        """_source_<col> value is '<src>::<col>' for every row."""
-        table = pa.table({"x": pa.array([10, 20], type=pa.int64())})
-        result = add_source_info(table, "mysrc")
-
-        assert result.column("_source_x").to_pylist() == ["mysrc::x", "mysrc::x"]
-
-    def test_multi_column_each_source_column_uses_its_own_name(self):
-        """Each _source_<col> value is '<src>::<col>' — columns are independent."""
-        table = pa.table(
-            {
-                "x": pa.array([1, 2], type=pa.int64()),
-                "y": pa.array([3, 4], type=pa.int64()),
-                "z": pa.array([5, 6], type=pa.int64()),
-            }
+    def test_each_column_gets_its_own_token_of_every_row(self):
+        table = pa.table({"k": [1, 2], "y": ["p", "q"], "x": [3.0, 4.0]})
+        carried = add_system_tag_columns(
+            add_source_tokens(table, "hash", exclude_columns=["k"]),
+            "hash",
+            "src",
+            ["row_0", "row_1"],
         )
-        result = add_source_info(table, "base")
+        result = source_tokens.materialize(carried)
+        assert [c for c in result.column_names if c.startswith("_source_")] == [
+            "_source_y",
+            "_source_x",
+        ]
+        assert result.column("_source_y").to_pylist() == [
+            "src::row_0::y",
+            "src::row_1::y",
+        ]
+        assert result.column("_source_x").to_pylist() == [
+            "src::row_0::x",
+            "src::row_1::x",
+        ]
+        field = result.schema.field("_source_x")
+        assert (field.type, field.nullable) == (pa.large_string(), False)
 
-        assert result.column("_source_x").to_pylist() == ["base::x", "base::x"]
-        assert result.column("_source_y").to_pylist() == ["base::y", "base::y"]
-        assert result.column("_source_z").to_pylist() == ["base::z", "base::z"]
-
-    def test_per_row_source_tokens_combined_with_column_name(self):
-        """With a per-row source list, each row's token is '<row_src>::<col>'."""
-        table = pa.table(
-            {
-                "a": pa.array([10, 20], type=pa.int64()),
-                "b": pa.array([30, 40], type=pa.int64()),
-            }
-        )
-        result = add_source_info(table, ["src0", "src1"])
-
-        assert result.column("_source_a").to_pylist() == ["src0::a", "src1::a"]
-        assert result.column("_source_b").to_pylist() == ["src0::b", "src1::b"]
-
-    def test_correct_number_of_source_columns_added(self):
-        """Exactly one _source_<col> column is added per non-excluded data column."""
-        table = pa.table(
-            {
-                "p": pa.array([1], type=pa.int64()),
-                "q": pa.array([2], type=pa.int64()),
-                "r": pa.array([3], type=pa.int64()),
-            }
-        )
-        result = add_source_info(table, "s")
-
-        assert result.num_columns == 6  # 3 data + 3 source
-        assert "_source_p" in result.column_names
-        assert "_source_q" in result.column_names
-        assert "_source_r" in result.column_names
+    def test_meta_columns_get_none(self):
+        table = pa.table({"x": [1], "__m": [2]})
+        assert add_source_tokens(table, "hash").column_names == [
+            "x",
+            "__m",
+            "_source_x",
+        ]
 
 
 class TestSystemTagColumnNames:

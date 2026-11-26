@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from typing import Any, ClassVar, TYPE_CHECKING
 
 import pyarrow as pa
@@ -26,6 +26,7 @@ from orcapod.core.streams.base import (
     schema_requires_io,
     typed_zero_row_table,
 )
+from orcapod.core.streams.preview import PreviewRequest, refused
 from orcapod.core.streams.view import (
     ViewStatus,
     StreamView,
@@ -41,7 +42,12 @@ from orcapod.contexts.stored import (
     report_rows_of_other_data_contexts,
     with_data_context,
 )
-from orcapod.protocols.core_protocols import DataProtocol, SourceProtocol, TagProtocol
+from orcapod.protocols.core_protocols import (
+    DataProtocol,
+    SourceProtocol,
+    StreamProtocol,
+    TagProtocol,
+)
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import SOURCE_DB_SCHEMA_VERSION, constants
 from orcapod.types import ColumnConfig, Schema
@@ -700,6 +706,12 @@ class CachedSource(RootSource):
         self._ensure_stream()
         assert self._cached_stream is not None
         return self._cached_stream.iter_data()
+
+    def _preview_batches(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """Refused: reading the source writes its cache."""
+        raise refused(self, "writes its cache when it is read")
 
     def as_table(
         self,

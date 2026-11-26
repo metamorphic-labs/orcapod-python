@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from orcapod.utils import source_tokens
 from orcapod.databases._pending_commits import PendingCommit, PendingCommits
 from orcapod.databases._row_index import KeyIndex, compact_tail, matching_rows
 from orcapod.databases.utils import (
@@ -242,6 +243,7 @@ class InMemoryArrowDatabase:
         flush: bool = False,
     ) -> None:
         self._validate_record_path(record_path)
+        source_tokens.refuse_derived(records.schema)
 
         if records.num_rows == 0:
             return

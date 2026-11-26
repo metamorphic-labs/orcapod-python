@@ -217,6 +217,15 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
         """
         ...
 
+    @property
+    def unique_keys(self) -> frozenset[frozenset[str]]:
+        """The tag sets no two rows of the stream agree on; empty certifies nothing.
+
+        Derived from the inputs when asked, never stored; in no hash, identity, config,
+        stored row or equality (``orcapod.core.unique_keys``, ITL-1464).
+        """
+        ...
+
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """
         Generates explicit iterator over (tag, data) pairs in the stream.
@@ -280,13 +289,28 @@ class StreamProtocol(TraceableProtocol, PipelineElementProtocol, Protocol):
     def run(self) -> "StreamViewProtocol":
         """Compute the whole stream and return a view of all its rows.
 
-        Does the work ``as_table()`` does, through the same path and cache; a job node
+        Every row is computed, with every effect; nothing is promised about how the
+        rows are produced or held (ITL-1464), and the view of a large result may hold
+        only its ends (``BoundedStreamView``). A job node
         runs as it does in a job. Every stream has it, with no argument: it is the one
         way to compute a stream outside a job (ITL-1081). ``head()`` and the notebook
         preview never compute a row.
 
         Returns:
             StreamView: Every computed row, with the default column configuration.
+        """
+        ...
+
+    def preview(
+        self, n: int = 10, *, compute_all: bool = False
+    ) -> "StreamViewProtocol":
+        """Compute the first ``n`` rows and only what they need, keeping nothing.
+
+        User functions are called; nothing is stored and nothing has an effect. A step
+        that needs its whole input is refused unless ``compute_all`` (ITL-1464).
+
+        Returns:
+            StreamView: The first ``n`` rows of ``as_table()``.
         """
         ...
 

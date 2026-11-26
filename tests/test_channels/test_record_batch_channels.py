@@ -23,6 +23,7 @@ from unittest import mock
 import pyarrow as pa
 import pytest
 
+from orcapod.utils import source_tokens
 from orcapod.protocols.core_protocols.streams import (
     RecordBatchInput,
     RecordBatchOutput,
@@ -105,7 +106,9 @@ def R(stream: Any) -> pa.Table:
 
 
 def same(table: pa.Table, expected: pa.Table) -> bool:
-    """Whether two tables have one schema (metadata included) and the same rows."""
+    """Whether two tables have one schema (metadata included) and the same rows, the
+    text of a channel's derived tokens built."""
+    table = source_tokens.materialize(table)
     return table.schema.equals(expected.schema, check_metadata=True) and bool(
         table.combine_chunks().equals(expected.combine_chunks())
     )
@@ -135,7 +138,9 @@ def test_a_channel_opened_on_a_stream_delivers_its_rows_and_refers_to_it() -> No
     as_protocol: RecordBatchInput = channel  # what an operator reads (type-checked)
     assert as_protocol.stream is stream
     batches = run(stream.open_channel().collect)
-    assert same(pa.Table.from_batches(batches), R(stream))
+    # Tokens may be derived on a channel; their text is the rows' (ITL-1464).
+    text = source_tokens.materialize(pa.Table.from_batches(batches))
+    assert same(text, R(stream))
     delivered = run(lambda: channel.to_stream())
     assert same(delivered.as_table(columns=ALL), R(stream))
     assert delivered.keys() == stream.keys()
@@ -872,13 +877,15 @@ def test_a_polling_source_is_read_once_through_a_channel() -> None:
 
 
 def test_opening_a_channel_computes_nothing() -> None:
-    """The stream's table is read at the first ``receive``, not when the channel opens."""
+    """The stream's table is read at the first ``receive``, not when the channel opens.
+
+    A library class's table is read with its tokens as they are (``carried_table``)."""
     stream = source()
     with mock.patch.object(
         ArrowTableSource,
-        "as_table",
+        "_carried_table",
         autospec=True,
-        side_effect=ArrowTableSource.as_table,
+        side_effect=ArrowTableSource._carried_table,  # pyright: ignore[reportPrivateUsage]  # the read of a channel
     ) as read:
         channel = stream.open_channel()
         assert read.call_count == 0

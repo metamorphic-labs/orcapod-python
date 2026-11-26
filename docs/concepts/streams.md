@@ -181,9 +181,10 @@ print(months.head(3).header())
 ### Computing a stream outside a job: `run()`
 
 Every stream, source and node has `run()`, with no arguments: it is the one way to compute
-any of them outside a job (developer, November 13, 2026). It does exactly the work
-`as_table()` does, through the same cache, and returns a `StreamView` of every row with the
-default columns. A stream already computed is not computed a second time; one whose input
+any of them outside a job (developer, November 13, 2026). It computes every row, with every
+effect, in the order of `as_table()`, and returns a `StreamView` with the default columns. It
+promises nothing about how the rows are produced or what is held meanwhile (developer,
+November 24, 2026). A stream already computed is not computed a second time; one whose input
 changed is recomputed. In a notebook, `stream.run()` at the end of a cell computes and displays.
 
 The view's own methods choose what is shown. Each returns a new view and never reads or
@@ -209,21 +210,69 @@ view does not hold, so it keeps them in the order it has them. The display of a 
 such as the one `run()` returns, shows its first and last five rows when it has more than
 ten, and its header gives the count.
 
+A view holds every row of the stream, with one exception, the bounded view. A
+`SpiralDBTableSource` holds no rows, and `run()` reads it in batches; so are read the
+operators that choose or rename columns, add tags or drop rows (`select_*`, `drop_*`,
+`map_*`, `add_tags`, `drop_nulls`, `filter`) and the chains of them over such a source. A
+result of at most 50,000 rows and 64 MiB of values (the values themselves, whatever their
+layout in memory), or of at most 2,000 rows, is held, as everywhere else. A larger one is not: its view has
+the row count, the columns, and the first and the last 1,000 rows. It is displayed as any
+view, and `head(n)` and `tail(n)` up to 1,000 rows give what any view gives. What needs the
+other rows (`table`, `as_table()`, `as_polars_df()`, `sort_by_tags()`, a longer `head` or
+`tail`) raises `BoundedViewError`: a part is never given as the whole. Ask the stream itself,
+`stream.as_table()`, which reads the source again and applies the operators again (no function
+of yours runs a second time). `stream.head(n)` after such a run shows its first rows. Whether
+a view is bounded depends only on the kind of stream and on its rows, so equal data
+always gives the same kind of view. A `polars_filter`, `pick`, `index`, `tag_by`, join,
+`group_by` or `batch`, a function pod, and everything after one, computes its whole result
+and holds it, also over a `SpiralDBTableSource`.
+
 A view holds the default column groups only. For system tags, source info, the data context
 or content hashes, ask the stream after `run()`. A function pod's or operator's output stream,
 a job node (a job's side-effect node included), an in-memory source and a `CachedSource` keep
 the rows `run()` gave: their `as_table(columns=...)` and `head(columns=...)` read those rows,
 compute nothing and deliver no side effect. Other streams do their `as_table()` work again: a
 side-effect stream outside a job delivers its side effects again (its `head()` shows no rows),
-a polling source polls again and a `SpiralDBTableSource` reads its whole table again. A view never asks its stream for more columns, because for those
+a polling source polls again and a `SpiralDBTableSource` reads its whole table again (so does
+an operator's stream whose `run()` gave a bounded view). A view never asks its stream for more columns, because for those
 streams asking again is not a read.
+
+### The first rows of a stream not computed yet: `preview(n)`
+
+`head()` never computes, so it has nothing to show of a derived stream nobody ran.
+`preview(n)` computes the first `n` rows of `as_table()`, and only what they need:
+
+```python
+first = months.preview(2)
+print(first.header())
+# FunctionPodStream[months] — preview: first 2 rows (run() computes every row)
+print(first.as_table().column("age_months").to_pylist())
+# [108, 120]
+```
+
+A source reads no more than is needed, an operator takes batches until enough rows have
+passed, and **your functions are called**, on one row after another until `n` rows have come
+out. Nothing is kept on a stream, nothing is stored (a pod with stored results reads them and
+adds none), and no hook fires; calling `preview` again computes again. Results a stream
+already holds are used. A view of fewer rows than asked for says it shows all of them.
+
+A join, `group_by`, `batch`, `polars_filter`, `tag_by`, `pick`, `index` or an operator of your
+own needs every row of its input, so `preview` refuses it (`PreviewRefusedError`, naming the
+step). `preview(n, compute_all=True)` computes that step and everything beneath it in full,
+functions included, and keeps none of it. A side-effect pod, a function that takes the
+invocation context, a `CachedSource`, a `PollingSource` and a node of a pipeline or job are
+refused always: a preview never acts. A `semi_join` whose inputs share no tag keeps every row
+of its left input and never reads its right one, so `preview` reads only the left input, as
+the full read does. A `DerivedSource` over a source shows its origin's first rows through
+the origin's own `preview` (refused for a `CachedSource` or `PollingSource` origin); over a
+job node it reads the stored rows, only with `compute_all=True`. It keeps none of them.
 
 What `run()` does on each kind of object:
 
 | Object | `run()` |
 |---|---|
 | An in-memory source (`DictSource`, `ArrowTableSource`, ...), a Delta or SQL table source | nothing to compute: a view of the rows it holds |
-| A `SpiralDBTableSource` | reads the whole table into memory (`head()` is the bounded read); every call reads again |
+| A `SpiralDBTableSource` | reads the whole table in batches (`head()` is the bounded read); every call reads again; a bounded view above 50,000 rows or 64 MiB |
 | A `PollingSource` (provisional, see [Provisional sources](sources.md#provisional-sources)) | polls, as `as_table()` does |
 | A `CachedSource` | reads its cache and writes the wrapped source's new rows to it |
 | A function pod's or operator's output stream | computes what is not computed yet |

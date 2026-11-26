@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from abc import abstractmethod
 from collections.abc import Collection, Sequence
 from typing import TYPE_CHECKING, Any
@@ -12,7 +11,11 @@ from orcapod.core.operators.meta_columns import (
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.data_tags import data_tags_first
 from orcapod.core.operators.arrow_keys import part_without_rule
-from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+from orcapod.core.operators.static_output_pod import (
+    StaticOutputOperatorPod,
+    collected_row_chunks,
+    rows_once,
+)
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import (
     ArgumentGroup,
@@ -228,16 +231,16 @@ class UnaryOperator(StaticOutputOperatorPod):
                     f"input_pipeline_hashes length ({len(input_pipeline_hashes)}) "
                     f"must match inputs length ({len(inputs)})"
                 )
-            rows = await inputs[0].collect()
-            if not rows:
-                # No rows in, no rows out: an operator never synthesizes a row.
-                # The typed empty stream the sync path returns needs a schema the
-                # channel does not carry (ITL-858), so nothing is emitted (ITL-865).
-                return
-            stream = self._materialize_input_stream(rows, input_pipeline_hashes[0])
-            result = self.static_process(stream)
-            for tag, data in result.iter_data():
-                await output.send((tag, data))
+            async with collected_row_chunks(inputs[:1]) as (rows,):
+                if not rows.num_rows:
+                    # No rows in, no rows out: an operator never synthesizes a row.
+                    # The typed empty stream the sync path returns needs a schema the
+                    # channel does not carry (ITL-858), so nothing is emitted (ITL-865).
+                    return
+                stream = rows.input_stream(input_pipeline_hashes[0])
+                result = self.static_process(stream)
+                for tag, data in rows_once(result):
+                    await output.send((tag, data))
         finally:
             await output.close()
 
@@ -343,20 +346,18 @@ class BinaryOperator(StaticOutputOperatorPod):
                     f"must match inputs length ({len(inputs)})"
                 )
             left_hash, right_hash = input_pipeline_hashes
-            left_rows, right_rows = await asyncio.gather(
-                inputs[0].collect(), inputs[1].collect()
-            )
-            if not left_rows or not right_rows:
-                # The one barrier binary operator, MergeJoin, is an inner join: an
-                # input with no rows gives no rows, as on the sync path. The typed
-                # empty stream needs a schema the channels do not carry (ITL-858),
-                # so nothing is emitted (ITL-865).
-                return
-            left_stream = self._materialize_input_stream(left_rows, left_hash)
-            right_stream = self._materialize_input_stream(right_rows, right_hash)
-            result = self.static_process(left_stream, right_stream)
-            for tag, data in result.iter_data():
-                await output.send((tag, data))
+            async with collected_row_chunks(inputs) as (left_rows, right_rows):
+                if not left_rows.num_rows or not right_rows.num_rows:
+                    # The one barrier binary operator, MergeJoin, is an inner join: an
+                    # input with no rows gives no rows, as on the sync path. The typed
+                    # empty stream needs a schema the channels do not carry (ITL-858),
+                    # so nothing is emitted (ITL-865).
+                    return
+                left_stream = left_rows.input_stream(left_hash)
+                right_stream = right_rows.input_stream(right_hash)
+                result = self.static_process(left_stream, right_stream)
+                for tag, data in rows_once(result):
+                    await output.send((tag, data))
         finally:
             await output.close()
 

@@ -27,12 +27,13 @@ from collections import Counter
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import datetime, timezone
 from functools import partial
-from typing import Any, Literal, NamedTuple, cast
+from typing import ClassVar, Any, Literal, NamedTuple, cast
 
 import polars as pl
 import pyarrow as pa
 
 from orcapod import contexts
+from orcapod.core.unique_keys import UniqueKeys, derived_keys
 from orcapod.core.nodes.provenance_methods import ProvenanceMethods
 from orcapod.core.function_pod import (
     fall_through_tags,
@@ -550,6 +551,11 @@ class FunctionNodeBase(StreamBase):
         return self._node_type
 
     @property
+    def unique_keys(self) -> UniqueKeys:
+        """The tag sets no two rows agree on, derived from the inputs' (``core/unique_keys``)."""
+        return derived_keys(self.producer, self.upstreams, self)
+
+    @property
     def producer(self) -> FunctionPodProtocol:
         return self._function_pod
 
@@ -1018,6 +1024,8 @@ class FunctionNode(FunctionNodeBase):
     and serialized to disk via ``Pipeline.save()``.
     """
 
+    DERIVES_UNIQUE_KEYS: ClassVar[bool] = True
+
     def __init__(
         self,
         function_pod: FunctionPodProtocol,
@@ -1409,6 +1417,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
     wrapping, pipeline records, and two-phase ``iter_data()`` / async
     execution.
     """
+
+    DERIVES_UNIQUE_KEYS: ClassVar[bool] = True
 
     # Set once a read has reported the stored rows it skipped (rows of another data
     # context); a class default so nodes rebuilt from a saved descriptor start unset.

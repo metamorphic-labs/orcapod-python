@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 from collections import defaultdict
-from collections.abc import Callable, Iterator, Mapping, Collection, Sequence
+from collections.abc import (
+    Callable,
+    Collection,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from typing import Any, TYPE_CHECKING, cast
 
 import pyarrow as pa
 
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, SourceInfoValue
+from orcapod.utils import source_tokens
 
 if TYPE_CHECKING:
     from orcapod.logical_types.identifier import LogicalTypeIdentifier
@@ -1464,10 +1473,17 @@ def append_to_system_tags(table: "pa.Table", value: str) -> "pa.Table":
         else c
         for c in table.column_names
     }
-    return table.rename_columns(column_name_map)
+    # A derived token column keeps reading the columns it read (ITL-1464).
+    return source_tokens.rename_read_columns(
+        table.rename_columns(column_name_map), column_name_map
+    )
 
 
-def fold_system_tag_values(values: Sequence[Any], *, label: str) -> str:
+_FOLD_PART = 4096
+"""How many members ``fold_system_tag_values`` digests at once."""
+
+
+def fold_system_tag_values(values: Iterable[Any], *, label: str) -> str:
     """Fold a group's system-tag values into one scalar: ``"<label>:<hex>"``.
 
     The one fold helper (ITL-1154). Many->one operators must emit scalar system tags,
@@ -1495,13 +1511,20 @@ def fold_system_tag_values(values: Sequence[Any], *, label: str) -> str:
     Returns:
         ``"<label>:<64 hex digits>"``.
     """
-    members = json.dumps(
-        [None if v is None else str(v) for v in values],
-        separators=(",", ":"),
-        ensure_ascii=False,
-    )
+    # The canonical JSON array, digested a part at a time: a group's members can be
+    # millions, and their text together is not held (ITL-1464).
+    digest = hashlib.sha256(b"[")
+    rest = iter(values)
+    between = b""
+    while part := [
+        None if v is None else str(v) for v in itertools.islice(rest, _FOLD_PART)
+    ]:
+        text = json.dumps(part, separators=(",", ":"), ensure_ascii=False)
+        digest.update(between + text[1:-1].encode("utf-8"))
+        between = b","
+    digest.update(b"]")
     # A folded value is a hash stored as a value: it carries its label.
-    return f"{label}:{hashlib.sha256(members.encode('utf-8')).hexdigest()}"
+    return f"{label}:{digest.hexdigest()}"
 
 
 def aggregated_list_type(
@@ -1712,6 +1735,12 @@ def sort_system_tag_values(table: "pa.Table") -> "pa.Table":
         if len(positions) <= 1:
             continue
 
+        # The values move between these columns, so a token derived from them is built
+        # first: it names the row it always named (ITL-1464).
+        table = source_tokens.materialize_reading(
+            table, {name for pair in positions.values() for name in pair.values()}
+        )
+
         # Sort positions numerically
         sorted_positions = sorted(positions.keys(), key=int)
 
@@ -1777,50 +1806,38 @@ def sort_system_tag_values(table: "pa.Table") -> "pa.Table":
     return table
 
 
-def add_source_info(
+def add_source_tokens(
     table: "pa.Table",
-    source_info: str | Collection[str] | None,
-    exclude_prefixes: Collection[str] = (
-        constants.META_PREFIX,
-        constants.DATAGRAM_PREFIX,
-    ),
+    schema_hash: str,
     exclude_columns: Collection[str] = (),
 ) -> "pa.Table":
-    """Add source information to an Arrow table."""
-    # Create a base list of per-row source tokens; one entry per row.
-    if source_info is None or isinstance(source_info, str):
-        base_source = [source_info] * table.num_rows
-    elif isinstance(source_info, Collection):
-        if len(source_info) != table.num_rows:
-            raise ValueError(
-                "Length of source_info collection must match number of rows in the table."
-            )
-        base_source = list(source_info)
-    else:
-        raise TypeError(
-            f"source_info must be a str, a sized Collection[str], or None; "
-            f"got {type(source_info).__name__}"
-        )
+    """Add the source-info token column of each data column, as a recipe (ITL-1464).
 
-    # For each data column, build an independent _source_<col> column from the
-    # base tokens.  We must NOT re-use the array produced for a previous column
-    # as input for the next one — doing so would accumulate column names
-    # (e.g. "src::col1::col2" instead of "src::col2").
-    for col in table.column_names:
-        if col.startswith(tuple(exclude_prefixes)) or col in exclude_columns:
+    Each ``_source_<col>`` column holds no bytes: its type says the token is the row's
+    source id, its record id and ``col`` (``source_tokens.TokenRecipe``), read from the
+    two system-tag columns ``add_system_tag_columns`` adds under ``schema_hash``.
+
+    Args:
+        table: The rows.
+        schema_hash: The source's schema hash, which names the system-tag columns.
+        exclude_columns: Columns with no token (the plain tags). Meta and datagram
+            columns have none either.
+
+    Returns:
+        The table with its token columns, non-nullable: a token is never null.
+    """
+    source_id, record_id = system_tag_column_names(schema_hash)
+    prefixes = (constants.META_PREFIX, constants.DATAGRAM_PREFIX)
+    for name in table.column_names:
+        if name.startswith(prefixes) or name in exclude_columns:
             continue
-        col_source = pa.array(
-            [f"{source_val}::{col}" for source_val in base_source],
-            type=pa.large_string(),
+        tokens = source_tokens.derived_array(
+            source_tokens.TokenRecipe(source_id, record_id, name), table.num_rows
         )
-        # Source info columns are always computed strings, never null.
         table = table.append_column(
-            pa.field(
-                f"{constants.SOURCE_PREFIX}{col}", pa.large_string(), nullable=False
-            ),
-            col_source,
+            pa.field(f"{constants.SOURCE_PREFIX}{name}", tokens.type, nullable=False),
+            tokens,
         )
-
     return table
 
 

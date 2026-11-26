@@ -18,6 +18,7 @@ from orcapod.errors import MissingOptionalDependencyError
 from orcapod.logical_types.identifier import LogicalTypeIdentifierError
 from orcapod.hashing.visitors import SemanticHashingVisitor
 from orcapod.logical_types.canonical_form import storage_form_schema
+from orcapod.utils import source_tokens
 from orcapod.utils.arrow_utils import normalize_extension_columns
 from orcapod.types import ContentHash
 
@@ -231,6 +232,7 @@ class StarfixArrowHasher:
         column that keeps the identifier, so ``hash_schema(table.schema)`` is not the
         schema inside ``hash_table(table)``, and nothing may rely on it.
         """
+        source_tokens.refuse_derived(schema)
         schema = storage_form_schema(schema)
         include_meta = has_extension_metadata(schema) or has_extension_type(schema)
         if include_meta:
@@ -329,6 +331,7 @@ class StarfixArrowHasher:
         Returns:
             The starfix digest (version prefix included).
         """
+        source_tokens.refuse_derived(table.schema)
         if isinstance(table, pa.RecordBatch):
             table = pa.Table.from_batches([table])
 

@@ -25,7 +25,6 @@ from orcapod.core.sources.source_ids import (
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import RowIdentifierError
 from orcapod.logical_types.identifier import LogicalTypeIdentifierError
-from orcapod.system_constants import constants
 from orcapod.types import ContentHash
 from orcapod.utils import arrow_utils, schema_utils
 from orcapod.utils.schema_utils import compute_source_schema_hash
@@ -200,12 +199,22 @@ def key_column_type_allowed(arrow_type: pa.DataType) -> bool:
     )
 
 
-def row_identifiers(table: pa.Table, record_id_columns: Sequence[str]) -> list[str]:
+def row_identifiers(
+    table: pa.Table,
+    record_id_columns: Sequence[str],
+    *,
+    first_row: int = 0,
+    seen: dict[str, int] | None = None,
+) -> list[str]:
     """Return each row's identifier: its key, or its position when no key is named.
 
     Args:
-        table: The source's rows.
+        table: The source's rows, or a part of them read in batches.
         record_id_columns: The key columns, in key order; empty for position.
+        first_row: The position of the table's first row among the source's rows: 0
+            for the whole table, the rows before it for a later batch.
+        seen: The keys of the rows before ``table``, by position, when it is a later
+            batch; the keys of its rows are added. ``None`` for the whole table.
 
     Returns:
         One identifier per row, in row order.
@@ -216,7 +225,7 @@ def row_identifiers(table: pa.Table, record_id_columns: Sequence[str]) -> list[s
             or two rows have the same key. The message names the column or the key.
     """
     if not record_id_columns:
-        return [positional_row_identifier(i) for i in range(table.num_rows)]
+        return [positional_row_identifier(first_row + i) for i in range(table.num_rows)]
     missing = [c for c in record_id_columns if c not in table.column_names]
     if missing:
         raise RowIdentifierError(
@@ -243,9 +252,10 @@ def row_identifiers(table: pa.Table, record_id_columns: Sequence[str]) -> list[s
                 "value outside years 1 to 9999, which a row identifier cannot write"
             ) from exc
     identifiers: list[str] = []
-    seen: dict[str, int] = {}
-    for i in range(table.num_rows):
-        key = [(c, columns[c][i]) for c in record_id_columns]
+    seen = {} if seen is None else seen
+    for row in range(table.num_rows):
+        i = first_row + row
+        key = [(c, columns[c][row]) for c in record_id_columns]
         nulls = [c for c, value in key if value is None]
         if nulls:
             raise RowIdentifierError(
@@ -393,6 +403,8 @@ class SourceStreamBuilder:
         data_tags: Collection[str] = (),
         *,
         hash_in_key_order: bool = False,
+        first_row: int = 0,
+        seen_keys: dict[str, int] | None = None,
     ) -> SourceStreamResult:
         """Run the full enrichment pipeline.
 
@@ -431,6 +443,13 @@ class SourceStreamBuilder:
                 (ITL-1272). The stream keeps the rows in the order given. Off by
                 default: the rows are hashed in the order given, which the user may
                 have chosen on purpose. Needs key columns and no ``source_id``.
+            first_row: The position of the table's first row among the source's
+                rows, when the table is a later batch of them (a preview reads a
+                source in batches): positional record ids continue from it. Needs
+                a ``source_name``, since a default one is a hash of the whole table.
+            seen_keys: The keys of the rows of the earlier batches, by position;
+                the keys of this table's rows are added, and a repeat is refused as
+                within one table (``row_identifiers``).
 
         Returns:
             SourceStreamResult with enriched stream and metadata.
@@ -506,7 +525,14 @@ class SourceStreamBuilder:
 
         # 3. The row identifiers (validates the key columns: a missing, null or
         # repeated key is refused here, before anything is hashed).
-        identifiers = row_identifiers(table, key_columns)
+        if (first_row or seen_keys is not None) and source_name is None:
+            raise ValueError(
+                "a table read in batches needs a source_name: a default one is a "
+                "hash of the whole table"
+            )
+        identifiers = row_identifiers(
+            table, key_columns, first_row=first_row, seen=seen_keys
+        )
 
         # 4. Compute schema hash from the tag/data Arrow schemas (ITL-640).
         # Nullable flags in the incoming table are trusted as-is — callers must
@@ -590,6 +616,7 @@ class SourceStreamBuilder:
         source_id: str,
         row_identifiers: Sequence[str],
         data_tags: Sequence[str] = (),
+        with_source_info: bool = True,
     ) -> ArrowTableStream:
         """Add source-info and system-tag columns to ``table`` and wrap it as a stream.
 
@@ -597,7 +624,8 @@ class SourceStreamBuilder:
         key's canonical JSON), and its source id is the source's name: the two
         system-tag columns. Each source-info value is
         ``<source_id>::<record id>::<column>`` (for example ``_source_amplitude``
-        holds ``<source_id>::row_3::amplitude``). A row keeps its record id wherever
+        holds ``<source_id>::row_3::amplitude``), carried as a recipe over the two system
+        tags until its text is needed (``source_tokens``). A row keeps its record id wherever
         and however often it is read, as long as its identifier is the same
         (ITL-1154).
 
@@ -611,19 +639,24 @@ class SourceStreamBuilder:
                 source.
             data_tags: The tag columns that are also data columns (data-tags);
                 they get source info like any data column.
+            with_source_info: Whether to build the source-info tokens. ``False`` only
+                for a read whose caller keeps no source-info column and hashes no row
+                (ITL-1464): the tokens are one string per row and data column, many
+                times the size of the rows. The stream then holds null tokens and
+                must not be handed on.
 
         Returns:
             The stream over the enriched table.
         """
-        source_info = [
-            f"{source_id}{constants.BLOCK_SEPARATOR}{identifier}"
-            for identifier in row_identifiers
-        ]
-        table = arrow_utils.add_source_info(
-            table,
-            source_info,
-            exclude_columns=[c for c in tag_columns if c not in data_tags],
-        )
+        # The tokens say nothing the two system tags below and the column names do not:
+        # each is carried as that recipe, and its text is built when it is needed
+        # (``source_tokens``, ITL-1464).
+        if with_source_info:
+            table = arrow_utils.add_source_tokens(
+                table,
+                schema_hash,
+                exclude_columns=[c for c in tag_columns if c not in data_tags],
+            )
         table = arrow_utils.add_system_tag_columns(
             table,
             schema_hash,

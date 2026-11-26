@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Collection, Mapping
+from contextlib import closing
+from collections.abc import Collection, Generator, Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -23,6 +24,7 @@ from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
 )
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+from orcapod.core.streams.carried import carried_table
 from orcapod.core.streams.view import (
     ViewStatus,
     StreamView,
@@ -33,6 +35,12 @@ from orcapod.core.streams.base import (
     typed_arrow_schemas,
     typed_zero_row_table,
 )
+from orcapod.core.streams.preview import (
+    PreviewRequest,
+    preview_batches,
+    refuse_without_compute_all,
+    slices_of,
+)
 from orcapod.errors import InputValidationError
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
@@ -40,6 +48,7 @@ from orcapod.utils import schema_utils
 from orcapod.utils.provisional import provisional_class_name
 
 if TYPE_CHECKING:
+    from orcapod.protocols.core_protocols import StreamProtocol
     from orcapod.core.nodes.function_node import FunctionJobNode
     from orcapod.core.nodes.operator_node import OperatorJobNode
 
@@ -589,13 +598,22 @@ class DerivedSource(RootSource):
         return self._derive_from(table, tags_as_data), has_rows
 
     def _derive_from(
-        self, table: "pa.Table", tags_as_data: Mapping[str, str]
+        self,
+        table: "pa.Table",
+        tags_as_data: Mapping[str, str],
+        *,
+        first_row: int = 0,
+        seen_keys: dict[str, int] | None = None,
     ) -> ArrowTableStream:
         """Append the tag copies to the origin rows ``table`` and enrich it as a source.
 
         Args:
             table: Rows of the origin.
             tags_as_data: Maps a tag column of the origin to the name of its copy.
+            first_row: The position of the first row of ``table`` among the origin's
+                rows, when it is a later batch of them.
+            seen_keys: The keys of the earlier batches' rows
+                (``SourceStreamBuilder.build``); ``None`` for all the rows.
         """
         for tag, name in tags_as_data.items():
             # The copy is the tag's own Arrow column under a renamed field, so its
@@ -611,6 +629,8 @@ class DerivedSource(RootSource):
             source_name=self.source_name,
             kind_part=self.kind_part(),
             record_id_columns=self._record_id_columns or (),
+            first_row=first_row,
+            seen_keys=seen_keys,
         )
         return result.stream
 
@@ -792,6 +812,49 @@ class DerivedSource(RootSource):
             head.for_stream(self, origin="stored"), total_rows=records.num_rows
         )
 
+    @override
+    def _preview_batches(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """This source's first rows (``preview_batches``), read without keeping them.
+
+        The rows it holds are sliced. Otherwise an origin source gives its rows through
+        its own preview, which refuses a source that would poll or write its cache
+        when read, so nothing is polled or written; each of its batches is derived as
+        it comes, so the origin reads no further than the rows a step above takes. An origin job node's stored
+        rows are read whole, only with ``compute_all``. Nothing read here is kept by
+        this source.
+        """
+        self._note_provisional_identity_use()
+        if self._tags_as_data is not None and self._cached_stream is not None:
+            yield from slices_of(self._cached_stream, request)
+            return
+        if self._tags_as_data is None and self._cached_table is not None:
+            yield from slices_of(self._stream_over(self._cached_table), request)
+            return
+        if isinstance(self._origin, RootSource) and self._tags_as_data is not None:
+            # The derived rows are the origin's, one for one and in order: each batch
+            # the origin gives is derived as it comes, its positional record ids
+            # continuing from the rows before it and its keys checked against
+            # theirs, so a step above that stops reading stops the origin too.
+            first_row = 0
+            seen_keys: dict[str, int] = {}
+            with closing(preview_batches(self._origin, request)) as batches:
+                for batch in batches:
+                    rows = batch.as_table()
+                    yield self._derive_from(
+                        rows,
+                        self._tags_as_data,
+                        first_row=first_row,
+                        seen_keys=seen_keys,
+                    )
+                    first_row += rows.num_rows
+            return
+        refuse_without_compute_all(self, request, "reads its origin's rows whole")
+        records = self._origin_records()
+        rows = self._empty_origin_table() if records is None else records
+        yield from slices_of(self._stream_over(rows), request)
+
     def _stream_over(self, table: "pa.Table") -> ArrowTableStream:
         """Return this source's stream over the origin rows ``table``."""
         if self._tags_as_data is not None:
@@ -812,3 +875,7 @@ class DerivedSource(RootSource):
         all_info: bool = False,
     ) -> "pa.Table":
         return self._get_stream().as_table(columns=columns, all_info=all_info)
+
+    def _carried_table(self, config: ColumnConfig) -> "pa.Table":
+        """The source's table, derived token columns as they are (ITL-1464)."""
+        return carried_table(self._get_stream(), config)

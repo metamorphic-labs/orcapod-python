@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import dataclasses
 import logging
 from abc import abstractmethod
 from collections.abc import (
+    Generator,
     AsyncIterator,
     Collection,
     Iterable,
@@ -12,12 +14,16 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
+from contextlib import closing
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from orcapod.core.exact_class import reads_as_its_class
+from orcapod.core.unique_keys import UniqueKeys, derived_keys
 from orcapod.protocols.core_protocols.streams import (
     RecordBatchInput,
     RecordBatchOutput,
@@ -36,23 +42,35 @@ from orcapod.core.data_tags import (
     stream_data_tags,
 )
 from orcapod.core.function_pod import FunctionPodStream
+from orcapod.core.row_spool import SPOOL_MEMORY_BYTES, RowSpool, held_bytes
 from orcapod.core.operators.provisional import (
     provisional_operator_name,
     warn_provisional_operator,
 )
+from orcapod.utils import source_tokens
 from orcapod.utils.provisional import note_provisional_use, provisional_class_name
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+from orcapod.core.streams.carried import carried_batches, carried_table
 from orcapod.core.streams.base import (
+    batch_streams_of,
+    reads_in_batches,
     ZERO_ROW_INPUT_COLUMNS,
     StreamBase,
     check_head_size,
-    reads_as_its_class,
     short_stream_repr,
     typed_zero_row_input,
     typed_zero_row_table,
     row_built_columns,
 )
+from orcapod.core.streams.preview import (
+    PREVIEW_COLUMNS,
+    PreviewRequest,
+    preview_batches,
+    refuse_without_compute_all,
+)
 from orcapod.core.streams.view import (
+    BoundedStreamView,
+    RunSize,
     STALE_NOTE,
     default_note,
     ViewStatus,
@@ -115,6 +133,24 @@ class StaticOutputOperatorPod(TraceableBase):
     ``AddTags``, ``DropNulls``, ``Index``, ``Pick``). Such an operator can be applied
     to each Arrow record batch of its input as it arrives
     (``async_execute_batches``); every other operator needs all of an input first.
+    """
+
+    BATCHES_GIVE_THE_WHOLE: ClassVar[bool] = False
+    """Whether ``static_process`` over consecutive batches of an input gives, put
+    together, exactly its result over the whole input: rows, order, types, nullability.
+
+    Stricter than ``ROW_BY_ROW``: no type or nullable flag of the result follows the
+    values (``Pick`` and ``Index`` build their result from rows, so theirs do). Read
+    from the class itself, never inherited: a subclass that changes the operator
+    declares it again. ``run()`` of a stream uses it (ITL-1464).
+    """
+
+    CARRIES_TOKENS: ClassVar[bool] = False
+    """Whether the operator passes derived token columns on (ITL-1464).
+
+    Declared by a library operator that never reads the values of a source-info column
+    it passes on, or builds their text itself. It holds for exactly the class that
+    declares it, never for a subclass (``_input_table``).
     """
 
     OUTPUT_SCHEMA_IS_INPUT_SCHEMA: ClassVar[bool] = False
@@ -219,6 +255,24 @@ class StaticOutputOperatorPod(TraceableBase):
             return
         if any(stream_data_tags(stream) for stream in streams):
             raise not_supported_yet(type(self).__name__, self.DATA_TAGS_ISSUE)
+
+    def _input_table(
+        self, stream: StreamProtocol, columns: dict[str, Any]
+    ) -> "pa.Table":
+        """The table of ``stream`` as this operator reads it.
+
+        Derived token columns as they are (``carried_table``) for an operator whose class
+        declares ``CARRIES_TOKENS`` itself and is used as that class; text for any other,
+        so a user's operator, also one that subclasses a library operator, reads text.
+
+        Args:
+            stream: An input stream.
+            columns: The column groups, as for ``as_table``.
+        """
+        kind = type(self)
+        if vars(kind).get("CARRIES_TOKENS") is True and reads_as_its_class(self, kind):
+            return carried_table(stream, columns)
+        return stream.as_table(columns=columns)
 
     def pipeline_identity_structure(self) -> Any:
         """Return the pipeline identity, which defaults to content identity for operators."""
@@ -512,7 +566,12 @@ class StaticOutputOperatorPod(TraceableBase):
             A stream over the rows, in row order.
         """
         if rows:
-            return StaticOutputOperatorPod._materialize_to_stream(rows)
+            # Kept as Arrow chunks, on local disk when large (ITL-1464): the table
+            # ``_materialize_to_stream`` builds.
+            with contextlib.closing(RowChunks()) as chunks:
+                for tag, data in rows:
+                    chunks.add(tag, data)
+                return chunks.output_stream()
         return StaticOutputOperatorPod._zero_rows_in_row_order(result)
 
     @staticmethod
@@ -578,6 +637,10 @@ class StaticOutputOperatorPod(TraceableBase):
             if not field.name.startswith(constants.SOURCE_PREFIX):
                 continue
             if pa.types.is_large_string(field.type):
+                continue
+            if source_tokens.is_derived(field.type):
+                # A token is one string, and a list of them is never empty: the type
+                # the column declares is the one its tokens give.
                 continue
             values = table.column(index).to_pylist()
             kinds = {arrow_utils.source_info_arrow_type(value) for value in values}
@@ -745,11 +808,11 @@ class StaticOutputOperatorPod(TraceableBase):
         table = typed_zero_row_input(upstream)
         if table is None:
             return None
-        tag_keys = upstream.keys()[0]
+        tag_keys, data_keys = upstream.keys()
         return StaticOutputOperatorPod._as_upstream_stream(
             StaticOutputOperatorPod._as_row_built_table(table, tag_keys),
             tag_keys,
-            stream_data_tags(upstream),
+            data_tag_names(tag_keys, data_keys),
             upstream,
         )
 
@@ -773,6 +836,19 @@ class StaticOutputOperatorPod(TraceableBase):
         Returns:
             A phrase (``t >= 1.0``; ``rows without a match in 'probes' are dropped``),
             or ``None``.
+        """
+        return None
+
+    def input_given_back(self, inputs: Sequence[StreamProtocol]) -> int | None:
+        """The position of the input this operator gives back unchanged over
+        ``inputs``, or ``None`` (the default): it computes its result.
+
+        Decided from the inputs' schemas only: nothing is computed or read. A preview
+        then reads only that input, as the full read does (``SemiJoin`` without a
+        shared tag gives back its left input and never reads its right one).
+
+        Args:
+            inputs: The operator's inputs, in order.
         """
         return None
 
@@ -1078,19 +1154,19 @@ class StaticOutputOperatorPod(TraceableBase):
                     f"input_pipeline_hashes length ({len(input_pipeline_hashes)}) "
                     f"must match inputs length ({len(inputs)})"
                 )
-            all_rows = await asyncio.gather(*(ch.collect() for ch in inputs))
-            if not all(all_rows):
-                # Every barrier operator that exists gives no rows when an input has
-                # none. The typed empty stream the sync path returns needs a schema
-                # the channels do not carry (ITL-858), so nothing is emitted (ITL-865).
-                return
-            streams = [
-                self._materialize_input_stream(rows, pipeline_hash)
-                for rows, pipeline_hash in zip(all_rows, input_pipeline_hashes)
-            ]
-            result = self.static_process(*streams)
-            for tag, data in result.iter_data():
-                await output.send((tag, data))
+            async with collected_row_chunks(inputs) as all_rows:
+                if not all(rows.num_rows for rows in all_rows):
+                    # Every barrier operator that exists gives no rows when an input has
+                    # none. The typed empty stream the sync path returns needs a schema
+                    # the channels do not carry (ITL-858), so nothing is emitted (ITL-865).
+                    return
+                streams = [
+                    rows.input_stream(pipeline_hash)
+                    for rows, pipeline_hash in zip(all_rows, input_pipeline_hashes)
+                ]
+                result = self.static_process(*streams)
+                for tag, data in rows_once(result):
+                    await output.send((tag, data))
         finally:
             await output.close()
 
@@ -1137,7 +1213,7 @@ class StaticOutputOperatorPod(TraceableBase):
                 # cannot make one table with the earlier ones is refused, as the sync
                 # path refuses the whole input, never processed alone.
                 settled: dict[str, pa.DataType] = {}
-                async for batch in channel:
+                async for batch in carried_batches(channel):
                     settled = settle_token_types(batch, settled)
                     await self._send_processed([batch], channel.stream, output)
             else:
@@ -1178,7 +1254,7 @@ class StaticOutputOperatorPod(TraceableBase):
             output: The channel to send into; a result with no rows sends nothing.
         """
         table = row_built_columns(
-            result.as_table(columns=ZERO_ROW_INPUT_COLUMNS), result.keys()
+            carried_table(result, ZERO_ROW_INPUT_COLUMNS), result.keys()
         )
         for batch in table.to_batches():
             if batch.num_rows:
@@ -1289,6 +1365,327 @@ async def _streams_of(inputs: Sequence[RecordBatchInput]) -> list[StreamProtocol
 # ---------------------------------------------------------------------------
 
 
+ROW_CHUNK_ROWS = 8_192
+"""Rows per Arrow table that ``RowChunks`` keeps: arriving rows are held as objects only
+until this many have arrived."""
+
+
+KEPT_ROWS_MEMORY_BYTES = SPOOL_MEMORY_BYTES
+"""Bytes of kept rows that stay in memory; beyond them the rows go to local disk and
+are read back memory-mapped (``RowSpool``)."""
+
+
+class RowChunks:
+    """Rows received one at a time, kept as Arrow tables, not as ``(Tag, Data)`` pairs.
+
+    The async path hands rows on one by one, and a node that must keep what passed
+    (an operator job node its output, a barrier operator its input) kept every pair:
+    18 to 110 KiB per row against a few KiB as Arrow data (ITL-1464). This keeps at most
+    ``ROW_CHUNK_ROWS`` pairs; every full chunk is built into two Arrow tables (tags
+    with system tags, data with source info) and the pairs are let go.
+
+    What it builds is exactly what the row list built: ``row_table()`` equals
+    ``StaticOutputOperatorPod._rows_to_table(rows)`` over all the rows added, in
+    order (same columns, types, field flags and values; only the arrays' chunking
+    differs), because that table is a concatenation of one table per row, matched by
+    name to the first row's column order, and concatenation chunk by chunk gives the
+    same table. Rows whose columns disagree raise ``pyarrow.ArrowInvalid`` as there,
+    and as there only when the table is asked for (``row_table``), never when a row
+    is added; the message's table index is then the row's place in its chunk, or the
+    chunk's place. Once a chunk could not be built, no later row is kept and every read
+    raises that error; a chunk is never built again.
+
+    Sealed chunks are held by a ``RowSpool``: in memory up to
+    ``KEPT_ROWS_MEMORY_BYTES``, beyond that in a private temporary file read back
+    memory-mapped. The table and streams built here then refer to the mapping, which
+    lives as long as they do: also after this object, its node or its job are gone, and
+    after the file is deleted.
+
+    A chunk is the record batch an ITL-1347 channel carries, before the last step of
+    its row-built form (the source-info field flags, which need every row); a node
+    wired to record-batch channels receives such batches and needs no ``RowChunks``.
+    """
+
+    def __init__(self) -> None:
+        # Sealed chunks: in memory up to the spool's limit, then on local disk, read
+        # back memory-mapped, so a large output is not process memory.
+        self._spool: RowSpool = RowSpool(memory_bytes=KEPT_ROWS_MEMORY_BYTES)
+        self._schema: pa.Schema | None = None
+        self._context_chunks: list[pa.Array[Any]] = []  # pyright: ignore[reportExplicitAny]  # any array
+        self._pending: list[tuple[TagProtocol, DataProtocol]] = []
+        self._tag_keys: tuple[str, ...] = ()
+        self._data_tags: tuple[str, ...] = ()
+        self._first_context_key: str | None = None
+        self._failure: Exception | None = None
+        self.num_rows: int = 0
+
+    def add(self, tag: TagProtocol, data: DataProtocol) -> None:
+        """Keep one row, after every row added before it.
+
+        Nothing of the row is read until its chunk is built.
+
+        Raises:
+            MemoryError: If a full chunk cannot be built for want of memory.
+            OSError: If a full chunk cannot be kept: no room on the local disk.
+        """
+        self.num_rows += 1
+        if self._failure is not None:
+            # The rows can no longer make a table: ``row_table`` raises, so none is kept.
+            return
+        self._pending.append((tag, data))
+        if len(self._pending) >= ROW_CHUNK_ROWS:
+            try:
+                self._seal()
+            except (MemoryError, OSError):
+                # The process, not the rows, failed: the run ends here.
+                raise
+            except Exception:  # noqa: BLE001  # raised by ``row_table``
+                # Rows that cannot make one table (columns that disagree). Receiving
+                # a row never raised for them: the error belongs to the read of the
+                # table, which a barrier whose other input is empty never makes.
+                pass
+
+    def _seal(self) -> None:
+        """Build the pending rows into one chunk and let the pairs go.
+
+        All or nothing, and never twice: after a failure nothing is built or given
+        again (every read raises the failure), and the rows kept so far are let go,
+        their files with them.
+        """
+        if self._failure is not None:
+            raise self._failure
+        if not self._pending:
+            return
+        try:
+            chunk, contexts_of_rows = self._build_chunk(self._pending)
+            self._spool.append(chunk)
+            self._context_chunks.append(contexts_of_rows)
+            self._pending = []
+        except Exception as error:
+            self._failure = error
+            self.close()
+            raise
+
+    def _build_chunk(
+        self, rows: list[tuple[TagProtocol, DataProtocol]]
+    ) -> tuple[pa.Table, pa.Array[Any]]:  # pyright: ignore[reportExplicitAny]  # any array
+        """Build rows into a table in the first chunk's columns, and their contexts."""
+        from orcapod.utils import arrow_utils
+
+        if self._schema is None:
+            tag, data = rows[0]
+            self._tag_keys = tuple(tag.keys())
+            self._data_tags = data_tag_names(tag.keys(), data.keys())
+            self._first_context_key = data.data_context_key
+        tag_tables = [tag.as_table(columns={"system_tags": True}) for tag, _ in rows]
+        data_tables = [data.as_table(columns={"source": True}) for _, data in rows]
+        if self._data_tags:
+            data_tables = [t.drop_columns(list(self._data_tags)) for t in data_tables]
+        # One chunk per column instead of one per row: the per-row arrays are what
+        # costs memory, the values are the same.
+        chunk = arrow_utils.hstack_tables(
+            arrow_utils.concat_tables_by_name(tag_tables).combine_chunks(),
+            arrow_utils.concat_tables_by_name(data_tables).combine_chunks(),
+        )
+        first = self._schema
+        if first is None:
+            self._schema = chunk.schema
+        elif not chunk.schema.equals(first, check_metadata=True):
+            # What joining it with the earlier chunks gives: their schema, the columns
+            # matched by name, or the error a table built from rows of differing
+            # columns raises.
+            chunk = arrow_utils.concat_tables_by_name(
+                [first.empty_table(), chunk]
+            ).combine_chunks()
+        return chunk, pa.array(
+            [data.data_context_key for _, data in rows], pa.large_string()
+        )
+
+    def close(self) -> None:
+        """Let the rows go and delete their files; a table already built stays valid.
+
+        Whoever made this closes it, also on an error or a cancellation: an exception
+        that is kept keeps the frames of the run, and this object with them.
+        """
+        self._spool.close()
+        self._pending = []
+        self._context_chunks = []
+
+    def row_table(self) -> tuple[pa.Table, tuple[str, ...], tuple[str, ...]]:
+        """Return what ``_rows_to_table`` returns for the rows added, in order.
+
+        Returns:
+            The concatenated table, the user tag column names and the data-tags. The
+            table stays valid after ``close``.
+
+        Raises:
+            ValueError: If no row was added, or the rows were let go (``close``).
+            Exception: The error of a chunk that could not be built, on every call.
+        """
+        if self.num_rows == 0:
+            raise ValueError("Cannot materialize an empty list of rows into a stream")
+        self._seal()
+        # Only the ``_source_*`` fields are flagged; the arrays are the spool's.
+        table = StaticOutputOperatorPod._flag_source_info_nullability(  # pyright: ignore[reportPrivateUsage]  # the one rule for these flags
+            self._spool.table()
+        )
+        return table, self._tag_keys, self._data_tags
+
+    def output_stream(self) -> StreamProtocol:
+        """Return the stream ``_materialize_to_stream`` builds from the rows added."""
+        return StaticOutputOperatorPod._stream_over_row_table(self.row_table())  # pyright: ignore[reportPrivateUsage]  # the one builder of that stream
+
+    def input_stream(self, pipeline_hash: ContentHash) -> StreamProtocol:
+        """Return the stream ``_materialize_input_stream`` builds from the rows added.
+
+        Args:
+            pipeline_hash: The pipeline hash of the stream the rows came from.
+
+        Returns:
+            A stream over the rows, in order, each with its own data context.
+
+        Raises:
+            ValueError: If no row was added.
+        """
+        table, tag_keys, data_tags = self.row_table()
+        table = table.append_column(
+            pa.field(constants.CONTEXT_KEY, pa.large_string(), nullable=False),
+            pa.chunked_array(self._context_chunks, pa.large_string()),
+        )
+        return _RowsOfStream(
+            table,
+            tag_columns=tag_keys,
+            pipeline_hash=pipeline_hash,
+            data_tags=data_tags,
+            data_context=contexts.resolve_context(self._first_context_key),
+        )
+
+
+def rows_once(
+    result: StreamProtocol,
+) -> Iterator[tuple[TagProtocol, DataProtocol]]:
+    """Return ``result``'s rows for a reader that passes each on once.
+
+    An ``ArrowTableStream`` keeps every pair ``iter_data`` yields; an operator that
+    sends its result downstream and then drops it would hold the whole result as
+    objects while it sends (ITL-1464), so it reads such a stream without keeping.
+
+    Args:
+        result: An operator's result stream.
+
+    Returns:
+        The rows of ``result.iter_data()``, in its order.
+    """
+    # Exactly an ``ArrowTableStream`` with its own iterator: a subclass's ``iter_data``,
+    # or one set on the instance, is what yields its rows, and is never bypassed.
+    if type(result) is ArrowTableStream and "iter_data" not in vars(result):
+        return result.iter_data_unkept()
+    return result.iter_data()
+
+
+SPILL_SLICE_ROWS = 65_536
+"""Rows handed to the spool at a time by ``kept_table``: the copy the spool makes of
+what it is given is then one slice, not the table."""
+
+
+def kept_table(table: pa.Table) -> pa.Table:
+    """Return ``table`` as a node keeps it: on local disk when it is large (ITL-1464).
+
+    A table of at most ``KEPT_ROWS_MEMORY_BYTES`` is returned as it is. A larger one
+    is written to a ``RowSpool`` and returned read back memory-mapped: the same
+    schema and values (only the arrays' chunking differs), not process memory. The
+    mapping lives as long as a table that refers to it.
+
+    Args:
+        table: The rows a node is about to keep.
+
+    Returns:
+        The table to keep.
+    """
+    held = held_bytes(table)
+    if held <= KEPT_ROWS_MEMORY_BYTES or not table.num_rows:
+        return table
+    with RowSpool(memory_bytes=KEPT_ROWS_MEMORY_BYTES) as spool:
+        # A row of lists can be megabytes: a slice is bounded in bytes too (ITL-1464).
+        fit = int(KEPT_ROWS_MEMORY_BYTES * table.num_rows / held)
+        size = max(1, min(SPILL_SLICE_ROWS, fit))
+        for start in range(0, table.num_rows, size):
+            spool.append(table.slice(start, size))
+        return spool.table()
+
+
+async def collect_row_chunks(
+    channel: ReadableChannel[tuple[TagProtocol, DataProtocol]],
+) -> RowChunks:
+    """Read ``channel`` to its end, keeping its rows as ``RowChunks``.
+
+    What a barrier operator does instead of ``channel.collect()``: the same rows in
+    the same order, without holding every row as a pair of objects (ITL-1464).
+
+    Args:
+        channel: The input channel.
+
+    Returns:
+        The rows, for the caller to close; ``num_rows`` is 0 when the channel delivered
+        none. Closed here when the read fails or is cancelled.
+    """
+    chunks = RowChunks()
+    try:
+        async for tag, data in channel:
+            chunks.add(tag, data)
+    except BaseException:
+        chunks.close()
+        raise
+    return chunks
+
+
+async def collect_all_row_chunks(
+    channels: Sequence[ReadableChannel[tuple[TagProtocol, DataProtocol]]],
+) -> list[RowChunks]:
+    """Read every channel to its end, at the same time (``collect_row_chunks``).
+
+    When one read fails, or this call is cancelled, every other read is cancelled and
+    ended before the error is raised: no reader outlives the call.
+
+    Args:
+        channels: The input channels.
+
+    Returns:
+        The rows of each channel, in the channels' order.
+    """
+    tasks = [asyncio.create_task(collect_row_chunks(channel)) for channel in channels]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            _ = task.cancel()
+        _ = await asyncio.gather(*tasks, return_exceptions=True)
+        for task in tasks:
+            if not task.cancelled() and task.exception() is None:
+                task.result().close()
+        raise
+
+
+@contextlib.asynccontextmanager
+async def collected_row_chunks(
+    channels: Sequence[ReadableChannel[tuple[TagProtocol, DataProtocol]]],
+) -> AsyncIterator[list[RowChunks]]:
+    """``collect_all_row_chunks``, closing every channel's rows when the block ends.
+
+    Args:
+        channels: The input channels.
+
+    Yields:
+        The rows of each channel, in the channels' order.
+    """
+    rows = await collect_all_row_chunks(channels)
+    try:
+        yield rows
+    finally:
+        for chunks in rows:
+            chunks.close()
+
+
 ROW_BUILT_OUTPUT = "_orcapod_row_built_output"
 """The attribute that marks a complete node output in the row-built form (ITL-1347).
 
@@ -1323,17 +1720,116 @@ def stream_from_batches(
     Returns:
         A complete, re-readable stream over the rows.
     """
-    if not batches:
-        return StaticOutputOperatorPod._materialize_upstream([], stream)  # pyright: ignore[reportPrivateUsage]  # the zero-row input of an operator
-    table = concatenate_batches(batches)
+    return _stream_of_rows(stream, concatenate_batches(batches) if batches else None)
+
+
+def _stream_of_rows(stream: StreamProtocol, table: pa.Table | None) -> StreamProtocol:
+    """``table`` as ``stream``'s rows (``stream_from_batches``); ``None`` for no row."""
     if table is None:
         return StaticOutputOperatorPod._materialize_upstream([], stream)  # pyright: ignore[reportPrivateUsage]  # the zero-row input of an operator
     return StaticOutputOperatorPod._output_stream(  # pyright: ignore[reportPrivateUsage]  # F and the identity, stage 2's
-        table, _keys_in_delivered_order(stream.keys(), table.column_names), stream
+        table, keys_in_delivered_order(stream.keys(), table.column_names), stream
     )
 
 
-def _keys_in_delivered_order(
+class BatchSpool:
+    """Record batches of one stream's rows, put under one another off process memory.
+
+    What ``concatenate_batches`` gives, held in a ``RowSpool``: in memory up to
+    ``KEPT_ROWS_MEMORY_BYTES``, beyond that in a private temporary file read back
+    memory-mapped. As there, batches that cannot make one table raise when the table is
+    asked for, never when they are added.
+    """
+
+    def __init__(self) -> None:
+        self._spool: RowSpool = RowSpool(memory_bytes=KEPT_ROWS_MEMORY_BYTES)
+        self._schema: pa.Schema | None = None
+        self._token_types: dict[str, pa.DataType] = {}
+        self._error: Exception | None = None
+        self.num_rows: int = 0
+
+    def add(self, batch: pa.RecordBatch) -> None:
+        """Hold a batch's rows after every row added before them."""
+        if not batch.num_rows:
+            return
+        self.num_rows += batch.num_rows
+        if self._error is None:
+            try:
+                self._add(batch)
+            except Exception as error:  # noqa: BLE001  # raised when the table is asked for
+                self._error = error
+
+    def _add(self, batch: pa.RecordBatch) -> None:
+        self._token_types = settle_token_types(batch, self._token_types)
+        table = open_provenance(batch, self._token_types)
+        if self._schema is None:
+            self._schema = table.schema
+        elif not table.schema.equals(self._schema, check_metadata=True):
+            table = self._in_one_form(table)
+        self._spool.append(table)
+
+    def _in_one_form(self, table: pa.Table) -> pa.Table:
+        """``table`` under the held rows' schema; where only one of the two derives a
+        source-info column, or they derive it otherwise, both become text."""
+        assert self._schema is not None
+        if table.column_names != self._schema.names:
+            # As a concatenation of them refuses them.
+            return pa.concat_tables([self._schema.empty_table(), table])
+        derived = {
+            *source_tokens.derived_columns(self._schema),
+            *source_tokens.derived_columns(table.schema),
+        }
+        names = {
+            f.name
+            for f in table.schema
+            if f.name in derived and f.type != self._schema.field(f.name).type
+        }
+        if names & {*source_tokens.derived_columns(self._schema)}:
+            held = self._spool.table()
+            self._schema = source_tokens.materialize(
+                self._schema.empty_table(), names
+            ).schema
+            self._spool.close()
+            self._spool = RowSpool(memory_bytes=KEPT_ROWS_MEMORY_BYTES)
+            for start in range(0, held.num_rows, SPILL_SLICE_ROWS):
+                part = held.slice(start, SPILL_SLICE_ROWS)
+                self._spool.append(source_tokens.materialize(part, names))
+        table = source_tokens.materialize(table, names)
+        return pa.concat_tables([self._schema.empty_table(), table])
+
+    def table(self) -> pa.Table | None:
+        """Every row added, in order; ``None`` for no row. It stays valid after ``close``.
+
+        Raises:
+            Exception: If the batches cannot make one table.
+        """
+        if self._error is not None:
+            raise self._error
+        return self._spool.table() if self.num_rows else None
+
+    def close(self) -> None:
+        """Let the rows go and delete their files."""
+        self._spool.close()
+
+
+async def stream_of_channel(channel: RecordBatchInput) -> StreamProtocol:
+    """Read a reserved input channel to its end and give its rows as its stream.
+
+    ``stream_from_batches`` of everything it delivers, held in a ``BatchSpool``.
+
+    Args:
+        channel: The channel, taken over by the calling task.
+    """
+    spool = BatchSpool()
+    try:
+        async for batch in carried_batches(channel):
+            spool.add(batch)
+        return _stream_of_rows(channel.stream, spool.table())
+    finally:
+        spool.close()
+
+
+def keys_in_delivered_order(
     keys: tuple[Sequence[str], Sequence[str]], names: Sequence[str]
 ) -> tuple[list[str], list[str]]:
     """The description's tag and data keys, in the order the delivered rows have them.
@@ -1396,7 +1892,11 @@ def settle_token_types(
         if not field.name.startswith(constants.SOURCE_PREFIX):
             continue
         kinds: set[pa.DataType]
-        if pa.types.is_large_string(field.type):
+        # A derived column settles as the text its recipe gives (ITL-1464).
+        derived = source_tokens.is_derived(field.type)
+        if isinstance(field.type, source_tokens.MemberTokenType):
+            kinds = {field.type.list_type}
+        elif derived or pa.types.is_large_string(field.type):
             kinds = {pa.large_string()}
         else:
             kinds = {
@@ -1408,7 +1908,8 @@ def settle_token_types(
         if len(kinds) > 1:
             raise SourceInfoTypesDisagree(field.name)
         (kind,) = kinds
-        _ = _named_tokens_as(column, kind, field.name)  # representable, or refused
+        if not derived:
+            _ = _named_tokens_as(column, kind, field.name)  # representable, or refused
         settled[field.name] = kind
     return settled
 
@@ -1488,6 +1989,31 @@ def _named_tokens_as(
         raise RowBuiltFormUnavailable(f"{name}: {error}") from error
 
 
+def _with_one_token_form(batches: Sequence[pa.RecordBatch]) -> list[pa.RecordBatch]:
+    """``batches`` with each source-info column in one form in all of them.
+
+    A column every batch derives by one recipe stays derived; one that some batches hold
+    as text, or derive otherwise, is text in all of them (ITL-1464).
+
+    Args:
+        batches: Record batches of one stream's rows.
+    """
+    kinds: dict[str, set[pa.DataType]] = {}
+    for batch in batches:
+        for field in batch.schema:
+            if field.name.startswith(constants.SOURCE_PREFIX):
+                kinds.setdefault(field.name, set()).add(field.type)
+    mixed = {name for name, types in kinds.items() if len(types) > 1}
+    formed: list[pa.RecordBatch] = []
+    for batch in batches:
+        if mixed & set(source_tokens.derived_columns(batch.schema)):
+            table = source_tokens.materialize(pa.Table.from_batches([batch]), mixed)
+            formed.extend(table.combine_chunks().to_batches())
+        else:
+            formed.append(batch)
+    return formed
+
+
 def concatenate_batches(batches: Sequence[pa.RecordBatch]) -> pa.Table | None:
     """Put a stream's record batches under one another, or ``None`` with no row.
 
@@ -1516,21 +2042,35 @@ def concatenate_batches(batches: Sequence[pa.RecordBatch]) -> pa.Table | None:
     settled: dict[str, pa.DataType] = {}
     for batch in rows:
         settled = settle_token_types(batch, settled)
+    return pa.concat_tables(
+        [open_provenance(batch, settled) for batch in _with_one_token_form(rows)]
+    )
+
+
+def open_provenance(
+    batch: pa.RecordBatch, settled: Mapping[str, pa.DataType]
+) -> pa.Table:
+    """``batch`` with each token column of its settled type and provenance fields nullable.
+
+    Batches of one stream then have one schema for their provenance; whether such a
+    field is nullable is decided over the complete table (``_flag_by_values``).
+
+    Args:
+        batch: A record batch of a stream's rows.
+        settled: Each source-info column's token type (``settle_token_types``).
+    """
     prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
-    opened: list[pa.RecordBatch] = []
-    for batch in rows:
-        columns: list[Any] = []  # pyright: ignore[reportExplicitAny]  # any column
-        fields: list[pa.Field[Any]] = []  # pyright: ignore[reportExplicitAny]  # any field
-        for field, column in zip(batch.schema, batch.columns, strict=True):
-            if field.name in settled:
-                column = _named_tokens_as(column, settled[field.name], field.name)
-                field = pa.field(field.name, settled[field.name])
-            if field.name.startswith(prefixes):
-                field = field.with_nullable(True)
-            columns.append(column)
-            fields.append(field)
-        opened.append(pa.RecordBatch.from_arrays(columns, schema=pa.schema(fields)))
-    return pa.Table.from_batches(opened)
+    columns: list[Any] = []  # pyright: ignore[reportExplicitAny]  # any column
+    fields: list[pa.Field[Any]] = []  # pyright: ignore[reportExplicitAny]  # any field
+    for field, column in zip(batch.schema, batch.columns, strict=True):
+        if field.name in settled and not source_tokens.is_derived(field.type):
+            column = _named_tokens_as(column, settled[field.name], field.name)
+            field = pa.field(field.name, settled[field.name])
+        if field.name.startswith(prefixes):
+            field = field.with_nullable(True)
+        columns.append(column)
+        fields.append(field)
+    return pa.Table.from_arrays(columns, schema=pa.schema(fields))
 
 
 class RowsOnRead:
@@ -1633,6 +2173,10 @@ class RowsOnRead:
     # The members that tell what the output is without reading it: the node's, which
     # the built stream takes too (``_as_upstream_stream``), or the built stream's once
     # it is built. A protocol check (``isinstance``) reads them and builds nothing.
+    @property
+    def unique_keys(self) -> UniqueKeys:
+        return self._node.unique_keys
+
     @property
     def producer(self) -> Any:
         return self._node.producer
@@ -1747,6 +2291,8 @@ class _RowsOfStream(ArrowTableStream):
         data_context: The rows' data context; ``None`` for the default.
     """
 
+    _carried_table = ArrowTableStream._carried_table  # pyright: ignore[reportPrivateUsage]  # read as its base is
+
     def __init__(
         self,
         table: pa.Table,
@@ -1811,6 +2357,8 @@ def produced_stream(stream: StreamProtocol) -> StreamProtocol:
 class DynamicPodStream(StreamBase):
     """Recomputable stream wrapping a ``StaticOutputOperatorPod`` invocation."""
 
+    DERIVES_UNIQUE_KEYS: ClassVar[bool] = True
+
     def __init__(
         self,
         pod: StaticOutputOperatorPod,
@@ -1832,6 +2380,9 @@ class DynamicPodStream(StreamBase):
         # that this one changed (ITL-1083).
         self._kept_states: tuple[tuple[str, object], ...] | None = None
         self._reset_generation: int = 0
+        # The window of the last large ``run()`` whose rows were not kept, with what
+        # its inputs were then (ITL-1464); shown by ``head`` only.
+        self._run_window: tuple[BoundedStreamView, tuple[object, ...]] | None = None
 
     def content_hash(self, hasher=None) -> ContentHash:
         """The stream's content hash; notes the use of a provisional operator.
@@ -1875,6 +2426,11 @@ class DynamicPodStream(StreamBase):
         return structure
 
     @property
+    def unique_keys(self) -> UniqueKeys:
+        """The tag sets no two rows agree on, derived from the inputs' (``core/unique_keys``)."""
+        return derived_keys(self.producer, self.upstreams, self)
+
+    @property
     def producer(self) -> PodProtocol:
         return self._pod
 
@@ -1887,6 +2443,7 @@ class DynamicPodStream(StreamBase):
         self._cached_stream = None
         self._cached_time = None
         self._kept_states = None
+        self._run_window = None
         self._reset_generation += 1
 
     def _typed_zero_row_table(self) -> pa.Table | None:
@@ -2033,6 +2590,145 @@ class DynamicPodStream(StreamBase):
             self._cached_time = datetime.now(timezone.utc)
             self._kept_states = kept_states
 
+    def _reads_in_batches(self) -> bool:
+        """Whether the operator is applied batch by batch, over an input read so."""
+        return (
+            reads_as_its_class(self, DynamicPodStream)
+            and applied_by_batch(self._pod)
+            and len(self._upstreams) == 1
+            and reads_in_batches(self._upstreams[0])
+        )
+
+    def _batch_streams_of_rows(self) -> Generator[StreamProtocol, None, None]:
+        """This stream's rows, in order, as one stream per batch (``run()``, ITL-1464).
+
+        Each batch of the input goes through ``static_process``, the one sync body. A
+        result ``RunSize`` says is kept is kept, as a read keeps it; a larger one is
+        not. A current kept result is given as it is.
+        """
+        self._pod._note_provisional_identity_use()
+        self._update_cache_status()
+        if self._cached_stream is not None and self._cached_time is not None:
+            if reads_in_batches(self._cached_stream):
+                # The operator handed its input on: read as that input is.
+                yield from batch_streams_of(self._cached_stream)
+            else:
+                yield self._cached_stream
+            return
+        kept_states = _upstream_states(self._upstreams)
+        kept: list[StreamProtocol] | None = []
+        size = RunSize()
+        handed_on = True
+        with closing(batch_streams_of(self._upstreams[0])) as batches:
+            for batch in batches:
+                try:
+                    result = self._pod.static_process(batch)
+                except Exception:
+                    # A read of the whole input raises before the operator runs: an
+                    # error further on in the input comes first, as it did there.
+                    for _ in batches:
+                        pass
+                    raise
+                handed_on = handed_on and result is batch
+                size.add(result.as_table())
+                if kept is not None:
+                    kept.append(result)
+                    if not size.is_kept:
+                        kept = None
+                yield result
+        if kept:
+            self._cached_stream = (
+                # Its input unchanged, as a read keeps it; nothing is read again.
+                self._upstreams[0] if handed_on else joined_batches(kept)
+            )
+            self._cached_time = datetime.now(timezone.utc)
+            self._kept_states = kept_states
+            self._run_window = None
+
+    def _preview_batches(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """The operator over its input's batches, or over its whole inputs.
+
+        A kept current result is read as it is; nothing is computed, and nothing is
+        kept of what is computed here.
+        """
+        self._pod._note_provisional_identity_use()
+        self._update_cache_status()
+        if self._cached_stream is not None and self._cached_time is not None:
+            yield from preview_batches(self._cached_stream, request)
+            return
+        pod = cast(StaticOutputOperatorPod, self._pod)
+        if len(self._upstreams) == 1 and applied_by_batch(pod):
+            keeps_every_row = pod.rows_dropped_text(0, (), self._upstreams) is None
+            wanted = request if keeps_every_row else request.without_limit()
+            with closing(preview_batches(self._upstreams[0], wanted)) as batches:
+                for batch in batches:
+                    yield pod.static_process(batch)
+            return
+        given_back = pod.input_given_back(self._upstreams)
+        if given_back is not None:
+            # The result is that input as it is: no other input is read, as in the
+            # full read.
+            yield from preview_batches(self._upstreams[given_back], request)
+            return
+        refuse_without_compute_all(self, request, "needs every row of its input")
+        result = pod.static_process(
+            *(
+                self._whole_input(upstream, request.of_every_row())
+                for upstream in self._upstreams
+            )
+        )
+        yield from preview_batches(result, request)
+
+    @staticmethod
+    def _whole_input(
+        upstream: StreamProtocol, request: PreviewRequest
+    ) -> StreamProtocol:
+        """Every row of ``upstream``, computed for a preview, with its pipeline hash."""
+        rows = joined_batches(list(preview_batches(upstream, request)))
+        return _RowsOfStream(
+            rows.as_table(columns=PREVIEW_COLUMNS),
+            tag_columns=rows.keys()[0],
+            pipeline_hash=upstream.pipeline_hash(),
+            data_tags=stream_data_tags(rows),
+            upstreams=upstream.upstreams,
+            data_context=StaticOutputOperatorPod._upstream_context(upstream),  # pyright: ignore[reportPrivateUsage]  # the one place that resolves an upstream's context
+        )
+
+    def run(self) -> StreamView:
+        """Compute every row and return a ``StreamView`` (``StreamBase.run``).
+
+        Over a source that reads its rows on demand, through operators applied batch by
+        batch, a large result (``RunSize``) is not held: the
+        view is bounded (``BoundedStreamView``), ``head`` then shows its first rows,
+        and ``as_table()`` reads and applies the operators again.
+        """
+        # Noted before the rows are read, so a change made meanwhile is seen.
+        _ = self.last_modified
+        state = (*_upstream_states(self._upstreams), self._pod.last_modified)
+        view = super().run()
+        if isinstance(view, BoundedStreamView):
+            self._run_window = (view, state)
+        return view
+
+    def _window_head(self, n: int, config: ColumnConfig) -> StreamView | None:
+        """The first rows of the last large ``run()``, or ``None`` when there are none
+        to show: no such run, changed inputs, more rows or other columns asked for."""
+        if self._run_window is None:
+            return None
+        view, state = self._run_window
+        if (*_upstream_states(self._upstreams), self._pod.last_modified) != state:
+            self._run_window = None
+            return None
+        if (
+            n > view.window_rows
+            or dataclasses.replace(config, sort_by_tags=False) != ColumnConfig()
+        ):
+            return None
+        head = view.head(n)
+        return head.sort_by_tags() if config.sort_by_tags else head
+
     def as_table(
         self,
         *,
@@ -2044,6 +2740,14 @@ class DynamicPodStream(StreamBase):
             "StreamProtocol has not been updated or is empty."
         )
         return self._cached_stream.as_table(columns=columns, all_info=all_info)
+
+    def _carried_table(self, config: ColumnConfig) -> "pa.Table":
+        """The operator's result, derived token columns as they are (ITL-1464)."""
+        self._refresh()
+        assert self._cached_stream is not None, (
+            "StreamProtocol has not been updated or is empty."
+        )
+        return carried_table(self._cached_stream, config)
 
     def iter_data(
         self,
@@ -2089,6 +2793,8 @@ class DynamicPodStream(StreamBase):
             view = head_of(
                 self._cached_stream.head(n, columns=config), self, origin="computed"
             )
+        elif (window := self._window_head(n, config)) is not None:
+            view = window
         else:
             matching = self._matching_head(n, config)
             # A view of no rows is falsy (``StreamView.__len__``): compared to None.
@@ -2156,6 +2862,43 @@ class DynamicPodStream(StreamBase):
         )
 
 
+def applied_by_batch(pod: object) -> bool:
+    """Whether an operator may be applied batch by batch (``run()``, ``preview()``).
+
+    Its own class declares ``BATCHES_GIVE_THE_WHOLE``, and no member is replaced on the
+    instance: what the class declares says nothing of another ``static_process``.
+    """
+    return type(pod).__dict__.get(
+        "BATCHES_GIVE_THE_WHOLE"
+    ) is True and reads_as_its_class(pod, type(pod))
+
+
+def joined_batches(batches: Sequence[StreamProtocol]) -> StreamProtocol:
+    """Put the batches of one operator's result together as the result itself.
+
+    Args:
+        batches: The results of consecutive batches of the input, in order; at least
+            one, all with the same columns and types.
+
+    Returns:
+        A stream over all their rows, every column group included.
+    """
+    first = batches[0]
+    return ArrowTableStream(
+        pa.concat_tables(
+            [
+                carried_table(
+                    batch, {"source": True, "system_tags": True, "context": True}
+                )
+                for batch in batches
+            ]
+        ),
+        tag_columns=first.keys()[0],
+        data_tags=stream_data_tags(first),
+        data_context=first.data_context_key,
+    )
+
+
 def _with_explain_line(view: StreamView, stream: StreamProtocol) -> StreamView:
     """Return ``view`` with the one-line split of ``explain()`` added to its header, for
     a ``Filter`` directly over a source (ITL-1402); any other view unchanged."""
@@ -2194,12 +2937,58 @@ def _upstream_state(stream: StreamProtocol) -> tuple[str, object]:
         return ("generation", generation + int(stream.is_stale))
     if isinstance(stream, DynamicPodStream):
         _ = stream.last_modified
+        if reads_in_batches(stream):
+            # It may have been read without keeping a result (``run()``, ITL-1464), and
+            # then notices no change of its own inputs: what it is computed from is
+            # part of its state, up to the source.
+            return ("generation", _chain_state(stream))
         return ("generation", stream._reset_generation)  # pyright: ignore[reportPrivateUsage]  # same class
     return ("time", stream.last_modified)
+
+
+def _chain_state(stream: DynamicPodStream) -> object:
+    """The state of an operator stream read in batches and of everything beneath it.
+
+    Its reset generation, its operator's modified time and the states of its inputs, so
+    it differs after any change of the source or of an operator in the chain, whether or
+    not a stream of the chain keeps a result. Keeping one is not a change. An unknown
+    time (``None``) counts as a change: the state equals no other.
+    """
+    inputs = _upstream_states(stream.upstreams)
+    pod_time = stream.producer.last_modified
+    if pod_time is None or ("time", None) in inputs:
+        return object()
+    return (stream._reset_generation, pod_time, inputs)  # pyright: ignore[reportPrivateUsage]  # same class
+
+
+_STATE_MEMO: ContextVar[dict[int, tuple[StreamProtocol, tuple[str, object]]] | None] = (
+    ContextVar("_STATE_MEMO", default=None)
+)
+"""The stream states found during one outermost ``_upstream_states`` call."""
 
 
 def _upstream_states(
     upstreams: tuple[StreamProtocol, ...],
 ) -> tuple[tuple[str, object], ...]:
-    """The state of each upstream (``_upstream_state``), in order."""
-    return tuple(_upstream_state(stream) for stream in upstreams)
+    """The state of each upstream (``_upstream_state``), in order.
+
+    Asking a stream for its state settles it, which asks for the states of its own
+    upstreams. Within one outermost call each stream is asked once, however many ways
+    lead to it, so the walk is linear in the graph (PR 560 review, round 2). The memo is
+    discarded when that call returns and is never shared between threads or tasks.
+    """
+    memo = _STATE_MEMO.get()
+    if memo is None:
+        token = _STATE_MEMO.set({})
+        try:
+            return _upstream_states(upstreams)
+        finally:
+            _STATE_MEMO.reset(token)
+    states: list[tuple[str, object]] = []
+    for stream in upstreams:
+        found = memo.get(id(stream))
+        if found is None:
+            # The stream is held with its state, so its id is not reused meanwhile.
+            found = memo[id(stream)] = (stream, _upstream_state(stream))
+        states.append(found[1])
+    return tuple(states)

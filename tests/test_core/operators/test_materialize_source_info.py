@@ -46,6 +46,7 @@ from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
 from orcapod.system_constants import constants
 from orcapod.types import CacheMode
+from orcapod.utils import source_tokens
 from orcapod.system_constants import OPERATOR_DB_SCHEMA_VERSION
 
 Row = tuple[TagProtocol, DataProtocol]
@@ -160,7 +161,7 @@ def _broadcast_row_zero(monkeypatch: pytest.MonkeyPatch) -> None:
         table: pa.Table, keys: tuple[Sequence[str], Sequence[str]]
     ) -> pa.Table:
         """Stamp row 0's source info on every row of the row-built form (ITL-1347)."""
-        formed = original_form(table, keys)
+        formed = source_tokens.materialize(original_form(table, keys))
         for i, name in enumerate(formed.column_names):
             if name.startswith(constants.SOURCE_PREFIX):
                 column = formed.column(i)
