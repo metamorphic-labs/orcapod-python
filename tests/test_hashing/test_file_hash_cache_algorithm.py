@@ -16,7 +16,7 @@ from upath import UPath
 from orcapod.hashing.cache_population import populate_hash_cache
 from orcapod.hashing.file_hashers import CachedFileHasher, FileHasher, FileHashKey
 from orcapod.hashing.hash_cachers import InMemoryHashCacher, SqliteHashCacher
-from orcapod.types import ContentHash
+from orcapod.types import ContentHash, PathLike
 
 ALGORITHM_ORDERS = [("sha256", "md5"), ("md5", "sha256"), ("sha256", "xxh64")]
 
@@ -176,3 +176,41 @@ def test_default_file_hash_ignores_a_cache_warmed_with_another_algorithm(
 
     assert hasher.hash_object(File(data_file)) == uncached  # filled by this call
     assert hasher.hash_object(File(data_file)) == uncached  # a cache hit
+
+
+class _CountingHasher:
+    """A ``FileHasher`` that counts the files it actually reads."""
+
+    def __init__(self, algorithm: str) -> None:
+        self.inner = FileHasher(algorithm=algorithm)
+        self.reads = 0
+
+    @property
+    def hash_label(self) -> str:
+        return self.inner.hash_label
+
+    def hash_file(self, file_path: PathLike) -> ContentHash:
+        self.reads += 1
+        return self.inner.hash_file(file_path)
+
+
+@pytest.mark.parametrize(("first", "second"), [("sha256", "md5"), ("md5", "sha256")])
+def test_sqlite_alternating_algorithms_evict_but_never_hit_wrongly(
+    tmp_path: Path, data_file: Path, first: str, second: str
+):
+    """One SQLite row per file: alternating algorithms replace each other's entry.
+
+    Each lookup with the other label is a miss (the file is read again), never a hit
+    on the other algorithm's hash; the same algorithm twice in a row is a hit.
+    """
+    inner = {a: _CountingHasher(a) for a in (first, second)}
+    with SqliteHashCacher(tmp_path / "cache.db") as c:
+        cached = {a: CachedFileHasher(inner[a], c) for a in (first, second)}
+        for algorithm in (first, second, first, second):
+            assert cached[algorithm].hash_file(data_file) == FileHasher(
+                algorithm=algorithm
+            ).hash_file(data_file)
+        assert (inner[first].reads, inner[second].reads) == (2, 2)  # evicted each time
+
+        assert cached[second].hash_file(data_file).method == second
+        assert inner[second].reads == 2  # same algorithm again: a hit
