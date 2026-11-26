@@ -16,18 +16,32 @@ class FileHashKey:
 
     The key captures the three file attributes that together identify a
     file's content without reading it: its absolute path, last-modified
-    time in nanoseconds, and byte size.
+    time in nanoseconds, and byte size; and the label of the algorithm whose
+    hash is looked up. A cacher returns an entry only for the same label: a
+    hash made with another algorithm is a miss (ITL-1488).
 
     Attributes:
         path: Absolute, resolved ``UPath``. Any ``PathLike`` input is
             normalised to ``UPath`` before constructing this key.
         mtime_ns: Last-modified time in nanoseconds (``path.stat().st_mtime_ns``).
         size: File size in bytes (``path.stat().st_size``).
+        label: Hash label of the algorithm (``ContentHash.method`` of the
+            hash, e.g. ``"sha256"``).
     """
 
     path: UPath
     mtime_ns: int
     size: int
+    label: str
+
+    @property
+    def stored_prefix(self) -> bytes:
+        """The leading bytes of a stored hash of this label (``<label>:``).
+
+        A persistent cacher stores ``ContentHash.to_prefixed_digest()``, which
+        starts with these bytes, and matches an entry's label on them.
+        """
+        return f"{self.label}:".encode("ascii")
 
 
 class FileHasher:
@@ -45,6 +59,11 @@ class FileHasher:
     ):
         self.algorithm = algorithm
         self.buffer_size = buffer_size
+
+    @property
+    def hash_label(self) -> str:
+        """The label of every hash this hasher returns: the algorithm's name."""
+        return self.algorithm
 
     def hash_file(self, file_path: PathLike) -> ContentHash:
         """Hash the file at ``file_path`` and return its ``ContentHash``.
@@ -68,7 +87,9 @@ class CachedFileHasher:
     ``hash_file``:
 
     1. Resolve the path to an absolute ``UPath`` and stat the file.
-    2. Look up ``(path, mtime_ns, size)`` in the cacher.
+    2. Look up ``(path, mtime_ns, size, label)`` in the cacher, ``label``
+       being the inner hasher's ``hash_label``: an entry made with another
+       algorithm is never returned (ITL-1488).
     3. On hit: return the cached ``ContentHash`` directly.
     4. On miss: delegate to the inner hasher, store the result, return it.
 
@@ -90,6 +111,11 @@ class CachedFileHasher:
         self.file_hasher = file_hasher
         self.cacher = cacher
 
+    @property
+    def hash_label(self) -> str:
+        """The inner hasher's label: the label of every hash this hasher returns."""
+        return self.file_hasher.hash_label
+
     def hash_file(self, file_path: PathLike) -> ContentHash:
         """Return the ``ContentHash`` for ``file_path``, using the cache.
 
@@ -102,7 +128,7 @@ class CachedFileHasher:
         path = file_path if isinstance(file_path, UPath) else UPath(file_path)
         path = path.resolve()
         stat = path.stat()
-        key = FileHashKey(path, stat.st_mtime_ns, stat.st_size)
+        key = FileHashKey(path, stat.st_mtime_ns, stat.st_size, self.hash_label)
 
         hit = self.cacher.get(key)
         if hit is not None:

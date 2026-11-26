@@ -16,10 +16,10 @@ default, configurable via the `algorithm` argument). It does this every time,
 with no memory of previous results.
 
 `HashCacher` is a protocol for any object that maps a `FileHashKey` to a
-`ContentHash`. The key is a three-field struct:
+`ContentHash`. The key is a four-field struct:
 
 ```
-FileHashKey(path, mtime_ns, size)
+FileHashKey(path, mtime_ns, size, label)
 ```
 
 The `mtime_ns` and `size` fields encode the file's identity at a specific
@@ -27,6 +27,16 @@ point in time. If the file is modified — its modification time or byte count
 changes — the key is different, so the old entry is never returned. You do
 not need to explicitly invalidate entries; the key change handles it
 automatically.
+
+The `label` field names the hash algorithm (`sha256`, `md5`, ...): it is the
+label every hash of that algorithm carries. A cached hash is returned only for
+the algorithm that made it. A cache filled with another algorithm, for example
+by `orcapod warm-cache --algorithm md5`, is a miss for the default SHA-256
+hasher, which reads the file and computes its own hash; it never returns the
+MD5 value. The stored tables hold one hash per path, modification time and
+size, so hashing the same file with a second algorithm replaces the first
+algorithm's entry. Fill the cache with the algorithm your pipeline uses (the
+default, `sha256`, unless you configured another).
 
 `CachedFileHasher` wraps a `FileHasher` with any `HashCacher`. When you call
 `hash_file(path)` on it, it first constructs the key from the file's current

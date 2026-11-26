@@ -52,9 +52,11 @@ class InMemoryHashCacher:
                 f"min_cache_size_bytes must be None or a non-negative integer, "
                 f"got {min_cache_size_bytes!r}"
             )
-        # Nested dict: (path, size) → {mtime_ns: ContentHash}.
-        # Separating the mtime_ns level from (path, size) makes both lookup
-        # modes O(1)/O(k) instead of O(n) over all cached entries.
+        # Nested dict: (path, size, label) → {mtime_ns: ContentHash}.
+        # Separating the mtime_ns level from (path, size, label) makes both
+        # lookup modes O(1)/O(k) instead of O(n) over all cached entries. The
+        # label is part of the key: a hash of another algorithm is never
+        # returned (ITL-1488).
         self._cache: dict[tuple, dict[int, ContentHash]] = {}
         self._read_only = read_only
         self._min_cache_size_bytes = min_cache_size_bytes
@@ -74,7 +76,7 @@ class InMemoryHashCacher:
         Returns:
             Cached ``ContentHash``, or ``None`` if not found.
         """
-        inner = self._cache.get((key.path, key.size))
+        inner = self._cache.get((key.path, key.size, key.label))
         if inner is None:
             return None
         if self._match_mtime:
@@ -103,7 +105,9 @@ class InMemoryHashCacher:
             and key.size < self._min_cache_size_bytes
         ):
             return
-        self._cache.setdefault((key.path, key.size), {})[key.mtime_ns] = value
+        self._cache.setdefault((key.path, key.size, key.label), {})[key.mtime_ns] = (
+            value
+        )
 
     def clear(self) -> None:
         """Remove all entries from the cache."""
@@ -126,7 +130,10 @@ class SqliteHashCacher:
     concurrency and thread-local connections for thread safety.
 
     The hash is stored as a BLOB in ``{method}:{raw_digest}`` format via
-    ``ContentHash.to_prefixed_digest()``.
+    ``ContentHash.to_prefixed_digest()``. A lookup matches only a row whose
+    hash starts with the key's ``{label}:``, so a hash made with another
+    algorithm is a miss (ITL-1488); a row holds one algorithm's hash per
+    ``(path, mtime_ns, size)``, and a put of another algorithm replaces it.
 
     Args:
         db_path: Path to the SQLite database file. Defaults to
@@ -262,7 +269,8 @@ class SqliteHashCacher:
         When ``match_mtime=True`` (default), the query filters on
         ``path``, ``mtime_ns``, and ``size``. When ``match_mtime=False``,
         only ``path`` and ``size`` are filtered and results are ordered
-        by ``mtime_ns DESC`` so the most recent entry is returned.
+        by ``mtime_ns DESC`` so the most recent entry is returned. Either
+        way only a hash of the key's label matches.
 
         Args:
             key: File hash cache key.
@@ -271,16 +279,19 @@ class SqliteHashCacher:
             Cached ``ContentHash``, or ``None`` if not found.
         """
         conn = self._connection()
+        prefix = key.stored_prefix
         if self._match_mtime:
             cursor = conn.execute(
-                "SELECT hash FROM file_hash_cache WHERE path=? AND mtime_ns=? AND size=?",
-                (str(key.path), key.mtime_ns, key.size),
+                "SELECT hash FROM file_hash_cache "
+                "WHERE path=? AND mtime_ns=? AND size=? AND substr(hash, 1, ?)=?",
+                (str(key.path), key.mtime_ns, key.size, len(prefix), prefix),
             )
         else:
             cursor = conn.execute(
                 "SELECT hash FROM file_hash_cache "
-                "WHERE path=? AND size=? ORDER BY mtime_ns DESC LIMIT 1",
-                (str(key.path), key.size),
+                "WHERE path=? AND size=? AND substr(hash, 1, ?)=? "
+                "ORDER BY mtime_ns DESC LIMIT 1",
+                (str(key.path), key.size, len(prefix), prefix),
             )
         row = cursor.fetchone()
         if row is None:

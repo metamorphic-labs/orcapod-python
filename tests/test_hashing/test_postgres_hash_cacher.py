@@ -35,7 +35,7 @@ from orcapod.types import ContentHash  # noqa: E402
 def make_key(
     path: str = "/a/b.txt", mtime_ns: int = 1000, size: int = 100
 ) -> FileHashKey:
-    return FileHashKey(path=UPath(path), mtime_ns=mtime_ns, size=size)
+    return FileHashKey(path=UPath(path), mtime_ns=mtime_ns, size=size, label="sha256")
 
 
 def make_hash(digest: bytes = b"\xab" * 32) -> ContentHash:
@@ -519,3 +519,51 @@ class TestPostgresReprRedaction:
 
         raw = "host=localhost dbname=orcapod user=alice"
         assert _redact_conninfo(raw) == raw
+
+
+# ---------------------------------------------------------------------------
+# A hash is returned only for its own algorithm (ITL-1488)
+# ---------------------------------------------------------------------------
+
+
+def _key_with_label(label: str) -> FileHashKey:
+    return FileHashKey(path=UPath("/a/b.txt"), mtime_ns=1000, size=100, label=label)
+
+
+@pytest.mark.postgres
+class TestPostgresHashCacherAlgorithmLabel:
+    @pytest.mark.parametrize(
+        ("first", "second"), [("sha256", "md5"), ("md5", "sha256")]
+    )
+    def test_entry_of_another_label_is_miss(self, cacher, first, second):
+        cacher.put(_key_with_label(first), ContentHash(first, b"\x01" * 16))
+        assert cacher.get(_key_with_label(second)) is None
+        assert cacher.get(_key_with_label(first)) == ContentHash(first, b"\x01" * 16)
+
+    @pytest.mark.parametrize(
+        ("first", "second"), [("sha256", "md5"), ("md5", "sha256")]
+    )
+    def test_put_of_another_label_replaces_entry(self, cacher, first, second):
+        cacher.put(_key_with_label(first), ContentHash(first, b"\x01" * 16))
+        cacher.put(_key_with_label(second), ContentHash(second, b"\x02" * 16))
+        assert cacher.get(_key_with_label(second)) == ContentHash(second, b"\x02" * 16)
+        assert cacher.get(_key_with_label(first)) is None
+
+    @pytest.mark.parametrize(
+        ("first", "second"), [("sha256", "md5"), ("md5", "sha256")]
+    )
+    def test_match_mtime_false_skips_newer_entry_of_another_label(
+        self, pg_conninfo, first, second
+    ):
+        c = PostgresHashCacher(pg_conninfo, match_mtime=False)
+        c.clear()
+        try:
+            older = FileHashKey(UPath("/a/b.txt"), 1000, 100, first)
+            newer = FileHashKey(UPath("/a/b.txt"), 2000, 100, second)
+            c.put(older, ContentHash(first, b"\x01" * 16))
+            c.put(newer, ContentHash(second, b"\x02" * 16))
+            assert c.get(FileHashKey(UPath("/a/b.txt"), 3000, 100, first)) == (
+                ContentHash(first, b"\x01" * 16)
+            )
+        finally:
+            c.close()

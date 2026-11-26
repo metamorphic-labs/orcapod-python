@@ -15,7 +15,9 @@ from orcapod.types import ContentHash
 
 
 def make_key(path_str: str, mtime_ns: int = 1000, size: int = 100) -> FileHashKey:
-    return FileHashKey(path=UPath(path_str), mtime_ns=mtime_ns, size=size)
+    return FileHashKey(
+        path=UPath(path_str), mtime_ns=mtime_ns, size=size, label="sha256"
+    )
 
 
 def make_hash(method: str = "sha256", digest: bytes = b"\xab" * 32) -> ContentHash:

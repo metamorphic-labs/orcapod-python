@@ -188,7 +188,8 @@ for _, data in total_lines.pod(everything):
 ## Large files
 
 Hashing a file means reading it. For large files Orcapod can cache the hash, keyed by the
-file's path, size and modification time, so that an unchanged file is not read again:
+file's path, size and modification time and the hash algorithm, so that an unchanged file is
+not read again (a hash cached by another algorithm is never used):
 
 ```python
 op.enable_file_hash_caching()

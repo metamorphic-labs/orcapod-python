@@ -180,7 +180,12 @@ class _HashVisitor:
         self, resolved: UPath, file_stat: os.stat_result
     ) -> tuple[FileOutcome, int]:
         try:
-            key = FileHashKey(resolved, file_stat.st_mtime_ns, file_stat.st_size)
+            key = FileHashKey(
+                resolved,
+                file_stat.st_mtime_ns,
+                file_stat.st_size,
+                self._hasher.hash_label,
+            )
             if not self._force and self._cacher.get(key) is not None:
                 return ("cached", file_stat.st_size)
             content_hash = self._hasher.hash_file(resolved)
@@ -199,16 +204,21 @@ class _DryRunVisitor:
 
     Args:
         cacher: Shared ``SqliteHashCacher`` instance.
+        hasher: The ``FileHasher`` a real run would use. Never called: only its
+            ``hash_label`` is read, so an entry of another algorithm counts as
+            not cached (ITL-1488).
         force: If ``True``, skip the cache check and always return ``"would_hash"``.
     """
 
     def __init__(
         self,
         cacher: SqliteHashCacher,
+        hasher: FileHasher,
         *,
         force: bool = False,
     ) -> None:
         self._cacher = cacher
+        self._label = hasher.hash_label
         self._force = force
 
     def __call__(
@@ -217,7 +227,9 @@ class _DryRunVisitor:
         try:
             if self._force:
                 return ("would_hash", file_stat.st_size)
-            key = FileHashKey(resolved, file_stat.st_mtime_ns, file_stat.st_size)
+            key = FileHashKey(
+                resolved, file_stat.st_mtime_ns, file_stat.st_size, self._label
+            )
             if self._cacher.get(key) is not None:
                 return ("cached", file_stat.st_size)
             return ("would_hash", file_stat.st_size)
@@ -322,10 +334,12 @@ def populate_hash_cache(
             ]
         )
 
+        hasher = FileHasher(algorithm=algorithm, buffer_size=buffer_size)
         if dry_run:
-            visitor: _HashVisitor | _DryRunVisitor = _DryRunVisitor(cacher, force=force)
+            visitor: _HashVisitor | _DryRunVisitor = _DryRunVisitor(
+                cacher, hasher, force=force
+            )
         else:
-            hasher = FileHasher(algorithm=algorithm, buffer_size=buffer_size)
             visitor = _HashVisitor(cacher, hasher, force=force)
         accumulator = _Accumulator(progress_callback)
 

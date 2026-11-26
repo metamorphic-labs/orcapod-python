@@ -140,6 +140,15 @@ class SemanticHasherProtocol(Protocol):
 class FileContentHasherProtocol(Protocol):
     """Protocol for file-related hashing."""
 
+    @property
+    def hash_label(self) -> str:
+        """The label of every hash ``hash_file`` returns (its ``ContentHash.method``).
+
+        A file hash cache uses it to return an entry only to a hasher of the same
+        algorithm (ITL-1488).
+        """
+        ...
+
     def hash_file(self, file_path: PathLike) -> ContentHash: ...
 
 

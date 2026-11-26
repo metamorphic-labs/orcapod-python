@@ -53,7 +53,10 @@ class PostgresHashCacher:
     and ``INSERT ... ON CONFLICT DO NOTHING`` for concurrent-insert safety.
 
     The hash is stored as a BYTEA in ``{method}:{raw_digest}`` format via
-    ``ContentHash.to_prefixed_digest()``.
+    ``ContentHash.to_prefixed_digest()``. A lookup matches only a row whose
+    hash starts with the key's ``{label}:``, so a hash made with another
+    algorithm is a miss (ITL-1488); a row holds one algorithm's hash per
+    ``(path, mtime_ns, size)``, and a put of another algorithm replaces it.
 
     Schema versioning is tracked in a companion ``file_hash_cache_meta``
     table. If an existing database is detected with an old schema (e.g.
@@ -203,7 +206,8 @@ class PostgresHashCacher:
         When ``match_mtime=True`` (default), the query filters on
         ``path``, ``mtime_ns``, and ``size``. When ``match_mtime=False``,
         only ``path`` and ``size`` are filtered and results are ordered
-        by ``mtime_ns DESC`` so the most recent entry is returned.
+        by ``mtime_ns DESC`` so the most recent entry is returned. Either
+        way only a hash of the key's label matches.
 
         Args:
             key: File hash cache key.
@@ -212,17 +216,20 @@ class PostgresHashCacher:
             Cached ``ContentHash``, or ``None`` if not found.
         """
         conn = self._connection()
+        prefix = key.stored_prefix
         if self._match_mtime:
             row = conn.execute(
                 "SELECT hash FROM file_hash_cache "
-                "WHERE path=%s AND mtime_ns=%s AND size=%s",
-                (str(key.path), key.mtime_ns, key.size),
+                "WHERE path=%s AND mtime_ns=%s AND size=%s "
+                "AND substring(hash from 1 for %s)=%s",
+                (str(key.path), key.mtime_ns, key.size, len(prefix), prefix),
             ).fetchone()
         else:
             row = conn.execute(
                 "SELECT hash FROM file_hash_cache "
-                "WHERE path=%s AND size=%s ORDER BY mtime_ns DESC LIMIT 1",
-                (str(key.path), key.size),
+                "WHERE path=%s AND size=%s AND substring(hash from 1 for %s)=%s "
+                "ORDER BY mtime_ns DESC LIMIT 1",
+                (str(key.path), key.size, len(prefix), prefix),
             ).fetchone()
         if row is None:
             return None
@@ -234,8 +241,10 @@ class PostgresHashCacher:
         """Store ``value`` under ``key``.
 
         No-ops silently when ``read_only=True`` or when ``key.size`` is below
-        ``min_cache_size_bytes``. Uses ``INSERT ... ON CONFLICT DO NOTHING``
-        so concurrent inserts of the same key from multiple workers are safe.
+        ``min_cache_size_bytes``. Uses ``INSERT ... ON CONFLICT`` so
+        concurrent inserts of the same key from multiple workers are safe: an
+        existing row with the same hash is kept, and one holding another
+        algorithm's hash is replaced, so the new algorithm's hash is cached.
 
         Args:
             key: File hash cache key.
@@ -254,7 +263,9 @@ class PostgresHashCacher:
             """
             INSERT INTO file_hash_cache (path, mtime_ns, size, hash)
             VALUES (%s, %s, %s, %s)
-            ON CONFLICT (path, mtime_ns, size) DO NOTHING
+            ON CONFLICT (path, mtime_ns, size) DO UPDATE
+                SET hash = EXCLUDED.hash, cached_at = EXCLUDED.cached_at
+                WHERE file_hash_cache.hash <> EXCLUDED.hash
             """,
             (str(key.path), key.mtime_ns, key.size, value.to_prefixed_digest()),
         )
