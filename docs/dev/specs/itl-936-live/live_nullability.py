@@ -195,8 +195,8 @@ def write_mode(project: str, dataset: str, report: dict[str, Any]) -> bool:
 
     from orcapod.databases import (
         SpiralDBConnector,
-        read_nullability_record,
-        write_nullability_record,
+        read_nullability_record,  # pyright: ignore[reportAttributeAccessIssue]  # historical: measured with pyspiral, removed in ITL-1186
+        write_nullability_record,  # pyright: ignore[reportAttributeAccessIssue]  # historical: measured with pyspiral, removed in ITL-1186
     )
     from orcapod.errors import (
         NullabilityRecordMismatchError,
@@ -207,7 +207,7 @@ def write_mode(project: str, dataset: str, report: dict[str, Any]) -> bool:
     from orcapod.types import ColumnInfo
 
     run = time.strftime("%Y%m%d%H%M%S")
-    client = sp.Spiral()
+    client = sp.Spiral()  # pyright: ignore[reportAttributeAccessIssue]  # historical: measured with pyspiral, removed in ITL-1186
     proj = client.project(project)
     names = {
         n: f"itl936_{run}_{n}"
@@ -456,10 +456,10 @@ def read_mode(
     """
     import spiral as sp  # pyright: ignore[reportMissingImports]  (spiraldb extra, absent in the type-check job)
 
-    from orcapod.databases import read_nullability_record
+    from orcapod.databases import read_nullability_record  # pyright: ignore[reportAttributeAccessIssue]  # historical: measured with pyspiral, removed in ITL-1186
     from orcapod.sources import SpiralDBTableSource
 
-    proj = sp.Spiral().project(project)
+    proj = sp.Spiral().project(project)  # pyright: ignore[reportAttributeAccessIssue]  # historical: measured with pyspiral, removed in ITL-1186
     ok = True
     for name in tables:
         tbl = proj.table(f"{dataset}.{name}")

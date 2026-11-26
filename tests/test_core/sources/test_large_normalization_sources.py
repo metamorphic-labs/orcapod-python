@@ -233,10 +233,10 @@ def test_function_pod_stream_is_large(n_rows: int, tmp_path: Path) -> None:
 
 def test_spiraldb_table_source_is_large(tmp_path: Path) -> None:
     from orcapod.sources import SpiralDBTableSource
-    from tests.test_databases import fake_pyspiral
+    from tests.test_databases import fake_spiral_sdk
 
-    with fake_pyspiral.install(tmp_path / "spiral"):
-        project = fake_pyspiral.FakeSpiral().project("p")
+    with fake_spiral_sdk.install(tmp_path / "spiral"):
+        project = fake_spiral_sdk.ExternalProject("p")
         table = project.create_table(
             "default.r", key_schema=pa.schema([pa.field("t", pa.string())])
         )

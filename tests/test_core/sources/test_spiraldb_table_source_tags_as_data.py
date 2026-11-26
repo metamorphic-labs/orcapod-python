@@ -21,7 +21,7 @@ from orcapod.errors import InputValidationError, SourceTooLargeError
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.serialization import resolve_source_from_config
 from orcapod.sources import SpiralDBTableSource
-from tests.test_databases import fake_pyspiral
+from tests.test_databases import fake_spiral_sdk
 
 _PROJECT = "edi-sample"
 _KEYS = pa.schema(
@@ -60,15 +60,15 @@ def _spike_rows(spikes: list[tuple[str, int, int]]) -> pa.Table:
 @pytest.fixture()
 def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Provide a fake project holding the 7-row ``spike`` table, read 2 rows per batch."""
-    monkeypatch.setattr(fake_pyspiral, "scan_batch_rows", 2)
-    with fake_pyspiral.install(tmp_path / "spiral"):
-        project = fake_pyspiral.FakeSpiral().project(_PROJECT)
+    monkeypatch.setattr(fake_spiral_sdk, "scan_batch_rows", 2)
+    with fake_spiral_sdk.install(tmp_path / "spiral"):
+        project = fake_spiral_sdk.ExternalProject(_PROJECT)
         project.create_table("default.spike", key_schema=_KEYS).write(
             _spike_rows(_SPIKES)
         )
-        fake_pyspiral.scan_log.clear()
+        fake_spiral_sdk.scan_log.clear()
         yield project
-        fake_pyspiral.scan_log.clear()
+        fake_spiral_sdk.scan_log.clear()
 
 
 def _source(**kwargs: Any) -> SpiralDBTableSource:
@@ -108,7 +108,7 @@ class TestTheCopy:
         tag_keys, data_keys = source.keys()
         _, data_schema = source.output_schema()
 
-        assert fake_pyspiral.scan_log == []
+        assert fake_spiral_sdk.scan_log == []
         assert tag_keys == ("subject_id", "timestamp", "unit_id")
         assert data_keys == ("amplitude", "spike_time_us")
         assert data_schema["spike_time_us"] is int
@@ -185,7 +185,7 @@ class TestTheCopy:
         """The bounded preview reads one head and shows the copied column."""
         html = _source(tags_as_data=_COPY)._repr_html_()
 
-        assert [scan.kwargs.get("limit") for scan in fake_pyspiral.scan_log] == [10]
+        assert [scan.kwargs.get("limit") for scan in fake_spiral_sdk.scan_log] == [10]
         assert "spike_time_us" in html
         assert "shape: (7, 5)" in html
 
@@ -210,7 +210,7 @@ class TestRefusedMappings:
             _source(tags_as_data=mapping)
 
         assert "'spike'" in str(raised.value)
-        assert fake_pyspiral.scan_log == []
+        assert fake_spiral_sdk.scan_log == []
 
     def test_a_tag_that_is_not_a_key_column_is_refused(self, project):
         """Only a key column, which is never null, can be copied."""
@@ -299,7 +299,7 @@ class TestSaveAndLoad:
 
         loaded = resolve_source_from_config(json.loads(json.dumps(config)))
 
-        assert fake_pyspiral.scan_log == []
+        assert fake_spiral_sdk.scan_log == []
         assert config["tags_as_data"] == {"timestamp": "t", "unit_id": "u"}
         assert isinstance(loaded, SpiralDBTableSource)
         assert loaded.to_config() == config
