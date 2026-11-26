@@ -620,7 +620,8 @@ limited_bmi = FunctionPod.from_fn(
 
 Apply `limited_bmi(source, label="bmi")` when recording a job. Set
 `PodConfig(max_concurrency=None)` to allow unlimited dispatch or use `1` to process
-one row at a time.
+one row at a time. If calls to a pod wait for each other, choose a limit that lets
+all calls in the group start.
 
 When calling `FunctionPod.async_execute` directly, you can also supply a `PipelineConfig`.
 The two settings resolve as follows.
