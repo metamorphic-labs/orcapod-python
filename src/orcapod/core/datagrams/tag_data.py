@@ -585,8 +585,9 @@ class Data(Datagram):
         gives it: its type is never worked out again from its value, which a
         nested token column would not survive. A change of the row keeps the
         typed column of every token it keeps (a selection, a drop, a rename,
-        added columns); only a token given as a Python value (a row built from
-        values, ``with_source_info``) is typed from its value. So a row built
+        added columns); a token given as a Python value (a row built from
+        values, ``with_source_info``) is typed from its value, and so is the
+        token of a column taken from another row (``with_columns_of``). So a row built
         from values and the same row read from a table give the same columns.
 
         ``as_table(columns={"source": True})`` differs in two ways: it types
@@ -887,22 +888,13 @@ class Data(Datagram):
             **{k: v for k, v in self._source_info.items() if k not in names},
         }
         new_p._source_info_table = None
-        # The added columns keep the typed tokens ``other`` gives; this row's own
-        # are its typed columns when it has them, typed from their values otherwise.
-        theirs = other.source_info_table()
-        kept = {
-            name: theirs.column(f"{constants.SOURCE_PREFIX}{name}")
-            for name in names
-            if f"{constants.SOURCE_PREFIX}{name}" in theirs.column_names
-        }
-        own = self._typed_source_info
-        if own is not None:
-            kept |= {
-                name.removeprefix(constants.SOURCE_PREFIX): own.column(name)
-                for name in own.column_names
-                if name.removeprefix(constants.SOURCE_PREFIX) not in names
-            }
-        new_p._typed_source_info = new_p._token_columns(kept)
+        # The added columns' tokens are typed from their values, as the edge
+        # between two nodes and a stored result give them, so a row has one
+        # instance id on every route (ITL-1471; typed tokens from end to end are
+        # ITL-1491). This row's own typed columns, when it has them, are kept.
+        self._keep_typed_tokens(
+            new_p, {k: k for k in Datagram.keys(self) if k not in names}
+        )
         return new_p
 
     def copy(self, include_cache: bool = True, preserve_id: bool = True) -> Self:

@@ -1106,8 +1106,12 @@ these preimages anywhere else.
   non-null token of a row read from an Arrow table (a stream's row) keeps the type that table
   gives it, with a nullable field, never typed again from the value (a nested token column
   would not survive it); a change of the row keeps the typed column of every
-  token it keeps (a selection, a drop, a rename, added columns, columns taken from another
-  row); only a token given as a Python value is typed from its value. There is one column
+  token it keeps (a selection, a drop, a rename, added columns); a token given as a Python value is typed
+  from its value, and so is the token of a column taken from another row (`with_columns_of`,
+  a data-tag falling through a function: the edge between two nodes and a stored result type
+  it from its value too, so it has one type on every route; typed tokens from end to end are
+  ITL-1491). A rename moves a column's token with it; a token held for the destination name
+  before is dropped. There is one column
   per data column: a data column with no token has a null token, so a row built from values
   and the same row read from a table have one instance id. Ids are a function of the row alone, never of the order
   sessions ran in. A pipeline table keeps one type per token column: a row whose token column
