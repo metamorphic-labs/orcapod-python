@@ -28,12 +28,14 @@ import pyarrow.compute as pc
 import pytest
 
 from orcapod import PipelineJob, function_pod
+from orcapod.channels import Channel
 from orcapod.contexts import get_default_context
 from orcapod.core import row_ids
 from orcapod.core.datagrams import EmptyData
 from orcapod.core.operators import SelectDataColumns
 from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import InMemoryArrowDatabase
+from orcapod.errors import EphemeralResultMissingError
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.side_effects import SideEffectPod
 from orcapod.system_constants import constants
@@ -579,12 +581,14 @@ def test_a_placeholder_carries_a_real_outputs_tokens_with_the_sentinel(
             assert uuid.UUID(hex=result_id).hex == result_id
 
 
-@pytest.mark.parametrize("path", ["sync", "async"])
 @ARRANGEMENT
 def test_a_node_given_a_placeholder_finds_its_result_by_the_input_hash(
-    path: str, arrangement: str
+    arrangement: str,
 ) -> None:
-    """0 calls, the stored result, no pipeline row, and another instance id."""
+    """0 calls, the stored result, no pipeline row, and another instance id.
+
+    Row by row, through ``execute_data``; the async route is the test below.
+    """
     database = InMemoryArrowDatabase()
     first = _job(database, InMemoryArrowDatabase(), arrangement)
     _run(first, "sync")
@@ -609,10 +613,7 @@ def test_a_node_given_a_placeholder_finds_its_result_by_the_input_hash(
         )
         assert node.get_cached_results([instance]) == {}
         # The result store answers by the input hash the placeholder keeps.
-        if path == "sync":
-            _, result = node.execute_data(tag, placeholder)
-        else:
-            _, result = asyncio.run(node._async_process_data_internal(tag, placeholder))
+        _, result = node.execute_data(tag, placeholder)
         assert result is not None
         key = (tag.as_dict()["subject"], tag.as_dict()["session"])
         assert result.as_dict()["z"] == expected[key]
@@ -620,3 +621,151 @@ def test_a_node_given_a_placeholder_finds_its_result_by_the_input_hash(
     database.flush()
     # No pipeline row is written for a placeholder input (ITL-1475 reconsiders it).
     assert _table(database, "add", "pdb_v2").sort_by(KEY).equals(stored_before)
+
+
+def _through_channels(node: Any, rows: list[tuple[Any, Any]]) -> list[tuple[Any, Any]]:
+    """Feed ``rows`` to ``node.async_execute`` through channels; return what it sends."""
+
+    async def run() -> list[tuple[Any, Any]]:
+        incoming: Channel[Any] = Channel()
+        outgoing: Channel[Any] = Channel()
+        for row in rows:
+            await incoming.writer.send(row)
+        await incoming.writer.close()
+        await node.async_execute(incoming.reader, outgoing.writer)
+        return await outgoing.reader.collect()
+
+    return asyncio.run(run())
+
+
+@ARRANGEMENT
+def test_placeholders_fed_through_the_async_route_find_their_results(
+    arrangement: str,
+) -> None:
+    """``async_execute`` given placeholders: the stored results, 0 calls, no new row.
+
+    Review of PR #583: the async route sent a placeholder whose instance id is not
+    stored to the function like any miss, and the pipeline writer then read the
+    placeholder as a table and raised ``EmptyDataAccessError``, although the result
+    was stored. It now finds the result by the input hash, as the sync route does,
+    and writes no pipeline row (ITL-1475).
+    """
+    database = InMemoryArrowDatabase()
+    first = _job(database, InMemoryArrowDatabase(), arrangement)
+    _run(first, "sync")
+    expected = {
+        (tag.as_dict()["subject"], tag.as_dict()["session"]): data.as_dict()["z"]
+        for tag, data in first.nodes["g"].iter_data()
+    }
+    stored_before = _table(database, "add", "pdb_v2").sort_by(KEY)
+    calls.clear()
+
+    later = _job(database, InMemoryArrowDatabase(), arrangement)
+    node: Any = later.nodes["g"]
+    placeholders = _placeholders(later)
+    assert len(placeholders) == 3
+    assert all(isinstance(data, EmptyData) for _, data in placeholders)
+    sent = _through_channels(node, placeholders)
+    assert {
+        (tag.as_dict()["subject"], tag.as_dict()["session"]): data.as_dict()["z"]
+        for tag, data in sent
+    } == expected
+    assert len(sent) == 3
+    assert calls == Counter(), "a function was called for a placeholder input"
+    database.flush()
+    assert _table(database, "add", "pdb_v2").sort_by(KEY).equals(stored_before)
+    # The node holds the rows it sent, as after any run.
+    assert sorted(_values(node.as_table(), "z")) == sorted(expected.values())
+
+
+@pytest.mark.parametrize("path", ["sync", "async"])
+def test_a_placeholder_whose_result_is_not_stored_is_refused(path: str) -> None:
+    """No stored result for the placeholder's input hash: an error, 0 calls, no row."""
+    database = InMemoryArrowDatabase()
+    _run(_job(database, InMemoryArrowDatabase()), "sync")
+    stored_before = _table(database, "add", "pdb_v2").sort_by(KEY)
+    calls.clear()
+
+    later = _job(database, InMemoryArrowDatabase())
+    node: Any = later.nodes["g"]
+    # Placeholders that stand for results ``g`` never saw: ``f``'s own input hashes.
+    unknown = [
+        (tag, EmptyData(cached_content_hash=data.content_hash()))
+        for tag, data in later.nodes["f"]._input_stream.iter_data()
+    ]
+    assert len(unknown) == 3
+    if path == "sync":
+        with pytest.raises(EphemeralResultMissingError):
+            node.execute_data(*unknown[0])
+    else:
+        with pytest.raises((EphemeralResultMissingError, ExceptionGroup)) as raised:
+            _through_channels(node, unknown)
+        error = raised.value
+        if isinstance(error, ExceptionGroup):
+            assert error.subgroup(EphemeralResultMissingError) is not None
+    assert calls == Counter()
+    database.flush()
+    assert _table(database, "add", "pdb_v2").sort_by(KEY).equals(stored_before)
+
+
+# ---------------------------------------------------------------------------
+# A trace finds the record of the row's own instance
+# ---------------------------------------------------------------------------
+
+
+@ORCHESTRATOR
+@ARRANGEMENT
+def test_each_jobs_trace_finds_its_own_record_after_a_token_only_rerun(
+    orchestrator: str, arrangement: str
+) -> None:
+    """Two jobs over one store, the second with new tokens: both still trace.
+
+    After the second job, ``g``'s table holds two records of every entry: the first
+    job's instance and the second's, both naming one result. A trace resolves a held
+    row by its instance (the entry with the row's own input tokens), so each job's
+    trace reports its own record. Review of PR #583: the trace matched on system
+    tags and result id alone, found both records and raised
+    ``ProvenanceInconsistencyError`` for every row of the first job.
+    """
+    database = InMemoryArrowDatabase()
+    first = _job(database, InMemoryArrowDatabase(), arrangement)
+    _run(first, orchestrator)
+    before = {
+        tuple(sorted(root.tags)): root for root in first.nodes["g"].trace({}, "z").roots
+    }
+    assert len(before) == 3
+    second = _job(database, InMemoryArrowDatabase(), arrangement)
+    _run(second, orchestrator)
+    stored = _table(database, "add", "pdb_v2")
+    assert stored.num_rows == 6
+
+    records: dict[str, set[str]] = {}
+    for name, job in (("first", first), ("second", second)):
+        trace = job.nodes["g"].trace({}, "z")
+        assert trace.matched == 3, name
+        assert len(trace.roots) == 3, name
+        records[name] = set()
+        for root in trace.roots:
+            assert root.node == "g" and root.function is not None, name
+            records[name].add(root.function.record_id)
+            # The first job computed its rows; the second took the stored results.
+            assert root.function.computed_here is (name == "first"), name
+            # Every input of the step is traced down to the source.
+            assert {step.kind for step in root.walk()} >= {"function", "source"}
+        assert len(records[name]) == 3, name
+    assert records["first"].isdisjoint(records["second"])
+    labelled = {
+        ContentHash.from_prefixed_digest(k).to_string() for k in _values(stored, KEY)
+    }
+    assert records["first"] | records["second"] == labelled
+    # The first job's trace is what it was before the second job ran.
+    again = {
+        tuple(sorted(root.tags)): root for root in first.nodes["g"].trace({}, "z").roots
+    }
+    assert again == before
+
+    # One row, selected by its tags, traces in both jobs too.
+    selector = {"subject": "m1", "session": 2}
+    for job in (first, second):
+        (root,) = job.nodes["g"].trace(selector, "z").roots
+        assert root.value == 222

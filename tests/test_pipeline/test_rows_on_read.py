@@ -1312,14 +1312,9 @@ def test_held_rows_that_cannot_make_one_table_raise_at_the_successors_edge() -> 
 
 def test_held_rows_that_cannot_make_one_table_are_sent_on_async() -> None:
     """Async: the held rows are sent on as the plan took them, never built into one
-    table first: the function node after the held node starts and ends, and the run
-    raises the rows' ``ArrowTypeError``.
-
-    The node looks a row up by its instance id, which reads the row's source-info
-    tokens (ITL-1471), so the error is raised when the first row is looked up,
-    before any row starts and before the function is called. Before the three ids
-    the lookup read no token, every row started, and the same error was raised
-    when the row was recorded (``main`` ca1c35d6)."""
+    table first: the function node after the held node starts every row and ends,
+    and the run raises the rows' ``ArrowTypeError``. ``main`` ca1c35d6 gives the same
+    events and error."""
     from orcapod.pipeline import AsyncPipelineOrchestrator
 
     held, after, _ = _held_job()
@@ -1334,4 +1329,60 @@ def test_held_rows_that_cannot_make_one_table_are_sent_on_async() -> None:
     observer = DataStarts()
     with pytest.raises(pa.ArrowTypeError, match="Expected bytes"):
         AsyncPipelineOrchestrator().run(dag, observer=observer, held_rows={held: rows})
-    assert observer.events == [("start", "after"), ("end", "after")]
+    assert observer.events == [
+        ("start", "after"),
+        ("data", "after"),
+        ("data", "after"),
+        ("end", "after"),
+    ]
+
+
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+def test_an_inactive_function_node_passes_rows_with_nested_tokens(
+    asynchronous: bool,
+) -> None:
+    """A node that looks a row up never types the row's tokens again (ITL-1471).
+
+    A function node finds a row by its instance id, which is made from the row's
+    source-info tokens. The tokens are read as the typed Arrow columns the row
+    carries, so rows with a nested token column (valid Arrow of a declared type,
+    whose values cannot be typed again from Python values: ``_unconvertible``) are
+    looked up without an error. The function is inactive: it is not called, gives no
+    output, and nothing is recorded. Review of PR #583: the lookup had typed the
+    tokens again from their values and raised ``ArrowTypeError`` before the function
+    was reached; ``main`` completes.
+    """
+    import asyncio
+
+    from orcapod.channels import Channel
+    from orcapod.core.data_function import PythonDataFunction
+    from orcapod.core.function_pod import FunctionPod
+    from orcapod.core.nodes.function_node import FunctionJobNode
+
+    def never(x: int) -> int:
+        raise AssertionError("an inactive function must not be called")
+
+    data_function = PythonDataFunction(never, output_keys="y")
+    data_function.set_active(False)
+    rows = _unconvertible()
+    database = InMemoryArrowDatabase()
+    node = FunctionJobNode(FunctionPod(data_function), rows, pipeline_database=database)
+
+    async def through_channels() -> list[Any]:
+        sent: Channel[Any] = Channel()
+        received: Channel[Any] = Channel()
+        for row in rows.iter_data():
+            await sent.writer.send(row)
+        await sent.writer.close()
+        await node.async_execute(sent.reader, received.writer)
+        return await received.reader.collect()
+
+    if asynchronous:
+        out = asyncio.run(through_channels())
+    else:
+        out = list(node.execute(rows).iter_data())
+    assert out == []
+    assert database.list_table_paths() == []
+    # Each row has its own instance id, read from the typed token column.
+    ids = [node.compute_instance_id(tag, data) for tag, data in rows.iter_data()]
+    assert len(set(ids)) == 2
