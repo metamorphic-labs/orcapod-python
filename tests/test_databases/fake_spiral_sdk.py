@@ -456,9 +456,11 @@ class _Store:
         with _metadata_lock:  # one upsert at a time: concurrent keys are all kept
             stored = self.metadata(table_id)
             stored.update(entries)
-            _ = (self.root / table_id / "metadata.json").write_text(
-                json.dumps({k: v.hex() for k, v in stored.items()})
-            )
+            # Written beside, then put in place: a reader sees a whole mapping.
+            target = self.root / table_id / "metadata.json"
+            written = target.with_suffix(".json.tmp")
+            _ = written.write_text(json.dumps({k: v.hex() for k, v in stored.items()}))
+            _ = written.replace(target)
 
     def keys(self, table_id: str) -> pa.Schema:
         """Return a table's key schema."""
@@ -500,7 +502,7 @@ def _staged(rows: pa.Table, keys: list[str], stored: pa.Schema) -> pa.Table:
             column = rows.column(i)
             rows = rows.set_column(
                 i,
-                field.name,
+                field.with_type(cut),  # the field, flag and metadata kept
                 pa.chunked_array([c.view(cut) for c in column.chunks], type=cut),
             )
     for key in keys:
