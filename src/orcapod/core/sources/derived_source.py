@@ -913,8 +913,9 @@ def _origin_read_keeping_nothing(origin: Any, *, read_by_this_class: bool) -> An
     """An origin that a full read of a ``DerivedSource`` subclass may read: nothing it
     reads stays on ``origin`` or beneath it (review of PR 571, round 3).
 
-    A ``DerivedSource`` is copied, with its own origin taken the same way, so the rows
-    it keeps stay on the copy. A source of the library that holds its rows
+    A ``DerivedSource`` of exactly this class is copied, with its own origin taken the
+    same way, so the rows it keeps stay on the copy; a subclass of it may keep rows
+    where a copy shares them, and is refused. A source of the library that holds its rows
     (``_stream``) or reads them on demand without keeping them (``SpiralDBTableSource``)
     is read as it is. A job node is read as it is only by ``DerivedSource``'s own
     code, which reads its stored rows (``get_all_records``) and keeps nothing; a
@@ -931,13 +932,21 @@ def _origin_read_keeping_nothing(origin: Any, *, read_by_this_class: bool) -> An
     """
     from orcapod.core.sources.spiraldb_table_source import SpiralDBTableSource
 
-    if isinstance(origin, DerivedSource):
+    if reads_as_its_class(origin, DerivedSource):
+        # Exactly this class: its state is known, so a copy keeps what it reads.
         twin = copy.copy(origin)
         twin._origin = _origin_read_keeping_nothing(  # pyright: ignore[reportPrivateUsage]  # the copy's own origin
             origin._origin,  # pyright: ignore[reportPrivateUsage]  # as above
-            read_by_this_class=reads_as_its_class(origin, DerivedSource),
+            read_by_this_class=True,
         )
         return twin
+    if isinstance(origin, DerivedSource):
+        # A subclass may hold what it reads where a copy shares it (N55).
+        raise refused(
+            origin,
+            "is a DerivedSource subclass: a DerivedSource subclass above it would "
+            "read it in full, and it may keep what is read",
+        )
     if isinstance(origin, RootSource):
         holds_its_rows = isinstance(
             getattr(origin, "_stream", None), ArrowTableStream

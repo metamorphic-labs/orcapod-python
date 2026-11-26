@@ -1334,3 +1334,33 @@ def test_a_derived_source_subclass_refuses_an_origin_that_could_keep_rows(
             derived.preview(1, compute_all=compute_all)
     assert store.list_table_paths() == []
     assert derived._held_rows() is None  # pyright: ignore[reportPrivateUsage]
+
+
+class _KeepingDerived(DerivedSource):
+    """A DerivedSource of your own that keeps every table it reads in a list."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.kept: list[Any] = []
+
+    def as_table(self, *args: Any, **kwargs: Any) -> Any:
+        table = super().as_table(*args, **kwargs)
+        self.kept.append(table)
+        return table
+
+
+def test_a_derived_source_subclass_refuses_an_origin_of_your_own_class(
+    source: Any,
+) -> None:
+    """Review of 963d4929: a ``DerivedSource`` subclass as the origin was read through
+    a shallow copy sharing its list, so it kept all 40 rows. Only an origin of exactly
+    the library class is copied and read; a subclass origin is refused before it is
+    read, compute_all or not."""
+    origin = _KeepingDerived(source(), tags_as_data={"subject": "who"}, source_id="o")
+    derived = _DroppingDerived(origin, tags_as_data={"timestamp": "t"}, source_id="d")
+    for compute_all in (False, True):
+        with pytest.raises(PreviewRefusedError):
+            derived.preview(2, compute_all=compute_all)
+    assert origin.kept == []
+    assert origin._held_rows() is None  # pyright: ignore[reportPrivateUsage]
+    assert derived._held_rows() is None  # pyright: ignore[reportPrivateUsage]
