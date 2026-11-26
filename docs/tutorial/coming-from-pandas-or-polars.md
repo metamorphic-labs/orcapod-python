@@ -28,19 +28,21 @@ sessions = CSVSource(
 ```
 
 Where pandas has `pd.read_csv` and Polars `pl.read_csv`, Orcapod has a source. What you add is
-`tag_columns`: the columns that say which row is which. The next section explains why.
+`tag_columns`: here, the columns that say which unit or session a row is about. The next
+section explains why.
 `tag_only_columns=True` keeps those columns out of the data, as in the tutorial.
 
 ## Tags and data
 
-Every column of a stream is either a **tag** or **data**. `keys()` gives the two groups:
+Each column of these streams is either a **tag** or **data** (a column can also be both, a
+*data-tag*: see [Data-tags](../concepts/data-tags.md)). `keys()` gives the two groups:
 
 ```python
 print(units.keys())
 # (('subject_id', 'session', 'probe', 'unit'), ('region', 'depth_um', 'n_spikes'))
 ```
 
-Tags name the row: here a unit of a probe in a session of a mouse. Data are what was measured
+Here the tags name a unit of a probe in a session of a mouse. Data are what was measured
 about it. A pandas index or the `on=` columns of a join play a similar part, but in Orcapod the
 roles are part of the stream and every step uses them:
 
@@ -93,8 +95,9 @@ print(joined.keys())
 # (('subject_id', 'session', 'probe', 'unit'), ('duration_s', 'n_spikes'))
 ```
 
-It is always an inner join: a row with no partner is dropped. Two streams that have a data
-column of the same name are refused, where pandas would add `_x` and `_y` suffixes:
+It is always an inner join: a row with no partner is dropped. `units` and `counts` both have
+the data column `n_spikes`, so joining them is refused, where pandas would add `_x` and `_y`
+suffixes:
 
 ```python
 from orcapod.errors import InputValidationError
@@ -138,9 +141,9 @@ Orcapod calls the function, it knows which inputs produced which output
 
 ## Group
 
-`group_by` gathers the rows that share the tags you name. Where pandas and Polars reduce each
-group with an aggregation (`.mean()`), Orcapod keeps the group's values as a list, and you
-reduce the list with a function:
+`group_by` gathers the rows that share the tags you name. Where the pandas and Polars versions
+of this analysis (in the appendix) call `.mean()` on each group, here `group_by` gives each
+group's `rate_hz` values as a list, and a function reduces the list:
 
 ```python
 per_session = rates.group_by(["subject_id", "session"])
@@ -173,16 +176,15 @@ print(means.run().sort_by_tags().head(3))
 [Part 4](04-many-rows-into-one.md) explains why, and how the members of a group are ordered.
 
 `run()` computes the stream and returns a view of its rows. Building `rates` and `means`
-computed nothing: a stream is computed when you ask for its rows (`run()`, `as_table()`,
-iterating), not when you write the step. Polars' lazy frames work the same way.
+called neither function: the functions are called when you ask for rows (`run()`,
+`as_table()`), not when you write the step.
 
 ## Where Orcapod differs
 
 ### Identity and stored results
 
-A pandas or Polars frame is a value in memory. An Orcapod stream also has an **identity**: a
-hash of the steps that produce it and of the sources it reads. Build the same steps again and
-you get the same identity:
+An Orcapod stream also has an **identity**, a hash of its steps and of the identities of the
+sources it reads. Build the same steps again and you get the same identity:
 
 ```python
 again = mean_rate.pod(
@@ -192,16 +194,14 @@ print(again.content_hash() == means.content_hash())
 # True
 ```
 
-A **job** uses that identity to store each result in a database and, when you run it again,
-to compute only what is not stored yet. [Part 5](05-pipeline-job.md) and
-[Part 6](06-reruns-and-caching.md) show this; [Identity & Hashing](../concepts/identity.md)
-explains what enters the identity.
+Storing results and computing only what is new is a job's work: see
+[Part 5](05-pipeline-job.md) and [Part 6](06-reruns-and-caching.md).
+[Identity & Hashing](../concepts/identity.md) explains the identities.
 
-### No implicit type conversion
+### Types must match
 
-pandas and Polars let you compare an integer column with a float, and pandas turns an integer
-column with a missing value into a float column. Orcapod converts nothing. A value must have
-its column's type:
+pandas and Polars both accept `> 1200.0` on an integer column. Orcapod's `filter` refuses a
+value whose type is not its column's:
 
 ```python
 try:
@@ -211,8 +211,9 @@ except InputValidationError as err:
 # Filter: column 'n_spikes' holds int, but the value 1200.0 is a float; convert it explicitly: Orcapod converts no value
 ```
 
-A function's parameters must match the column types. `n_spikes` holds integers, so a function
-that declares `n_spikes: float` is refused when you build the pod:
+A function pod's input columns must be compatible with its parameter annotations. `n_spikes`
+holds integers, so a function that declares `n_spikes: float` is refused when you build the
+pod:
 
 ```python
 @function_pod(output_keys="rate_hz")
@@ -234,14 +235,13 @@ A column that may hold a missing value has its own type, `T | None`; see
 
 ### Tags against data
 
-The tag columns decide what a join matches and what a group keeps, so choose them as you would
-choose a table's key: the columns that, together, name one row. A value you want to compute
-with belongs in a data column, because a function receives data columns. A column can also be
-both, a tag and data at once: see [Data-tags](../concepts/data-tags.md).
+The tag columns decide what a join matches and what a group keeps, so choose them with care.
+A value you want to compute with belongs in a data column, because a function receives data
+columns; a column that must be both is a data-tag ([Data-tags](../concepts/data-tags.md)).
 
 ## Appendix: the same analysis in pandas and Polars
 
-Every Orcapod stream can be read as a data frame: `as_pandas_df()` and `as_polars_df()`. Here
+`as_pandas_df()` and `as_polars_df()` read a stream as a data frame. Here
 are the mean firing rates computed in pandas and in Polars, then read from the Orcapod stream
 `means` for comparison. The three give the same numbers.
 

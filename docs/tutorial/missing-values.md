@@ -29,12 +29,17 @@ sessions = CSVSource(
 
 ## A table with gaps
 
-The workshop dataset has no missing values, so add a small file with some. Suppose the lab
-measured, after the experiment, the length of each probe's track through the brain. One
-probe's track was not measured, and one row lost its session:
+The workshop dataset has no missing values, so write a small file with some, in a new
+temporary folder (so it cannot replace a file of yours). Suppose the lab measured, after the
+experiment, the length of each probe's track through the brain. One probe's track was not
+measured, and one row lost its session:
 
 ```python
-(data_dir / "histology.csv").write_text(
+import tempfile
+from pathlib import Path
+
+histology_path = Path(tempfile.mkdtemp()) / "histology.csv"
+histology_path.write_text(
     "subject_id,session,probe,track_um\n"
     "mouse_01,s1,imec0,3100\n"
     "mouse_01,s1,imec1,\n"
@@ -42,7 +47,7 @@ probe's track was not measured, and one row lost its session:
     "mouse_02,,imec0,2800\n"
 )
 histology = CSVSource(
-    str(data_dir / "histology.csv"),
+    str(histology_path),
     tag_columns=["subject_id", "session", "probe"], tag_only_columns=True,
     source_id="histology",
 )
@@ -93,8 +98,8 @@ except ValueError as err:
 # Incoming data schema Schema({'track_um': int | None}) is not compatible with expected input schema Schema({'track_um': int}): column 'track_um' has type int | None, the function expects int
 ```
 
-The pod is refused when you build it, before any row is read: the column may hold a null, and
-the function says it cannot take one. You have two choices: drop the rows with a null, or let
+The pod is refused when you build it, before the function is called: the column may hold a
+null, and the function says it cannot take one. You have two choices: drop the rows with a null, or let
 the function take `None`.
 
 ## Dropping the rows with a null
@@ -169,9 +174,11 @@ null. A function declared `-> float` that returns `None` fails for that row inst
 
 ## A null in a tag column
 
-Back to the row that lost its session. To read an empty text cell as a null, give the source
-the column types with `schema=` (an Arrow schema, one field per column of the file, in the
-file's order). A field is nullable unless you say `nullable=False`:
+Back to the row that lost its session. Here the source is read with `schema=` (an Arrow
+schema, one field per column of the file, in the file's order), and `session` is declared a
+text field that may be null; a field is nullable unless you say `nullable=False`. The empty
+`session` cell then reads as a null. [Sources](../concepts/sources.md#a-csv-files-types-schema)
+lists what reads as null under a declared schema:
 
 ```python
 import pyarrow as pa
@@ -183,7 +190,7 @@ histology_schema = pa.schema([
     pa.field("track_um", pa.int64()),
 ])
 histology = CSVSource(
-    str(data_dir / "histology.csv"),
+    str(histology_path),
     tag_columns=["subject_id", "session", "probe"], tag_only_columns=True,
     source_id="histology",
     schema=histology_schema,
@@ -214,13 +221,12 @@ print(with_sessions.run().sort_by_tags())
 # └─────────────┴──────────┴────────┴──────────┴────────────┴────────────┘
 ```
 
-The row with no session is gone: **a null in a tag column matches nothing**, not even a null in
-the other stream. The join is inner, so a row without a partner is dropped, and no error is
-raised. The other null, in the data column `track_um`, is carried through.
+The row with no session is gone: `session` is a tag both streams share, so the join matches
+on it, and the null matched no session. The join is inner, so that row was dropped, with no
+error. The other null, in the data column `track_um`, is carried through.
 
-The joined `session` is `str`, not `str | None`: `sessions` declares it `str`, and a row whose
-key is null cannot be in the result. [Join](../concepts/operators.md#join) has the full rule for
-joins on keys that may be null.
+The joined `session` is `str`, not `str | None`. [Join](../concepts/operators.md#join) has the
+rules for joins on keys that may be null.
 
 If a row disappears from a join and you do not see why, look for a null in the tag columns the
 two streams share. In a job, `node.why_missing` names the step that removed a row
@@ -233,9 +239,11 @@ two streams share. In a job, `node.why_missing` names the step that removed a ro
 - `drop_nulls` keeps the rows where the named columns hold a value and makes their type `T`.
 - A function annotated `T | None` receives `None`; one that returns `None` declares its output
   `T | None`, and the `None` is stored as a null.
-- A null in a tag column matches nothing in a join, and the row is dropped without an error.
-- An empty cell in a CSV text column is the empty string unless you declare the column's type
-  with `schema=` ([Sources](../concepts/sources.md#a-csv-files-types-schema) has the full table of what reads as null).
+- Here, a row whose shared tag `session` was null found no partner in the join and was
+  dropped without an error.
+- Read without `schema=`, the empty `session` cell was the empty string; with a nullable
+  declared text field it was a null ([Sources](../concepts/sources.md#a-csv-files-types-schema)
+  has the full table).
 
 ## Exercises
 
