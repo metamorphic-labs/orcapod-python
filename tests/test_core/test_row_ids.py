@@ -180,42 +180,60 @@ class TestInstanceId:
 
 
 class TestRecordId:
-    def test_the_preimage_is_the_labelled_instance_id_and_the_result_id_bytes(
+    NODE = HASHER.hash_table(pa.table({"node": pa.array(["first"])}))
+    OTHER_NODE = HASHER.hash_table(pa.table({"node": pa.array(["second"])}))
+
+    def test_the_preimage_is_the_labelled_node_hash_and_instance_id_and_the_result_id(
         self,
     ) -> None:
         instance = row_ids.instance_id(HASHER, _tag(), _data())
         result_id = uuid.uuid4()
-        preimage = row_ids.record_id_preimage(instance, result_id)
-        assert preimage.column_names == ["__pipeline_instance_id", "__data_id"]
+        preimage = row_ids.record_id_preimage(self.NODE, instance, result_id)
+        assert preimage.column_names == [
+            "__node_content_hash",
+            "__pipeline_instance_id",
+            "__data_id",
+        ]
         assert set(preimage.schema.types) == {pa.large_binary()}
         assert preimage.to_pylist() == [
             {
+                "__node_content_hash": self.NODE.to_prefixed_digest(),
                 "__pipeline_instance_id": instance.to_prefixed_digest(),
                 "__data_id": result_id.bytes,
             }
         ]
-        assert row_ids.record_id(HASHER, instance, result_id) == HASHER.hash_table(
-            preimage
-        )
+        assert row_ids.record_id(
+            HASHER, self.NODE, instance, result_id
+        ) == HASHER.hash_table(preimage)
 
     def test_another_result_of_one_instance_is_another_record(self) -> None:
         instance = row_ids.instance_id(HASHER, _tag(), _data())
         first, second = uuid.uuid4(), uuid.uuid4()
-        assert row_ids.record_id(HASHER, instance, first) != row_ids.record_id(
-            HASHER, instance, second
-        )
-        assert row_ids.record_id(HASHER, instance, first) == row_ids.record_id(
-            HASHER, instance, first
-        )
+        assert row_ids.record_id(
+            HASHER, self.NODE, instance, first
+        ) != row_ids.record_id(HASHER, self.NODE, instance, second)
+        assert row_ids.record_id(
+            HASHER, self.NODE, instance, first
+        ) == row_ids.record_id(HASHER, self.NODE, instance, first)
 
     def test_one_result_of_two_instances_is_two_records(self) -> None:
         other = {name: f"dict_v1:other::row_9::{name}" for name in DATA_VALUES}
         result_id = uuid.uuid4()
         assert row_ids.record_id(
-            HASHER, row_ids.instance_id(HASHER, _tag(), _data()), result_id
+            HASHER, self.NODE, row_ids.instance_id(HASHER, _tag(), _data()), result_id
         ) != row_ids.record_id(
-            HASHER, row_ids.instance_id(HASHER, _tag(), _data(tokens=other)), result_id
+            HASHER,
+            self.NODE,
+            row_ids.instance_id(HASHER, _tag(), _data(tokens=other)),
+            result_id,
         )
+
+    def test_one_instance_and_result_recorded_by_two_nodes_is_two_records(self) -> None:
+        instance = row_ids.instance_id(HASHER, _tag(), _data())
+        result_id = uuid.uuid4()
+        assert row_ids.record_id(
+            HASHER, self.NODE, instance, result_id
+        ) != row_ids.record_id(HASHER, self.OTHER_NODE, instance, result_id)
 
     def test_the_three_ids_carry_the_arrow_label(self) -> None:
         tag, data = _tag(), _data()
@@ -223,7 +241,7 @@ class TestRecordId:
         for value in (
             row_ids.entry_id(HASHER, tag, data),
             instance,
-            row_ids.record_id(HASHER, instance, uuid.uuid4()),
+            row_ids.record_id(HASHER, instance, instance, uuid.uuid4()),
         ):
             assert value.to_prefixed_digest().startswith(b"arrow_v1:")
 

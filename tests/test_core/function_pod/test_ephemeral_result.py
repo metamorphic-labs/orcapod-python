@@ -449,7 +449,9 @@ class TestBulkResolution:
         instance = ContentHash.from_prefixed_digest(
             existing["__pipeline_instance_id"][0].as_py()
         )
-        record = row_ids.record_id(hasher, instance, ephemeral_result_id)
+        record = row_ids.record_id(
+            hasher, node.content_hash(), instance, ephemeral_result_id
+        )
         recorded = existing["__recorded_at"][0].as_py()
         shift = datetime.timedelta(minutes=1 if later == "ephemeral" else -1)
         ephemeral_row = existing.drop([ROW_KEY])
@@ -466,7 +468,7 @@ class TestBulkResolution:
             )
         pipeline_db.add_record(
             node._versioned_pipeline_path,
-            row_ids.pipeline_row_key(node.content_hash(), record),
+            record.to_prefixed_digest(),
             ephemeral_row,
         )
         pipeline_db.flush()
@@ -918,16 +920,13 @@ class TestAddPipelineRecordIndexed:
         assert "__pipeline_recomputation_index" not in all_records.column_names
         expected = row_ids.record_id(
             node.data_context.arrow_hasher,
+            node.content_hash(),
             ContentHash.from_prefixed_digest(node.compute_instance_id(tag, data)),
             result_id,
         ).to_prefixed_digest()
         assert all_records.column(row_ids.RECORD_ID_COL).to_pylist() == [expected]
-        # The table's key is the node's content hash with the record id.
-        assert all_records.column("__row_key").to_pylist() == [
-            row_ids.pipeline_row_key(
-                node.content_hash(), ContentHash.from_prefixed_digest(expected)
-            )
-        ]
+        # The table's key is the record id, which covers the node's content hash.
+        assert all_records.column("__row_key").to_pylist() == [expected]
 
     def test_second_call_with_a_new_result_writes_a_second_row(self):
         """A recompute (a new result id) for the same instance is a new row."""

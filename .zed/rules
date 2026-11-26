@@ -1067,19 +1067,20 @@ these preimages anywhere else.
   entry id    — hash of user tags, system tags, the labelled input data hash (__pipeline_entry_id)
   instance id — hash of the entry id (labelled) and the input's source-info tokens in name
                 order (__pipeline_instance_id)
-  record id   — hash of the instance id (labelled) and the result id, __data_id
-                (__pipeline_record_id)
+  record id   — hash of the node's content hash (labelled), the instance id (labelled) and
+                the result id, __data_id (__pipeline_record_id)
 
 - A function node identifies a row by its instance id (tokens included): it is the plain lookup
   column of the pipeline table and the key of the node's in-memory cache. A new instance of a
   known entry (same values, other tokens) writes a new row; its result normally comes from the
   result store (same input hash), so nothing is computed.
-- A pipeline row stores its record id (__pipeline_record_id). The table's key is the node's
-  content hash with the record id (row_ids.pipeline_row_key; not a hash, never read apart):
+- A pipeline row stores its record id (__pipeline_record_id). It is the table's key, and it
+  covers the content hash of the node that records the row (developer, November 26, 2026):
   with the default pipeline-hash scope one table holds the rows of several nodes, told apart by
-  __node_content_hash, and two of them can record one instance with one cached result. Never
-  key the table by the record id alone: the second node's row would be dropped as a duplicate.
-  A write skips only a row this node already stored under that record id; a recompute has a new
+  __node_content_hash, and two of them can record one instance with one cached result, each
+  under its own record id. Never take the node's content hash out of the record id: the second
+  node's row would be dropped as a duplicate. The row stores __node_content_hash, so it gives
+  its record id again from its own columns. A write skips only a row this node already stored under that record id; a recompute has a new
   result id, so it writes a new row. There is no recomputation index: among the rows of one
   instance, __recorded_at says which is the latest.
 - Only side effects and functions that take the invocation context are keyed by the entry id:

@@ -157,7 +157,7 @@ for the entry, including:
 | Column | Arrow type | Nullable | Meaning |
 |---|---|---|---|
 | `__pipeline_instance_id` | `large_binary` | yes | The row's instance id: the hash of its entry id (tags, system tags, input data hash) and the input's source-info tokens. The node looks a row up by it. |
-| `__pipeline_record_id` | `large_binary` | yes | The row's record id: the hash of its instance id and the id of its result. |
+| `__pipeline_record_id` | `large_binary` | yes | The row's record id: the hash of the node's content hash (`__node_content_hash`), its instance id and the id of its result. It is the table's key. |
 | `__pipeline_run_id` | `large_string` | yes | The ID of the job run that recorded the entry. A node run outside a job stores null. |
 | `__recorded_at` | `timestamp[us, tz=UTC]` | no | The UTC time the node recorded the entry. |
 
@@ -168,12 +168,13 @@ Reusing a pipeline entry preserves its original run ID and recording
 time. If the result is lost and the node recomputes it, the new entry has its
 own run ID and recording time.
 
-A row is named by its record id, the hash of its instance id and the id of its
-result ([the three ids](hashing.md#3-pipeline-db-entry-keys)), stored in
-`__pipeline_record_id`. One table holds the rows of every node with one pipeline
-hash, told apart by `__node_content_hash`, so the table's key is the node's
-content hash with the record id: two such nodes that record one instance with one
-stored result each keep their row. A row is written unless this node already
+A row is named by its record id, the hash of the node's content hash, its
+instance id and the id of its result
+([the three ids](hashing.md#3-pipeline-db-entry-keys)), stored in
+`__pipeline_record_id`; it is the table's key. One table holds the rows of every
+node with one pipeline hash, told apart by `__node_content_hash`, and the record
+id covers that hash: two such nodes that record one instance with one stored
+result have two record ids, and each keeps its row. A row is written unless this node already
 stored that record, so the table keeps every distinct record of every node:
 
 - the same instance recorded again with the same result is one row;

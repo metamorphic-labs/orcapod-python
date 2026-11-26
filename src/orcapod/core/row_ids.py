@@ -15,7 +15,8 @@ context's Arrow hasher, and each is built from the one before:
   entry id and the source-info tokens of the row's data. A function node looks a
   row up by it.
 - The **record id** names one stored row of a function node's pipeline table:
-  the instance id and the id of the result the row points at.
+  the content hash of the node that records it, the instance id and the id of
+  the result the row points at. It is the table's key.
 
 Every preimage is built here and nowhere else. The column names inside a
 preimage are part of its recipe: changing one moves every id made from it.
@@ -132,20 +133,29 @@ def instance_id(
     return hasher.hash_table(instance_id_preimage(entry_id(hasher, tag, data), data))
 
 
-def record_id_preimage(instance: "ContentHash", result_id: uuid.UUID) -> "pa.Table":
+def record_id_preimage(
+    node_content_hash: "ContentHash", instance: "ContentHash", result_id: uuid.UUID
+) -> "pa.Table":
     """Build the preimage of a stored row's record id.
 
     Args:
+        node_content_hash: The content hash of the node that records the row.
         instance: The row's instance id.
         result_id: The id of the result the row points at.
 
     Returns:
-        A one-row table: ``__pipeline_instance_id`` (``large_binary``, the
-        labelled digest of the instance id), then ``__data_id``
-        (``large_binary``, the bytes of the result id).
+        A one-row table: ``__node_content_hash`` (``large_binary``, the labelled
+        digest of the node's content hash), then ``__pipeline_instance_id``
+        (``large_binary``, the labelled digest of the instance id), then
+        ``__data_id`` (``large_binary``, the bytes of the result id). A pipeline
+        row stores the three columns as they are here, so it gives its record id
+        again from its own columns.
     """
     return pa.table(
         {
+            constants.NODE_CONTENT_HASH_COL: pa.array(
+                [node_content_hash.to_prefixed_digest()], type=pa.large_binary()
+            ),
             INSTANCE_ID_COL: pa.array(
                 [instance.to_prefixed_digest()], type=pa.large_binary()
             ),
@@ -157,38 +167,27 @@ def record_id_preimage(instance: "ContentHash", result_id: uuid.UUID) -> "pa.Tab
 
 
 def record_id(
-    hasher: "ArrowHasherProtocol", instance: "ContentHash", result_id: uuid.UUID
+    hasher: "ArrowHasherProtocol",
+    node_content_hash: "ContentHash",
+    instance: "ContentHash",
+    result_id: uuid.UUID,
 ) -> "ContentHash":
-    """Return a stored row's record id: the hash of its instance id and result id.
+    """Return a stored row's record id.
+
+    It is the hash of the recording node's content hash, the row's instance id
+    and its result id. One pipeline table holds the rows of every node with one
+    pipeline hash (the default table scope): two such nodes that record the same
+    instance with the same stored result have two record ids, so each keeps its
+    own row, and the record id alone is the table's key (developer, November 26,
+    2026).
 
     Args:
         hasher: The Arrow hasher of the row's data context.
+        node_content_hash: The content hash of the node that records the row.
         instance: The row's instance id.
         result_id: The id of the result the row points at.
 
     Returns:
         The record id.
     """
-    return hasher.hash_table(record_id_preimage(instance, result_id))
-
-
-def pipeline_row_key(node_content_hash: "ContentHash", record: "ContentHash") -> bytes:
-    """Return the key a pipeline table keeps a row under: the node, then the record.
-
-    One pipeline table holds the rows of every node with one pipeline hash (the
-    default table scope), told apart by the node's content hash. Two such nodes
-    can record the same instance with the same stored result, which is one record
-    id; each keeps its own row, so the table's key is the pair (node content hash,
-    record id). The key is not a hash and is never read apart: the row stores both
-    parts in their own columns.
-
-    Args:
-        node_content_hash: The content hash of the node that records the row.
-        record: The row's record id.
-
-    Returns:
-        The labelled digest of the node's content hash, its length first (four
-        bytes, big-endian), then the labelled digest of the record id.
-    """
-    node = node_content_hash.to_prefixed_digest()
-    return len(node).to_bytes(4, "big") + node + record.to_prefixed_digest()
+    return hasher.hash_table(record_id_preimage(node_content_hash, instance, result_id))

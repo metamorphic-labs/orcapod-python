@@ -178,8 +178,10 @@ def _instance_id_of_stored_row(row: pa.Table) -> ContentHash:
 
 
 def _record_id_of_stored_row(row: pa.Table) -> ContentHash:
-    """The record id, from a stored row: its instance id and its result id."""
-    return HASHER.hash_table(row.select(["__pipeline_instance_id", "__data_id"]))
+    """The record id, from a stored row: its node, its instance id, its result id."""
+    return HASHER.hash_table(
+        row.select(["__node_content_hash", "__pipeline_instance_id", "__data_id"])
+    )
 
 
 def _values(table: pa.Table, column: str) -> list[Any]:
@@ -224,16 +226,16 @@ def test_every_pipeline_row_gives_its_instance_and_record_id_again(
         (record,) = _values(row, "__pipeline_record_id")
         assert _instance_id_of_stored_row(row).to_prefixed_digest() == instance
         assert _record_id_of_stored_row(row).to_prefixed_digest() == record
-        # The table's key is the node's content hash with the record id.
-        assert key == row_ids.pipeline_row_key(
-            ContentHash.from_prefixed_digest(_values(row, "__node_content_hash")[0]),
-            ContentHash.from_prefixed_digest(record),
-        )
-        # The same through the one module, from the stored instance and result ids.
+        # The table's key is the record id.
+        assert key == record
+        # The same through the one module, from the stored node content hash,
+        # instance id and result id.
         (result_id,) = _values(row, "__data_id")
+        (node_hash,) = _values(row, "__node_content_hash")
         assert (
             row_ids.record_id(
                 HASHER,
+                ContentHash.from_prefixed_digest(node_hash),
                 ContentHash.from_prefixed_digest(instance),
                 uuid.UUID(bytes=result_id),
             ).to_prefixed_digest()
