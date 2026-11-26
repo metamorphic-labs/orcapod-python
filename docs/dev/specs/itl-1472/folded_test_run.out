@@ -1,0 +1,92 @@
+pytest tests/test_hashing/golden tests/test_pipeline tests/test_core/function_pod tests/test_core/data_tags tests/test_core/streams tests/test_core/nodes tests/test_docs tests/test_core/operators/test_rejoin.py tests/test_core/operators/test_streaming_rejoin.py tests/test_core/operators/test_filter_pipeline.py tests/test_core/test_order_invariance.py tests/test_core/sources/test_spiraldb_table_source_where.py -q -rf --tb=line
+(folded prototype; started with O34_MARK=ignored, see golden-changes-o34.md section 5)
+
+= 74 failed, 14036 passed, 14 skipped, 170 xfailed, 913 warnings =
+
+   1 tests/test_core/data_tags/test_fall_through_pod_wiring.py
+   9 tests/test_core/function_pod/test_function_pod_auto_select.py
+   1 tests/test_docs/test_doc_samples.py
+  35 tests/test_hashing/golden/test_golden_hashes.py
+   2 tests/test_hashing/golden/test_golden_store.py
+   1 tests/test_pipeline/test_diagram.py
+   2 tests/test_pipeline/test_function_commit_dependencies.py
+   6 tests/test_pipeline/test_node_staleness_after_run.py
+  10 tests/test_pipeline/test_provenance_review.py
+   2 tests/test_pipeline/test_result_database.py
+   2 tests/test_pipeline/test_saved_job_with_data_tag_operator_nodes.py
+   3 tests/test_pipeline/test_source_display_names.py
+
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job.node[SelectDataColumns].content_hash]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job.node[SelectDataColumns].pipeline_hash]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"a","subject":"s1"}]._tag_record_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"a","subject":"s1"}]._tag_source_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"a","subject":"s1"}].data_hash]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"a","subject":"s2"}]._tag_record_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"a","subject":"s2"}]._tag_source_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"a","subject":"s2"}].data_hash]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"b","subject":"s3"}]._tag_record_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"b","subject":"s3"}]._tag_source_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"b","subject":"s3"}].data_hash]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job.node[SelectDataColumns].system_tag_columns]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job.node[ratio].content_hash]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job.node[ratio].pipeline_hash]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job.table[golden_rejoin_job/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/schema:2940d188693a284739b066b85def5c18e849c85c1de5fc9a3444d6dfbb25e7ba/pdb_v1].record_ids]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job.table_paths]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job_async.node[SelectDataColumns].content_hash]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job_async.node[SelectDataColumns].pipeline_hash]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"a","subject":"s1"}]._tag_record_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"a","subject":"s1"}]._tag_source_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"a","subject":"s1"}].data_hash]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"a","subject":"s2"}]._tag_record_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"a","subject":"s2"}]._tag_source_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"a","subject":"s2"}].data_hash]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"b","subject":"s3"}]._tag_record_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"b","subject":"s3"}]._tag_source_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"b","subject":"s3"}].data_hash]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job_async.node[SelectDataColumns].system_tag_columns]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job_async.node[ratio].content_hash]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job_async.node[ratio].pipeline_hash]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job_async.table[golden_rejoin_job/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/schema:2940d188693a284739b066b85def5c18e849c85c1de5fc9a3444d6dfbb25e7ba/pdb_v1].record_ids]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_golden_entry[pipeline:rejoin_job_async.table_paths]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_no_unpinned_entries[pipeline]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_values_independent_of_process_and_hash_seed[0]
+FAILED tests/test_hashing/golden/test_golden_hashes.py::test_values_independent_of_process_and_hash_seed[4242]
+FAILED tests/test_hashing/golden/test_golden_store.py::test_add_writes_provisional_entries_to_their_provisional_files[order0]
+FAILED tests/test_hashing/golden/test_golden_store.py::test_add_writes_provisional_entries_to_their_provisional_files[order1]
+FAILED tests/test_pipeline/test_diagram.py::test_collapse_folds_column_steps_and_joins_into_edges
+FAILED tests/test_pipeline/test_function_commit_dependencies.py::test_pending_records_remain_readable[recomputation-sync]
+FAILED tests/test_pipeline/test_function_commit_dependencies.py::test_pending_records_remain_readable[recomputation-async]
+FAILED tests/test_pipeline/test_node_staleness_after_run.py::test_no_node_is_stale_after_a_run[sync-in_memory]
+FAILED tests/test_pipeline/test_node_staleness_after_run.py::test_no_node_is_stale_after_a_run[async-in_memory]
+FAILED tests/test_pipeline/test_node_staleness_after_run.py::test_no_node_is_stale_after_a_run[async-in_memory-reversed]
+FAILED tests/test_pipeline/test_node_staleness_after_run.py::test_no_node_is_stale_after_a_run[sync-delta]
+FAILED tests/test_pipeline/test_node_staleness_after_run.py::test_no_node_is_stale_after_a_run[async-delta]
+FAILED tests/test_pipeline/test_node_staleness_after_run.py::test_no_node_is_stale_after_a_run[async-delta-reversed]
+FAILED tests/test_pipeline/test_provenance_review.py::test_a_collapsed_endpoint_stays_when_its_outgoing_edge_is_not_highlighted[sync]
+FAILED tests/test_pipeline/test_provenance_review.py::test_a_collapsed_endpoint_stays_when_its_outgoing_edge_is_not_highlighted[async]
+FAILED tests/test_pipeline/test_provenance_review.py::test_a_batch_after_a_partly_stored_run_traces[sync-stored0]
+FAILED tests/test_pipeline/test_provenance_review.py::test_a_batch_after_a_partly_stored_run_traces[sync-stored1]
+FAILED tests/test_pipeline/test_provenance_review.py::test_a_batch_after_a_partly_stored_run_traces[sync-stored2]
+FAILED tests/test_pipeline/test_provenance_review.py::test_a_batch_after_a_partly_stored_run_traces[sync-stored3]
+FAILED tests/test_pipeline/test_provenance_review.py::test_a_batch_after_a_partly_stored_run_traces[async-stored0]
+FAILED tests/test_pipeline/test_provenance_review.py::test_a_batch_after_a_partly_stored_run_traces[async-stored1]
+FAILED tests/test_pipeline/test_provenance_review.py::test_a_batch_after_a_partly_stored_run_traces[async-stored2]
+FAILED tests/test_pipeline/test_provenance_review.py::test_a_batch_after_a_partly_stored_run_traces[async-stored3]
+FAILED tests/test_pipeline/test_result_database.py::TestEachJobReadsItsOwnRows::test_a_load_only_run[sync]
+FAILED tests/test_pipeline/test_result_database.py::TestEachJobReadsItsOwnRows::test_a_load_only_run[async]
+FAILED tests/test_pipeline/test_saved_job_with_data_tag_operator_nodes.py::test_a_job_over_a_tags_as_data_source_saves_and_loads[sync]
+FAILED tests/test_pipeline/test_saved_job_with_data_tag_operator_nodes.py::test_a_job_over_a_tags_as_data_source_saves_and_loads[async]
+FAILED tests/test_pipeline/test_source_display_names.py::test_explain_and_trace_values_are_those_without_a_label
+FAILED tests/test_pipeline/test_source_display_names.py::test_shared_labels_are_told_apart[False]
+FAILED tests/test_pipeline/test_source_display_names.py::test_shared_labels_are_told_apart[True]
+FAILED tests/test_core/function_pod/test_function_pod_auto_select.py::test_call_drops_unused_columns_like_a_hand_written_select
+FAILED tests/test_core/function_pod/test_function_pod_auto_select.py::test_call_selects_once_after_the_join
+FAILED tests/test_core/function_pod/test_function_pod_auto_select.py::test_function_with_invocation_context_drops_unused_columns
+FAILED tests/test_core/function_pod/test_function_pod_auto_select.py::test_cached_function_pod_drops_unused_columns
+FAILED tests/test_core/function_pod/test_function_pod_auto_select.py::test_wrapped_function_pod_drops_unused_columns
+FAILED tests/test_core/function_pod/test_function_pod_auto_select.py::test_job_equals_the_job_with_a_hand_written_select
+FAILED tests/test_core/function_pod/test_function_pod_auto_select.py::test_job_with_two_inputs_equals_hand_written_join_and_select
+FAILED tests/test_core/function_pod/test_function_pod_auto_select.py::test_call_equals_the_stream_convenience_methods
+FAILED tests/test_core/function_pod/test_function_pod_auto_select.py::test_job_equals_the_job_built_with_convenience_methods
+FAILED tests/test_core/data_tags/test_fall_through_pod_wiring.py::test_a_fall_through_pod_called_directly_drops_an_extra_column
+FAILED tests/test_docs/test_doc_samples.py::test_doc_page_samples_run[docs/concepts/function-pods.md]

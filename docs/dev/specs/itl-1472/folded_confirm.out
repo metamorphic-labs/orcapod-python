@@ -1,0 +1,23 @@
+== 1. No select node: the pod's node is fed by the source
+  nodes: {'events': 'source', 'f': 'function', 'h': 'function'}
+  rows of f: [5.0, 7.0, 9.0]
+  calls: 3
+== 2. Results are shared with the hand-written select
+  nodes: ['SelectDataColumns', 'events', 'f']
+  calls made by the hand-written form on the same store: 0
+  pipeline hash equal: False
+  content hash equal: False
+    confirm/_result/double/f741c0fb382f2f9961ea9abbb8fd5fad30eee802c3885b8e54ee267733232525/v0/python.function.v1/
+    confirm/_result/halve/33dee9f51b439bd82359e2cf8d3b1aa722fbaaae212b25d9577f44a816a1b906/v0/python.function.v1/r
+    confirm/double/f741c0fb382f2f9961ea9abbb8fd5fad30eee802c3885b8e54ee267733232525/v0/python.function.v1/schema:8
+    confirm/double/f741c0fb382f2f9961ea9abbb8fd5fad30eee802c3885b8e54ee267733232525/v0/python.function.v1/schema:a
+    confirm/halve/33dee9f51b439bd82359e2cf8d3b1aa722fbaaae212b25d9577f44a816a1b906/v0/python.function.v1/schema:d7
+== 3. The modes: default, strict, process
+  no extra column: default, strict and process share the pipeline hash: True | content hash: True
+  extra columns, strict=True: ValueError: Incoming data schema Schema({'amplitude': float, 'noise': float, 'gain
+  extra columns, process: ValueError: Incoming data schema Schema({'amplitude': float, 'noise': float, 'gain
+  extra columns, default: pipeline hash differs from the no-extra pod's: True
+== 4. The input's column order never counts
+  columns given in another order: pipeline hash equal: True | content hash equal: True
+  the node's identity tuple, last element: drops_extra_columns
+  elements in the tuple: 3 | without extra columns: 2

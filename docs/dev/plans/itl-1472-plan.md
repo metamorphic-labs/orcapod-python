@@ -1,19 +1,23 @@
 # ITL-1472: implementation plan
 
 The design is `docs/dev/specs/itl-1472-edge-registration.md`; its decisions D1 to D11 were decided on the
-developer's behalf on 2026-11-26 and are revertible. O34 (the automatic select) was decided by the developer
-the same day: option (b), which stage 3 implements.
+developer's behalf on 2026-11-26 and are revertible. O34 (the automatic select) is the developer's revision of
+the same day: there is no selection node; a function pod reads only the columns its function takes and its
+node's identity tuple gets one label when it drops any (the design's section 4a), which is stage 3a.
 
 Each stage is one pull request against `main`, with its own Linear issue. Targeted tests locally, one pytest
-process; the suite in CI. Across every stage: **no content hash, pipeline hash, stored path, stored column or
-golden value moves**; the golden suite is the check.
+process; the suite in CI. **Stage 3a is the only stage that moves a hash**: it changes the golden entries
+listed in `docs/dev/specs/itl-1472/golden-changes-o34.md`, exactly those, after the developer approves the
+list. In every other stage no content hash, pipeline hash, stored path, stored column or golden value moves;
+the golden suite is the check.
 
 | Stage | Issue | Content | Depends on |
 |---|---|---|---|
 | 1 | ITL-1483 | Graph edges carry their input position | - |
 | 2 | to file | Edges as the public and the saved structure | 1 |
-| 3 | to file | The restriction on the edge | 2 |
-| 4 | to file | The old rules go; cached operators; the edge view; visibility; docs | 3 |
+| 3a | to file | A function pod reads only its columns; no selection node (moves hashes) | approval of the golden list; independent of 1 and 2 |
+| 3b | to file | The restriction on the edge | 2, 3a |
+| 4 | to file | The old rules go; cached operators; the edge view; visibility; docs | 3b |
 | later | to file | `job.restrict` / `job.unrestrict` on any edge; filter push-down | 4; ITL-1219 |
 
 Stages 1 and 2 touch the lines of both orchestrators that the ITL-1464 integration branch changes: whichever
@@ -74,7 +78,42 @@ by `test_one_stream_given_twice_fails_to_run_in_a_job`).
 Tests: selection (ambiguous without a position when a node feeds two; unknown edge), order of `job.edges`,
 save and load round trip, an earlier format refused, the order-invariance case over recording orders.
 
-## Stage 3: the restriction on the edge
+## Stage 3a: a function pod reads only its columns
+
+The one hash-moving change, in its own pull request so that its golden diff is exactly the approved list
+(`docs/dev/specs/itl-1472/golden-changes-o34.md`, section 2). It does not depend on edges and can go first.
+
+- `_FunctionPodBase.__call__` adds no `SelectDataColumns`. In the default mode, on an input with data columns
+  that are neither parameters nor fall-through data-tags, the node's identity tuple gets one
+  extra label element: `(pod, inputs, "drops_extra_columns")`, content and pipeline identity alike. The label
+  is a constant (`DROPS_EXTRA_COLUMNS`) beside the node's identity code; one function appends it for the
+  node, the pod's stream and the invocation key, and a test finds no other literal. In every other case the
+  tuple is exactly today's. `strict=True` and `process` refuse an extra column, as today.
+- The function node, the plain `FunctionPodStream` and the async path narrow each input row to the function's
+  columns (and the fall-through data-tags) at one place, before the input data hash, the entry and instance
+  ids and the call. The input data hash must equal the one today's select gives, so stored results are found.
+  A node with the label ignores every data column its function does not take; one without it refuses an
+  extra column. Source info of an ignored column is not carried.
+- Save and load: `"drops_extra_columns": true` in the function node's descriptor, only when the node has the
+  label; the loader rebuilds the node with it.
+- `explain()` and `diagram()` name the ignored columns on the pod, computed from the input's columns and the
+  function's parameters.
+- Provenance (`trace`, `why_missing`) narrows an input row to the function's columns before it compares the
+  stored input data hash, as the node does (the prototype's test run shows it does not today).
+- Golden: `--remove` each entry of the approved list, then the generator writes the new values; the diff of
+  the golden folder is the list and nothing else. New cases, added without touching a pinned value: a pod
+  ignoring two columns in both input column orders (one identity), beside the hand-written select (another
+  pipeline hash, equal input data hashes), under a `ctx` pod and a fall-through pod.
+- Docs and rules: `CLAUDE.md` and `.zed/rules` ("Calling a function pod": ITL-807's equivalence with the
+  hand-written select is withdrawn, and the default call adds no step), `docs/concepts/function-pods.md`, the
+  pages that print a node list holding `SelectDataColumns`, a changelog fragment under "Breaking changes".
+
+Done when: the golden diff equals the approved list; a pod called on a stream with no extra column,
+`process` and `strict=True` are unchanged in every hash; results computed before the change, and by the
+hand-written select, are served (no function call); the tests counted in the golden document change for the
+reasons given there and no other test changes; sync and async agree.
+
+## Stage 3b: the restriction on the edge
 
 - `SourceProtocol.unrestricted()` and `.restricted(condition, limit)`, required members; `SpiralDBTableSource`
   implements both; a source that cannot push down refuses `restricted` (D7).
@@ -82,13 +121,8 @@ save and load round trip, an earlier format refused, the order-invariance case o
   restriction; `EdgeRestrictionConflictError` (in `errors.py`) for two different restrictions on one edge,
   before anything is recorded, in either order, naming the edge, both restrictions and the filter remedy.
   One node feeding a commutative operator twice is one edge (D2).
-- The automatic select (O34, option (b)): `_FunctionPodBase.__call__` records its automatic
-  `SelectDataColumns` over the unrestricted source and gives the restriction with its own invocation, so it
-  is held on the edge after the select (`select -> f`); `A -> select` holds none. That edge's stream is
-  `select(A.restricted(x))`: the restriction is carried back to the source read, never a full read and a
-  local filter. The select node itself is run in full only when its own rows are wanted (its `run()`, or an
-  unrestricted edge out of it into a node that runs); a node fed through such an edge is judged stale by the
-  source, not by the select node. A select the user writes keeps the plain rule.
+- No rule for the automatic selection: with stage 3a there is no selection node, so `f(A_x)` and `h(A_y)`
+  restrict the two edges `A -> f` and `A -> h`.
 - Reads: one pushed-down read per source node and distinct restriction among its edges into nodes that
   run; the full read only for an edge without one; the source node itself reads the whole table when read.
 - `bind`: a source stating a restriction is refused (D5); a source that cannot push down is refused for a
@@ -100,11 +134,8 @@ save and load round trip, an earlier format refused, the order-invariance case o
 
 Tests: the design note's list, items 1 to 6, 8 and 9 (several restrictions, every conflict in every order,
 positions, roles of the restricted column, scans counted, state rule, side effects, save, load and bind).
-For O34: `f(A_x)` and `h(A_y)` taking the same columns are accepted in both recording orders, with one select
-node, two pushed-down scans and no full scan; `f(A_x)` and `f(A_y)` are refused on `select -> f`; a condition
-on a column the select drops; `f(A_x)` beside `h(A)`; the select node reads empty after such a run and shows
-every row after its own `run()`; `f` holds its run while the select node has none; hashes and stored tables
-equal the hand-written select's; sync and async.
+With stage 3a: `f(A_x)` and `h(A_y)` taking the same columns are accepted in both recording orders, with
+two pushed-down scans and no full scan; `f(A_x)` and `f(A_y)` are refused on `A -> f`; sync and async.
 
 ## Stage 4: the old rules go; visibility
 

@@ -2,8 +2,12 @@
 
 Status: proposal, no library code. Round 2 (2026-11-26): this replaces the twin-node design of the first
 round. The model (section 1) is the developer's and is not reopened. Section 13 lists the decisions D1 to D11,
-each **decided on the developer's behalf, 2026-11-26, revertible**, and O34 (the automatic select), decided
-by the developer the same day: option (b). The implementation plan is `docs/dev/plans/itl-1472-plan.md`.
+each **decided on the developer's behalf, 2026-11-26, revertible**, and O34 (the automatic select), as the
+developer settled it the same day: there is no selection node; a function pod reads only the columns its
+function takes, and its node's identity tuple gets one label, `drops_extra_columns`, when it drops any
+(section 4a).
+That is the one part of this design that moves hashes; the exact golden list, for approval, is
+`docs/dev/specs/itl-1472/golden-changes-o34.md`. The implementation plan is `docs/dev/plans/itl-1472-plan.md`.
 
 Evidence marks: **[read]** read on `main` (5eb327ad); **[ran N]**
 `docs/dev/scripts/itl_1472/collapse_on_main.py`, heading N, on `main` as it is; **[proto N]**
@@ -98,48 +102,78 @@ both recording orders, and an accepted job has the same nodes, rows and scans in
 
 **The first shared node decides.** `op(A_x) -> f` and `op(A_y) -> g` conflict on `A -> op(A)` [proto 2].
 
-**The automatic select (O34, decided: option (b)).** A function pod called on a table with columns it does
-not take adds an automatic `SelectDataColumns`. Under the plain rule it would be the first shared node, and
-`f(A_x)` and `h(A_y)` would conflict whenever `f` and `h` take the same columns, though the user wrote two
-pods and no shared step ([proto 2] shows that refusal: the prototype has the plain rule, and (b) is designed
-here, not prototyped). So:
+**The automatic select.** On `main` a function pod called on a table with columns it does not take adds a
+`SelectDataColumns`, shared by every pod that takes the same columns. It would be the first shared node, and
+`f(A_x)` and `h(A_y)` would conflict though the user wrote two pods and no shared step [proto 2]. The
+developer's answer (O34) is section 4a: there is no such node, so `x` is on `A -> f` and `y` on `A -> h`, and
+the plain rule applies with no exception.
 
-- **Where the restriction lives.** A restriction written on the input of an automatic select passes through
-  it: it is recorded on the edge **after** the select, `select -> f`, and the edge `A -> select` is recorded
-  with none. `f(A_x)` and `h(A_y)` are then the edges `select -> f` with `x` and `select -> h` with `y`: one
-  shared select node, no conflict. `f(A_x)` and `f(A_y)` are still refused, on `select -> f`.
-- **Only the automatic select directly over the restricted source**, decided in the one place that adds it
-  (`_FunctionPodBase.__call__`), which records the select over the unrestricted source and gives the
-  restriction with its own invocation. A select the user writes (`A_x.select_data_columns(...)`) keeps the
-  plain rule: its restriction is on `A -> select`. A pod called with two inputs joins first; the restriction
-  is on the edge into the `Join`. The graph, hashes and stored tables stay those of the hand-written select.
-- **How it is read: pushed down, always.** The stream of `select -> f` under `x` is defined as the select
-  applied to the source's read under `x`, `select(A.restricted(x))`: the restriction is carried back
-  through the select to the source read. It is never a full read of the table followed by a filter of the
-  select's rows (that would be Orcapod's equality, which D7 refuses, and a column the select drops could
-  not be filtered on at all). The rule is by structure, with no mark in the record: a restriction on an edge
-  out of a `SelectDataColumns` node whose own input edge leaves a source is carried out at that source's
-  read. The condition is checked against the source's columns. Reads are counted as in section 5: one
-  pushed-down read per source and distinct restriction, shared by every edge that carries it.
-- **What the select node shows.** The full rows of its input, as the node `A` shows the whole table: the
-  select node's own rows are the select of everything, and it computes them (a full read of `A`) only when
-  its own rows are wanted: `select.run()`, or a run in which an edge out of it without a restriction feeds a
-  node that runs. A run in which every edge out of it is restricted does not run the select node; it reads
-  empty there, as a node that has not run does. The per-edge select is applied in flight and stores
-  nothing; the node's cache mode concerns its own run only.
-- **Staleness.** A node fed through such an edge does not depend on the select node having run: for the
-  state rule its upstream on that edge is the source (its bind and modified time), so `f` holds its run
-  while the select node has none.
-- **The edge view** of `select -> f` is the same stream, `select(A.restricted(x))`: a pushed-down read, with
-  the limit applied in that read.
+With `A.filter(x)` and `A.filter(y)` there is no conflict and one full scan: five nodes (`A`, two filters,
+two pod nodes) with section 4a, seven on `main` with its selects [proto 3].
 
-With `A.filter(x)` and `A.filter(y)` there is no conflict: seven nodes with the selects, one full scan
-[proto 3].
+## 4a. A function pod reads only its columns (O34, decided by the developer)
 
-**Leaf streams (D8).** A stream built before the `with` block is one leaf [ran 7]; two such streams of one
-identity over different restrictions would be one slot again, bound to whichever came first. Until a stream
-brings its steps into the pipeline (ITL-1387, PR 500), that pair is refused by the present walk
-(`restrictions_beneath`), narrowed to leaves that share a key.
+**No selection node.** A function pod's node takes its input stream as given and reads only the data columns
+that are parameters of its function (and the data-tags that fall through it, as today). Tags are never
+dropped. `f(A_x)` and `h(A_y)` are the edges `A -> f` and `A -> h`, each with its restriction; `f(A_x)` and
+`f(A_y)` are one node and are refused. Nothing is hidden, passed through or judged specially: the earlier
+answers to O34 (a restriction passing through the select; a selector node of the pod's own) are dropped
+with all their machinery (the carry-back to the source read, staleness judged by the source, the selector
+kind, its label and its hiding).
+
+**The modes.**
+
+| Call | Extra data columns in the input | What happens |
+|---|---|---|
+| `pod(a)` | none | as today; today's identity |
+| `pod(a)` | some | accepted; they are ignored; one info log names them; the node's identity gets the label |
+| `pod(a, strict=True)`, `pod.process(a)` | none | as today; the identity `pod(a)` has |
+| `pod(a, strict=True)`, `pod.process(a)` | some | refused, as today |
+
+`strict` is in no identity. A missing required column is an error in every form. A function that accepts
+arbitrary keywords takes every column and ignores none. Operators and `SideEffectPod` are unchanged.
+
+**Identity.** One extra pure-label element, `drops_extra_columns`, appended to the function node's identity
+tuple exactly when it matters: the default mode **and** an input with data columns the function does not
+take. Today the tuple is `(pod, inputs)`; then it is `(pod, inputs, "drops_extra_columns")`, in the content
+identity and the pipeline identity alike. No key and value, no class name; the pod's own identity is
+untouched. The same tuple is the identity of the pod's stream and the key a pipeline gives the invocation,
+so one function appends the label for all three. The label is a constant defined once beside that code and
+written as a literal nowhere else. Hashed by `semantic_v1`: no new hash label, no new hash site. The
+ignored names are **not** in the identity: they follow from the upstream's schema, which its hash holds, and
+the function's parameters, and the input's column order never counts [fold 4]. In every other case the tuple
+is exactly today's: the default call, `strict=True` and `process` share one identity and one pipeline table
+[fold 3], and nothing moves.
+
+- **The input data hash covers only the columns the function takes**, so the entry and instance ids and the
+  result table are those of the hand-written select: a job with `pod(a.select_data_columns(...))` on the same
+  store computes nothing after the folded job ran [fold 2].
+- The function's `uri` and result table path are unchanged. The node's content hash, pipeline hash and
+  **pipeline table path** change for a pod called on an input with extra columns, and for nothing else; so
+  does what is keyed by that pipeline hash (the invocation context of a pod taking `ctx`, the system-tag
+  column names a later `Join` or `MergeJoin` extends with it).
+- A function node with the label ignores every data column its function does not take; one without it
+  refuses an extra column, as today. So a compiled or loaded node needs no mode of its own.
+
+**This reverses ITL-807's equivalence.** `pod(a)` is no longer the graph, hashes and stored tables of
+`pod(a.select_data_columns(...))`: the first is one node over `a`, the second a select node and a pod node.
+They share results, not the pipeline table. `CLAUDE.md` and `.zed/rules` ("Calling a function pod"),
+`docs/concepts/function-pods.md` and every page that prints a node list holding `SelectDataColumns` change.
+
+**Shown.** `explain()` says on the pod's line which columns it reads and which it ignores
+(`reads age, weight of rejoined; ignores height, score`). `diagram()` lists the ignored columns in the pod's
+detail and in the text listing; the picture has one node and one line. Both compute the names from the
+input's columns and the function's parameters. A saved job writes `"drops_extra_columns": true` in the
+function node's descriptor only when the node has the label; the loader rebuilds the node with it.
+
+**What the edge design gains and loses.** Gains: the edge a user sees is the edge there is (`job.edge("events",
+"f")` with no resolution rule); no exception in the conflict rule, the reads or the staleness rule; fewer
+nodes; and a place for a later column projection in the read of the edge `A -> f` (the pod's columns are
+known where the edge is read). Loses: the select as a node of its own, with rows to look at and an operator
+cache; a user who wants that writes the select.
+
+[fold N] is `docs/dev/specs/itl-1472/folded_confirm.py`, heading N, run on the prototype
+(`folded-prototype.patch`, variant `O34_MARK=label`); its output is `folded_confirm.out`.
 
 ## 5. Reading
 
@@ -150,7 +184,7 @@ A node's input is the stream of its edge (section 6), in both orchestrators, thr
   is refused, **D7**). Edges with one restriction share the read [proto 5]; `MergeJoin(A, A)` is one scan [proto 4].
 - **Scans in a run:** per source node, one per distinct restriction on its edges into nodes that run, plus
   one full read only if such an edge has no restriction. `f(A_x)`, `g(A_y)`: two scans, both with a predicate,
-  none full [proto 1]. An edge after an automatic select counts with its source (section 4, O34).
+  none full [proto 1].
 - **The node `A` shows the whole table**, and reads it only when something reads `A`
   (`job.nodes["events"].as_table()`: one full scan, then [proto 1]). Being a node triggers no read: a run, the
   diagram and `head()` (a bounded read) never read `A` in full. A table too large to read whole still refuses
@@ -269,7 +303,13 @@ execution-only restriction on that read which is not an edge restriction and is 
 
 ## 10. What moves
 
-**No content hash, pipeline hash, stored path, stored column or golden value.**
+**The edge design moves no content hash, pipeline hash, stored path, stored column or golden value. Section
+4a does**: the content hash, pipeline hash and pipeline-table path of a pod called in the default mode on a
+stream with a data column it does not take (the pods that drop columns, and nothing else). Measured with the golden generator in `--check` mode on the
+prototype, nothing written: 34 entries, all in 2 cases of the provisional pipeline file (`rejoin_job`,
+`rejoin_job_async`: `golden_ratio` drops `height` and `score`), no entry of a frozen file, nothing else among
+2480 computed entries. The exact list, old and new values, the reason for each, the tests that change and the
+variants not chosen are in `docs/dev/specs/itl-1472/golden-changes-o34.md`.
 
 - [proto 1] `f` below a restricted edge equals `f` of the unrestricted job in all three.
 - **[impact]** One test run with the prototype applied (`prototype_plugin.py`, `impact_run.out`): the golden
@@ -320,7 +360,8 @@ The stages, each one pull request against `main`, are in `docs/dev/plans/itl-147
 |---|---|
 | 1 (ITL-1483) | Graph edges carry their input position; `MergeJoin(A, A)` and `SemiJoin(A, A)` run |
 | 2 | Edges as the public and saved structure: `job.edges`, `job.edge`, the `Edge` record, saved records |
-| 3 | The restriction on the edge: the sugar, the conflict rule, reads per restriction, bind (D5, D7) |
+| 3a | A function pod reads only its columns (section 4a): the one stage that moves hashes, after the golden list is approved |
+| 3b | The restriction on the edge: the sugar, the conflict rule, reads per restriction, bind (D5, D7) |
 | 4 | The old rules go; cached operators (D6); `edge_stream`; diagram, `explain()`, run summary; docs |
 | later | `restrict` / `unrestrict` on any edge (section 9); filter push-down |
 
@@ -330,7 +371,8 @@ The stages, each one pull request against `main`, are in `docs/dev/plans/itl-147
    the unrestricted job's, scans counted (one per distinct restriction, none full); one restriction on several
    edges (one scan).
 2. Every conflict in every recording order, same error: two restrictions, restricted with unrestricted, a
-   limit against none, at the first shared node (an operator; a select the user wrote), across two `with` blocks;
+   limit against none, at the first shared node (an operator; a select the user wrote; one pod called twice), across two `with` blocks; two pods taking
+   the same columns accepted;
    the same restriction written twice accepted; nothing recorded after a refusal; the filter remedy.
 3. Positions: `MergeJoin(A_x, A_y)` and `(A_y, A_x)`, `MergeJoin(A, A)`, `SemiJoin(A_x, A)` and `(A, A_x)`;
    `Join` and `Rejoin` of branches below two restricted edges; a pod called with two inputs.
@@ -368,4 +410,12 @@ the developer). The edge view (section 6, points 1 and 2) was confirmed by the d
 
 | # | Question | Decided |
 |---|---|---|
-| O34 | A function pod's automatic `SelectDataColumns` as the first shared node | **(b)**: a restriction on the automatic select's input passes through to the edge after it; the select node stays shared and shows the full rows of its input; the read stays pushed down (section 4). Not (a) the refusal, not (c) a select node per pod |
+| O34 | A function pod's automatic `SelectDataColumns` as the first shared node | There is no selection node: a function pod reads only the columns its function takes. In the default mode, on an input with other data columns, the function node's identity tuple gets one extra label element, `drops_extra_columns`; otherwise the tuple is exactly today's and nothing moves. The ignored names are not in the identity (section 4a). The earlier answers (pass-through; a selector node; the names, or a key and boolean, in the identity) are withdrawn |
+
+**Open, from that decision.**
+
+| # | Question | Options | Recommendation |
+|---|---|---|---|
+| D12 | The golden entries that move | the list in `docs/dev/specs/itl-1472/golden-changes-o34.md`, section 2: 34 entries in 2 provisional cases, no frozen file | approve the exact list before any golden change |
+| D13 | The label's name and constant | `"drops_extra_columns"`, the constant `DROPS_EXTRA_COLUMNS` beside the node's identity code, appended as `(pod, inputs, label)` by one function used by the node, the pod's stream and the invocation key | approve the name (it is in the hash) |
+| D14 | How it is shown | the `explain()` line and the `diagram()` detail, names computed; `"drops_extra_columns": true` in the saved descriptor (section 4a) | approve the wording |
