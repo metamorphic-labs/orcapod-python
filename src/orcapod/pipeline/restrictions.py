@@ -71,7 +71,7 @@ def restriction_of(stream: StreamProtocol) -> Restriction | None:
     if not isinstance(stream, RootSource):
         return None
     condition, limit = stream.condition, stream.row_limit
-    if not condition and limit is None:
+    if condition.is_empty and limit is None:
         return None
     return (condition, limit)
 
@@ -87,7 +87,7 @@ def restriction_text(condition: Condition | None, limit: int | None) -> str:
         The condition's text (``Condition.text``) after ``where``, then the limit.
     """
     parts: list[str] = []
-    if condition:
+    if condition is not None and not condition.is_empty:
         parts.append(f"where {condition.text()}")
     if limit is not None:
         parts.append(f"limit {limit}")
@@ -405,7 +405,7 @@ def refuse_restricted_cache_config(config: Mapping[str, object]) -> None:
     condition = Condition.from_config(where) if isinstance(where, Mapping) else None
     saved_limit = config.get("limit")
     limit = saved_limit if isinstance(saved_limit, int) else None
-    if condition or saved_limit is not None:
+    if (condition is not None and not condition.is_empty) or saved_limit is not None:
         name = config.get("source_name") or config.get("source_type", "source")
         raise _restricted_cache_error(f"{name}: {restriction_text(condition, limit)}")
 
