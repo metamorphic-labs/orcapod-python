@@ -14,8 +14,8 @@ what SpiralDB keeps was measured live with spiral-sdk 0.16.78
   and restored to the *logical* one (``decode_rows``). A type either comes back exactly
   or is refused. Every refusal of a type, a name or a value that may be lifted is an
   entry of one table, ``REFUSALS``.
-* **The manifest.** One a table, written at creation and never changed
-  (``manifest_bytes``, ``read_manifest``): the record path, the kind, the logical
+* **The manifest.** One a table, written before its first rows (stage 3 may record a
+  table that still has no rows again) (``manifest_bytes``, ``read_manifest``): the record path, the kind, the logical
   schema, and the stored names at every depth, as one payload. Stage 3 (ITL-1498) keeps
   it in the table's own metadata, in chunks of at most 8 KiB, beside the table's identity
   (``spiral_store_names``); never in the dataset's schema table, which is all or nothing

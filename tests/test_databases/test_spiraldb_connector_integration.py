@@ -697,3 +697,74 @@ def test_the_fake_cuts_nul_in_names_inside_nested_encoded_arrays(
         rows = pa.table({"k": pa.array(["a", "b"], pa.large_string()), "l": lists})
         stored = table.append(rows).scan().to_table()
         assert stored.column("l").to_pylist() == [[{"x": 1}], [{"x": 1}]]
+
+
+# ---------------------------------- verification r3 of PR 590 (0dc34c95)
+
+
+class _ProbeExtension(pa.ExtensionType):
+    """An extension type of the tests' own, over any storage."""
+
+    def __init__(self, storage: Any) -> None:
+        super().__init__(storage, "orcapod.test.probe")
+
+    def __arrow_ext_serialize__(self) -> bytes:
+        return b""
+
+    @classmethod
+    def __arrow_ext_deserialize__(cls, storage_type: Any, serialized: bytes) -> Any:
+        return cls(storage_type)
+
+
+def _struct_one(name: str) -> Any:
+    return pa.array([{name: 1}], pa.struct([(name, pa.int8())]))
+
+
+def _dictionary_of(values: Any, n: int) -> Any:
+    return pa.DictionaryArray.from_arrays(pa.array([0] * n, pa.int32()), values)
+
+
+def test_a_sliced_nullable_list_of_encoded_structs_round_trips(place: _Place) -> None:
+    """A null row of a sliced list over dictionary-encoded structs is kept (measured
+    live with spiral-sdk 0.16.78: such a list is stored as its decoded values)."""
+    lists = pa.LargeListArray.from_arrays(
+        pa.array([0, 1, 2, 3], pa.int64()),
+        _dictionary_of(_struct_one("x"), 3),
+        mask=pa.array([False, True, False]),
+    )
+    got = _written_and_read(
+        place, "sliced_encoded_lists", pa.table({"l": lists.slice(1, 2)})
+    )
+    assert got.column("l").to_pylist() == [None, [{"x": 1}]]
+
+
+@pytest.mark.parametrize("encoded", [False, True], ids=["plain", "dictionary"])
+def test_nul_is_cut_in_names_inside_an_extension(place: _Place, encoded: bool) -> None:
+    """An extension column is stored as its storage, its struct names cut at NUL (measured
+    live with spiral-sdk 0.16.78 for a plain struct)."""
+    storage = _struct_one("x\0y")
+    if encoded:
+        storage = _dictionary_of(storage, 1)
+    column = pa.ExtensionArray.from_storage(_ProbeExtension(storage.type), storage)
+    got = _written_and_read(
+        place, f"nul_in_extension_{encoded}", pa.table({"e": column})
+    )
+    assert got.column("e").to_pylist() == [{"x": 1}]
+
+
+def test_a_reserved_name_inside_an_encoded_struct_is_refused(place: _Place) -> None:
+    """Measured live with spiral-sdk 0.16.78: a struct field named ``$a`` is refused, also
+    when the struct is dictionary-encoded."""
+    client = _client(place)
+    key = pa.schema([pa.field("k", pa.large_string(), False)])
+    table = client.project(place.project).create_keyed_table(
+        place.dataset, "reserved_in_encoded", key, exist_ok=True
+    )
+    rows = pa.table(
+        {
+            "k": pa.array(["r0", "r1"], pa.large_string()),
+            "s": _dictionary_of(_struct_one("$a"), 2),
+        }
+    )
+    with pytest.raises(Exception, match="reserved"):  # noqa: B017, PT011  # the SDK's error type differs from the fake's
+        _ = table.append(rows)

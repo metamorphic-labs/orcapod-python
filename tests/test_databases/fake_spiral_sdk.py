@@ -239,19 +239,29 @@ def _decoded(array: Any) -> Any:
     return array
 
 
-def _holds_encoding(t: Any) -> bool:
-    """Whether a type is, or holds at any depth, a dictionary or run-end encoding."""
+def _needs_decoding(t: Any, *, in_extension: bool = False) -> bool:
+    """Whether a column must be rebuilt as the service stores it before its names are
+    cut (``types``, ``nul``): it holds a dictionary or run-end encoding at any depth, or
+    an extension type whose storage holds a struct field name with NUL."""
     if pa.types.is_dictionary(t) or pa.types.is_run_end_encoded(t):
         return True
     if isinstance(t, pa.BaseExtensionType):
-        return False
-    return any(_holds_encoding(t.field(i).type) for i in range(t.num_fields))
+        return _needs_decoding(t.storage_type, in_extension=True)
+    if in_extension and pa.types.is_struct(t):
+        if any("\0" in t.field(i).name for i in range(t.num_fields)):
+            return True
+    return any(
+        _needs_decoding(t.field(i).type, in_extension=in_extension)
+        for i in range(t.num_fields)
+    )
 
 
 def _deep_decoded(array: Any) -> Any:
     """``array`` with every dictionary and run-end encoding undone, at any depth, as the
     service stores it (``types``), so nested names are cut as at the top (``nul``)."""
     a = _decoded(array)
+    if a.offset:
+        a = pa.concat_arrays([a])  # rebuilt from offset zero: pyarrow builds no slice
     t = a.type
     mask = a.is_null() if a.null_count else None
     if pa.types.is_struct(t):
@@ -558,7 +568,7 @@ def _staged(rows: pa.Table, keys: list[str], stored: pa.Schema) -> pa.Table:
     names = [name.split("\0")[0] for name in rows.column_names]  # nul
     rows = rows.rename_columns(names)
     for i, field in enumerate(rows.schema):  # nul, at every depth
-        if _holds_encoding(field.type):
+        if _needs_decoding(field.type):
             # Stored as its values (``types``): decoded first, so its names are cut.
             decoded = pa.chunked_array(
                 [_deep_decoded(c) for c in rows.column(i).chunks]
