@@ -1,0 +1,26 @@
+
+== 1. f(A.where(m1)) and f(A.where(m2)) in one job: refused
+  ValueError: Two streams read different rows in one pipeline: the source 'spiraldb_table_v1:events' is read with two different rest ...
+
+== 2. One identity: the sources and the invocations hash alike
+  source content hashes equal: True
+  source pipeline hashes equal: True
+  invocation keys equal: True
+
+== 3. Refusal switched off (demonstration only): one slot, one node
+  registered m1 then m2:
+  job.nodes: {'events': 'source', 'first': 'function'}
+  rows of 'first': t = [1, 2, 3]
+  registered m2 then m1:
+  job.nodes: {'events': 'source', 'first': 'function'}
+  rows of 'first': t = [4, 5]
+
+== 4. Two separate DictSource objects with equal rows: one slot, one node
+  a is b: False | content hashes equal: True
+  job.nodes: {'arrow_v1:00000296ec0ad52b3340af0a51f99b2be93401a847c1f1aecc787aa95d2bd18f582751': 'source', 'first': 'function'}
+  rows of 'first': t = [1, 2]
+
+== 5. Two node objects of one identity are one dict key
+  node_a is node_b: False
+  node_a == node_b: True
+  len({node_a: 1, node_b: 2}): 1
