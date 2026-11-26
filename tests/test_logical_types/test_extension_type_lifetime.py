@@ -16,8 +16,9 @@ import sys
 import textwrap
 import threading
 import weakref
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -236,11 +237,9 @@ def test_a_subclass_made_with_arguments_has_one_instance_for_each(
 ) -> None:
     """Different construction arguments give different types, equal ones the same one."""
     made = _made("test.lifetime.arguments")
-    built: list[tuple[str, int]] = []
 
     class Scaled(made):
         def __init__(self, unit: str, factor: int = 1) -> None:
-            built.append((unit, factor))
             self.unit = unit
             self.factor = factor
             pa.ExtensionType.__init__(self, pa.int64(), "test.lifetime.arguments")
@@ -267,12 +266,11 @@ def test_a_subclass_made_with_arguments_has_one_instance_for_each(
         ("s", 2),
         ("m", 3),
     ]
-    # Equal arguments give the instance already made, and build nothing again.
+    # Equal arguments give the instance already made.
     assert Scaled("m", factor=2) is metres
     assert Scaled("s", factor=2) is seconds
     assert Scaled.__arrow_ext_deserialize__(pa.int64(), b"m*3") is metres_by_three
-    assert sorted(built) == [("m", 2), ("m", 3), ("s", 2)]
-    # Arguments that compare equal but are of another type are other arguments.
+    # Arguments that compare equal and give other metadata are other arguments.
     assert Scaled("m", factor=True) is not Scaled("m", factor=1)
     assert Scaled("m", factor=True).factor is True
     # The base class's instance is none of them.
@@ -289,16 +287,243 @@ def test_a_subclass_made_with_arguments_has_one_instance_for_each(
     assert kept is not None and Scaled("kg", factor=4) is kept
 
 
-def test_arguments_that_cannot_name_an_instance_are_refused() -> None:
-    """An unhashable argument cannot say which instance is meant."""
-    made = _made("test.lifetime.unhashable")
+def _describing(name: str, describe: Callable[[Any], str]) -> type[Any]:
+    """A subclass of a made class whose metadata is ``describe`` of its one argument."""
+    made = _made(name)
 
-    class Listed(made):
-        def __init__(self, names: list[str]) -> None:
-            pa.ExtensionType.__init__(self, pa.int64(), "test.lifetime.unhashable")
+    class Describing(made):
+        def __init__(self, value: Any) -> None:
+            self.value = value
+            pa.ExtensionType.__init__(self, pa.int64(), name)
 
-    with pytest.raises(TypeError, match="hashable"):
-        Listed(["a", "b"])
+        def __arrow_ext_serialize__(self) -> bytes:
+            return describe(self.value).encode()
+
+        def __arrow_ext_scalar_class__(self) -> type[pa.ExtensionScalar]:
+            return _TaggedScalar
+
+    return Describing
+
+
+class _TaggedTuple(tuple):  # pyright: ignore[reportMissingTypeArgument]  # any items
+    """A tuple with a tag its equality does not read."""
+
+    tag: str
+
+    def __new__(cls, items: Iterable[Any], tag: str) -> "_TaggedTuple":
+        self = super().__new__(cls, items)
+        self.tag = tag
+        return self
+
+
+class _UnhashableTuple(_TaggedTuple):
+    """A tagged tuple that cannot be hashed."""
+
+    __hash__ = None  # pyright: ignore[reportAssignmentType]  # unhashable on purpose
+
+
+class _Loose:
+    """A value whose equality ignores the note its metadata holds."""
+
+    def __init__(self, note: str) -> None:
+        self.note = note
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _Loose)
+
+    def __hash__(self) -> int:
+        return 0
+
+
+class _Config:
+    """A value with the default equality: equal only to itself."""
+
+    def __init__(self, payload: str) -> None:
+        self.payload = payload
+
+
+def _same_bit_nans() -> tuple[float, float]:
+    """Two float objects holding the same NaN, bit for bit."""
+    first = struct.unpack(">d", bytes.fromhex("7ff8000000000000"))[0]
+    second = struct.unpack(">d", bytes.fromhex("7ff8000000000000"))[0]
+    assert first is not second
+    return first, second
+
+
+# Arguments a comparison of argument values gets wrong, with the metadata each gives:
+# name -> (how the metadata is made, the arguments).
+_METADATA_DECIDES: dict[str, tuple[Callable[[Any], str], Callable[[], list[Any]]]] = {
+    # Two NaN objects with identical bits are two members of a frozenset.
+    "nan_frozensets": (
+        lambda value: f"{len(value):02d}",
+        lambda: [frozenset(_same_bit_nans()[:1]), frozenset(_same_bit_nans())],
+    ),
+    "nan_tuples": (
+        lambda value: f"{len(value):02d}",
+        lambda: [_same_bit_nans()[:1], _same_bit_nans(), _same_bit_nans() * 2],
+    ),
+    # A tuple subclass's own state is not its contents.
+    "tagged_tuples": (
+        lambda value: value.tag,
+        lambda: [
+            _TaggedTuple([1, 2], "first"),
+            _TaggedTuple([1, 2], "second"),
+            _TaggedTuple([1, 2], "third"),
+        ],
+    ),
+    "unhashable_tuples": (
+        lambda value: value.tag,
+        lambda: [_UnhashableTuple([1, 2], "first"), _UnhashableTuple([1, 2], "second")],
+    ),
+    "decimals": (str, lambda: [Decimal("1.0"), Decimal("1.00"), Decimal("1")]),
+    "loose_equality": (
+        lambda value: value.note,
+        lambda: [_Loose("first"), _Loose("second"), _Loose("third")],
+    ),
+    "unhashable_lists": (
+        lambda value: "+".join(value),
+        lambda: [["a", "b"], ["b", "a"], ["a"]],
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_METADATA_DECIDES))
+@pytest.mark.parametrize("order", ["as_listed", "reversed"])
+def test_arguments_of_different_metadata_are_different_types(
+    tmp_path: Path, registered: Callable[[Any], Any], case: str, order: str
+) -> None:
+    """Whatever the arguments' own equality says, each metadata has its own instance.
+
+    The order in which the instances are first made never decides which metadata a
+    column is written with.
+    """
+    describe, arguments = _METADATA_DECIDES[case]
+    values = arguments()
+    if order == "reversed":
+        values = values[::-1]
+    describing = _describing(f"test.lifetime.metadata.{case}.{order}", describe)
+    types = [describing(value) for value in values]
+    assert [t.__arrow_ext_serialize__().decode() for t in types] == [
+        describe(value) for value in values
+    ]
+    assert len({id(t) for t in types}) == len(values)
+    # The same metadata again, from freshly made arguments, is the instance made first.
+    for extension, value in zip(
+        types, arguments()[:: -1 if order == "reversed" else 1]
+    ):
+        assert describing(value) is extension
+
+    registered(types[0])
+    # Read back, the metadata alone names the instance.
+    by_metadata = {t.__arrow_ext_serialize__(): t for t in types}
+    describing.__arrow_ext_deserialize__ = classmethod(
+        lambda cls, storage_type, serialized: by_metadata[serialized]
+    )
+    table = pa.table(
+        {f"column_{i}": _array(t, [10 + i, 20 + i, None]) for i, t in enumerate(types)}
+    )
+    pq.write_table(table, tmp_path / "metadata.parquet")
+    read = pa_ds.dataset(tmp_path / "metadata.parquet").to_table(use_threads=True)
+    for i, extension in enumerate(types):
+        column = read.column(f"column_{i}")
+        assert column.type is extension, describe(values[i])
+        assert column.to_pylist() == [
+            f"Describing:{10 + i}",
+            f"Describing:{20 + i}",
+            None,
+        ]
+
+
+def test_reads_of_one_metadata_keep_one_instance(
+    tmp_path: Path, registered: Callable[[Any], Any]
+) -> None:
+    """A deserializer that makes a fresh argument on every read keeps one type.
+
+    The kept instances are counted by metadata, never by reads: an argument equal only
+    to itself (the default equality) does not make an instance of its own.
+    """
+    made = _made("test.lifetime.fresh")
+
+    class Configured(made):
+        def __init__(self, config: _Config) -> None:
+            self.config = config
+            pa.ExtensionType.__init__(self, pa.int64(), "test.lifetime.fresh")
+
+        def __arrow_ext_serialize__(self) -> bytes:
+            return self.config.payload.encode()
+
+        @classmethod
+        def __arrow_ext_deserialize__(
+            cls, storage_type: pa.DataType, serialized: bytes
+        ) -> pa.ExtensionType:
+            return cls(_Config(serialized.decode()))
+
+    payloads = ["alpha", "beta", "gamma"]
+    first = {payload: Configured(_Config(payload)) for payload in payloads}
+    assert len({id(t) for t in first.values()}) == 3
+    made_by_reads = [
+        Configured.__arrow_ext_deserialize__(pa.int64(), payload.encode())
+        for _ in range(500)
+        for payload in payloads[::-1]
+    ]
+    assert {id(t) for t in made_by_reads} == {id(t) for t in first.values()}
+    for extension in made_by_reads[:3]:
+        assert first[extension.__arrow_ext_serialize__().decode()] is extension
+
+    registered(first["alpha"])
+    table = pa.table(
+        {payload: _array(first[payload], [1, 2, None]) for payload in payloads}
+    )
+    pq.write_table(table, tmp_path / "fresh.parquet")
+    for _ in range(3):
+        read = pa_ds.dataset(tmp_path / "fresh.parquet").to_table(use_threads=True)
+        for payload in payloads:
+            assert read.column(payload).type is first[payload]
+            assert read.column(payload).to_pylist() == [1, 2, None]
+
+
+@pytest.mark.parametrize("order", [("a", "b", "c"), ("c", "a", "b")])
+def test_an_argument_the_metadata_does_not_hold_makes_no_type(
+    tmp_path: Path, registered: Callable[[Any], Any], order: tuple[str, ...]
+) -> None:
+    """Instances of one class, name, storage and metadata are one type: the first made.
+
+    Arrow cannot tell them apart on read, so an argument that only a hook reads, and
+    the metadata does not hold, could not survive a write and a read anyway.
+    """
+    name = f"test.lifetime.unserialized.{'_'.join(order)}"
+    made = _made(name)
+
+    class Labelled(made):
+        def __init__(self, label: str, unit: str = "m") -> None:
+            self.label = label
+            self.unit = unit
+            pa.ExtensionType.__init__(self, pa.int64(), name)
+
+        def __arrow_ext_serialize__(self) -> bytes:
+            return self.unit.encode()
+
+        @classmethod
+        def __arrow_ext_deserialize__(
+            cls, storage_type: pa.DataType, serialized: bytes
+        ) -> pa.ExtensionType:
+            return cls("from a read", unit=serialized.decode())
+
+    types = [Labelled(label) for label in order]
+    assert all(t is types[0] for t in types)
+    assert types[0].label == order[0]
+    # The metadata does hold the unit: another unit is another type.
+    seconds = [Labelled(label, unit="s") for label in order[::-1]]
+    assert all(t is seconds[0] for t in seconds)
+    assert seconds[0] is not types[0]
+    assert (seconds[0].label, seconds[0].unit) == (order[-1], "s")
+
+    registered(types[0])
+    for extension in (types[0], seconds[0]):
+        read = _read_back(extension, [1, 2, None], tmp_path / "labelled.parquet")
+        assert read.type is extension
+        assert read.type.label == extension.label
+        assert read.to_pylist() == [1, 2, None]
 
 
 def _echoing(name: str) -> type[Any]:
@@ -426,6 +651,8 @@ def test_threads_constructing_cold_subclasses_at_once_get_one_instance_each() ->
     classes = 4
     callers = 6
     inside = threading.Barrier(classes, timeout=30)
+    first_pass = threading.Event()
+    first_pass.set()
     start = threading.Barrier(classes * callers, timeout=30)
 
     def subclass(index: int) -> type[Any]:
@@ -433,12 +660,15 @@ def test_threads_constructing_cold_subclasses_at_once_get_one_instance_each() ->
             def __init__(self, unit: str) -> None:
                 self.unit = unit
                 self.index = index
-                if unit == "together":
+                if unit == "together" and first_pass.is_set():
                     # Every class has a constructor running at this point.
                     inside.wait()
                 pa.ExtensionType.__init__(
                     self, pa.int64(), "test.lifetime.threads.cold"
                 )
+
+            def __arrow_ext_serialize__(self) -> bytes:
+                return self.unit.encode()
 
             def __arrow_ext_scalar_class__(self) -> type[pa.ExtensionScalar]:
                 return _TaggedScalar
@@ -450,6 +680,7 @@ def test_threads_constructing_cold_subclasses_at_once_get_one_instance_each() ->
     # First, one constructor of each class runs at the same time as the others.
     with ThreadPoolExecutor(classes) as pool:
         together = list(pool.map(lambda cls: cls("together"), cold))
+    first_pass.clear()
     assert [type(t) for t in together] == cold
     assert [cls("together") for cls in cold] == together
 

@@ -106,10 +106,10 @@ def make_arrow_extension_type(
         the instance suitable for passing to ``pa.register_extension_type`` or
         returning from ``get_arrow_extension_type()``. Every call, and every column
         read, gives the one instance of the class, which lives until the process ends
-        (``KeptInstances``; ITL-1422). A subclass is a type of its own: it has its own
-        instance, one for each set of (hashable) construction arguments when it
-        defines an ``__init__`` that takes any, with its own Arrow hooks, kept the
-        same way.
+        (``KeptInstances``; ITL-1422). A subclass is a type of its own, with its own
+        Arrow hooks: it has one instance for each serialized metadata it gives (with
+        its extension name and storage type), whatever arguments its ``__init__``
+        takes, kept the same way.
     """
     _name, _storage, _metadata = extension_name, storage_type, metadata or b""
     _readable = (_metadata, *(m for m in also_reads if m != _metadata))
@@ -152,7 +152,7 @@ def make_arrow_extension_type(
             )
         return cls()
 
-    # One instance per concrete class and construction arguments, each kept until the
+    # One instance per concrete class and serialized metadata, each kept until the
     # process ends (``KeptInstances``): a subclass keeps its own identity and hooks.
     extension_class = KeptInstances(
         f"_ArrowExt_{_sanitize(extension_name)}",
