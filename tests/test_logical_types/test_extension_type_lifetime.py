@@ -1060,7 +1060,7 @@ _FORK_WITH_LOCK_HELD = '''
             made_in_callback.append(callback_type())
 
     def early_child_callback():
-        """Construct before the Orcapod child hook has reset its inherited lock."""
+        """Construct in the child before os.fork returns."""
         signal.alarm(3)
         if callback_kind == "gc":
             gc.callbacks.append(on_collection)
@@ -1071,7 +1071,7 @@ _FORK_WITH_LOCK_HELD = '''
         else:
             made_in_callback.append(callback_type())
 
-    # Child hooks run in registration order, so this hook runs before Orcapod's.
+    # Register before importing Orcapod so our child hook runs first.
     if callback_kind != "none":
         os.register_at_fork(after_in_child=early_child_callback)
 
@@ -1081,22 +1081,19 @@ _FORK_WITH_LOCK_HELD = '''
     winner = extension_type()
     callback_type = make_arrow_extension_type("test.lifetime.fork_callback", pa.int64())
     locked = threading.Event()
-    starting_fork = threading.Event()
     release = threading.Event()
+    released_by_parent = []
 
     def hold_publication_lock():
         """Keep the lock held by a thread that will not exist in the child."""
-        with arrow_lifetime._publication_lock:
+        with arrow_lifetime._lock_for_process():
             locked.set()
-            assert starting_fork.wait(timeout=5)
-            # Begin fork with the lock held and let a waiting before-fork hook proceed.
-            release.wait(timeout=1)
+            released_by_parent.append(release.wait(timeout=10))
 
     thread = threading.Thread(target=hold_publication_lock)
     thread.start()
     try:
         assert locked.wait(timeout=5)
-        starting_fork.set()
         child = os.fork()
         if child == 0:
             signal.alarm(3)
@@ -1111,6 +1108,7 @@ _FORK_WITH_LOCK_HELD = '''
         release.set()
         thread.join(timeout=5)
 
+    assert released_by_parent == [True]
     parent_result = []
     parent_reader = threading.Thread(
         target=lambda: parent_result.append(extension_type()), daemon=True
@@ -1126,7 +1124,7 @@ _FORK_WITH_LOCK_HELD = '''
 def test_a_child_can_construct_a_type_after_fork_with_the_lock_held(
     callback_kind: str,
 ) -> None:
-    """The child can publish even in a callback preceding Orcapod's fork hook."""
+    """Even an early child callback can publish while the parent holds its lock."""
     process = subprocess.run(
         [sys.executable, "-c", textwrap.dedent(_FORK_WITH_LOCK_HELD), callback_kind],
         capture_output=True,
@@ -1134,6 +1132,143 @@ def test_a_child_can_construct_a_type_after_fork_with_the_lock_held(
         timeout=20,
         check=False,
     )
+    assert process.returncode == 0, process.stderr[-3000:]
+
+
+_FORK_WITH_LOGGING_LOCK_HELD = '''
+    import faulthandler
+    import gc
+    import logging
+    import os
+    import sys
+    import threading
+
+    import pyarrow as pa
+
+    callback_kind = sys.argv[1]
+    locked = threading.Event()
+    forking = threading.Event()
+    made = []
+
+    # In reverse registration order, this runs just before logging acquires its
+    # lock. It used to run after Orcapod had acquired the publication lock.
+    os.register_at_fork(before=forking.set)
+    from orcapod.logical_types import make_arrow_extension_type
+
+    extension_type = make_arrow_extension_type("test.lifetime.fork_logging", pa.int64())
+
+    def on_collection(phase, info):
+        """Construct a type from GC while the other thread is forking."""
+        if phase == "start":
+            made.append(extension_type())
+
+    def construct_under_logging_lock():
+        """Hold the logging lock before starting the extension construction."""
+        with logging._lock:
+            locked.set()
+            assert forking.wait(timeout=3)
+            if callback_kind == "gc":
+                gc.callbacks.append(on_collection)
+                try:
+                    gc.collect()
+                finally:
+                    gc.callbacks.remove(on_collection)
+            else:
+                made.append(extension_type())
+
+    gc.disable()
+    reader = threading.Thread(target=construct_under_logging_lock, daemon=True)
+    reader.start()
+    assert locked.wait(timeout=3)
+    faulthandler.dump_traceback_later(5, exit=True)
+    child = os.fork()
+    if child == 0:
+        os._exit(0)
+    _, status = os.waitpid(child, 0)
+    assert os.waitstatus_to_exitcode(status) == 0, status
+    reader.join(timeout=3)
+    assert len(made) == 1 and extension_type() is made[0]
+    faulthandler.cancel_dump_traceback_later()
+'''
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork requires POSIX")
+@pytest.mark.parametrize("callback_kind", ["direct", "gc"])
+def test_fork_can_wait_for_logging_while_its_thread_constructs_a_type(
+    callback_kind: str,
+) -> None:
+    """A fork must allow the logging lock holder to finish constructing its type."""
+    process = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            textwrap.dedent(_FORK_WITH_LOGGING_LOCK_HELD),
+            callback_kind,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    assert process.returncode == 0, process.stderr[-3000:]
+
+
+_FAILED_FORK = '''
+    import errno
+    import os
+    import resource
+    import sys
+    import threading
+
+    import pyarrow as pa
+
+    from orcapod.logical_types import make_arrow_extension_type
+
+    extension_type = make_arrow_extension_type("test.lifetime.failed_fork", pa.int64())
+    winner = extension_type()
+    if not hasattr(resource, "RLIMIT_NPROC"):
+        sys.exit(77)
+
+    continued = threading.Event()
+    made = []
+
+    def retrieve_winner():
+        """Wait for the failed fork before trying the parent publication lock."""
+        if continued.wait(timeout=5):
+            made.append(extension_type())
+
+    # On systems that cap threads too, the reader must start before the limit.
+    reader = threading.Thread(target=retrieve_winner, daemon=True)
+    reader.start()
+    _, hard = resource.getrlimit(resource.RLIMIT_NPROC)
+    resource.setrlimit(resource.RLIMIT_NPROC, (1, hard))
+    try:
+        child = os.fork()
+    except BlockingIOError as exc:
+        assert exc.errno == errno.EAGAIN
+    else:
+        if child == 0:
+            os._exit(0)
+        os.waitpid(child, 0)
+        sys.exit(77)
+    continued.set()
+    reader.join(timeout=3)
+    assert len(made) == 1 and made[0] is winner
+'''
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork requires POSIX")
+def test_a_failed_fork_leaves_the_parent_publication_lock_usable() -> None:
+    """A real fork failure still allows another thread to retrieve the winner."""
+    process = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(_FAILED_FORK)],
+        capture_output=True,
+        text=True,
+        timeout=15,
+        check=False,
+    )
+    if process.returncode == 77:
+        pytest.skip("this process cannot force fork to fail with RLIMIT_NPROC")
     assert process.returncode == 0, process.stderr[-3000:]
 
 

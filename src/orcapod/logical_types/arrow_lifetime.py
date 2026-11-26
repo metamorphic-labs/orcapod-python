@@ -17,31 +17,19 @@ _REFERENCE_TO = ctypes.py_object
 # interruptions can also use the table.
 # A signal handler that interrupts the main thread while it holds this lock can
 # deadlock if it waits for another thread to construct an extension type.
-_publication_lock = threading.RLock()
+_publication_lock_state = (os.getpid(), threading.RLock())
 
 
-def _acquire_lock_before_fork() -> None:
-    """Let earlier child callbacks re-enter the forking thread's lock."""
-    _ = _publication_lock.acquire()
-
-
-def _release_lock_after_fork() -> None:
-    """Release the fork acquisition in the parent."""
-    _publication_lock.release()
-
-
-def _reset_lock_after_fork() -> None:
-    """Give the child an unlocked lock after earlier child callbacks run."""
-    global _publication_lock
-    _publication_lock = threading.RLock()
-
-
-if hasattr(os, "register_at_fork"):
-    os.register_at_fork(
-        before=_acquire_lock_before_fork,
-        after_in_parent=_release_lock_after_fork,
-        after_in_child=_reset_lock_after_fork,
-    )
+def _lock_for_process() -> threading.RLock:
+    """Select a lock this process owns, even in an early child callback."""
+    global _publication_lock_state
+    pid = os.getpid()
+    if _publication_lock_state[0] != pid:
+        replacement = (pid, threading.RLock())
+        # Allocation can run GC, and a callback may already have installed a lock.
+        if _publication_lock_state[0] != pid:
+            _publication_lock_state = replacement
+    return _publication_lock_state[1]
 
 
 def keep_for_process(extension_type: pa.ExtensionType) -> pa.ExtensionType:
@@ -128,7 +116,7 @@ class KeptInstances(type):
         key = (id(concrete_class), _arrow_identity(candidate))
         prepared = (concrete_class, _REFERENCE_TO(candidate))
         kept = KeptInstances._kept
-        with _publication_lock:
+        with _lock_for_process():
             entry = kept.setdefault(key, prepared)
         return cast(pa.ExtensionType, entry[1].value)
 
