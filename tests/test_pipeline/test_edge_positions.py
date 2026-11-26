@@ -597,3 +597,43 @@ def test_a_function_pod_given_one_stream_twice_names_the_function_and_its_join()
         _identity.pod(d, d2).content_hash()
     assert "'_identity'" in str(err.value)
     assert "Join: the same stream" in str(err.value)
+
+
+OVER_REJOIN = {
+    "Join over Rejoin": lambda rejoined, w, **kw: Join()(
+        rejoined, w.select_data_columns(["x"]), **kw
+    ),
+    "two-input function pod over Rejoin": lambda rejoined, w, **kw: _identity.pod(
+        rejoined, w.select_data_columns(["x"]), **kw
+    ),
+    "SemiJoin over Rejoin": lambda rejoined, w, **kw: SemiJoin()(rejoined, w, **kw),
+}
+
+
+@pytest.mark.parametrize("in_job", [False, True], ids=["standalone", "in_job"])
+@pytest.mark.parametrize("case", sorted(OVER_REJOIN))
+def test_a_join_over_a_repeated_rejoin_raises_the_rejoin_refusal(
+    case: str, in_job: bool
+) -> None:
+    """Verification of a59c55b7 (P3): a join whose input check meets the upstream
+    refusal lets it through as it is (its type and the pod that got the repeat), not
+    wrapped in a plain ``InputValidationError``; a function pod adds its context. The
+    ``Rejoin`` is built outside the job (inside, recording it is refused first, before
+    any step over it)."""
+    from orcapod.core.operators.repeated_operands import RepeatedOperandError
+
+    d, d2, w = _data_tags_only(), _data_tags_only(), _data_tags_and_data()
+    rejoined = Rejoin()(d, d2)
+    with pytest.raises(RepeatedOperandError) as err:
+        if in_job:
+            job = PipelineJob(name="refused", database=InMemoryArrowDatabase())
+            with job:
+                OVER_REJOIN[case](rejoined, w, label="after")
+        else:
+            OVER_REJOIN[case](rejoined, w).content_hash()
+    assert err.value.pod == "Rejoin"
+    message = str(err.value)
+    assert message.startswith(f"Rejoin: the {REFUSAL.split('.*')[0]}")
+    assert "Join: the same stream" not in message.replace("Rejoin: the same", "")
+    if case.startswith("two-input function pod"):
+        assert "in the inputs of the function pod of '_identity'" in message
