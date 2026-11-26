@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import cast
 
 import griffe
-from griffe import Alias, Module
+from griffe import Alias, Module, Object
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PUBLIC_MODULES = (
@@ -81,7 +81,7 @@ def test_public_exports_have_api_reference_entries() -> None:
     for source_module in modules:
         modules.extend(
             child
-            for child in source_module.modules.values()
+            for child in source_module.members.values()
             if isinstance(child, Module)
         )
         if source_module.exports and source_module.path not in PUBLIC_MODULES:
@@ -95,7 +95,7 @@ def test_public_exports_have_api_reference_entries() -> None:
     def reference_key(path: str) -> tuple[str, str]:
         # Preserve the exported spelling while counting existing entries for
         # the same object through an alias (e.g. orcapod.core.operators.Join).
-        obj = package[path.removeprefix("orcapod.")]
+        obj = cast("Object | Alias", package[path.removeprefix("orcapod.")])
         target = obj.final_target if isinstance(obj, Alias) else obj
         return path.rsplit(".", 1)[-1], target.path
 
