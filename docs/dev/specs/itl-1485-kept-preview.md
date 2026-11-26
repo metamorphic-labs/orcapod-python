@@ -84,20 +84,18 @@ Approved as recommended by the coordinator on the developer's behalf (November 2
   Recommended: they keep `main`'s "every read scans again"; a run's rows are a job's
   business. The computed `preview(n)` of ITL-1464 (#571, not merged) can answer a source's
   preview from the record later.
-- **D7. The total is kept with the rows** (amended after the review of af670090; decided
-  on the developer's behalf: "a repeated preview of an unchanged source takes no time").
-  The read that fills the record also counts the table's keys whenever a preview answered
-  from it shows the table's row count (its rows are not every row the source reads, or a
-  condition chose them), at the same version and through the same handle, to the largest
-  bound such a preview counts to. Every preview the record answers then makes no call,
-  its total included. The one call `main` does not make: a preview whose condition
-  returned every matching row also counts, once per version (the connector remembers it).
-  That count is for later previews only (review of 854bbf94): it is made only when the
-  rows will be kept, never delays or fails the preview it follows (its total is exact),
-  and when it fails nothing is kept. A record is kept only while the source still reads
-  its version, condition and limit, so a late read of an older version never replaces a
-  newer record. Rows are copied out only when they are a real slice (their buffers hold
-  over 1 MiB beyond their values), after the row bound is checked.
+- **D7. The total is kept with the rows** (amended after the reviews of af670090,
+  854bbf94 and 0a9ccfeb; decided on the developer's behalf: "a repeated preview of an
+  unchanged source takes no time"). A read whose rows are not every row the source reads
+  counts the table's keys, as on `main`, at the same version and through the same handle,
+  to the largest bound a preview answered from its rows counts to, and keeps the count.
+  A read of every row a condition chose knows its total and counts nothing (never waits
+  for a count); the first smaller preview answered from its rows counts once, as `main`
+  does for that preview, and the count is kept with the rows. Every other preview the
+  record answers makes no call. A record is kept only while the source still reads its
+  version, condition and limit, so a late read of an older version never replaces a
+  newer record. Each chunk of each column is copied out only when it is a real slice
+  (its buffers hold over 1 MiB beyond its values), after the row bound is checked.
 - **One version, one read, a closed source** (review of af670090). The pinned version
   is read once per preview: the rows, the count and the record's key are all of it, so a
   source check that moves the version during a preview neither mixes versions nor keeps

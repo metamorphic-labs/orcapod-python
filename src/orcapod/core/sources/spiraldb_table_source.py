@@ -100,20 +100,31 @@ def _is_positive_int(value: object) -> bool:
 
 
 def _compact(rows: "pa.Table") -> "pa.Table":
-    """Return ``rows`` in buffers of their own when they are a slice of larger buffers.
+    """Return ``rows`` with each sliced chunk copied into buffers of its own.
 
     A scan's limit slices its last batch, and a slice keeps the batch's whole buffers:
-    one small row beside a large one would keep the large one. Rows whose buffers hold
-    more than ``_SLICE_SLACK`` bytes beyond their values (a real slice; a whole column's
-    last offset, which ``nbytes`` leaves out, is a few bytes) are copied out, when their
-    values fit ``PREVIEW_KEPT_BYTES``; any others are returned as they are.
+    one small row beside a large one would keep the large one. Each chunk of each
+    column is judged on its own: one whose buffers hold more than ``_SLICE_SLACK`` bytes
+    beyond its values is a real slice and is copied (a whole chunk's last offset, which
+    ``nbytes`` leaves out, is a few bytes); every other chunk is kept as it is. Rows
+    whose values do not fit ``PREVIEW_KEPT_BYTES`` are returned as they are (they are
+    not kept).
     """
-    if (
-        rows.nbytes > PREVIEW_KEPT_BYTES
-        or rows.get_total_buffer_size() <= rows.nbytes + _SLICE_SLACK
-    ):
+    if rows.nbytes > PREVIEW_KEPT_BYTES:
         return rows
-    return rows.take(pa.array(range(rows.num_rows), pa.int64()))
+    columns: list[pa.ChunkedArray[Any]] = []  # pyright: ignore[reportExplicitAny]  # any column
+    copied = False
+    for column in rows.columns:
+        chunks: list[pa.Array[Any]] = []  # pyright: ignore[reportExplicitAny]  # any column
+        for chunk in column.chunks:
+            if chunk.get_total_buffer_size() > chunk.nbytes + _SLICE_SLACK:
+                chunk = chunk.take(pa.array(range(len(chunk)), pa.int64()))
+                copied = True
+            chunks.append(chunk)
+        columns.append(pa.chunked_array(chunks, type=column.type))
+    if not copied:
+        return rows
+    return pa.Table.from_arrays(columns, schema=rows.schema)
 
 
 class _Head(NamedTuple):
@@ -1128,9 +1139,20 @@ class SpiralDBTableSource(RootSource):
             every_row = limit is None or whole < limit
             total = whole if every_row and whole <= bound else None
         else:
-            # Counted by the read to counted_to + 1 >= bound + 1 (``_read_preview``).
+            # Counted to counted_to + 1 >= bound + 1: by the read when its rows were not
+            # all the source reads, else by the first preview that needs it.
             counted = kept.table_rows
-            total = None if counted is None or counted > bound else counted
+            if counted is None:
+                counted = self._lookup_table().count_rows(
+                    asof=kept.key[0], at_most=kept.counted_to + 1
+                )
+                kept = dataclasses.replace(kept, table_rows=counted)
+                if (
+                    self._kept_preview is not None
+                    and self._kept_preview.key == kept.key
+                ):
+                    self._keep(kept)
+            total = None if counted > bound else counted
         if limit is not None and condition.is_empty:
             total = limit if total is None and limit <= bound else total
             total = None if total is None else min(limit, total)
@@ -1145,10 +1167,10 @@ class SpiralDBTableSource(RootSource):
         The rows and the count are read at the version in ``key``, through one handle.
         Counting is needed only when a preview answered from these rows shows the
         table's row count: when they are not every row the source reads (this preview
-        then needs it, as on main), or a condition chose them (only a later, smaller
-        preview needs it: it is counted only when the rows are kept, and a failed count
-        keeps nothing and fails nothing). The record is kept only while the source is
-        open and still reads the version, condition and limit of ``key``.
+        then needs it, as on main). A read of every row a condition chose knows its
+        total and counts nothing; the first smaller preview answered from its rows
+        counts, as on main, and keeps the count. The record is kept only while the
+        source is open and still reads the version, condition and limit of ``key``.
         """
         asof, condition, limit = key
         table = self._lookup_table()
@@ -1165,16 +1187,10 @@ class SpiralDBTableSource(RootSource):
         counted_to = self._count_bound(count)
         table_rows: int | None = None
         if counted_to is not None and not complete:
-            # This preview shows the table's row count, as on main.
+            # This preview shows the table's row count, as on main. A preview that read
+            # every matching row knows its total and counts nothing: a smaller preview
+            # answered from its rows counts then (``_head``).
             table_rows = table.count_rows(asof=asof, at_most=counted_to + 1)
-        elif counted_to is not None and keep and not condition.is_empty:
-            # Every matching row was read: this preview's total is exact. The count is
-            # only for a smaller preview answered later from the kept rows, so it never
-            # fails this one: without it nothing is kept.
-            try:
-                table_rows = table.count_rows(asof=asof, at_most=counted_to + 1)
-            except Exception:  # noqa: BLE001  # an optimisation; the preview stands
-                keep = False
         kept = _KeptPreview(
             key=key,
             rows=read,
@@ -1184,13 +1200,17 @@ class SpiralDBTableSource(RootSource):
             counted_to=counted_to or 0,
         )
         if keep:
-            with self._connection_lock:
-                # A source closed during the read keeps nothing, and a read of a
-                # version the source no longer reads never replaces a newer record.
-                current = (self._asof, self._condition, self._limit)
-                if not self._closed and current == key:
-                    self._kept_preview = kept
+            self._keep(kept)
         return kept
+
+    def _keep(self, kept: _KeptPreview) -> None:
+        """Keep ``kept`` as the source's preview while the source is open and still
+        reads its version, condition and limit: a late read of an older version never
+        replaces a newer record."""
+        with self._connection_lock:
+            current = (self._asof, self._condition, self._limit)
+            if not self._closed and current == kept.key:
+                self._kept_preview = kept
 
     def _count_bound(self, shown: int) -> int | None:
         """Return how far a preview showing ``shown`` rows counts the table's rows, or
