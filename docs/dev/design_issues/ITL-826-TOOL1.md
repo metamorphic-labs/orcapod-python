@@ -18,7 +18,8 @@ Pay it down directory by directory, starting with `src/`, and regenerate the bas
 to remove fixed entries. One known item is the 26 import cycles reported in `src/`.
 
 ~~`orcapod.hashing` exports nine names from a missing `legacy_core` module as `None`.~~
-**Fix (ITL-1481)** Removed the nine exports and the fixture generator that called them.
+**Fix (ITL-1481)** Removed the nine exports and the fixture generator that imported and
+called `hash_data` and `hash_pathset`.
 
 Protocols that lag their concrete classes. These baselined errors are not runtime bugs (the
 concrete classes have the method or parameter), but the protocols misdescribe what callers
