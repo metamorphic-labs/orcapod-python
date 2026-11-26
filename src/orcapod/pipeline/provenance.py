@@ -44,6 +44,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 
+from orcapod.core.row_ids import RECORD_ID_COL
 from orcapod.errors import ProvenanceInconsistencyError
 from orcapod.system_constants import constants
 from orcapod.types.explanation import Step, plain_repr
@@ -986,7 +987,7 @@ def _latest(entries: list[Row], node: Any) -> Row:
             "have the row's system tags and result; the link is ambiguous"
         )
     distinct: dict[Any, Row] = {
-        _hash_text(e.get("__pipeline_entry_id")) or id(e): e for e in entries
+        _hash_text(e.get(RECORD_ID_COL)) or id(e): e for e in entries
     }
     if len(distinct) > 1:
         raise ProvenanceInconsistencyError(
@@ -1028,7 +1029,7 @@ def _function_run(
         computed_at=_datetime(result.get(f"{constants.META_PREFIX}pod_ts")),
         computed_here=bool(entry.get(f"{constants.META_PREFIX}computed")),
         result_id=bytes(entry[constants.DATA_RECORD_ID]).hex(),
-        entry_id=_hash_text(entry.get("__pipeline_entry_id")) or "",
+        record_id=_hash_text(entry.get(RECORD_ID_COL)) or "",
         run_id=entry.get(_RUN_ID_COL),
         recorded_at=_datetime(entry.get(_RECORDED_AT_COL)),
     )

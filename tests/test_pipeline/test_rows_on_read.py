@@ -1204,6 +1204,9 @@ def _system_tag_outcome(case: str, asynchronous: bool) -> Any:
         node._stored_table_path,  # pyright: ignore[reportPrivateUsage]  # the raw LOG table
         record_id_column="_record_hash",
     )
+    if stored is not None:
+        # The insertion time differs between two runs; everything else is compared.
+        stored = stored.drop(["__recorded_at"])
     successor = job.nodes["b"].as_table(columns={"system_tags": True, "source": True})
     return (
         str(kept.schema),
@@ -1309,9 +1312,14 @@ def test_held_rows_that_cannot_make_one_table_raise_at_the_successors_edge() -> 
 
 def test_held_rows_that_cannot_make_one_table_are_sent_on_async() -> None:
     """Async: the held rows are sent on as the plan took them, never built into one
-    table first: the function node after the held node starts every row and ends,
-    and the run raises the rows' ``ArrowTypeError``. ``main`` ca1c35d6 gives the same
-    events and error."""
+    table first: the function node after the held node starts and ends, and the run
+    raises the rows' ``ArrowTypeError``.
+
+    The node looks a row up by its instance id, which reads the row's source-info
+    tokens (ITL-1471), so the error is raised when the first row is looked up,
+    before any row starts and before the function is called. Before the three ids
+    the lookup read no token, every row started, and the same error was raised
+    when the row was recorded (``main`` ca1c35d6)."""
     from orcapod.pipeline import AsyncPipelineOrchestrator
 
     held, after, _ = _held_job()
@@ -1326,9 +1334,4 @@ def test_held_rows_that_cannot_make_one_table_are_sent_on_async() -> None:
     observer = DataStarts()
     with pytest.raises(pa.ArrowTypeError, match="Expected bytes"):
         AsyncPipelineOrchestrator().run(dag, observer=observer, held_rows={held: rows})
-    assert observer.events == [
-        ("start", "after"),
-        ("data", "after"),
-        ("data", "after"),
-        ("end", "after"),
-    ]
+    assert observer.events == [("start", "after"), ("end", "after")]

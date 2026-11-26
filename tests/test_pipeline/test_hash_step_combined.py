@@ -123,7 +123,7 @@ class TestStoredPathsAndKeys:
         _ = _operator_job(store).run()
 
         paths = sorted(store.list_sources())
-        assert sorted(path[-1] for path in paths) == ["odb_v1", "pdb_v1", "rdb_v1"]
+        assert sorted(path[-1] for path in paths) == ["odb_v2", "pdb_v2", "rdb_v1"]
         for path in paths:
             for component in path:
                 assert "semantic_v" not in component, path
@@ -139,7 +139,7 @@ class TestStoredPathsAndKeys:
         store = InMemoryArrowDatabase()
         _ = _operator_job(store).run()
 
-        (path,) = [p for p in store.list_sources() if p[-1] == "odb_v1"]
+        (path,) = [p for p in store.list_sources() if p[-1] == "odb_v2"]
         table = store.get_all_records(path, record_id_column="_record_hash")
         assert table is not None
         keys = cast(list[bytes], table.column("_record_hash").to_pylist())
@@ -224,8 +224,8 @@ class TestSideEffectNodeChecksEveryRun:
     def test_a_table_written_before_v03_that_appears_between_runs_is_refused(self):
         """A sink's second run raises on an old log added after its first run.
 
-        The old log is at a layout of the withdrawn 0.3.0 (``tdb_v2``). A log a version
-        before 0.4 wrote at ``tdb_v1`` under another hash looks current and does not stop
+        The old log is at a layout of the withdrawn 0.3.0 (``tdb_v1``). A log a version
+        before 0.4 wrote at ``tdb_v2`` under another hash looks current and does not stop
         the sink: the approved removal of the pre-0.4 store detection (nobody has such
         a store; ITL-1259).
         """
@@ -236,7 +236,7 @@ class TestSideEffectNodeChecksEveryRun:
         delivered.clear()
 
         # A log of the same pod at the layout Orcapod v0.2 wrote, under another hash.
-        old_path = _add_table_written_before_v03(store, "tdb_v1", "tdb_v2")
+        old_path = _add_table_written_before_v03(store, "tdb_v2", "tdb_v1")
 
         # The same job object runs the sink again (a node holding a current run is not
         # run, ITL-1095, so it is cleared first): the check is not remembered from the
@@ -258,7 +258,7 @@ class TestSideEffectNodeChecksEveryRun:
         _ = job.run()  # nothing new in the database: runs, and delivers nothing again
         assert delivered == []
 
-        old_path = _add_table_written_before_v03(store, "pdb_v1", "pdb_v2")
+        old_path = _add_table_written_before_v03(store, "pdb_v2", "pdb_v1")
 
         job.nodes["notify"].clear_cache()
         with pytest.raises(SideEffectLogDataContextError) as info:
@@ -269,7 +269,7 @@ class TestSideEffectNodeChecksEveryRun:
     def test_the_error_does_not_offer_a_fresh_store_as_a_safe_retry(self):
         """The error message warns that a fresh database repeats every side effect."""
         error = SideEffectLogDataContextError(
-            (("j", "side_effects", "notify", "schema:abc", "tdb_v2"),),
+            (("j", "side_effects", "notify", "schema:abc", "tdb_v1"),),
             "std:v0.1:default",
             CURRENT,
             node_label="notify",

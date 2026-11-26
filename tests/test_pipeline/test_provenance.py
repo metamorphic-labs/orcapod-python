@@ -221,7 +221,7 @@ def test_shared_memoized_result_is_traced_exactly(tmp_path: Path) -> None:
     # u0 and u2 have equal inputs: one stored result, two entries, two records.
     assert unit_runs["u0"] is not None and unit_runs["u2"] is not None
     assert unit_runs["u0"].result_id == unit_runs["u2"].result_id
-    assert unit_runs["u0"].entry_id != unit_runs["u2"].entry_id
+    assert unit_runs["u0"].record_id != unit_runs["u2"].record_id
     assert {unit_runs["u0"].computed_here, unit_runs["u2"].computed_here} == {
         True,
         False,
@@ -467,11 +467,11 @@ def test_reader_keeps_the_nodes_own_entries(tmp_path: Path) -> None:
     theirs, _ = other.nodes["unit_rates"]._stored_provenance()
     assert mine is not None and theirs is not None
     assert mine.num_rows == theirs.num_rows == 5
-    assert set(mine.column("__pipeline_entry_id").to_pylist()).isdisjoint(
-        theirs.column("__pipeline_entry_id").to_pylist()
+    assert set(mine.column("__pipeline_record_id").to_pylist()).isdisjoint(
+        theirs.column("__pipeline_record_id").to_pylist()
     )
     for column in (
-        "__pipeline_base_entry_id",
+        "__pipeline_instance_id",
         "__node_content_hash",
         "__computed",
         "__input_data_hash",

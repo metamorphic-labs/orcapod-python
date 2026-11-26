@@ -228,7 +228,7 @@ def test_a_job_writes_its_result_and_pipeline_tables_at_the_declared_paths(
     # The pipeline table carries no revision.
     assert pipeline[0][-(len(uri) + 2) : -2] == uri[:-1] + ("python.function.v1",)
     assert pipeline[0][-2].startswith("schema:")
-    assert pipeline[0][-1] == PIPELINE_DB_SCHEMA_VERSION == "pdb_v1"
+    assert pipeline[0][-1] == PIPELINE_DB_SCHEMA_VERSION == "pdb_v2"
     assert "rev1" not in pipeline[0]
     assert _stored_columns(database, result[0]) == _expected_result_columns(
         PythonDataFunction(fn, output_keys=keys)
@@ -278,8 +278,11 @@ def _run_and_fingerprint(name: str) -> dict[str, Any]:
         "node_pipeline_hash": node.pipeline_hash().to_string(),
         "rows": rows,
         "pipeline_path": pipeline_path,
-        "pipeline_record_ids": sorted(
-            str(record_id) for record_id in pipeline_table.column("_id").to_pylist()
+        # A record id holds the result id, which is random: the instance ids are
+        # compared (ITL-1471).
+        "pipeline_instance_ids": sorted(
+            str(instance)
+            for instance in pipeline_table.column("__pipeline_instance_id").to_pylist()
         ),
         "result_path": result_path,
     }

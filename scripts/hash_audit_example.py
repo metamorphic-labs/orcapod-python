@@ -15,6 +15,7 @@ import hashlib
 
 from orcapod.config import DEFAULT_CONFIG
 from orcapod.contexts import resolve_context
+from orcapod.core import row_ids
 from orcapod.core.function_pod import function_pod
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.operators.join import Join
@@ -169,21 +170,20 @@ def main() -> None:
         pipeline_database=db_for_node,
     )
 
-    sub("Site 7 — compute_base_entry_id() — recomputation-index-free")
-    alice_base = node.compute_base_entry_id(alice_tag_j, alice_data_j)
-    bob_base = node.compute_base_entry_id(bob_tag_j, bob_data_j)
-    print(f"    alice base_entry_id (hex)   = {alice_base.hex()!r}")
-    print(f"    bob   base_entry_id (hex)   = {bob_base.hex()!r}")
+    hasher = node.data_context.arrow_hasher
+    sub("Site 7 — entry id — tags, system tags, input data hash")
+    alice_entry = row_ids.entry_id(hasher, alice_tag_j, alice_data_j)
+    bob_entry = row_ids.entry_id(hasher, bob_tag_j, bob_data_j)
+    print(
+        f"    alice entry id (hex)        = {alice_entry.to_prefixed_digest().hex()!r}"
+    )
+    print(f"    bob   entry id (hex)        = {bob_entry.to_prefixed_digest().hex()!r}")
 
-    sub("Site 8 — compute_pipeline_entry_id() — includes recomputation_index=0")
-    alice_pipe = node.compute_pipeline_entry_id(
-        alice_tag_j, alice_data_j, recomputation_index=0
-    )
-    bob_pipe = node.compute_pipeline_entry_id(
-        bob_tag_j, bob_data_j, recomputation_index=0
-    )
-    print(f"    alice pipeline_entry_id (hex) = {alice_pipe.hex()!r}")
-    print(f"    bob   pipeline_entry_id (hex) = {bob_pipe.hex()!r}")
+    sub("Site 8 — instance id — entry id, source-info tokens")
+    alice_instance = node.compute_instance_id(alice_tag_j, alice_data_j)
+    bob_instance = node.compute_instance_id(bob_tag_j, bob_data_j)
+    print(f"    alice instance id (hex)     = {alice_instance.hex()!r}")
+    print(f"    bob   instance id (hex)     = {bob_instance.hex()!r}")
 
     sub("FunctionJobNode hashes")
     print(f"    node.content_hash()         = {node.content_hash()}")

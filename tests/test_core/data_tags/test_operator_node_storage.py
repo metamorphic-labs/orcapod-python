@@ -100,7 +100,7 @@ def _join_job(
 
 
 def _operator_table(store: ArrowDatabaseProtocol) -> pa.Table:
-    """The one stored operator cache table (``odb_v1``)."""
+    """The one stored operator cache table (``odb_v2``)."""
     paths = [p for p in store.list_table_paths() if p[-1] == OPERATOR_DB_SCHEMA_VERSION]
     assert len(paths) == 1, paths
     table = store.get_all_records(paths[0])
@@ -406,7 +406,21 @@ def test_a_plain_operator_or_an_uncached_one_asks_nothing_of_the_database() -> N
     from orcapod.databases.connector_arrow_database import ConnectorArrowDatabase
     from orcapod.databases.sqlite_connector import SQLiteConnector
 
-    database = ConnectorArrowDatabase(SQLiteConnector(":memory:"))
+    class KeepsTimestamps(SQLiteConnector):
+        """SQLite's rules, but a timestamp is taken: an operator cache's insertion
+        time is refused by SQLite itself when the database is attached (ITL-1471),
+        and this test is about the data-tag marker, which SQLite does not keep."""
+
+        def unstorable_column_reason(
+            self, name: str, arrow_type: pa.DataType, *, primary_key: bool
+        ) -> str | None:
+            if pa.types.is_timestamp(arrow_type):
+                return None
+            return super().unstorable_column_reason(
+                name, arrow_type, primary_key=primary_key
+            )
+
+    database = ConnectorArrowDatabase(KeepsTimestamps(":memory:"))
     plain = _join_job(InMemoryArrowDatabase(), [1], tag_only=True).nodes["joined"]
     plain.attach_databases(pipeline_database=database, cache_mode=CacheMode.LOG)
     with_data_tags = _join_job(InMemoryArrowDatabase(), [1]).nodes["joined"]

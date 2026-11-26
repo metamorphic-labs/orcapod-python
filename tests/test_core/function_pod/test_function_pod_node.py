@@ -271,12 +271,12 @@ class TestFunctionNodeExecuteData:
         assert all_records is not None
         assert all_records.num_rows >= 1
 
-    def test_execute_data_second_call_same_input_appends_recomputation_record(
-        self, node
-    ):
-        """Under the ITL-508 recomputation-index design, each call for the same
-        logical input creates a new versioned pipeline record rather than
-        deduplicating. Two calls produce two records with sequential indices.
+    def test_execute_data_second_call_same_input_is_one_record(self, node):
+        """The same input processed twice gives one pipeline record (ITL-1471).
+
+        The second call takes the stored result, so its record id (instance id
+        and result id) is the first call's, and the write is skipped. Under the
+        recomputation index (ITL-508) this wrote a second row.
         """
         tag = Tag({"id": 0})
         data = Data({"x": 3})
@@ -286,7 +286,7 @@ class TestFunctionNodeExecuteData:
         db.flush()
         all_records = db.get_all_records(node._versioned_pipeline_path)
         assert all_records is not None
-        assert all_records.num_rows == 2
+        assert all_records.num_rows == 1
 
     def test_process_and_store_two_data_add_two_entries(self, node):
         tag = Tag({"id": 0})
@@ -656,10 +656,11 @@ class TestGetAllRecordsAllInfo:
         )
 
     def test_all_info_excludes_pipeline_entry_id(self, filled_node):
-        """__pipeline_entry_id must not appear in get_all_records output even with all_info."""
+        """The row key and the instance id never appear in get_all_records, even with all_info."""
         result = filled_node.get_all_records(all_info=True)
         assert result is not None
-        assert "__pipeline_entry_id" not in result.column_names
+        assert "__pipeline_record_id" not in result.column_names
+        assert "__pipeline_instance_id" not in result.column_names
 
     def test_all_info_excludes_node_content_hash(self, filled_node):
         """NODE_CONTENT_HASH_COL must not appear in get_all_records output even with all_info."""

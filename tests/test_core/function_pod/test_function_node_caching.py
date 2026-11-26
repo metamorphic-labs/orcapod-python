@@ -1,7 +1,7 @@
 """Tests for FunctionNode caching: pipeline DB vs result DB interaction.
 
 Covers:
-- compute_pipeline_entry_id behavior
+- compute_instance_id behavior
 - Pipeline entry_id based Phase 2 skip (tag + system_tags + data_hash)
 - CachedFunctionPod result cache hit with novel pipeline entry_id
 - Same data data, different tags → 1 result record, N pipeline records
@@ -83,17 +83,17 @@ def _make_node(stream, db=None):
 
 
 # ---------------------------------------------------------------------------
-# compute_pipeline_entry_id
+# compute_instance_id on rows with and without system tags
 # ---------------------------------------------------------------------------
 
 
-class TestComputePipelineEntryId:
+class TestInstanceIdOfPlainRows:
     def test_returns_non_empty_bytes(self):
         stream = _make_stream([{"id": 0, "x": 10}])
         node, _ = _make_node(stream)
         tag = Tag({"id": 0})
         data = Data({"x": 10})
-        entry_id = node.compute_pipeline_entry_id(tag, data)
+        entry_id = node.compute_instance_id(tag, data)
         assert isinstance(entry_id, bytes)
         assert len(entry_id) > 0
         # Must be method-prefixed: b"{method}:{raw_digest}"
@@ -104,24 +104,24 @@ class TestComputePipelineEntryId:
         node, _ = _make_node(stream)
         tag = Tag({"id": 0})
         data = Data({"x": 10})
-        id1 = node.compute_pipeline_entry_id(tag, data)
-        id2 = node.compute_pipeline_entry_id(tag, data)
+        id1 = node.compute_instance_id(tag, data)
+        id2 = node.compute_instance_id(tag, data)
         assert id1 == id2
 
     def test_different_tags_produce_different_ids(self):
         stream = _make_stream([{"id": 0, "x": 10}])
         node, _ = _make_node(stream)
         data = Data({"x": 10})
-        id_tag0 = node.compute_pipeline_entry_id(Tag({"id": 0}), data)
-        id_tag1 = node.compute_pipeline_entry_id(Tag({"id": 1}), data)
+        id_tag0 = node.compute_instance_id(Tag({"id": 0}), data)
+        id_tag1 = node.compute_instance_id(Tag({"id": 1}), data)
         assert id_tag0 != id_tag1
 
     def test_different_data_produce_different_ids(self):
         stream = _make_stream([{"id": 0, "x": 10}])
         node, _ = _make_node(stream)
         tag = Tag({"id": 0})
-        id_x10 = node.compute_pipeline_entry_id(tag, Data({"x": 10}))
-        id_x99 = node.compute_pipeline_entry_id(tag, Data({"x": 99}))
+        id_x10 = node.compute_instance_id(tag, Data({"x": 10}))
+        id_x99 = node.compute_instance_id(tag, Data({"x": 99}))
         assert id_x10 != id_x99
 
 
@@ -148,8 +148,8 @@ class TestSystemTagAwareness:
             system_tags={f"{constants.SYSTEM_TAG_PREFIX}source:xyz": "row0"},
         )
 
-        id_a = node.compute_pipeline_entry_id(tag_a, data)
-        id_b = node.compute_pipeline_entry_id(tag_b, data)
+        id_a = node.compute_instance_id(tag_a, data)
+        id_b = node.compute_instance_id(tag_b, data)
         assert id_a != id_b
 
 
@@ -416,7 +416,7 @@ class TestPipelineRecordSourceColumns:
 
 
 # ---------------------------------------------------------------------------
-# compute_base_entry_id
+# compute_instance_id
 # ---------------------------------------------------------------------------
 
 
@@ -426,17 +426,17 @@ class TestComputeBaseEntryId:
         node, _ = _make_node(stream)
         tag = Tag({"id": 0})
         data = Data({"x": 10})
-        base_entry_id = node.compute_base_entry_id(tag, data)
-        assert isinstance(base_entry_id, bytes)
-        assert len(base_entry_id) > 0
-        assert b":" in base_entry_id
+        instance_id = node.compute_instance_id(tag, data)
+        assert isinstance(instance_id, bytes)
+        assert len(instance_id) > 0
+        assert b":" in instance_id
 
     def test_same_inputs_produce_same_id(self):
         stream = _make_stream([{"id": 0, "x": 10}])
         node, _ = _make_node(stream)
         tag = Tag({"id": 0})
         data = Data({"x": 10})
-        assert node.compute_base_entry_id(tag, data) == node.compute_base_entry_id(
+        assert node.compute_instance_id(tag, data) == node.compute_instance_id(
             tag, data
         )
 
@@ -444,59 +444,14 @@ class TestComputeBaseEntryId:
         stream = _make_stream([{"id": 0, "x": 10}])
         node, _ = _make_node(stream)
         data = Data({"x": 10})
-        assert node.compute_base_entry_id(
+        assert node.compute_instance_id(
             Tag({"id": 0}), data
-        ) != node.compute_base_entry_id(Tag({"id": 1}), data)
+        ) != node.compute_instance_id(Tag({"id": 1}), data)
 
     def test_different_data_produce_different_ids(self):
         stream = _make_stream([{"id": 0, "x": 10}])
         node, _ = _make_node(stream)
         tag = Tag({"id": 0})
-        assert node.compute_base_entry_id(
+        assert node.compute_instance_id(
             tag, Data({"x": 10})
-        ) != node.compute_base_entry_id(tag, Data({"x": 99}))
-
-    def test_differs_from_versioned_entry_id_at_index_zero(self):
-        """After ITL-508, compute_pipeline_entry_id includes the index in the preimage,
-        so compute_pipeline_entry_id(tag, data, 0) != compute_base_entry_id(tag, data)."""
-        stream = _make_stream([{"id": 0, "x": 10}])
-        node, _ = _make_node(stream)
-        tag = Tag({"id": 0})
-        data = Data({"x": 10})
-        base_id = node.compute_base_entry_id(tag, data)
-        versioned_id_0 = node.compute_pipeline_entry_id(tag, data, 0)
-        assert base_id != versioned_id_0
-
-
-# ---------------------------------------------------------------------------
-# compute_pipeline_entry_id with recomputation_index
-# ---------------------------------------------------------------------------
-
-
-class TestVersionedEntryIdDiffersByIndex:
-    def test_different_indices_produce_different_ids(self):
-        stream = _make_stream([{"id": 0, "x": 10}])
-        node, _ = _make_node(stream)
-        tag = Tag({"id": 0})
-        data = Data({"x": 10})
-        assert node.compute_pipeline_entry_id(
-            tag, data, 0
-        ) != node.compute_pipeline_entry_id(tag, data, 1)
-
-    def test_same_index_produces_same_id(self):
-        stream = _make_stream([{"id": 0, "x": 10}])
-        node, _ = _make_node(stream)
-        tag = Tag({"id": 0})
-        data = Data({"x": 10})
-        assert node.compute_pipeline_entry_id(
-            tag, data, 1
-        ) == node.compute_pipeline_entry_id(tag, data, 1)
-
-    def test_default_index_zero_is_consistent(self):
-        stream = _make_stream([{"id": 0, "x": 10}])
-        node, _ = _make_node(stream)
-        tag = Tag({"id": 0})
-        data = Data({"x": 10})
-        assert node.compute_pipeline_entry_id(
-            tag, data
-        ) == node.compute_pipeline_entry_id(tag, data, 0)
+        ) != node.compute_instance_id(tag, Data({"x": 99}))

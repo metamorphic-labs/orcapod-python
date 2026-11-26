@@ -460,7 +460,7 @@ def test_one_stored_table_per_node_whatever_is_built_first(tmp_path: Path) -> No
     assert second == third == {"computed": 0, "from_store": 1}
 
     job_tables = DeltaTableDatabase(tmp_path / "store" / "job").list_table_paths()
-    pipeline_tables = [p for p in job_tables if p[-1] == "pdb_v1"]
+    pipeline_tables = [p for p in job_tables if p[-1] == "pdb_v2"]
     assert len(pipeline_tables) == 1, pipeline_tables
     operator_tables = DeltaTableDatabase(
         tmp_path / "store" / "operators"
