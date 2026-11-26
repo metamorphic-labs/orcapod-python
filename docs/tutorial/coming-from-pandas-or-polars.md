@@ -200,8 +200,8 @@ Storing results and computing only what is new is a job's work: see
 
 ### Types must match
 
-pandas and Polars both accept `> 1200.0` on an integer column. Orcapod's `filter` refuses a
-value whose type is not its column's:
+pandas and Polars both accept `> 1200.0` on an integer column. Orcapod's `filter` refuses it
+on `n_spikes`, which holds integers:
 
 ```python
 try:
@@ -241,9 +241,8 @@ columns; a column that must be both is a data-tag ([Data-tags](../concepts/data-
 
 ## Appendix: the same analysis in pandas and Polars
 
-`as_pandas_df()` and `as_polars_df()` read a stream as a data frame. Here
-are the mean firing rates computed in pandas and in Polars, then read from the Orcapod stream
-`means` for comparison. The three give the same numbers.
+Here are the mean firing rates computed in pandas and in Polars, then read from the Orcapod
+stream `means` as a Polars data frame with `as_polars_df()`, for comparison. The three give the same numbers.
 
 ```python
 import pandas as pd
