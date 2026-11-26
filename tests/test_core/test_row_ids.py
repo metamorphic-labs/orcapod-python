@@ -676,3 +676,70 @@ class TestARenameMovesTheToken:
             back = renamed.rename({new: old for old, new in mapping.items()})
             assert back.source_info() == data.source_info()
         assert len(ids) == 1
+
+
+class TestARenameOfAPlaceholderKeepsItsTokens:
+    """A placeholder's sentinel tokens survive a rename (review of PR #583).
+
+    A placeholder holds no payload column: its tokens are all it has of a row.
+    An empty mapping changes nothing and returns the row itself; a mapping that
+    names none of its tokens keeps every token; a mapping that names one moves it.
+    """
+
+    URI = ("combine", "abc", "v0", "python.function.v1")
+
+    def _placeholder(self, columns: tuple[str, ...]) -> EmptyData:
+        return EmptyData(
+            cached_content_hash=_data().content_hash(),
+            source_info=output_source_info(
+                self.URI, row_ids.EPHEMERAL_RESULT_GONE, list(columns)
+            ),
+        )
+
+    @pytest.mark.parametrize("columns", [("y", "z", "w"), ("w", "z", "y")])
+    @pytest.mark.parametrize(
+        "mapping", [{}, {"absent": "other"}, {"absent": "other", "gone": "more"}]
+    )
+    def test_a_rename_that_names_no_token_changes_nothing(
+        self, columns: tuple[str, ...], mapping: dict[str, str]
+    ) -> None:
+        placeholder = self._placeholder(columns)
+        tokens = dict(placeholder.source_info())
+        table = placeholder.source_info_table()
+        instance = row_ids.instance_id(HASHER, _tag(), placeholder)
+        assert len(tokens) == 3
+
+        renamed = placeholder.rename(mapping)
+        if not mapping:
+            assert renamed is placeholder
+        assert isinstance(renamed, EmptyData)
+        for row in (renamed, placeholder):
+            assert row.source_info() == tokens
+            assert list(row.source_info()) == list(columns)
+            assert row.source_info_table().equals(table)
+            assert row.source_info_table().schema.equals(table.schema)
+            assert row_ids.instance_id(HASHER, _tag(), row) == instance
+            assert row.content_hash() == _data().content_hash()
+
+    @pytest.mark.parametrize("columns", [("y", "z", "w"), ("w", "z", "y")])
+    def test_a_rename_that_names_tokens_moves_them(
+        self, columns: tuple[str, ...]
+    ) -> None:
+        placeholder = self._placeholder(columns)
+        tokens = dict(placeholder.source_info())
+        instance = row_ids.instance_id(HASHER, _tag(), placeholder)
+        mapping = {"y": "q", "w": "r", "absent": "other"}
+
+        renamed = placeholder.rename(mapping)
+        assert renamed.source_info() == {
+            mapping.get(name, name): token for name, token in tokens.items()
+        }
+        assert sorted(renamed.source_info_table().column_names) == [
+            "_source_q",
+            "_source_r",
+            "_source_z",
+        ]
+        assert row_ids.instance_id(HASHER, _tag(), renamed) != instance
+        # The first row is as it was.
+        assert placeholder.source_info() == tokens
+        assert row_ids.instance_id(HASHER, _tag(), placeholder) == instance
