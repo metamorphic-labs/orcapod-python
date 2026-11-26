@@ -37,7 +37,7 @@ What the probe established (Live):
 | listing a dataset | no SDK call; the HTTP listing PR 550 uses is marked **deprecated** in the service's reference. Its items hold id, dataset, name, key schema and root: **no metadata** |
 | metadata of a listed table | one open by id and one metadata read per table |
 
-The probe left six empty throwaway tables in the conformance dataset, named
+The probes left seven empty throwaway tables in the conformance dataset, named
 `orcapod_r2probe_66783e4c_*` (their rows are deleted; one holds a large metadata record). They
 are to be dropped once SpiralDB offers a drop of a keyed table.
 
