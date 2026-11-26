@@ -1,10 +1,11 @@
-# Tutorial
+# Tutorials
 
-This tutorial teaches Orcapod by building one small analysis from start to finish. It is
-written for scientists who are comfortable with Python and have not used Orcapod before. You
-can work through it on your own, at your own pace, on a laptop.
+These tutorials teach Orcapod on one small analysis. The core course builds it from start to
+finish, and the short tutorials each add one subject. They are written for scientists who are
+comfortable with Python and have not used Orcapod before. You can work through them on your
+own, at your own pace, on a laptop.
 
-Each part takes about 20 minutes: a few minutes of reading, samples to run, and two or three
+A page takes about 20 minutes: a few minutes of reading, samples to run, and two or three
 exercises. Every exercise has a solution you can unfold. Every sample on these pages is run by
 Orcapod's test suite, so what a page shows is what the library prints.
 
@@ -44,7 +45,9 @@ workshop_data/
 
 27 files, about 0.4 MB. [Part 0](00-setup.md) shows how to generate it.
 
-## The parts
+## Core course
+
+Do these parts in order.
 
 | Part | You learn | Time |
 |---|---|---|
@@ -55,19 +58,26 @@ workshop_data/
 | [4. Many rows into one](04-many-rows-into-one.md) | Grouping rows and computing over the group | 20 min |
 | [5. Keeping results](05-pipeline-job.md) | `PipelineJob`: run a pipeline against a database | 20 min |
 | [6. Re-runs](06-reruns-and-caching.md) | What is recomputed, and what is not | 20 min |
-| [7. Working with files](07-files.md) | Functions that read and write files | 20 min |
-| [8. Inspecting and tracing](08-inspecting-and-tracing.md) | Where a result came from | 20 min |
-| [9. Handling errors](09-when-things-go-wrong.md) | Errors while building a pipeline; failed rows in a run | 15 min |
-| [10. Where next](10-where-next.md) | Features this tutorial did not cover | optional |
 
-Parts 0 to 6 are the core and should be done in order. Parts 7 to 10 can be read in any
-order afterwards.
+## Short tutorials
+
+Each is on one subject and can be read in any order after the parts it names.
+
+| Tutorial | You learn | Before you start | Time |
+|---|---|---|---|
+| [Working with files](files.md) | Functions that read and write files | Parts 0 to 5 | 20 min |
+| [Inspecting results](inspecting-results.md) | The steps of a job, where a row came from, the record of each call | Parts 0 to 6 | 15 min |
+| [Tracing a value](tracing-a-value.md) | One value back to its source cells; why a row is missing | Parts 0 to 6 | 20 min |
+| [Chaining pipelines](chaining-pipelines.md) | A second pipeline over the stored results of the first | Parts 0 to 5 | 10 min |
+| [Handling errors](handling-errors.md) | Errors while building a pipeline; failed rows in a run | Parts 0 to 6 | 15 min |
+
+[Where next](where-next.md) is a short tour of features these pages did not cover.
 
 ## How to use these pages
 
 Type or paste each sample into a Python session, a notebook, or a script, in the order shown.
 Within one page, later samples use names defined by earlier ones. Each page starts from
-scratch, so you can stop after any part and pick up at the next one later.
+scratch, so you can stop after any page and pick up at the next one later.
 
 Lines starting with `#` directly under a `print(...)` show what it prints. Where a value
 differs from run to run (a hash, a timestamp), the page shows `...` in its place.

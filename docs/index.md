@@ -66,8 +66,9 @@ for tag, data in result:
 
 - [Getting Started](getting-started.md) -- a hands-on walkthrough of sources, streams,
   function pods, and operators.
-- [Tutorial](tutorial/index.md) -- a self-paced course in eleven short parts, from a first
-  stream to a stored, re-runnable pipeline over files, with exercises and solutions.
+- [Tutorials](tutorial/index.md) -- a self-paced core course in seven parts, from a first
+  stream to a stored, re-runnable pipeline, and short tutorials on files, inspecting results,
+  tracing a value, chaining pipelines and handling errors, with exercises and solutions.
 - [Concepts](concepts/sources.md) -- deeper explanations of Orcapod's core abstractions.
 - [Troubleshooting](troubleshooting.md) -- common errors, their causes and fixes.
 - [API Reference](api/index.md) -- complete reference for all public classes and functions.

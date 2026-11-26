@@ -232,4 +232,4 @@ With `pip`, in the activated environment: `python my_pipeline.py`.
 The results above are held in memory, so each new run computes everything again. To save
 results in a database and have later runs compute only what is new, record the same steps
 inside a `PipelineJob`. See [Pipelines and Jobs](concepts/pipeline-job.md), or work through
-the [Tutorial](tutorial/index.md), which builds up to it step by step.
+the [Tutorials](tutorial/index.md), which build up to it step by step.
