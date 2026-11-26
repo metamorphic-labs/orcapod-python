@@ -775,35 +775,261 @@ def test_storage_types_differing_in_nested_field_metadata_are_different_types(
         assert column.to_pylist() == rows
 
 
-def test_an_instance_is_kept_before_any_caller_can_get_it(
+def test_an_instance_is_pinned_before_any_caller_can_get_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The permanent reference is added before the instance is published.
+    """An instance is pinned while the table's lock is held, once for its key.
 
-    Otherwise a competing caller could be handed a type that is not yet kept. About
-    ``KeptInstances`` itself: it reads the order of its two steps.
+    Every caller reads the table under that lock, so none is handed a type that is not
+    yet kept. About ``KeptInstances`` itself: it reads where the pin happens.
     """
-    published_when_kept: list[bool] = []
+    held_when_pinned: list[bool] = []
+    pinned: list[Any] = []
     keep = arrow_lifetime.keep_for_process
 
+    def lock_is_free() -> bool:
+        free = arrow_lifetime._LOCK.acquire(blocking=False)
+        if free:
+            arrow_lifetime._LOCK.release()
+        return free
+
     def watched(extension_type: pa.ExtensionType) -> pa.ExtensionType:
-        published_when_kept.append(
-            any(kept is extension_type for kept in KeptInstances._kept.values())
-        )
+        with ThreadPoolExecutor(1) as other_thread:
+            held_when_pinned.append(not other_thread.submit(lock_is_free).result())
+        pinned.append(extension_type)
         return keep(extension_type)
 
     monkeypatch.setattr(arrow_lifetime, "keep_for_process", watched)
-    made = _made("test.lifetime.kept_first")
+    made = _made("test.lifetime.pinned_first")
 
     class Custom(made):
         pass
 
     first = made()  # pyright: ignore[reportCallIssue]  # the synthesized class takes no arguments
     custom = Custom()  # pyright: ignore[reportCallIssue]  # the synthesized class takes no arguments
-    assert published_when_kept[:2] == [False, False]
-    assert not any(published_when_kept)
-    assert any(kept is first for kept in KeptInstances._kept.values())
-    assert any(kept is custom for kept in KeptInstances._kept.values())
+    for _ in range(3):
+        assert made() is first  # pyright: ignore[reportCallIssue]  # the synthesized class takes no arguments
+        assert Custom() is custom  # pyright: ignore[reportCallIssue]  # the synthesized class takes no arguments
+    assert held_when_pinned == [True, True]
+    assert len(pinned) == 2 and pinned[0] is first and pinned[1] is custom
+    with ThreadPoolExecutor(1) as other_thread:
+        assert other_thread.submit(lock_is_free).result()
+
+
+def _loose_metaclass() -> type[KeptInstances]:
+    class LooseMeta(KeptInstances):
+        """Classes that all compare equal and hash alike."""
+
+        def __eq__(cls, other: object) -> bool:
+            return isinstance(other, LooseMeta)
+
+        def __hash__(cls) -> int:
+            return 0
+
+    return LooseMeta
+
+
+def _raising_metaclass() -> type[KeptInstances]:
+    class RaisingMeta(KeptInstances):
+        """Classes that cannot be hashed or compared."""
+
+        def __eq__(cls, other: object) -> bool:
+            raise RuntimeError("this class cannot be compared")
+
+        def __hash__(cls) -> int:
+            raise RuntimeError("this class cannot be hashed")
+
+    return RaisingMeta
+
+
+@pytest.mark.parametrize("metaclass", ["loose", "raising"])
+@pytest.mark.parametrize("order", [(0, 1, 2), (2, 0, 1)])
+def test_a_class_is_told_apart_by_what_it_is_not_by_its_equality(
+    metaclass: str, order: tuple[int, ...]
+) -> None:
+    """Classes that compare equal, or cannot be hashed, each keep their own instance."""
+    name = f"test.lifetime.class_identity.{metaclass}.{'_'.join(map(str, order))}"
+    made = _made(name)
+    meta = _loose_metaclass() if metaclass == "loose" else _raising_metaclass()
+    refs: list[weakref.ref[Any]] = []
+
+    def subclass(index: int) -> type[Any]:
+        class Sibling(made, metaclass=meta):
+            def __init__(self) -> None:
+                refs.append(weakref.ref(self))
+                self.index = index
+                pa.ExtensionType.__init__(self, pa.int64(), name)
+
+            def __arrow_ext_scalar_class__(self) -> type[pa.ExtensionScalar]:
+                return _TaggedScalar
+
+        Sibling.__name__ = f"Sibling{index}"
+        return Sibling
+
+    classes = [subclass(index) for index in range(3)]
+    types = {index: classes[index]() for index in order}
+    for index in order[::-1]:
+        assert type(types[index]) is classes[index]
+        assert types[index].index == index
+        assert classes[index]() is types[index]
+        assert _array(types[index], [index, None]).to_pylist() == [
+            f"Sibling{index}:{index}",
+            None,
+        ]
+    assert len({id(t) for t in types.values()}) == 3
+    # Nothing but the three types is kept: every other instance made is gone.
+    del types
+    gc.collect()
+    assert sum(ref() is not None for ref in refs) == 3
+
+
+@pytest.mark.parametrize("order", ["winner_first", "returning_class_first"])
+def test_a_new_that_returns_the_kept_instance_adds_no_reference(order: str) -> None:
+    """A thousand calls that give the instance already kept pin it no further."""
+    name = f"test.lifetime.returning.{order}"
+    made = _made(name)
+    winner: list[Any] = []
+
+    class Returning(made):
+        def __new__(cls) -> Any:
+            if winner:
+                return winner[0]
+            return super().__new__(cls)
+
+        def __init__(self) -> None:
+            if not winner:
+                pa.ExtensionType.__init__(self, pa.int64(), name)
+
+    class Plain(made):
+        pass
+
+    classes = [Plain, Returning] if order == "winner_first" else [Returning, Plain]
+    first = [cls() for cls in classes]  # pyright: ignore[reportCallIssue]  # the synthesized class takes no arguments
+    winner.append(first[classes.index(Returning)])
+    kept = winner[0]
+    before = sys.getrefcount(kept)
+    for _ in range(1000):
+        assert Returning() is kept
+        assert Plain() is first[classes.index(Plain)]  # pyright: ignore[reportCallIssue]  # the synthesized class takes no arguments
+    assert sys.getrefcount(kept) - before == 0
+
+
+class _FailingOnce(dict):  # pyright: ignore[reportMissingTypeArgument]  # the table's own types
+    """A table whose next insertion fails for lack of memory."""
+
+    failures = 1
+
+    def _fail(self) -> None:
+        if self.failures:
+            self.failures -= 1
+            raise MemoryError("no memory for the table entry")
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        self._fail()
+        super().__setitem__(key, value)
+
+    def setdefault(self, key: Any, default: Any = None) -> Any:
+        if key not in self:
+            self._fail()
+        return super().setdefault(key, default)
+
+
+@pytest.mark.parametrize("units", [("m", "s"), ("s", "m")])
+def test_a_failed_insertion_keeps_nothing(
+    monkeypatch: pytest.MonkeyPatch, units: tuple[str, str]
+) -> None:
+    """An instance that could not be stored is not pinned, and the next call works."""
+    name = f"test.lifetime.failed_insertion.{'_'.join(units)}"
+    made = _made(name)
+    refs: list[weakref.ref[Any]] = []
+
+    class Unit(made):
+        def __init__(self, unit: str) -> None:
+            refs.append(weakref.ref(self))
+            self.unit = unit
+            pa.ExtensionType.__init__(self, pa.int64(), name)
+
+        def __arrow_ext_serialize__(self) -> bytes:
+            return self.unit.encode()
+
+    table = _FailingOnce(KeptInstances._kept)
+    monkeypatch.setattr(KeptInstances, "_kept", table)
+    with pytest.raises(MemoryError, match="no memory for the table entry"):
+        Unit(units[0])
+    gc.collect()
+    assert [ref() is not None for ref in refs] == [False]
+
+    types = [Unit(unit) for unit in units]
+    assert [t.unit for t in types] == list(units)
+    assert [Unit(unit) for unit in units[::-1]] == types[::-1]
+    assert Unit(units[0]) is types[0] and Unit(units[1]) is types[1]
+    del types
+    gc.collect()
+    assert sum(ref() is not None for ref in refs) == 2
+
+
+_NO_SYMBOL_LOOKUP = """
+    import gc
+    import sys
+    import weakref
+
+    import pyarrow as pa
+
+    from orcapod.logical_types import make_arrow_extension_type
+
+    def deny(event, args):
+        if event.startswith("ctypes.dlsym"):
+            raise RuntimeError("symbol lookup denied: " + repr(args[1:]))
+
+    sys.addaudithook(deny)
+
+    name = "test.lifetime.audit"
+    made = make_arrow_extension_type(name, pa.int64(), b"1")
+    constructed = []
+    inner = []
+
+    class Nested(made):
+        def __init__(self, unit):
+            constructed.append(weakref.ref(self))
+            self.unit = unit
+            pa.ExtensionType.__init__(self, pa.int64(), name)
+            if len(constructed) % 2:
+                # The same key, stored before this instance is.
+                inner.append(Nested(unit))
+
+        def __arrow_ext_serialize__(self):
+            return self.unit.encode()
+
+    for unit in sys.argv[1:]:
+        outer = Nested(unit)
+        assert inner.pop() is outer and outer.unit == unit
+        assert Nested(unit) is outer
+        del outer
+    assert type(made()) is made
+    gc.collect()
+    alive = [ref() is not None for ref in constructed]
+    # Per unit: the outer instance lost, the inner one is kept, later ones are hits.
+    assert alive == [False, True, False, False] * len(sys.argv[1:]), alive
+    print("kept", sum(alive), flush=True)
+"""
+
+
+@pytest.mark.parametrize("units", [("m", "s", "kg"), ("kg", "m", "s")])
+def test_keeping_a_type_looks_up_no_symbol(units: tuple[str, ...]) -> None:
+    """What the pin needs is bound when Orcapod is imported.
+
+    A process that refuses symbol lookups afterwards (an audit hook) still makes, keeps
+    and drops types: nothing is left pinned by a failed clean-up.
+    """
+    result = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(_NO_SYMBOL_LOOKUP), *units],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr[-3000:]
+    assert result.stdout.splitlines()[-1] == "kept 3"
 
 
 @pytest.mark.parametrize("depth", [1, 3])
