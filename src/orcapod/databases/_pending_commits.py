@@ -8,12 +8,6 @@ from contextlib import contextmanager
 import pyarrow as pa
 
 
-class RejectedWriteRow:
-    """Attach the rejected row's input position to an atomic connector error."""
-
-    row_index: int | None = None
-
-
 class PendingCommit:
     """The outcome of an attempt to commit pending results."""
 
@@ -25,12 +19,14 @@ class PendingCommit:
         """Withdraw this dependent record if the attempt fails."""
         self._dependents.setdefault((queue, key), set()).add(record_id)
 
-    def finish(self, *, committed: bool) -> None:
+    def finish(
+        self, *, committed: bool, discarded: dict[str, set[bytes]] | None = None
+    ) -> None:
         """Release the guarded rows on success or withdraw them on failure."""
         self.committed = committed
         if not committed:
             for (queue, key), ids in self._dependents.items():
-                queue.discard(key, ids, self)
+                queue.discard(key, ids, self, discarded=discarded)
         self._dependents.clear()
 
 
@@ -83,16 +79,24 @@ class PendingCommits:
             attempt.finish(committed=committed)
 
     def finish_rows(
-        self, key: str, attempted: set[bytes], committed: set[bytes]
+        self,
+        key: str,
+        attempted: set[bytes],
+        *,
+        committed: bool,
+        discarded: dict[str, set[bytes]] | None = None,
     ) -> None:
-        """Release dependents of durable rows and withdraw those of failed rows."""
+        """Resolve dependents of attempted rows, leaving other guards in place."""
         attempts = self._attempts.get(key)
         if attempts is None:
             return
-        for record_id in attempts.keys() & attempted:
-            attempts.pop(record_id).finish(committed=record_id in committed)
+        resolved = [
+            attempts.pop(record_id) for record_id in attempts.keys() & attempted
+        ]
         if not attempts:
             self._attempts.pop(key)
+        for attempt in resolved:
+            attempt.finish(committed=committed, discarded=discarded)
 
     @contextmanager
     def guard(
@@ -110,15 +114,25 @@ class PendingCommits:
             if record_id not in self._ids.get(key, ()):
                 self.forget(key, {record_id})
 
-    def discard(self, key: str, ids: set[bytes], attempt: PendingCommit) -> None:
+    def discard(
+        self,
+        key: str,
+        ids: set[bytes],
+        attempt: PendingCommit,
+        *,
+        discarded: dict[str, set[bytes]] | None = None,
+    ) -> None:
         """Withdraw the records still guarded by the failed attempt."""
         guards = self._guards.get(key, {})
         ids = {record_id for record_id in ids if guards.get(record_id) is attempt}
         self.forget(key, ids)
         held_ids = self._ids.get(key)
-        if held_ids is None or not held_ids.intersection(ids):
+        if held_ids is None:
             return
-        held_ids.difference_update(ids)
+        removed = ids & held_ids
+        if not removed:
+            return
+        held_ids.difference_update(removed)
         if held_ids:
             self._batches[key] = self._select(self._batches[key], ids, keep=False)
         else:
@@ -127,6 +141,9 @@ class PendingCommits:
             self._schema_checks.pop(key, None)
             if self._on_empty is not None:
                 self._on_empty(key)
+        if discarded is not None:
+            discarded.setdefault(key, set()).update(removed)
+        self.finish_rows(key, removed, committed=False, discarded=discarded)
 
     def take_ready(self, key: str) -> tuple[pa.Table, set[bytes]] | None:
         """Take the records ready to commit, leaving blocked records readable."""

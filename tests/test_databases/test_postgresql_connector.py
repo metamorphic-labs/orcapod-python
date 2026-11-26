@@ -21,44 +21,31 @@ from orcapod.databases.postgresql_connector import (
     _coerce_pg_value,
     _pg_type_to_arrow,
 )
-from orcapod.errors import InputValidationError
+from orcapod.errors import OrcapodDatabaseWriteError
 from orcapod.protocols.db_connector_protocol import DBConnectorProtocol
 from orcapod.types import ColumnInfo
 
 
 class _PostgreSQLTransaction:
-    """Track PostgreSQL's aborted transaction and the effects of savepoint commands."""
+    """Track PostgreSQL's aborted transaction and durable writes."""
 
     def __init__(self) -> None:
         self.committed = {b"seed": 1}
         self.pending = self.committed.copy()
-        self.savepoint: dict[bytes, int] | None = None
         self.aborted = False
         self.commands: list[str] = []
 
     def execute(self, sql: str, row: tuple[bytes, int] | None = None) -> None:
-        if sql.startswith("ROLLBACK TO SAVEPOINT "):
-            assert self.savepoint is not None
-            self.pending = self.savepoint.copy()
-            self.aborted = False
         assert not self.aborted
-        if sql.startswith("SAVEPOINT "):
-            assert self.savepoint is None
-            self.savepoint = self.pending.copy()
-        elif sql.startswith("RELEASE SAVEPOINT "):
-            assert self.savepoint is not None
-            self.savepoint = None
-        elif sql.startswith("INSERT "):
+        if sql.startswith("INSERT "):
             assert row is not None
             key, value = row
             if value < 0:
                 self.aborted = True
                 raise psycopg.errors.CheckViolation("value must be positive")
             self.pending[key] = value
-        elif not sql.startswith("ROLLBACK TO SAVEPOINT "):
-            assert sql.startswith("CREATE TABLE IF NOT EXISTS") or sql == (
-                "SET CONSTRAINTS ALL IMMEDIATE"
-            )
+        else:
+            assert sql.startswith("CREATE TABLE IF NOT EXISTS")
         self.commands.append(sql)
 
     def executemany(self, sql: str, rows: Iterable[tuple[bytes, int]]) -> None:
@@ -67,14 +54,12 @@ class _PostgreSQLTransaction:
 
     def commit(self) -> None:
         assert not self.aborted
-        assert self.savepoint is None
         self.committed = self.pending.copy()
         self.commands.append("COMMIT")
 
     def rollback(self) -> None:
         self.aborted = False
         self.pending = self.committed.copy()
-        self.savepoint = None
         self.commands.append("ROLLBACK")
 
     def read(self) -> Iterator[pa.RecordBatch]:
@@ -89,7 +74,7 @@ class _PostgreSQLTransaction:
 
 @pytest.mark.parametrize("bad_first", [False, True])
 @pytest.mark.parametrize("on_event_loop", [False, True])
-def test_postgresql_check_refusal_uses_savepoints_to_commit_valid_rows(
+def test_postgresql_check_refusal_rolls_back_and_names_the_whole_batch(
     bad_first: bool, on_event_loop: bool
 ) -> None:
     transaction = _PostgreSQLTransaction()
@@ -126,33 +111,21 @@ def test_postgresql_check_refusal_uses_savepoints_to_commit_valid_rows(
             for batch in (left, right) if bad_first else (right, left):
                 writer.add_records(("t",), batch, record_id_column="id")
             with pytest.raises(
-                InputValidationError, match="must be positive"
+                OrcapodDatabaseWriteError, match="must be positive"
             ) as refused:
                 writer.flush()
             for handle in (reader, writer):
                 rows = handle.get_all_records(("t",), record_id_column="id")
                 assert rows is not None
-                assert rows.sort_by("id").to_pylist() == [
-                    {"id": b"good-1", "v": 11},
-                    {"id": b"good-2", "v": 12},
-                    {"id": b"seed", "v": 1},
-                ]
-            assert "bad-1" in str(refused.value) and "bad-2" in str(refused.value)
-            assert (
-                sum(
-                    command.startswith("SAVEPOINT ") for command in transaction.commands
-                )
-                == 4
-            )
-            assert (
-                sum(
-                    command.startswith("ROLLBACK TO SAVEPOINT ")
-                    for command in transaction.commands
-                )
-                == 2
+                assert rows.to_pylist() == [{"id": b"seed", "v": 1}]
+            assert "'t'" in str(refused.value)
+            assert all(
+                repr(key) in str(refused.value)
+                for key in (b"bad-1", b"bad-2", b"good-1", b"good-2")
             )
             assert transaction.commands.count("ROLLBACK") == 1
-            assert transaction.commands[-1] == "COMMIT"
+            assert transaction.commands[-1] == "ROLLBACK"
+            cursor.executemany.assert_called_once()
             before = transaction.commands.copy()
             writer.flush()
             assert transaction.commands == before

@@ -25,7 +25,6 @@ from typing import TYPE_CHECKING, Any
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from orcapod.databases._sql_writes import RowIsolation, write_with_savepoints
 from orcapod.databases.utils import is_direct_projection
 from orcapod.errors import UnstorableTableNameError, UnsupportedValueError
 from orcapod.types import ColumnInfo
@@ -37,13 +36,6 @@ else:
     psycopg = LazyModule("psycopg")
 
 logger = logging.getLogger(__name__)
-
-
-def _is_row_refusal(error: Exception) -> bool:
-    return isinstance(
-        error,
-        (psycopg.IntegrityError, psycopg.DataError, psycopg.errors.RaiseException),
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -677,37 +669,6 @@ class PostgreSQLConnector:
         skip_existing: bool = False,
     ) -> None:
         """Write records to a table using upsert semantics."""
-        self._upsert_records(
-            table_name, records, id_column, skip_existing, isolate=False
-        )
-
-    def isolate_refused_rows(
-        self,
-        table_name: str,
-        records: pa.Table,
-        id_column: str,
-        skip_existing: bool,
-        error: Exception,
-        progress: RowIsolation,
-    ) -> bool:
-        if not _is_row_refusal(error):
-            return False
-        refused = self._upsert_records(
-            table_name, records, id_column, skip_existing, isolate=True
-        )
-        progress.refused.update(refused)
-        progress.settled.update(range(records.num_rows))
-        return True
-
-    def _upsert_records(
-        self,
-        table_name: str,
-        records: pa.Table,
-        id_column: str,
-        skip_existing: bool,
-        *,
-        isolate: bool,
-    ) -> dict[int, str]:
         self._require_table_name(table_name)
         with self._lock:
             conn = self._require_open()
@@ -740,17 +701,8 @@ class PostgreSQLConnector:
             rows_iter = (tuple(row[c] for c in cols) for row in records.to_pylist())
             try:
                 with conn.cursor() as cur:
-                    if isolate:
-                        # Report deferred constraint violations inside the row's savepoint.
-                        cur.execute("SET CONSTRAINTS ALL IMMEDIATE")
-                        refused = write_with_savepoints(
-                            cur.execute, sql, rows_iter, _is_row_refusal
-                        )
-                    else:
-                        cur.executemany(sql, rows_iter)
-                        refused = {}
+                    cur.executemany(sql, rows_iter)
                 conn.commit()
-                return refused
             except BaseException:
                 conn.rollback()
                 raise

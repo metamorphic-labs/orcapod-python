@@ -23,20 +23,10 @@ from typing import Any
 
 import pyarrow as pa
 
-from orcapod.databases._pending_commits import RejectedWriteRow
-from orcapod.databases._sql_writes import RowIsolation
 from orcapod.databases.utils import is_direct_projection
 from orcapod.types import ColumnInfo
 
 logger = logging.getLogger(__name__)
-
-
-class _SQLiteRejectedWriteRow(sqlite3.IntegrityError, RejectedWriteRow):
-    """A native SQLite integrity error with the index of the rejected row."""
-
-
-def _is_row_refusal(error: Exception) -> bool:
-    return isinstance(error, (sqlite3.IntegrityError, sqlite3.DataError))
 
 
 # ---------------------------------------------------------------------------
@@ -478,30 +468,6 @@ class SQLiteConnector:
             skip_existing: If True, skip rows whose id already exists
                 (INSERT OR IGNORE). If False, overwrite (INSERT OR REPLACE).
         """
-        self._upsert_records(table_name, records, skip_existing)
-
-    def isolate_refused_rows(
-        self,
-        table_name: str,
-        records: pa.Table,
-        id_column: str,
-        skip_existing: bool,
-        error: Exception,
-        progress: RowIsolation,
-    ) -> bool:
-        if not _is_row_refusal(error):
-            return False
-        self._upsert_records(table_name, records, skip_existing, progress=progress)
-        return True
-
-    def _upsert_records(
-        self,
-        table_name: str,
-        records: pa.Table,
-        skip_existing: bool,
-        *,
-        progress: RowIsolation | None = None,
-    ) -> None:
         with self._lock:
             conn = self._require_open()
             self._validate_table_name(table_name)
@@ -510,55 +476,14 @@ class SQLiteConnector:
             placeholders = ", ".join("?" for _ in cols)
             verb = "INSERT OR IGNORE" if skip_existing else "INSERT OR REPLACE"
             sql = f'{verb} INTO "{table_name}" ({col_list}) VALUES ({placeholders})'
-            row_index = -1
-
-            def rows() -> Iterator[tuple[Any, ...]]:
-                nonlocal row_index
-                for row_index, row in enumerate(records.to_pylist()):
-                    yield tuple(row[c] for c in cols)
-
-            if progress is not None:
-                # RAISE(ROLLBACK) ends the transaction, and a deferred foreign key
-                # is checked only at commit. Each row therefore owns a transaction.
-                for values in rows():
-                    conn.execute("BEGIN")
-                    try:
-                        conn.execute(sql, values)
-                        conn.commit()
-                    except BaseException as error:
-                        if conn.in_transaction:
-                            conn.rollback()
-                        if not isinstance(error, Exception) or not _is_row_refusal(
-                            error
-                        ):
-                            raise
-                        progress.refused[row_index] = str(error)
-                    progress.settled.add(row_index)
-                return
-
-            conn.execute("BEGIN")
+            rows = (tuple(row[c] for c in cols) for row in records.to_pylist())
             try:
-                conn.executemany(sql, rows())
-                row_index = -1  # Commit-time failures have no individual row.
+                conn.execute("BEGIN")
+                conn.executemany(sql, rows)
                 conn.commit()
-            except BaseException as error:
-                conn.rollback()
-                # sqlite3 steps each row before asking the iterator for the next one.
-                # These two constraints diagnose the row being stepped.
-                if (
-                    isinstance(error, sqlite3.IntegrityError)
-                    and row_index >= 0
-                    and error.sqlite_errorcode
-                    in (
-                        sqlite3.SQLITE_CONSTRAINT_NOTNULL,
-                        sqlite3.SQLITE_CONSTRAINT_CHECK,
-                    )
-                ):
-                    rejected = _SQLiteRejectedWriteRow(*error.args)
-                    rejected.sqlite_errorcode = error.sqlite_errorcode
-                    rejected.sqlite_errorname = error.sqlite_errorname
-                    rejected.row_index = row_index
-                    raise rejected from error
+            except BaseException:
+                if conn.in_transaction:
+                    conn.rollback()
                 raise
 
     @property

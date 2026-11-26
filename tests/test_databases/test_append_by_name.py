@@ -38,6 +38,7 @@ from orcapod.databases.utils import declared_null_path, in_held_column_order
 from orcapod.errors import (
     InputValidationError,
     NullInNonNullableColumnError,
+    OrcapodDatabaseWriteError,
     UnstorableColumnError,
     UnsupportedValueError,
 )
@@ -686,7 +687,7 @@ def test_a_table_changed_between_queue_and_flush_is_refused_as_on_main(
         with sqlite3.connect(path) as other:
             CHANGES[change](other)
     before = _sqlite(path).get_all_records(PATH, record_id_column="rid")
-    with pytest.raises(ValueError, match="Schema mismatch"):
+    with pytest.raises(OrcapodDatabaseWriteError, match="Schema mismatch"):
         db.flush()
     after = _sqlite(path).get_all_records(PATH, record_id_column="rid")
     assert before is not None and after is not None
@@ -1196,58 +1197,25 @@ def test_stored_not_null_refusal_preserves_other_rows_and_tables(
             _add(reader, _nullable_values([(b"changed", 77)]), flush=True)
         else:
             _add(reader, seed, flush=True)
-            with pytest.raises(NullInNonNullableColumnError, match="'v'"):
+            with pytest.raises(OrcapodDatabaseWriteError, match="'v'") as raised:
                 writer.flush()
-        expected = [
-            {ID: b"changed", "v": 77 if stored_at_enqueue else 1},
-            {ID: b"later", "v": 3},
-            {ID: b"valid", "v": 2},
-        ]
+            assert all(
+                repr(key) in str(raised.value)
+                for key in (b"bad", b"also-bad", b"valid", b"later")
+            )
+        expected = [{ID: b"changed", "v": 1}]
+        if stored_at_enqueue:
+            expected = [
+                {ID: b"changed", "v": 77},
+                {ID: b"later", "v": 3},
+                {ID: b"valid", "v": 2},
+            ]
         assert _read_values(writer).to_pylist() == expected
         independent = _nullable_values([(b"ok", 5), (b"also-ok", 6)])
         writer.add_records(
             ("independent",), independent, record_id_column=ID, flush=True
         )
         assert _read_values(reader, ("independent",)).equals(independent.sort_by(ID))
-        writer.flush()
-        assert _read_values(reader).to_pylist() == expected
-
-
-@pytest.mark.parametrize("bad_first", [False, True])
-def test_sqlite_check_failure_drops_only_the_rejected_row(
-    tmp_path: Path, bad_first: bool
-) -> None:
-    db_file = str(tmp_path / "store.db")
-    # CHECK is backend metadata the Arrow schema cannot describe.
-    with closing(sqlite3.connect(db_file)) as sql:
-        sql.execute(
-            'CREATE TABLE t ("__record_id" BLOB PRIMARY KEY, v INTEGER CHECK (v > 0))'
-        )
-    with (
-        SQLiteConnector(db_file) as connector,
-        SQLiteConnector(db_file) as reader_connector,
-    ):
-        writer = ConnectorArrowDatabase(connector)
-        reader = ConnectorArrowDatabase(reader_connector)
-        _add(reader, _nullable_values([(b"seed", 1)]), flush=True)
-        good = _nullable_values([(b"good-1", 2), (b"good-2", 3)])
-        mixed = _nullable_values([(b"bad", -1), (b"good-3", 4)])
-        for batch in (mixed, good) if bad_first else (good, mixed):
-            _add(writer, batch)
-        independent_path = ("independent",)
-        independent = _nullable_values([(b"other-1", 5), (b"other-2", 6)])
-        writer.add_records(independent_path, independent, record_id_column=ID)
-        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
-            writer.flush()
-        assert _read_values(reader).to_pylist() == [{ID: b"seed", "v": 1}]
-        assert _read_values(reader, independent_path).equals(independent.sort_by(ID))
-        expected = [
-            {ID: b"good-1", "v": 2},
-            {ID: b"good-2", "v": 3},
-            {ID: b"good-3", "v": 4},
-            {ID: b"seed", "v": 1},
-        ]
-        assert _read_values(writer).to_pylist() == expected
         writer.flush()
         assert _read_values(reader).to_pylist() == expected
 
@@ -1274,13 +1242,15 @@ def test_connector_writes_to_the_same_key_follow_flush_order(
         refused = _nullable_values([(b"bad", -1)])
         for batch in (refused, valid) if bad_first else (valid, refused):
             _add(writer_a, batch)
-        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+        with pytest.raises(OrcapodDatabaseWriteError, match="CHECK"):
             writer_a.flush()
         assert _read_values(writer_b).to_pylist() == [{ID: b"shared", "v": 1}]
 
         _add(writer_b, _nullable_values([(b"shared", 99)]), flush=True)
         assert _read_values(writer_b).to_pylist() == [{ID: b"shared", "v": 99}]
         writer_a.flush()
+        assert _read_values(writer_b).to_pylist() == [{ID: b"shared", "v": 99}]
+        _add(writer_a, valid, flush=True)
         assert _read_values(writer_b).to_pylist() == [
             {ID: b"also-good", "v": 20},
             {ID: b"shared", "v": 10},
@@ -1290,8 +1260,13 @@ def test_connector_writes_to_the_same_key_follow_flush_order(
 @pytest.mark.parametrize("bad_first", [False, True])
 @pytest.mark.parametrize("on_event_loop", [False, True])
 @pytest.mark.parametrize("refusal", ["ABORT", "ROLLBACK", "deferred foreign key"])
-def test_sqlite_refusal_isolation_commits_valid_rows_and_names_rejected_keys(
-    tmp_path: Path, bad_first: bool, on_event_loop: bool, refusal: str
+@pytest.mark.parametrize("skip_duplicates", [False, True])
+def test_sqlite_refusal_drops_and_names_the_whole_batch(
+    tmp_path: Path,
+    bad_first: bool,
+    on_event_loop: bool,
+    refusal: str,
+    skip_duplicates: bool,
 ) -> None:
     db_file = str(tmp_path / "store.db")
     with closing(sqlite3.connect(db_file)) as sql:
@@ -1325,19 +1300,31 @@ def test_sqlite_refusal_isolation_commits_valid_rows_and_names_rejected_keys(
             _add(reader, _nullable_values([(b"seed", 1)]), flush=True)
             left = _nullable_values([(b"bad-1", -1), (b"good-1", 2)])
             right = _nullable_values([(b"good-2", 3), (b"bad-2", -2)]).select(["v", ID])
+            independent = ("independent",)
+            independent_rows = _nullable_values([(b"other-1", 4), (b"other-2", 5)])
+            if not bad_first:
+                writer.add_records(independent, independent_rows, record_id_column=ID)
             for batch in (left, right) if bad_first else (right, left):
-                _add(writer, batch)
-            with pytest.raises(InputValidationError, match=message) as refused:
+                writer.add_records(
+                    PATH, batch, record_id_column=ID, skip_duplicates=skip_duplicates
+                )
+            if bad_first:
+                writer.add_records(independent, independent_rows, record_id_column=ID)
+            with pytest.raises(OrcapodDatabaseWriteError, match=message) as raised:
                 writer.flush()
-            expected = [
-                {ID: b"good-1", "v": 2},
-                {ID: b"good-2", "v": 3},
-                {ID: b"seed", "v": 1},
-            ]
+            expected = [{ID: b"seed", "v": 1}]
             assert _read_values(reader).to_pylist() == expected
-            assert "bad-1" in str(refused.value) and "bad-2" in str(refused.value)
+            assert "'t'" in str(raised.value)
+            assert all(
+                repr(key) in str(raised.value)
+                for key in (b"bad-1", b"bad-2", b"good-1", b"good-2")
+            )
             assert _read_values(writer).to_pylist() == expected
+            assert _read_values(reader, independent).equals(
+                independent_rows.sort_by(ID)
+            )
             writer.flush()
+            assert _read_values(reader).to_pylist() == expected
 
         async def on_loop() -> None:
             check()
@@ -1349,7 +1336,7 @@ def test_sqlite_refusal_isolation_commits_valid_rows_and_names_rejected_keys(
 
 
 @pytest.mark.parametrize("bad_first", [False, True])
-def test_partial_result_commit_preserves_records_guarded_by_committed_results(
+def test_refused_result_batch_drops_and_names_its_guarded_records(
     tmp_path: Path, bad_first: bool
 ) -> None:
     db_file = str(tmp_path / "store.db")
@@ -1368,6 +1355,7 @@ def test_partial_result_commit_preserves_records_guarded_by_committed_results(
         results = ConnectorArrowDatabase(result_connector)
         records = ConnectorArrowDatabase(record_connector)
         dependent_path = ("dependents",)
+        downstream_path = ("downstream",)
         accepted = [(b"good-1", 1), (b"good-2", 2)]
         refused = [(b"bad-1", -1), (b"bad-2", -2)]
         for batch in (refused, accepted) if bad_first else (accepted, refused):
@@ -1382,19 +1370,38 @@ def test_partial_result_commit_preserves_records_guarded_by_committed_results(
                         _nullable_values([(record_id, value)]),
                         record_id_column=ID,
                     )
+                downstream_guard = records.pending_result(dependent_path, record_id)
+                assert downstream_guard is not None
+                downstream_id = b"downstream-" + result_id
+                with records.guard_record(
+                    downstream_path, downstream_id, downstream_guard
+                ):
+                    records.add_records(
+                        downstream_path,
+                        _nullable_values([(downstream_id, value)]),
+                        record_id_column=ID,
+                    )
         records.flush()
         assert results.get_all_records(dependent_path, record_id_column=ID) is None
 
-        with pytest.raises(InputValidationError, match="must be positive"):
+        with pytest.raises(
+            OrcapodDatabaseWriteError, match="must be positive"
+        ) as raised:
             results.flush_result_batch(PATH, publish_records=True)
         results.fail_pending_result(PATH)
-        assert _read_values(results).to_pylist() == [
-            {ID: key, "v": value} for key, value in accepted
-        ]
+        assert results.get_all_records(PATH, record_id_column=ID) is None
+        assert records.get_all_records(dependent_path, record_id_column=ID) is None
+        assert records.get_all_records(downstream_path, record_id_column=ID) is None
+        assert all(
+            repr(table) in str(raised.value)
+            for table in ("t", "dependents", "downstream")
+        )
+        for key, _ in accepted + refused:
+            assert repr(key) in str(raised.value)
+            assert repr(b"record-" + key) in str(raised.value)
+            assert repr(b"downstream-" + key) in str(raised.value)
         records.flush()
-        assert _read_values(results, dependent_path).to_pylist() == [
-            {ID: b"record-" + key, "v": value} for key, value in accepted
-        ]
+        assert results.get_all_records(dependent_path, record_id_column=ID) is None
 
 
 @pytest.mark.parametrize("bad_first", [False, True])

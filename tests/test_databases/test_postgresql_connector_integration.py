@@ -30,6 +30,7 @@ import psycopg
 import pyarrow as pa
 import pytest
 
+from orcapod.errors import OrcapodDatabaseWriteError
 from orcapod.databases import ConnectorArrowDatabase, PostgreSQLConnector
 from orcapod.types import ColumnInfo
 
@@ -474,7 +475,7 @@ class TestConnectorArrowDatabaseWithPostgreSQL:
         db.add_record(("fn", "mismatch"), record_id="r1", record=r1, flush=True)
         r2 = pa.table({"x": pa.array([2.0], type=pa.float64())})
         db.add_record(("fn", "mismatch"), record_id="r2", record=r2)
-        with pytest.raises(ValueError, match="Schema mismatch"):
+        with pytest.raises(OrcapodDatabaseWriteError, match="Schema mismatch"):
             db.flush()
 
 

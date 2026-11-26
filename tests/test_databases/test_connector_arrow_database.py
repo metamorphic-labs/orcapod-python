@@ -36,7 +36,7 @@ import pytest
 # Imports under test — all of these will fail until the modules are created
 # ---------------------------------------------------------------------------
 
-from orcapod.errors import UnsupportedValueError
+from orcapod.errors import OrcapodDatabaseWriteError, UnsupportedValueError
 from orcapod.protocols.db_connector_protocol import DBConnectorProtocol
 from orcapod.types import ColumnInfo
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
@@ -848,83 +848,37 @@ class TestFlushBehaviour:
         assert result is not None
         assert result.num_rows == 2
 
-    def test_failed_flush_retains_queued_rows_and_duplicate_policy(
-        self, monkeypatch: pytest.MonkeyPatch
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_failed_connector_batch_is_reported_and_removed(
+        self, monkeypatch: pytest.MonkeyPatch, reverse: bool
     ) -> None:
         connector = MockDBConnector()
         db = ConnectorArrowDatabase(connector)
-        path = self.PATH
-        db.add_record(path, b"old", make_table(v=[1]), flush=True)
-        db.add_record(path, b"old", make_table(v=[99]), skip_duplicates=True)
-        db.add_record(path, b"first", make_table(v=[2]))
-        db.add_record(path, b"second", make_table(v=[3]))
+        db.add_record(self.PATH, b"old", make_table(v=[1]), flush=True)
+        keys = [b"first", b"second", b"third"]
+        for key in reversed(keys) if reverse else keys:
+            db.add_record(self.PATH, key, make_table(v=[2]), skip_duplicates=True)
 
-        def refuse_write(*args: Any, **kwargs: Any) -> None:
-            raise OSError("store temporarily unavailable")
+        def refuse_write(*args: object, **kwargs: object) -> None:
+            raise OSError("store unavailable")
 
         with monkeypatch.context() as patch:
             patch.setattr(connector, "upsert_records", refuse_write)
-            with pytest.raises(OSError, match="store temporarily unavailable"):
-                db.flush()
-
-        pending_and_stored = db.get_all_records(path, record_id_column="id")
-        assert pending_and_stored is not None
-        assert pending_and_stored.sort_by("v")["v"].to_pylist() == [1, 2, 3, 99]
-        db.flush()
-
-        reader = ConnectorArrowDatabase(connector)
-        stored = reader.get_all_records(path, record_id_column="id")
-        assert stored is not None
-        assert stored.sort_by("id").to_pylist() == [
-            {"id": b"first", "v": 2},
-            {"id": b"old", "v": 1},
-            {"id": b"second", "v": 3},
-        ]
-
-    def test_non_sql_isolation_does_not_replay_rows_settled_before_an_interruption(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        connector = MockDBConnector()
-        db = ConnectorArrowDatabase(connector)
-        other_handle = ConnectorArrowDatabase(connector)
-        upsert = connector.upsert_records
-        path = self.PATH
-        db.add_records(
-            path,
-            pa.table({"id": [b"good", b"bad", b"later"], "v": [10, -1, 20]}),
-            record_id_column="id",
-        )
-
-        def reject_or_interrupt(
-            table_name: str,
-            records: pa.Table,
-            id_column: str,
-            skip_existing: bool = False,
-        ) -> None:
-            values = records["v"].to_pylist()
-            if -1 in values:
-                raise UnsupportedValueError("negative values are refused")
-            if 20 in values:
-                raise OSError("store temporarily unavailable")
-            upsert(table_name, records, id_column, skip_existing=skip_existing)
-
-        with monkeypatch.context() as patch:
-            patch.setattr(connector, "upsert_records", reject_or_interrupt)
             with pytest.raises(
-                OSError, match="store temporarily unavailable"
+                OrcapodDatabaseWriteError, match="store unavailable"
             ) as raised:
                 db.flush()
-        assert "b'bad' — negative values are refused" in "\n".join(
-            raised.value.__notes__
-        )
-        other_handle.add_record(path, b"good", make_table(v=[99]), flush=True)
+        assert all(repr(key) in str(raised.value) for key in keys)
         db.flush()
-        stored = other_handle.get_all_records(path, record_id_column="id")
+        rows = db.get_all_records(self.PATH, record_id_column="id")
+        assert rows is not None
+        assert rows.to_pylist() == [{"id": b"old", "v": 1}]
+        db.add_record(self.PATH, b"old", make_table(v=[99]), flush=True)
+        stored = ConnectorArrowDatabase(connector).get_all_records(
+            self.PATH, record_id_column="id"
+        )
         assert stored is not None
-        assert stored.sort_by("id").to_pylist() == [
-            {"id": b"good", "v": 99},
-            {"id": b"later", "v": 20},
-        ]
+        assert stored.to_pylist() == [{"id": b"old", "v": 99}]
 
     def test_second_flush_on_existing_table_upserts(self, db):
         """Flushing the same path twice should not duplicate rows."""
@@ -956,7 +910,7 @@ class TestFlushBehaviour:
         assert result is not None
         assert result["v"][0].as_py() == 1  # original preserved via skip_existing=True
 
-    def test_flush_schema_mismatch_raises_value_error(self, db):
+    def test_flush_schema_mismatch_reports_discarded_keys(self, db):
         """flush() must raise ValueError when the pending schema differs from
         the table already in the connector — before any data is written."""
         db.add_record(("t",), b"a", make_table(v=[1]), flush=True)
@@ -966,7 +920,7 @@ class TestFlushBehaviour:
             pa.table({"__record_id": pa.array([b"b"]), "x": pa.array([2])}),
             record_id_column="__record_id",
         )
-        with pytest.raises(ValueError, match="Schema mismatch"):
+        with pytest.raises(OrcapodDatabaseWriteError, match="Schema mismatch"):
             db.flush()
 
 
