@@ -1005,14 +1005,16 @@ current data context are the current entries.
 
 | Table | Layout (last path component) | Constant |
 |---|---|---|
-| Function pipeline | `pdb_v1` | `PIPELINE_DB_SCHEMA_VERSION` |
+| Function pipeline | `pdb_v2` | `PIPELINE_DB_SCHEMA_VERSION` |
 | Function result | `rdb_v1` (after the type's revision, `rev1`) | `RESULT_DB_SCHEMA_VERSION` |
-| Side-effect log | `tdb_v1` | `TRACKING_DB_SCHEMA_VERSION` |
-| Operator cache | `odb_v1` | `OPERATOR_DB_SCHEMA_VERSION` |
+| Side-effect log | `tdb_v2` | `TRACKING_DB_SCHEMA_VERSION` |
+| Operator cache | `odb_v2` | `OPERATOR_DB_SCHEMA_VERSION` |
 | Cached source | `sdb_v1` | `SOURCE_DB_SCHEMA_VERSION` |
 
-- Every layout marker starts at `v1` for the first release, 0.4.0 (developer, November 18,
-  2026, ITL-1259; 0.3.0 was withdrawn, so nothing released uses `v2`). A change to the common
+- Every layout marker started at `v1` for the first release, 0.4.0 (developer, November 18,
+  2026, ITL-1259; 0.3.0 was withdrawn). The pipeline, side-effect log and operator cache
+  layouts moved to `v2` before that release, with the three row ids (developer, November 25,
+  2026, ITL-1471; below, "Row ids"). A change to the common
   bookkeeping columns of a table kind moves its layout version, so the table gets a new path.
   Never add, rename or retype a stored column without it.
 - A function result table is at
@@ -1031,7 +1033,7 @@ current data context are the current entries.
     correct result for the same input? No: a new major. Yes: a new revision (the type's
     columns) or a new `rdb` version (the common columns). Components are delimited, never
     parsed out of one string; the major is not repeated.
-  - Pipeline tables carry no revision (`.../python.function.v1/schema:<pipeline hash>/pdb_v1`).
+  - Pipeline tables carry no revision (`.../python.function.v1/schema:<pipeline hash>/pdb_v2`).
     A saved job names the type and major only (`data_function_type_id`); the revision comes
     from the installed library's declaration (`declaration_for(type id)`).
 - A data function type's declaration (`PYTHON_FUNCTION`, beside its class in
@@ -1087,6 +1089,45 @@ current data context are the current entries.
   `contexts/logical_types.json`, never in a data context manifest: a logical type is
   versioned by its own identifier, and that file is not frozen.
 
+### Row ids: entry, instance, record
+
+A row that passes through a node has three nested ids (developer, November 25, 2026,
+ITL-1466, ITL-1471; `docs/reference/hashing.md` section 3). All three, with their preimages,
+are defined in one module, `core/row_ids.py`; never build one of these preimages anywhere else.
+
+| Id | Hash of | Column |
+|---|---|---|
+| entry id | user tags, system tags, the labelled input data hash | `__pipeline_entry_id` |
+| instance id | the entry id (labelled), the input's source-info tokens in name order | `__pipeline_instance_id` |
+| record id | the instance id (labelled), the result id (`__data_id`) | `__pipeline_record_id` |
+
+- A function node identifies a row by its **instance id** (tokens included): it is the plain
+  lookup column of the pipeline table and the key of the node's in-memory cache. A new instance
+  of a known entry (same values, other tokens) writes a new row; its result normally comes from
+  the result store (same input hash), so nothing is computed.
+- The pipeline table's row key is the **record id**. A write skips only an identical record id;
+  a recompute has a new result id, so it writes a new row. There is no recomputation index:
+  among the rows of one instance, `__recorded_at` says which is the latest.
+- Only side effects and functions that take the invocation context are keyed by the **entry
+  id**: the side-effect log's row key and its `entry_id` column, and
+  `InvocationContext._entry_id_hash_ch` (`invocation_hash` is `pipeline_hash :: entry id`). A
+  token never reaches that key, so a token-only change upstream delivers nothing again.
+- The operator cache keeps its whole-row key (`_record_hash`) and stores, outside that key,
+  the row's entry id (`__pipeline_entry_id`) and its insertion time (`__recorded_at`); a row
+  passed again is skipped and keeps its first time. Every read of the cache drops both
+  (`_STORED_ONLY_COLUMNS`).
+- The column names inside a preimage are part of its recipe: renaming one moves the ids made
+  from it (the golden cases pin a pipeline table's instance ids; a record id holds a random
+  result id and cannot be pinned).
+- The placeholder of an ephemeral result that is gone (`EmptyData`) carries the source-info
+  tokens a real output would, with the sentinel `row_ids.EPHEMERAL_RESULT_GONE` in place of
+  the result id (one constant; built by `data_function.output_source_info`, as a real output's
+  tokens are). A node given a placeholder computes its instance id from those tokens, finds its
+  result in the result store by the input hash, calls nothing and writes no pipeline row
+  (developer, November 26, 2026; `FunctionJobNode._empty_data_cache_hit` is the one place
+  that holds that choice, to be reconsidered in ITL-1475).
+- `PostRunPayload.result_id` is the result's id (a UUID, not a hash).
+
 ### System tag evolution rules
 
 1. **Name-preserving** — single-stream ops (filter, select, map). Column name and value pass
@@ -1099,8 +1140,8 @@ current data context are the current entries.
    makes every user tag `list[T]` and keeps it a tag, while `GroupBy` keeps its scalar keys and
    drops every other user tag (ITL-1070). No tag ever moves to the data group. Source-info
    columns become `list[str]` with one element per member. System
-   tag columns must stay **scalar**, because `_build_record_id_preimage`
-   (`core/nodes/function_node.py`) hashes them directly to derive record identity. They fold
+   tag columns must stay **scalar**, because `entry_id_preimage`
+   (`core/row_ids.py`) hashes them directly to derive a row's entry id. They fold
    to a deterministic digest via `arrow_utils.fold_system_tag_values` and their column name
    gains `::{pipeline_hash}` — a blend of rules 2 and 3.
 

@@ -243,15 +243,19 @@ type by type, is [Data types per database](../reference/database-types.md).
 
 Orcapod's own stored tables hold such columns. A function node's result table holds
 list-valued executor columns and `__`-prefixed columns. A side-effect node's log holds a UTC
-timestamp and `__data_context`, and an operator cache and a cached source hold
-`__data_context` too. So a job refuses these nodes when it is built, before anything runs:
+timestamp and `__data_context`. An operator cache holds `__data_context`, the row's entry id
+and a UTC timestamp, the time the row was first stored (`__recorded_at`). A cached source
+holds `__data_context` too. So a job refuses these nodes when it is built, or when a database
+is attached to them, before anything runs:
 
 - every function node, on SQLite and PostgreSQL;
 - every side-effect node, on SQLite;
+- every operator node with caching on (`CacheMode.LOG` or `REPLAY`), on SQLite: the SQLite
+  connector has no column type for a timestamp;
 - every node that stores anything, on SpiralDB.
 
-An operator cache or cached source on a SQL connector is refused when it is written, before
-anything is stored, if one of its columns has a type or name the connector does not store. On
+An operator cache or cached source on a SQL connector is also refused when it is written, before
+anything is stored, if one of its own columns has a type or name the connector does not store. On
 PostgreSQL that is every operator cache with caching on: its system-tag column names
 (`_tag_source_id::` and a 64-character hash) are longer than 63 bytes.
 A table's name is its Orcapod path joined by `__`, and every node table and cached source path

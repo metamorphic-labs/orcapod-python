@@ -35,7 +35,7 @@ columns): a new result table, and no hash moves.
 The function's pipeline table carries no revision:
 
 ```text
-<job>/<function>/<output schema hash>/v<function major>/python.function.v1/schema:<pipeline hash>/pdb_v1
+<job>/<function>/<output schema hash>/v<function major>/python.function.v1/schema:<pipeline hash>/pdb_v2
 ```
 
 A saved job names the type and its major only (`"data_function_type_id":
@@ -69,7 +69,7 @@ print(describe_pair.pod.uri[-1])
 for path in sorted(types_store.list_sources()):
     print(path[-4:])
 # ('v0', 'python.function.v1', 'rev1', 'rdb_v1')
-# ('v0', 'python.function.v1', 'schema:...', 'pdb_v1')
+# ('v0', 'python.function.v1', 'schema:...', 'pdb_v2')
 ```
 
 ## The Python function type, `python.function.v1`
@@ -148,7 +148,7 @@ print([name for name in stored.column_names if name.startswith("__pf_var_")])
 # ['__pf_var_function_name', '__pf_var_function_version', '__pf_var_function_module', '__pf_var_function_signature_hash', '__pf_var_function_content_hash', '__pf_var_git_hash']
 ```
 
-## The pipeline columns, `pdb_v1`
+## The pipeline columns, `pdb_v2`
 
 A function node's pipeline table stores the input tags and source-info tokens,
 the input and output hashes, the referenced result record ID, and bookkeeping
@@ -156,6 +156,7 @@ for the entry, including:
 
 | Column | Arrow type | Nullable | Meaning |
 |---|---|---|---|
+| `__pipeline_instance_id` | `large_binary` | yes | The row's instance id: the hash of its entry id (tags, system tags, input data hash) and the input's source-info tokens. The node looks a row up by it. |
 | `__pipeline_run_id` | `large_string` | yes | The ID of the job run that recorded the entry. A node run outside a job stores null. |
 | `__recorded_at` | `timestamp[us, tz=UTC]` | no | The UTC time the node recorded the entry. |
 
@@ -166,16 +167,27 @@ Reusing a pipeline entry preserves its original run ID and recording
 time. If the result is lost and the node recomputes it, the new entry has its
 own run ID and recording time.
 
+A row's key is its record id, the hash of its instance id and the id of its
+result ([the three ids](hashing.md#3-pipeline-db-entry-keys)); a read names it
+`__pipeline_record_id`. A row is written unless a row with that record id is
+already stored, so the table keeps every distinct record:
+
+- the same instance recorded again with the same result is one row;
+- a recompute has a new result, so it is a new row, and the row recorded last is
+  the instance's current one;
+- an input that arrives with other source-info tokens (its upstream result was
+  computed again) is a new instance: it gets a new row, and its result comes
+  from the result database, so the function is not called.
+
 During a sync run, a repeated identical input without system tags reuses the
 first entry. During an async run, both copies can be scheduled before either
-entry is available, producing two entries with successive recomputation indices.
+entry is available; each then gets its own result, and so its own row.
 A load-only run writes nothing. Neither recording column enters any hash.
 
 Read these columns on joined records with
 `node.get_all_records(columns={"meta": True})` or `node.get_all_records(all_info=True)`.
-Pipeline tables written by 0.4.0rc1 through 0.4.0rc3 lack these columns. Rebuild
-those tables before appending, even if their rows have been deleted. The layout
-name stays `pdb_v1`.
+Pipeline tables written by a release candidate before the three ids are at the
+layout `pdb_v1`: they are reported as tables of another layout and are not read.
 
 ## Where it is declared, and how a released declaration is kept
 
