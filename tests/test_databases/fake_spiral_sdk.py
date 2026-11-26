@@ -823,9 +823,12 @@ def _in_key_ranges(rows: pa.Table, keys: list[str], ranges: list[KeyRange]) -> p
     stored = list(zip(*(rows.column(k).to_pylist() for k in keys)))
     picks: list[int] = []
     for key_range in ranges:
-        if key_range.start is None or key_range.start != key_range.end:
+        start, end = key_range.start, key_range.end
+        if start is None or end is None or start != end:
             raise NotImplementedError("the fake reads ranges of one key only")
-        wanted = tuple(v.value for v in key_range.start.values)
+        if not (start.inclusive and end.inclusive):
+            raise NotImplementedError("the fake reads inclusive ranges of one key only")
+        wanted = tuple(v.value for v in start.values)
         picks.extend(i for i, key in enumerate(stored) if key == wanted)
     return rows.take(pa.array(picks, pa.int64()))
 

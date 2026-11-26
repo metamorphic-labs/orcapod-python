@@ -489,10 +489,18 @@ def _stored_db(ids: list[str]) -> ConnectorArrowDatabase:
 def test_a_lookup_by_id_reads_only_its_key(monkeypatch: pytest.MonkeyPatch) -> None:
     db = _stored_db(["r0", "r1", "r2"])
     calls = _Calls(monkeypatch)
+
+    def keys_of(scan: dict[str, Any]) -> list[bytes]:
+        ranges = scan.get("key_ranges") or []
+        return sorted(r.start.values[0].value for r in ranges)
+
     one = db.get_record_by_id(RESULT, b"r1", record_id_column="__record_id")
+    first = calls.scans
+    calls.scans = []
     some = db.get_records_by_ids(
         RESULT, [b"r2", b"r0", b"absent"], record_id_column="__record_id"
     )
+    second = calls.scans
     assert one is not None and one["__record_id"].to_pylist() == [b"r1"]
     assert some is not None and sorted(
         cast(list[bytes], some["__record_id"].to_pylist())
@@ -500,8 +508,11 @@ def test_a_lookup_by_id_reads_only_its_key(monkeypatch: pytest.MonkeyPatch) -> N
         b"r0",
         b"r2",
     ]
-    assert calls.whole_reads() == []
-    assert all(s.get("key_ranges") for s in calls.scans)
+    # Each lookup reads by its own keys, and never the whole table.
+    for scans, asked in ((first, [b"r1"]), (second, [b"absent", b"r0", b"r2"])):
+        assert scans, asked
+        assert any(keys_of(s) == asked for s in scans), (asked, scans)
+        assert all(s.get("key_ranges") for s in scans)
 
 
 @pytest.mark.usefixtures("root")
@@ -534,7 +545,10 @@ def test_skip_existing_reads_only_the_keys_it_writes(
     assert keyed and all(len(s["key_ranges"]) <= 2 for s in keyed)
     got = db.get_all_records(RESULT, record_id_column="__record_id")
     assert got is not None
-    assert dict(zip(got["__record_id"].to_pylist(), got["a.b"].to_pylist()))[b"r1"] == 1
+    values = dict(zip(got["__record_id"].to_pylist(), got["a.b"].to_pylist()))
+    assert values[b"r1"] == 1  # kept
+    assert values[b"r9"] == 51  # written (offset 50, second row)
+    assert values == {b"r0": 0, b"r1": 1, b"r2": 2, b"r9": 51}
 
 
 @pytest.mark.usefixtures("root")
@@ -618,6 +632,7 @@ def test_a_job_run_lists_the_dataset_once_and_opens_each_new_table_once(
             )
         ),
         tag_columns=["k"],
+        tag_only_columns=True,
         source_id="s",
         record_id_columns=["k"],
     )
@@ -933,7 +948,8 @@ def _store_with_rows(
 def test_a_pending_row_is_merged_with_the_stored_schema_as_before(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A pending row looked up alone keeps the stored rows' merged (nullable) schema."""
+    """A pending row looked up alone has the schema a whole read gives it: the stored
+    rows' merged (nullable) one where pending and stored rows are merged."""
     connector, db = _store_with_rows(rows(["r0"]))
     pending = rows(["r9"])
     pending = pending.cast(
@@ -942,14 +958,33 @@ def test_a_pending_row_is_merged_with_the_stored_schema_as_before(
         )
     )
     db.add_records(RESULT, pending, record_id_column="__record_id")
-    for call in (
-        lambda: db.get_records_by_ids(RESULT, [b"r9"], record_id_column="__record_id"),
-        lambda: db.get_record_by_id(RESULT, b"r9", record_id_column="__record_id"),
-        lambda: db.get_records_with_column_value(
-            RESULT, {"__record_id": b"r9"}, record_id_column="__record_id"
+    # (call, whether a.b is nullable): the lookups that merge pending rows with stored
+    # candidates keep the merged (nullable) field; ``get_record_by_id`` answers a
+    # pending id from the buffer alone, as given (not null), with or without
+    # narrowing.
+    for call, nullable in (
+        (
+            lambda: db.get_records_by_ids(
+                RESULT, [b"r9"], record_id_column="__record_id"
+            ),
+            True,
+        ),
+        (
+            lambda: db.get_record_by_id(RESULT, b"r9", record_id_column="__record_id"),
+            False,
+        ),
+        (
+            lambda: db.get_records_with_column_value(
+                RESULT, {"__record_id": b"r9"}, record_id_column="__record_id"
+            ),
+            True,
         ),
     ):
         narrowed, whole = _as_with_whole_reads(monkeypatch, connector, call)
+        assert narrowed is not None and narrowed[0] != "raised", narrowed
+        schema, got = narrowed
+        assert [r["__record_id"] for r in got] == [b"r9"]
+        assert schema.field("a.b").nullable is nullable
         assert narrowed == whole
 
 
@@ -1276,3 +1311,43 @@ def test_a_closed_store_connector_refuses_every_call_and_releases_its_tables() -
     # the connector sharing its client keeps its own reference
     assert shared.get_pk_columns(name) == ["__record_id"]
     assert not shared.has_table(name)
+
+
+# ------------------------------------- CodeRabbit on PR 599 (2e798c2a)
+
+
+@pytest.mark.usefixtures("root")
+def test_a_retry_after_a_failed_first_append_in_one_run_records_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A table judged new earlier in a run; its first write records manifest A and its
+    append fails. A retry in the same run (another schema, B) reads the table again,
+    finds its own record on a table with no rows (new, N42), and records B."""
+    name = names.store_table_name(RESULT)
+    _make_table(name, {}, with_rows=False)
+    connector = store()
+    db = ConnectorArrowDatabase(connector)
+    real_append = fake.FakeKeyedTable.append
+    failures = [RuntimeError("the commit failed")]
+
+    def failing_once(table: Any, data: pa.Table) -> Any:
+        if failures:
+            raise failures.pop()
+        return real_append(table, data)
+
+    monkeypatch.setattr(fake.FakeKeyedTable, "append", failing_once)
+    with db.run_scope():
+        assert not db.table_exists(RESULT)  # judged new in this run
+        with pytest.raises(RuntimeError, match="commit failed"):
+            ConnectorArrowDatabase(connector).add_records(
+                RESULT, rows(["a0"]), record_id_column="__record_id", flush=True
+            )
+        other = rows(["b0"]).drop_columns(["s"])
+        ConnectorArrowDatabase(connector).add_records(
+            RESULT, other, record_id_column="__record_id", flush=True
+        )
+    got = ConnectorArrowDatabase(store()).get_all_records(
+        RESULT, record_id_column="__record_id"
+    )
+    assert got is not None and got.column_names == other.column_names
+    assert got["__record_id"].to_pylist() == [b"b0"]

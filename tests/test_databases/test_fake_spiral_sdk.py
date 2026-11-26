@@ -40,3 +40,17 @@ def test_a_zero_width_fixed_size_list_of_dictionaries_keeps_its_rows(
     assert len(got) == len(given)
     assert got.to_pylist() == given.to_pylist()
     assert got.type == pa.list_(pa.string(), 0)
+
+
+def test_the_fake_refuses_an_exclusive_point_range() -> None:
+    """A range of one key whose bounds are not both inclusive selects no row: the fake
+    refuses it rather than return the key's row; an inclusive one reads it."""
+    rows = pa.table({"k": pa.array([b"a", b"b"], pa.large_binary()), "v": [1, 2]})
+    for inclusive in ((False, False), (True, False), (False, True)):
+        start = fake.KeyBound((fake.literal(b"a", pa.binary()),), inclusive[0])
+        end = fake.KeyBound((fake.literal(b"a", pa.binary()),), inclusive[1])
+        with pytest.raises(NotImplementedError, match="one key only"):
+            _ = fake._in_key_ranges(rows, ["k"], [fake.KeyRange(start, end)])  # pyright: ignore[reportPrivateUsage]
+    bound = fake.KeyBound((fake.literal(b"a", pa.binary()),))
+    got = fake._in_key_ranges(rows, ["k"], [fake.KeyRange(bound, bound)])  # pyright: ignore[reportPrivateUsage]
+    assert got["v"].to_pylist() == [1]

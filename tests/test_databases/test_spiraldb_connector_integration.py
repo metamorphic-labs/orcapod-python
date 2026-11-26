@@ -22,7 +22,7 @@ import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import pyarrow as pa
@@ -839,18 +839,33 @@ def test_store_lookups_read_by_key_and_by_value(place: _Place) -> None:
     with db.run_scope():
         one = db.get_record_by_id(path, b"r1", record_id_column="__record_id")
         assert one is not None and one["__record_id"].to_pylist() == [b"r1"]
-        some = db.get_records_by_ids(
-            path, [b"r2", b"absent", b"r0"], record_id_column="__record_id"
-        )
-        assert some is not None
-        assert set(some["__record_id"].to_pylist()) == {b"r0", b"r2"}
+        # The ids in two orders give the same rows in the same order (the stored
+        # order), duplicates kept: compared as lists (a NaN by its text).
+        asked = [b"r2", b"absent", b"r0"]
+        results = []
+        for ids in (asked, list(reversed(asked))):
+            some = db.get_records_by_ids(path, ids, record_id_column="__record_id")
+            assert some is not None
+            assert sorted(cast(list[bytes], some["__record_id"].to_pylist())) == [
+                b"r0",
+                b"r2",
+            ]
+            results.append([repr(r) for r in some.to_pylist()])  # NaN: by its text
+        assert results[0] == results[1]
         for constraints, expected in (
-            ({"__data_context": "std:v1:default", "a.b": 2}, {b"r1"}),
-            ({"$x": True, "*": b""}, {b"r0"}),
-            ({"a.b": None}, set()),
+            ({"__data_context": "std:v1:default", "a.b": 2}, [b"r1"]),
+            ({"$x": True, "*": b""}, [b"r0"]),
+            ({"a.b": None}, []),
         ):
-            got = db.get_records_with_column_value(
-                path, constraints, record_id_column="__record_id"
-            )
-            found = set() if got is None else set(got["__record_id"].to_pylist())
-            assert found == expected, constraints
+            reordered = dict(reversed(list(constraints.items())))
+            outcomes = []
+            for given in (constraints, reordered):
+                got = db.get_records_with_column_value(
+                    path, given, record_id_column="__record_id"
+                )
+                found = [] if got is None else got["__record_id"].to_pylist()
+                assert found == expected, given
+                outcomes.append(
+                    None if got is None else [repr(r) for r in got.to_pylist()]
+                )
+            assert outcomes[0] == outcomes[1], constraints
