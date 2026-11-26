@@ -1131,11 +1131,17 @@ are defined in one module, `core/row_ids.py`; never build one of these preimages
   result in the result store by the input hash, calls nothing and writes no pipeline row
   (developer, November 26, 2026; `FunctionJobNode._empty_data_cache_hit` is the one place
   that holds that choice, to be reconsidered in ITL-1475).
-- The instance id reads a row's tokens through `DataProtocol.source_info_table()`: for a row
-  read from an Arrow table (a stream's row) the typed columns that table has, with nullable
-  fields, never typed again from the token values (a nested token column would not survive
-  it); for a row built from Python values, or changed since it was read, the columns typed
-  from its tokens. A lookup must never fail on a row its stream holds as valid Arrow. The
+- The instance id reads a row's tokens through `DataProtocol.source_info_table()`. A token
+  column has one canonical type, a function of the token's value alone (developer decision
+  of November 26, 2026): a null token is a `large_string` null whatever type its column
+  declares; a non-null token of a row read from an Arrow table (a stream's row) keeps the
+  type that table gives it, with a nullable field, never typed again from the value (a
+  nested token column would not survive it); a row built from Python values, or changed
+  since it was read, has its tokens typed from their values. Ids are a function of the row
+  alone, never of the order sessions ran in. A pipeline table keeps one type per token
+  column: a row whose token column has another type than the rows recorded (a list token
+  beside a string or null token) is refused, naming the column and both types
+  (`_require_one_type_per_token_column`), and the write fails as a database write error. A lookup must never fail on a row its stream holds as valid Arrow. The
   pipeline row stores that same table (`_add_pipeline_record`), never the columns of
   `as_table(columns={"source": True})`: every stored row gives its instance and record id
   again from its own columns.

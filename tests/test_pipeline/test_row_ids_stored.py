@@ -792,18 +792,22 @@ def test_each_jobs_trace_finds_its_own_record_after_a_token_only_rerun(
 # ---------------------------------------------------------------------------
 
 _NESTED_TOKEN = pa.large_list(pa.large_list(pa.large_list(pa.large_string())))
-# Token columns whose Arrow type is not the type their values would be given if it
-# were worked out again: a list column holding nulls (a null alone reads as a
-# string), and a nested list column whose values cannot be typed again at all.
+# Token columns of three rows. A token's type follows its value (ITL-1471): a null
+# is a ``large_string`` null, and a non-null token keeps the type of its column,
+# also where that type could not be worked out again from the value (the nested
+# lists). One column has one type: a list column holds no null.
 TOKEN_COLUMNS: dict[str, tuple["pa.Array[Any]", "pa.Array[Any]"]] = {
-    "null_in_a_list_column": (
-        pa.array([None, ["s::row_1::a"], None], pa.large_list(pa.large_string())),
+    "lists_and_a_null_string": (
+        pa.array(
+            [["s::row_0::a"], ["s::row_1::a", "t::row_1::a"], []],
+            pa.large_list(pa.large_string()),
+        ),
         pa.array(["s::row_0::b", None, "s::row_2::b"], pa.large_string()),
     ),
     "nested": (
         pa.array([[None, [[]]], [None, [[]]], [[["s::row_2::a"]]]], _NESTED_TOKEN),
         pa.array(
-            [["s::row_0::b"], None, ["s::row_2::b", None]],
+            [["s::row_0::b"], [], ["s::row_2::b", None]],
             pa.large_list(pa.large_string()),
         ),
     ),
@@ -847,12 +851,14 @@ def test_a_stored_row_keeps_the_token_columns_its_instance_id_was_made_from(
 ) -> None:
     """Every stored row gives its instance and record id again, whatever its tokens.
 
-    The instance id is made from the typed token columns the row carries. The
-    pipeline row stores those same columns (one helper builds both), so the ids are
-    recomputed from the stored row alone, also when a token column's type is not
-    the type its values would be given again: a list column holding a null, or a
-    nested list. Before, the row stored the columns typed again from the values:
-    another type for the first, an ``ArrowTypeError`` for the second.
+    The instance id is made from the token columns the row carries, each with the
+    type its value has (a null is a string null; a non-null token keeps its
+    column's type). The pipeline row stores those same columns (one helper builds
+    both), so the ids are recomputed from the stored row alone, also for nested
+    lists, whose type could not be worked out again from the values (before, the
+    row stored the columns typed again from the values: an ``ArrowTypeError``).
+    A column mixing nulls and lists is refused, as on ``main``
+    (``test_row_ids_review_2.py``).
     """
     stream = _typed_token_stream(tokens, arrangement)
     database = InMemoryArrowDatabase()

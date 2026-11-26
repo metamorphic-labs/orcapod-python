@@ -49,6 +49,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+# The Arrow type of a null source-info token, whatever type its column declares
+# (``arrow_utils.source_info_arrow_type(None)``).
+_NULL_TOKEN_TYPE = pa.large_string()
+
+
 def _source_info_field(name: str, token: SourceInfoValue) -> pa.Field[Any]:
     """The field of source-info column ``name`` holding ``token``, as a row's table has it."""
     import pyarrow as _pa
@@ -572,8 +577,11 @@ class Data(Datagram):
         """Return the source-info tokens as a one-row table.
 
         One ``_source_<column>`` per data column, in their order, every field
-        nullable. A row read from an Arrow table (a stream's row) gives the columns
-        that table has, with their types: a token's type is never worked out again
+        nullable. Each column has one canonical type, a function of the token's
+        value alone (ITL-1471): a null token is a ``large_string`` null whatever
+        type its column declares (a null says nothing a type could tell apart),
+        and a non-null token of a row read from an Arrow table (a stream's row)
+        keeps the type that table gives it: its type is never worked out again
         from its value, which a
         nested token column would not survive (ITL-1471). A row built from Python
         values, or changed since it was read, gives the columns
@@ -589,10 +597,19 @@ class Data(Datagram):
             return self._ensure_source_info_table()
         # The fields of a row's own table: the name and the type, nullable, as
         # ``_source_info_field`` makes them (a stream's may be non-null). The
-        # arrays are the stream's, wrapped again, never cast.
+        # arrays are the stream's, wrapped again, never cast. A null token is a
+        # ``large_string`` null whatever its column declares.
+        columns = [
+            pa.chunked_array([pa.nulls(1, _NULL_TOKEN_TYPE)])
+            if column.null_count == len(column)
+            else column
+            for column in typed.columns
+        ]
         return pa.Table.from_arrays(
-            typed.columns,
-            schema=pa.schema([pa.field(f.name, f.type) for f in typed.schema]),
+            columns,
+            schema=pa.schema(
+                [pa.field(f.name, c.type) for f, c in zip(typed.schema, columns)]
+            ),
         )
 
     def with_source_info(self, **source_info: "SourceInfoValue") -> Self:

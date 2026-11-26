@@ -1386,6 +1386,9 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
     _current_tables_checked: bool = False
     # Preflight the first miss before invoking user code. Each commit checks again.
     _pipeline_preflight_checked: bool = False
+    # The Arrow type of each source-info column this node's pipeline table holds
+    # (stored, or recorded by this node since); ``None`` until first needed.
+    _token_column_types: "dict[str, pa.DataType] | None" = None
     # Set once a database that cannot list its tables was reported.
     _unlisted_store_reported: bool = False
     # Instance ids of the inputs of the last completed run in this process, each with
@@ -1531,6 +1534,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 completions it cannot match exist; nothing has been delivered then.
         """
         self._pipeline_preflight_checked = False
+        self._token_column_types = None
         self._refresh_stored_tables()
         if self._delivers_side_effects:
             self._stale_tables_checked = False
@@ -1716,6 +1720,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         self._stale_tables_checked = False
         self._current_tables_checked = False
         self._pipeline_preflight_checked = False
+        self._token_column_types = None
         self._unlisted_store_reported = False
         self._skipped_rows_reported = False
         # ... and its own rows to compare with the job file's expected count.
@@ -3261,6 +3266,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         )
 
         try:
+            self._require_one_type_per_token_column(input_source_table)
             self._write_pipeline_record(
                 row_key, combined_record, data_record_id.bytes, is_ephemeral
             )
@@ -3273,6 +3279,49 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 node_label=self.label,
                 tag=tag.as_dict(),
             ) from exc
+
+    def _require_one_type_per_token_column(self, tokens: "pa.Table") -> None:
+        """Refuse a row whose token column has another type than the rows recorded.
+
+        A pipeline table has one Arrow type per column. A token's type is a
+        function of its value (``Data.source_info_table``: a null is a
+        ``large_string`` null, a list a list), so rows whose tokens of one column
+        differ in kind (a list token and a string or null token) cannot share a
+        table. The types are those of the stored table, read once, and of the
+        rows this node recorded since.
+
+        Args:
+            tokens: The row's source-info columns, as it is about to be recorded.
+
+        Raises:
+            InputValidationError: Naming the column and both types.
+        """
+        known = self._token_column_types
+        if known is None:
+            known = {}
+            database = self._require_pipeline_database()
+            stored = database.get_table_schema(self._versioned_pipeline_path)
+            for field in stored or ():
+                if field.name.startswith(constants.SOURCE_PREFIX):
+                    known[field.name] = arrow_utils.normalize_to_large_types(
+                        field.type, keep_null=True
+                    )
+            self._token_column_types = known
+        for field in tokens.schema:
+            row_type = arrow_utils.normalize_to_large_types(field.type, keep_null=True)
+            recorded = known.setdefault(field.name, row_type)
+            if recorded != row_type:
+                raise InputValidationError(
+                    f"Function node {self.label!r}: the source-info column "
+                    f"{field.name!r} of this row has Arrow type "
+                    f"{arrow_utils.describe_arrow_type(row_type)}, and the rows "
+                    "already recorded in its pipeline table have "
+                    f"{arrow_utils.describe_arrow_type(recorded)}. A pipeline "
+                    "table keeps one type per column, and a token's type follows "
+                    "its value: a null token is a large_string null, a list of "
+                    "tokens a list. Give every row of this column tokens of one "
+                    "kind (for example an empty list in place of a null)."
+                )
 
     def _preflight_pipeline_write_schema(self) -> None:
         """Refuse an incompatible table before the first computation in this run."""
