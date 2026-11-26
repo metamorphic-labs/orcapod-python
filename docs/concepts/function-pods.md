@@ -671,7 +671,9 @@ but it does compute the results that are missing. `job.run(load_only=True)` fill
 with what is already stored for this run's inputs and never computes: sources are read,
 operators run on the rows that reach them, each function node takes the stored results of
 its inputs and skips the inputs that have none, no side effect is delivered and nothing is
-written to the database. The summary counts what each node loaded and skipped:
+written to the database. A cached source reads only the rows already in its cache. If it
+has no stored rows, it warns and supplies an empty input. The summary counts what each
+node loaded and skipped:
 
 ```python
 more_mice = mice + [{"subject_id": "mouse_04", "weight": 30.0, "height": 0.12}]

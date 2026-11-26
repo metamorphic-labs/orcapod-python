@@ -15,6 +15,7 @@ from orcapod.core.nodes import JobNode
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.nodes.source_node import SourceJobNode
+from orcapod.core.sources.cached_source import stored_source_caches
 from orcapod.core.sources.derived_source import DerivedSource
 from orcapod.core.streams.base import StreamBase
 from orcapod.side_effects import SideEffectJobNode, SideEffectNode
@@ -1082,43 +1083,46 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         """
         from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 
-        prepared = self._prepare_run(commit_every_rows, load_only=load_only)
-        # The state rule (ITL-1095): a node that holds a current run is not run again.
-        plan = prepared.plan
-        counter = RunCountingObserver()
-        effective_orchestrator = orchestrator or SyncPipelineOrchestrator()
-        is_sync = isinstance(effective_orchestrator, SyncPipelineOrchestrator)
-        with self._executing(prepared, plan, commit_every_rows, load_only=load_only):
-            if is_sync:
-                # Held nodes give their output streams on the sync path (ITL-1347).
-                _ = effective_orchestrator.run(
-                    plan.dag,
-                    observer=_with_counter(observer, counter),
-                    run_id=prepared.run_id,
-                    pipeline_uri=prepared.pipeline_uri,
-                    materialize_results=materialize_results,
-                    load_only=load_only,
-                    held=plan.held,
-                )
-            else:
-                # The async path sends the rows the plan took (until stage 5).
-                _ = effective_orchestrator.run(
-                    plan.dag,
-                    observer=_with_counter(observer, counter),
-                    run_id=prepared.run_id,
-                    pipeline_uri=prepared.pipeline_uri,
-                    materialize_results=materialize_results,
-                    load_only=load_only,
-                    held_rows=plan.held_rows,
-                )
-        summary = self._finish_run(
-            prepared,
-            counter,
-            plan,
-            load_only=load_only,
-            unchecked_sources=prepared.unchecked_sources,
-            asynchronous=not is_sync,
-        )
+        with stored_source_caches(load_only):
+            prepared = self._prepare_run(commit_every_rows, load_only=load_only)
+            # The state rule (ITL-1095): a node that holds a current run is not run again.
+            plan = prepared.plan
+            counter = RunCountingObserver()
+            effective_orchestrator = orchestrator or SyncPipelineOrchestrator()
+            is_sync = isinstance(effective_orchestrator, SyncPipelineOrchestrator)
+            with self._executing(
+                prepared, plan, commit_every_rows, load_only=load_only
+            ):
+                if is_sync:
+                    # Held nodes give their output streams on the sync path (ITL-1347).
+                    _ = effective_orchestrator.run(
+                        plan.dag,
+                        observer=_with_counter(observer, counter),
+                        run_id=prepared.run_id,
+                        pipeline_uri=prepared.pipeline_uri,
+                        materialize_results=materialize_results,
+                        load_only=load_only,
+                        held=plan.held,
+                    )
+                else:
+                    # The async path sends the rows the plan took (until stage 5).
+                    _ = effective_orchestrator.run(
+                        plan.dag,
+                        observer=_with_counter(observer, counter),
+                        run_id=prepared.run_id,
+                        pipeline_uri=prepared.pipeline_uri,
+                        materialize_results=materialize_results,
+                        load_only=load_only,
+                        held_rows=plan.held_rows,
+                    )
+            summary = self._finish_run(
+                prepared,
+                counter,
+                plan,
+                load_only=load_only,
+                unchecked_sources=prepared.unchecked_sources,
+                asynchronous=not is_sync,
+            )
         if not summary.ok:
             warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
         return summary
@@ -1169,28 +1173,31 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 f"{type(orchestrator).__name__}. Use job.run(orchestrator=...) to run "
                 "it."
             )
-        prepared = self._prepare_run(commit_every_rows, load_only=load_only)
-        # The state rule (ITL-1095): a node that holds a current run is not run again.
-        plan = prepared.plan
-        counter = RunCountingObserver()
-        with self._executing(prepared, plan, commit_every_rows, load_only=load_only):
-            _ = await orchestrator.run_async(
-                plan.dag,
-                observer=_with_counter(observer, counter),
-                run_id=prepared.run_id,
-                pipeline_uri=prepared.pipeline_uri,
-                materialize_results=materialize_results,
+        with stored_source_caches(load_only):
+            prepared = self._prepare_run(commit_every_rows, load_only=load_only)
+            # The state rule (ITL-1095): a node that holds a current run is not run again.
+            plan = prepared.plan
+            counter = RunCountingObserver()
+            with self._executing(
+                prepared, plan, commit_every_rows, load_only=load_only
+            ):
+                _ = await orchestrator.run_async(
+                    plan.dag,
+                    observer=_with_counter(observer, counter),
+                    run_id=prepared.run_id,
+                    pipeline_uri=prepared.pipeline_uri,
+                    materialize_results=materialize_results,
+                    load_only=load_only,
+                    held_rows=plan.held_rows,
+                )
+            summary = self._finish_run(
+                prepared,
+                counter,
+                plan,
                 load_only=load_only,
-                held_rows=plan.held_rows,
+                unchecked_sources=prepared.unchecked_sources,
+                asynchronous=True,
             )
-        summary = self._finish_run(
-            prepared,
-            counter,
-            plan,
-            load_only=load_only,
-            unchecked_sources=prepared.unchecked_sources,
-            asynchronous=True,
-        )
         if not summary.ok:
             warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
         return summary

@@ -496,6 +496,8 @@ that could not be opened, so a later load can find them when they return.
 An existing SQLite source opens read-only. A missing SQLite database file stays
 absent and its source slot stays unbound. SQLite may create its own `-wal` and
 `-shm` working files while reading an existing WAL database.
+SQLite filenames are interpreted literally by default. Pass `uri=True` to
+`SQLiteTableSource` for SQLite URI syntax. The job records this choice.
 
 The file records each node's own Arrow types, so saving types
 every node from its inputs' types, as previewing an empty job does, and costs what that

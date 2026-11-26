@@ -44,14 +44,14 @@ if TYPE_CHECKING:
     from orcapod.config import OrcapodConfig
 
 
-def _access_path(db_path: str | os.PathLike[str]) -> str | os.PathLike[str]:
+def _access_path(db_path: str | os.PathLike[str], *, uri: bool) -> str:
     """The path a later read opens: a file path made absolute, a special name as given.
 
     ``":memory:"`` and ``file:`` URIs are not file system paths.
     """
     text = os.fspath(db_path)
-    if text == ":memory:" or text.startswith("file:"):
-        return db_path
+    if text == ":memory:" or (uri and text.startswith("file:")):
+        return text
     return os.path.abspath(text)
 
 
@@ -94,6 +94,8 @@ class SQLiteTableSource(DBTableSource):
         tag_only_columns: Tag columns kept as tags only, not data, exactly as in
             v0.3; ``True`` for all of them. Keyword-only. Every other tag column is
             a data-tag: also a data column of the same name (ITL-1023).
+        uri: Interpret ``file:`` as SQLite URI syntax when true. Otherwise
+            the path is a literal filename.
 
     Raises:
         ValueError: If the table is not found or is empty.
@@ -119,14 +121,16 @@ class SQLiteTableSource(DBTableSource):
         config: "OrcapodConfig | None" = None,
         *,
         tag_only_columns: TagOnlyColumns = (),
+        uri: bool = False,
         _read_only: bool = False,
     ) -> None:
         self._db_path = db_path
         # A check (ITL-1102) reopens the database found now, whatever the working
         # directory is then; an in-memory database or a URI is kept as given.
-        self._access_path: str | os.PathLike[str] = _access_path(db_path)
+        self._access_path = _access_path(db_path, uri=uri)
         self._read_only = _read_only
-        connector = SQLiteConnector(db_path, _read_only=_read_only)
+        self._uri = uri
+        connector = SQLiteConnector(db_path, _read_only=_read_only, _uri=uri)
 
         try:
             # A missing table is reported as missing, not as a table without a key.
@@ -212,7 +216,9 @@ class SQLiteTableSource(DBTableSource):
 
         The connector the source was built with was closed once the table was read.
         """
-        connector = SQLiteConnector(self._access_path, _read_only=self._read_only)
+        connector = SQLiteConnector(
+            self._access_path, _read_only=self._read_only, _uri=self._uri
+        )
         try:
             yield connector
         finally:
@@ -222,6 +228,8 @@ class SQLiteTableSource(DBTableSource):
         """Serialize source configuration to a JSON-compatible dict."""
         base = super().to_config()
         base.pop("connector", None)
+        if self._uri:
+            base["uri"] = True
         return {**base, "source_type": self.SOURCE_KIND, "db_path": str(self._db_path)}
 
     @classmethod
@@ -255,6 +263,7 @@ class SQLiteTableSource(DBTableSource):
                 source_id=name,
                 label=config.get("label"),
                 data_context=config.get("data_context"),
+                uri=config.get("uri", False),
                 _read_only=True,
             ),
         )

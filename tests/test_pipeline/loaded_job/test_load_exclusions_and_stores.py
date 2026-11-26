@@ -10,7 +10,7 @@ import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.core.nodes import FunctionJobNode, OperatorJobNode
-from orcapod.core.operators import Join
+from orcapod.core.operators import Join, SelectDataColumns
 from orcapod.databases import (
     DeltaTableDatabase,
     InMemoryArrowDatabase,
@@ -20,6 +20,7 @@ from orcapod.errors import OrcapodDatabaseContentWarning
 from orcapod.pipeline.run_summary import RunSummary
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+from orcapod.side_effects import SideEffectPod
 from orcapod.sources import CSVSource, DictSource, SQLiteTableSource
 
 SOURCE_ORDERS = pytest.mark.parametrize(
@@ -33,6 +34,11 @@ def total(x: int | None, y: int | None) -> int:
     return (x or 0) + (y or 0)
 
 
+def deliver(ctx: object, x: int | None, y: int | None) -> None:
+    """Represent an external delivery without doing any I/O."""
+    del ctx, x, y
+
+
 def save_job(
     database: ArrowDatabaseProtocol,
     *,
@@ -40,6 +46,7 @@ def save_job(
     cache_database: ArrowDatabaseProtocol | None = None,
     memory_first: bool = False,
     file_source: StreamProtocol | None = None,
+    extra_nodes: bool = False,
 ) -> Path:
     """Save a job whose file-backed source can be restored independently."""
     _ = Path("rows.csv").write_text("id,group,x,y\n1,a,5,6\n2,b,7,8\n3,c,9,10\n")
@@ -67,6 +74,9 @@ def save_job(
         calculated = total.pod(memory, label="memory_total")
         _ = Join()(calculated, file, label="joined")
         _ = total.pod(file, label="file_total")
+        if extra_nodes:
+            _ = SelectDataColumns("x")(file, label="selected")
+            _ = SideEffectPod(deliver)(file, label="delivered")
     sources: dict[str, StreamProtocol] = {"file": file, "memory": memory}
     if memory_first:
         sources = dict(reversed(sources.items()))
@@ -440,3 +450,112 @@ def test_loading_a_job_does_not_create_a_temporary_blueprint(
 
     monkeypatch.setattr(tempfile, "NamedTemporaryFile", refuse_tempfile)
     assert PipelineJob.load(path).unbound_sources == ["memory"]
+
+
+@pytest.mark.parametrize("uri", [False, True], ids=["literal", "uri"])
+def test_sqlite_source_load_preserves_filename_interpretation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, uri: bool
+) -> None:
+    """A file: string can name a literal path or a URI selected by the caller."""
+    monkeypatch.chdir(tmp_path)
+    for name, value in (("file:input.sqlite", 2), ("input.sqlite", 99)):
+        with closing(sqlite3.connect(tmp_path / name)) as connection:
+            _ = connection.execute(
+                'CREATE TABLE samples (id INTEGER PRIMARY KEY, "group" TEXT NOT NULL, '
+                "x INTEGER NOT NULL, y INTEGER NOT NULL)"
+            )
+            _ = connection.executemany(
+                "INSERT INTO samples VALUES (?, ?, ?, ?)",
+                [(1, "a", value, 5), (2, "b", value, 7), (3, "c", value, 9)],
+            )
+            connection.commit()
+    source = SQLiteTableSource(
+        "file:input.sqlite",
+        "samples",
+        tag_columns=["id", "group"],
+        tag_only_columns=True,
+        source_id="file",
+        uri=uri,
+    )
+    expected = [99 if uri else 2] * 3
+    assert source.as_table().column("x").to_pylist() == expected
+    path = save_job(DeltaTableDatabase("store"), file_source=source)
+    loaded = PipelineJob.load(path)
+    assert loaded.nodes["file"].as_table().column("x").to_pylist() == expected
+    if not uri:
+        Path("input.sqlite").unlink()
+        loaded = PipelineJob.load(path)
+        assert loaded.nodes["file"].as_table().column("x").to_pylist() == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    "cache_state", ["moved", "moved-after-load", "empty", "present"]
+)
+async def test_load_only_uses_only_stored_cache_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    cache_state: str,
+    asynchronous: bool,
+) -> None:
+    """Load-only never ingests live rows, even when the cache could accept them."""
+    monkeypatch.chdir(tmp_path)
+    root = Path("cache")
+    path = save_job(
+        DeltaTableDatabase("store"),
+        cache_database=DeltaTableDatabase(root),
+        extra_nodes=True,
+    )
+    if cache_state in {"moved", "empty"}:
+        _ = root.rename("moved")
+    if cache_state == "empty":
+        root.mkdir()
+    with Path("rows.csv").open("a") as csv:
+        _ = csv.write("4,d,11,12\n")
+    before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
+    loaded = PipelineJob.load(path)
+    if cache_state == "moved-after-load":
+        _ = root.rename("moved")
+        before = {}
+    summary = await load_only(loaded, asynchronous=asynchronous)
+
+    assert {p: p.read_bytes() for p in root.rglob("*") if p.is_file()} == before
+    assert root.exists() == (cache_state in {"empty", "present"})
+    assert loaded.nodes["file_total"].as_table().num_rows == (
+        3 if cache_state == "present" else 0
+    )
+    for label in ("selected", "delivered"):
+        assert loaded.nodes[label].as_table().num_rows == (
+            3 if cache_state == "present" else 0
+        )
+    if cache_state == "moved":
+        assert summary.skipped_unbound_sources["file_total"] == ("file",)
+        assert "Could not reconstruct source 'file'" in caplog.text
+    else:
+        assert summary.nodes["file_total"].not_stored == 0
+        if cache_state != "present":
+            assert "has no stored rows" in caplog.text
+
+
+@pytest.mark.parametrize("label", ["file", "file_total", "selected", "delivered"])
+def test_node_load_only_uses_only_stored_source_cache_rows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    label: str,
+) -> None:
+    """A direct node run has the same source-cache guarantee as a job run."""
+    monkeypatch.chdir(tmp_path)
+    root = Path("cache")
+    path = save_job(
+        DeltaTableDatabase("store"),
+        cache_database=DeltaTableDatabase(root),
+        extra_nodes=True,
+    )
+    _ = root.rename("moved")
+    root.mkdir()
+    loaded = PipelineJob.load(path)
+
+    _ = loaded.nodes[label].run(load_only=True)
+    assert list(root.iterdir()) == []
