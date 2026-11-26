@@ -43,29 +43,25 @@ appended, which every database must refuse, naming the column; for a logical typ
 the same values under another logical type identifier (another extension name over the
 same storage), which would otherwise read back as the stored type. Every batch written is
 read back with `get_all_records`.
-The SpiralDB column is measured through the test suite's disk fake of SpiralDB, which
-models what SpiralDB does to a column (no SpiralDB is used). No database tells tag
+No database tells tag
 columns from data columns, so a type is kept or refused the same way in either role.
 The library value types (NumPy, pandas, Polars, torch) are
 [provisional](../concepts/arrays.md): their stored form may change in a later release.
 
 The databases: `InMemoryArrowDatabase` (in-memory), `DeltaTableDatabase` (Delta), and
-`ConnectorArrowDatabase` over `SQLiteConnector`, `PostgreSQLConnector` and
-`SpiralDBConnector`. See [The database](../concepts/pipeline-job.md#the-database) for how a
+`ConnectorArrowDatabase` over `SQLiteConnector` and `PostgreSQLConnector`. Orcapod reads
+SpiralDB but does not write it for now (`SpiralDBWriteNotSupportedError`). See [The database](../concepts/pipeline-job.md#the-database) for how a
 job uses one.
 
 Some refusals depend on the values or names as well as the type:
 
-- SpiralDB cannot store a null struct, so a struct column with a null row is refused
-  (the rows below have one); a struct column with no null row is kept.
 - SQLite reads a NaN back as NULL and `-0.0` as `0.0`, so a `double` column holding one
   is refused (the float rows below hold both); one without them is kept.
 - Delta has no `null` type: a new column, or a new nested field, holding only nulls with
   no type is refused (the `null` row below), while a `null`-typed value is kept where the
   table already stores a type.
-- Delta and SpiralDB give a map's key and item fields back as `key` and `value`, so a map
-  with other names is refused. SpiralDB does not keep metadata on a map's key or item
-  field, so a map with such metadata is refused there.
+- Delta gives a map's key and item fields back as `key` and `value`, so a map with other
+  names is refused.
 - A fixed-size list or fixed-size binary read back by Delta with another length or width
   than its type is refused on read, never padded or cut.
 - Delta refuses a column whose name holds a backtick, or is one deltalake's MERGE reserves
@@ -130,162 +126,158 @@ order, each field equal to the held one (the same type at every depth, the same 
 type, the same field attributes), are put in the held order, whether the table was
 flushed in between or not. The in-memory database matches them to the rows still pending,
 else the stored table; Delta to the rows still pending (it matches a stored table by name
-itself); a connector database (SQLite, PostgreSQL, SpiralDB) to the rows it has pending,
+itself); a connector database (SQLite, PostgreSQL) to the rows it has pending,
 and to the stored table when it writes or reads them, checking them first against the
 table as it is then, by exact name and type (a column with field metadata stays in its
-queued order at a flush; SpiralDB, which keeps field metadata, matches a write by name
-itself). A table keeps the column
-order the database gave its first write: the first write's order, except in SpiralDB,
-which stores and reads a table's key columns first and then its other columns sorted by
-name, whatever the order written (measured on SpiralDB itself). An append that also
+queued order at a flush). A table keeps the column order of its first write. An append that also
 adds, omits or retypes a column keeps each database's own rule. The order of a struct's
 fields is not covered: a struct whose fields are in another order is another type here.
 
 ## Integer
 
-| Type | in-memory | Delta | SQLite | PostgreSQL | SpiralDB |
-|---|---|---|---|---|---|
-| `int8` | kept | kept | refused | refused | kept |
-| `int16` | kept | kept | refused | refused | kept |
-| `int32` | kept | kept | refused | kept (by rule) | kept |
-| `int64` | kept | kept | kept | kept (by rule) | kept |
-| `uint8` | kept | kept (recorded type) | refused | refused | kept |
-| `uint16` | kept | kept (recorded type) | refused | refused | kept |
-| `uint32` | kept | kept (recorded type) | refused | refused | kept |
-| `uint64` | kept | kept (recorded type) | refused | refused | kept |
+| Type | in-memory | Delta | SQLite | PostgreSQL |
+|---|---|---|---|---|
+| `int8` | kept | kept | refused | refused |
+| `int16` | kept | kept | refused | refused |
+| `int32` | kept | kept | refused | kept (by rule) |
+| `int64` | kept | kept | kept | kept (by rule) |
+| `uint8` | kept | kept (recorded type) | refused | refused |
+| `uint16` | kept | kept (recorded type) | refused | refused |
+| `uint32` | kept | kept (recorded type) | refused | refused |
+| `uint64` | kept | kept (recorded type) | refused | refused |
 
 ## Float
 
-| Type | in-memory | Delta | SQLite | PostgreSQL | SpiralDB |
-|---|---|---|---|---|---|
-| `halffloat (float16)` | kept | kept (recorded type) | refused | refused | kept |
-| `float (float32)` | kept | kept | refused | kept (by rule) | kept |
-| `double (float64)` | kept | kept | refused | kept (by rule) | kept |
+| Type | in-memory | Delta | SQLite | PostgreSQL |
+|---|---|---|---|---|
+| `halffloat (float16)` | kept | kept (recorded type) | refused | refused |
+| `float (float32)` | kept | kept | refused | kept (by rule) |
+| `double (float64)` | kept | kept | refused | kept (by rule) |
 
 ## Decimal
 
-| Type | in-memory | Delta | SQLite | PostgreSQL | SpiralDB |
-|---|---|---|---|---|---|
-| `decimal128(10, 2)` | kept | kept | refused | refused | kept |
-| `decimal128(38, 4)` | kept | kept | refused | refused | kept |
-| `decimal256(40, 2)` | kept | refused | refused | refused | kept |
-| `decimal256(76, 10)` | kept | refused | refused | refused | kept |
+| Type | in-memory | Delta | SQLite | PostgreSQL |
+|---|---|---|---|---|
+| `decimal128(10, 2)` | kept | kept | refused | refused |
+| `decimal128(38, 4)` | kept | kept | refused | refused |
+| `decimal256(40, 2)` | kept | refused | refused | refused |
+| `decimal256(76, 10)` | kept | refused | refused | refused |
 
 ## Boolean
 
-| Type | in-memory | Delta | SQLite | PostgreSQL | SpiralDB |
-|---|---|---|---|---|---|
-| `bool` | kept | kept | kept | kept (by rule) | kept |
+| Type | in-memory | Delta | SQLite | PostgreSQL |
+|---|---|---|---|---|
+| `bool` | kept | kept | kept | kept (by rule) |
 
 ## Null
 
-| Type | in-memory | Delta | SQLite | PostgreSQL | SpiralDB |
-|---|---|---|---|---|---|
-| `null` | kept | refused | refused | refused | kept |
+| Type | in-memory | Delta | SQLite | PostgreSQL |
+|---|---|---|---|---|
+| `null` | kept | refused | refused | refused |
 
 ## Temporal
 
-| Type | in-memory | Delta | SQLite | PostgreSQL | SpiralDB |
-|---|---|---|---|---|---|
-| `date32` | kept | kept | refused | kept (by rule) | kept |
-| `date64` | kept | kept (recorded type) | refused | refused | kept |
-| `time32[s]` | kept | kept (recorded type) | refused | refused | kept |
-| `time32[ms]` | kept | kept (recorded type) | refused | refused | kept |
-| `time64[us]` | kept | kept (recorded type) | refused | refused | kept |
-| `time64[ns]` | kept | kept (recorded type) | refused | refused | kept |
-| `timestamp[s]` | kept | kept (recorded type) | refused | refused | kept |
-| `timestamp[ms]` | kept | kept (recorded type) | refused | refused | kept |
-| `timestamp[us]` | kept | kept | refused | kept (by rule) | kept |
-| `timestamp[ns]` | kept | kept (recorded type) | refused | refused | kept |
-| `timestamp[s, tz=UTC]` | kept | kept (recorded type) | refused | refused | refused |
-| `timestamp[ms, tz=UTC]` | kept | kept (recorded type) | refused | refused | refused |
-| `timestamp[us, tz=UTC]` | kept | kept | refused | kept (by rule) | refused |
-| `timestamp[ns, tz=UTC]` | kept | kept (recorded type) | refused | refused | refused |
-| `timestamp[s, tz=Europe/Berlin]` | kept | kept (recorded type) | refused | refused | refused |
-| `timestamp[ms, tz=Europe/Berlin]` | kept | kept (recorded type) | refused | refused | refused |
-| `timestamp[us, tz=Europe/Berlin]` | kept | kept (recorded type) | refused | refused | refused |
-| `timestamp[ns, tz=Europe/Berlin]` | kept | kept (recorded type) | refused | refused | refused |
-| `duration[s]` | kept | kept (recorded type) | refused | refused | kept |
-| `duration[ms]` | kept | kept (recorded type) | refused | refused | kept |
-| `duration[us]` | kept | kept (recorded type) | refused | refused | kept |
-| `duration[ns]` | kept | kept (recorded type) | refused | refused | kept |
+| Type | in-memory | Delta | SQLite | PostgreSQL |
+|---|---|---|---|---|
+| `date32` | kept | kept | refused | kept (by rule) |
+| `date64` | kept | kept (recorded type) | refused | refused |
+| `time32[s]` | kept | kept (recorded type) | refused | refused |
+| `time32[ms]` | kept | kept (recorded type) | refused | refused |
+| `time64[us]` | kept | kept (recorded type) | refused | refused |
+| `time64[ns]` | kept | kept (recorded type) | refused | refused |
+| `timestamp[s]` | kept | kept (recorded type) | refused | refused |
+| `timestamp[ms]` | kept | kept (recorded type) | refused | refused |
+| `timestamp[us]` | kept | kept | refused | kept (by rule) |
+| `timestamp[ns]` | kept | kept (recorded type) | refused | refused |
+| `timestamp[s, tz=UTC]` | kept | kept (recorded type) | refused | refused |
+| `timestamp[ms, tz=UTC]` | kept | kept (recorded type) | refused | refused |
+| `timestamp[us, tz=UTC]` | kept | kept | refused | kept (by rule) |
+| `timestamp[ns, tz=UTC]` | kept | kept (recorded type) | refused | refused |
+| `timestamp[s, tz=Europe/Berlin]` | kept | kept (recorded type) | refused | refused |
+| `timestamp[ms, tz=Europe/Berlin]` | kept | kept (recorded type) | refused | refused |
+| `timestamp[us, tz=Europe/Berlin]` | kept | kept (recorded type) | refused | refused |
+| `timestamp[ns, tz=Europe/Berlin]` | kept | kept (recorded type) | refused | refused |
+| `duration[s]` | kept | kept (recorded type) | refused | refused |
+| `duration[ms]` | kept | kept (recorded type) | refused | refused |
+| `duration[us]` | kept | kept (recorded type) | refused | refused |
+| `duration[ns]` | kept | kept (recorded type) | refused | refused |
 
 ## String and binary
 
-| Type | in-memory | Delta | SQLite | PostgreSQL | SpiralDB |
-|---|---|---|---|---|---|
-| `string` | kept | kept | kept | kept (by rule) | kept |
-| `large_string` | kept | kept | kept | kept (by rule) | kept |
-| `binary` | kept | kept | kept | kept (by rule) | kept |
-| `large_binary` | kept | kept | kept | kept (by rule) | kept |
-| `fixed_size_binary[4]` | kept | kept (recorded type) | refused | refused | kept |
+| Type | in-memory | Delta | SQLite | PostgreSQL |
+|---|---|---|---|---|
+| `string` | kept | kept | kept | kept (by rule) |
+| `large_string` | kept | kept | kept | kept (by rule) |
+| `binary` | kept | kept | kept | kept (by rule) |
+| `large_binary` | kept | kept | kept | kept (by rule) |
+| `fixed_size_binary[4]` | kept | kept (recorded type) | refused | refused |
 
 ## List
 
-| Type | in-memory | Delta | SQLite | PostgreSQL | SpiralDB |
-|---|---|---|---|---|---|
-| `list<int64>` | kept | kept (recorded type) | refused | refused | kept |
-| `list<int64 not null item>` | kept | kept (recorded type) | refused | refused | kept |
-| `large_list<int64>` | kept | kept (recorded type) | refused | refused | kept |
-| `large_list<int64 not null item>` | kept | kept (recorded type) | refused | refused | kept |
-| `fixed_size_list<int64>[2]` | kept | kept (recorded type) | refused | refused | kept |
-| `fixed_size_list<int64 not null item>[2]` | kept | kept (recorded type) | refused | refused | kept |
-| `large_list<float16>` | kept | kept (recorded type) | refused | refused | kept |
-| `fixed_size_list<int16>[0]` | kept | kept (recorded type) | refused | refused | kept |
+| Type | in-memory | Delta | SQLite | PostgreSQL |
+|---|---|---|---|---|
+| `list<int64>` | kept | kept (recorded type) | refused | refused |
+| `list<int64 not null item>` | kept | kept (recorded type) | refused | refused |
+| `large_list<int64>` | kept | kept (recorded type) | refused | refused |
+| `large_list<int64 not null item>` | kept | kept (recorded type) | refused | refused |
+| `fixed_size_list<int64>[2]` | kept | kept (recorded type) | refused | refused |
+| `fixed_size_list<int64 not null item>[2]` | kept | kept (recorded type) | refused | refused |
+| `large_list<float16>` | kept | kept (recorded type) | refused | refused |
+| `fixed_size_list<int16>[0]` | kept | kept (recorded type) | refused | refused |
 
 ## Struct and map
 
-| Type | in-memory | Delta | SQLite | PostgreSQL | SpiralDB |
-|---|---|---|---|---|---|
-| `struct<a: int32, b: string not null>` | kept | kept | refused | refused | refused |
-| `struct<> (no fields)` | kept | refused | refused | refused | refused |
-| `uuid (Arrow's canonical extension type)` | kept | refused | refused | refused | refused |
-| `struct<f: fixed_size_list<int64>[2]>` | kept | kept (recorded type) | refused | refused | refused |
-| `map<string, int64>` | kept | kept (recorded type) | refused | refused | kept |
+| Type | in-memory | Delta | SQLite | PostgreSQL |
+|---|---|---|---|---|
+| `struct<a: int32, b: string not null>` | kept | kept | refused | refused |
+| `struct<> (no fields)` | kept | refused | refused | refused |
+| `uuid (Arrow's canonical extension type)` | kept | refused | refused | refused |
+| `struct<f: fixed_size_list<int64>[2]>` | kept | kept (recorded type) | refused | refused |
+| `map<string, int64>` | kept | kept (recorded type) | refused | refused |
 
 ## Names and metadata
 
-| Type | in-memory | Delta | SQLite | PostgreSQL | SpiralDB |
-|---|---|---|---|---|---|
-| `large_list<named: int16 {unit: m}>` | kept | kept (recorded type) | refused | refused | kept |
-| `struct<a: int32 {unit: s}>` | kept | kept (recorded type) | refused | refused | refused |
-| `map<string, int64>, keys sorted` | kept | kept (recorded type) | refused | refused | kept |
-| `map<k: string, v: int64>, keys sorted` | kept | refused | refused | refused | refused |
-| `map<string, int64 {unit: m}> (item metadata)` | kept | kept (recorded type) | refused | refused | refused |
-| `map<string {unit: m}, int64> (key metadata)` | kept | kept (recorded type) | refused | refused | refused |
-| `map<string, struct<a: int64 {unit: m}>> (metadata inside the item)` | kept | kept (recorded type) | refused | refused | refused |
-| `int64 {unit: s} (field metadata)` | kept | kept | refused | refused | kept |
+| Type | in-memory | Delta | SQLite | PostgreSQL |
+|---|---|---|---|---|
+| `large_list<named: int16 {unit: m}>` | kept | kept (recorded type) | refused | refused |
+| `struct<a: int32 {unit: s}>` | kept | kept (recorded type) | refused | refused |
+| `map<string, int64>, keys sorted` | kept | kept (recorded type) | refused | refused |
+| `map<k: string, v: int64>, keys sorted` | kept | refused | refused | refused |
+| `map<string, int64 {unit: m}> (item metadata)` | kept | kept (recorded type) | refused | refused |
+| `map<string {unit: m}, int64> (key metadata)` | kept | kept (recorded type) | refused | refused |
+| `map<string, struct<a: int64 {unit: m}>> (metadata inside the item)` | kept | kept (recorded type) | refused | refused |
+| `int64 {unit: s} (field metadata)` | kept | kept | refused | refused |
 
 ## Nullability
 
-| Type | in-memory | Delta | SQLite | PostgreSQL | SpiralDB |
-|---|---|---|---|---|---|
-| `int64 not null` | kept | kept | kept | kept (by rule) | kept |
-| `string not null` | kept | kept | kept | kept (by rule) | kept |
+| Type | in-memory | Delta | SQLite | PostgreSQL |
+|---|---|---|---|---|
+| `int64 not null` | kept | kept | kept | kept (by rule) |
+| `string not null` | kept | kept | kept | kept (by rule) |
 
 ## Orcapod logical type
 
-| Type | in-memory | Delta | SQLite | PostgreSQL | SpiralDB |
-|---|---|---|---|---|---|
-| `File` | kept | kept | refused | refused | refused |
-| `Directory` | kept | kept | refused | refused | refused |
-| `Path` | kept | kept | refused | refused | refused |
-| `UPath` | kept | kept | refused | refused | refused |
-| `uuid.UUID` | kept | kept | refused | refused | refused |
-| `list[Path]` | kept | kept | refused | refused | refused |
-| `set[int]` | kept | kept | refused | refused | refused |
-| `set[uuid.UUID]` | kept | kept | refused | refused | refused |
-| `dict[str, int]` | kept | kept (recorded type) | refused | refused | kept |
-| `user class, exact (dataclass)` | kept | kept | refused | refused | refused |
-| `user class, structural (orcapod.dataclass)` | kept | kept | refused | refused | refused |
+| Type | in-memory | Delta | SQLite | PostgreSQL |
+|---|---|---|---|---|
+| `File` | kept | kept | refused | refused |
+| `Directory` | kept | kept | refused | refused |
+| `Path` | kept | kept | refused | refused |
+| `UPath` | kept | kept | refused | refused |
+| `uuid.UUID` | kept | kept | refused | refused |
+| `list[Path]` | kept | kept | refused | refused |
+| `set[int]` | kept | kept | refused | refused |
+| `set[uuid.UUID]` | kept | kept | refused | refused |
+| `dict[str, int]` | kept | kept (recorded type) | refused | refused |
+| `user class, exact (dataclass)` | kept | kept | refused | refused |
+| `user class, structural (orcapod.dataclass)` | kept | kept | refused | refused |
 
 ## Library value type
 
-| Type | in-memory | Delta | SQLite | PostgreSQL | SpiralDB |
-|---|---|---|---|---|---|
-| `numpy.ndarray` (provisional) | kept | kept | refused | refused | refused |
-| `pandas.DataFrame` (provisional) | kept | kept | refused | refused | refused |
-| `pandas.Series` (provisional) | kept | kept | refused | refused | refused |
-| `polars.DataFrame` (provisional) | kept | kept | refused | refused | refused |
-| `polars.Series` (provisional) | kept | kept | refused | refused | refused |
-| `torch.Tensor` (provisional) | kept | kept | refused | refused | refused |
+| Type | in-memory | Delta | SQLite | PostgreSQL |
+|---|---|---|---|---|
+| `numpy.ndarray` (provisional) | kept | kept | refused | refused |
+| `pandas.DataFrame` (provisional) | kept | kept | refused | refused |
+| `pandas.Series` (provisional) | kept | kept | refused | refused |
+| `polars.DataFrame` (provisional) | kept | kept | refused | refused |
+| `polars.Series` (provisional) | kept | kept | refused | refused |
+| `torch.Tensor` (provisional) | kept | kept | refused | refused |

@@ -4,7 +4,7 @@ A table holds one type per column. Rows appended with other field metadata (the
 column's own, or a nested field's: a struct child, a list item, a map key or item),
 another nested field name or another ``keys_sorted`` would read back with the held
 column's attributes, or the held rows with theirs. Every database that keeps such
-attributes (in-memory, Delta, SpiralDB) refuses the append before anything is buffered,
+attributes (in-memory, Delta) refuses the append before anything is buffered,
 naming the column and the path, against the stored table and against a batch still
 pending; the held rows read back unchanged. Nullability is left out: whether a
 nullability change is refused belongs to the nullability audit (ITL-842).
@@ -28,7 +28,7 @@ from tests.test_databases.type_matrix import (
 
 PATH = ("t",)
 I64 = pa.int64()
-DATABASES = ("in-memory", "Delta", "SpiralDB")
+DATABASES = ("in-memory", "Delta")
 
 
 def _meta(unit: str | None) -> dict[str, str] | None:
@@ -95,9 +95,8 @@ CHANGES = {
 
 
 def _refuses_the_type(database: str, where: str, unit: str | None) -> bool:
-    """SpiralDB refuses metadata on a map's key or item field: its connector would
-    not keep it (``spiraldb_connector._holds_map_field_metadata``)."""
-    return database == "SpiralDB" and where.startswith("map") and unit is not None
+    """Whether ``database`` cannot store the column at all: neither does."""
+    return False
 
 
 def _rows(ids: list[bytes], field: Any, values: list[Any]) -> pa.Table:

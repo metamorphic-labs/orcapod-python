@@ -76,6 +76,9 @@ class SemiJoin(BinaryOperator):
     (a null key matches nothing) and keeps the left input's type (ITL-829).
     """
 
+    CONSTRAINING_INPUTS: ClassVar[tuple[int, ...]] = (1,)
+    CONSTRAINT_MATCHES_SHARED_TAGS: ClassVar[bool] = True
+
     @staticmethod
     def _match_keys(
         left_tag_keys: Collection[str], right_tag_keys: Collection[str]

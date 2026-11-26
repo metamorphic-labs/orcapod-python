@@ -1,7 +1,7 @@
 """Tests for SpiralDBTableSource's interface as a source.
 
 SpiralDB needs network access and credentials, so these tests run against the
-disk-backed pyspiral fake (``tests/test_databases/fake_pyspiral.py``): the source goes
+disk-backed pyspiral fake (``tests/test_databases/fake_spiral_sdk.py``): the source goes
 through the real ``SpiralDBConnector``. Reading in batches, restrictions, the row cap and
 record identity are in ``test_spiraldb_table_source_streaming.py``; the workshop path is in
 ``test_spiraldb_table_source_fake.py``.
@@ -32,7 +32,7 @@ import pytest
 from orcapod.core.sources import SpiralDBTableSource
 from orcapod.databases import SpiralDBConnector
 from orcapod.databases.spiraldb_connector import SpiralDBTable
-from tests.test_databases import fake_pyspiral
+from tests.test_databases import fake_spiral_sdk
 
 _TABLE_NAME = "spike_data"
 _PROJECT_ID = "test-project-123456"
@@ -55,7 +55,7 @@ def _make_table(
             }
         )
     keys = pa.schema([rows.schema.field(name) for name in pk_columns])
-    project = fake_pyspiral.FakeSpiral().project(project_id)
+    project = fake_spiral_sdk.ExternalProject(project_id)
     project.create_table(f"{dataset}.{name}", key_schema=keys).write(rows)
 
 
@@ -76,7 +76,7 @@ def _make_composite_pk_table() -> None:
 @pytest.fixture(autouse=True)
 def fake_spiral(tmp_path: Path):
     """Route every source in this module to a fresh fake SpiralDB."""
-    with fake_pyspiral.install(tmp_path / "spiral"):
+    with fake_spiral_sdk.install(tmp_path / "spiral"):
         yield
 
 

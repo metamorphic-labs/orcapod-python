@@ -184,8 +184,8 @@ same (`Run of job '...': 1 row failed.`).
 **Fix.** The message says how to see the full traceback:
 `job.last_run.print_traceback("label")`. While developing, run with
 `job.run(orchestrator=SyncPipelineOrchestrator(error_policy="fail_fast"))` (from
-`orcapod.pipeline`) so that the first failure stops the run and raises. See the tutorial,
-[Part 9](tutorial/09-when-things-go-wrong.md).
+`orcapod.pipeline`) so that the first failure stops the run and raises. See the tutorial
+[Handling errors](tutorial/handling-errors.md).
 
 ### `TypeError: ...() got an unexpected keyword argument 'ctx'` from a `sink_pod`
 
@@ -394,8 +394,8 @@ Arrow type you wrote as a class: build it with `make_arrow_extension_type`, whic
   are installing a version of Orcapod older than 0.2, which required the Graphviz
   development headers. The latest stable release on PyPI, which a plain `uv add orcapod`
   installs, is 0.1.4 (0.3.0 was withdrawn). Install the latest 0.4.0 release candidate:
-  `uv add "orcapod>=0.4.0rc4"`.
+  `uv add "orcapod>=0.4.0rc7"`.
 - **Python version.** Orcapod needs Python 3.11 or newer.
 - **A release candidate is not installed.** `uv add orcapod` (like `pip install orcapod`)
   takes the latest stable release and skips pre-releases. Name a candidate version, at least:
-  `uv add "orcapod>=0.4.0rc4"`.
+  `uv add "orcapod>=0.4.0rc7"`.

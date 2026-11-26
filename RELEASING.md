@@ -299,24 +299,23 @@ repository of the organization.
 
 The `spiral-integration` job of `Run Tests` runs on every push to `main` and by hand
 (`workflow_dispatch`) on `metamorphic-labs/orcapod-python`, never on pull requests. It runs
-beside the test jobs, not after them, so its result comes in minutes. It authenticates to SpiralDB with a workload private key (ITL-1185): pyspiral reads
+beside the test jobs, not after them, so its result comes in minutes. It authenticates to SpiralDB with a workload private key (ITL-1185): spiral-sdk reads
 `SPIRAL_CLIENT_ID` (the workload id) and `SPIRAL_PRIVATE_KEY` (the private key as a JSON Web
-Key) from the environment, signs a client assertion with the key, and requests a token from
-`https://auth.spiraldb.com/oauth/token` with the `client_credentials` grant. It requests no
-GitHub OIDC token: pyspiral's workload identity path posts a token exchange that the server
-rejects. Client secrets are not used: the server no longer issues them. The job fails at its
+Key) from the environment. It requests no GitHub OIDC token. The job fails at its
 first step, naming each missing setting, when one of the three below is not set or the key
 is not a private JWK naming its `kid`. No agent creates, reads or sets any of them.
+
+The tests read through Orcapod and write their fixed tables through spiral-sdk, in the dataset
+`orcapod_conformance` of the test project. spiral-sdk cannot drop a keyed table, so they stay;
+each run writes the same rows.
 
 On `metamorphic-labs/orcapod-python` and in SpiralDB, the developer sets:
 
 1. The SpiralDB workload the job runs as (today `orcapod-gha`) holds the **editor** role on
-   the test project ("Orcapod testing"): the tests create, write, read and drop tables there.
-2. A key pair registered for that workload. pyspiral's own CLI has no command for this; use
-   Studio or the newer SpiralDB CLI, in an environment of its own and never installed beside
-   pyspiral (both provide a top-level `spiral` module):
-   `spiral workloads keys add <workload id> --kid <key id> --output -` prints the private key
-   as a JWK that names its `kid`. A PEM key is not accepted.
+   the test project ("Orcapod testing"): the tests create, write and read tables there.
+2. A key pair registered for that workload, made in Studio or with
+   `spiral workloads keys add <workload id> --kid <key id> --output -`, which prints the private
+   key as a JWK that names its `kid`. A PEM key is not accepted.
 3. Repository secrets (`Settings → Secrets and variables → Actions → Secrets`):
    `SPIRAL_CLIENT_ID`, the workload id (`work_...`), and `SPIRAL_PRIVATE_KEY`, the private JWK
    as one line of JSON. Keep the key file out of the repository and delete it once the secret
@@ -334,6 +333,45 @@ can hold several keys, so the job keeps working during the switch.
 If the key may have been exposed (for example printed in a log), remove it from the workload
 first (`spiral workloads keys rm`), so it stops signing in at once, then add a new key and
 replace the secret as above. The job fails in between; that is the price of containment.
+
+### Moving the spiral-sdk pin
+
+`pyproject.toml` pins one version of `spiral-sdk` (the `spiraldb` extra): a pre-alpha that
+releases daily, of which Orcapod uses two attributes that are not public API
+(`Client._native.api_url` and `Client._native.access_token`, for the documented table listing).
+To move the pin: change it there, run `uv lock`, and run the conformance tests live
+(`tests/test_databases/test_spiraldb_connector_integration.py`, see its docstring). A refusal or a
+value that changed is a change of `tests/test_databases/fake_spiral_sdk.py` (its `RULES`) first.
+
+### Migrating a SpiralDB dataset from pyspiral
+
+Once per dataset that an Orcapod release on pyspiral wrote, by a person who may write there.
+Nothing else may write to the dataset meanwhile. The two clients cannot share an environment, so
+each step has its own; `<old>` is the last commit on pyspiral
+(`7a2248bfb3867a3ccb6dd55e21cb0e2a90769a9f`), `<new>` the commit or release being used.
+
+```bash
+uv run --no-project --isolated --python 3.12 \
+  --with "orcapod[spiraldb] @ git+https://github.com/metamorphic-labs/orcapod-python@<old>" \
+  --with pyspiral==0.16.33 scripts/migrate_spiral_schemas.py \
+  dry-run --project <project> --dataset <dataset> --plan plan.json
+
+uv run --no-project --isolated --python 3.12 \
+  --with "orcapod[spiraldb] @ git+https://github.com/metamorphic-labs/orcapod-python@<new>" \
+  --with spiral-sdk==0.16.74 scripts/migrate_spiral_schemas.py \
+  write --project <project> --dataset <dataset> --plan plan.json --digest <printed digest>
+
+uv run --no-project --isolated --python 3.12 \
+  --with "orcapod[spiraldb] @ git+https://github.com/metamorphic-labs/orcapod-python@<new>" \
+  --with spiral-sdk==0.16.74 scripts/migrate_spiral_schemas.py \
+  verify --project <project> --dataset <dataset> --plan plan.json
+```
+
+`--dataset` can be repeated. `write` refuses unless the plan and every table are as the dry run
+found them; an interrupted `write` is refused by every read of the dataset and is finished by
+running it again (one stopped while it created the schema table asks for `--adopt <table id>`, for
+a table you know that run made). `verify` compares schemas, table ids, versions, source ids, content and pipeline
+hashes and each table's first rows with the plan; it does not read every row.
 
 ## Pre-releases
 
