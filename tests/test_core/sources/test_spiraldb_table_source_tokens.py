@@ -9,14 +9,19 @@ Runs against the disk-backed fake of the SpiralDB client.
 
 from __future__ import annotations
 
+import collections
 from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
 import pytest
 
+from orcapod import PipelineJob
 from orcapod.core.sources import spiraldb_table_source as source_module
+from orcapod.databases import InMemoryArrowDatabase
+from orcapod.pipeline import AsyncPipelineOrchestrator
 from orcapod.sources import SpiralDBTableSource
+from orcapod.system_constants import constants
 from orcapod.utils import arrow_utils, source_tokens
 from tests.test_databases import fake_spiral_sdk
 
@@ -64,6 +69,10 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     with fake_spiral_sdk.install(tmp_path / "spiral"):
         made = fake_spiral_sdk.ExternalProject(_PROJECT)
         made.create_table("default.event", key_schema=_KEYS).write(_rows())
+        # The same rows with the value columns laid out in the other order.
+        made.create_table("default.event_other_layout", key_schema=_KEYS).write(
+            _rows().select(["subject_id", "timestamp", "quality", "amplitude"])
+        )
         yield made
 
 
@@ -207,6 +216,80 @@ def test_an_operator_over_the_source_still_reads_its_tokens(
             .as_table(all_info=True)
         )
     assert table.equals(expected)
+
+
+def _job_rows(
+    table: str,
+    tag_columns: list[str],
+    tag_only: bool,
+    dropped: list[str],
+    orchestrator: Any,
+) -> pa.Table:
+    """Run ``drop_nulls`` over the source as a job's only node; return its rows."""
+    source = SpiralDBTableSource(
+        _PROJECT, table, tag_columns=tag_columns, tag_only_columns=tag_only
+    )
+    with PipelineJob(name="tokens", database=InMemoryArrowDatabase()) as job:
+        source.drop_nulls(dropped, label="kept")
+    job.run(orchestrator=orchestrator)
+    return job.nodes["kept"].as_table(all_info=True)
+
+
+def _row_counts(table: pa.Table) -> collections.Counter[tuple[tuple[str, Any], ...]]:
+    """Count each row of a table: a comparison by rows that ignores their order."""
+    return collections.Counter(tuple(sorted(row.items())) for row in table.to_pylist())
+
+
+# The named columns in two orders, as data only and with a tag among them (a data-tag
+# or a tag-only tag, by ``tag_only``).
+_DROPPED = [
+    ["quality", "amplitude"],
+    ["amplitude", "quality"],
+    ["quality", "subject_id", "amplitude"],
+    ["timestamp", "amplitude", "subject_id", "quality"],
+]
+
+
+@pytest.mark.parametrize("table", ["event", "event_other_layout"])
+@pytest.mark.parametrize("tag_only", [False, True], ids=["data_tags", "tag_only"])
+@pytest.mark.parametrize(
+    "tag_columns", [["subject_id", "timestamp"], ["timestamp", "subject_id"]]
+)
+@pytest.mark.parametrize("dropped", _DROPPED, ids="-".join)
+def test_an_operator_in_a_job_reads_the_tokens_on_both_paths(
+    project: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    table: str,
+    tag_columns: list[str],
+    tag_only: bool,
+    dropped: list[str],
+) -> None:
+    sync = _job_rows(table, tag_columns, tag_only, dropped, None)
+    on_async = _job_rows(
+        table, tag_columns, tag_only, dropped, AsyncPipelineOrchestrator()
+    )
+
+    assert sync.num_rows == _ROWS - 1
+    assert on_async.num_rows == _ROWS - 1
+    for name in sync.column_names:
+        if name.startswith("_source_"):
+            assert sync.column(name).null_count == 0
+    with monkeypatch.context() as patched:
+        _with_tokens_always(patched)
+        expected = _job_rows(table, tag_columns, tag_only, dropped, None)
+    # The whole table is compared: rows, Arrow schema, system tags, tokens and row
+    # hashes. Sync is exact; async rows are compared by count, never by order.
+    assert "_content_hash" in expected.column_names
+    assert any(
+        name.startswith(constants.SYSTEM_TAG_PREFIX) for name in expected.column_names
+    )
+    assert sync.schema.equals(expected.schema, check_metadata=True)
+    assert sync.equals(expected)
+    assert on_async.schema.equals(expected.schema, check_metadata=True)
+    assert _row_counts(on_async) == _row_counts(expected)
+    # The order of the named columns changes nothing.
+    again = _job_rows(table, tag_columns, tag_only, dropped[::-1], None)
+    assert again.equals(sync)
 
 
 def test_iteration_still_gives_each_row_its_tokens(project: Any) -> None:

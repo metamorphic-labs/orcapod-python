@@ -1,9 +1,11 @@
-# Part 7: Working with files
+# Working with files
 
 Much data is kept in files: images, binary recordings, tables, often with one folder per
 recording. A pipeline over such data passes *references to files* from step to step, and the
 functions open them. Orcapod identifies a file by its **content**, so a result is recomputed
 when the file it was computed from changes.
+
+**Before you start:** Parts 0 to 5 of the [core course](index.md#core-course).
 
 You will:
 
