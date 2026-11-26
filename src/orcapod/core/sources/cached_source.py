@@ -639,6 +639,7 @@ class CachedSource(RootSource):
 
         stored = self._read_cached_records_with_hashes()
         self._presented_hashes = self._record_hashes(stored)
+        self._note_stored_hashes(self._presented_hashes)
         return self._stream_from_records(stored)
 
     def _record_hashes(self, stored: pa.Table | None) -> set[bytes]:
@@ -666,11 +667,15 @@ class CachedSource(RootSource):
                 "Cached source %r has no stored rows for this load-only run.",
                 self.source_id,
             )
+        self._note_stored_hashes(hashes)
+        snapshots[id(self)] = stream
+        return stream
+
+    def _note_stored_hashes(self, hashes: set[bytes]) -> None:
+        """Track changes to the stored view, including rows written by a full read."""
         if hashes != self._load_only_hashes:
             self._load_only_hashes = hashes
             self._load_only_modified_time = datetime.now(timezone.utc)
-        snapshots[id(self)] = stream
-        return stream
 
     def _stream_from_records(self, stored: pa.Table | None) -> ArrowTableStream:
         """Present stored cache rows using the wrapped source's schema."""

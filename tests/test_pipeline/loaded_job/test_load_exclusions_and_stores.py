@@ -1,19 +1,23 @@
 """Report skipped nodes and reopen saved stores without creating directories."""
 
 import json
+import ntpath
+import os
 import sqlite3
 import sys
 import tempfile
 from collections.abc import Sequence
 from contextlib import closing
 from inspect import signature
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from types import SimpleNamespace
 
 import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.core.nodes import FunctionJobNode, OperatorJobNode
 from orcapod.core.operators import Join, SelectDataColumns
+from orcapod.core.sources import sqlite_table_source
 from orcapod.databases import (
     DeltaTableDatabase,
     InMemoryArrowDatabase,
@@ -553,6 +557,54 @@ def test_sqlite_source_keeps_dot_dot_after_a_symlink(
     loaded = PipelineJob.load(path)
     assert source.as_table().column("x").to_pylist() == [2] * 3
     assert loaded.nodes["file"].as_table().column("x").to_pylist() == [2] * 3
+
+
+def test_sqlite_source_pins_rooted_windows_filename_to_the_working_drive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Windows path with a root and no drive needs the working drive."""
+    monkeypatch.setattr(
+        sqlite_table_source,
+        "os",
+        SimpleNamespace(path=ntpath, fspath=os.fspath, getcwd=lambda: r"C:\work"),
+    )
+    monkeypatch.setattr(sqlite_table_source, "PurePath", PureWindowsPath)
+    path = sqlite_table_source._access_path(r"\input.sqlite")  # pyright: ignore[reportPrivateUsage]  # exercise Windows path semantics on any test host
+    assert PureWindowsPath(path).as_uri() == "file:///C:/input.sqlite"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+async def test_load_only_invalidates_full_operator_after_cache_returns_to_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, asynchronous: bool
+) -> None:
+    """The same empty snapshot after a full run must invalidate its held rows."""
+    monkeypatch.chdir(tmp_path)
+    _ = Path("rows.csv").write_text("id,x\n1,10\n")
+    source = CSVSource("rows.csv", tag_columns=["id"], tag_only_columns=True)
+    root = Path("cache")
+    cached = source.cached(cache_database=DeltaTableDatabase(root))
+    job = PipelineJob(name="small", database=InMemoryArrowDatabase())
+    with job:
+        _ = SelectDataColumns("x")(cached, label="selected")
+    node = job.nodes["selected"]
+    assert isinstance(node, OperatorJobNode)
+
+    _ = await load_only(job, asynchronous=asynchronous)
+    assert node.as_table().num_rows == 0
+    if asynchronous:
+        _ = await job.run_async()
+    else:
+        _ = job.run()
+    assert node.as_table().column("x").to_pylist() == [10]
+
+    _ = root.rename("moved")
+    summary = await load_only(job, asynchronous=asynchronous)
+    assert summary.ran_nothing is False
+    assert node.as_table().num_rows == 0
+    repeated = await load_only(job, asynchronous=asynchronous)
+    assert repeated.ran_nothing is True
+    assert not root.exists()
 
 
 @pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")

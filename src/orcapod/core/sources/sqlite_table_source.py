@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 from collections.abc import Collection, Iterator
 from contextlib import contextmanager
+from pathlib import PurePath
 from typing import Any, ClassVar, TYPE_CHECKING
 
 from orcapod.core.data_tags import TagOnlyColumns
@@ -50,7 +51,7 @@ def _access_path(db_path: str | os.PathLike[str]) -> str:
     SQLite's empty and in-memory database names are kept as given.
     """
     text = os.fspath(db_path)
-    if text in {"", ":memory:"} or os.path.isabs(text):
+    if text in {"", ":memory:"} or PurePath(text).is_absolute():
         return text
     # Resolve relative names against this directory without changing how the
     # filesystem follows a symlink before processing a following '..'.
