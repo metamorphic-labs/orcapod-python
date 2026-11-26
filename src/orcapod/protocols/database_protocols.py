@@ -66,6 +66,19 @@ class ArrowDatabaseProtocol(Protocol):
         """
         ...
 
+    def run_scope(self) -> AbstractContextManager[None]:
+        """Return the scope of one run, which ``job.run``, ``run_async`` and a job
+        node's ``run`` enter once per database they use (ITL-1502).
+
+        A database may hold, inside it, what one run makes safe to hold: a SpiralDB
+        store holds one existence answer per table and one listing of its dataset
+        (``spiraldb_store_tables``). Scopes nest: one held state lives until the
+        outermost scope exits, and is dropped then, also when the run raised. Outside
+        a scope nothing is held. A database that holds nothing returns an empty
+        scope.
+        """
+        ...
+
     def refresh_table(self, record_path: tuple[str, ...]) -> None:
         """Read the table at ``record_path`` from the store's current version next time.
 

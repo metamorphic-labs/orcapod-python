@@ -19,7 +19,8 @@ import os
 import re
 import threading
 import uuid
-from collections.abc import Collection, Iterator
+from collections.abc import Collection, Iterator, Mapping
+from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
@@ -28,7 +29,11 @@ from orcapod.databases.utils import is_direct_projection
 from orcapod.errors import UnstorableTableNameError
 from orcapod.types import ColumnInfo
 from orcapod.utils.lazy_module import LazyModule
-from orcapod.databases.table_names import joined_table_name, joined_table_paths
+from orcapod.databases.table_names import (
+    joined_table_name,
+    joined_table_paths,
+    whole_table,
+)
 
 if TYPE_CHECKING:
     import psycopg
@@ -411,6 +416,20 @@ class PostgreSQLConnector:
             )
 
     # ── Schema introspection ──────────────────────────────────────────────────
+
+    def run_scope(self) -> AbstractContextManager[None]:
+        """Hold nothing across a run: an empty scope."""
+        return nullcontext()
+
+    def read_candidates(
+        self,
+        table_name: str,
+        *,
+        keys: Collection[bytes] | None = None,
+        equal: Mapping[str, Any] | None = None,
+    ) -> pa.Table | None:
+        """Return the whole table: the database filters it."""
+        return whole_table(self.iter_batches(f'SELECT * FROM "{table_name}"'))
 
     def table_name(self, path: tuple[str, ...]) -> str:
         """Return the name of the table at a full record path: the joined rule."""

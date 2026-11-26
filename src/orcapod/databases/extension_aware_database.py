@@ -251,6 +251,10 @@ class ExtensionAwareDatabase:
         """The wrapped database's storage location, if it names one."""
         return getattr(self._db, "storage_location")  # noqa: B009  # optional capability
 
+    def run_scope(self) -> AbstractContextManager[None]:
+        """The wrapped database's scope of one run (ITL-1502)."""
+        return self._db.run_scope()
+
     def refresh_table(self, record_path: tuple[str, ...]) -> None:
         """Refresh the wrapped database's table (ITL-1408)."""
         self._db.refresh_table(record_path)

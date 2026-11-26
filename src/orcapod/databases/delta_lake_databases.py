@@ -9,7 +9,7 @@ import time
 import uuid
 from collections import defaultdict
 from collections.abc import Callable, Collection, Mapping
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -3557,6 +3557,10 @@ class DeltaTableDatabase:
         """
         record_key = self._get_record_key(record_path)
         self._flush_by_key(record_key)
+
+    def run_scope(self) -> AbstractContextManager[None]:
+        """Hold nothing across a run: an empty scope (ITL-1502)."""
+        return nullcontext()
 
     def refresh_table(self, record_path: tuple[str, ...]) -> None:
         """Read the table at ``record_path`` from the store's current version next time.

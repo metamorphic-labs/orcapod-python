@@ -25,7 +25,7 @@ import urllib.parse
 import urllib.request
 import warnings
 from collections.abc import Collection, Iterator, Mapping
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import copy
 from threading import local
 from typing import TYPE_CHECKING, Any, cast
@@ -47,7 +47,11 @@ from orcapod.databases.spiraldb_schema_table import (
     describe_difference,
 )
 from orcapod.databases.spiraldb_sign_in import require_sign_in
-from orcapod.databases.table_names import joined_table_name, joined_table_paths
+from orcapod.databases.table_names import (
+    joined_table_name,
+    joined_table_paths,
+    whole_table,
+)
 from orcapod.errors import (
     NullInNonNullableColumnError,
     SpiralDBWriteNotSupportedError,
@@ -721,6 +725,30 @@ class SpiralDBConnector:
             return self._store.table_paths(prefix, pending)
         names = {*self.get_table_names(), *(joined_table_name(p) for p in pending)}
         return joined_table_paths(names, prefix)
+
+    def run_scope(self) -> AbstractContextManager[None]:
+        """The scope of one run: a store holds one existence answer per table and one
+        listing in it (``StoreTables.run_scope``); a plain connector holds nothing."""
+        if self._store is not None:
+            return self._store.run_scope()
+        return nullcontext()
+
+    def read_candidates(
+        self,
+        table_name: str,
+        *,
+        keys: Collection[bytes] | None = None,
+        equal: Mapping[str, Any] | None = None,
+    ) -> pa.Table | None:
+        """Return the rows of a table that may match a lookup (ITL-1502).
+
+        A store reads only the asked keys and pushes equality down to the scan
+        (``StoreTables.read_candidates``); a plain connector reads the whole table.
+        """
+        self._require_open()
+        if self._store is not None:
+            return self._store.read_candidates(table_name, keys=keys, equal=equal)
+        return whole_table(self.iter_batches(f'SELECT * FROM "{table_name}"'))
 
     def _refuse_in_store_mode(self, what: str) -> None:
         """Refuse an operation on raw tables in a store-mode connector."""

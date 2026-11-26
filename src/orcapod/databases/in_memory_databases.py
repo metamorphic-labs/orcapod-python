@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from collections.abc import Callable, Collection, Mapping
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, nullcontext
 from typing import TYPE_CHECKING, Any, cast
 
 import pyarrow as pa
@@ -387,6 +387,10 @@ class InMemoryArrowDatabase:
         """Promote the ready batches in the shared queue."""
         for record_key in list(self._pending_batches):
             self._flush_by_key(record_key)
+
+    def run_scope(self) -> AbstractContextManager[None]:
+        """Hold nothing across a run: an empty scope (ITL-1502)."""
+        return nullcontext()
 
     def refresh_table(self, record_path: tuple[str, ...]) -> None:
         """Nothing to refresh: every view reads the one shared store (ITL-1408).

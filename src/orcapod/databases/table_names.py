@@ -12,6 +12,10 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Sequence
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import pyarrow as pa
 
 
 def joined_table_name(path: Sequence[str]) -> str:
@@ -55,3 +59,15 @@ def joined_table_paths(
         elif name.startswith(stem + "__"):
             found.add(prefix + tuple(name[len(stem) + 2 :].split("__")))
     return sorted(found)
+
+
+def whole_table(batches: Iterable[pa.RecordBatch]) -> pa.Table | None:
+    """Return the batches of a whole-table read as one table, ``None`` for none.
+
+    What a relational connector's ``read_candidates`` gives: the whole table, which
+    ``ConnectorArrowDatabase`` then filters (ITL-1502).
+    """
+    import pyarrow as pa
+
+    found = list(batches)
+    return pa.Table.from_batches(found) if found else None

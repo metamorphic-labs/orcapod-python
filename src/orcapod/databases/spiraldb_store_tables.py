@@ -25,10 +25,10 @@ still race in between (N45, N53).
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection, Iterator
-from contextlib import AbstractContextManager
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -70,7 +70,12 @@ class _KeyedTable(Protocol):
     def set_metadata(self, metadata: dict[str, bytes]) -> None: ...
 
     def scan(
-        self, columns: list[str] | None = None, *, limit: int | None = None
+        self,
+        columns: list[str] | None = None,
+        *,
+        filter: Any = None,
+        limit: int | None = None,
+        key_ranges: list[Any] | None = None,
     ) -> _Scan: ...
 
     def append(self, data: pa.Table) -> _KeyedTable: ...
@@ -90,6 +95,23 @@ class _Client(Protocol):
     def project(self, id: str) -> _Project: ...
 
     def keyed_table_by_id(self, table_id: str) -> _KeyedTable: ...
+
+
+@dataclass
+class _Run:
+    """What one run holds (``StoreTables.run_scope``, ITL-1502).
+
+    Attributes:
+        absent: Tables found absent in this run and not created by it since.
+        listing: The dataset's tables, names by table id, listed once in this run and
+            extended by the tables this run created; ``None`` until first listed.
+        handles: The latest snapshot of each table this run opened by id or wrote, by
+            table id: with one writer, nothing else moves it during the run.
+    """
+
+    absent: set[str]
+    listing: dict[str, str] | None = None
+    handles: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -134,6 +156,9 @@ class StoreTables:
         # The manifest header each table had when it was last judged new (``None``:
         # absent or without one): a first write may record a table only as it was then.
         self._judged: dict[str, bytes | None] = {}
+        # What one run holds, while a run scope is open (ITL-1502).
+        self._run: _Run | None = None
+        self._run_depth: int = 0
 
     key_column: str = codec.KEY_COLUMN
     """The key column of every store table."""
@@ -167,6 +192,69 @@ class StoreTables:
         _ = _one_data_context(records)
         _ = codec.encode_rows(_last_of_each_key(records))
 
+    # ── one run ──────────────────────────────────────────────────────────────
+
+    @contextmanager
+    def run_scope(self) -> Iterator[None]:
+        """Hold one existence answer per table and one listing for a run (ITL-1502).
+
+        The one place a negative answer is kept (it refines N42, which keeps none):
+        inside a run, a table found absent is not looked up again until this process
+        creates it, and the dataset is listed once, the listing then extended by this
+        run's own creates. A listing never makes a table absent. Scopes nest (a job
+        node's run inside a job's, one connector reached through several views): one
+        state lives until the outermost scope exits, and is dropped then, also when
+        the run raised. Outside a scope nothing is held. Deleting this method's state
+        brings N42's rule back.
+
+        Safe only with one writer: until the lease (O37), a second writer is not
+        supported, and a table it creates during a run may be answered absent for the
+        rest of that run.
+        """
+        if self._run_depth == 0:
+            self._run = _Run(absent=set(), handles={})
+        self._run_depth += 1
+        try:
+            yield
+        finally:
+            self._run_depth -= 1
+            if self._run_depth == 0:
+                self._run = None
+
+    def _listing(self) -> dict[str, str]:
+        """The dataset's tables, names by id: listed once per run, each time outside."""
+        if self._run is not None and self._run.listing is not None:
+            return dict(self._run.listing)
+        with self._service_call("list the store tables"):
+            listed = self._list_tables()
+        if self._run is not None:
+            self._run.listing = dict(listed)
+        return listed
+
+    def _by_id(self, table_id: str) -> _KeyedTable:
+        """The table's latest snapshot: opened once per run, outside a run each time."""
+        handles = None if self._run is None else self._run.handles
+        if handles is not None and table_id in handles:
+            return handles[table_id]
+        table = self._client.keyed_table_by_id(table_id)
+        if handles is not None:
+            handles[table_id] = table
+        return table
+
+    def _appended(self, table: _KeyedTable, rows: pa.Table) -> None:
+        """Append rows and keep the snapshot the commit returns for the run."""
+        written = table.append(rows)
+        if self._run is not None and self._run.handles is not None:
+            self._run.handles[str(written.resource_id)] = written
+
+    def _created(self, table_name: str, table: _KeyedTable) -> None:
+        """Note in the run a table this process made or found while creating it."""
+        if self._run is None:
+            return
+        self._run.absent.discard(table_name)
+        if self._run.listing is not None:
+            self._run.listing[str(table.resource_id)] = table_name
+
     # ── names ────────────────────────────────────────────────────────────────
 
     def table_name(self, path: tuple[str, ...]) -> str:
@@ -199,9 +287,13 @@ class StoreTables:
         if found is not None:
             return found
         path = self._path_of(table_name)
+        if self._run is not None and table_name in self._run.absent:
+            return None  # found absent in this run, and not created by it since
         table = self._open_table(table_name)
         if table is None:
             self._judged[table_name] = None
+            if self._run is not None:
+                self._run.absent.add(table_name)
             return None
         self._require_key(table, table_name)
         with self._service_call(f"read the metadata of {table_name}"):
@@ -281,8 +373,7 @@ class StoreTables:
         """
         start = names.store_table_name_prefix(prefix)
         found = {p for p in pending if p[: len(prefix)] == prefix}
-        with self._service_call("list the store tables"):
-            listed = self._list_tables()
+        listed = self._listing()
         for table_id, table_name in listed.items():
             if not table_name.startswith(start):
                 continue
@@ -316,8 +407,7 @@ class StoreTables:
 
     def table_names(self) -> list[str]:
         """The names of the dataset's tables that start as store tables do, sorted."""
-        with self._service_call("list the store tables"):
-            listed = self._list_tables()
+        listed = self._listing()
         prefix = names.STORE_TABLE_NAME_PREFIX
         return sorted(n for n in listed.values() if n.startswith(prefix))
 
@@ -345,11 +435,58 @@ class StoreTables:
         found = self._require(table_name)
         schema = _live(found.manifest.schema)
         with self._service_call(f"read {table_name}"):
-            stored = self._client.keyed_table_by_id(found.table_id).scan().to_table()
+            stored = self._by_id(found.table_id).scan().to_table()
         if stored.num_rows == 0:
             return
         rows = codec.decode_rows(stored, found.manifest, schema)
         yield from rows.to_batches()
+
+    def read_candidates(
+        self,
+        table_name: str,
+        *,
+        keys: Collection[bytes] | None = None,
+        equal: Mapping[str, Any] | None = None,
+    ) -> pa.Table | None:
+        """The table's rows that may match a lookup, decoded (ITL-1502).
+
+        Asked keys are read as one key range each; ``equal`` is pushed down to the scan
+        for a column whose stored type SpiralDB compares as Arrow does (text, binary,
+        integers, booleans) and a value of that type. A null value, a float, an instant
+        or any other column is left to the caller's exact filter: the rows returned
+        hold every match, perhaps more. ``None`` for a table with no rows.
+        """
+        found = self._judge(table_name)
+        if found is None:
+            return None
+        schema = _live(found.manifest.schema)
+        predicate: _Expression | None = None
+        for column, value in (equal or {}).items():
+            if column == codec.KEY_COLUMN or column not in found.manifest.schema.names:
+                continue
+            stored: pa.Field[pa.DataType] = found.manifest.physical.field(
+                found.manifest.schema.get_field_index(column)
+            )
+            literal = _pushed_literal(cast(object, value), stored.type)
+            if literal is None:
+                continue
+            term = _equals(stored.name, literal)
+            predicate = term if predicate is None else _both(predicate, term)
+        ranges = None
+        if keys is not None:
+            unique = sorted(set(keys))
+            if not unique:
+                return schema.empty_table()
+            ranges = _key_ranges(unique)
+        with self._service_call(f"read {table_name}"):
+            stored_rows = (
+                self._by_id(found.table_id)
+                .scan(filter=predicate, key_ranges=ranges)
+                .to_table()
+            )
+        if stored_rows.num_rows == 0:
+            return schema.empty_table()
+        return codec.decode_rows(stored_rows, found.manifest, schema)
 
     # ── writing ──────────────────────────────────────────────────────────────
 
@@ -358,24 +495,29 @@ class StoreTables:
         of the rows has passed, so a refusal leaves no table behind."""
         _ = self._path_of(table_name)
 
-    def _create_or_open(self, table_name: str) -> _KeyedTable:
-        """The table at a computed name, created now if absent."""
-        table = self._open_table(table_name)
+    def _create_or_open(self, table_name: str) -> tuple[_KeyedTable, bool]:
+        """The table at a computed name, created now if absent, and whether this call
+        created it (then it is empty, with the store's key, and nobody's record)."""
+        known_absent = self._run is not None and table_name in self._run.absent
+        table = None if known_absent else self._open_table(table_name)
         if table is not None:
-            return table
+            self._created(table_name, table)
+            return table, False
         key = pa.schema([pa.field(codec.KEY_COLUMN, pa.large_binary(), nullable=False)])
         project = self._client.project(self._project_id)
+        created = True
         try:
             with self._service_call(f"create {table_name}"):
-                _ = project.create_keyed_table(self._dataset, table_name, key)
+                table = project.create_keyed_table(self._dataset, table_name, key)
         except sp.SpiralError as exc:
             if "status 409" not in str(exc):
                 raise
             # Made meanwhile: the caller compares it with what it judged (N45).
-        table = self._open_table(table_name)
+            table, created = self._open_table(table_name), False
         if table is None:
             raise KeyError(f"no store table {self._qualified(table_name)}")
-        return table
+        self._created(table_name, table)
+        return table, created
 
     def _unchanged_since_judged(self, table: _KeyedTable, seen: bytes | None) -> bool:
         """Whether a table opened to be recorded is still as it was judged new: the same
@@ -446,15 +588,17 @@ class StoreTables:
             if encoded.num_rows == 0:
                 return  # nothing to write, so nothing is created
             seen = self._judged.pop(table_name, None)
-            table = self._create_or_open(table_name)
-            self._require_key(table, table_name)
-            if self._unchanged_since_judged(table, seen):
+            table, created = self._create_or_open(table_name)
+            if not created:
+                self._require_key(table, table_name)
+            # A table this call created is empty and nobody's: nothing to compare.
+            if created or self._unchanged_since_judged(table, seen):
                 with self._service_call(f"record {table_name}"):
                     table.set_metadata(metadata)
             else:
                 self._require_same_manifest(table, table_name, path, manifest)
             with self._service_call(f"write {table_name}"):
-                _ = table.append(encoded)
+                self._appended(table, encoded)
             self._found[table_name] = _Found(
                 str(table.resource_id),
                 names.StoreTableRecord(path, path[-1], context),
@@ -472,16 +616,17 @@ class StoreTables:
         encoded = _encoded(records)
         if encoded.num_rows == 0:
             return  # a write of no rows is never sent
-        table = self._client.keyed_table_by_id(found.table_id)
+        table = self._by_id(found.table_id)
         with self._service_call(f"write {table_name}"):
-            _ = table.append(encoded)
+            self._appended(table, encoded)
 
     def _without_stored_keys(self, found: _Found, records: pa.Table) -> pa.Table:
-        """The rows whose key the table does not hold yet."""
+        """The rows whose key the table does not hold yet: only their keys are read."""
+        keys = cast(list[bytes], pc.unique(records[codec.KEY_COLUMN]).to_pylist())
         with self._service_call("read the keys of a store table"):
             stored = (
-                self._client.keyed_table_by_id(found.table_id)
-                .scan([codec.KEY_COLUMN])
+                self._by_id(found.table_id)
+                .scan([codec.KEY_COLUMN], key_ranges=_key_ranges(keys))
                 .to_table()
             )
         if stored.num_rows == 0:
@@ -531,6 +676,59 @@ def _live(schema: pa.Schema) -> pa.Schema:
     from orcapod.contexts import get_default_context
 
     return declaration_form_schema(schema, get_default_context().type_converter)
+
+
+class _Expression(Protocol):
+    """A spiral-sdk scan expression, opaque here."""
+
+
+def _literal(value: object, arrow_type: pa.DataType) -> _Expression:
+    """spiral-sdk's ``literal``, typed for this module."""
+    return cast(_Expression, sp.literal(value, arrow_type))
+
+
+def _equals(column: str, literal: _Expression) -> _Expression:
+    """spiral-sdk's ``eq`` of a column and a literal."""
+    return cast(_Expression, sp.eq(sp.column(column), literal))
+
+
+def _both(one: _Expression, other: _Expression) -> _Expression:
+    """spiral-sdk's ``and_``."""
+    return cast(_Expression, sp.and_(one, other))
+
+
+def _key_ranges(keys: Sequence[bytes]) -> list[object]:
+    """One key range of exactly each key (spiral-sdk's ``KeyRange``)."""
+    ranges: list[object] = []
+    for key in keys:
+        bound = cast(object, sp.KeyBound((_literal(bytes(key), pa.binary()),)))
+        ranges.append(cast(object, sp.KeyRange(bound, bound)))
+    return ranges
+
+
+def _pushed_literal(value: object, stored_type: pa.DataType) -> _Expression | None:
+    """A scan literal SpiralDB compares as Arrow does, or ``None`` to leave the
+    condition to the caller's filter."""
+    t = pa.types
+    if value is None:
+        return None
+    if (t.is_string(stored_type) or t.is_large_string(stored_type)) and isinstance(
+        value, str
+    ):
+        return _literal(value, pa.string())
+    if (t.is_binary(stored_type) or t.is_large_binary(stored_type)) and isinstance(
+        value, bytes
+    ):
+        return _literal(value, pa.binary())
+    if t.is_boolean(stored_type) and type(value) is bool:
+        return _literal(value, pa.bool_())
+    if t.is_integer(stored_type) and type(value) is int:
+        try:
+            _ = pa.scalar(value, stored_type)
+        except (OverflowError, pa.ArrowInvalid):
+            return None
+        return _literal(value, stored_type)
+    return None
 
 
 def _same_manifest(one: codec.StoreManifest, other: codec.StoreManifest) -> bool:

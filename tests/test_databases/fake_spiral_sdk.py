@@ -24,7 +24,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 from unittest.mock import patch
 
 import pyarrow as pa
@@ -75,6 +75,8 @@ RULES = {
     "literal": "a literal must have the column's exact type (large_string is none)",
     "float-eq": "0.0 does not equal -0.0, and NaN equals NaN",
     "rows": "rows come in key order; filter before limit",
+    "key-ranges": "spiral-sdk 0.16.78 (November 26, 2026): a scan with key ranges gives the "
+    "rows of each range in the order of the ranges; a key no row has gives no row",
     "list": "the documented listing filters a dataset and pages; a page can be empty "
     "(documented, not seen)",
     "table-metadata": "spiral-sdk 0.16.78 (November 26, 2026): get_metadata and "
@@ -784,6 +786,32 @@ class FakeReader:
         self._record.closed = True
 
 
+class KeyBound(NamedTuple):
+    """Stands in for ``spiral.KeyBound``: a full key as literals in key order."""
+
+    values: tuple[_Literal, ...]
+    inclusive: bool = True
+
+
+class KeyRange(NamedTuple):
+    """Stands in for ``spiral.KeyRange``; the fake reads ranges of one key only."""
+
+    start: KeyBound | None = None
+    end: KeyBound | None = None
+
+
+def _in_key_ranges(rows: pa.Table, keys: list[str], ranges: list[KeyRange]) -> pa.Table:
+    """The rows of each one-key range, in the order of the ranges (``key-ranges``)."""
+    stored = list(zip(*(rows.column(k).to_pylist() for k in keys)))
+    picks: list[int] = []
+    for key_range in ranges:
+        if key_range.start is None or key_range.start != key_range.end:
+            raise NotImplementedError("the fake reads ranges of one key only")
+        wanted = tuple(v.value for v in key_range.start.values)
+        picks.extend(i for i, key in enumerate(stored) if key == wanted)
+    return rows.take(pa.array(picks, pa.int64()))
+
+
 class FakeScan:
     """Stands in for ``spiral.tables.Scan``: rows are read when asked for."""
 
@@ -848,9 +876,12 @@ class FakeKeyedTable:
         filter: FakePredicate | None = None,
         limit: int | None = None,
         batch_rows: int | None = None,
+        key_ranges: list[KeyRange] | None = None,
     ) -> FakeScan:
-        """Plan a scan (``rows``, ``literal``, ``float-eq``)."""
+        """Plan a scan (``rows``, ``literal``, ``float-eq``, ``key-ranges``)."""
         rows = self._store.read(self.resource_id, self._version)
+        if key_ranges is not None:
+            rows = _in_key_ranges(rows, self._table["keys"], key_ranges)
         for name, wanted in filter.terms if filter else ():
             if rows.schema.field(name).type != wanted.type:
                 raise SpiralError(
@@ -1082,6 +1113,8 @@ fake_module = types.SimpleNamespace(
     literal=literal,
     eq=eq,
     and_=and_,
+    KeyBound=KeyBound,
+    KeyRange=KeyRange,
     drop_column=drop_column,
 )
 

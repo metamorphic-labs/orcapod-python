@@ -807,3 +807,36 @@ def test_a_reserved_name_inside_an_encoded_struct_is_refused(place: _Place) -> N
     )
     with pytest.raises(Exception, match="reserved"):  # noqa: B017, PT011  # the SDK's error type differs from the fake's
         _ = table.append(rows)
+
+
+def test_store_lookups_read_by_key_and_by_value(place: _Place) -> None:
+    """ITL-1502: lookups narrowed at the scan (key ranges, pushed-down equality) return
+    exactly what an exact filter of the whole table returns."""
+    from orcapod.databases import ConnectorArrowDatabase
+
+    path = ("conformance_lookups", "0123456789abcdef" * 4, "rdb_v1")
+    written = _codec_rows()
+    store = SpiralDBConnector(
+        place.project, place.dataset, place.overrides, _store=True
+    )
+    db = ConnectorArrowDatabase(store)
+    db.add_records(path, written, record_id_column="__record_id", flush=True)
+    with db.run_scope():
+        one = db.get_record_by_id(path, b"r1", record_id_column="__record_id")
+        assert one is not None and one["__record_id"].to_pylist() == [b"r1"]
+        some = db.get_records_by_ids(
+            path, [b"r2", b"absent", b"r0"], record_id_column="__record_id"
+        )
+        assert some is not None
+        assert set(some["__record_id"].to_pylist()) == {b"r0", b"r2"}
+        for constraints, expected in (
+            ({"__data_context": "std:v1:default", "a.b": 2}, {b"r1"}),
+            ({"$x": True, "*": b""}, {b"r0"}),
+            ({"ok$*;": 0}, {b"r0"}),
+            ({"a.b": None}, set()),
+        ):
+            got = db.get_records_with_column_value(
+                path, constraints, record_id_column="__record_id"
+            )
+            found = set() if got is None else set(got["__record_id"].to_pylist())
+            assert found == expected, constraints

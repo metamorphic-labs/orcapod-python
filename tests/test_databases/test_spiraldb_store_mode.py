@@ -9,9 +9,10 @@ from __future__ import annotations
 import datetime as dt
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pytest
 
 from orcapod.contexts.stored import tables_of_another_layout
@@ -434,6 +435,276 @@ def test_a_logical_type_live_or_in_storage_form_is_one_column(first_live: bool) 
     assert got is not None and got.num_rows == 2
 
 
+# ------------------------------------ ITL-1502: keyed reads, one answer per run
+
+
+class _Calls:
+    """Counts what the store asks of SpiralDB: opens by name, listings, scans."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from orcapod.databases import spiraldb_connector
+
+        self.opens = 0
+        self.listings = 0
+        self.scans: list[dict[str, Any]] = []
+        open_table = spiraldb_connector._open_keyed_table  # pyright: ignore[reportPrivateUsage]
+        list_tables = spiraldb_connector._list_keyed_tables  # pyright: ignore[reportPrivateUsage]
+        scan = fake.FakeKeyedTable.scan
+
+        def counted_open(*args: Any) -> Any:
+            self.opens += 1
+            return open_table(*args)
+
+        def counted_list(*args: Any) -> Any:
+            self.listings += 1
+            return list_tables(*args)
+
+        def counted_scan(table: Any, columns: Any = None, **kw: Any) -> Any:
+            self.scans.append({"columns": columns, **kw})
+            return scan(table, columns, **kw)
+
+        monkeypatch.setattr(spiraldb_connector, "_open_keyed_table", counted_open)
+        monkeypatch.setattr(spiraldb_connector, "_list_keyed_tables", counted_list)
+        monkeypatch.setattr(fake.FakeKeyedTable, "scan", counted_scan)
+
+    def whole_reads(self) -> list[dict[str, Any]]:
+        """Scans that read every row: no key ranges, no filter, no limit."""
+        return [
+            s
+            for s in self.scans
+            if s.get("key_ranges") is None
+            and s.get("filter") is None
+            and s.get("limit") is None
+        ]
+
+
+def _stored_db(ids: list[str]) -> ConnectorArrowDatabase:
+    db = ConnectorArrowDatabase(store())
+    db.add_records(RESULT, rows(ids), record_id_column="__record_id", flush=True)
+    return db
+
+
+@pytest.mark.usefixtures("root")
+def test_a_lookup_by_id_reads_only_its_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = _stored_db(["r0", "r1", "r2"])
+    calls = _Calls(monkeypatch)
+    one = db.get_record_by_id(RESULT, b"r1", record_id_column="__record_id")
+    some = db.get_records_by_ids(
+        RESULT, [b"r2", b"r0", b"absent"], record_id_column="__record_id"
+    )
+    assert one is not None and one["__record_id"].to_pylist() == [b"r1"]
+    assert some is not None and sorted(
+        cast(list[bytes], some["__record_id"].to_pylist())
+    ) == [
+        b"r0",
+        b"r2",
+    ]
+    assert calls.whole_reads() == []
+    assert all(s.get("key_ranges") for s in calls.scans)
+
+
+@pytest.mark.usefixtures("root")
+def test_a_lookup_by_value_is_pushed_down(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = _stored_db(["r0", "r1", "r2"])
+    calls = _Calls(monkeypatch)
+    got = db.get_records_with_column_value(
+        RESULT, {"__data_context": CONTEXT, "a.b": 1}, record_id_column="__record_id"
+    )
+    assert got is not None and got["__record_id"].to_pylist() == [b"r1"]
+    assert calls.whole_reads() == []
+    assert calls.scans and all(s.get("filter") is not None for s in calls.scans)
+
+
+@pytest.mark.usefixtures("root")
+def test_skip_existing_reads_only_the_keys_it_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _stored_db(["r0", "r1", "r2"])
+    calls = _Calls(monkeypatch)
+    db.add_records(
+        RESULT,
+        rows(["r1", "r9"], offset=50),
+        record_id_column="__record_id",
+        skip_duplicates=True,
+        flush=True,
+    )
+    assert calls.whole_reads() == []
+    keyed = [s for s in calls.scans if s.get("key_ranges") is not None]
+    assert keyed and all(len(s["key_ranges"]) <= 2 for s in keyed)
+    got = db.get_all_records(RESULT, record_id_column="__record_id")
+    assert got is not None
+    assert dict(zip(got["__record_id"].to_pylist(), got["a.b"].to_pylist()))[b"r1"] == 1
+
+
+@pytest.mark.usefixtures("root")
+def test_one_open_by_name_per_absent_table_per_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = ConnectorArrowDatabase(store())
+    calls = _Calls(monkeypatch)
+    for _ in range(3):
+        assert not db.table_exists(RESULT)
+    assert calls.opens == 3  # outside a run, nothing is held (N42)
+    calls.opens = 0
+    with db.run_scope():
+        for _ in range(3):
+            assert not db.table_exists(RESULT)
+        assert calls.opens == 1
+        db.add_records(RESULT, rows(["r0"]), record_id_column="__record_id", flush=True)
+        assert db.table_exists(RESULT)  # its own create made it present
+    calls.opens = 0
+    assert db.table_exists(RESULT)
+    assert ConnectorArrowDatabase(store()).table_exists(RESULT)
+
+
+@pytest.mark.usefixtures("root")
+def test_one_listing_per_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    db = _stored_db(["r0"])
+    calls = _Calls(monkeypatch)
+    for _ in range(3):
+        assert db.list_table_paths(("my_fn",)) == [RESULT]
+    assert calls.listings == 3
+    calls.listings = 0
+    other = ("my_fn", "other", "rdb_v1")
+    with db.run_scope():
+        for _ in range(3):
+            assert db.list_table_paths(("my_fn",)) == [RESULT]
+        db.add_records(other, rows(["r0"]), record_id_column="__record_id", flush=True)
+        assert db.list_table_paths(("my_fn",)) == sorted([RESULT, other])
+    assert calls.listings == 1
+
+
+@pytest.mark.usefixtures("root")
+def test_the_run_map_is_kept_by_the_outermost_scope_and_dropped_on_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = ConnectorArrowDatabase(store())
+    view = db.at("anywhere")  # the same connector: one map
+    calls = _Calls(monkeypatch)
+    with pytest.raises(RuntimeError), db.run_scope():
+        with view.run_scope():
+            assert not db.table_exists(RESULT)
+        assert not db.table_exists(RESULT)  # the inner exit kept the map
+        assert calls.opens == 1
+        raise RuntimeError("the run failed")
+    assert not db.table_exists(RESULT)  # dropped on exit, also when the run raised
+    assert calls.opens == 2
+
+
+@pytest.mark.usefixtures("root")
+def test_a_job_run_lists_the_dataset_once_and_opens_each_new_table_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from orcapod import PipelineJob, function_pod
+    from orcapod.sources import ArrowTableSource
+
+    @function_pod(output_keys="y")
+    def double(x: int) -> int:
+        return 2 * x
+
+    source = ArrowTableSource(
+        pa.table(
+            {
+                "k": pa.array(["a", "b"], pa.large_string()),
+                "x": pa.array([1, 2], pa.int64()),
+            }
+        ).cast(
+            pa.schema(
+                [
+                    pa.field("k", pa.large_string(), False),
+                    pa.field("x", pa.int64(), False),
+                ]
+            )
+        ),
+        tag_columns=["k"],
+        source_id="s",
+        record_id_columns=["k"],
+    )
+    db = ConnectorArrowDatabase(store())
+    calls = _Calls(monkeypatch)
+    job = PipelineJob(name="calls", database=db)
+    with job:
+        double.pod(source, label="d")
+    _ = job.run()
+    assert calls.listings == 1
+    tables = len(db.list_table_paths())
+    assert calls.opens <= tables
+
+
+_PUSHED: dict[str, Any] = {
+    "s": pa.large_string(),
+    "b": pa.large_binary(),
+    "i": pa.int32(),
+    "t": pa.bool_(),
+    "f": pa.float64(),
+    "ts": pa.timestamp("us", tz="UTC"),
+}
+
+
+@pytest.mark.usefixtures("root")
+@pytest.mark.parametrize("seed", range(25))
+def test_candidates_are_a_superset_of_the_matches(seed: int) -> None:
+    """Whatever is pushed down, the candidates hold every row that matches exactly."""
+    import random
+
+    rng = random.Random(seed)
+    values: dict[str, list[Any]] = {
+        "s": ["x", "y", ""],
+        "b": [b"x", b"", b"\x00"],
+        "i": [0, 1, -1],
+        "t": [True, False],
+        "f": [0.0, -0.0, float("nan"), 1.5],
+        "ts": [
+            dt.datetime(2026, 1, 1, tzinfo=utc),
+            dt.datetime(1970, 1, 1, tzinfo=utc),
+        ],
+    }
+    n = 20
+    columns: dict[str, Any] = {
+        "__record_id": pa.array(
+            [f"r{i}".encode() for i in range(n)], pa.large_binary()
+        ),
+        "__data_context": pa.array([CONTEXT] * n, pa.large_string()),
+    }
+    for name, arrow_type in _PUSHED.items():
+        picks = [
+            None if rng.random() < 0.2 else rng.choice(values[name]) for _ in range(n)
+        ]
+        columns[name] = pa.array(picks, arrow_type)
+    table = pa.table(columns)
+    connector = store()
+    db = ConnectorArrowDatabase(connector)
+    db.add_records(RESULT, table, record_id_column="__record_id", flush=True)
+    name = connector.table_name(RESULT)
+    for _ in range(20):
+        asked = rng.sample(sorted(_PUSHED), rng.randint(1, 3))
+        equal = {c: rng.choice([*values[c], None]) for c in asked}
+        keys = (
+            None
+            if rng.random() < 0.5
+            else [f"r{rng.randrange(n + 3)}".encode() for _ in range(rng.randint(1, 4))]
+        )
+        candidates = connector.read_candidates(name, keys=keys, equal=equal)
+        assert candidates is not None
+        whole = connector.read_candidates(name)
+        assert whole is not None
+        mask: Any = pa.array([True] * whole.num_rows)
+        for column, value in equal.items():
+            mask = pc.and_(
+                mask,
+                pc.fill_null(
+                    pc.equal(whole[column], pa.scalar(value, whole[column].type)),
+                    pa.scalar(False),
+                ),
+            )
+        if keys is not None:
+            mask = pc.and_(
+                mask, pc.is_in(whole["__record_id"], pa.array(keys, pa.large_binary()))
+            )
+        matches = set(whole.filter(mask)["__record_id"].to_pylist())
+        assert matches <= set(candidates["__record_id"].to_pylist())
+
+
 # ------------------------------------- verification of PR 595 (0a4189c3)
 
 
@@ -501,6 +772,28 @@ def test_a_storage_form_identifier_no_type_is_registered_for_is_kept_as_given() 
     assert got.schema.field("u").type == pa.large_string()
     assert got.schema.field("u").metadata == field.metadata
     assert got["u"].to_pylist() == ["x"]
+
+
+@pytest.mark.usefixtures("root")
+def test_a_table_is_opened_by_id_once_per_run_and_reads_its_own_writes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = _stored_db(["r0"])
+    opens: list[str] = []
+    by_id = fake.FakeClient.keyed_table_by_id
+
+    def counted(client: Any, table_id: str, **kw: Any) -> Any:
+        opens.append(table_id)
+        return by_id(client, table_id, **kw)
+
+    monkeypatch.setattr(fake.FakeClient, "keyed_table_by_id", counted)
+    with db.run_scope():
+        for _ in range(3):
+            assert db.get_record_by_id(RESULT, b"r0") is not None
+        db.add_records(RESULT, rows(["r1"]), record_id_column="__record_id", flush=True)
+        got = db.get_all_records(RESULT, record_id_column="__record_id")
+        assert got is not None and set(got["__record_id"].to_pylist()) == {b"r0", b"r1"}
+    assert len(opens) == 1
 
 
 # ------------------------------------- verification r3 of PR 595 (2aef2bd3)

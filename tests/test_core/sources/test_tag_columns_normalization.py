@@ -10,14 +10,19 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from collections.abc import Collection, Iterator
+from collections.abc import Collection, Iterator, Mapping
+from contextlib import AbstractContextManager, nullcontext
 from typing import Any
 
 import pyarrow as pa
 import pytest
 
 from orcapod.utils.schema_utils import _normalize_column_list
-from orcapod.databases.table_names import joined_table_name, joined_table_paths
+from orcapod.databases.table_names import (
+    joined_table_name,
+    joined_table_paths,
+    whole_table,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -349,6 +354,20 @@ class _MockConnector:
             )
         }
         self._pk_columns = pk_columns or {"events": ["session_id"]}
+
+    def run_scope(self) -> AbstractContextManager[None]:
+        """Hold nothing across a run: an empty scope."""
+        return nullcontext()
+
+    def read_candidates(
+        self,
+        table_name: str,
+        *,
+        keys: Collection[bytes] | None = None,
+        equal: Mapping[str, Any] | None = None,
+    ) -> pa.Table | None:
+        """Return the whole table: the database filters it."""
+        return whole_table(self.iter_batches(f'SELECT * FROM "{table_name}"'))
 
     def table_name(self, path: tuple[str, ...]) -> str:
         """Return the name of the table at a full record path: the joined rule."""

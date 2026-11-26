@@ -288,16 +288,24 @@ class ConnectorArrowDatabase:
 
     # ── Committed data access ─────────────────────────────────────────────────
 
-    def _get_committed_table(self, record_path: tuple[str, ...]) -> pa.Table | None:
-        """Fetch all committed records for a path from the connector."""
+    def _get_committed_table(
+        self,
+        record_path: tuple[str, ...],
+        *,
+        keys: Collection[bytes] | None = None,
+        equal: Mapping[str, Any] | None = None,
+    ) -> pa.Table | None:
+        """Fetch the committed records for a path that may match a lookup.
+
+        Every record when ``keys`` and ``equal`` are ``None``; otherwise what the
+        connector narrows its read to (``read_candidates``, ITL-1502), a superset of
+        the matches, which the caller filters exactly.
+        """
         table_name = self._path_to_table_name(self._path_prefix + record_path)
         self._require_table_name(table_name)
         if not self._connector.has_table(table_name):
             return None
-        batches = list(self._connector.iter_batches(f'SELECT * FROM "{table_name}"'))
-        if not batches:
-            return None
-        return pa.Table.from_batches(batches)
+        return self._connector.read_candidates(table_name, keys=keys, equal=equal)
 
     def list_table_paths(self, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
         """List the paths of the tables stored under ``prefix``.
@@ -748,6 +756,10 @@ class ConnectorArrowDatabase:
         for record_key in list(self._pending_batches):
             self._flush_by_key(record_key)
 
+    def run_scope(self) -> AbstractContextManager[None]:
+        """The connector's scope of one run (ITL-1502): views share it."""
+        return self._connector.run_scope()
+
     def refresh_table(self, record_path: tuple[str, ...]) -> None:
         """Nothing to refresh: every read queries the connector's backend (ITL-1408)."""
 
@@ -854,7 +866,7 @@ class ConnectorArrowDatabase:
                 return self._handle_record_id_column(filtered, record_id_column)
 
         # Check committed
-        committed = self._get_committed_table(record_path)
+        committed = self._get_committed_table(record_path, keys=[record_id])
         if committed is None:
             return None
         filtered = committed.filter(pc.field(self.RECORD_ID_COLUMN) == record_id)
@@ -867,10 +879,22 @@ class ConnectorArrowDatabase:
         record_path: tuple[str, ...],
         record_id_column: str | None = None,
     ) -> pa.Table | None:
+        return self._records(record_path, record_id_column)
+
+    def _records(
+        self,
+        record_path: tuple[str, ...],
+        record_id_column: str | None,
+        *,
+        keys: Collection[bytes] | None = None,
+        equal: Mapping[str, Any] | None = None,
+    ) -> pa.Table | None:
+        """The committed and pending records, the committed ones narrowed by the
+        connector to the candidates of a lookup (``_get_committed_table``)."""
         record_key = self._get_record_key(record_path)
         parts: list[pa.Table] = []
 
-        committed = self._get_committed_table(record_path)
+        committed = self._get_committed_table(record_path, keys=keys, equal=equal)
         if committed is not None and committed.num_rows > 0:
             parts.append(committed)
         pending = self._pending_batches.get(record_key)
@@ -903,9 +927,7 @@ class ConnectorArrowDatabase:
         ids_list = [coerce_record_id(r) for r in record_ids]
         if not ids_list:
             return None
-        all_records = self.get_all_records(
-            record_path, record_id_column=self.RECORD_ID_COLUMN
-        )
+        all_records = self._records(record_path, self.RECORD_ID_COLUMN, keys=ids_list)
         if all_records is None:
             return None
         filtered = all_records.filter(
@@ -924,16 +946,19 @@ class ConnectorArrowDatabase:
     ) -> pa.Table | None:
         if flush:
             self.flush()
-        all_records = self.get_all_records(
-            record_path, record_id_column=self.RECORD_ID_COLUMN
-        )
-        if all_records is None:
-            return None
-
         if isinstance(column_values, Mapping):
-            pairs = list(column_values.items())
+            pairs = cast(list[tuple[str, Any]], list(column_values.items()))
         else:
             pairs = cast(list[tuple[str, Any]], list(column_values))
+        # A column named once is offered to the connector to narrow its read; the
+        # filter below is exact whatever the connector reads (ITL-1502).
+        named = [col for col, _ in pairs]
+        equal: dict[str, Any] = {
+            col: val for col, val in pairs if named.count(col) == 1
+        }
+        all_records = self._records(record_path, self.RECORD_ID_COLUMN, equal=equal)
+        if all_records is None:
+            return None
 
         expr = None
         for col, val in pairs:

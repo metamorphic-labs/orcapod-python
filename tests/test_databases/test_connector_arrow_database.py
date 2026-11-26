@@ -24,7 +24,8 @@ Test sections:
 from __future__ import annotations
 
 import re
-from collections.abc import Collection, Iterator
+from collections.abc import Collection, Iterator, Mapping
+from contextlib import AbstractContextManager, nullcontext
 from typing import Any
 
 import pyarrow as pa
@@ -39,7 +40,11 @@ from orcapod.protocols.db_connector_protocol import DBConnectorProtocol
 from orcapod.types import ColumnInfo
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.databases import ConnectorArrowDatabase
-from orcapod.databases.table_names import joined_table_name, joined_table_paths
+from orcapod.databases.table_names import (
+    joined_table_name,
+    joined_table_paths,
+    whole_table,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +94,20 @@ class MockDBConnector:
         self.close_called = False
 
     # ── Schema introspection ──────────────────────────────────────────────────
+
+    def run_scope(self) -> AbstractContextManager[None]:
+        """Hold nothing across a run: an empty scope."""
+        return nullcontext()
+
+    def read_candidates(
+        self,
+        table_name: str,
+        *,
+        keys: Collection[bytes] | None = None,
+        equal: Mapping[str, Any] | None = None,
+    ) -> pa.Table | None:
+        """Return the whole table: the database filters it."""
+        return whole_table(self.iter_batches(f'SELECT * FROM "{table_name}"'))
 
     def table_name(self, path: tuple[str, ...]) -> str:
         """Return the name of the table at a full record path: the joined rule."""

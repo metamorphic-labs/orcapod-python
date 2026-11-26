@@ -12,7 +12,8 @@ Planned implementations:
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterator
+from collections.abc import Collection, Iterator, Mapping
+from contextlib import AbstractContextManager
 from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
 
 from orcapod.types import ColumnInfo
@@ -99,7 +100,38 @@ class DBConnectorProtocol(Protocol):
         """
         ...
 
+    def run_scope(self) -> AbstractContextManager[None]:
+        """Return the scope of one run (``ArrowDatabaseProtocol.run_scope``): what the
+        connector may hold for one run lives until the outermost scope exits. The
+        relational connectors hold nothing and return an empty scope."""
+        ...
+
     # ── Read ──────────────────────────────────────────────────────────────────
+
+    def read_candidates(
+        self,
+        table_name: str,
+        *,
+        keys: Collection[bytes] | None = None,
+        equal: Mapping[str, Any] | None = None,
+    ) -> pa.Table | None:
+        """Return the rows of a table that may match a lookup (ITL-1502).
+
+        At least every row whose key (``__record_id``) is in ``keys`` and whose columns
+        equal ``equal``; possibly more. ``ConnectorArrowDatabase`` filters what comes
+        back exactly, so a connector only decides how much it reads: the relational
+        connectors read the whole table, a SpiralDB store reads by key range and pushes
+        equality down to the scan where SpiralDB compares as Arrow does.
+
+        Args:
+            table_name: A name ``table_name`` returned, of a table that exists.
+            keys: Record ids, or ``None`` for any.
+            equal: Column values, or ``None`` for any.
+
+        Returns:
+            The rows, or ``None`` for a table with no rows.
+        """
+        ...
 
     def iter_batches(
         self,

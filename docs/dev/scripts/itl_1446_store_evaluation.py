@@ -291,9 +291,19 @@ class _Table:
         return _Table(self._t.append(data), self._n, self._c)
 
     def scan(self, columns: Any = None, **kw: Any) -> Any:
-        kind = "whole-table scan" if columns is None else f"scan of {list(columns)}"
-        if "limit" in kw:
-            kind += f" limit {kw['limit']}"
+        narrowed = [
+            what
+            for what in ("key_ranges", "filter", "limit")
+            if kw.get(what) is not None
+        ]
+        if columns is None and not narrowed:
+            kind = "whole-table scan"
+        else:
+            kind = "scan of " + (
+                "all columns" if columns is None else f"{list(columns)}"
+            )
+            if narrowed:
+                kind += " by " + ", ".join(narrowed)
         self._c[(kind, self._n)] += 1
         return self._t.scan(columns, **kw)
 

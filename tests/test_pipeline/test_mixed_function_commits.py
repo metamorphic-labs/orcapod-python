@@ -489,6 +489,9 @@ class ProtocolDatabase(DatabaseWithoutCommitGuards):
     def flush_batch(self, record_path: tuple[str, ...]) -> None:
         self._inner.flush_batch(record_path)
 
+    def run_scope(self) -> AbstractContextManager[None]:
+        return self._inner.run_scope()
+
     def refresh_table(self, record_path: tuple[str, ...]) -> None:
         self._inner.refresh_table(record_path)
 
