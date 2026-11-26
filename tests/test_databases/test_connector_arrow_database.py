@@ -888,8 +888,7 @@ class TestFlushBehaviour:
         rows = ConnectorArrowDatabase(connector).get_all_records(
             path, record_id_column="id"
         )
-        assert rows is not None
-        return {row["id"]: row["v"] for row in rows.to_pylist()}
+        return {} if rows is None else {row["id"]: row["v"] for row in rows.to_pylist()}
 
     @pytest.mark.parametrize("skip_first", [False, True])
     def test_a_skip_batch_does_not_change_the_policy_of_an_ordinary_write(
@@ -970,6 +969,96 @@ class TestFlushBehaviour:
                 b"skipping": 2,
             }
             assert self._stored_values(connector, ("other", "v1")) == {b"o": 3}
+
+    def test_an_interrupt_between_any_two_lines_of_a_flush_loses_no_row(
+        self,
+    ) -> None:
+        """A KeyboardInterrupt injected (by a line trace) before any line of the
+        queue bookkeeping or of a table's flush leaves each queued table's rows and
+        ids consistent; every row is then stored once, or named as removed
+        (ITL-1381, round 5)."""
+        import sys
+        from pathlib import Path
+
+        from orcapod.databases import _pending_commits
+        from orcapod.databases import connector_arrow_database as module
+
+        traced_files = {_pending_commits.__file__, module.__file__}
+        traced_functions = {
+            "_flush_by_key",
+            "_commit_batch",
+            "_discard_attempted",
+        }
+
+        class LoggingConnector(SQLiteConnector):
+            def __init__(self) -> None:
+                super().__init__(":memory:")
+                self.written: list[bytes] = []
+
+            def upsert_records(
+                self,
+                table_name: str,
+                records: pa.Table,
+                id_column: str,
+                skip_existing: bool = False,
+            ) -> None:
+                super().upsert_records(
+                    table_name, records, id_column, skip_existing=skip_existing
+                )
+                self.written.extend(cast(list[bytes], records[id_column].to_pylist()))
+
+        expected = {b"plain": 1, b"skipping": 2, b"o": 3}
+        position = 0
+        while True:
+            position += 1
+            connector = LoggingConnector()
+            try:
+                db = ConnectorArrowDatabase(connector)
+                self._mixed_policies(db, self.PATH)
+                db.add_record(("other", "v1"), b"o", make_table(v=[3]))
+                lines = 0
+
+                def trace(frame: Any, event: str, arg: Any) -> Any:
+                    nonlocal lines
+                    code = frame.f_code
+                    if code.co_filename not in traced_files or (
+                        Path(code.co_filename).name != "_pending_commits.py"
+                        and code.co_name not in traced_functions
+                    ):
+                        return None
+                    if event == "line":
+                        lines += 1
+                        if lines == position:
+                            raise KeyboardInterrupt
+                    return trace
+
+                notes = ""
+                sys.settrace(trace)
+                try:
+                    db.flush()
+                except KeyboardInterrupt as interrupt:
+                    notes = "\n".join(getattr(interrupt, "__notes__", []))
+                finally:
+                    sys.settrace(None)
+                if lines < position:
+                    break  # Every line was interrupted once.
+                for key, table in db._pending_batches.items():
+                    queued = set(
+                        table[ConnectorArrowDatabase.RECORD_ID_COLUMN].to_pylist()
+                    )
+                    assert queued == set(db._pending_record_ids[key]), position
+                db.flush()
+                assert len(connector.written) == len(set(connector.written)), position
+                stored = self._stored_values(connector, self.PATH)
+                stored |= self._stored_values(connector, ("other", "v1"))
+                for key, value in expected.items():
+                    assert stored.get(key) == value or repr(key) in notes, (
+                        position,
+                        key,
+                    )
+            finally:
+                connector.close()
+        assert position > 20
 
     def test_each_policy_batch_is_checked_against_the_schema_guard(self) -> None:
         """The table's schema guard checks every write of a split flush, not only

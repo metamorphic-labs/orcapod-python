@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from collections import defaultdict
 from collections.abc import Callable, Collection, Mapping
 from contextlib import AbstractContextManager
 from typing import TYPE_CHECKING, Any, cast
@@ -54,8 +53,6 @@ class InMemoryArrowDatabase:
         max_hierarchy_depth: int = 10,
         _path_prefix: tuple[str, ...] = (),
         _shared_tables: "dict[str, pa.Table] | None" = None,
-        _shared_pending_batches: "dict[str, pa.Table] | None" = None,
-        _shared_pending_record_ids: "dict[str, set[bytes]] | None" = None,
         _shared_indexes: "dict[str, KeyIndex] | None" = None,
         _root: InMemoryArrowDatabase | None = None,
         _scoped_path: tuple[str, ...] = (),
@@ -67,14 +64,6 @@ class InMemoryArrowDatabase:
         self._tables: dict[str, pa.Table] = (
             _shared_tables if _shared_tables is not None else {}
         )
-        self._pending_batches: dict[str, pa.Table] = (
-            _shared_pending_batches if _shared_pending_batches is not None else {}
-        )
-        self._pending_record_ids: dict[str, set[bytes]] = (
-            _shared_pending_record_ids
-            if _shared_pending_record_ids is not None
-            else defaultdict(set)
-        )
         self._indexes: dict[str, KeyIndex] = (
             _shared_indexes if _shared_indexes is not None else {}
         )
@@ -82,10 +71,12 @@ class InMemoryArrowDatabase:
         self._pending_commits = (
             _root._pending_commits
             if _root is not None
-            else PendingCommits(
-                self.RECORD_ID_COLUMN, self._pending_batches, self._pending_record_ids
-            )
+            else PendingCommits(self.RECORD_ID_COLUMN)
         )
+        # Read-only views of the queue shared by every view of the database; each
+        # table's rows and ids change together, in one step (ITL-1381).
+        self._pending_batches = self._pending_commits.batches
+        self._pending_record_ids = self._pending_commits.ids
 
     # ------------------------------------------------------------------
     # Path helpers
@@ -197,7 +188,7 @@ class InMemoryArrowDatabase:
     ) -> "pa.Table":
         """Filter out records whose IDs are already in pending or committed database."""
         input_ids = set(table[self.RECORD_ID_COLUMN].to_pylist())
-        pending_ids = self._pending_record_ids[record_key]
+        pending_ids = self._pending_record_ids.get(record_key, frozenset())
         committed_ids = self._committed_id_index(record_key)
         all_existing = {
             record_id
@@ -319,7 +310,9 @@ class InMemoryArrowDatabase:
         else:
             # Check for conflicts in the pending batch only
             input_ids = set(records[self.RECORD_ID_COLUMN].to_pylist())
-            pending_conflicts = input_ids & self._pending_record_ids[record_key]
+            pending_conflicts = input_ids & self._pending_record_ids.get(
+                record_key, frozenset()
+            )
             if pending_conflicts:
                 raise ValueError(
                     f"Records with IDs {pending_conflicts} already exist in the "
@@ -328,14 +321,17 @@ class InMemoryArrowDatabase:
 
         # Add to pending batch
         existing_pending = self._pending_batches.get(record_key)
-        if existing_pending is None:
-            self._pending_batches[record_key] = records
-        else:
-            self._pending_batches[record_key] = pa.concat_tables(
-                [existing_pending, records]
-            )
+        queued = (
+            records
+            if existing_pending is None
+            else pa.concat_tables([existing_pending, records])
+        )
         pending_ids = cast(list[bytes], records[self.RECORD_ID_COLUMN].to_pylist())
-        self._pending_record_ids[record_key].update(pending_ids)
+        self._pending_commits.queue(
+            record_key,
+            queued,
+            self._pending_record_ids.get(record_key, frozenset()).union(pending_ids),
+        )
 
         if flush:
             self.flush()
@@ -501,8 +497,6 @@ class InMemoryArrowDatabase:
             max_hierarchy_depth=self.max_hierarchy_depth,
             _path_prefix=self._path_prefix + path_components,
             _shared_tables=self._tables,
-            _shared_pending_batches=self._pending_batches,
-            _shared_pending_record_ids=self._pending_record_ids,
             _shared_indexes=self._indexes,
             _root=new_root,
             _scoped_path=new_scoped_path,
@@ -605,7 +599,7 @@ class InMemoryArrowDatabase:
         record_key = self._get_record_key(record_path)
 
         # Check pending first
-        if record_id in self._pending_record_ids[record_key]:
+        if record_id in self._pending_record_ids.get(record_key, frozenset()):
             pending = self._pending_batches[record_key]
             filtered = pending.filter(pc.field(self.RECORD_ID_COLUMN) == record_id)
             if filtered.num_rows > 0:

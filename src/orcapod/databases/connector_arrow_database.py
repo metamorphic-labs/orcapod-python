@@ -19,7 +19,6 @@ Example::
 from __future__ import annotations
 
 import re
-from collections import defaultdict
 from collections.abc import Callable, Collection, Mapping
 from contextlib import AbstractContextManager
 from typing import Any, cast
@@ -130,8 +129,6 @@ class ConnectorArrowDatabase:
         connector: DBConnectorProtocol,
         max_hierarchy_depth: int = 10,
         _path_prefix: tuple[str, ...] = (),
-        _shared_pending_batches: dict[str, pa.Table] | None = None,
-        _shared_pending_record_ids: dict[str, set[bytes]] | None = None,
         _shared_pending_skip_existing: dict[str, set[bytes]] | None = None,
         _root: ConnectorArrowDatabase | None = None,
         _scoped_path: tuple[str, ...] = (),
@@ -141,14 +138,6 @@ class ConnectorArrowDatabase:
         self._path_prefix = _path_prefix
         self._root = _root
         self._scoped_path = _scoped_path
-        self._pending_batches: dict[str, pa.Table] = (
-            _shared_pending_batches if _shared_pending_batches is not None else {}
-        )
-        self._pending_record_ids: dict[str, set[bytes]] = (
-            _shared_pending_record_ids
-            if _shared_pending_record_ids is not None
-            else defaultdict(set)
-        )
         # The schema each stored table was read with, for the append check
         # (``_refuse_changed_columns``).
         self._stored_schemas: dict[str, pa.Schema] = {}
@@ -168,11 +157,13 @@ class ConnectorArrowDatabase:
             if _root is not None
             else PendingCommits(
                 self.RECORD_ID_COLUMN,
-                self._pending_batches,
-                self._pending_record_ids,
                 on_empty=self._discard_pending_duplicate_policy,
             )
         )
+        # Read-only views of the queue, shared by every view of the database. Each
+        # table's rows and ids change together, in one step (ITL-1381).
+        self._pending_batches = self._pending_commits.batches
+        self._pending_record_ids = self._pending_commits.ids
 
     def _discard_pending_duplicate_policy(self, key: str) -> None:
         """Forget the duplicate policy when an entire queued batch is discarded."""
@@ -525,7 +516,9 @@ class ConnectorArrowDatabase:
             # Committed duplicates are handled at flush time via
             # upsert_records(skip_existing=True), which lets the connector skip
             # stored ids natively — no full-table read needed here.
-            pending_conflicts = input_ids & self._pending_record_ids[record_key]
+            pending_conflicts = input_ids & self._pending_record_ids.get(
+                record_key, frozenset()
+            )
             if pending_conflicts:
                 mask = pc.invert(
                     pc.is_in(
@@ -537,7 +530,9 @@ class ConnectorArrowDatabase:
             if records.num_rows == 0:
                 return
         else:
-            conflicts = input_ids & self._pending_record_ids[record_key]
+            conflicts = input_ids & self._pending_record_ids.get(
+                record_key, frozenset()
+            )
             if conflicts:
                 raise ValueError(
                     f"Records with IDs {conflicts} already exist in the pending batch. "
@@ -556,23 +551,26 @@ class ConnectorArrowDatabase:
         # Buffer in pending batch
         existing_pending = self._pending_batches.get(record_key)
         if existing_pending is None:
-            self._pending_batches[record_key] = records
+            queued = records
         else:
             # Two queued batches may declare a column's nullability differently, as
             # stored and queued rows may (ITL-1381).
             self._refuse_loosened_columns(record_path, existing_pending, records)
-            self._pending_batches[record_key] = pa.concat_tables(
-                _alike([existing_pending, records])
-            )
+            queued = pa.concat_tables(_alike([existing_pending, records]))
         queued_ids = cast(list[bytes], records[self.RECORD_ID_COLUMN].to_pylist())
         # Each row keeps the write policy it was queued with: flush() writes the
-        # rows of each policy as their own batch (ITL-1381).
+        # rows of each policy as their own batch (ITL-1381). A policy recorded for
+        # an id not (yet) queued is never read.
         skipped = self._pending_skip_existing.setdefault(record_key, set())
         if skip_duplicates:
             skipped.update(queued_ids)
         else:
             skipped.difference_update(queued_ids)
-        self._pending_record_ids[record_key].update(queued_ids)
+        self._pending_commits.queue(
+            record_key,
+            queued,
+            self._pending_record_ids.get(record_key, frozenset()).union(queued_ids),
+        )
 
         if flush:
             self.flush()
@@ -722,8 +720,8 @@ class ConnectorArrowDatabase:
     def at(self, *path_components: str) -> "ConnectorArrowDatabase":
         """Return a new ConnectorArrowDatabase scoped to the given sub-path.
 
-        The returned instance shares the connector and all three pending dicts
-        (_pending_batches, _pending_record_ids, _pending_skip_existing) by reference.
+        The returned instance shares the connector, the pending queue
+        (``_pending_commits``) and the write policies (``_pending_skip_existing``).
         Calling flush() on any view drains the entire shared pending queue.
 
         Raises:
@@ -747,8 +745,6 @@ class ConnectorArrowDatabase:
             connector=self._connector,
             max_hierarchy_depth=self.max_hierarchy_depth,
             _path_prefix=self._path_prefix + path_components,
-            _shared_pending_batches=self._pending_batches,
-            _shared_pending_record_ids=self._pending_record_ids,
             _shared_pending_skip_existing=self._pending_skip_existing,
             _root=new_root,
             _scoped_path=new_scoped_path,
@@ -824,9 +820,10 @@ class ConnectorArrowDatabase:
 
         Rows queued with ``skip_duplicates`` and rows queued without it are written
         as two batches, each with its own write policy, never as one (ITL-1381).
-        Each batch is taken from the queue only when it is written, so a batch not
-        yet sent stays queued, whatever interrupts the flush, and the table's schema
-        guard stays with it and checks its write too. Each batch commits or leaves
+        Each batch stays in the queue until its write is tried (``_commit_batch``
+        takes it out, in one step), so a batch not yet sent stays queued, whatever
+        interrupts the flush, and the table's schema guard stays with it and checks
+        its write too. Each batch commits or leaves
         the queue on its own; the first failure is raised after both were tried.
         """
         first_error: Exception | None = None
@@ -835,7 +832,8 @@ class ConnectorArrowDatabase:
                 skipped = self._pending_skip_existing.get(record_key, set())
                 queued = self._pending_record_ids.get(record_key, set())
                 among = queued & skipped if skip_existing else queued - skipped
-                ready = self._pending_commits.take_ready(record_key, among)
+                # Left in the queue until its write is tried (``_commit_batch``).
+                ready = self._pending_commits.peek_ready(record_key, among)
                 if ready is None:
                     continue
                 batch, ids = ready
@@ -930,6 +928,9 @@ class ConnectorArrowDatabase:
                 id_column=self.RECORD_ID_COLUMN,
                 skip_existing=skip_existing,
             )
+            # Inside the try: an interruption after the write still takes the rows
+            # out of the queue (below), so they are never written again.
+            self._pending_commits.remove(record_key, ids)
         except Exception as error:
             discarded = self._discard_attempted(record_key, ids)
             raise OrcapodDatabaseWriteError(
@@ -956,6 +957,7 @@ class ConnectorArrowDatabase:
     ) -> dict[str, set[bytes]]:
         """Withdraw an attempted batch's keys and the records they guard; return
         every removed key, by table."""
+        self._pending_commits.remove(record_key, ids)
         discarded = {record_key: ids.copy()}
         self._pending_commits.finish_rows(
             record_key, ids, committed=False, discarded=discarded

@@ -7,7 +7,6 @@ import re
 import sys
 import time
 import uuid
-from collections import defaultdict
 from collections.abc import Callable, Collection, Mapping
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -1746,8 +1745,6 @@ class DeltaTableDatabase:
         _path_prefix: tuple[str, ...] = (),
         _root: "DeltaTableDatabase | None" = None,
         _scoped_path: tuple[str, ...] = (),
-        _shared_pending_batches: "dict[str, pa.Table] | None" = None,
-        _shared_pending_record_ids: "defaultdict[str, set[bytes]] | None" = None,
         _shared_delta_table_cache: "dict[str, deltalake.DeltaTable] | None" = None,
         _shared_snapshots: "dict[str, _CommittedSnapshot] | None" = None,
         _shared_pending_indexes: "dict[str, KeyIndex] | None" = None,
@@ -1786,14 +1783,6 @@ class DeltaTableDatabase:
         self._delta_table_cache: dict[str, deltalake.DeltaTable] = (
             _shared_delta_table_cache if _shared_delta_table_cache is not None else {}
         )
-        if _shared_pending_batches is not None:
-            self._pending_batches = _shared_pending_batches
-        else:
-            self._pending_batches: dict[str, pa.Table] = {}
-        if _shared_pending_record_ids is not None:
-            self._pending_record_ids = _shared_pending_record_ids
-        else:
-            self._pending_record_ids: dict[str, set[bytes]] = defaultdict(set)
         # The committed rows of each loaded table version (ITL-919), shared like the
         # loaded tables: a snapshot describes the cached table's version only.
         self._snapshots: dict[str, _CommittedSnapshot] = (
@@ -1808,11 +1797,13 @@ class DeltaTableDatabase:
             if _root is not None
             else PendingCommits(
                 self.RECORD_ID_COLUMN,
-                self._pending_batches,
-                self._pending_record_ids,
                 on_empty=self._discard_pending_index,
             )
         )
+        # Read-only views of the queue shared by every view of the database; each
+        # table's rows and ids change together, in one step (ITL-1381).
+        self._pending_batches = self._pending_commits.batches
+        self._pending_record_ids = self._pending_commits.ids
         # Record keys whose table was found absent (ITL-1173), so lookups do not try
         # to open it again on every row. Family-wide like the loaded tables, and
         # forgotten on any flush of the family and on a flush of the key: a table
@@ -2848,7 +2839,10 @@ class DeltaTableDatabase:
         )
         if staged_pending is not None:
             self._refuse_unmergeable_append(record_path, staged_pending, staged_pending)
-            self._pending_batches[self._get_record_key(record_path)] = staged_pending
+            staged_key = self._get_record_key(record_path)
+            self._pending_commits.queue(
+                staged_key, staged_pending, self._pending_record_ids[staged_key]
+            )
 
         # Step 7: Add to pending batch (no overwrite logic needed)
         self._add_to_pending_batch(record_path, schema_compatible_table)
@@ -2898,7 +2892,7 @@ class DeltaTableDatabase:
 
         # Get IDs that already exist in pending batch or Delta table
         existing_in_pending = input_ids.intersection(
-            self._pending_record_ids[record_key]
+            self._pending_record_ids.get(record_key, frozenset())
         )
         existing_in_delta = input_ids.intersection(self._stored_ids(record_path))
         if existing_in_delta:
@@ -2931,7 +2925,9 @@ class DeltaTableDatabase:
         input_ids = set(table[self.RECORD_ID_COLUMN].to_pylist())
         record_key = self._get_record_key(record_path)
         # Check conflicts with pending batch
-        pending_conflicts = input_ids.intersection(self._pending_record_ids[record_key])
+        pending_conflicts = input_ids.intersection(
+            self._pending_record_ids.get(record_key, frozenset())
+        )
         if pending_conflicts:
             raise ValueError(
                 f"Cannot insert records with IDs that already exist in pending batch: {pending_conflicts}. "
@@ -3039,19 +3035,20 @@ class DeltaTableDatabase:
         # Add row index column for internal tracking
         record_key = self._get_record_key(record_path)
         pending_batch = self._pending_batches.get(record_key)
+        pending_ids = cast(list[bytes], table[self.RECORD_ID_COLUMN].to_pylist())
+        queued_ids = self._pending_record_ids.get(record_key, frozenset()).union(
+            pending_ids
+        )
         if pending_batch is None:
-            self._pending_batches[record_key] = table
+            self._pending_commits.queue(record_key, table, queued_ids)
         else:
             # Kept at O(log n) record batches, and its indexes extended in place, so a
             # lookup's cost does not grow with the rows pending (ITL-919).
             grown = compact_tail(pa.concat_tables([pending_batch, table]))
-            self._pending_batches[record_key] = grown
+            self._pending_commits.queue(record_key, grown, queued_ids)
             index = self._pending_indexes.get(record_key)
             if index is not None and index.table is pending_batch:
                 index.append(table, grown)
-
-        pending_ids = cast(list[bytes], table[self.RECORD_ID_COLUMN].to_pylist())
-        self._pending_record_ids[record_key].update(pending_ids)
 
     def _should_auto_flush(self, record_path: tuple[str, ...]) -> bool:
         """Check if auto-flush should be triggered."""
@@ -3310,9 +3307,9 @@ class DeltaTableDatabase:
         # Serve a pending record only if its id is not stored: a flush keeps the
         # stored row and drops the pending one.
         record_key = self._get_record_key(record_path)
-        if record_id in self._pending_record_ids[
-            record_key
-        ] and record_id not in self._stored_ids(record_path):
+        if record_id in self._pending_record_ids.get(
+            record_key, frozenset()
+        ) and record_id not in self._stored_ids(record_path):
             # Return the pending record after removing the entry id column
             pending = self._pending_rows(record_path)
             assert pending is not None, "Pending batch should not be None"
@@ -4287,8 +4284,6 @@ class DeltaTableDatabase:
             _path_prefix=self._path_prefix + path_components,
             _root=new_root,
             _scoped_path=new_scoped_path,
-            _shared_pending_batches=root_instance._pending_batches,
-            _shared_pending_record_ids=root_instance._pending_record_ids,
             _shared_delta_table_cache=root_instance._delta_table_cache,
             _shared_snapshots=root_instance._snapshots,
             _shared_pending_indexes=root_instance._pending_indexes,

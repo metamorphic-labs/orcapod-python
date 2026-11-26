@@ -2,10 +2,56 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping, Set
 from contextlib import contextmanager
+from dataclasses import dataclass
 
 import pyarrow as pa
+
+
+@dataclass(frozen=True)
+class QueuedRows:
+    """One table's queued rows and their ids, replaced as a whole (ITL-1381).
+
+    The queue never changes the rows and the ids in two steps: an interruption
+    (``KeyboardInterrupt``) between two statements leaves both as they were or
+    both as they become.
+    """
+
+    table: pa.Table
+    ids: frozenset[bytes]
+
+
+class QueuedTables(Mapping[str, pa.Table]):
+    """Read-only view of each key's queued rows."""
+
+    def __init__(self, queue: dict[str, QueuedRows]) -> None:
+        self._queue = queue
+
+    def __getitem__(self, key: str) -> pa.Table:
+        return self._queue[key].table
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._queue)
+
+    def __len__(self) -> int:
+        return len(self._queue)
+
+
+class QueuedIds(Mapping[str, frozenset[bytes]]):
+    """Read-only view of each key's queued ids."""
+
+    def __init__(self, queue: dict[str, QueuedRows]) -> None:
+        self._queue = queue
+
+    def __getitem__(self, key: str) -> frozenset[bytes]:
+        return self._queue[key].ids
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._queue)
+
+    def __len__(self) -> int:
+        return len(self._queue)
 
 
 class PendingCommit:
@@ -36,18 +82,43 @@ class PendingCommits:
     def __init__(
         self,
         record_id_column: str,
-        batches: dict[str, pa.Table],
-        ids: dict[str, set[bytes]],
         *,
         on_empty: Callable[[str], None] | None = None,
     ) -> None:
         self._record_id_column = record_id_column
-        self._batches = batches
-        self._ids = ids
+        # The queue itself: every change replaces a key's entry by one assignment.
+        self._queue: dict[str, QueuedRows] = {}
+        self._batches = QueuedTables(self._queue)
+        self._ids = QueuedIds(self._queue)
         self._on_empty = on_empty
         self._attempts: dict[str, dict[bytes | None, PendingCommit]] = {}
         self._guards: dict[str, dict[bytes, PendingCommit]] = {}
         self._schema_checks: dict[str, Callable[[pa.Schema], None]] = {}
+
+    @property
+    def batches(self) -> Mapping[str, pa.Table]:
+        """Each key's queued rows (read-only)."""
+        return self._batches
+
+    @property
+    def ids(self) -> Mapping[str, frozenset[bytes]]:
+        """Each key's queued ids (read-only)."""
+        return self._ids
+
+    def queue(self, key: str, table: pa.Table, ids: Set[bytes]) -> None:
+        """Make ``table`` (with exactly ``ids``) the key's queued rows, in one step."""
+        self._queue[key] = QueuedRows(table, frozenset(ids))
+
+    def clear(self) -> None:
+        """Drop every queued row."""
+        self._queue.clear()
+
+    def _replace(self, key: str, table: pa.Table, ids: frozenset[bytes]) -> None:
+        """Keep ``ids`` of the key's rows (``table``), or drop the key when none."""
+        if ids:
+            self._queue[key] = QueuedRows(table, ids)
+        else:
+            self._queue.pop(key, None)
 
     @contextmanager
     def guard_schema(
@@ -126,18 +197,17 @@ class PendingCommits:
         guards = self._guards.get(key, {})
         ids = {record_id for record_id in ids if guards.get(record_id) is attempt}
         self.forget(key, ids)
-        held_ids = self._ids.get(key)
-        if held_ids is None:
+        held = self._queue.get(key)
+        if held is None:
             return
-        removed = ids & held_ids
+        removed = ids & held.ids
         if not removed:
             return
-        held_ids.difference_update(removed)
-        if held_ids:
-            self._batches[key] = self._select(self._batches[key], ids, keep=False)
+        remaining = held.ids - removed
+        if remaining:
+            self._replace(key, self._select(held.table, removed, keep=False), remaining)
         else:
-            self._batches.pop(key)
-            self._ids.pop(key)
+            self._queue.pop(key)
             self._schema_checks.pop(key, None)
             if self._on_empty is not None:
                 self._on_empty(key)
@@ -145,47 +215,71 @@ class PendingCommits:
             discarded.setdefault(key, set()).update(removed)
         self.finish_rows(key, removed, committed=False, discarded=discarded)
 
-    def take_ready(
-        self, key: str, among: set[bytes] | None = None
+    def peek_ready(
+        self, key: str, among: Set[bytes] | None = None
     ) -> tuple[pa.Table, set[bytes]] | None:
-        """Take the records ready to commit, leaving blocked records readable.
+        """The records ready to commit, left in the queue (blocked ones excluded).
 
         Args:
             key: The table's key.
-            among: Take only these ids (the rows of one write policy); the other
-                queued rows stay queued. ``None`` takes every ready row.
+            among: Only these ids (the rows of one write policy). ``None``: every
+                ready row.
 
-        The taken and the remaining rows are built as new objects before the queue
-        is changed, so an interruption while splitting leaves the queue as it was.
+        Returns:
+            The ready rows and their ids, or ``None`` when none is ready. Nothing
+            leaves the queue: ``remove`` takes them out once their write was tried.
         """
-        batch = self._batches.get(key)
-        if batch is None or not batch.num_rows:
+        held = self._queue.get(key)
+        if held is None or not held.table.num_rows:
             return None
-        held = self._ids.get(key, set())
         blocked = {
             record_id
             for record_id, attempt in self._guards.get(key, {}).items()
             if not attempt.committed
         }
-        taken = (held if among is None else held & among) - blocked
-        if not taken:
+        ready = set(held.ids if among is None else held.ids & among) - blocked
+        if not ready:
             return None
-        if taken == held:
-            self._batches.pop(key)
-            self._ids.pop(key, None)
-            return batch, taken
-        taken_rows = self._select(batch, taken, keep=True)
-        remaining_rows = self._select(batch, taken, keep=False)
-        remaining_ids = held - taken
-        self._batches[key] = remaining_rows
-        self._ids[key] = remaining_ids
-        return taken_rows, taken
+        if ready == held.ids:
+            return held.table, ready
+        return self._select(held.table, ready, keep=True), ready
 
-    def restore(self, key: str, batch: pa.Table, ids: set[bytes]) -> None:
+    def remove(self, key: str, ids: Set[bytes]) -> None:
+        """Take rows out of the queue, in one step."""
+        held = self._queue.get(key)
+        if held is None or not ids & held.ids:
+            return
+        remaining = held.ids - ids
+        table = (
+            self._select(held.table, set(ids), keep=False) if remaining else held.table
+        )
+        self._replace(key, table, remaining)
+
+    def take_ready(
+        self, key: str, among: Set[bytes] | None = None
+    ) -> tuple[pa.Table, set[bytes]] | None:
+        """Take the records ready to commit, leaving blocked records readable.
+
+        Args:
+            key: The table's key.
+            among: Take only these ids; the other queued rows stay queued.
+                ``None`` takes every ready row.
+
+        The taken and the remaining rows are built before the queue changes, and
+        the queue changes in one step (``remove``).
+        """
+        ready = self.peek_ready(key, among)
+        if ready is not None:
+            self.remove(key, ready[1])
+        return ready
+
+    def restore(self, key: str, batch: pa.Table, ids: Set[bytes]) -> None:
         """Restore a retryable write ahead of rows that were held back."""
-        held = self._batches.get(key)
-        self._batches[key] = batch if held is None else pa.concat_tables([batch, held])
-        self._ids.setdefault(key, set()).update(ids)
+        held = self._queue.get(key)
+        if held is None:
+            self.queue(key, batch, ids)
+        else:
+            self.queue(key, pa.concat_tables([batch, held.table]), held.ids | ids)
 
     def forget(self, key: str, ids: set[bytes]) -> None:
         """Forget dependencies for records that are leaving the queue."""
@@ -198,7 +292,7 @@ class PendingCommits:
             if not guards:
                 self._guards.pop(key)
 
-    def _select(self, batch: pa.Table, ids: set[bytes], *, keep: bool) -> pa.Table:
+    def _select(self, batch: pa.Table, ids: Set[bytes], *, keep: bool) -> pa.Table:
         """Keep or remove the given rows, preserving their order and schema."""
         mask = [
             (record_id in ids) == keep
