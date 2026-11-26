@@ -1078,18 +1078,18 @@ class StaticOutputOperatorPod(TraceableBase):
                     f"input_pipeline_hashes length ({len(input_pipeline_hashes)}) "
                     f"must match inputs length ({len(inputs)})"
                 )
-            all_rows = await asyncio.gather(*(ch.collect() for ch in inputs))
-            if not all(all_rows):
+            all_rows = await collect_all_row_chunks(inputs)
+            if not all(rows.num_rows for rows in all_rows):
                 # Every barrier operator that exists gives no rows when an input has
                 # none. The typed empty stream the sync path returns needs a schema
                 # the channels do not carry (ITL-858), so nothing is emitted (ITL-865).
                 return
             streams = [
-                self._materialize_input_stream(rows, pipeline_hash)
+                rows.input_stream(pipeline_hash)
                 for rows, pipeline_hash in zip(all_rows, input_pipeline_hashes)
             ]
             result = self.static_process(*streams)
-            for tag, data in result.iter_data():
+            for tag, data in rows_once(result):
                 await output.send((tag, data))
         finally:
             await output.close()
@@ -1287,6 +1287,238 @@ async def _streams_of(inputs: Sequence[RecordBatchInput]) -> list[StreamProtocol
 # ---------------------------------------------------------------------------
 # Conversions between streams and Arrow record batches (ITL-1347)
 # ---------------------------------------------------------------------------
+
+
+ROW_CHUNK_ROWS = 8_192
+"""Rows per Arrow table that ``RowChunks`` keeps: arriving rows are held as objects only
+until this many have arrived."""
+
+
+class RowChunks:
+    """Rows received one at a time, kept as Arrow tables, not as ``(Tag, Data)`` pairs.
+
+    The async path hands rows on one by one, and a node that must keep what passed
+    (an operator job node its output, a barrier operator its input) kept every pair:
+    18 to 110 KiB per row against a few KiB as Arrow data (ITL-1464). This keeps at most
+    ``ROW_CHUNK_ROWS`` pairs; every full chunk is built into two Arrow tables (tags
+    with system tags, data with source info) and the pairs are let go.
+
+    What it builds is exactly what the row list built: ``row_table()`` equals
+    ``StaticOutputOperatorPod._rows_to_table(rows)`` over all the rows added, in
+    order (same columns, types, field flags and values; only the arrays' chunking
+    differs), because that table is a concatenation of one table per row, matched by
+    name to the first row's column order, and concatenation chunk by chunk gives the
+    same table. Rows whose columns disagree raise ``pyarrow.ArrowInvalid`` as there,
+    and as there only when the table is asked for (``row_table``), never when a row
+    is added; the message's table index is then the row's place in its chunk, or the
+    chunk's place. Once a chunk could not be built, no later row is kept and every read
+    raises that error; a chunk is never built again.
+
+    A chunk is the record batch an ITL-1347 channel carries, before the last step of
+    its row-built form (the source-info field flags, which need every row); a node
+    wired to record-batch channels receives such batches and needs no ``RowChunks``.
+    """
+
+    def __init__(self) -> None:
+        # One entry per sealed chunk (tags, data, contexts): a chunk is published whole.
+        self._chunks: list[tuple[pa.Table, pa.Table, pa.Array[Any]]] = []  # pyright: ignore[reportExplicitAny]  # any array
+        self._pending: list[tuple[TagProtocol, DataProtocol]] = []
+        self._tag_keys: tuple[str, ...] = ()
+        self._data_tags: tuple[str, ...] = ()
+        self._first_context_key: str | None = None
+        self._failure: Exception | None = None
+        self.num_rows: int = 0
+
+    def add(self, tag: TagProtocol, data: DataProtocol) -> None:
+        """Keep one row, after every row added before it.
+
+        Nothing of the row is read until its chunk is built.
+
+        Raises:
+            MemoryError: If a full chunk cannot be built for want of memory.
+            OSError: If a full chunk cannot be kept for want of a system resource.
+        """
+        self.num_rows += 1
+        if self._failure is not None:
+            # The rows can no longer make a table: ``row_table`` raises, so none is kept.
+            return
+        self._pending.append((tag, data))
+        if len(self._pending) >= ROW_CHUNK_ROWS:
+            try:
+                self._seal()
+            except (MemoryError, OSError):
+                # The process, not the rows, failed: the run ends here.
+                raise
+            except Exception:  # noqa: BLE001  # raised by ``row_table``
+                # Rows that cannot make one table (columns that disagree). Receiving
+                # a row never raised for them: the error belongs to the read of the
+                # table, which a barrier whose other input is empty never makes.
+                pass
+
+    def _seal(self) -> None:
+        """Build the pending rows into one chunk and let the pairs go.
+
+        All or nothing, and never twice: a chunk is published whole by one append, and
+        after a failure nothing is built or given again (every read raises the failure).
+        """
+        if self._failure is not None:
+            raise self._failure
+        if not self._pending:
+            return
+        try:
+            chunk = self._build_chunk(self._pending)
+            nothing: list[tuple[TagProtocol, DataProtocol]] = []
+            self._chunks.append(chunk)
+        except Exception as error:
+            self._failure = error
+            self._pending = []
+            raise
+        self._pending = nothing
+
+    def _build_chunk(
+        self, rows: list[tuple[TagProtocol, DataProtocol]]
+    ) -> tuple[pa.Table, pa.Table, pa.Array[Any]]:  # pyright: ignore[reportExplicitAny]  # any array
+        """Build rows into their tag table, data table and data contexts."""
+        from orcapod.utils import arrow_utils
+
+        if not self._chunks:
+            tag, data = rows[0]
+            self._tag_keys = tuple(tag.keys())
+            self._data_tags = data_tag_names(tag.keys(), data.keys())
+            self._first_context_key = data.data_context_key
+        tag_tables = [tag.as_table(columns={"system_tags": True}) for tag, _ in rows]
+        data_tables = [data.as_table(columns={"source": True}) for _, data in rows]
+        if self._data_tags:
+            data_tables = [t.drop_columns(list(self._data_tags)) for t in data_tables]
+        # One chunk per column instead of one per row: the per-row arrays are what
+        # costs memory, the values are the same.
+        return (
+            arrow_utils.concat_tables_by_name(tag_tables).combine_chunks(),
+            arrow_utils.concat_tables_by_name(data_tables).combine_chunks(),
+            pa.array([data.data_context_key for _, data in rows], pa.large_string()),
+        )
+
+    def row_table(self) -> tuple[pa.Table, tuple[str, ...], tuple[str, ...]]:
+        """Return what ``_rows_to_table`` returns for the rows added, in order.
+
+        Returns:
+            The concatenated table, the user tag column names and the data-tags.
+
+        Raises:
+            ValueError: If no row was added.
+            Exception: The error of a chunk that could not be built, on every call.
+        """
+        from orcapod.utils import arrow_utils
+
+        if self.num_rows == 0:
+            raise ValueError("Cannot materialize an empty list of rows into a stream")
+        self._seal()
+        combined_tags = arrow_utils.concat_tables_by_name(
+            [tags for tags, _, _ in self._chunks]
+        )
+        combined_data = StaticOutputOperatorPod._flag_source_info_nullability(  # pyright: ignore[reportPrivateUsage]  # the one rule for these flags
+            arrow_utils.concat_tables_by_name([data for _, data, _ in self._chunks])
+        )
+        return (
+            arrow_utils.hstack_tables(combined_tags, combined_data),
+            self._tag_keys,
+            self._data_tags,
+        )
+
+    def output_stream(self) -> StreamProtocol:
+        """Return the stream ``_materialize_to_stream`` builds from the rows added."""
+        return StaticOutputOperatorPod._stream_over_row_table(self.row_table())  # pyright: ignore[reportPrivateUsage]  # the one builder of that stream
+
+    def input_stream(self, pipeline_hash: ContentHash) -> StreamProtocol:
+        """Return the stream ``_materialize_input_stream`` builds from the rows added.
+
+        Args:
+            pipeline_hash: The pipeline hash of the stream the rows came from.
+
+        Returns:
+            A stream over the rows, in order, each with its own data context.
+
+        Raises:
+            ValueError: If no row was added.
+        """
+        table, tag_keys, data_tags = self.row_table()
+        table = table.append_column(
+            pa.field(constants.CONTEXT_KEY, pa.large_string(), nullable=False),
+            pa.chunked_array([c for _, _, c in self._chunks], pa.large_string()),
+        )
+        return _RowsOfStream(
+            table,
+            tag_columns=tag_keys,
+            pipeline_hash=pipeline_hash,
+            data_tags=data_tags,
+            data_context=contexts.resolve_context(self._first_context_key),
+        )
+
+
+def rows_once(
+    result: StreamProtocol,
+) -> Iterator[tuple[TagProtocol, DataProtocol]]:
+    """Return ``result``'s rows for a reader that passes each on once.
+
+    An ``ArrowTableStream`` keeps every pair ``iter_data`` yields; an operator that
+    sends its result downstream and then drops it would hold the whole result as
+    objects while it sends (ITL-1464), so it reads such a stream without keeping.
+
+    Args:
+        result: An operator's result stream.
+
+    Returns:
+        The rows of ``result.iter_data()``, in its order.
+    """
+    # Exactly an ``ArrowTableStream`` with its own iterator: a subclass's ``iter_data``,
+    # or one set on the instance, is what yields its rows, and is never bypassed.
+    if type(result) is ArrowTableStream and "iter_data" not in vars(result):
+        return result.iter_data_unkept()
+    return result.iter_data()
+
+
+async def collect_row_chunks(
+    channel: ReadableChannel[tuple[TagProtocol, DataProtocol]],
+) -> RowChunks:
+    """Read ``channel`` to its end, keeping its rows as ``RowChunks``.
+
+    What a barrier operator does instead of ``channel.collect()``: the same rows in
+    the same order, without holding every row as a pair of objects (ITL-1464).
+
+    Args:
+        channel: The input channel.
+
+    Returns:
+        The rows; ``num_rows`` is 0 when the channel delivered none.
+    """
+    chunks = RowChunks()
+    async for tag, data in channel:
+        chunks.add(tag, data)
+    return chunks
+
+
+async def collect_all_row_chunks(
+    channels: Sequence[ReadableChannel[tuple[TagProtocol, DataProtocol]]],
+) -> list[RowChunks]:
+    """Read every channel to its end, at the same time (``collect_row_chunks``).
+
+    When one read fails, or this call is cancelled, every other read is cancelled and
+    ended before the error is raised: no reader outlives the call.
+
+    Args:
+        channels: The input channels.
+
+    Returns:
+        The rows of each channel, in the channels' order.
+    """
+    tasks = [asyncio.create_task(collect_row_chunks(channel)) for channel in channels]
+    try:
+        return await asyncio.gather(*tasks)
+    except BaseException:
+        for task in tasks:
+            _ = task.cancel()
+        _ = await asyncio.gather(*tasks, return_exceptions=True)
+        raise
 
 
 ROW_BUILT_OUTPUT = "_orcapod_row_built_output"

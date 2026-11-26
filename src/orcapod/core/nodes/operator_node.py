@@ -41,6 +41,7 @@ from orcapod.channels import Channel, ChannelClosed, ReadableChannel, WritableCh
 from orcapod.config import OrcapodConfig
 from orcapod.core.operators.static_output_pod import (
     RowBuiltFormUnavailable,
+    RowChunks,
     StaticOutputOperatorPod,
     produced_stream,
     rows_on_read,
@@ -2311,11 +2312,12 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
                     require_same_data_context(
                         input_stream.data_context_key, self.data_context_key
                     )
-            collected: list[tuple[TagProtocol, DataProtocol]] = []
+            # Kept as Arrow tables, not as a list of every pair (ITL-1464).
+            collected = RowChunks()
 
             async def forward() -> None:
                 async for item in intermediate.reader:
-                    collected.append(item)
+                    collected.add(*item)
                     await output.send(item)
 
             hashes = [s.pipeline_hash() for s in self._input_streams]
@@ -2341,8 +2343,8 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
             # does, and store it in LOG mode (sync DB write, post-hoc). A run
             # with no rows replaces an earlier run's output too: the node then
             # reads as a zero-row table.
-            if collected:
-                stream = StaticOutputOperatorPod._materialize_to_stream(collected)
+            if collected.num_rows:
+                stream = collected.output_stream()
                 self._cached_output_stream = stream
                 if should_store:
                     self._store_output_stream(stream)
