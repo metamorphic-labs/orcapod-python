@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import threading
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 
@@ -12,9 +12,8 @@ import pyarrow as pa
 _ADD_REFERENCE = ctypes.pythonapi.Py_IncRef
 _REFERENCE_TO = ctypes.py_object
 
-# Held only to read and write the table of kept instances, never while a constructor
-# or a serializer runs. Reentrant, so a finalizer the garbage collector runs inside
-# cannot block on it.
+# Held only to compare and publish prepared entries. Reentrant so same-thread
+# interruptions can also use the table.
 _LOCK = threading.RLock()
 
 
@@ -48,7 +47,7 @@ class KeptInstances(type):
     Calling the class returns a kept instance: the first one stored of that concrete
     class with that Arrow extension name, storage type (with the metadata of every
     nested field) and serialized metadata (``__arrow_ext_serialize__()``). Every
-    instance a call returns is kept with ``keep_for_process``, once.
+    instance a call returns is kept through the table for the life of the process.
 
     That key is what Arrow tells types apart by when it reads a column: two instances
     Arrow cannot tell apart on read are one type, and anything Arrow can tell apart is
@@ -66,51 +65,42 @@ class KeptInstances(type):
     apart by which object it is (``id``; the table holds the class, so the number is
     never used again): a class's own equality or hash is never consulted.
 
-    This holds the lifetime rule of ``keep_for_process``: a read builds a column's type
-    by calling its class (``__arrow_ext_deserialize__``), and every such call returns a
-    kept instance, so no read hands Arrow a type that a worker thread could destroy.
+    A read builds a column's type by calling its class
+    (``__arrow_ext_deserialize__``), and every such call returns a kept instance, so
+    no read hands Arrow a type that a worker thread could destroy.
     The number of kept instances is the number of distinct classes, names, storage
     types and metadata used, not the number of reads.
 
     How a call works:
 
-    1. It constructs a candidate and reads its key, with no lock held: a constructor
-       or a serializer may build other types, on its own thread or on another one it
-       waits for. The key is read from Arrow's own description of the candidate
-       (``_arrow_identity``), which holds the metadata Arrow serialized when the type
-       was built, so the serializer runs once for each construction.
-    2. Under one short lock it looks the key up. When it is absent, the candidate is
-       stored and then pinned for the process; every caller reads the table under the
-       same lock, so none is handed an instance that is not yet pinned. The stored
-       instance is returned.
+    1. It constructs the candidate, reads its key and prepares its owning reference
+       with no lock held. Constructors, serializers and GC callbacks can build other
+       types, on the same thread or on another one they wait for. The key comes from
+       Arrow's own description, which holds the metadata already serialized during
+       construction.
+    2. Under one short lock, ``setdefault`` installs the prepared entry if the key is
+       absent and returns the stored entry. The table itself is permanently rooted,
+       so installing the reference pins the instance immediately. Entries are never
+       removed or replaced.
 
-    A candidate that is not stored was never pinned: it is dropped like any other
-    object when the call returns, by the thread that made it. An instance is pinned
-    once for its key, whatever ``__new__`` returned and however often it is found
-    again. A failure while storing leaves nothing pinned and nothing stored.
+    A losing candidate and its prepared reference are discarded after unlocking.
+    If insertion fails, the prepared entry is discarded in the same way.
     """
 
-    # (id of the concrete class, Arrow identity) -> (the class, its kept instance).
-    _kept: dict[tuple[int, bytes], tuple[type, pa.ExtensionType]] = {}
+    # (id of the concrete class, Arrow identity) -> (class, owning reference).
+    _kept: dict[tuple[int, bytes], tuple[type, ctypes.py_object]] = {}
+    # This permanent reference keeps every published entry alive through shutdown.
+    _ADD_REFERENCE(_REFERENCE_TO(_kept))
 
     def __call__(cls, *args: Any, **kwargs: Any) -> Any:
         """Return the kept instance of ``cls`` that these arguments describe."""
-        # User code runs here, with no lock held.
-        candidate = super().__call__(*args, **kwargs)
+        candidate = cast(pa.ExtensionType, super().__call__(*args, **kwargs))
         key = (id(cls), _arrow_identity(candidate))
+        prepared = (cls, _REFERENCE_TO(candidate))
+        kept = KeptInstances._kept
         with _LOCK:
-            kept = KeptInstances._kept
-            entry = kept.get(key)
-            if entry is not None:
-                return entry[1]
-            kept[key] = (cls, candidate)
-            try:
-                keep_for_process(candidate)
-            except BaseException:
-                # Never leave an instance in the table that is not pinned.
-                del kept[key]
-                raise
-            return candidate
+            entry = kept.setdefault(key, prepared)
+        return cast(pa.ExtensionType, entry[1].value)
 
 
 def _arrow_identity(extension_type: pa.ExtensionType) -> bytes:

@@ -18,9 +18,10 @@ import threading
 import weakref
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from ctypes import py_object
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pyarrow.dataset as pa_ds
@@ -775,45 +776,74 @@ def test_storage_types_differing_in_nested_field_metadata_are_different_types(
         assert column.to_pylist() == rows
 
 
-def test_an_instance_is_pinned_before_any_caller_can_get_it(
+def test_gc_during_pin_preparation_can_wait_for_another_type(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An instance is pinned while the table's lock is held, once for its key.
+    """A GC callback waiting for another thread can finish during pin preparation."""
+    outer_type = _made("test.lifetime.pin_gc.outer")
+    # The generated classes have zero-argument constructors.
+    make_outer = cast(Callable[[], pa.ExtensionType], outer_type)
+    make_inner = cast(
+        Callable[[], pa.ExtensionType], _made("test.lifetime.pin_gc.inner")
+    )
+    reference_to = arrow_lifetime._REFERENCE_TO
+    threads: list[threading.Thread] = []
+    made: list[pa.ExtensionType] = []
+    finished = threading.Event()
+    finished_during_gc: list[bool] = []
 
-    Every caller reads the table under that lock, so none is handed a type that is not
-    yet kept. About ``KeptInstances`` itself: it reads where the pin happens.
-    """
-    held_when_pinned: list[bool] = []
-    pinned: list[Any] = []
-    keep = arrow_lifetime.keep_for_process
+    def construct_inner() -> None:
+        made.append(make_inner())
+        finished.set()
 
-    def lock_is_free() -> bool:
-        free = arrow_lifetime._LOCK.acquire(blocking=False)
-        if free:
-            arrow_lifetime._LOCK.release()
-        return free
+    def on_gc(phase: str, _info: dict[str, int]) -> None:
+        if phase == "start" and not threads:
+            thread = threading.Thread(target=construct_inner, daemon=True)
+            threads.append(thread)
+            thread.start()
+            finished_during_gc.append(finished.wait(timeout=5))
 
-    def watched(extension_type: pa.ExtensionType) -> pa.ExtensionType:
-        with ThreadPoolExecutor(1) as other_thread:
-            held_when_pinned.append(not other_thread.submit(lock_is_free).result())
-        pinned.append(extension_type)
-        return keep(extension_type)
+    def collect_before_referencing(value: object) -> py_object:
+        if type(value) is outer_type:
+            # Collect here deterministically instead of relying on the GC threshold.
+            gc.callbacks.append(on_gc)
+            try:
+                _ = gc.collect()
+            finally:
+                gc.callbacks.remove(on_gc)
+        return reference_to(value)
 
-    monkeypatch.setattr(arrow_lifetime, "keep_for_process", watched)
-    made = _made("test.lifetime.pinned_first")
+    monkeypatch.setattr(arrow_lifetime, "_REFERENCE_TO", collect_before_referencing)
+    _ = make_outer()
+    for thread in threads:
+        thread.join(timeout=5)
+    assert finished_during_gc == [True], "GC could not wait for the other constructor"
+    assert make_inner() is made[0]
 
-    class Custom(made):
-        pass
 
-    first = made()  # pyright: ignore[reportCallIssue]  # the synthesized class takes no arguments
-    custom = Custom()  # pyright: ignore[reportCallIssue]  # the synthesized class takes no arguments
-    for _ in range(3):
-        assert made() is first  # pyright: ignore[reportCallIssue]  # the synthesized class takes no arguments
-        assert Custom() is custom  # pyright: ignore[reportCallIssue]  # the synthesized class takes no arguments
-    assert held_when_pinned == [True, True]
-    assert len(pinned) == 2 and pinned[0] is first and pinned[1] is custom
-    with ThreadPoolExecutor(1) as other_thread:
-        assert other_thread.submit(lock_is_free).result()
+def test_reentry_during_failed_pin_preparation_keeps_one_instance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An inner call can publish a winner even if the outer preparation fails."""
+    extension_type = _made("test.lifetime.pin_reentry")
+    make = cast(Callable[[], pa.ExtensionType], extension_type)
+    reference_to = arrow_lifetime._REFERENCE_TO
+    inner: list[pa.ExtensionType] = []
+    interrupted = False
+
+    def reenter_before_referencing(value: object) -> py_object:
+        nonlocal interrupted
+        if type(value) is extension_type and not interrupted:
+            interrupted = True
+            inner.append(make())
+            raise MemoryError("pin preparation interrupted")
+        return reference_to(value)
+
+    monkeypatch.setattr(arrow_lifetime, "_REFERENCE_TO", reenter_before_referencing)
+    with pytest.raises(MemoryError, match="pin preparation interrupted"):
+        _ = make()
+    winner = inner.pop()
+    assert all(make() is winner for _ in range(3))
 
 
 def _loose_metaclass() -> type[KeptInstances]:
@@ -923,10 +953,6 @@ class _FailingOnce(dict):  # pyright: ignore[reportMissingTypeArgument]  # the t
         if self.failures:
             self.failures -= 1
             raise MemoryError("no memory for the table entry")
-
-    def __setitem__(self, key: Any, value: Any) -> None:
-        self._fail()
-        super().__setitem__(key, value)
 
     def setdefault(self, key: Any, default: Any = None) -> Any:
         if key not in self:
