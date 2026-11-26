@@ -379,6 +379,40 @@ class ArrowTableStream(StreamBase):
             total_rows=self._table.num_rows,
         )
 
+    @property
+    def num_rows(self) -> int:
+        """How many rows the stream holds; nothing is read or assembled."""
+        return self._table.num_rows
+
+    def read_rows(
+        self,
+        start: int,
+        length: int,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> "pa.Table":
+        """Return rows ``start`` to ``start + length`` of ``as_table(...)``.
+
+        Exactly ``as_table(columns=columns, all_info=all_info).slice(start, length)``,
+        for a reader that shows a page at a time (ITL-1464). The columns are views of
+        the table the stream holds: when that table is memory-mapped, only the pages
+        of the rows read are touched. Two configurations read every row first:
+        ``sort_by_tags`` (the page is of the sorted rows) and ``content_hash`` (a
+        row's hash is computed from the row).
+
+        Args:
+            start: The first row's position.
+            length: How many rows; fewer are returned at the end.
+            columns: Column groups, exactly as for ``as_table``.
+            all_info: As for ``as_table``.
+
+        Returns:
+            The rows, in the order ``as_table`` gives them.
+        """
+        config = ColumnConfig.handle_config(columns, all_info=all_info)
+        return self._assemble_table(config, limit=None).slice(start, length)
+
     def _typed_zero_row_table(self) -> "pa.Table":
         """This stream's table cut to no rows: its own Arrow types, no row assembled."""
         return self._assemble_table(ZERO_ROW_INPUT_COLUMNS, limit=0)
@@ -454,41 +488,63 @@ class ArrowTableStream(StreamBase):
         # TODO: make it work with table batch stream
         if self._cached_elements is None:
             cached_elements = []
-            tag_columns = list(self._all_tag_columns)
-            # Each row's source info goes to ``Data`` as Arrow columns, so it
-            # keeps the type it has here: re-typing it from Python values
-            # (``to_pylist``) would infer a type the stream already knows.
-            source_columns = list(self._source_info_table.column_names)
-            data_columns = list(self._data_columns) + source_columns
+            for pair in self._build_rows():
+                yield pair
 
-            # The source-info columns go beside the data columns they describe: the
-            # rows of this one table are read together, however each column is
-            # chunked (``rows_of`` reads batch by batch, cut at every column's chunk
-            # boundaries, so no row is dropped or paired with another's).
-            rows = self._table
-            for name in source_columns:
-                rows = rows.append_column(
-                    self._source_info_table.schema.field(name),
-                    self._source_info_table.column(name),
-                )
-            # The table is prepared once for all of its rows (ITL-1348): building
-            # ``Tag(row)`` and ``Data(row)`` from one-row slices normalized every row
-            # three times and split its columns again.
-            tags = (
-                Tag.rows_of(rows.select(tag_columns), self.data_context)
-                if tag_columns
-                else None
-            )
-            for data in Data.rows_of(rows.select(data_columns), self.data_context):
-                # A fresh empty tag per row, so rows never share one object.
-                tag = next(tags) if tags is not None else Tag({})
-
-                yield tag, data
-
-                cached_elements.append((tag, data))
+                cached_elements.append(pair)
             self._cached_elements = cached_elements
         else:
             yield from self._cached_elements
+
+    def iter_data_unkept(self) -> Iterator[tuple[TagProtocol, Data]]:
+        """Iterate the rows as ``iter_data`` does, without keeping the pairs built.
+
+        ``iter_data`` keeps every pair it yields for the stream's life, so a second
+        iteration returns the same objects. A reader that passes each row on once
+        (an operator sending its result downstream) has no second iteration, and the
+        kept pairs are the whole result held as objects (ITL-1464). Pairs an earlier
+        ``iter_data`` kept are yielded as they are.
+
+        Yields:
+            A ``(Tag, Data)`` tuple for each row, in table order.
+        """
+        if self._cached_elements is not None:
+            yield from self._cached_elements
+        else:
+            yield from self._build_rows()
+
+    def _build_rows(self) -> Iterator[tuple[TagProtocol, Data]]:
+        """Build and yield each row's ``(Tag, Data)`` pair, in table order."""
+        tag_columns = list(self._all_tag_columns)
+        # Each row's source info goes to ``Data`` as Arrow columns, so it
+        # keeps the type it has here: re-typing it from Python values
+        # (``to_pylist``) would infer a type the stream already knows.
+        source_columns = list(self._source_info_table.column_names)
+        data_columns = list(self._data_columns) + source_columns
+
+        # The source-info columns go beside the data columns they describe: the
+        # rows of this one table are read together, however each column is
+        # chunked (``rows_of`` reads batch by batch, cut at every column's chunk
+        # boundaries, so no row is dropped or paired with another's).
+        rows = self._table
+        for name in source_columns:
+            rows = rows.append_column(
+                self._source_info_table.schema.field(name),
+                self._source_info_table.column(name),
+            )
+        # The table is prepared once for all of its rows (ITL-1348): building
+        # ``Tag(row)`` and ``Data(row)`` from one-row slices normalized every row
+        # three times and split its columns again.
+        tags = (
+            Tag.rows_of(rows.select(tag_columns), self.data_context)
+            if tag_columns
+            else None
+        )
+        for data in Data.rows_of(rows.select(data_columns), self.data_context):
+            # A fresh empty tag per row, so rows never share one object.
+            tag = next(tags) if tags is not None else Tag({})
+
+            yield tag, data
 
     def __repr__(self) -> str:
         refs = f", data_tags={self._data_tags}" if self._data_tags else ""

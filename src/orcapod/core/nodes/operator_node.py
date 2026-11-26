@@ -41,7 +41,9 @@ from orcapod.channels import Channel, ChannelClosed, ReadableChannel, WritableCh
 from orcapod.config import OrcapodConfig
 from orcapod.core.operators.static_output_pod import (
     RowBuiltFormUnavailable,
+    RowChunks,
     StaticOutputOperatorPod,
+    kept_table as spilled_when_large,
     produced_stream,
     rows_on_read,
 )
@@ -1758,6 +1760,8 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
                         StaticOutputOperatorPod._raise_as_rows_do(
                             produced.iter_data(), error
                         )
+                    # On local disk when large, read back memory-mapped (ITL-1464).
+                    kept_table = spilled_when_large(kept_table)
                     self._cached_output_stream = ArrowTableStream(
                         kept_table, tag_columns=tag_keys, data_tags=data_tags
                     )
@@ -2023,6 +2027,51 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
             return iter([])
         return current.iter_data()
 
+    def current_run_row_count(self) -> int | None:
+        """How many rows the node's current run has, or ``None`` without one.
+
+        Read-only, as ``as_table``: never computes and never reads the database.
+        ``None`` before a run in this process, after ``clear_cache()`` or once the
+        node is stale (where ``as_table`` gives a zero-row table). Nothing is read
+        when the node holds its run as a table (ITL-1464).
+        """
+        current = self._current_output()
+        if current is None:
+            return None
+        if isinstance(current, ArrowTableStream):
+            return current.num_rows
+        return current.as_table().num_rows
+
+    def read_current_run(
+        self,
+        start: int,
+        length: int,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> "pa.Table | None":
+        """Return rows ``start`` to ``start + length`` of the current run, or ``None``.
+
+        Exactly ``as_table(columns=columns, all_info=all_info).slice(start, length)``
+        when the node holds a current run, for a view that shows a page at a time
+        (ITL-1464): a large run is kept in a memory-mapped file, and only the pages
+        of the rows read are touched (see ``ArrowTableStream.read_rows`` for the two
+        configurations that read every row). ``None`` without a current run, as
+        ``current_run_row_count``.
+
+        Args:
+            start: The first row's position.
+            length: How many rows; fewer are returned at the end.
+            columns: Column groups, exactly as for ``as_table``.
+            all_info: As for ``as_table``.
+        """
+        current = self._current_output()
+        if current is None:
+            return None
+        if isinstance(current, ArrowTableStream):
+            return current.read_rows(start, length, columns=columns, all_info=all_info)
+        return current.as_table(columns=columns, all_info=all_info).slice(start, length)
+
     def as_table(
         self,
         *,
@@ -2266,6 +2315,10 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
         node_hash = self.content_hash().to_string()
         ctx_obs = obs.contextualize(*self.node_identity_path)
 
+        # Kept as Arrow tables, not as a list of every pair (ITL-1464); closed below,
+        # so a run that fails or is cancelled leaves no file on local disk.
+        collected = RowChunks()
+
         try:
             ctx_obs.on_node_start(node_label, node_hash)
             self._run_load_only = load_only
@@ -2311,11 +2364,10 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
                     require_same_data_context(
                         input_stream.data_context_key, self.data_context_key
                     )
-            collected: list[tuple[TagProtocol, DataProtocol]] = []
 
             async def forward() -> None:
                 async for item in intermediate.reader:
-                    collected.append(item)
+                    collected.add(*item)
                     await output.send(item)
 
             hashes = [s.pipeline_hash() for s in self._input_streams]
@@ -2341,8 +2393,8 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
             # does, and store it in LOG mode (sync DB write, post-hoc). A run
             # with no rows replaces an earlier run's output too: the node then
             # reads as a zero-row table.
-            if collected:
-                stream = StaticOutputOperatorPod._materialize_to_stream(collected)
+            if collected.num_rows:
+                stream = collected.output_stream()
                 self._cached_output_stream = stream
                 if should_store:
                     self._store_output_stream(stream)
@@ -2377,6 +2429,7 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
             self.clear_cache()
             raise
         finally:
+            collected.close()
             try:
                 await output.close()
             except BaseException:
