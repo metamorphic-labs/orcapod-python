@@ -501,3 +501,37 @@ def test_a_storage_form_identifier_no_type_is_registered_for_is_kept_as_given() 
     assert got.schema.field("u").type == pa.large_string()
     assert got.schema.field("u").metadata == field.metadata
     assert got["u"].to_pylist() == ["x"]
+
+
+# ------------------------------------- verification r3 of PR 595 (2aef2bd3)
+
+
+@pytest.mark.usefixtures("root")
+def test_a_writer_appends_beside_an_equivalent_manifest_of_other_bytes() -> None:
+    """(a) Equivalent schemas (metadata in another order) are one manifest: compared by
+    identity, never by bytes."""
+    first = rows(["a0"]).replace_schema_metadata({"x": "1", "y": "2"})
+    second = rows(["b0"]).replace_schema_metadata({"y": "2", "x": "1"})
+    db1, _ = _interleaved(first, second)
+    db1.flush()
+    got = ConnectorArrowDatabase(store()).get_all_records(
+        RESULT, record_id_column="__record_id"
+    )
+    assert got is not None
+    assert set(got["__record_id"].to_pylist()) == {b"a0", b"b0"}
+
+
+@pytest.mark.usefixtures("root")
+def test_a_storage_form_name_that_is_not_utf8_is_kept_as_given() -> None:
+    """(b) As at fe4145c7: an extension name of any bytes is kept in storage form."""
+    metadata = {b"ARROW:extension:name": b"test.\xff", b"ARROW:extension:metadata": b""}
+    field = pa.field("u", pa.large_string(), metadata=metadata)
+    table = rows(["r0"]).append_column(field, pa.array(["x"], pa.large_string()))
+    db = ConnectorArrowDatabase(store())
+    db.add_records(RESULT, table, record_id_column="__record_id", flush=True)
+    got = ConnectorArrowDatabase(store()).get_all_records(
+        RESULT, record_id_column="__record_id"
+    )
+    assert got is not None
+    assert got.schema.field("u").metadata == metadata
+    assert got["u"].to_pylist() == ["x"]

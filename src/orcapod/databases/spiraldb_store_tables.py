@@ -17,7 +17,10 @@ What a ``SpiralDBConnector`` in store mode does with its tables; the design is
   metadata of each candidate (cached by table id): that is how stale layouts are found
   (ITL-954).
 
-Private until the store is switched on (stage 5): there is no lease yet (stage 4).
+Private until the store is switched on (stage 5): there is no lease yet (stage 4). One
+writer at a time: a first write re-reads the table just before recording it and never
+overwrites what that read shows, but without a compare-and-set two concurrent writers can
+still race in between (N45, N53).
 """
 
 from __future__ import annotations
@@ -376,7 +379,13 @@ class StoreTables:
 
     def _unchanged_since_judged(self, table: _KeyedTable, seen: bytes | None) -> bool:
         """Whether a table opened to be recorded is still as it was judged new: the same
-        manifest header (or none) and no rows."""
+        manifest header (or none) and no rows.
+
+        Read immediately before the manifest is written, so a record that read shows is
+        never overwritten (N45). It narrows, and cannot close, the window in which two
+        writers race: spiral-sdk has no compare-and-set, so another writer can still
+        record the table between this read and the write. Concurrent writers are not
+        supported until the lease (O37; N53)."""
         with self._service_call("read the metadata of a store table"):
             header = table.get_metadata().get(codec.MANIFEST_KEY)
         return header == seen and not self._holds_rows(table)
@@ -406,9 +415,7 @@ class StoreTables:
             raise SpiralStoreTableCollisionError(
                 str(exc), table=self._qualified(table_name)
             ) from exc
-        if current is None or codec.manifest_bytes(current) != codec.manifest_bytes(
-            manifest
-        ):
+        if current is None or not _same_manifest(current, manifest):
             raise SpiralStoreTableCollisionError(
                 "another writer recorded it since it was judged, with another manifest",
                 table=self._qualified(table_name),
@@ -524,3 +531,15 @@ def _live(schema: pa.Schema) -> pa.Schema:
     from orcapod.contexts import get_default_context
 
     return declaration_form_schema(schema, get_default_context().type_converter)
+
+
+def _same_manifest(one: codec.StoreManifest, other: codec.StoreManifest) -> bool:
+    """Whether two manifests record one table: the same path and kind, equivalent
+    logical schemas (``schema_difference``) and the same stored schema. Never by their
+    bytes, which differ for equivalent schemas represented differently."""
+    return (
+        one.record_path == other.record_path
+        and one.kind == other.kind
+        and codec.schema_difference(one.schema, other.schema) is None
+        and one.physical.equals(other.physical)
+    )

@@ -78,12 +78,19 @@ def _with_live_logical_types(records: pa.Table) -> pa.Table:
         "LogicalTypeConverterProtocol",
         cast(object, get_default_context().type_converter),
     )
+
+    def registered(name: bytes) -> bool:
+        try:
+            text = name.decode()
+        except UnicodeDecodeError:
+            return False  # no type is registered under bytes: kept as given
+        return converter.get_logical_type_by_arrow_extension_name(text) is not None
+
     known = [
         i
         for i, field in enumerate(records.schema)
         if (name := (field.metadata or {}).get(b"ARROW:extension:name")) is not None
-        and converter.get_logical_type_by_arrow_extension_name(name.decode())
-        is not None
+        and registered(name)
     ]
     if not known:
         return records

@@ -14,11 +14,12 @@ what SpiralDB keeps was measured live with spiral-sdk 0.16.78
   and restored to the *logical* one (``decode_rows``). A type either comes back exactly
   or is refused. Every refusal of a type, a name or a value that may be lifted is an
   entry of one table, ``REFUSALS``.
-* **The manifest.** One a table, written before its first rows (``manifest_entries``,
-  ``read_manifest``): the record path, the kind, the logical schema, and the stored names
-  at every depth. It is kept in the table's own metadata, in chunks, beside the table's
-  identity record (``spiral_store_names``); never in the dataset's schema table, which is
-  all or nothing under one completion marker (decision of 2026-11-26, ITL-1498).
+* **The manifest.** One a table, written before its first rows; a table that still has
+  no rows may be recorded again (stage 3) (``manifest_entries``, ``read_manifest``): the
+  record path, the kind, the logical schema, and the stored names at every depth. It is
+  kept in the table's own metadata, in chunks of at most 8 KiB, beside the table's identity
+  record (``spiral_store_names``); never in the dataset's schema table, which is all or
+  nothing under one completion marker (decision of 2026-11-26, ITL-1498).
 
 Logical types are handled by their identifier (extension name and metadata) alone, as
 ``ARROW:extension:*`` field metadata over the storage type: neither writing nor reading
