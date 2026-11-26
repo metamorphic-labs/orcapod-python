@@ -43,6 +43,7 @@ from typing import Any, cast
 
 import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from orcapod.databases.utils import identity_node
 from orcapod.logical_types.canonical_form import (
@@ -457,6 +458,11 @@ def encode_rows(rows: pa.Table) -> pa.Table:
         with _at(field.name):
             if field.name == KEY_COLUMN and column.null_count:
                 raise UnstorableInSpiralError("a null key")
+            if field.name == KEY_COLUMN and pc.count_distinct(column).as_py() < len(
+                column
+            ):
+                # The service refuses the whole write: refused before any table is made.
+                raise UnstorableInSpiralError("a record id repeated in one write")
             chunks = [_encode(_storage(c), field) for c in column.chunks]
         columns.append(cast(Any, pa.chunked_array)(chunks, type=stored.type))
     return pa.Table.from_arrays(columns, schema=physical)
@@ -672,7 +678,7 @@ def decode_rows(
             live = isinstance(out.type, pa.BaseExtensionType)
             storage: Any = out.type.storage_type if live else out.type
             if storage != field.type:
-                chunks = [c.cast(storage) for c in chunks]
+                chunks = [_retyped(c, storage) for c in chunks]
             if live:
                 chunks = [
                     pa.ExtensionArray.from_storage(cast(Any, out.type), c)
@@ -695,6 +701,36 @@ def empty_rows(manifest: StoreManifest) -> pa.Table:
         A table with no rows.
     """
     return manifest.schema.empty_table()
+
+
+def _retyped(array: Any, target: Any) -> Any:
+    """Return decoded values in another layout of their type (small or large variants).
+
+    A type holding a map is rebuilt from its parts: pyarrow aborts the process when it
+    casts a map between layouts. Any other type is cast.
+    """
+    t = pa.types
+    if not _holds(target, t.is_map):
+        return array.cast(target)
+    mask = array.is_null() if array.null_count else None
+    if t.is_struct(target):
+        children = [
+            _retyped(array.field(i), target.field(i).type)
+            for i in range(target.num_fields)
+        ]
+        return pa.StructArray.from_arrays(children, fields=_children(target), mask=mask)
+    if t.is_map(target):
+        rows = _map_rows(array)
+        keys = _retyped(array.keys.take(rows), target.key_type)
+        items = _retyped(array.items.take(rows), target.item_type)
+        return _map(array, keys, items, target)
+    items = _retyped(array.flatten(), target.value_type)
+    if t.is_fixed_size_list(target):
+        return _fixed_size_list(array, items, target)
+    if t.is_list(target):
+        small_offsets = pa.array(_offsets(array).astype(np.int32), pa.int32())
+        return pa.ListArray.from_arrays(small_offsets, items, type=target, mask=mask)
+    return _large_list(array, items, target)
 
 
 def _decode(array: Any, field: pa.Field[Any], physical: pa.Field[Any]) -> Any:

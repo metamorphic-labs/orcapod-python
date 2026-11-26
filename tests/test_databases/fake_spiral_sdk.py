@@ -65,7 +65,8 @@ RULES = {
     "and one named '' or '*' (spiral-sdk 0.16.78, November 26, 2026) is refused",
     "time-of-day": "spiral-sdk 0.16.78 (November 26, 2026): a time32 or time64 value outside "
     "one day, at any depth, refuses the whole write",
-    "nul": "a column name is cut at a NUL character",
+    "nul": "a column name is cut at a NUL character; so is a struct field name, at every "
+    "depth (spiral-sdk 0.16.78, November 26, 2026)",
     "type-conflict": "a column of another type than stored is refused",
     "unsupported": "duration, interval, fixed-size binary, union, an empty struct and a "
     "null struct outside a list are refused",
@@ -290,10 +291,52 @@ def _stored_array(array: pa.Array[Any], target: pa.DataType) -> pa.Array[Any]:
         values = _stored_array(
             a.values.slice(a.offset * t.list_size, len(a) * t.list_size), t.value_type
         )
+        if t.list_size == 0:  # no values to count the rows by: from buffers
+            valid = pc.is_valid(a).buffers()[1] if a.null_count else None
+            return pa.Array.from_buffers(
+                t,
+                len(a),
+                cast(Any, [valid]),  # the stubs take no None for an absent buffer
+                null_count=a.null_count,
+                children=[values],
+            )
         return cast(Any, pa.FixedSizeListArray).from_arrays(
             values, type=t, mask=a.is_null() if a.null_count else None
         )
     return a.cast(target)
+
+
+def _names_cut_at_nul(t: Any) -> Any:
+    """Return ``t`` with every struct field name cut at its first NUL (``nul``)."""
+    if isinstance(t, pa.BaseExtensionType):
+        return t
+    if pa.types.is_struct(t):
+        return pa.struct(
+            [
+                pa.field(
+                    f.name.split("\0")[0],
+                    _names_cut_at_nul(f.type),
+                    f.nullable,
+                    f.metadata,
+                )
+                for f in t
+            ]
+        )
+    if pa.types.is_large_list(t) or pa.types.is_list(t):
+        item = t.value_field
+        kind: Any = pa.large_list if pa.types.is_large_list(t) else pa.list_
+        return kind(item.with_type(_names_cut_at_nul(item.type)))
+    if pa.types.is_fixed_size_list(t):
+        item = t.value_field
+        return pa.list_(item.with_type(_names_cut_at_nul(item.type)), t.list_size)
+    if pa.types.is_map(t):
+        map_of: Any = pa.map_  # the stubs take no fields and keys_sorted together
+        return map_of(
+            t.key_field.with_type(_names_cut_at_nul(t.key_type)),
+            t.item_field.with_type(_names_cut_at_nul(t.item_type)),
+            keys_sorted=t.keys_sorted,
+        )
+    return t
 
 
 def _check_nulls(array: Any, field: pa.Field[Any], *, in_list: bool) -> None:
@@ -451,6 +494,15 @@ def _staged(rows: pa.Table, keys: list[str], stored: pa.Schema) -> pa.Table:
     """Validate ``rows`` and return them as they are stored (``stage``)."""
     names = [name.split("\0")[0] for name in rows.column_names]  # nul
     rows = rows.rename_columns(names)
+    for i, field in enumerate(rows.schema):  # nul, at every depth
+        cut = _names_cut_at_nul(field.type)
+        if cut != field.type:
+            column = rows.column(i)
+            rows = rows.set_column(
+                i,
+                field.name,
+                pa.chunked_array([c.view(cut) for c in column.chunks], type=cut),
+            )
     for key in keys:
         if key not in names:
             raise _refuse(f"Input batch is missing key field '{key}'")
