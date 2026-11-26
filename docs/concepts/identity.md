@@ -39,8 +39,7 @@ What the name in the `source_id` is depends on how the source was created:
 - File- and table-backed sources default to a name derived from their location (the file
   path for `CSVSource`, the table folder's path or URI for `DeltaTableSource`), not from the
   rows.
-- If you pass `source_id` yourself, that is the name. What the identity then holds is in the
-  table above.
+- If you pass `source_id` yourself, the table above says what the identity holds.
 
 Two sources that differ only in their key columns name the same rows differently, so they
 are two sources: different content hashes (each gets its own cache), the same pipeline hash
