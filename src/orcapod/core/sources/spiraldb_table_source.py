@@ -90,6 +90,8 @@ PREVIEW_ROWS = 10
 # library value), so the row bound alone does not bound the memory kept (ITL-1485).
 PREVIEW_KEPT_ROWS = 10_000
 PREVIEW_KEPT_BYTES = 64 * 2**20
+# Bytes a kept preview's buffers may hold beyond its values before they are copied out.
+_SLICE_SLACK = 2**20
 
 
 def _is_positive_int(value: object) -> bool:
@@ -98,14 +100,18 @@ def _is_positive_int(value: object) -> bool:
 
 
 def _compact(rows: "pa.Table") -> "pa.Table":
-    """Return ``rows`` in buffers of their own when they hold more than their values.
+    """Return ``rows`` in buffers of their own when they are a slice of larger buffers.
 
     A scan's limit slices its last batch, and a slice keeps the batch's whole buffers:
-    one small row beside a large one would keep the large one. Rows whose values fit
-    ``PREVIEW_KEPT_BYTES`` are copied out; others are returned as they are (they are not
-    kept).
+    one small row beside a large one would keep the large one. Rows whose buffers hold
+    more than ``_SLICE_SLACK`` bytes beyond their values (a real slice; a whole column's
+    last offset, which ``nbytes`` leaves out, is a few bytes) are copied out, when their
+    values fit ``PREVIEW_KEPT_BYTES``; any others are returned as they are.
     """
-    if rows.nbytes > PREVIEW_KEPT_BYTES or rows.get_total_buffer_size() <= rows.nbytes:
+    if (
+        rows.nbytes > PREVIEW_KEPT_BYTES
+        or rows.get_total_buffer_size() <= rows.nbytes + _SLICE_SLACK
+    ):
         return rows
     return rows.take(pa.array(range(rows.num_rows), pa.int64()))
 
@@ -1138,8 +1144,11 @@ class SpiralDBTableSource(RootSource):
 
         The rows and the count are read at the version in ``key``, through one handle.
         Counting is needed only when a preview answered from these rows shows the
-        table's row count: when they are not every row the source reads, or a
-        condition chose them.
+        table's row count: when they are not every row the source reads (this preview
+        then needs it, as on main), or a condition chose them (only a later, smaller
+        preview needs it: it is counted only when the rows are kept, and a failed count
+        keeps nothing and fails nothing). The record is kept only while the source is
+        open and still reads the version, condition and limit of ``key``.
         """
         asof, condition, limit = key
         table = self._lookup_table()
@@ -1148,12 +1157,24 @@ class SpiralDBTableSource(RootSource):
         )
         count = 0 if read is None else read.num_rows
         complete = count < head_limit or head_limit == limit
+        # The row bound first: rows that will not be kept are neither copied nor counted.
+        keep = count <= PREVIEW_KEPT_ROWS
+        if keep and read is not None:
+            read = _compact(read)
+            keep = read.get_total_buffer_size() <= PREVIEW_KEPT_BYTES
         counted_to = self._count_bound(count)
         table_rows: int | None = None
-        if counted_to is not None and (not complete or not condition.is_empty):
+        if counted_to is not None and not complete:
+            # This preview shows the table's row count, as on main.
             table_rows = table.count_rows(asof=asof, at_most=counted_to + 1)
-        if read is not None:
-            read = _compact(read)
+        elif counted_to is not None and keep and not condition.is_empty:
+            # Every matching row was read: this preview's total is exact. The count is
+            # only for a smaller preview answered later from the kept rows, so it never
+            # fails this one: without it nothing is kept.
+            try:
+                table_rows = table.count_rows(asof=asof, at_most=counted_to + 1)
+            except Exception:  # noqa: BLE001  # an optimisation; the preview stands
+                keep = False
         kept = _KeptPreview(
             key=key,
             rows=read,
@@ -1162,12 +1183,12 @@ class SpiralDBTableSource(RootSource):
             table_rows=table_rows,
             counted_to=counted_to or 0,
         )
-        if count <= PREVIEW_KEPT_ROWS and (
-            read is None or read.get_total_buffer_size() <= PREVIEW_KEPT_BYTES
-        ):
+        if keep:
             with self._connection_lock:
-                # A source closed during the read keeps nothing.
-                if not self._closed:
+                # A source closed during the read keeps nothing, and a read of a
+                # version the source no longer reads never replaces a newer record.
+                current = (self._asof, self._condition, self._limit)
+                if not self._closed and current == key:
                     self._kept_preview = kept
         return kept
 

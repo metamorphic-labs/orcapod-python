@@ -92,6 +92,12 @@ Approved as recommended by the coordinator on the developer's behalf (November 2
   bound such a preview counts to. Every preview the record answers then makes no call,
   its total included. The one call `main` does not make: a preview whose condition
   returned every matching row also counts, once per version (the connector remembers it).
+  That count is for later previews only (review of 854bbf94): it is made only when the
+  rows will be kept, never delays or fails the preview it follows (its total is exact),
+  and when it fails nothing is kept. A record is kept only while the source still reads
+  its version, condition and limit, so a late read of an older version never replaces a
+  newer record. Rows are copied out only when they are a real slice (their buffers hold
+  over 1 MiB beyond their values), after the row bound is checked.
 - **One version, one read, a closed source** (review of af670090). The pinned version
   is read once per preview: the rows, the count and the record's key are all of it, so a
   source check that moves the version during a preview neither mixes versions nor keeps
