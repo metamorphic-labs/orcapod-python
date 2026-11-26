@@ -1220,6 +1220,9 @@ points at.
   `__recorded_at`; another node that shares the table keeps its own row of the same record. A recompute (the
   stored result is gone) has a new result id, so it is a new row; among the rows of one
   instance, the one recorded last is the current one. There is no recomputation index.
+  "Recorded last" is read from `__recorded_at`, the recording process's UTC clock at the
+  write: a clock set back between two writes of one instance leaves the earlier record
+  current until a later write.
 - Side effects and functions that take the invocation context are keyed by the **entry id**
   only: a token never reaches their key, so a row that arrives again with new tokens is not
   delivered again.
@@ -1249,7 +1252,7 @@ preimage = tag.as_table(columns={"system_tags": True})
 | **Algorithm** | `StarfixArrowHasher.hash_table(preimage)` — single-row Arrow table hash |
 | **Output format** | `ContentHash`; `bytes` in `b"{method}:{digest}"` format where stored |
 | **Uniqueness guarantee** | Unique per `(tag lineage, input_data content)` |
-| **Known exclusions** | `NODE_CONTENT_HASH_COL` excluded — the node's content hash is fully determined by the DB table path (scoped by `uri` + `pipeline_hash()`). The source-info tokens are excluded by design: they are provenance, and enter the instance id. |
+| **Known exclusions** | `NODE_CONTENT_HASH_COL` excluded: the table path does not determine it (with the default pipeline-hash scope one table holds the rows of several nodes), so a pipeline row stores it in `__node_content_hash` and the table's key holds it, `row_ids.pipeline_row_key(node content hash, record id)`; the ids themselves are a function of the row alone. The source-info tokens are excluded by design: they are provenance, and enter the instance id. |
 
 ---
 
@@ -1257,7 +1260,7 @@ preimage = tag.as_table(columns={"system_tags": True})
 
 | Field | Value |
 |---|---|
-| **Inputs** | `__pipeline_entry_id` (the entry id's labelled digest, `pa.large_binary()`), then the `_source_*` columns of the input data in name order (`data.source_info_table()`), each with one canonical type that is a function of the token's value alone: a null token is a `large_string` null whatever type its column declares; a non-null token of a row read from an Arrow table keeps the type that table gives it (nullable field), never typed again from the value; a token of a row built from Python values has the type of its value. So the id is a function of the row alone, never of the order sessions ran in. The pipeline row stores this same table (`FunctionJobNode._add_pipeline_record`), so a stored row gives its instance id again from its own columns |
+| **Inputs** | `__pipeline_entry_id` (the entry id's labelled digest, `pa.large_binary()`), then the `_source_*` columns of the input data in name order (`data.source_info_table()`): one per data column, a data column with no token having a null token, each with one canonical type that is a function of the token's value alone: a null token is a `large_string` null whatever type its column declares; a non-null token of a row read from an Arrow table keeps the type that table gives it (nullable field), never typed again from the value, also after a change of the row that keeps the token (a selection, a drop, a rename, added columns); a token given as a Python value has the type of its value. A row built from values and the same row read from a table give the same columns. So the id is a function of the row alone, never of the order sessions ran in. The pipeline row stores this same table (`FunctionJobNode._add_pipeline_record`), so a stored row gives its instance id again from its own columns |
 | **Algorithm** | `StarfixArrowHasher.hash_table(preimage)` |
 | **Output format** | `ContentHash`; stored in `__pipeline_instance_id` as `b"{method}:{digest}"` |
 | **Uniqueness guarantee** | Unique per `(entry, source-info tokens)`; the in-memory cache key and the lookup column of the pipeline table |

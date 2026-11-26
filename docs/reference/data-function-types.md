@@ -180,16 +180,37 @@ stored that record, so the table keeps every distinct record of every node:
 - a recompute has a new result, so it is a new row, and the row recorded last is
   the instance's current one;
 - an input that arrives with other source-info tokens (its upstream result was
-  computed again) is a new instance: it gets a new row, and its result comes
-  from the result database, so the function is not called.
+  computed again) is a new instance: it gets a new row. Its result is looked up
+  in the result database by the input data hash: when a result is stored there
+  the function is not called, and when none is (it was removed, or was an
+  ephemeral result that is gone) the function is called.
+
+"Recorded last" is read from `__recorded_at`, the recording process's UTC clock at
+the write. So among the records of one instance the current one is the one with
+the latest time: a clock set back between two writes of one instance leaves the
+earlier record current until a later write.
 
 During a sync run, a repeated identical input without system tags reuses the
 first entry. During an async run, both copies can be scheduled before either
 entry is available; when each then computes its own result, each has its own row.
 A load-only run writes nothing. Neither recording column enters any hash.
 
-Read these columns on joined records with
-`node.get_all_records(columns={"meta": True})` or `node.get_all_records(all_info=True)`.
+Read the two recording columns (`__pipeline_run_id`, `__recorded_at`) on joined
+records with `node.get_all_records(columns={"meta": True})` or
+`node.get_all_records(all_info=True)`. The joined records do not hold the two
+ids: `__pipeline_instance_id` and `__pipeline_record_id` are columns of the
+pipeline table itself, read from the database by the table's path:
+
+```python
+pipeline_path = next(p for p in types_store.list_sources() if p[-1] == "pdb_v2")
+pipeline_rows = types_store.get_all_records(pipeline_path)
+print([name for name in pipeline_rows.column_names if name.startswith("__pipeline_")])
+# ['__pipeline_instance_id', '__pipeline_record_id', '__pipeline_run_id']
+joined = types_job.nodes["describe"].get_all_records(all_info=True)
+print([name for name in joined.column_names if name.startswith("__pipeline_")])
+# ['__pipeline_run_id']
+```
+
 Pipeline tables written by a release candidate before the three ids are at the
 layout `pdb_v1`: they are reported as tables of another layout and are not read.
 
