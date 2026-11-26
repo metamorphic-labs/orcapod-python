@@ -794,7 +794,11 @@ class SpiralDBTableSource(RootSource):
 
     def _under_condition(self) -> str:
         """Return `` under where <condition>`` for a restricted source, else nothing."""
-        return f" under where {self._condition.text()}" if self._condition else ""
+        return (
+            f" under where {self._condition.text()}"
+            if not self._condition.is_empty
+            else ""
+        )
 
     def _key_tokens(self, table: "pa.Table") -> list[str]:
         """Return each row's identifier: the canonical JSON of its primary key.
@@ -872,7 +876,7 @@ class SpiralDBTableSource(RootSource):
         # Keys must be unique across the whole read, not only within a slice.
         identifiers: set[str] = set()
         for batch in table.scan_batches(
-            where=self._condition or None,
+            where=None if self._condition.is_empty else self._condition,
             limit=limit,
             asof=asof,
         ):

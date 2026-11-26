@@ -8,13 +8,11 @@ ITL-1477, stays an isolated addition: one gate, one function and their tests, li
 
 - Work continues on the branch of PR 574 (`eywalker/itl-998-spiraldbtablesource-restrict-a-read-to-a`),
   which holds the spec and this plan. `main` is merged in when it moves; no rebase, no force-push.
-- **ITL-1465 (PR 576, draft).** Its branch is not merged into this one. Nothing in ITL-998 needs its code: a
-  range is built with `col`, which works today; ITL-1465 only turns `start <= col(c) < stop` (and `c1 and c2`)
-  into an error instead of a silently dropped bound. Merging an unmerged draft would put its commits into PR
-  574's diff and tie this PR to its review. The prototype merges with 576's current head without a conflict
-  (`git merge-tree`; both change `types/condition.py`, in different places). Once 576 is on `main`, `main` is
-  merged in here and the one test that depends on it is added (`where(start <= col("t") < stop)` raises).
-  PR 574 is not marked ready before then (D11).
+- **ITL-1465 (PR 576).** Merged into `main`, and `main` merged in here (2026-11-26). ITL-998 needs none of its
+  code: a range is built with `col`; ITL-1465 turns `start <= col(c) < stop` (and `c1 and c2`) into an error
+  instead of a silently dropped bound. Until it was on `main` its branch was not merged into this one, and
+  PR 574 stayed a draft (D11). The test that depends on it is in place (`where(start <= col("t") < stop)`
+  raises).
 - The sketch in the worktree (uncommitted, from the coordinator's handoff) is the starting point; section 7 of
   the spec says what of it is kept and what changes.
 
@@ -101,7 +99,7 @@ more data columns (CLAUDE.md, "Testing conventions"; the shared several-item fam
 9. **Saved.** Source config and a saved and loaded job, with datetimes and dates tagged; an equality-only
    `where` with two columns given out of order saves in canonical order; a config saved before (keys in the
    order given) loads to the same condition; one-column configs unchanged byte for byte.
-10. **After 576 merges:** `where(start <= col("t") < stop)` raises.
+10. `where(start <= col("t") < stop)` raises (ITL-1465, on `main`).
 
 `tests/test_types_condition*.py`: `to_config` key order of an equality-only condition (the existing tests compare
 dicts, which ignore order, so they keep passing; one new test compares the JSON text).
@@ -157,7 +155,7 @@ Run locally: the touched test files only, one pytest process; ruff, ruff format,
 2. Tests 1 to 9, then the condition tests; ruff, basedpyright, the golden check.
 3. Docs, changelog fragment.
 4. Live tests written; the conformance test run on throwaway tables before ready.
-5. After 576 merges: merge `main`, add test 10. Then the PR readiness pipeline.
+5. After 576 merged: merge `main`, add test 10 (done). Then the PR readiness pipeline.
 
 ## ITL-1477, later (isolated)
 

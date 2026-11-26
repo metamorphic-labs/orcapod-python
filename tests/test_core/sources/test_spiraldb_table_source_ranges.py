@@ -482,6 +482,21 @@ class TestRefusals:
         with pytest.raises(TypeError, match="integer, timestamp or date"):
             _source().where(col("x").between(0.0, 1.0))
 
+    def test_a_chained_comparison_is_refused(self, project):
+        """``start <= col(c) < stop`` would keep one bound silently (ITL-1465)."""
+        start, stop = _T0, _T0 + dt.timedelta(hours=1)
+        source = _source()
+        fake_spiral_sdk.scan_log.clear()
+
+        with pytest.raises(
+            TypeError,
+            match=r"Condition has no truth value\. .*For a range, use "
+            r"\.between\(a, b\) \(both ends included\)\.",
+        ):
+            source.where(start <= col("at") < stop)
+        assert source.condition.is_empty
+        assert fake_spiral_sdk.scan_log == []
+
     @pytest.mark.parametrize(
         ("column", "value"),
         [("x", 0.5), ("g", 1.0), ("s", "s03"), ("f", True)],
@@ -589,7 +604,7 @@ class TestIdentity:
         source = _source()
         _ = source.where(col("unit") >= 4)
 
-        assert not source.condition
+        assert source.condition.is_empty
         assert len(_keys(source)) == 12
 
     def test_the_constructor_and_where_are_one_mechanism(self, project):
