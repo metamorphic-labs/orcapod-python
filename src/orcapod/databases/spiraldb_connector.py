@@ -53,6 +53,13 @@ from orcapod.errors import (
     UnrecordedTableSchemaWarning,
 )
 from orcapod.types import ColumnInfo
+from orcapod.types.condition import (
+    EQUALS,
+    ColumnOperand,
+    Condition,
+    Term,
+    is_range_type,
+)
 from orcapod.utils import arrow_utils
 from orcapod.utils.warning_utils import outside_orcapod_stacklevel
 
@@ -377,6 +384,58 @@ def _literal(value: Any, arrow_type: pa.DataType) -> Any:
     return None
 
 
+_COMPARE = {"<": "lt", "<=": "lte", ">": "gt", ">=": "gte"}
+"""The SDK function of each order comparison."""
+
+
+def _range_predicate(
+    column: str, operator: str, value: object, arrow_type: pa.DataType
+) -> Any:  # pyright: ignore[reportExplicitAny]  # an SDK expression, untyped
+    """Return the scan predicate ``column operator value``, applied by SpiralDB.
+
+    Only a column whose values SpiralDB orders as Orcapod does (``is_range_type``:
+    integers, timestamps, dates); a range is never read and compared here, since it
+    exists to bound the read.
+
+    Args:
+        column: The column's name.
+        operator: ``<``, ``<=``, ``>`` or ``>=``.
+        value: A bound checked against the column (``check_restriction``).
+        arrow_type: The column's type as SpiralDB stores it.
+
+    Raises:
+        ValueError: If the column's type takes no range.
+    """
+    literal = _literal(value, arrow_type) if is_range_type(arrow_type) else None
+    if literal is None:
+        raise ValueError(
+            f"column {column!r} holds {arrow_type}, which takes no range in a scan"
+        )
+    return getattr(sp, _COMPARE[operator])(sp.column(column), literal)
+
+
+def _scan_terms(where: Condition | None) -> list[Term]:
+    """Return the requirements of a scan's condition, refusing what a scan cannot apply.
+
+    Raises:
+        ValueError: If a requirement is not a plain column equal to, or ordered against,
+            a value (``check_restriction`` refuses these before a source reads).
+    """
+    terms: list[Term] = []
+    for node in () if where is None else where.root.children:
+        if not (
+            isinstance(node, Term)
+            and not node.path.fields
+            and not isinstance(node.value, ColumnOperand)
+            and (node.operator == EQUALS or node.operator in _COMPARE)
+        ):
+            raise ValueError(
+                f"a scan applies equalities and ranges of a column only; got {where}"
+            )
+        terms.append(node)
+    return terms
+
+
 def _equals(array: Any, value: Any) -> Any:
     """Return where ``array`` equals ``value``, as SpiralDB compares: floats as 64-bit
     numbers, ``0.0`` not equal to ``-0.0`` and NaN equal to NaN; a null is no match.
@@ -465,18 +524,34 @@ class SpiralDBTable:
     def scan_batches(
         self,
         *,
-        where: Mapping[str, object] | None = None,
+        where: Condition | None = None,
         limit: int | None = None,
         asof: int | None = None,
     ) -> Iterator[pa.RecordBatch]:
-        """Yield prepared Arrow batches from this resolved table in key order."""
+        """Yield prepared Arrow batches from this resolved table in key order.
+
+        Args:
+            where: Equalities and ranges of columns, all of which must hold
+                (``SpiralDBConnector.scan_batches``).
+            limit: Read at most this many matching rows.
+            asof: Read this version.
+
+        Raises:
+            ValueError: If ``where`` holds anything else, or a range of a column whose
+                type takes none.
+        """
         connector = self._connector
         table = self._at(asof)
         reading = self._reading(table)
         predicate = None
         local: dict[str, object] = {}
-        for column, value in (where or {}).items():
+        for term in _scan_terms(where):
+            column, value = term.path.column, term.value
             column_type = reading.found.field(column).type
+            if term.operator != EQUALS:
+                bound = _range_predicate(column, term.operator, value, column_type)
+                predicate = bound if predicate is None else sp.and_(predicate, bound)
+                continue
             literal = _literal(value, column_type)
             if literal is None and pa.types.is_float32(column_type):
                 # No float32 is exactly this value. The SDK would round it, so 0.1 would
@@ -874,7 +949,7 @@ class SpiralDBConnector:
         self,
         table_name: str,
         *,
-        where: Mapping[str, object] | None = None,
+        where: Condition | None = None,
         limit: int | None = None,
         asof: int | None = None,
     ) -> Iterator[pa.RecordBatch]:
@@ -888,8 +963,9 @@ class SpiralDBConnector:
 
         Args:
             table_name: Plain table name (no dataset prefix).
-            where: Column name to value. A row is read only if every named column
-                equals its value.
+            where: Equalities and ranges of columns (a ``Condition`` that
+                ``check_restriction`` takes); a row is read only if all hold. A range
+                is of an integer, timestamp or date column, and SpiralDB applies it.
             limit: Read at most this many rows, the first in key order.
             asof: Read the table as of this version (a ``get_table_version`` value).
 

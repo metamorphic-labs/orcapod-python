@@ -67,7 +67,7 @@ Operator: TypeAlias = Literal[
 """The operator of a ``Term``."""
 
 EQUALS: Operator = "=="
-"""The operator of an equality term (``where`` takes only these)."""
+"""The operator of an equality term."""
 
 COMPARISONS: frozenset[str] = frozenset({"==", "!=", "<", "<=", ">", ">="})
 """The operators that compare a column with a value or with another column."""
@@ -679,6 +679,102 @@ def check_equality_conditions(
     return dict(conditions)
 
 
+def is_range_type(arrow_type: pa.DataType) -> bool:
+    """Return whether a source's restriction takes a range of a column of ``arrow_type``.
+
+    Integers of every width, timestamps of every unit and zone, and dates: the table
+    system orders their values as Orcapod does. Floats are not: SpiralDB orders them by
+    IEEE 754 total order (a NaN beyond the infinities, ``-0.0`` below ``0.0``), not as
+    Orcapod does (a NaN is in no range, ``-0.0`` equals ``0.0``); ITL-1477. Strings
+    and binary follow the table system's collation. Each of these is left to
+    ``filter``.
+
+    Args:
+        arrow_type: The column's Arrow type.
+
+    Returns:
+        Whether a range of the column can be a restriction.
+    """
+    return (
+        pa.types.is_integer(arrow_type)
+        or pa.types.is_timestamp(arrow_type)
+        or pa.types.is_date(arrow_type)
+    )
+
+
+_RESTRICTION_FORMS = (
+    "where takes equalities (column=value) and ranges (col(c) >= a, col(c) < b, "
+    "col(c).between(a, b)), all of which must hold"
+)
+_TO_FILTER = (
+    "Filter the stream instead, as a step of the pipeline: source.filter(...) with the "
+    "same condition"
+)
+
+
+def check_restriction(condition: Condition, schema: pa.Schema) -> None:
+    """Check a source's restriction against its table's columns; convert nothing.
+
+    A restriction is applied by the table system, so it takes only what the table
+    system tests as Orcapod would: a column equal to a value, and a range (``<``,
+    ``<=``, ``>``, ``>=``; ``between`` is two of them) of an integer, timestamp or date
+    column (``is_range_type``). All must hold. A column equals one value; ranges add
+    up and may select no row. Every value passes ``check_value_for_column``: exactly
+    of its column's Python type, held exactly by its column's Arrow type.
+
+    Args:
+        condition: The condition.
+        schema: The table's columns (system columns removed).
+
+    Raises:
+        ValueError: If a column is not in the table, or must equal two values.
+        TypeError: If the condition holds anything else, a range names a column of
+            another type, or a value is not of its column's type or does not fit it.
+    """
+    terms: list[Term] = []
+    for node in condition.root.children:
+        if not (
+            isinstance(node, Term)
+            and not node.path.fields
+            and not isinstance(node.value, ColumnOperand)
+            and (node.operator == EQUALS or node.operator in ORDER_COMPARISONS)
+        ):
+            raise TypeError(
+                f"{_RESTRICTION_FORMS}; {condition} has others. {_TO_FILTER}"
+            )
+        terms.append(node)
+    unknown = list(
+        dict.fromkeys(t.path.column for t in terms if t.path.column not in schema.names)
+    )
+    if unknown:
+        raise ValueError(
+            f"where names columns that the table does not have: {unknown}. "
+            f"Columns: {schema.names}"
+        )
+    equal_to: dict[str, object] = {}
+    for term in terms:
+        column, value = term.path.column, term.value
+        arrow_type = schema.field(column).type
+        if term.operator != EQUALS and not is_range_type(arrow_type):
+            raise TypeError(
+                f"column {column!r} holds {arrow_type}; where takes a range of an "
+                f"integer, timestamp or date column only. {_TO_FILTER}"
+            )
+        try:
+            check_value_for_column(value, arrow_type)
+        except TypeError as exc:
+            raise TypeError(f"column {column!r} {exc}") from exc
+        if term.operator != EQUALS:
+            continue
+        held = equal_to.setdefault(column, value)
+        if not _same_condition_value(held, value):
+            raise ValueError(
+                f"column {column!r} is already restricted to {held!r}; it cannot "
+                f"also equal {value!r} (a source reads one value per column; filter "
+                "the stream to state a condition that holds for no row)"
+            )
+
+
 # -----------------------------------------------------------------------------
 # Building conditions: col(name)
 # -----------------------------------------------------------------------------
@@ -947,7 +1043,7 @@ class Condition:
     not. ``Condition.of`` builds the equalities ``where()`` takes; ``col(name)`` builds
     the rest; ``&``, ``|`` and ``~`` combine conditions. It knows nothing of a source, a
     limit or an identity. A source uses one to choose which of its rows are read
-    (``SpiralDBTableSource.where``, ITL-1218: equalities only), a restriction in no hash;
+    (``SpiralDBTableSource.where``: equalities and ranges), a restriction in no hash;
     the ``Filter`` operator takes one as a step of the pipeline, its identity the
     condition's ``canonical_form()`` (ITL-1374).
 
@@ -1121,7 +1217,7 @@ class Condition:
 
     @property
     def only_equalities(self) -> bool:
-        """Whether every requirement is a column equal to a value (``where`` takes only these).
+        """Whether every requirement is a column equal to a value.
 
         True for the empty condition. A field of a struct, or a comparison of two
         columns, is not an equality in this sense.
@@ -1288,7 +1384,9 @@ class Condition:
     def to_config(self) -> dict[str, object]:
         """Return the condition as it is saved, JSON-ready.
 
-        Only equalities: column name to value, as before (a date, datetime or bytes value
+        In canonical order (the order ``canonical_form`` sorts the requirements), so
+        equal conditions are saved alike, whatever order they were given in (ITL-998).
+        Only equalities: column name to value (a date, datetime or bytes value
         written as ``{"date": iso}``, ``{"datetime": iso}`` or ``{"bytes": hex}``, a NaN
         or infinite float as ``{"float": "nan"}``, ``{"float": "inf"}`` or
         ``{"float": "-inf"}``, any other value as it is). Anything else: one key,
@@ -1304,8 +1402,9 @@ class Condition:
         if not self.only_equalities:
             return {_TREE_KEY: _node_to_config(self._root)}
         return {
-            column: _condition_value_to_config(value)
-            for column, value in self.equalities.items()
+            node.path.column: _condition_value_to_config(node.value)
+            for node in _canonically_sorted(self._root.children)
+            if isinstance(node, Term)
         }
 
     @classmethod
