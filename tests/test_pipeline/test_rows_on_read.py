@@ -1354,19 +1354,24 @@ def test_an_inactive_function_node_passes_rows_with_nested_tokens(
     """
     import asyncio
 
+    from orcapod import function_pod
     from orcapod.channels import Channel
     from orcapod.core.data_function import PythonDataFunction
     from orcapod.core.function_pod import FunctionPod
     from orcapod.core.nodes.function_node import FunctionJobNode
 
+    @function_pod(output_keys="y")
     def never(x: int) -> int:
         raise AssertionError("an inactive function must not be called")
 
-    data_function = PythonDataFunction(never, output_keys="y")
+    pod = never.pod
+    assert isinstance(pod, FunctionPod)
+    data_function = pod.data_function
+    assert isinstance(data_function, PythonDataFunction)
     data_function.set_active(False)
     rows = _unconvertible()
     database = InMemoryArrowDatabase()
-    node = FunctionJobNode(FunctionPod(data_function), rows, pipeline_database=database)
+    node = FunctionJobNode(pod, rows, pipeline_database=database)
 
     async def through_channels() -> list[Any]:
         sent: Channel[Any] = Channel()
