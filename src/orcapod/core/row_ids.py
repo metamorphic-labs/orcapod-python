@@ -46,7 +46,7 @@ ENTRY_ID_COL = "__pipeline_entry_id"
 # id's preimage.
 INSTANCE_ID_COL = "__pipeline_instance_id"
 
-# The record id's column: the name the pipeline table's row key is read under.
+# The record id's column in the pipeline table.
 RECORD_ID_COL = "__pipeline_record_id"
 
 # What stands in a source-info token where the result id would be, when the token
@@ -170,3 +170,25 @@ def record_id(
         The record id.
     """
     return hasher.hash_table(record_id_preimage(instance, result_id))
+
+
+def pipeline_row_key(node_content_hash: "ContentHash", record: "ContentHash") -> bytes:
+    """Return the key a pipeline table keeps a row under: the node, then the record.
+
+    One pipeline table holds the rows of every node with one pipeline hash (the
+    default table scope), told apart by the node's content hash. Two such nodes
+    can record the same instance with the same stored result, which is one record
+    id; each keeps its own row, so the table's key is the pair (node content hash,
+    record id). The key is not a hash and is never read apart: the row stores both
+    parts in their own columns.
+
+    Args:
+        node_content_hash: The content hash of the node that records the row.
+        record: The row's record id.
+
+    Returns:
+        The labelled digest of the node's content hash, its length first (four
+        bytes, big-endian), then the labelled digest of the record id.
+    """
+    node = node_content_hash.to_prefixed_digest()
+    return len(node).to_bytes(4, "big") + node + record.to_prefixed_digest()

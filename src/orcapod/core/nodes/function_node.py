@@ -141,9 +141,11 @@ def _pipeline_meta_schema() -> pa.Schema:
     """The bookkeeping columns of a function node's pipeline record (``pdb_v2``).
 
     The record holds the tags, system tags and input source-info columns, then
-    these. The row's key, its record id, is not among them: the database keeps it
-    and a read names it ``__pipeline_record_id``. The instance id is the plain
-    column a run looks a row up by (``core/row_ids.py``, ITL-1471). One definition for the writer (``add_pipeline_record``) and for the
+    these. The instance id is the plain column a run looks a row up by, and the
+    record id names the row (``core/row_ids.py``, ITL-1471). The table's key is
+    the node's content hash with the record id (``row_ids.pipeline_row_key``): one
+    table holds the rows of every node with one pipeline hash, and two of them can
+    record one instance with one result. One definition for the writer (``add_pipeline_record``) and for the
     check of the pipeline database when it is attached (ITL-1162).
     """
     return pa.schema(
@@ -156,6 +158,7 @@ def _pipeline_meta_schema() -> pa.Schema:
             pa.field(f"{constants.META_PREFIX}computed", pa.bool_()),
             pa.field(constants.IS_EPHEMERAL_COL, pa.bool_()),
             pa.field(INSTANCE_ID_COL, pa.large_binary()),
+            pa.field(RECORD_ID_COL, pa.large_binary()),
             *_PIPELINE_RECORDING_FIELDS,
         ]
     )
@@ -1983,6 +1986,25 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             if pair is not None and pair[1] is not None:
                 yield pair[0], pair[1]
 
+    def held_instance_ids(self) -> list[bytes]:
+        """The instance id of each row this node holds, in the order it holds them.
+
+        One id per row of ``iter_data`` / ``as_table``: the id the row was looked
+        up and recorded under (``compute_instance_id`` of its input). A trace reads
+        it to find the stored record of a held row (``pipeline/provenance.py``).
+
+        Returns:
+            The labelled digests, or ``[]`` when the node holds no run.
+        """
+        if self._run_entry_counts is None:
+            return []
+        cache = self._cached_output_datas
+        return [
+            eid
+            for eid in self._run_entry_order
+            if (pair := cache.get(eid)) is not None and pair[1] is not None
+        ]
+
     def _set_run_rows(
         self,
         entry_ids: list[bytes],
@@ -2424,12 +2446,19 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
 
     def _write_pipeline_record(
         self,
-        record_id: bytes,
+        row_key: bytes,
         record: pa.Table,
         result_id: bytes,
         is_ephemeral: bool,
     ) -> None:
-        """Queue a readable record with a dependency on its result's commit."""
+        """Queue a readable record with a dependency on its result's commit.
+
+        Args:
+            row_key: The row's key in the table (``row_ids.pipeline_row_key``).
+            record: The row.
+            result_id: The id of the result the row points at.
+            is_ephemeral: Whether the result is in the ephemeral database.
+        """
         database = self._require_pipeline_database()
         path = self._versioned_pipeline_path
         pod = self._ephemeral_cached_pod if is_ephemeral else self._cached_function_pod
@@ -2451,10 +2480,10 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         result_guard = (
             contextlib.nullcontext()
             if dependency is None
-            else database.guard_record(path, record_id, dependency)
+            else database.guard_record(path, row_key, dependency)
         )
         with database.guard_table_schema(path, check), result_guard:
-            database.add_record(path, record_id, record, skip_duplicates=True)
+            database.add_record(path, row_key, record, skip_duplicates=True)
 
     def _row_processed(self) -> None:
         """Count a processed row; commit once a batch is full (only inside a job run)."""
@@ -3095,11 +3124,13 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
     ) -> None:
         """Add a pipeline record for a row that produced output.
 
-        The row's key is its record id, the hash of its instance id and the id of
-        its result (``row_ids.record_id``); nothing is read before the write. The
-        database skips a row whose record id is already stored, so the same
-        instance recorded again with the same result is one row, with its first
-        recording time. A recompute has a new result id, so it is a new row. An
+        The row is named by its record id, the hash of its instance id and the id
+        of its result (``row_ids.record_id``), and kept under this node's content
+        hash with it (``row_ids.pipeline_row_key``); nothing is read before the
+        write. The database skips a row whose key is already stored, so the same
+        instance recorded again by this node with the same result is one row,
+        with its first recording time. Another node that shares the table (the
+        same pipeline hash) keeps its own row of the same record. A recompute has a new result id, so it is a new row. An
         input whose tokens changed is a new instance: its row is new, and its
         result normally comes from the result store, so nothing is computed
         (ITL-1471).
@@ -3174,11 +3205,15 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         self._account_for_stale_tables()
         self._preflight_pipeline_write_schema()
 
-        record_id = row_ids.record_id(
+        record = row_ids.record_id(
             self.data_context.arrow_hasher,
             ContentHash.from_prefixed_digest(instance_id),
             data_record_id,
-        ).to_prefixed_digest()
+        )
+        # The table is shared by the nodes of one pipeline hash: the row's key is
+        # this node's content hash with the record id, so another node's record
+        # of the same instance and result is another row.
+        row_key = row_ids.pipeline_row_key(self.content_hash(), record)
 
         # The input's source-info columns, exactly as the instance id read them
         # (``row_ids.instance_id_preimage`` takes the same table): a stored row
@@ -3205,6 +3240,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 f"{constants.META_PREFIX}computed": [computed],
                 constants.IS_EPHEMERAL_COL: [is_ephemeral],
                 INSTANCE_ID_COL: [instance_id],
+                RECORD_ID_COL: [record.to_prefixed_digest()],
                 PIPELINE_RUN_ID_COL: [run_id],
                 PIPELINE_RECORDED_AT_COL: [datetime.now(timezone.utc)],
             },
@@ -3226,7 +3262,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
 
         try:
             self._write_pipeline_record(
-                record_id, combined_record, data_record_id.bytes, is_ephemeral
+                row_key, combined_record, data_record_id.bytes, is_ephemeral
             )
         except OrcapodDatabaseError:
             # The stored table could not be read: report the read failure itself.
@@ -3452,10 +3488,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         # table this read fetches and of no other (entries only: no result table).
         self._pipeline_database.refresh_table(self._versioned_pipeline_path)
         context_key = self._stored_data_context_key
-        entries = self._pipeline_database.get_all_records(
-            self._versioned_pipeline_path,
-            record_id_column=RECORD_ID_COL,
-        )
+        entries = self._pipeline_database.get_all_records(self._versioned_pipeline_path)
         if entries is not None:
             entries = keep_rows_of_data_context(entries, context_key)
             if self._table_scope == "pipeline_hash":
@@ -3542,10 +3575,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             return None
 
         self._account_for_stale_tables()
-        taginfo = self._pipeline_database.get_all_records(
-            self._versioned_pipeline_path,
-            record_id_column=RECORD_ID_COL,
-        )
+        taginfo = self._pipeline_database.get_all_records(self._versioned_pipeline_path)
 
         if taginfo is None:
             return None
@@ -4515,14 +4545,27 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                             elif isinstance(data, EmptyData):
                                 # A placeholder whose instance is not stored: the
                                 # result store answers by its input hash, nothing
-                                # is computed and no pipeline row is written, as
-                                # on the sync path (``_empty_data_cache_hit``).
-                                found_tag, found = self._empty_data_cache_hit(
-                                    tag, data, instance_id
-                                )
+                                # is computed and no pipeline row is written
+                                # (``_empty_data_cache_hit``). A placeholder with
+                                # no stored result is a failed row under the row
+                                # failure policy, with the events of the sync path:
+                                # the row starts before the lookup.
                                 ctx_obs.on_data_start(node_label, tag, data)
+                                try:
+                                    found_tag, found = self._empty_data_cache_hit(
+                                        tag, data, instance_id
+                                    )
+                                except (OrcapodDatabaseError, TypeIdentityError):
+                                    # Never a row failure, whatever the policy.
+                                    raise
+                                except Exception as exc:
+                                    ctx_obs.on_data_crash(node_label, tag, data, exc)
+                                    if error_policy == "fail_fast":
+                                        raise
+                                    failed_rows[0] += 1
+                                    continue
                                 ctx_obs.on_data_end(
-                                    node_label, tag, data, found, cached=True
+                                    node_label, tag, data, found, cached=False
                                 )
                                 await output.send((found_tag, found))
                                 run_entry_ids.append(instance_id)
