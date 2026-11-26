@@ -22,19 +22,21 @@ Independent review of the first head found that a commutative operator hashes it
 as a set, so `Join()(d)` and `Join()(d, d)` (where `d` has no data column besides its
 data-tags, so no overlap refuses it) shared one content hash and cache path but gave
 different rows (5 against 3 for `id = [1, 1, 2]`), and which one a job kept followed the
-order the steps were recorded in. Decided on the developer's behalf (2026-11-26): a
-commutative operator (`Join`, `Rejoin`, any pod whose `argument_symmetry` is a
-`frozenset`) or a function pod given the same stream more than once is refused with
-`InputValidationError` before anything is recorded, naming the pod and the stream and
-pointing to `MergeJoin` for a self-join. One rule,
-`core/operators/repeated_operands.refuse_repeated_operands`: an operator's `process` and a
-function pod's `handle_input_streams` call it with the operands' identity (the same object
-twice), and `_record_invocation` with their content hashes (also two streams of one
-identity, which would be one step of the pipeline). Called on its own, a pod computes no
-content hash of its inputs (hashing a raw stream reads its rows, and not every value type
-can be hashed), and the rule asks `argument_symmetry` (which builds a `frozenset` of the
-streams, hashing them) only once a repeat is found. Before, standalone `Join()(d, d)` ran when no data column overlapped and was
-refused (overlapping data columns) otherwise.
+order the steps were recorded in. The round-2 review found that a check by object identity
+missed two separate sources of one identity (standalone hashes still collided, and a step
+recorded over them compiled in one order and failed in the other), and that the check
+added its own error for an operand that cannot be hashed.
+
+Decided on the developer's behalf (2026-11-26): refuse exactly where the identity is formed
+from the operands as a set. `core/operators/repeated_operands.operand_set` builds that set
+and raises `RepeatedOperandError` (an `InputValidationError`) when two operands have one
+identity (they are equal as the set compares them). `Join.argument_symmetry` (so also
+`Rejoin`), the commutative branch of `BinaryOperator.argument_symmetry` and the function
+pod's `argument_symmetry` call it and name the operator or the function. Whatever forms the
+identity meets the refusal: hashing, recording, compiling; a function pod forms it when
+called with several inputs. No separate check remains. An operand whose identity cannot be
+computed raises what hashing it raises. Rows computed without forming the identity
+(standalone `as_table()`) are computed as before.
 
 A commutative operator's inputs have no position also when it has one input (`Join()(a)`):
 only a function or side-effect pod gets position 0 for its one input.

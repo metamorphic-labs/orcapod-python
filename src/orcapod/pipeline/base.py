@@ -344,10 +344,9 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                 read one source under two restrictions (ITL-1218), whatever streams
                 lead there. Nothing is recorded then.
             InputValidationError: If the pod is commutative and two of its inputs have
-                one content hash (``refuse_repeated_operands``, ITL-1419). Nothing is
-                recorded then.
+                one identity: forming the invocation's identity refuses it
+                (``repeated_operands.operand_set``, ITL-1419). Nothing is recorded then.
         """
-        from orcapod.core.operators.repeated_operands import refuse_repeated_operands
         from orcapod.pipeline.restrictions import require_one_restriction
 
         key = invocation.content_hash().to_string()
@@ -362,11 +361,6 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         # every source the pipeline's streams read now (nothing is remembered: a
         # slot rebound since the last invocation changes what they read).
         require_one_restriction([*self._held_streams(), *inputs])
-        # A commutative pod hashes its inputs as a set: two inputs of one identity
-        # would make one step of two different ones (ITL-1419).
-        refuse_repeated_operands(
-            invocation.pod, inputs, [upstream_hash for _, upstream_hash in upstreams]
-        )
         self._remember_invocation(key, invocation)
         self._hash_graph.add_node(key)
         self._hash_graph.add_edges_from(

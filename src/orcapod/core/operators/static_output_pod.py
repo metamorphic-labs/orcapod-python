@@ -318,9 +318,6 @@ class StaticOutputOperatorPod(TraceableBase):
         self._note_provisional_identity_use()
 
         # perform input stream validation
-        from orcapod.core.operators.repeated_operands import refuse_repeated_operands
-
-        refuse_repeated_operands(self, streams)
         self.check_data_tag_support(*streams)
         self.validate_inputs(*streams)
         self.tracker_manager.record_operator_pod_invocation(

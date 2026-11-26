@@ -215,7 +215,21 @@ class Join(NonZeroInputOperator):
         return sorted(streams, key=lambda s: s.pipeline_hash().to_hex())
 
     def argument_symmetry(self, streams: Collection) -> ArgumentGroup:
-        return frozenset(streams)
+        """The inputs as a set: ``Join`` is commutative.
+
+        Raises:
+            RepeatedOperandError: If two inputs have one identity (ITL-1419): a set
+                cannot tell ``Join(d)`` from ``Join(d, d)``.
+        """
+        from orcapod.core.operators.repeated_operands import (
+            RepeatedOperandError,
+            operand_set,
+        )
+
+        try:
+            return operand_set(streams)
+        except RepeatedOperandError as err:
+            raise RepeatedOperandError(err.reason, pod=type(self).__name__) from None
 
     def output_schema(
         self,

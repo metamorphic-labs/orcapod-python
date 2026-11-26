@@ -647,13 +647,9 @@ class _FunctionPodBase(TraceableBase):
         if len(streams) == 0:
             raise ValueError("At least one input stream is required")
         elif len(streams) > 1:
-            from orcapod.core.operators.repeated_operands import (
-                refuse_repeated_operands,
-            )
-
-            # The pod joins its inputs: one stream twice is refused, naming the pod
-            # (ITL-1419), before the join is built or recorded.
-            refuse_repeated_operands(self, streams)
+            # The pod's identity covers its inputs as the set its join forms: one
+            # stream twice is refused here, naming the function (ITL-1419).
+            _ = self.argument_symmetry(streams)
             # TODO: simplify the multi-stream handling logic
             multi_stream_handler = self.multi_stream_handler()
             joined_stream = multi_stream_handler.process(*streams)
@@ -870,7 +866,22 @@ class _FunctionPodBase(TraceableBase):
         return self.process(input_stream, label=label)
 
     def argument_symmetry(self, streams: Collection[StreamProtocol]) -> ArgumentGroup:
-        return self.multi_stream_handler().argument_symmetry(streams)
+        """The symmetry of the join the pod puts its inputs through.
+
+        Raises:
+            RepeatedOperandError: If two inputs have one identity (ITL-1419), naming
+                the function.
+        """
+        from orcapod.core.operators.repeated_operands import RepeatedOperandError
+
+        try:
+            return self.multi_stream_handler().argument_symmetry(streams)
+        except RepeatedOperandError as err:
+            raise RepeatedOperandError(
+                err.reason,
+                pod=f"the function pod of {self.canonical_function_name!r}, which joins "
+                "its inputs",
+            ) from None
 
     def output_schema(
         self,

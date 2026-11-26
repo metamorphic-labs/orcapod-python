@@ -281,15 +281,13 @@ one.
     try:
         units.join(units)
     except InputValidationError as err:
-        print("c:", str(err).split(". ")[0])
-    # c: Join is given the same stream 'CSVSource' more than once
+        print("c:", str(err).split(", but")[0])
+    # c: Input streams are not compatible: Datas should not have overlapping keys
     ```
 
     (a) The column is called `subject_id`. (b) `n_spikes` is in `units`:
-    pass both, `firing_rate.pod(units, sessions)`. (c) A join takes each stream once: it
-    treats its inputs as a set, so a stream given twice is refused. To put a stream beside
-    itself, use `MergeJoin` (Part 3), whose inputs are ordered. Two different tables that
-    share a data column name are refused too: rename one side, or use `MergeJoin`.
+    pass both, `firing_rate.pod(units, sessions)`. (c) Both sides have the same data columns.
+    If two tables share a column name, rename one side or use `MergeJoin` (Part 3).
 
 **2.** Run the failing version of `firing_rate` (the one with the 1200 limit) in a job with
 only a `StatusObserver`, and print how many rows ended in each state.

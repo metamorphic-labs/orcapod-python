@@ -333,70 +333,128 @@ COMMUTATIVE = {
 INPUTS = {"data_tags_only": _data_tags_only, "data_tags_and_data": _data_tags_and_data}
 
 
+REPEATS = {
+    "same_object": lambda make: (lambda s: (s, s))(make()),
+    "equal_sources": lambda make: (make(), make()),
+}
+REFUSAL = r"same stream.*more than once.*MergeJoin"
+
+
+def _who(pod: str) -> str:
+    """What the refusal names: the operator, or the function of a function pod."""
+    return "_identity" if pod == "function_pod" else pod
+
+
+@pytest.mark.parametrize("repeat", sorted(REPEATS))
 @pytest.mark.parametrize("inputs", sorted(INPUTS))
 @pytest.mark.parametrize("pod", sorted(COMMUTATIVE))
-def test_a_repeated_operand_of_a_commutative_pod_is_refused_standalone(
-    pod: str, inputs: str
+def test_a_repeated_operand_is_refused_where_the_identity_is_formed(
+    pod: str, inputs: str, repeat: str
 ) -> None:
-    """A commutative operator, or a function pod (which joins its inputs), hashes its
-    operands as a set, so ``Join(d)`` and ``Join(d, d)`` would share one identity
-    and cache path but give different rows. The same stream object twice is refused,
-    naming the pod and the stream."""
-    stream = INPUTS[inputs]()
-    name = "FunctionPod" if pod == "function_pod" else pod
-    with pytest.raises(InputValidationError, match=rf"{name}.*same stream.*MergeJoin"):
-        COMMUTATIVE[pod](stream, stream)
-
-
-@pytest.mark.parametrize("pod", sorted(COMMUTATIVE))
-def test_two_sources_of_one_identity_are_one_stream_when_recorded(pod: str) -> None:
-    """Two source objects of one identity: a pod called on its own compares objects
-    (it computes no content hash), so ``Join(d1, d2)`` is not refused for being one
-    stream there; recorded in a pipeline, their one content hash makes them one stream,
-    refused before anything is recorded (the function pod's join is the step refused)."""
-    d1, d2 = _data_tags_only(), _data_tags_only()
-    assert d1 is not d2 and d1.content_hash() == d2.content_hash()
-    COMMUTATIVE[pod](d1, d2)  # not refused as one stream on its own
-    job = PipelineJob(name="refused", database=InMemoryArrowDatabase())
-    name = "Rejoin" if pod == "Rejoin" else "Join"
-    with pytest.raises(InputValidationError, match=rf"{name} is given the same stream"):
-        with job:
-            COMMUTATIVE[pod](d1, d2, label="twice")
-    assert "twice" not in job.nodes
+    """A commutative operator, or a function pod (which joins its inputs), forms its
+    identity from its operands as a set, so ``Join(d)`` and ``Join(d, d2)`` (``d2`` a
+    separate source of ``d``'s identity) would have one identity but different rows.
+    Forming that identity refuses two operands of one identity, one object or not,
+    naming the operator or function and the stream."""
+    first, second = REPEATS[repeat](INPUTS[inputs])
+    assert first.content_hash() == second.content_hash()
+    # With data columns besides the data-tags, the operator's own check refuses the
+    # overlapping columns first, when the step is built (as before ITL-1419).
+    refusal = (
+        rf"{_who(pod)}.*{REFUSAL}"
+        if inputs == "data_tags_only" or pod == "function_pod"
+        else "overlapping"
+    )
+    with pytest.raises(InputValidationError, match=refusal):
+        COMMUTATIVE[pod](first, second).content_hash()
 
 
 @pytest.mark.parametrize("pod", ["Join", "Rejoin"])
 def test_a_repeat_among_three_operands_is_refused(pod: str) -> None:
-    d, w = _data_tags_only("d"), _data_tags_and_data("w")
-    with pytest.raises(InputValidationError, match="same stream"):
-        COMMUTATIVE[pod](d, w.select_data_columns(["x"]), d)
+    d = _data_tags_only("d")
+    # A second branch of ``d`` (Rejoin takes branches of one stream), and a separate
+    # source of ``d``'s identity as the third operand.
+    branch = d.add_tags(cohort="A")
+    with pytest.raises(InputValidationError, match=rf"{pod}.*{REFUSAL}"):
+        COMMUTATIVE[pod](d, branch, _data_tags_only("d")).content_hash()
 
 
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("repeated_first", [False, True])
+@pytest.mark.parametrize("repeat", sorted(REPEATS))
 @pytest.mark.parametrize("pod", sorted(COMMUTATIVE))
 def test_a_repeated_operand_is_refused_when_recorded_in_either_order(
-    pod: str, repeated_first: bool, mode: str
+    pod: str, repeat: str, repeated_first: bool, mode: str
 ) -> None:
-    """Refused before anything is recorded, whether the one-operand step is recorded
-    before or after: the job keeps only that step, and runs it (sync and async) with
-    the rows of the standalone step."""
-    d = _data_tags_only()
-    # Tags and data only: a function's result record id (in its source info) is
-    # not the standalone pod's inside a job, whatever this test does.
-    expected = _rows(COMMUTATIVE[pod](d).as_table())
+    """Recording forms the identity: refused before anything is recorded, whether the
+    one-operand step is recorded before or after; the job keeps only that step, and
+    runs it (sync and async) with the rows of the standalone step."""
+    first, second = REPEATS[repeat](_data_tags_only)
+    expected = _rows(COMMUTATIVE[pod](first).as_table())
     job = PipelineJob(name="refused", database=InMemoryArrowDatabase())
     with job:
         if not repeated_first:
-            COMMUTATIVE[pod](d, label="once")
-        with pytest.raises(InputValidationError, match="same stream"):
-            COMMUTATIVE[pod](d, d, label="twice")
+            COMMUTATIVE[pod](first, label="once")
+        with pytest.raises(InputValidationError, match=rf"{_who(pod)}.*{REFUSAL}"):
+            COMMUTATIVE[pod](first, second, label="twice")
         if repeated_first:
-            COMMUTATIVE[pod](d, label="once")
+            COMMUTATIVE[pod](first, label="once")
     assert "twice" not in job.nodes
     _run(job, mode)
     assert _rows(job.once.as_table()) == expected
     assert len(expected) == 3
+
+
+@pytest.mark.parametrize("repeated_first", [False, True])
+def test_a_step_over_a_repeated_join_is_refused_in_either_order(
+    repeated_first: bool,
+) -> None:
+    """Round-2 finding P1: a downstream step over ``Join(d, d2)`` ran in one recording
+    order and failed compilation in the other. The join is refused when its identity
+    is formed, in both orders."""
+    d, d2 = _data_tags_only(), _data_tags_only()
+    job = PipelineJob(name="refused", database=InMemoryArrowDatabase())
+    with job:
+        if not repeated_first:
+            d.select_data_columns(["id"], label="once")
+        with pytest.raises(InputValidationError, match=REFUSAL):
+            Join()(d, d2).select_data_columns(["id"], label="after")
+        if repeated_first:
+            d.select_data_columns(["id"], label="once")
+    assert "after" not in job.nodes
+    job.run()
+    assert job.once.as_table().num_rows == 3
+
+
+def _raw_with_map(values: list[int]) -> Any:
+    """A raw stream (no source) with a map data column: its identity hashes its rows,
+    and a map value cannot be hashed."""
+    from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+
+    table = pa.table(
+        {
+            "id": pa.array(values, pa.int64()),
+            "m": pa.array(
+                [[("k", v)] for v in values], pa.map_(pa.large_string(), pa.int64())
+            ),
+        }
+    )
+    return ArrowTableStream(table, tag_columns=["id"])
+
+
+def test_an_operand_whose_identity_cannot_be_formed_raises_the_hashing_error() -> None:
+    """Round-2 finding P2: the rule adds no error of its own. A raw stream whose
+    identity cannot be computed raises, when a commutative pod's identity is formed,
+    exactly what hashing that stream raises; its rows are computed as before."""
+    raw = _raw_with_map([1, 2])
+    other = _data_tags_and_data()
+    joined = Join()(raw, other.select_data_columns(["x"]))
+    assert joined.as_table().num_rows == 3
+    with pytest.raises(ValueError) as own:
+        raw.content_hash()
+    with pytest.raises(type(own.value)) as formed:
+        joined.content_hash()
+    assert str(formed.value) == str(own.value)
 
 
 def test_an_ordered_operator_still_takes_one_stream_twice() -> None:
