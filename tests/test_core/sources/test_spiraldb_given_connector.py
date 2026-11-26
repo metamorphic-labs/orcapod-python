@@ -1,7 +1,7 @@
 """``SpiralDBTableSource(connector=...)`` (ITL-1457), on the fake.
 
-Sources given one connector use one client and read the schema table once per version.
-Everything else is compared with sources that make their own: rows, order, ids, hashes,
+Sources given one connector use one client. Everything else, the schema table included (each
+source reads it as one that makes its own connector, so a warm connector skips no check), is compared with sources that make their own: rows, order, ids, hashes,
 errors, warnings, and the SDK calls in their order. The findings of the reviews of #553 and
 #554, which shared or reused more than this, are cases here.
 """
@@ -511,8 +511,8 @@ def test_the_order_sources_are_made_in_changes_nothing(
         "open": 3,
         "schema": 3,
         "open schemas": 3,  # looked at for each source
-        "schema schemas": 1,
-        "scan schemas": 1,
+        "schema schemas": 3,  # and read by each, as without a connector
+        "scan schemas": 3,
     }
     for index, name in enumerate(_TABLES):
         assert sorted(_ks(made[name])) == [10 * index + i for i in range(4)]
@@ -526,37 +526,59 @@ def test_each_read_looks_at_everything_again(calls: _Calls) -> None:
         assert calls.take() == ["open", "schema", "open schemas", "scan"]
 
 
-def test_a_new_version_of_the_schema_table_is_read_once(calls: _Calls) -> None:
+def test_a_new_version_of_the_schema_table_is_read_once_per_source(
+    calls: _Calls,
+) -> None:
+    """Each source reads a new version once, as one that makes its own connector does;
+    a source's later reads of that version use its rows, as on main."""
     connector = SpiralDBConnector("p")
     sources = [_source(n, connector=connector, max_rows=None) for n in _TABLES]
     fake.migrate("p", {})
-    calls.take()
+    _ = calls.take()
     for _ in range(2):
         for source in sources:
             _ = source.as_table()
     counts = collections.Counter(calls.take())
-    assert counts["open schemas"] == 6 and counts["scan schemas"] == 1
+    assert counts["open schemas"] == 6 and counts["scan schemas"] == 3
 
 
-def test_the_one_call_that_is_not_made_again(
-    root: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("failure", ["status 403", "status 500"])
+@pytest.mark.parametrize("failing", ["schema schemas", "scan schemas"])
+def test_a_warm_connector_skips_no_check_of_the_schema_table(
+    root: Path, monkeypatch: pytest.MonkeyPatch, failing: str, failure: str
 ) -> None:
-    """The rows of a schema table's version are read once for the sources given one
-    connector, so that a failure of reading them again cannot be seen by the second. Its
-    current version is looked at all the same."""
-    connector = SpiralDBConnector("p")
-    _ = _source("b", connector=connector)
-    scan = fake.FakeKeyedTable.scan
+    """Review finding 555-r1 P1: what a source that makes its own connector raises when it
+    is built, a source given a connector that already read the same version of the schema
+    table raises too, at the same call."""
+    warm = SpiralDBConnector("p")
+    _ = _source("b", connector=warm).as_table()
+    schema, scan = fake.FakeKeyedTable.schema, fake.FakeKeyedTable.scan
+
+    def refuse(table: Any, what: str) -> None:
+        if table._table["name"] == st.SCHEMA_TABLE and what == failing:
+            raise fake.SpiralError(failure)
+
+    def new_schema(self: Any) -> Any:
+        refuse(self, "schema schemas")
+        return schema(self)
 
     def new_scan(self: Any, *args: Any, **given: Any) -> Any:
-        if self._table["name"] == st.SCHEMA_TABLE:
-            raise fake.SpiralError("status 500")
+        refuse(self, "scan schemas")
         return scan(self, *args, **given)
 
+    monkeypatch.setattr(fake.FakeKeyedTable, "schema", new_schema)
     monkeypatch.setattr(fake.FakeKeyedTable, "scan", new_scan)
-    with pytest.raises(fake.SpiralError, match="500"):
-        _source("a")
-    assert len(_ks(_source("a", connector=connector))) == 4
+    raised: list[tuple[str, list[str]]] = []
+    for connector in (None, warm):
+        given = {} if connector is None else {"connector": connector}
+        with pytest.raises(fake.SpiralError, match=failure) as caught:
+            _ = _source("a", **given)
+        raised.append((str(caught.value), caught.value.__notes__))
+    fresh, on_warm = raised
+    assert on_warm == fresh
+    monkeypatch.setattr(fake.FakeKeyedTable, "schema", schema)
+    monkeypatch.setattr(fake.FakeKeyedTable, "scan", scan)
+    assert len(_ks(_source("a", connector=warm))) == 4
 
 
 def test_a_count_is_each_sources_own(calls: _Calls) -> None:

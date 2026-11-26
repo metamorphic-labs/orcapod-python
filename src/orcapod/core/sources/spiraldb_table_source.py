@@ -319,10 +319,10 @@ class SpiralDBTableSource(RootSource):
             name of a data column that receives a copy of it, as in
             ``DerivedSource``. ``None`` (default) or an empty mapping copies nothing.
         connector: A ``SpiralDBConnector`` of this project and dataset whose SDK client
-            the source uses, so that sources given one connector sign in once and read
-            the dataset's schema table once per version of it (ITL-1457), as the copies
-            ``where()`` makes do. Whose sign-in it is was decided when the connector was
-            made. The source holds its own reference: closing the connector, the source
+            the source uses, so that sources given one connector sign in once (ITL-1457).
+            Only the client is shared: each source reads the dataset's schema table and
+            makes every other call as a source that makes its own connector does. Whose
+            sign-in it is was decided when the connector was made. The source holds its own reference: closing the connector, the source
             or another source given it affects no other. It is part of no identity and is
             not saved. ``None`` (default): the source makes its own. Keyword-only.
 
