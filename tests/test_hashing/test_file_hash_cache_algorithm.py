@@ -342,3 +342,36 @@ def test_sqlite_reads_a_well_formed_stored_hash(tmp_path: Path):
     with SqliteHashCacher(db_path) as c:
         _insert_raw(db_path, b"sha256:" + b"\x07" * 32)
         assert c.get(_key("sha256")) == ContentHash("sha256", b"\x07" * 32)
+
+
+# ---------------------------------------------------------------------------
+# An invalid label is refused on put and a miss on read, on every cacher
+# ---------------------------------------------------------------------------
+
+INVALID_LABELS = [
+    pytest.param("sha256\x00", id="embedded-nul"),
+    pytest.param("shä256", id="non-ascii"),
+    pytest.param("", id="empty"),
+]
+
+
+@pytest.mark.parametrize("match_mtime", [True, False])
+@pytest.mark.parametrize("label", INVALID_LABELS)
+def test_put_with_an_invalid_label_raises_value_error(
+    any_mtime_cacher: Cacher, match_mtime: bool, label: str
+):
+    with pytest.raises(ValueError):
+        any_mtime_cacher.put(_key(label), ContentHash(label, b"\x01" * 32))
+    assert any_mtime_cacher.get(_key(label)) is None
+
+
+@pytest.mark.parametrize("match_mtime", [True, False])
+@pytest.mark.parametrize("label", INVALID_LABELS)
+def test_sqlite_read_with_an_invalid_label_is_a_miss(
+    tmp_path: Path, match_mtime: bool, label: str
+):
+    """A persisted row whose bytes begin with the invalid label is still a miss."""
+    db_path = tmp_path / "c.db"
+    with SqliteHashCacher(db_path, match_mtime=match_mtime) as c:
+        _insert_raw(db_path, label.encode("utf-8") + b":" + b"\x07" * 32)
+        assert c.get(_key(label)) is None

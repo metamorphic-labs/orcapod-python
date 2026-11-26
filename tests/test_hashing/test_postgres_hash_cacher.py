@@ -701,3 +701,38 @@ class TestPostgresHashCacherStrictStore:
             values[label] for label in values if found[label] is not None
         ]
         assert sum(v is not None for v in found.values()) == 1
+
+
+_INVALID_LABELS = [
+    pytest.param("sha256\x00", id="embedded-nul"),
+    pytest.param("shä256", id="non-ascii"),
+    pytest.param("", id="empty"),
+]
+
+
+@pytest.mark.postgres
+class TestPostgresHashCacherInvalidLabel:
+    @pytest.mark.parametrize("match_mtime", [True, False])
+    @pytest.mark.parametrize("label", _INVALID_LABELS)
+    def test_put_raises_value_error_and_read_is_a_miss(
+        self, pg_conninfo: str, match_mtime: bool, label: str
+    ):
+        c = PostgresHashCacher(pg_conninfo, match_mtime=match_mtime)
+        c.clear()
+        try:
+            with pytest.raises(ValueError):
+                c.put(_key_with_label(label), ContentHash(label, b"\x01" * 32))
+            with psycopg.connect(pg_conninfo) as conn:
+                conn.execute(
+                    "INSERT INTO file_hash_cache (path, mtime_ns, size, hash) "
+                    "VALUES (%s, %s, %s, %s)",
+                    (
+                        "/a/b.txt",
+                        1000,
+                        100,
+                        label.encode("utf-8") + b":" + b"\x07" * 32,
+                    ),
+                )
+            assert c.get(_key_with_label(label)) is None
+        finally:
+            c.close()

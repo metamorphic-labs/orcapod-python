@@ -14,6 +14,7 @@ from orcapod.hashing.file_hashers import (
     FileHashKey,
     parse_stored_file_hash,
     require_storable,
+    stored_hash_prefix,
 )
 from orcapod.types import ContentHash
 
@@ -220,7 +221,9 @@ class PostgresHashCacher:
             Cached ``ContentHash``, or ``None`` if not found.
         """
         conn = self._connection()
-        prefix = key.stored_prefix
+        prefix = stored_hash_prefix(key.label)
+        if prefix is None:  # no hash of an invalid label is ever stored
+            return None
         if self._match_mtime:
             row = conn.execute(
                 "SELECT hash FROM file_hash_cache "

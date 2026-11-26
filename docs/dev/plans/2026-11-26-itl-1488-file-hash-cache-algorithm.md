@@ -31,6 +31,10 @@ the default (SHA-256) file handler returned the MD5 value with caching on.
 - The persistent cachers read a stored value with `parse_stored_file_hash`: exactly the key's
   label, `:`, and a digest of that algorithm's length; anything else is a miss.
 
+- An invalid label (an embedded NUL, a non-ASCII name, an empty or unknown name: any name
+  `hashlib.new` refuses, whatever it raises) is a `ValueError` on put
+  (`file_hash_digest_size`) and a miss on read (`stored_hash_prefix` returns `None`).
+
 ## Tests
 
 `tests/test_hashing/test_file_hash_cache_algorithm.py`: two algorithms on one file over one

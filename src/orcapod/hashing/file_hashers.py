@@ -34,14 +34,28 @@ class FileHashKey:
     size: int
     label: str
 
-    @property
-    def stored_prefix(self) -> bytes:
-        """The leading bytes of a stored hash of this label (``<label>:``).
 
-        A persistent cacher stores ``ContentHash.to_prefixed_digest()``, which
-        starts with these bytes, and matches an entry's label on them.
-        """
-        return f"{self.label}:".encode("ascii")
+def stored_hash_prefix(label: str) -> bytes | None:
+    """The leading bytes of a stored hash of ``label`` (``<label>:``), if it is valid.
+
+    A persistent cacher stores ``ContentHash.to_prefixed_digest()``, which starts
+    with these bytes, and matches an entry's label on them.
+
+    Args:
+        label: The label of a key.
+
+    Returns:
+        ``<label>:`` as ASCII bytes, or ``None`` when ``label`` is not an ASCII
+        name of an algorithm with a fixed digest length: no hash of it can be
+        stored, so every lookup with it is a miss.
+    """
+    if not label.isascii():
+        return None
+    try:
+        _ = file_hash_digest_size(label)
+    except ValueError:
+        return None
+    return f"{label}:".encode("ascii")
 
 
 def require_storable(key: FileHashKey, value: ContentHash) -> None:
@@ -87,15 +101,11 @@ def parse_stored_file_hash(blob: bytes, label: str) -> ContentHash | None:
         The stored hash, or ``None`` when the value is not a well-formed hash of
         ``label``.
     """
-    prefix = f"{label}:".encode("ascii")
-    if not blob.startswith(prefix):
-        return None
-    try:
-        size = file_hash_digest_size(label)
-    except ValueError:
+    prefix = stored_hash_prefix(label)
+    if prefix is None or not blob.startswith(prefix):
         return None
     digest = blob[len(prefix) :]
-    if len(digest) != size:
+    if len(digest) != file_hash_digest_size(label):
         return None
     return ContentHash(method=label, digest=digest)
 
