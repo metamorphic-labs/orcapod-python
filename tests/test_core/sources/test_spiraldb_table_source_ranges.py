@@ -30,6 +30,7 @@ from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.sources import SpiralDBTableSource
 from orcapod.types import Condition, col
 from tests.test_databases import fake_spiral_sdk
+from tests.test_docs._doc_samples import extract_blocks
 
 _PROJECT = "workshop-sample"
 _UTC = dt.timezone.utc
@@ -237,6 +238,36 @@ class TestRows:
 
         assert not set(before) & set(after)
         assert sorted(before + after) == _keys(_source())
+
+    def test_documented_windows_over_integer_microseconds(
+        self, project: fake_spiral_sdk.ExternalProject
+    ) -> None:
+        """The documented windows split the count column at the hour boundary."""
+        page = Path(__file__).parents[3] / "docs" / "concepts" / "sources.md"
+        (sample,) = (
+            block.source
+            for block in extract_blocks(page.read_text(encoding="utf-8"))
+            if "first_hour = events.where(" in block.source
+        )
+        hour = 3_600_000_000
+        project.create_table(
+            "default.events", key_schema=[("timestamp", pa.uint64())]
+        ).write(
+            pa.table(
+                {
+                    "timestamp": pa.array([0, hour - 1, hour, 2 * hour], pa.uint64()),
+                    "unit_id": [106, 107, 106, 106],
+                }
+            )
+        )
+        scope: dict[str, Any] = {
+            "events": SpiralDBTableSource(_PROJECT, "events", tag_only_columns=True)
+        }
+        exec(sample, scope)
+
+        assert scope["first_hour"].as_table()["timestamp"].to_pylist() == [0, hour - 1]
+        assert scope["second_hour"].as_table()["timestamp"].to_pylist() == [hour]
+        assert scope["one_unit"].as_table()["timestamp"].to_pylist() == [0]
 
     def test_both_ends_of_an_integer_type(self, project):
         assert _keys(_source().where(col("n") >= 0, col("n") <= 255)) == _keys(

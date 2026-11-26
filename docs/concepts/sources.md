@@ -451,11 +451,15 @@ reads every row) and `row_limit` (`None` without a limit).
 `col` as in `filter`. Write a window half-open, `>= start` and `< stop`: adjacent windows then
 neither overlap nor leave a gap. `col(c).between(a, b)` includes both ends.
 
+The `timestamp` column in this example stores microsecond counts as `uint64`. An Arrow
+timestamp column takes `datetime` bounds, aware when the column has a time zone and naive
+when it has none.
+
 <!-- docs-test: skip -->
 ```python
 from orcapod import col
 
-hour = 3_600_000_000  # the timestamp column counts microseconds
+hour = 3_600_000_000
 first_hour = events.where(col("timestamp") >= 0, col("timestamp") < hour)
 second_hour = events.where(col("timestamp") >= hour, col("timestamp") < 2 * hour)
 one_unit = first_hour.where(unit_id=106)  # a range and an equality
