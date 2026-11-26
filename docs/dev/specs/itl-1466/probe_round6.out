@@ -1,0 +1,27 @@
+2 pipeline DB entries have no match in persistent result DB — data may have been deleted externally. These inputs will be recomputed.
+2 pipeline DB entries have no match in persistent result DB — data may have been deleted externally. These inputs will be recomputed.
+
+== 1. run, then the same run again in a new job
+   calls {'f': 2, 'g': 2, 'fired': 2}
+   calls {'f': 2, 'g': 2, 'fired': 2} (nothing computed, nothing fired again)
+   g passages: ['27f485afd553', '9ee2453b9224']
+
+== 2. f's results are lost; a new job runs: f recomputes (new result id)
+   lost the result table of f
+   calls {'f': 4, 'g': 2, 'fired': 2}
+   f's output tokens name the result: ['152bf2d6674c', '0ab9e4dc4279']
+   f passages (served rows): ['c6ca34962ab4', '1a77f13d128c']
+   g passages, default (everything): ['27f485afd553', '9ee2453b9224', '8054aa09b9b2', 'e40d16634f89']
+   g, one row per content, latest: ['8054aa09b9b2', 'e40d16634f89']
+   g, one row per content, first:  ['27f485afd553', '9ee2453b9224']
+   g, one row per content, raise:  RowIdentifierError several stored rows have one content: ar ...
+   g computed again? False | tell fired again? False
+
+== 3. plain function pod: result ids with and without a result store
+   with a store, two builds equal: True
+   without, two builds equal:      False
+
+== 4. node and plain stream, one recipe
+   operator: node ids == plain ids: True
+   operator cache columns: ['_record_hash', '_source_x', '__node_content_hash', '__recorded_at']
+   operator node, latest: ['c7b7d2ca85c6', '3433d6b6aaae']

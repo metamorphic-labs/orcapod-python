@@ -8,6 +8,9 @@ amended (section 3); section 4 gives the reasoning for system tags in a function
 modes (section 3), a derived source over a plain origin reads it as the origin reads (section
 5), and the trace boundary (section 7). Round 4 is design only: the prototype is not changed.
 **Round 5**: P3 is decided as recommended, the trace boundary; kept tokens stand.
+**Round 6**: the store is a complete record, and a derived source's record id is the store's
+row key; **section 13 supersedes the earlier sections where they differ** (the function
+record id of section 4, P1, P2, D4/D5, D12).
 Evidence: **[ran]** a script in `itl-1466/` on `0d1e017c`; **[proto]** `probe_round2` or
 `probe_tokens` on the prototype (they fail on the library as it is); **[read]** the code;
 **[inferred]** none of these. Round 3's own script is `probe_entries` [proto]. Section 12: what is decided, what is open, and **what the
@@ -138,7 +141,7 @@ one pair, and a join of two `as_source` results (4 columns) gave one again [prot
 | Origin | What is hashed |
 |---|---|
 | Plain operator stream, raw stream, operator node (`OFF`, `LOG`, `REPLAY`) | one row: user tags, system tags, data. No tokens, no node hash, no meta or context columns |
-| Function stream **and** function node | the pipeline table's base entry id: user tags, system tags and labelled input data hash of the **input** row; stored as `__pipeline_base_entry_id` |
+| Function stream **and** function node | *(superseded, section 13: the store key)* the pipeline table's base entry id: user tags, system tags and labelled input data hash of the **input** row; stored as `__pipeline_base_entry_id` |
 | Source origin (`tags_as_data` only) | nothing: the row's record id in that source |
 | `record_id_columns` given | nothing: canonical JSON of the key columns |
 
@@ -465,7 +468,7 @@ limit), `reference/hashing.md` (rule 8, sites 4 and 5, inventory), `CLAUDE.md` a
 
 | # | Question | Recommendation |
 |---|---|---|
-| P1 | A `LOG` cache holds one content several times (corrected input with an equal output; results recomputed), and D6 makes `as_source` raise [proto 4, 4b] | **With the developer.** The coordinator recommends (b): collapse rows equal in tags, system tags and data to one, keeping the latest passage's tokens; distinct upstream entries are never collapsed, because their system tags differ. Note: an operator cache row records no time today (its columns are the row, its row hash, the node hash and the data context [read]), so "latest" needs a recorded time added to the operator cache layout, or a rule that does not need one. The other option, (a): keep both passages, told apart by the upstream function's result id; that id is random per store, so ids then differ between two fresh stores |
+| P1 | *Closed in round 6 (section 13): everything stored is served; one row per content is a restriction mode.* A `LOG` cache holds one content several times (corrected input with an equal output; results recomputed), and D6 makes `as_source` raise [proto 4, 4b] | **With the developer.** The coordinator recommends (b): collapse rows equal in tags, system tags and data to one, keeping the latest passage's tokens; distinct upstream entries are never collapsed, because their system tags differ. Note: an operator cache row records no time today (its columns are the row, its row hash, the node hash and the data context [read]), so "latest" needs a recorded time added to the operator cache layout, or a rule that does not need one. The other option, (a): keep both passages, told apart by the upstream function's result id; that id is random per store, so ids then differ between two fresh stores |
 | S1 | Side effects, the rest: the new caching mode; a failed row in it; load-only and before a run; own source id | Retry a failed row on the next iteration; after a load-only run, and before a run, the invocation log's delivered rows (refused without `track_completion`); own source id: yes (section 3) |
 | P5 | A `LOG` node loads as `OFF`, so `as_source` of a loaded operator is refused though its rows are stored [proto 7] | Save the cache mode with the node (its own issue); until then the refusal says to attach `LOG` again |
 | | Held plain-stream rows as "known content" (D10) | No; the fixed-content sources beneath a plain origin, yes (section 6) |
@@ -474,7 +477,7 @@ limit), `reference/hashing.md` (rule 8, sites 4 and 5, inventory), `CLAUDE.md` a
 
 | # | Decision |
 |---|---|
-| D4, D5 | Record id: hash of tags, system tags, data, no tokens. A function stream or node: the base entry id (tags, system tags, input hash), one recipe for both (round 3; P2 closed). ITL-1154's wording is amended |
+| D4, D5 | *Function and operator records superseded in round 6 (section 13): the store's row key.* Record id: hash of tags, system tags, data, no tokens. A function stream or node: the base entry id (tags, system tags, input hash), one recipe for both (round 3; P2 closed). ITL-1154's wording is amended |
 | D1 | One form; `tags_as_data=None` for none, `{}` refused (round 3) |
 | D6 | Repeated ids raise; an operation that repeats rows will add an index column later |
 | D7 | `OFF`: the current run's rows. Caching on: the content of the cache |
@@ -492,7 +495,7 @@ limit), `reference/hashing.md` (rule 8, sites 4 and 5, inventory), `CLAUDE.md` a
 | D2 | Which objects? | Section 3. A slot gives its bound source. Refuse unbound slots and non-job nodes |
 | D3 | Arguments on a source? | None: itself. `source_id` alone: refused. `tags_as_data`: as today. No `label` |
 | D9 | Default id | Keep the origin's content hash |
-| D12 | History | Every stored entry, the latest recomputation of each; ITL-1129 later |
+| D12 | History | *Round 6:* every stored passage by default; one row per content as a restriction (`first`, `latest`, `raise`); ITL-1129 later |
 | D15 | Kind version | `derived_v1` if before 0.4.0 (0 golden moves), else `derived_v2` (14 provisional) |
 | D16 | Save, load, moved store | Loads unbound and rebinds; warn on a load-only run over an unbound slot; raise when the recorded table is absent; restriction walks enter a plain origin |
 
@@ -503,3 +506,151 @@ other rows in one job are
 silently one (more 4); the stored-schema conflict of section 2; the loaded load-only run that
 is silently empty (more 3). Not examined: `SourceProxy` of a Postgres or Spiral source,
 ephemeral results, `REPLAY` by running it, `PollingSource` under async.
+
+## 13. Round 6: the store is a complete record
+
+Developer, 2026-11-25 (afternoon); **this section supersedes the earlier ones where they
+differ**. Evidence: **[proto6]** `probe_round6` on the round 6 prototype (local branch
+`scratch/itl-1466-prototype`, not in this pull request); **[timed]** `time_entry_lookup`, on
+the library as it is.
+
+### 13.1 The model
+
+1. **The store keeps every distinct passage.** A function node's pipeline row key is the hash
+   of: user tags, system tags, the input's source-info tokens (in name order), the labelled
+   input data hash, and the **result id** (the result record's `__data_id`). A write is skipped
+   only when every one of these matches (`skip_duplicates`). The operator cache keeps its
+   whole-row key (tags, system tags, data, tokens, node content hash), as today.
+2. **A derived source's record id is the store's row key**, `arrow_v1:<hex>`. One recipe per
+   pod and its node: a plain function stream hashes the same five things with the result id
+   of its output; a plain operator stream hashes its whole row with tokens and its own content
+   hash, as the node does.
+3. **By default `as_source` serves everything stored**, duplicates of content included.
+4. **A mode serves one row per (tags, system tags, data)**, keeping `first` or `latest` by
+   recorded time, or raising (`raise`). Each served row keeps its own store key as record id.
+   The mode is a **restriction**, like `where` and `limit`: outside every identity, under the
+   restriction rules as they are (whether several restrictions of one table may coexist is a
+   separate issue, not this design).
+5. **Kept** from earlier rounds: the trace boundary (P3); kept single tokens (D11); side effects
+   follow their origin's mode; one pair always; D6, a repeated store key raises.
+6. **Superseded**: the base entry id as record id (D4/D5's function row, section 4), node and
+   plain as separate rules (P2), the token-free key with first-come storage (P1's options (a)
+   and (b)), and "the latest recomputation per base id" (D12, section 4).
+
+### 13.2 Checked before any code
+
+**Two keys, kept apart.** `_build_record_id_preimage` (user tags, system tags, labelled input
+hash) is shared today by three users [read]:
+
+| User | Key | Round 6 |
+|---|---|---|
+| Function node pipeline row | the preimage + a recomputation index | **changes**: the store key above, no index |
+| Side-effect invocation log (`side_effects._execute_side_effect_row`) | the preimage + `__pipeline_recomputation_index` fixed at 0 | **unchanged**: the entry |
+| `InvocationContext` record id of a pod that takes `ctx` (`FunctionPod._build_invocation_context`) | the same | **unchanged**: the entry |
+
+So the change separates them: the pipeline row gets its own preimage function; the side-effect
+and invocation keys keep `_build_record_id_preimage` with the column named
+`__pipeline_recomputation_index` and the value 0, **even though the pipeline table no longer has
+that column**: renaming it in that preimage would move every invocation hash. The constant
+should be renamed in code (it is a fixed preimage column now, not an index), its value kept.
+Checked [proto6 2]: after a token-only change upstream (`f`'s results were lost and recomputed,
+so its output tokens name new result ids), `g` recorded two new passages, was not called again
+(result-store hit on the same input hash), and the tracked side-effect pod over `g` did **not**
+fire again (2 deliveries before, 2 after). A token never reaches the side-effect key.
+
+**The recomputation index is no longer needed.** A recompute (a stored row whose result is gone)
+writes a new result with a new `__data_id`, so its key differs from the old row's without an
+index. Confirmed [proto6 2]: `f` recomputed both rows (4 calls), the table holds the 2 old rows
+(result gone) and 2 new ones; nothing queries the table before a write any more (today each
+write reads every row of its base entry to find the next index [read]). Where the index chose
+between rows (the node's held rows, the ephemeral placeholders), `__recorded_at` chooses
+instead. The ITL-508 behaviour "the same input processed twice writes two rows" ends: with the
+same result id the second write is the same key and is skipped (the one test of it,
+`test_execute_data_second_call_same_input_appends_recomputation_record`, now sees 1 row).
+
+**Lookup cost without a stored entry id** [timed, N inputs all stored, one process, 18 CPUs]:
+
+| N | Hash every input's entry | Filter a stored id column (`is_in`) | Join on (tags, system tags, input hash) | Hash every stored row |
+|---|---|---|---|---|
+| 10,000 | 0.19 s | 0.018 s | 0.005 s | 0.19 s |
+| 100,000 | 1.87 s | 0.009 s | 0.007 s | 1.84 s |
+| 1,000,000 | 18.6 s | 0.11 s | 0.035 s | not run |
+
+Hashing dominates (about 19 µs a row); the lookup itself is cheap either way. Rehashing stored
+rows to find entries is as costly as hashing the inputs and is not an option. Today's run
+already hashes every input. Recommendation: **keep a plain, non-key id column** for the lookup,
+and make it the **passage id** (the store key without the result id), not the entry: a run must
+decide whether *this passage* is stored, and a stored entry with other tokens is a new passage
+to record (without computing). The prototype does this (`__pipeline_passage_id`). A later speed
+option: a join on the columns needs no hashing for a warm rerun (0.035 s against 18.6 s per
+million rows); it must then match as Orcapod matches (a null equal to a null here, unlike
+`Join`), so it is a separate change.
+
+**What moves** [proto6; golden run on the prototype]:
+
+| Item | Moves | Note |
+|---|---|---|
+| Pipeline table layout | `pdb_v1` to `pdb_v2`: `__pipeline_recomputation_index` removed, `__pipeline_base_entry_id` replaced by `__pipeline_passage_id`, row key recipe changed | every function node's stored path (last component) |
+| Operator cache layout (developer, round 6 addition) | `odb_v1` to `odb_v2`: `__recorded_at` (UTC, microseconds, not null) added, outside the row key | every `LOG` / `REPLAY` node's stored path (last component); a re-passed row is skipped and keeps its first time |
+| Golden `*.table[.../pdb_v1].record_ids`: `pipeline:job`, `pipeline:drop_nulls_job` (frozen file `pipeline-02`); `filter_job`, `polars_filter_expr_job`, `rejoin_job`, `rejoin_job_async` (provisional) | **6 entries can no longer be pinned**: the key holds the result id, a UUIDv7, new in every fresh store | pin the `__pipeline_passage_id` column instead (deterministic), as result tables pin their input hashes |
+| Golden `*.table_paths` of the same 6 cases | **6 entries move**: only `pdb_v1` to `pdb_v2` | |
+| Every other golden entry | none (2,756 golden tests pass; 18 fail, the 12 entries above and the 6 tests that check pinning, process independence and the async-equals-sync pin of the same entries) | no golden case caches an operator, so `odb_v2` moves none |
+| Side-effect invocation hashes, `tdb_v1`, result tables (`rdb_v1`), function uris, content and pipeline hashes | none | |
+| A derived source's record ids over a function origin | base entry id to store key | provisional, unpinned |
+
+The 6 frozen-file and provisional changes need the developer's approval of the exact list
+(v1 is open until 0.4.0). The layout bumps: nothing final is released, and ITL-1259 started
+every marker at `v1` for 0.4.0, so keeping `v1` is possible; **recommend the bump** anyway:
+stores written by a candidate are then reported as another layout and never read, rather than
+refused at the first write as an incompatible table.
+
+### 13.3 The prototype and its numbers
+
+Changed (scratch only): the function node's row key, the passage id, `__recorded_at` in place of
+the index, `pdb_v2`; the operator cache's `__recorded_at`, `odb_v2`, dropped on every read; the
+derived source serving every stored row with the store key as record id; the mode,
+`DerivedSource.one_row_per_content(keep=...)` (a copy, outside identity); one recipe for plain
+streams. Not done: the mode in `pipeline/restrictions.py` (the walk, one restriction per table,
+the caching refusal and the aggregation warning are to be applied to it as written).
+
+[proto6]:
+
+- A rerun in a new job: nothing computed, nothing fired, 2 passages.
+- Results of `f` lost, a new job runs: `f` 4 calls; `g` 2 calls (none again); `tell` 2
+  deliveries (none again). `g` serves 4 rows by default (2 passages of each entry, the second
+  with `f`'s new tokens); `latest` serves the 2 new ones, `first` the 2 old ones, each with its
+  own store key; `raise` raises. `f` serves 2: a row whose result is gone has no data to serve.
+- Plain function pod: with a result store, two builds give equal record ids; without one, they
+  differ (each output is a one-off output of its run).
+- Plain operator stream ids equal the operator node's stored row keys; the node's `latest`
+  works on `__recorded_at`.
+
+Tests [selected by directory: `test_core/function_pod`, `nodes`, `sources`, the side-effect
+directories, `test_empty_data`, `test_caching_integration`, `test_result_cache`,
+`test_table_scope`, `test_pipeline`; one process]: 11,078 pass, 600 fail, 4 errors. By cause:
+
+| Cause | Count | What a real change does |
+|---|---|---|
+| A test reads `__pipeline_base_entry_id` or the index (cross-session miss 384, pipeline record metadata 44, commit dependencies 14, crash recovery 4, ephemeral result 3, batched commits 2, provenance 1) | 452 | read the passage id; drop the index |
+| A test names `pdb_v1` / `odb_v1` or crafts a table at that path (stored data context 53, loaded operator cache 13, loaded job readback 8, result database 4, hash step 3, zero-row order 2, arrow types 2, narrower bind 2, provenance review 1) | 88 | the new markers |
+| A test injects a failure into the pre-write index query, now gone (store write failure) | 4 | remove |
+| A test compares two runs' stored operator tables, now with times (rows on read) | 6 | compare without the time |
+| ITL-508's "two rows for one input" (function pod node) | 1 | now one row, by design |
+| A rerun whose input tokens were wrong before and are right now "keeps old rows and rewrites none" (tag table source info) | 2 | **behaviour change, by design**: the corrected tokens are a new passage, recorded without computing (0 calls still) |
+| Earlier prototype rounds: a loaded `OFF` operator refused (loaded argument order 40, saved job 1); an unregistered class in a loaded slot (4, also on the round 3 prototype); `tags_as_data` tests of D1 / D11 (6) | 51 | already reported (section 9) |
+
+No failure points at a design problem. Open points the prototype shows: an ephemeral
+placeholder (`EmptyData`, a gone ephemeral result flowing through) has no readable tokens, so
+its passage id is its entry; and the default view can show a row whose result is gone only as
+"not served", as today.
+
+### 13.4 Answers to the round 6 checks, in short
+
+- Side effects keep the entry key; the store key is separate; a token change fires nothing.
+- The recomputation index is unnecessary: confirmed.
+- Lookup: keep a plain passage-id column (hashing, not the lookup, is the cost: about 19 µs a
+  row); a column join is a later speed-up.
+- Layouts `pdb_v2` and `odb_v2`; golden: 6 record-id entries become unpinnable (pin the
+  passage id instead) and 6 table-path entries move; nothing else.
+- `first` / `latest` need a recorded time: the pipeline table has `__recorded_at`; the operator
+  cache gets one (decided), and keeps the time of a row's first insertion.
