@@ -344,7 +344,10 @@ class SpiralDBTableSource(RootSource):
                     f"{name} must be a positive integer or None, got {value!r}"
                 )
         # What needs no table (the values' types, None) is checked before connecting.
-        requested = Condition.of(where) if where else Condition()
+        if isinstance(where, Condition):
+            requested = where
+        else:
+            requested = Condition.of(where) if where else Condition()
         if not _is_positive_int(batch_rows):
             raise ValueError(
                 f"batch_rows must be a positive integer, got {batch_rows!r}"
@@ -438,7 +441,7 @@ class SpiralDBTableSource(RootSource):
             self._table_schema: pa.Schema = arrow_utils.drop_system_columns(
                 schema.empty_table()
             ).schema
-            if requested:
+            if not requested.is_empty:
                 try:
                     self._apply_restriction(requested)
                 except (ValueError, TypeError) as exc:
@@ -902,7 +905,7 @@ class SpiralDBTableSource(RootSource):
         """
         if (
             max_rows is not None
-            and not self._condition
+            and self._condition.is_empty
             and (limit is None or limit > max_rows)
         ):
             # Nothing but limit bounds the read, and the limit does not keep it
@@ -1055,7 +1058,7 @@ class SpiralDBTableSource(RootSource):
         if rows.num_rows < head_limit or head_limit == limit:
             return _Head(rows, True, rows.num_rows, False)
         bound, total = self._bounded_count(n, table)
-        if limit is not None and not self._condition:
+        if limit is not None and self._condition.is_empty:
             total = limit if total is None and limit <= bound else total
             total = None if total is None else min(limit, total)
         return _Head(rows, True, total, True, bound)
@@ -1102,7 +1105,7 @@ class SpiralDBTableSource(RootSource):
         if not head.total_is_estimate:
             all_rows = f"all {shown:,} row{'' if shown == 1 else 's'}"
             return f"{all_rows}, sorted by tags" if sorted_by_tags else all_rows
-        if self._condition:
+        if not self._condition.is_empty:
             condition = self._condition.text()
             read = (
                 f"{shown:,} matching rows read, sorted by tags"

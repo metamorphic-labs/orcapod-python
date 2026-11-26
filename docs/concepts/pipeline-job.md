@@ -58,8 +58,8 @@ The three stages:
    and failed; see
    [Reading the run summary](function-pods.md#reading-the-run-summary).
 
-Among `job.run()`'s optional arguments, the tutorial's
-[Part 9](../tutorial/09-when-things-go-wrong.md) demonstrates `orchestrator=` (for example
+Among `job.run()`'s optional arguments, the tutorial
+[Handling errors](../tutorial/handling-errors.md) demonstrates `orchestrator=` (for example
 `SyncPipelineOrchestrator(error_policy="fail_fast")` to stop at the first failing row; the
 default policy skips failed rows and continues) and `observer=` (`StatusObserver`,
 `LoggingObserver`) to record what happened during the run. An observer only watches: one
@@ -455,6 +455,13 @@ appears only when there is something to fold). `direction=` and `collapse=` set 
 shown first, and the one shown where scripts do not run. A selected node stays selected
 when it is in the new layout. The checkboxes appear for graphs of up to 100 nodes: a larger
 diagram carries only the layout its arguments ask for, which keeps a notebook small.
+
+An input that only decides which rows of another input pass (the right input of a
+`SemiJoin`) is drawn as a dashed edge that enters the box from the side (from above or below
+when the graph runs left to right); the data input enters as every other edge does. The node's
+details give the tags the rows match on, and the text form lists such an input after the
+others: `<- spikes; constrained by units`. `collapse=True` never hides it: folded steps on its
+way are drawn dash-dotted.
 
 In each node, the kind line under the name (kind, what it is, status) is wrapped onto
 short lines, so a node is about as wide as its name.

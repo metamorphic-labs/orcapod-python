@@ -21,10 +21,10 @@ Orcapod to a uv project (start one with `uv init` in a new directory), and `uv r
 your code in that project's environment:
 
 ```bash
-uv add "orcapod>=0.4.0rc4"
+uv add "orcapod>=0.4.0rc7"
 ```
 
-In an environment not managed by uv, use `pip install "orcapod>=0.4.0rc4"` instead. For the
+In an environment not managed by uv, use `pip install "orcapod>=0.4.0rc7"` instead. For the
 development version, install from the repository:
 `uv add git+https://github.com/metamorphic-labs/orcapod-python`.
 
@@ -99,9 +99,10 @@ session.
 
 - [Getting Started](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/getting-started.md):
   sources, streams and function pods, step by step.
-- [Tutorial](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/tutorial/index.md):
-  a self-paced course in eleven short parts, from a first stream to a stored, re-runnable
-  pipeline over files, with exercises.
+- [Tutorials](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/tutorial/index.md):
+  a self-paced core course in seven parts, from a first stream to a stored, re-runnable
+  pipeline, and short tutorials on files, inspecting results, tracing a value, chaining
+  pipelines and handling errors, with exercises.
 - [Concepts](https://github.com/metamorphic-labs/orcapod-python/tree/main/docs/concepts): sources,
   streams, function pods, operators, pipelines and jobs, identity and hashing, file types,
   arrays and your own data types.

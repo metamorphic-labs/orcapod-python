@@ -134,6 +134,20 @@ class StaticOutputOperatorPod(TraceableBase):
     and its input's head is never asked for.
     """
 
+    CONSTRAINING_INPUTS: ClassVar[tuple[int, ...]] = ()
+    """The input positions whose rows only decide which rows of the other inputs pass.
+
+    No row of such an input flows on (``SemiJoin``'s right input). Display only: the
+    pipeline diagram draws these inputs apart (ITL-1455); it enters no identity. Only a
+    plain tuple of plain integers within the inputs counts; anything else is none.
+    """
+
+    CONSTRAINT_MATCHES_SHARED_TAGS: ClassVar[bool] = False
+    """Whether the constraining inputs match on the tag columns every input has.
+
+    Display only: the diagram then names those tags.
+    """
+
     PROVISIONAL: ClassVar[bool] = False
     """Whether the operator is provisional: its identity is not frozen (ITL-1266).
 

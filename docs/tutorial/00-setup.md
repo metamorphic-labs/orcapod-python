@@ -14,7 +14,7 @@ new directory, and `uv add` adds Orcapod to it):
 ```bash
 mkdir orcapod-workshop && cd orcapod-workshop
 uv init
-uv add "orcapod>=0.4.0rc4"
+uv add "orcapod>=0.4.0rc7"
 ```
 
 Without uv, with `pip` in a virtual environment:
@@ -23,7 +23,7 @@ Without uv, with `pip` in a virtual environment:
 mkdir orcapod-workshop && cd orcapod-workshop
 python -m venv .venv
 source .venv/bin/activate        # on Windows: .venv\Scripts\activate
-pip install "orcapod>=0.4.0rc4"
+pip install "orcapod>=0.4.0rc7"
 ```
 
 The workshop uses the latest 0.4.0 release candidate, which these commands install (naming
@@ -71,12 +71,12 @@ print("Orcapod is working.")
 # Orcapod is working.
 ```
 
-If you see the two lines above, you are ready. You do not need to understand the script yet;
-every piece of it is introduced in the parts that follow.
+If you see the two lines above, you are ready. The following parts introduce every piece of
+the script.
 
 ### Messages you can ignore
 
-You may see these on your screen. They are harmless.
+These messages are harmless.
 
 - `ProvisionalHashWarning: Filter is provisional: its identity is not frozen ...`, once per
   Python session for each provisional step you use: `filter`, `group_by`, `batch`,
@@ -108,9 +108,9 @@ It prints `Wrote 27 files (... kB) to .../workshop_data` and creates the `worksh
 directory described on the [tutorial front page](index.md#the-dataset). The data is the same
 on every machine and every run, so your output will match these pages exactly.
 
-Keep `workshop_data.py` in your working directory. Every part of the tutorial starts with
-these two lines. `make_dataset()` writes the original files again on every call, overwriting
-any edits you made to them, and gives you their location:
+Keep `workshop_data.py` in your working directory. Every part starts by calling
+`make_dataset()`. Each call writes the original files again, overwriting any edits you made
+to them, and returns their location:
 
 ```python
 from workshop_data import make_dataset
@@ -144,8 +144,7 @@ with `pandas.read_csv`. Which column or columns identify a row in each file?
     # False False
     ```
 
-    Hold on to this idea. Orcapod calls these identifying columns *tags*, and Part 1 starts
-    from them.
+    Orcapod calls these identifying columns *tags*. Part 1 starts from them.
 
 **2.** How many spikes are in `workshop_data/sessions/mouse_01_s1/spikes_imec0.csv`?
 
@@ -157,5 +156,3 @@ with `pandas.read_csv`. Which column or columns identify a row in each file?
     print(len(spikes))
     # 1736
     ```
-
-Next: [Part 1: Your first stream](01-first-stream.md).
