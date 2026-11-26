@@ -437,20 +437,23 @@ def timestamp_count(value: datetime, arrow_type: pa.TimestampType) -> int:
     return count
 
 
-def check_value_for_column(value: object, arrow_type: pa.DataType) -> None:
+def check_value_for_column(
+    value: object, arrow_type: pa.DataType, *, require_exact: bool = False
+) -> None:
     """Check one condition value against the Arrow type of its column; convert nothing.
 
     The literal rule (ITL-1374, section 2.6): the value must be exactly of
     ``condition_value_type(arrow_type)``, and the column's type must hold it exactly
     (``7`` for ``uint32``; not ``-1`` for ``uint32``, ``300`` for ``int8``, a
-    microsecond for ``timestamp[s]``). A float is rounded to a narrower float column's
-    precision, as the column stores any value, and refused only when finite and beyond
-    its range. A zoned timestamp column takes an aware ``datetime``, any other a naive
-    one.
+    microsecond for ``timestamp[s]``). For an in-pipeline filter, a float can be rounded
+    to the column's precision, provided a finite value stays finite. A restriction
+    requires an exact value and also takes a Python int a float column can hold exactly.
+    A zoned timestamp column takes an aware ``datetime``, any other a naive one.
 
     Args:
         value: The value.
         arrow_type: The column's Arrow type.
+        require_exact: Apply the source restriction rule to floating-point values.
 
     Raises:
         TypeError: If the value is not of the column's type, does not fit it, or the
@@ -463,7 +466,8 @@ def check_value_for_column(value: object, arrow_type: pa.DataType) -> None:
             f"holds {arrow_type}, which a value condition does not support; only a "
             "null test (is_null, is_not_null) takes it"
         )
-    if type(value) is not expected:
+    float_int = require_exact and expected is float and type(value) is int
+    if type(value) is not expected and not float_int:
         raise TypeError(
             f"holds {arrow_type} ({expected.__name__}), but the value {value!r} is a "
             f"{type(value).__name__}; convert it explicitly to {expected.__name__} (a "
@@ -481,7 +485,7 @@ def check_value_for_column(value: object, arrow_type: pa.DataType) -> None:
         assert isinstance(arrow_type, pa.TimestampType)
         timestamp_count(value, arrow_type)
         return
-    if isinstance(value, float):
+    if isinstance(value, float) and not require_exact:
         # Rounding to the column's precision is how a float column stores any
         # value, so it is not refused; a finite value beyond its range is.
         stored = pa.scalar(value, type=arrow_type).as_py()
@@ -489,7 +493,14 @@ def check_value_for_column(value: object, arrow_type: pa.DataType) -> None:
             raise TypeError(f"holds {arrow_type}, whose range does not reach {value!r}")
         return
     try:
-        exact = _same_stored_value(pa.scalar(value, type=arrow_type).as_py(), value)
+        # Arrow imposes its own int-to-float limits, even for exactly representable
+        # integers above those limits. Compare to the original int after the round trip.
+        scalar_value = (
+            float(value) if expected is float and type(value) is int else value
+        )
+        exact = _same_stored_value(
+            pa.scalar(scalar_value, type=arrow_type).as_py(), value
+        )
     except (pa.ArrowInvalid, OverflowError) as exc:
         raise TypeError(
             f"holds {arrow_type}, which cannot hold {value!r}: {exc}"
@@ -510,6 +521,8 @@ def _same_stored_value(stored: object, value: object) -> bool:
         value_instant = instant_microseconds(value)
         if stored_instant is not None and value_instant is not None:
             return stored_instant == value_instant
+    if isinstance(stored, float) and isinstance(value, float) and math.isnan(value):
+        return math.isnan(stored)
     return stored == value
 
 
@@ -695,7 +708,8 @@ def check_equality_conditions(
 ) -> dict[str, object]:
     """Check ``where`` equalities against a table's columns; convert nothing.
 
-    ``check_value_for_column`` for each, after the column is found.
+    ``check_value_for_column`` with exact representation for each, after the column is
+    found.
 
     Args:
         conditions: Column name to value.
@@ -718,7 +732,7 @@ def check_equality_conditions(
     for column, value in conditions.items():
         arrow_type = schema.field(column).type
         try:
-            check_value_for_column(value, arrow_type)
+            check_value_for_column(value, arrow_type, require_exact=True)
         except TypeError as exc:
             raise TypeError(f"column {column!r} {exc}") from exc
     return dict(conditions)
@@ -765,7 +779,8 @@ def check_restriction(condition: Condition, schema: pa.Schema) -> None:
     ``<=``, ``>``, ``>=``; ``between`` is two of them) of an integer, timestamp or date
     column (``is_range_type``). All must hold. A column equals one value; ranges add
     up and may select no row. Every value passes ``check_value_for_column``: exactly
-    of its column's Python type, held exactly by its column's Arrow type.
+    of its column's Python type (or an int for a float column), held exactly by its
+    column's Arrow type.
 
     Args:
         condition: The condition.
@@ -807,7 +822,7 @@ def check_restriction(condition: Condition, schema: pa.Schema) -> None:
                 f"integer, timestamp or date column only. {_TO_FILTER}"
             )
         try:
-            check_value_for_column(value, arrow_type)
+            check_value_for_column(value, arrow_type, require_exact=True)
         except TypeError as exc:
             raise TypeError(f"column {column!r} {exc}") from exc
         if term.operator != EQUALS:

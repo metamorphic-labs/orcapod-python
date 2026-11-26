@@ -291,7 +291,7 @@ class TestSeveralConditionsInOneCall:
         [
             ({"subject_id": "m1", "channel": 1.0}, "channel"),
             ({"subject_id": b"m1", "channel": 1}, "subject_id"),
-            ({"flag": True, "subject_id": "m1", "amplitude": 3}, "amplitude"),
+            ({"flag": True, "subject_id": "m1", "amplitude": True}, "amplitude"),
         ],
     )
     def test_a_value_of_another_type_among_several_is_refused(
@@ -355,7 +355,7 @@ class TestRefusals:
             ("channel", True, "bool"),
             ("channel", 1.0, "float"),
             ("channel", np.int64(1), "int64"),
-            ("amplitude", 3, "int"),
+            ("amplitude", True, "bool"),
             ("note", b"n1", "bytes"),
             ("day", _START, "datetime"),
             ("started", "2026-11-20T09:30:00", "str"),
@@ -374,14 +374,13 @@ class TestRefusals:
         with pytest.raises(TypeError, match="channel"):
             _source(where={"channel": "1"})
 
-    def test_a_float_beyond_the_column_range_is_refused(self):
-        """A finite float a float32 column cannot reach is refused; rounding is not."""
+    @pytest.mark.parametrize("value", [1e300, 0.1])
+    def test_an_inexact_float_is_refused_by_the_equality_check(self, value):
+        """The equality check refuses both overflow and lost precision."""
         schema = pa.schema([pa.field("x", pa.float32())])
 
-        # About the condition check itself: the fake has no float32 data to match.
-        with pytest.raises(TypeError, match="range"):
-            check_equality_conditions({"x": 1e300}, schema)
-        assert check_equality_conditions({"x": 0.1}, schema) == {"x": 0.1}
+        with pytest.raises(TypeError, match="cannot hold .* exactly"):
+            check_equality_conditions({"x": value}, schema)
 
     @pytest.mark.parametrize("value", [1e300, -1e300])
     def test_a_float_overflow_is_refused_by_where_and_the_constructor(

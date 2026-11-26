@@ -6,8 +6,8 @@ live probe, November 26, 2026): ``-0.0`` reads only ``-0.0`` and a NaN only its 
 pattern. Which rows a source read would then depend on which equal value was kept
 (independent review of d4115197): ``where(col("id") >= 0, {"v": -0.0}, v=0.0)`` read
 one row and the signs reversed another, under identical conditions, canonical forms
-and saved JSON. Such a value is refused, pointing to ``filter``; every other float
-equality is pushed down as before. Runs on the fake only.
+and saved JSON. Such a value is refused, pointing to ``filter``. Other float equality
+values must fit the column exactly. Runs on the fake only.
 """
 
 from __future__ import annotations
@@ -32,15 +32,18 @@ _KEYS = pa.schema([pa.field("id", pa.int64()), pa.field("lab", pa.large_string()
 
 
 def _table() -> pa.Table:
-    """Return rows with both zeros, a NaN of each sign, and ordinary values."""
+    """Return rows with both zeros, NaNs, infinities, and ordinary values."""
     return pa.table(
         {
             "id": pa.array([0, 1, 2, 3, 4, 5], pa.int64()),
             "lab": pa.array(["a", "a", "b", "b", "c", "c"], pa.large_string()),
             "v": pa.array(
-                [-0.0, 0.0, math.nan, _NEGATIVE_NAN, 1.5, math.inf], pa.float64()
+                [-0.0, 0.0, float(2**53 + 2), 0.1, 1.5, math.inf], pa.float64()
             ),
-            "g": pa.array([-0.0, 0.0, math.nan, 2.5, 1.5, -math.inf], pa.float32()),
+            "g": pa.array(
+                [-0.0, 0.0, float(2**100), 0.5, 1.5, -math.inf], pa.float32()
+            ),
+            "h": pa.array([-0.0, 0.0, math.nan, 0.5, 1.5, 2.0], pa.float16()),
             "n": pa.array([10, 11, 12, 13, 14, 15], pa.int32()),
         }
     )
@@ -177,3 +180,93 @@ class TestEveryOtherFloatEqualityAsBefore:
             assert _async_ids(source) == expected
             pushed = dict(fake_spiral_sdk.scan_log[-1].kwargs["where"].equalities)
             assert set(pushed) == set(where)
+
+
+@pytest.mark.parametrize(
+    ("column", "value"),
+    [
+        ("h", 0.1),
+        ("h", 2.0**-25),
+        ("h", 2049),
+        ("g", 0.1),
+        ("g", -0.1),
+        ("g", 2.0**-150),
+        ("g", 1e300),
+        ("g", 2**24 + 1),
+        ("v", 2**53 + 1),
+    ],
+)
+def test_inexact_float_column_equality_is_refused(
+    project: fake_spiral_sdk.ExternalProject, column: str, value: int | float
+) -> None:
+    """Require exact values before scanning, regardless of equality order or form."""
+    source = _source()
+    terms = [(column, value), ("n", 13)]
+    message = rf"column {column!r} holds .* cannot hold .* exactly"
+    for equalities in (dict(terms), dict(reversed(terms))):
+        with pytest.raises(TypeError, match=message):
+            source.where(**equalities)
+        with pytest.raises(TypeError, match=message):
+            _source(where=equalities)
+    with pytest.raises(TypeError, match=message):
+        source.where(col(column) == value)
+    assert fake_spiral_sdk.scan_log == []
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "row"),
+    [
+        ("h", 0.5, 3),
+        ("h", 2, 5),
+        ("g", 0.5, 3),
+        ("g", 2**100, 2),
+        ("v", 0.1, 3),
+        ("v", 2**53 + 2, 2),
+    ],
+)
+def test_exact_float_column_equalities_select_rows(
+    project: fake_spiral_sdk.ExternalProject, column: str, value: int | float, row: int
+) -> None:
+    """An exact Python float or int selects the matching row at each width."""
+    source = _source()
+    terms = [(column, value), ("n", 10 + row)]
+    for equalities in (dict(terms), dict(reversed(terms))):
+        restricted = source.where(equalities)
+        assert _ids(restricted) == [row]
+        assert _async_ids(restricted) == [row]
+
+
+@pytest.mark.parametrize(
+    ("arrow_type", "bit_type", "bits"),
+    [
+        (pa.float32(), pa.uint32(), [0x7FC00000, 0x7FC00001, 0xFFC00000, 0x7F800001]),
+        (
+            pa.float64(),
+            pa.uint64(),
+            [
+                0x7FF8000000000000,
+                0x7FF8000000000001,
+                0xFFF8000000000000,
+                0x7FF0000000000001,
+            ],
+        ),
+    ],
+    ids=["float32", "float64"],
+)
+def test_fake_nan_equality_requires_matching_bits(
+    project: fake_spiral_sdk.ExternalProject,
+    arrow_type: pa.DataType,
+    bit_type: pa.DataType,
+    bits: list[int],
+) -> None:
+    """The fake's scan matches a NaN only when both sign and payload match."""
+    values = pa.array([*bits, None, 0], bit_type).view(arrow_type)
+    project.create_table("default.nans", key_schema=[("id", pa.int64())]).write(
+        pa.table({"id": list(range(len(values))), "v": values})
+    )
+    table = fake_spiral_sdk.FakeClient().keyed_table(_PROJECT, "default", "nans")
+    for row, value in enumerate(values.slice(0, 3).cast(pa.float64()).to_pylist()):
+        predicate = fake_spiral_sdk.eq(
+            fake_spiral_sdk.column("v"), fake_spiral_sdk.literal(value, arrow_type)
+        )
+        assert table.scan(filter=predicate).to_table()["id"].to_pylist() == [row]

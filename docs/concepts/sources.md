@@ -496,11 +496,10 @@ identities and reused by the full run. Use an operator when selecting rows is pa
 the pipeline computes. Restrict on tag (key) columns where you can; a condition on a data
 column is allowed.
 
-`where` and `stream.filter` take the same equalities, written the same way, and keep the same
-rows (for a float column, `where` uses the table system's own equality, `filter` Orcapod's:
-see [Filter](operators.md#filter). SpiralDB's equality tells the two zeros apart and a NaN by
-its bits, so `where(x=0.0)` does not read a row holding `-0.0`; `where` refuses `-0.0` and NaN,
-for which the two rules disagree, and points to `filter`). One spelling differs: `filter` takes
+`where` and `stream.filter` accept the same equality syntax. For float columns, `where`
+requires exactly representable values and uses SpiralDB's equality. `where(x=0.0)` selects
+positive zero only. `where` refuses `-0.0` and NaN and points to `filter`, which treats both
+zeros as equal and all NaNs as equal. See [Filter](operators.md#filter). `filter` takes
 `label=` (the step's label, as every stream method does), so a column named `label` is written
 `filter({"label": "x"})` or `filter(col("label") == "x")`, while `where(label="x")` restricts
 that column. Neither takes `None` as a value: both raise `ValueError` and point to
@@ -598,20 +597,20 @@ print(Condition.of(day=day, started=started, recorded=recorded))
   `where()` with no condition. Everything else of the source is carried over: the pinned
   table version, `limit`, `max_rows`, the tags and data-tags, `tags_as_data`, the key
   columns, the source id and the label. The original source is not changed.
-- **No conversion.** A value must be exactly of its column's Python type: an `int` for an
-  integer column (not `True`, not `1.0`, not a NumPy scalar: use `.item()`), a `float` for a
-  float column, a `datetime.date` for a date column and a `datetime.datetime` for a timestamp
-  column (not a string; see below), and it must fit the column's Arrow type. A timestamp
-  column with a time zone takes an aware `datetime`, one without a zone a naive `datetime`.
-  Anything else raises `TypeError`, naming the column and both types. Columns of other types
-  (lists, structs) take no condition.
+- **Exact values.** An integer column takes a Python `int`, a float column takes a Python
+  `float` or `int`, a date column takes a `datetime.date`, and a timestamp column takes a
+  `datetime.datetime`. A timestamp column with a time zone takes an aware `datetime`.
+  A timestamp column without a zone takes a naive `datetime`. To use a NumPy scalar,
+  call `.item()` first. The column's Arrow type must hold the value exactly. For example,
+  `where(x=0.5)` is valid on a `float32` column, and `where(x=0.1)` raises `TypeError`
+  before a scan. Lists and structs take no condition.
 - **The table system's equality.** Each condition is sent to SpiralDB as `column == value`,
   and which rows it selects is SpiralDB's own equality, not Orcapod's. For a float column,
   `0.0` does not select the `-0.0` rows (seen on the service, not documented by it). An
   equality to `-0.0` or a NaN raises `TypeError` and points to `filter`: SpiralDB matches
   them by their bits, while Orcapod counts `-0.0` equal to `0.0` and NaN equal to NaN, so
-  the rows read would depend on which of two equal values a condition kept (ITL-1480). A value that no `float32` is exactly, such as `0.1`, selects no row of a
-  `float32` column. SpiralDB cannot compare a `float16` column, so Orcapod reads the rows the
+  the rows read would depend on which of two equal values a condition kept (ITL-1480).
+  SpiralDB cannot compare a `float16` column, so Orcapod reads the rows the
   other conditions select and compares them itself, by the same rule and before `limit`. To
   select rows by such values as Orcapod matches them, filter
   inside the pipeline (`PolarsFilter`). An infinite value is saved as `{"float": "inf"}` or

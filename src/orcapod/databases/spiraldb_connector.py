@@ -367,10 +367,6 @@ def _literal(value: Any, arrow_type: pa.DataType) -> Any:
         arrow_type = pa.binary()
     if pa.types.is_float64(arrow_type):
         return sp.literal(value, arrow_type)
-    if pa.types.is_float32(arrow_type) and (
-        math.isnan(value) or pa.scalar(value, pa.float32()).as_py() == value
-    ):
-        return sp.literal(value, arrow_type)
     if pa.types.is_timestamp(arrow_type):
         # As a count of the unit: the SDK takes no datetime between two of them.
         return sp.literal(timestamp_count(value, arrow_type), arrow_type)
@@ -382,6 +378,10 @@ def _literal(value: Any, arrow_type: pa.DataType) -> Any:
         or pa.types.is_date(arrow_type)
     ):
         return sp.literal(value, arrow_type)
+    if pa.types.is_float32(arrow_type):
+        scalar_value = float(value) if type(value) is int else value
+        if math.isnan(value) or pa.scalar(scalar_value, arrow_type).as_py() == value:
+            return sp.literal(value, arrow_type)
     return None
 
 
@@ -452,7 +452,8 @@ def _equals(array: Any, value: Any) -> Any:
     doubles = array.cast(pa.float64())
     if math.isnan(value):
         return compute.fill_null(compute.is_nan(doubles), False)
-    mask = compute.equal(doubles, pa.scalar(value, pa.float64()))
+    scalar = pa.scalar(float(value) if type(value) is int else value, pa.float64())
+    mask = compute.equal(doubles, scalar)
     if value == 0.0:
         negative = compute.less(compute.divide(1.0, doubles), 0.0)
         wanted = math.copysign(1.0, value) < 0

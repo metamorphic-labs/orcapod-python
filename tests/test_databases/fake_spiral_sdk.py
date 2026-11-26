@@ -13,7 +13,6 @@ the rule is applied.
 from __future__ import annotations
 
 import json
-import math
 import operator
 import os
 import struct
@@ -69,7 +68,7 @@ RULES = {
     "non-null": "a null in a column, struct field or list item declared or stored "
     "non-null is refused",
     "literal": "a literal must have the column's exact type (large_string is none)",
-    "float-eq": "0.0 does not equal -0.0, and NaN equals NaN",
+    "float-eq": "floats match by bit pattern, including signed zeros and NaNs",
     "float-order": "lt, lte, gt and gte order floats by IEEE 754 total order: the "
     "negative NaN below -inf, -0.0 below 0.0, positive NaNs above inf (seen November 26, "
     "2026, ITL-998); a null meets no comparison",
@@ -287,13 +286,6 @@ def _check_nulls(array: Any, field: pa.Field[Any], *, in_list: bool) -> None:
         _check_nulls(array.flatten(), t.value_field, in_list=True)
 
 
-def _bits(value: Any) -> Any:
-    """Return ``value`` so that ``==`` compares it as the service does (``float-eq``)."""
-    if isinstance(value, float):
-        return "nan" if math.isnan(value) else (value, math.copysign(1.0, value))
-    return value
-
-
 def _ordered(value: Any) -> Any:
     """Return ``value`` so that ``<`` orders it as the service does (``float-order``)."""
     if isinstance(value, float):
@@ -305,7 +297,7 @@ def _ordered(value: Any) -> Any:
 def _compares(stored: Any, op: str, value: Any) -> bool:
     """Return whether a stored value meets ``op value`` (not null)."""
     if op == "==":
-        return _bits(stored) == _bits(value)
+        return stored == value
     return {
         "<": operator.lt,
         "<=": operator.le,
@@ -557,13 +549,19 @@ def literal(value: Any, type: Any = None) -> _Literal:
     """Stand in for ``spiral.literal`` (``literal``): an explicit scalar type."""
     if type is None or pa.types.is_large_string(type) or pa.types.is_large_binary(type):
         raise TypeError(f"unsupported literal Arrow type {type}")
-    scalar = pa.scalar(value, type)
     if pa.types.is_timestamp(type):
+        scalar = pa.scalar(value, type)
         # Kept as its integer count, never a Python value: an instant at either end of
         # a count (year 1 east of UTC, the ends of timestamp[ns]) has no datetime or
         # pandas Timestamp in its zone. The scan reads the count as the same type.
         return _Literal(scalar.value, type)
-    return _Literal(scalar.as_py(), type)
+    if (
+        pa.types.is_floating(type)
+        and isinstance(value, int)
+        and not isinstance(value, bool)
+    ):
+        value = float(value)
+    return _Literal(pa.scalar(value, type).as_py(), type)
 
 
 def eq(left: _Column, right: _Literal) -> FakePredicate:
@@ -703,6 +701,15 @@ class FakeKeyedTable:
             if pa.types.is_temporal(wanted.type):
                 width = pa.int32() if pa.types.is_date32(wanted.type) else pa.int64()
                 stored, given = stored.cast(width), given.cast(width)
+            elif op == "==" and pa.types.is_floating(wanted.type):
+                # Read raw bits before to_pylist() can quiet a signaling NaN.
+                bits = {16: pa.uint16(), 32: pa.uint32(), 64: pa.uint64()}[
+                    wanted.type.bit_width
+                ]
+                stored = pa.chunked_array(
+                    [chunk.view(bits) for chunk in stored.chunks], bits
+                )
+                given = given.view(bits)
             values, (value,) = stored.to_pylist(), given.to_pylist()
             rows = rows.filter(
                 pa.array(
