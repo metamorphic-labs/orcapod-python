@@ -89,3 +89,24 @@ What this shows:
 ## Not covered
 
 Two processes (no lease yet), and a large table (the job is small).
+
+## After ITL-1502 (PR 599): keyed reads, one existence answer and one listing per run
+
+The same evaluation on PR 599, on the fake and live: every compared value still equals Delta's.
+SpiralDB calls per step (the same on the fake and live):
+
+| Step | Stage 3 | After ITL-1502 |
+|---|---|---|
+| first run | 111 | 21 |
+| unchanged rerun | 19 | 14 |
+| two rows added | 53 | 30 |
+| function version changed | 118 | 24 |
+| `run_async`, a new job | 111 | 21 |
+| load only | 10 | 9 |
+| `clear_cache`, then run | 34 | 27 |
+| a separate result database | 127 | 45 |
+
+- Each absent table is opened by name once per run, the dataset is listed once per run, and
+  each table is opened by id once per run.
+- Lookups read only their keys (key ranges) or their pushed-down equality.
+- What remains warm is `get_all_records`, a read of every row of a table by definition.
