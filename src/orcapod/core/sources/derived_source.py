@@ -40,6 +40,7 @@ from orcapod.core.streams.preview import (
     PreviewRequest,
     preview_batches,
     refuse_without_compute_all,
+    refused,
     slices_of,
 )
 from orcapod.errors import InputValidationError
@@ -820,24 +821,22 @@ class DerivedSource(RootSource):
 
         The reading above is written for this class; a subclass may read or derive
         its rows another way (developer decision N55, review of PR 571), so its rows
-        are its own full read, only with ``compute_all``. The read is made on a copy,
-        so this source keeps nothing; an origin source that would poll or write its
-        cache when read is refused first, as by this class's own preview.
+        are its own full read, only with ``compute_all``. The read is made on a copy
+        whose origins are copies too (``_origin_read_keeping_nothing``), so neither
+        this source nor any origin keeps what it read; an origin that cannot be read
+        that way is refused.
 
         Raises:
-            PreviewRefusedError: Without ``compute_all``, or if the origin is refused.
+            PreviewRefusedError: Without ``compute_all``, or if an origin is refused.
         """
         refuse_without_compute_all(
             self, request, "is a subclass that reads its rows its own way"
         )
-        if isinstance(self._origin, RootSource):
-            # Its own preview refuses an origin that polls or writes its cache, and
-            # reads one row of any other.
-            with closing(
-                preview_batches(self._origin, PreviewRequest(limit=1))
-            ) as batches:
-                _ = next(batches, None)
-        yield from slices_of(copy.copy(self), request)
+        twin = copy.copy(self)
+        twin._origin = _origin_read_keeping_nothing(
+            self._origin, read_by_this_class=False
+        )
+        yield from slices_of(twin, request)
 
     @override
     def _preview_batches(
@@ -908,3 +907,47 @@ class DerivedSource(RootSource):
         all_info: bool = False,
     ) -> "pa.Table":
         return self._get_stream().as_table(columns=columns, all_info=all_info)
+
+
+def _origin_read_keeping_nothing(origin: Any, *, read_by_this_class: bool) -> Any:
+    """An origin that a full read of a ``DerivedSource`` subclass may read: nothing it
+    reads stays on ``origin`` or beneath it (review of PR 571, round 3).
+
+    A ``DerivedSource`` is copied, with its own origin taken the same way, so the rows
+    it keeps stay on the copy. A source of the library that holds its rows
+    (``_stream``) or reads them on demand without keeping them (``SpiralDBTableSource``)
+    is read as it is. A job node is read as it is only by ``DerivedSource``'s own
+    code, which reads its stored rows (``get_all_records``) and keeps nothing; a
+    subclass reading one directly could do anything with it. Anything else (a
+    ``CachedSource``, a ``PollingSource``, a ``SourceProxy``, a source of your own)
+    is refused: when in doubt, refuse.
+
+    Args:
+        origin: The origin to read.
+        read_by_this_class: Whether ``DerivedSource``'s own code reads it.
+
+    Raises:
+        PreviewRefusedError: If the origin cannot be read without keeping rows.
+    """
+    from orcapod.core.sources.spiraldb_table_source import SpiralDBTableSource
+
+    if isinstance(origin, DerivedSource):
+        twin = copy.copy(origin)
+        twin._origin = _origin_read_keeping_nothing(  # pyright: ignore[reportPrivateUsage]  # the copy's own origin
+            origin._origin,  # pyright: ignore[reportPrivateUsage]  # as above
+            read_by_this_class=reads_as_its_class(origin, DerivedSource),
+        )
+        return twin
+    if isinstance(origin, RootSource):
+        holds_its_rows = isinstance(
+            getattr(origin, "_stream", None), ArrowTableStream
+        ) and type(origin).__module__.startswith("orcapod.")
+        if holds_its_rows or reads_as_its_class(origin, SpiralDBTableSource):
+            return origin
+    elif read_by_this_class:
+        return origin
+    raise refused(
+        origin,
+        "a DerivedSource subclass above it would read in full, and it may keep or "
+        "write what is read",
+    )

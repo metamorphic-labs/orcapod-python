@@ -1256,3 +1256,81 @@ def test_a_derived_source_subclass_previews_its_own_read(
     for n in (1, 2, 41):
         _same(previewed.preview(n, compute_all=True).as_table(), whole[:n])
     assert previewed._held_rows() is None  # pyright: ignore[reportPrivateUsage]
+
+
+# ---------------------------------------------------------------------------
+# Review of bae54b3c: a DerivedSource subclass's full read keeps nothing anywhere
+# ---------------------------------------------------------------------------
+
+
+def test_a_derived_source_subclass_over_stored_rows_is_previewed_with_compute_all(
+    source: Any,
+) -> None:
+    """Review of bae54b3c, finding 1: over an exact DerivedSource of a job node's
+    stored rows, the origin was probed without ``compute_all`` and refused although
+    the caller gave it."""
+    job = PipelineJob(name="itl1464_derived_subclass", database=InMemoryArrowDatabase())
+    with job:
+        _ = _Calls().pod(_with_time(source), label="triple")
+    _ = job.run()
+
+    def derived() -> Any:
+        """Over a cold origin each time: a read keeps the origin's rows on it."""
+        inner = DerivedSource(job.nodes["triple"])
+        return _DroppingDerived(inner, tags_as_data={"subject": "who"}, source_id="d")
+
+    whole = derived().as_table()
+    previewed = derived()
+    with pytest.raises(PreviewRefusedError, match="compute_all"):
+        previewed.preview(2)
+    for n in (1, 2):
+        _same(previewed.preview(n, compute_all=True).as_table(), whole[:n])
+    assert previewed._held_rows() is None  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("depth", [1, 2])
+def test_a_derived_source_subclass_leaves_its_origins_cold(
+    source: Any, depth: int
+) -> None:
+    """Review of bae54b3c, finding 2: the full read of a copy kept every row on the
+    shared, cold origin. Each origin is read through a copy of its own."""
+    origins: list[Any] = [source()]
+    for level in range(depth):
+        origins.append(
+            DerivedSource(
+                origins[-1],
+                tags_as_data={"subject": f"s{level}"},
+                source_id=f"o{level}",
+            )
+        )
+    previewed = _DroppingDerived(
+        origins[-1], tags_as_data={"timestamp": "t"}, source_id="d"
+    )
+    shown = previewed.preview(2, compute_all=True).as_table()
+    for origin in [previewed, *origins[1:]]:
+        assert origin._held_rows() is None  # pyright: ignore[reportPrivateUsage]
+    _same(shown, previewed.as_table()[:2])
+
+
+@pytest.mark.parametrize("origin", ["cached", "subclass_over_node"])
+def test_a_derived_source_subclass_refuses_an_origin_that_could_keep_rows(
+    source: Any, origin: str
+) -> None:
+    """When in doubt, refuse: an origin whose full read could write or keep rows (a
+    ``CachedSource``; a job node a subclass reads directly) is refused, compute_all or
+    not, and nothing is written or kept."""
+    store = InMemoryArrowDatabase()
+    if origin == "cached":
+        made: Any = CachedSource(source(), cache_database=store)
+    else:
+        job = PipelineJob(name="itl1464_direct_node", database=InMemoryArrowDatabase())
+        with job:
+            _ = _Calls().pod(_with_time(source), label="triple")
+        _ = job.run()
+        made = job.nodes["triple"]
+    derived = _DroppingDerived(made, tags_as_data={"subject": "who"}, source_id="d")
+    for compute_all in (False, True):
+        with pytest.raises(PreviewRefusedError):
+            derived.preview(1, compute_all=compute_all)
+    assert store.list_table_paths() == []
+    assert derived._held_rows() is None  # pyright: ignore[reportPrivateUsage]
