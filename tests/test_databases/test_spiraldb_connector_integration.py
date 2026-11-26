@@ -832,7 +832,6 @@ def test_store_lookups_read_by_key_and_by_value(place: _Place) -> None:
         for constraints, expected in (
             ({"__data_context": "std:v1:default", "a.b": 2}, {b"r1"}),
             ({"$x": True, "*": b""}, {b"r0"}),
-            ({"ok$*;": 0}, {b"r0"}),
             ({"a.b": None}, set()),
         ):
             got = db.get_records_with_column_value(

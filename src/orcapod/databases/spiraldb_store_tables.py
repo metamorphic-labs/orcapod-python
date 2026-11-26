@@ -739,7 +739,9 @@ def _pushed_literal(value: object, stored_type: pa.DataType) -> _Expression | No
         return _literal(value, pa.binary())
     if t.is_boolean(stored_type) and type(value) is bool:
         return _literal(value, pa.bool_())
-    if t.is_integer(stored_type) and type(value) is int:
+    # Not an unsigned integer: the exact filter compares a Python int to one as int64
+    # and raises above that range, which pushdown must not hide (ITL-1505 fixes it).
+    if t.is_signed_integer(stored_type) and type(value) is int:
         try:
             _ = pa.scalar(value, stored_type)
         except (OverflowError, pa.ArrowInvalid):

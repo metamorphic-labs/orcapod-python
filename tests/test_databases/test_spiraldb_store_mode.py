@@ -1048,3 +1048,29 @@ def test_a_recorded_empty_table_with_a_corrupt_manifest_is_refused() -> None:
         _table(name).get_metadata()[f"{codec.MANIFEST_KEY}/0"]
         == corrupt[f"{codec.MANIFEST_KEY}/0"]
     )
+
+
+# ------------------------------------- verification r5 of PR 599 (a236e6c8)
+
+
+@pytest.mark.usefixtures("root")
+@pytest.mark.parametrize(
+    "value", [2**64 - 1, 2**63 + 5, 5, 0], ids=["max", "absent-large", "small", "zero"]
+)
+def test_an_unsigned_column_is_not_pushed_down(
+    monkeypatch: pytest.MonkeyPatch, value: int
+) -> None:
+    """Equality on an unsigned integer is left to the exact filter, so a value above the
+    int64 range raises as it does over the whole table (ITL-1505 fixes that error)."""
+    table = rows(["r0", "r1"]).append_column("u", pa.array([2**64 - 1, 5], pa.uint64()))
+    connector, db = _store_with_rows(table)
+    calls = _Calls(monkeypatch)
+    narrowed, whole = _as_with_whole_reads(
+        monkeypatch,
+        connector,
+        lambda: db.get_records_with_column_value(
+            RESULT, {"u": value}, record_id_column="__record_id"
+        ),
+    )
+    assert narrowed == whole
+    assert all(s.get("filter") is None for s in calls.scans)
