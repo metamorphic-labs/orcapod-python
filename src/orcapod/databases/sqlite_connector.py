@@ -462,11 +462,14 @@ class SQLiteConnector:
         Args:
             table_name: Target table (must already exist).
             records: Arrow table of records to write.
-            id_column: Column used as the unique row identifier. Conflict
-                detection is handled by the SQL PRIMARY KEY constraint;
-                this argument is accepted for protocol compliance.
-            skip_existing: If True, skip rows whose id already exists
-                (INSERT OR IGNORE). If False, overwrite (INSERT OR REPLACE).
+            id_column: Column used as the unique row identifier, the table's
+                primary key. Conflict handling covers this column only
+                (``ON CONFLICT (<id>)``), as PostgreSQL's does: every other
+                constraint violation (``CHECK``, ``NOT NULL``, another ``UNIQUE``
+                column) raises and rolls the whole batch back (ITL-1490).
+            skip_existing: If True, keep the stored row of an id that already
+                exists (``DO NOTHING``). If False, update it in place
+                (``DO UPDATE``).
         """
         with self._lock:
             conn = self._require_open()
@@ -474,8 +477,20 @@ class SQLiteConnector:
             cols = list(records.column_names)
             col_list = ", ".join('"' + c.replace('"', '""') + '"' for c in cols)
             placeholders = ", ".join("?" for _ in cols)
-            verb = "INSERT OR IGNORE" if skip_existing else "INSERT OR REPLACE"
-            sql = f'{verb} INTO "{table_name}" ({col_list}) VALUES ({placeholders})'
+            escaped_id = id_column.replace('"', '""')
+            updates = ", ".join(
+                f'"{escaped}" = excluded."{escaped}"'
+                for escaped in (c.replace('"', '""') for c in cols if c != id_column)
+            )
+            action = (
+                "DO NOTHING"
+                if skip_existing or not updates
+                else f"DO UPDATE SET {updates}"
+            )
+            sql = (
+                f'INSERT INTO "{table_name}" ({col_list}) VALUES ({placeholders}) '
+                f'ON CONFLICT ("{escaped_id}") {action}'
+            )
             rows = (tuple(row[c] for c in cols) for row in records.to_pylist())
             try:
                 conn.execute("BEGIN")

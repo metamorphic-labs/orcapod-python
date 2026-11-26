@@ -108,16 +108,17 @@ class DBConnectorProtocol(Protocol):
     ) -> None:
         """Write records to a table atomically using upsert semantics.
 
-        Roll back the batch on a rejected write so the caller can safely retain
-        uncommitted records for another attempt.
+        Roll back the whole batch on a rejected write. Conflict handling covers
+        ``id_column`` only: any other constraint violation (``CHECK``,
+        ``NOT NULL``, a ``UNIQUE`` column other than the id) raises (ITL-1490).
 
         Args:
             table_name: Target table (must already exist).
             records: Arrow table of records to write.
             id_column: Column used as the unique row identifier.
-            skip_existing: If ``True``, skip records whose ``id_column`` value
-                already exists in the table (INSERT OR IGNORE).
-                If ``False``, overwrite existing records (INSERT OR REPLACE).
+            skip_existing: If ``True``, keep the stored row of an ``id_column``
+                value that already exists (``ON CONFLICT (<id>) DO NOTHING``).
+                If ``False``, update it in place (``ON CONFLICT (<id>) DO UPDATE``).
         """
         ...
 
