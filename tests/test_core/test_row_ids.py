@@ -345,3 +345,114 @@ class TestSentinel:
             assert real[column].replace(result_id.hex, "X") == gone[column].replace(
                 row_ids.EPHEMERAL_RESULT_GONE, "X"
             )
+
+
+class TestTokensAreReadAsTheRowCarriesThem:
+    """The instance id reads a stream row's typed token columns (review of PR #583).
+
+    A row read from an Arrow table keeps that table's source-info columns. The
+    instance id is made from them, with a row's own nullable fields, and a token's
+    type is never worked out again from its value.
+    """
+
+    NESTED = pa.large_list(pa.large_list(pa.large_list(pa.large_string())))
+
+    def _stream(self, nested: bool) -> Any:
+        from orcapod.core.streams import ArrowTableStream
+
+        tokens_a = (
+            pa.array([[None, [[]]], [None, [[]]], [[["t"]]]], self.NESTED)
+            if nested
+            else pa.array(
+                ["s::row_0::a", "s::row_1::a", "s::row_2::a"], pa.large_string()
+            )
+        )
+        table = pa.Table.from_arrays(
+            [
+                pa.array(["m1", "m1", "m2"], pa.large_string()),
+                pa.array([1, 2, 1], pa.int64()),
+                pa.array([10, 20, 30], pa.int64()),
+                pa.array([0.5, 1.5, 2.5], pa.float64()),
+                tokens_a,
+                pa.array(["s::row_0::b", "s::row_1::b", None], pa.large_string()),
+            ],
+            schema=pa.schema(
+                [
+                    pa.field("subject", pa.large_string(), nullable=False),
+                    pa.field("session", pa.int64(), nullable=False),
+                    pa.field("a", pa.int64(), nullable=False),
+                    pa.field("b", pa.float64(), nullable=False),
+                    pa.field("_source_a", tokens_a.type, nullable=nested),
+                    pa.field("_source_b", pa.large_string()),
+                ]
+            ),
+        )
+        return ArrowTableStream(table, tag_columns=["subject", "session"])
+
+    def test_an_ordinary_rows_columns_are_those_its_own_table_gives(self) -> None:
+        rows = list(self._stream(nested=False).iter_data())
+        assert len(rows) == 3
+        for _, data in rows:
+            typed = data.source_info_table()
+            own = data.as_table(columns={"source": True}).select(
+                ["_source_a", "_source_b"]
+            )
+            assert typed.equals(own)
+            assert typed.schema.equals(own.schema)
+            assert all(field.nullable for field in typed.schema)
+
+    def test_an_ordinary_rows_instance_id_is_the_one_its_own_table_gives(self) -> None:
+        ids = set()
+        for tag, data in self._stream(nested=False).iter_data():
+            entry = row_ids.entry_id(HASHER, tag, data)
+            own = data.as_table(columns={"source": True})
+            by_hand = pa.table(
+                {"__pipeline_entry_id": _binary(entry.to_prefixed_digest())}
+            )
+            for name in ("_source_a", "_source_b"):
+                by_hand = by_hand.append_column(
+                    own.schema.field(name), own.column(name)
+                )
+            assert row_ids.instance_id(HASHER, tag, data) == HASHER.hash_table(by_hand)
+            ids.add(row_ids.instance_id(HASHER, tag, data))
+        assert len(ids) == 3
+
+    def test_a_nested_token_column_is_read_with_its_type_and_never_typed_again(
+        self,
+    ) -> None:
+        rows = list(self._stream(nested=True).iter_data())
+        ids = set()
+        for index, (tag, data) in enumerate(rows):
+            typed = data.source_info_table()
+            assert typed.schema.field("_source_a").type == self.NESTED
+            assert typed.schema.field("_source_b").type == pa.large_string()
+            preimage = row_ids.instance_id_preimage(
+                row_ids.entry_id(HASHER, tag, data), data
+            )
+            assert preimage.column_names == [
+                "__pipeline_entry_id",
+                "_source_a",
+                "_source_b",
+            ]
+            assert preimage.schema.field("_source_a").type == self.NESTED
+            ids.add(row_ids.instance_id(HASHER, tag, data))
+            if index < 2:
+                # Typing this token again from its value is what fails.
+                with pytest.raises(pa.ArrowTypeError):
+                    data.as_table(columns={"source": True})
+        assert len(ids) == 3
+
+    def test_a_changed_row_gives_the_tokens_it_now_has(self) -> None:
+        _, data = next(iter(self._stream(nested=False).iter_data()))
+        assert data.copy().source_info_table().equals(data.source_info_table())
+        selected = data.select("b")
+        assert selected.source_info_table().column_names == ["_source_b"]
+        renamed = data.rename({"a": "c"})
+        assert renamed.source_info_table().column_names == ["_source_c", "_source_b"]
+        retold = data.with_source_info(a="other::row_9::a")
+        assert retold.source_info_table().to_pylist() == [
+            {"_source_a": "other::row_9::a", "_source_b": "s::row_0::b"}
+        ]
+        assert row_ids.instance_id(HASHER, _tag(), retold) != row_ids.instance_id(
+            HASHER, _tag(), data
+        )

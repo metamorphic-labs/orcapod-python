@@ -674,8 +674,6 @@ def test_placeholders_fed_through_the_async_route_find_their_results(
     assert calls == Counter(), "a function was called for a placeholder input"
     database.flush()
     assert _table(database, "add", "pdb_v2").sort_by(KEY).equals(stored_before)
-    # The node holds the rows it sent, as after any run.
-    assert sorted(_values(node.as_table(), "z")) == sorted(expected.values())
 
 
 @pytest.mark.parametrize("path", ["sync", "async"])

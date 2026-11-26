@@ -371,7 +371,10 @@ class Data(Datagram):
             self._source_info: dict[str, SourceInfoValue] = self._source_info_of_row(
                 si_table
             )
+            # The table's own source-info columns, when the tokens are all its own.
+            typed = si_table if not source_info and si_table.num_rows == 1 else None
         else:
+            typed = None
             # Dict path: extract source-info keys before calling super()
             data_only = {
                 k: v
@@ -394,6 +397,10 @@ class Data(Datagram):
             self._source_info = {**contained_source_info, **(source_info or {})}
 
         self._source_info_table: "pa.Table | None" = None
+        # The row's source-info columns as the Arrow table it was read from gave
+        # them, when it was read from one (here, or ``rows_of``); ``None``
+        # otherwise, and after any change of the columns or tokens.
+        self._typed_source_info: "pa.Table | None" = typed
 
     @staticmethod
     def _data_and_source_info_tables(
@@ -464,6 +471,7 @@ class Data(Datagram):
             assert source_info_row is not None
             data._source_info = cls._source_info_of_row(source_info_row)
             data._source_info_table = None
+            data._typed_source_info = source_info_row
             yield data
 
     # ------------------------------------------------------------------
@@ -563,14 +571,29 @@ class Data(Datagram):
     def source_info_table(self) -> "pa.Table":
         """Return the source-info tokens as a one-row table.
 
-        The columns ``as_table(columns={"source": True})`` appends to the data
-        columns: one ``_source_<column>`` per data column, in their order.
+        One ``_source_<column>`` per data column, in their order, every field
+        nullable. A row read from an Arrow table (a stream's row) gives the columns
+        that table has, with their types: a token's type is never worked out again
+        from its value, which a
+        nested token column would not survive (ITL-1471). A row built from Python
+        values, or changed since it was read, gives the columns
+        ``as_table(columns={"source": True})`` appends to the data columns, typed
+        from the tokens.
 
         Returns:
             The one-row table, or a table with no column when no data column has
             a token.
         """
-        return self._ensure_source_info_table()
+        typed = self._typed_source_info
+        if typed is None:
+            return self._ensure_source_info_table()
+        # The fields of a row's own table: the name and the type, nullable, as
+        # ``_source_info_field`` makes them (a stream's may be non-null). The
+        # arrays are the stream's, wrapped again, never cast.
+        return pa.Table.from_arrays(
+            typed.columns,
+            schema=pa.schema([pa.field(f.name, f.type) for f in typed.schema]),
+        )
 
     def with_source_info(self, **source_info: "SourceInfoValue") -> Self:
         """Create a copy with updated source-information entries."""
@@ -581,6 +604,7 @@ class Data(Datagram):
             current[key] = value
         new_p = self.copy(include_cache=False)
         new_p._source_info = current
+        new_p._typed_source_info = None
         return new_p
 
     # ------------------------------------------------------------------
@@ -668,6 +692,7 @@ class Data(Datagram):
             if k in self._source_info
         }
         new_p._source_info_table = None
+        new_p._typed_source_info = None
         return new_p
 
     def drop(self, *column_names: str, ignore_missing: bool = False) -> Self:
@@ -677,6 +702,7 @@ class Data(Datagram):
             k: v for k, v in self._source_info.items() if k not in column_names
         }
         new_p._source_info_table = None
+        new_p._typed_source_info = None
         return new_p
 
     def rename(self, column_mapping: "Mapping[str, str]") -> Self:
@@ -685,6 +711,7 @@ class Data(Datagram):
             column_mapping.get(k, k): v for k, v in self._source_info.items()
         }
         new_p._source_info_table = None
+        new_p._typed_source_info = None
         return new_p
 
     def with_columns(
@@ -710,6 +737,7 @@ class Data(Datagram):
             new_source_info[col] = None  # new columns get empty source info
         new_p._source_info = new_source_info
         new_p._source_info_table = None
+        new_p._typed_source_info = None
         return new_p
 
     def as_datagram(
@@ -772,12 +800,16 @@ class Data(Datagram):
             **{k: v for k, v in self._source_info.items() if k not in names},
         }
         new_p._source_info_table = None
+        new_p._typed_source_info = None
         return new_p
 
     def copy(self, include_cache: bool = True, preserve_id: bool = True) -> Self:
         new_p = super().copy(include_cache=include_cache, preserve_id=preserve_id)
         new_p._source_info = dict(self._source_info)
         new_p._source_info_table = self._source_info_table if include_cache else None
+        # Not a cache: it is what the row was read with, and stays true for a copy
+        # (every method that changes the columns or the tokens clears it).
+        new_p._typed_source_info = self._typed_source_info
         return new_p
 
 
