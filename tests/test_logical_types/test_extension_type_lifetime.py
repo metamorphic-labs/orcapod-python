@@ -8,12 +8,16 @@ destroyed by a worker. The race itself is rare, so these tests check the propert
 
 from __future__ import annotations
 
+import copy
 import gc
+import struct
 import subprocess
 import sys
 import textwrap
+import threading
 import weakref
 from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -297,6 +301,182 @@ def test_arguments_that_cannot_name_an_instance_are_refused() -> None:
         Listed(["a", "b"])
 
 
+def _echoing(name: str) -> type[Any]:
+    """A subclass of a made class whose metadata is the text of its one argument."""
+    made = _made(name)
+
+    class Echoing(made):
+        def __init__(self, value: Any) -> None:
+            self.value = value
+            pa.ExtensionType.__init__(self, pa.int64(), name)
+
+        def __arrow_ext_serialize__(self) -> bytes:
+            return _exact_text(self.value).encode()
+
+        @classmethod
+        def __arrow_ext_deserialize__(
+            cls, storage_type: pa.DataType, serialized: bytes
+        ) -> pa.ExtensionType:
+            return cls(_VALUES_BY_TEXT[serialized.decode()])
+
+        def __arrow_ext_scalar_class__(self) -> type[pa.ExtensionScalar]:
+            return _TaggedScalar
+
+    return Echoing
+
+
+def _exact_text(value: Any) -> str:
+    """Text that tells apart every value the instances must tell apart."""
+    if isinstance(value, float):
+        return f"float:{struct.pack('>d', value).hex()}"
+    if isinstance(value, (tuple, frozenset)):
+        parts = [_exact_text(item) for item in value]
+        if isinstance(value, frozenset):
+            parts.sort()
+        return f"{type(value).__name__}({','.join(parts)})"
+    return f"{type(value).__name__}:{value!r}"
+
+
+_OTHER_NAN = struct.unpack(">d", bytes.fromhex("7ff8000000000001"))[0]
+_NEGATIVE_NAN = struct.unpack(">d", bytes.fromhex("fff8000000000000"))[0]
+
+# Groups of arguments that compare equal in Python (or, for the NaNs, are one value to
+# Arrow's matching) and are still different arguments: each has its own metadata.
+_EQUAL_BUT_DISTINCT: list[list[Any]] = [
+    [0.0, -0.0, 0, False],
+    [1, 1.0, True],
+    [float("nan"), _OTHER_NAN, _NEGATIVE_NAN],
+    [(0.0,), (-0.0,), (0,), (False,)],
+    [(1, (2.0, True)), (1, (2, True)), (1, (2.0, 1)), (True, (2.0, True))],
+    [frozenset({0.0}), frozenset({-0.0}), frozenset({False})],
+    [("a", frozenset({(1,)})), ("a", frozenset({(True,)})), ("a", frozenset({(1.0,)}))],
+]
+_VALUES_BY_TEXT: dict[str, Any] = {
+    _exact_text(value): value for group in _EQUAL_BUT_DISTINCT for value in group
+}
+
+
+@pytest.mark.parametrize("group", range(len(_EQUAL_BUT_DISTINCT)))
+@pytest.mark.parametrize("order", ["as_listed", "reversed"])
+def test_equal_but_distinct_arguments_are_distinct_types(
+    tmp_path: Path,
+    registered: Callable[[Any], Any],
+    group: int,
+    order: str,
+) -> None:
+    """``0.0`` and ``-0.0``, ``1`` and ``True``: each has its own instance and metadata.
+
+    The order in which they are first constructed never decides which metadata a
+    column is written with.
+    """
+    values = _EQUAL_BUT_DISTINCT[group]
+    if order == "reversed":
+        values = values[::-1]
+    echoing = _echoing(f"test.lifetime.distinct.{group}.{order}")
+    types = [echoing(value) for value in values]
+    assert len({id(t) for t in types}) == len(values)
+    assert [t.__arrow_ext_serialize__().decode() for t in types] == [
+        _exact_text(value) for value in values
+    ]
+    for value, extension in zip(values, types):
+        # An equal argument made again (another object) gives the instance already made.
+        again = _VALUES_BY_TEXT[_exact_text(value)]
+        assert echoing(again) is extension
+        assert echoing(copy.deepcopy(value)) is extension
+
+    registered(types[0])
+    table = pa.table(
+        {f"column_{i}": _array(t, [10 + i, 20 + i, None]) for i, t in enumerate(types)}
+    )
+    pq.write_table(table, tmp_path / "distinct.parquet")
+    read = pa_ds.dataset(tmp_path / "distinct.parquet").to_table(use_threads=True)
+    for i, extension in enumerate(types):
+        column = read.column(f"column_{i}")
+        assert column.type is extension, values[i]
+        assert column.to_pylist() == [f"Echoing:{10 + i}", f"Echoing:{20 + i}", None]
+
+
+def test_a_constructor_may_wait_for_another_type_made_on_another_thread() -> None:
+    """No process-wide lock is held while a constructor runs."""
+    inner_made = _made("test.lifetime.threads.inner")
+    outer_made = _made("test.lifetime.threads.outer")
+
+    class Inner(inner_made):
+        pass
+
+    class Outer(outer_made):
+        def __init__(self) -> None:
+            made: list[Any] = []
+            thread = threading.Thread(target=lambda: made.append(Inner()), daemon=True)  # pyright: ignore[reportCallIssue]  # the synthesized class takes no arguments
+            thread.start()
+            thread.join(30)
+            self.inner = made[0] if made else None
+            pa.ExtensionType.__init__(self, pa.int64(), "test.lifetime.threads.outer")
+
+    outer = Outer()
+    assert outer.inner is not None, "the other thread could not construct its type"
+    assert type(outer.inner) is Inner
+    assert Inner() is outer.inner  # pyright: ignore[reportCallIssue]  # the synthesized class takes no arguments
+    assert Outer() is outer
+
+
+def test_threads_constructing_cold_subclasses_at_once_get_one_instance_each() -> None:
+    """Different cold subclasses are made at once; each class still has one instance."""
+    made = _made("test.lifetime.threads.cold")
+    classes = 4
+    callers = 6
+    inside = threading.Barrier(classes, timeout=30)
+    start = threading.Barrier(classes * callers, timeout=30)
+
+    def subclass(index: int) -> type[Any]:
+        class Cold(made):
+            def __init__(self, unit: str) -> None:
+                self.unit = unit
+                self.index = index
+                if unit == "together":
+                    # Every class has a constructor running at this point.
+                    inside.wait()
+                pa.ExtensionType.__init__(
+                    self, pa.int64(), "test.lifetime.threads.cold"
+                )
+
+            def __arrow_ext_scalar_class__(self) -> type[pa.ExtensionScalar]:
+                return _TaggedScalar
+
+        Cold.__name__ = f"Cold{index}"
+        return Cold
+
+    cold = [subclass(index) for index in range(classes)]
+    # First, one constructor of each class runs at the same time as the others.
+    with ThreadPoolExecutor(classes) as pool:
+        together = list(pool.map(lambda cls: cls("together"), cold))
+    assert [type(t) for t in together] == cold
+    assert [cls("together") for cls in cold] == together
+
+    # Then many threads race to make the same cold instance of each class.
+    def construct(cls: type[Any]) -> Any:
+        start.wait()
+        return cls("raced")
+
+    with ThreadPoolExecutor(classes * callers) as pool:
+        raced = list(pool.map(construct, cold * callers))
+    mine: list[Any] = []
+    for index, cls in enumerate(cold):
+        mine = raced[index::classes]
+        assert len(mine) == callers
+        assert all(t is mine[0] for t in mine)
+        assert type(mine[0]) is cls and mine[0].index == index
+        assert cls("raced") is mine[0]
+        assert _array(mine[0], [index, None]).to_pylist() == [
+            f"Cold{index}:{index}",
+            None,
+        ]
+    alive = [weakref.ref(t) for t in raced[:classes]]
+    del raced, mine, together
+    gc.collect()
+    assert all(ref() is not None for ref in alive)
+
+
 def test_a_subclass_instance_outlives_every_python_reference() -> None:
     """A subclass's instance is kept for the process like its base's."""
     made = _made("test.lifetime.subclass_kept")
@@ -368,6 +548,8 @@ _CHILD = """
     def produce(i: int, name: str) -> tuple[set[bytes], Reading]:
         return {name.encode(), str(i).encode()}, Reading(label=name, level=i)
 
+    work, mode, path, arrangement = sys.argv[1:]
+
     ROWS = [
         {"subject": "s2", "session": 1, "i": 3, "name": "c"},
         {"subject": "s1", "session": 2, "i": 2, "name": "b"},
@@ -384,10 +566,17 @@ _CHILD = """
         for row in ROWS
     )
 
+    # The declared tag order and the layout of the rows' columns.
+    TAGS, COLUMNS = {
+        "tags_first": (["subject", "session"], ["subject", "session", "i", "name"]),
+        "data_first": (["session", "subject"], ["name", "i", "session", "subject"]),
+        "mixed": (["session", "subject"], ["subject", "name", "session", "i"]),
+    }[arrangement]
+
     def source():
         return DictSource(
-            ROWS,
-            tag_columns=["subject", "session"],
+            [{column: row[column] for column in COLUMNS} for row in ROWS],
+            tag_columns=TAGS,
             tag_only_columns=True,
             source_id="readings",
         )
@@ -408,7 +597,6 @@ _CHILD = """
             for tag, data in stream.iter_data()
         )
 
-    work, mode, path = sys.argv[1:]
     database = DeltaTableDatabase(work + "/store")
     if mode == "save":
         job = PipelineJob(name="exit", database=database)
@@ -432,18 +620,28 @@ _CHILD = """
 
 
 @pytest.mark.parametrize("path", ["sync", "async"])
+@pytest.mark.parametrize("arrangement", ["tags_first", "data_first", "mixed"])
 def test_a_process_that_read_logical_types_exits_cleanly(
-    tmp_path: Path, path: str
+    tmp_path: Path, path: str, arrangement: str
 ) -> None:
     """Processes that run, save, load and read a job's rows exit with code 0.
 
     Four rows, two tags and two outputs of two logical types (``set[bytes]`` and a
-    dataclass), on the sync and the async job path: the first process computes and
+    dataclass), on the sync and the async job path, with the tags declared in either
+    order and the rows' columns laid out three ways: the first process computes and
     stores them, each later one loads the saved job and reads them from the store.
     """
     for mode in ["save", *["load"] * 5]:
         result = subprocess.run(
-            [sys.executable, "-c", textwrap.dedent(_CHILD), str(tmp_path), mode, path],
+            [
+                sys.executable,
+                "-c",
+                textwrap.dedent(_CHILD),
+                str(tmp_path),
+                mode,
+                path,
+                arrangement,
+            ],
             capture_output=True,
             text=True,
             timeout=120,
