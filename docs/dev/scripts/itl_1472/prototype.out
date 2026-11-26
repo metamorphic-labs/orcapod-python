@@ -1,57 +1,61 @@
 
-== [proto 1] f over two restrictions: two slots, two nodes, one identity, one store
-  sync: job.nodes = {'SelectDataColumns_1': 'operator', 'SelectDataColumns_2': 'operator', 'double_1': 'function', 'double_2': 'function', 'events_1': 'source', 'events_2': 'source'}
-    content hash equal: True | pipeline hash equal: True | stored path equal: True
-    rows: double_1 t=[1, 2, 3], double_2 t=[1, 3, 5]
-    function calls: [1, 2, 3, 5] (4 calls, 4 distinct rows)
-    double_1.as_source() serves t=[1, 2, 3, 5]
-    pipeline table rows: 4 | as seen from double_2: 4
-    a new job on the same store: 0 calls
-  async: job.nodes = {'SelectDataColumns_1': 'operator', 'SelectDataColumns_2': 'operator', 'double_1': 'function', 'double_2': 'function', 'events_1': 'source', 'events_2': 'source'}
-    content hash equal: True | pipeline hash equal: True | stored path equal: True
-    rows: double_1 t=[1, 2, 3], double_2 t=[1, 3, 5]
-    function calls: [1, 1, 2, 3, 5] (5 calls, 4 distinct rows)
-    double_1.as_source() serves t=[1, 1, 2, 3, 3, 5]
-    pipeline table rows: 6 | as seen from double_2: 6
-    a new job on the same store: 0 calls
+== [proto 1] f(A.where(m1)) and g(A.where(m2)): three nodes, two pushed-down reads
+  recorded f then g: nodes={'SelectDataColumns_1': 'operator', 'SelectDataColumns_2': 'operator', 'events': 'source', 'f': 'function', 'g': 'function'}
+    rows of f: t=[1, 2, 3]; of g: t=[4, 5]
+    scans in the run: ["where=subject_id == 'm2', limit=None", "where=subject_id == 'm1', limit=None"]
+  recorded g then f: nodes={'SelectDataColumns_1': 'operator', 'SelectDataColumns_2': 'operator', 'events': 'source', 'f': 'function', 'g': 'function'}
+    rows of f: t=[1, 2, 3]; of g: t=[4, 5]
+    scans in the run: ["where=subject_id == 'm2', limit=None", "where=subject_id == 'm1', limit=None"]
+  f equals f of the unrestricted job: content hash True | pipeline hash True | stored path True
+  the source node read by hand: t=[1, 2, 3, 4, 5]
+    scans of that read: ['where=None, limit=None']
 
-== [proto 2] state-driven run(): one node runs, its twin stays empty
-  after double_1.run(): double_1 t=[1, 2, 3], double_2 t=[]
-  calls: [1, 2, 3]; double_2 stale: True
-  then job.run(): held=['double_1']; calls now [1, 2, 3, 5]
-  load_only: double_1 t=[1, 2, 3], double_2 t=[1, 3, 5]
+== [proto 2] two different restrictions on one edge: refused, in either order
+  f(m1), f(m2):
+    The edge from 'SpiralDBTableSource' to 'SelectDataColumns' (position 0) is written with two different restrictions (where subject_id='m1'; where subject_id='m2'). An edge carr
+  f(m2), f(m1):
+    The edge from 'SpiralDBTableSource' to 'SelectDataColumns' (position 0) is written with two different restrictions (where subject_id='m1'; where subject_id='m2'). An edge carr
+  f(m1), f(A):
+    The edge from 'SpiralDBTableSource' to 'SelectDataColumns' (position 0) is written with two different restrictions (no restriction; where subject_id='m1'). An edge carries one
+  f(A), f(m1):
+    The edge from 'SpiralDBTableSource' to 'SelectDataColumns' (position 0) is written with two different restrictions (no restriction; where subject_id='m1'). An edge carries one
+  f(m1), f(m1 written again):
+    accepted
+  f(m1), h(m2), both reading only 'amplitude':
+    The edge from 'SpiralDBTableSource' to 'SelectDataColumns' (position 0) is written with two different restrictions (where subject_id='m1'; where subject_id='m2'). An edge carr
+  f(op(m1)), g(op(m2)):
+    The edge from 'SpiralDBTableSource' to 'MapData' (position 0) is written with two different restrictions (where subject_id='m1'; where subject_id='m2'). An edge carries one re
 
-== [proto 3] registration order: names and rows in both orders
-  registered m1, odd: slots={'events_1': "where subject_id='m1'", 'events_2': 'where parity=1'} rows={'double_1': [1, 2, 3], 'double_2': [1, 3, 5]}
-  registered odd, m1: slots={'events_1': 'where parity=1', 'events_2': "where subject_id='m1'"} rows={'double_1': [1, 3, 5], 'double_2': [1, 2, 3]}
+== [proto 3] the remedy: the condition as a step (filter)
+  nodes={'Filter_1': 'operator', 'Filter_2': 'operator', 'SelectDataColumns_1': 'operator', 'SelectDataColumns_2': 'operator', 'events': 'source', 'f1': 'function', 'f2': 'function'}
+  f1: t=[1, 2, 3]; f2: t=[4, 5]
+  scans: ['where=None, limit=None']
 
-== [proto 4] tracked side effect over two edges: once per entry
-  sync: nodes=['events_1', 'events_2', 'tell_1', 'tell_2'] delivered t=[1, 2, 3, 5]
-  async: nodes=['events_1', 'events_2', 'tell_1', 'tell_2'] delivered t=[1, 2, 3, 5]
+== [proto 4] an ordered operator: each position is its own edge
+  MergeJoin(m1, odd): t=[1, 3] amplitude=[[1.5, 1.5], [3.5, 3.5]]
+    scans: ["where=subject_id == 'm1', limit=None", 'where=parity == 1, limit=None']
+  MergeJoin(odd, m1): t=[1, 3] amplitude=[[1.5, 1.5], [3.5, 3.5]]
+    scans: ['where=parity == 1, limit=None', "where=subject_id == 'm1', limit=None"]
+  MergeJoin(A, A): t=[1, 2, 3, 4, 5] amplitude=[[1.5, 1.5], [2.5, 2.5], [3.5, 3.5], [4.5, 4.5], [5.5, 5.5]]
+    scans: ['where=None, limit=None']
+  SemiJoin(A, m1): t=[1, 2, 3] amplitude=[1.5, 2.5, 3.5]
+    scans: ['where=None, limit=None', "where=subject_id == 'm1', limit=None"]
+  SemiJoin(m1, A): t=[1, 2, 3] amplitude=[1.5, 2.5, 3.5]
+    scans: ["where=subject_id == 'm1', limit=None", 'where=None, limit=None']
 
-== [proto 5] untracked side effect over two edges: once per crossing
-  sync: nodes=['events_1', 'events_2', 'tell_untracked_1', 'tell_untracked_2'] delivered t=[1, 1, 2, 3, 3, 5]
-  async: nodes=['events_1', 'events_2', 'tell_untracked_1', 'tell_untracked_2'] delivered t=[1, 1, 2, 3, 3, 5]
+== [proto 5] one restriction on two edges out of a source: one read
+  rows of f: t=[1, 2, 3]; of g: t=[1, 2, 3]
+  scans: ["where=subject_id == 'm1', limit=None"]
 
-== [proto 6] a cached operator over two restrictions, by cache mode
-  OFF:
-    GroupBy_1: [('m1', [1.5, 2.5, 3.5])]
-    GroupBy_2: [('m1', [1.5, 3.5]), ('m2', [5.5])]
-  LOG:
-    GroupBy_1: [('m1', [1.5, 2.5, 3.5])]
-    GroupBy_2: [('m1', [1.5, 3.5]), ('m2', [5.5])]
-  REPLAY:
-    GroupBy_1: [('m1', [1.5, 2.5, 3.5]), ('m1', [1.5, 3.5]), ('m2', [5.5])]
-    GroupBy_2: [('m1', [1.5, 2.5, 3.5]), ('m1', [1.5, 3.5]), ('m2', [5.5])]
+== [proto 6] a cached operator below a restricted edge, by cache mode
+  OFF: a job under m1 shows [('m1', [1.5, 2.5, 3.5])]
+    then a job under parity=1 shows [('m1', [1.5, 3.5]), ('m2', [5.5])]
+  LOG: a job under m1 shows [('m1', [1.5, 2.5, 3.5])]
+    then a job under parity=1 shows [('m1', [1.5, 3.5]), ('m2', [5.5])]
+  REPLAY: a job under m1 shows [('m1', [1.5, 2.5, 3.5]), ('m1', [1.5, 3.5]), ('m2', [5.5])]
+    then a job under parity=1 shows [('m1', [1.5, 2.5, 3.5]), ('m1', [1.5, 3.5]), ('m2', [5.5])]
 
-== [proto 7] two equal DictSource objects: two slots, two nodes
-  f(a), f(b), f(a): job.nodes = ['arrow_v1:00000296ec0ad52b3340af0a51f99b2be93401a847c1f1aecc787aa95d2bd18f582751_1', 'arrow_v1:00000296ec0ad52b3340af0a51f99b2be93401a847c1f1aecc787aa95d2bd18f582751_2', 'double_1', 'double_2']
-
-== [proto 8] save and load with main's format
-  saved nodes: 6
-  saved sources: ['events_1', 'events_2']
-    events_1: where={'subject_id': 'm1'}
-    events_2: where={'parity': 1}
-  loaded job.nodes = {'SelectDataColumns_1': 'operator', 'SelectDataColumns_2': 'operator', 'double_1': 'function', 'double_2': 'function', 'events_1': 'source', 'events_2': 'source'}
-    double_1: t=[1, 2, 3]
-    double_2: t=[1, 3, 5]
+== [proto 7] the edge view: the upstream node's stream under the restriction
+  events -> f with a limit of 2, before any run: t=[1, 2]
+    scans: ["where=subject_id == 'm1', limit=2"]
+    f holds 0 rows: nothing ran

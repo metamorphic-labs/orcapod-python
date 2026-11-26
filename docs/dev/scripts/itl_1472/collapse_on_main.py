@@ -12,12 +12,17 @@ What it shows, each under its own heading:
 3. With only the refusal switched off, the two uses become ONE slot and ONE node, and
    the rows that flow are those of whichever use was registered first.
 4. Two separate ``DictSource`` objects with equal rows become one slot and one node.
-5. Two node objects of one identity are equal and hash alike, so a ``dict`` or the DAG
-   keyed by node objects holds one of them.
+5. One node feeding one operator twice: ``Join`` and ``Rejoin`` refuse it themselves;
+   ``MergeJoin`` and ``SemiJoin`` build a node with two inputs but one graph edge, and
+   the run fails.
+6. A job reads a source once per run, however many nodes it feeds.
+7. A stream built before the ``with`` block is a leaf (a slot), not its steps.
+8. Where a saved job keeps a restriction and its edges today.
 """
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import warnings
@@ -30,6 +35,7 @@ sys.path.insert(0, str(REPO))  # the SpiralDB fake lives in the test package
 
 from orcapod import function_pod  # noqa: E402  # after the path insert
 from orcapod.core.nodes import FunctionJobNode  # noqa: E402
+from orcapod.core.operators import Join, MergeJoin, Rejoin, SemiJoin  # noqa: E402
 from orcapod.core.sources import DictSource  # noqa: E402
 from orcapod.core.sources.spiraldb_table_source import SpiralDBTableSource  # noqa: E402
 from orcapod.databases import InMemoryArrowDatabase  # noqa: E402
@@ -79,6 +85,71 @@ def describe(job: PipelineJob) -> None:
             print(f"  rows of {name!r}: t = {rows['t']}")
 
 
+@function_pod(output_keys="halved")
+def halve(amplitude: float | None) -> float | None:
+    """Return half of ``amplitude``."""
+    return None if amplitude is None else amplitude / 2
+
+
+def more_on_main(table: SpiralDBTableSource, root: Path) -> None:
+    heading("5. One node feeding one operator twice")
+    for operator in (Join, Rejoin, MergeJoin, SemiJoin):
+        name = operator.__name__
+        try:
+            job = PipelineJob(name="twice", database=InMemoryArrowDatabase())
+            with job:
+                operator()(table, table, label="op")
+            node = job.nodes["op"]
+            print(
+                f"  {name}(A, A): built, {len(node.upstreams)} inputs,",
+                f"{len(job._graph_edges)} graph edge(s)",  # pyright: ignore[reportPrivateUsage]
+            )
+            job.run()
+            print("    ran:", node.as_table().num_rows, "rows")
+        except Exception as exc:  # noqa: BLE001  # the demonstration prints what main raises
+            print(f"  {name}(A, A): {type(exc).__name__}: {str(exc)[:88]}")
+
+    heading("6. Scans of one run: a source feeding two functions")
+    job = PipelineJob(name="scans", database=InMemoryArrowDatabase())
+    with job:
+        double.pod(table, label="f")
+        halve.pod(table, label="g")
+    fake_spiral_sdk.scan_log.clear()
+    job.run()
+    print(
+        "  scans:",
+        [f"where={r.filter!r}, limit={r.limit}" for r in fake_spiral_sdk.scan_log],
+    )
+
+    heading("7. A stream built before the with block")
+    renamed = table.where(subject_id="m1").map_data({"amplitude": "a"})
+    job = PipelineJob(name="outside", database=InMemoryArrowDatabase())
+    with job:
+        renamed.map_data({"a": "amplitude"}, label="back")
+    print(
+        "  job.nodes:",
+        {n[:12]: node.node_type for n, node in sorted(job.nodes.items())},
+    )
+
+    heading("8. A saved job: the restriction and the edges")
+    job = PipelineJob(name="saved", database=InMemoryArrowDatabase())
+    with job:
+        double.pod(table.where(subject_id="m1"), label="f")
+    path = root / "job.json"
+    job.save(path)
+    saved = json.loads(path.read_text())
+    print(
+        "  bindings.sources.events.where:",
+        saved["bindings"]["sources"]["events"]["where"],
+    )
+    edges = saved["pipeline"]["edges"]
+    print(
+        f"  pipeline.edges: {len(edges)} pairs of node keys, such as",
+        [k[:14] for k in edges[0]],
+    )
+    print("  pipeline.nodes keys:", sorted(k[:14] for k in saved["pipeline"]["nodes"]))
+
+
 def main() -> None:
     with (
         tempfile.TemporaryDirectory() as root,
@@ -125,6 +196,8 @@ def main() -> None:
             restrictions.require_one_restriction = original
             job_module.refuse_restriction_conflicts = saved_job_refusal
 
+        more_on_main(table, Path(root))
+
     heading("4. Two separate DictSource objects with equal rows: one slot, one node")
     rows = [{"t": 1, "amplitude": 1.5}, {"t": 2, "amplitude": 2.5}]
     a = DictSource(rows, tag_columns=["t"], tag_only_columns=True)
@@ -136,14 +209,6 @@ def main() -> None:
         a.content_hash() == b.content_hash(),
     )
     describe(job_over(a, b, labels=("first", "second")))
-
-    heading("5. Two node objects of one identity are one dict key")
-    job_a = job_over(a, labels=("f",))
-    job_b = job_over(b, labels=("f",))
-    node_a, node_b = job_a.nodes["f"], job_b.nodes["f"]
-    print("  node_a is node_b:", node_a is node_b)
-    print("  node_a == node_b:", node_a == node_b)
-    print("  len({node_a: 1, node_b: 2}):", len({node_a: 1, node_b: 2}))
 
 
 if __name__ == "__main__":
