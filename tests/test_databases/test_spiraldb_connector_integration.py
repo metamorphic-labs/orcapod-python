@@ -22,6 +22,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pyarrow as pa
 import pytest
@@ -371,3 +372,39 @@ def test_table_metadata(place: _Place) -> None:
     assert found["m" * 255] == b"x" * (8192 - 255)
     assert "m" * 256 not in found
     assert "conformance.big" not in found
+
+
+def test_the_fake_keeps_concurrent_upserts_of_different_keys(tmp_path: Path) -> None:
+    """Two clients upserting different keys at once keep both (measured live, 0.16.78).
+
+    Review of PR 589, finding 1: each read waits for the other writer's read, so an
+    upsert that is not atomic would lose one key.
+    """
+    import threading
+
+    with fake.install(tmp_path):
+        key = pa.schema([pa.field("k", pa.large_string(), False)])
+        made = fake.FakeClient().project("p").create_keyed_table("d", "t", key)
+        both_read = threading.Barrier(2, timeout=0.5)
+        original = fake._Store.metadata  # pyright: ignore[reportPrivateUsage]  # the read an upsert starts from
+
+        def metadata_after_the_other_read(self: Any, table_id: str) -> dict[str, bytes]:
+            found = original(self, table_id)
+            try:
+                _ = both_read.wait()
+            except threading.BrokenBarrierError:
+                pass  # an atomic upsert holds the other writer back: no meeting
+            return found
+
+        def upsert(name: str) -> None:
+            fake.FakeClient().keyed_table_by_id(made.resource_id).set_metadata(
+                {name: b"1"}
+            )
+
+        with patch.object(fake._Store, "metadata", metadata_after_the_other_read):  # pyright: ignore[reportPrivateUsage]
+            writers = [threading.Thread(target=upsert, args=(n,)) for n in "ab"]
+            for w in writers:
+                w.start()
+            for w in writers:
+                w.join()
+        assert made.get_metadata() == {"a": b"1", "b": b"1"}

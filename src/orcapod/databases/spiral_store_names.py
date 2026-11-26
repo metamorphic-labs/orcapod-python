@@ -44,6 +44,10 @@ MAX_PATH_JSON_BYTES = 8000
 """The longest recorded path, in UTF-8 bytes of its JSON. SpiralDB refuses an entry whose key
 and value together are over 8,192 bytes; this leaves room for the key."""
 
+MAX_METADATA_ENTRY_BYTES = 8192
+"""The most UTF-8 bytes of a metadata entry's key and value together that SpiralDB accepts
+(measured live with spiral-sdk 0.16.78)."""
+
 STORE_KEY = "orcapod.store"
 PATH_KEY = "orcapod.path"
 LAYOUT_KEY = "orcapod.layout"
@@ -168,12 +172,20 @@ def store_table_metadata(
         )
     if not data_context_key:
         raise ValueError("a store table records the data context that created it")
-    return {
+    record = {
         STORE_KEY: STORE_FORMAT.encode(),
         PATH_KEY: path_json,
         LAYOUT_KEY: path[-1].encode(),
         DATA_CONTEXT_KEY: data_context_key.encode(),
     }
+    for key, value in record.items():
+        size = len(key.encode()) + len(value)
+        if size > MAX_METADATA_ENTRY_BYTES:
+            limit = MAX_METADATA_ENTRY_BYTES
+            raise ValueError(
+                f"the metadata entry {key!r} is {size} bytes, over SpiralDB's {limit}"
+            )
+    return record
 
 
 def read_store_table_metadata(metadata: Mapping[str, bytes]) -> StoreTableRecord | None:
@@ -214,6 +226,12 @@ def read_store_table_metadata(metadata: Mapping[str, bytes]) -> StoreTableRecord
             f"its path is not a list of names: {path!r}"
         )
     components = tuple(cast("list[str]", items))
+    try:
+        _ = _path_json(components)  # what a writer refuses is refused on read too
+    except ValueError as exc:
+        raise SpiralStoreTableCollisionError(
+            f"its path cannot be named: {exc}"
+        ) from exc
     if layout != components[-1]:
         raise SpiralStoreTableCollisionError(
             f"its layout {layout!r} is not its path's last component {components[-1]!r}"
@@ -235,5 +253,5 @@ def require_store_table_path(record: StoreTableRecord, path: Sequence[str]) -> N
     """
     if record.path != tuple(path):
         raise SpiralStoreTableCollisionError(
-            f"it records path {'/'.join(record.path)!r}, not {'/'.join(path)!r}"
+            f"it records path {list(record.path)}, not {list(path)}"
         )

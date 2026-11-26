@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import threading
 import types
 import urllib.parse
 import uuid
@@ -80,6 +81,9 @@ RULES = {
 }
 
 _MAX_METADATA_KEY_BYTES = 255
+# Upserts of metadata are atomic on the service (two clients' keys are all kept); the
+# fake's stores are in one process.
+_metadata_lock = threading.Lock()
 _MAX_METADATA_ENTRY_BYTES = 8192
 
 _ROOT_ENV = "FAKE_SPIRAL_SDK_ROOT"
@@ -378,11 +382,12 @@ class _Store:
                 or size + len(value) > _MAX_METADATA_ENTRY_BYTES
             ):
                 raise _status(400)
-        stored = self.metadata(table_id)
-        stored.update(entries)
-        _ = (self.root / table_id / "metadata.json").write_text(
-            json.dumps({k: v.hex() for k, v in stored.items()})
-        )
+        with _metadata_lock:  # one upsert at a time: concurrent keys are all kept
+            stored = self.metadata(table_id)
+            stored.update(entries)
+            _ = (self.root / table_id / "metadata.json").write_text(
+                json.dumps({k: v.hex() for k, v in stored.items()})
+            )
 
     def keys(self, table_id: str) -> pa.Schema:
         """Return a table's key schema."""

@@ -27,7 +27,8 @@ def test_the_digest_is_sha256_of_the_canonical_json_of_the_components() -> None:
 
 
 def test_the_label_names_the_algorithm() -> None:
-    assert names.SPIRAL_TABLE_NAME_LABEL == "spiral_table_name_v1"
+    # The label is defined once, in the module (the hash label rule): not repeated here.
+    assert re.fullmatch(r"[a-z_]+_v[0-9]+", names.SPIRAL_TABLE_NAME_LABEL)
     # A hash in a name is bare hex: the label is not written into the name.
     assert names.SPIRAL_TABLE_NAME_LABEL not in names.store_table_name(RESULT)
 
@@ -178,3 +179,31 @@ def test_a_table_of_another_path_under_the_name_is_refused() -> None:
     assert found is not None
     with pytest.raises(SpiralStoreTableCollisionError, match="rdb_v1"):
         names.require_store_table_path(found, PIPELINE)
+
+
+def test_a_record_with_an_entry_over_the_service_s_limit_is_refused() -> None:
+    # Review of PR 589, finding 2: the data context key is the caller's text too.
+    with pytest.raises(ValueError, match="8192"):
+        _ = names.store_table_metadata(PIPELINE, "x" * 8192)
+
+
+def test_a_recorded_path_that_writers_refuse_is_refused_on_read() -> None:
+    # Review of PR 589, finding 3: JSON can spell a lone surrogate, which no writer writes.
+    record = {
+        **names.store_table_metadata(RESULT, "std:v1:default"),
+        "orcapod.path": b'["\\ud800","rdb_v1"]',
+    }
+    with pytest.raises(SpiralStoreTableCollisionError, match="UTF-8"):
+        _ = names.read_store_table_metadata(record)
+
+
+def test_the_collision_message_keeps_components_apart() -> None:
+    # Review of PR 589, finding 4: ("a/b", ...) and ("a", "b", ...) must read differently.
+    found = names.read_store_table_metadata(
+        names.store_table_metadata(("a/b", "rdb_v1"), "std:v1:default")
+    )
+    assert found is not None
+    with pytest.raises(SpiralStoreTableCollisionError) as raised:
+        names.require_store_table_path(found, ("a", "b", "rdb_v1"))
+    assert "['a/b', 'rdb_v1']" in str(raised.value)
+    assert "['a', 'b', 'rdb_v1']" in str(raised.value)
