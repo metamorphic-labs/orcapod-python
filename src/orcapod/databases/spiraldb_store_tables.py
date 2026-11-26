@@ -751,14 +751,19 @@ def _one_data_context(records: pa.Table) -> str:
     Raises:
         ValueError: If there is no data context column, a null in it, or two values.
         InputValidationError: If the key is not one of a data context this Orcapod
-            has (an unknown or a short key), naming it.
+            has (an unknown, a short or an empty key), naming it.
     """
     if DATA_CONTEXT_COLUMN not in records.column_names:
         raise ValueError(
             f"a SpiralDB store keeps rows with a {DATA_CONTEXT_COLUMN!r} column only"
         )
     values = pc.unique(records.column(DATA_CONTEXT_COLUMN)).to_pylist()
-    if len(values) != 1 or not isinstance(values[0], str) or not values[0]:
+    if values == [""]:
+        raise InputValidationError(
+            "the rows' data context '' is not one this Orcapod has: a table recording "
+            "it could not be read"
+        )
+    if len(values) != 1 or not isinstance(values[0], str):
         raise ValueError(
             f"rows of one write to a SpiralDB store hold one data context, not {values}"
         )
