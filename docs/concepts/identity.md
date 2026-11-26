@@ -21,7 +21,6 @@ What a source's identity holds depends on its kind:
 | `DerivedSource` without `tags_as_data` (`node.as_source()`) | the content hash of the job node it reads, and nothing else: a `source_id` you give changes its name, not its content hash |
 | `DerivedSource` or `SpiralDBTableSource` with `tags_as_data` | its `source_id`, its schema, its key columns and the `tags_as_data` mapping |
 | `PollingSource` | its `source_id`, what its implementation states as its identity (`impl.identity()`), its tag columns and its key columns; not its schema |
-| `CachedSource` | the identity of the source it wraps |
 | `SourceProxy` (stands in for a source that a loaded job could not rebuild) | the content hash and the pipeline hash saved with the job |
 
 - The `source_id` is the kind of source, the version of that kind and the source's name, as
@@ -40,8 +39,8 @@ What the name in the `source_id` is depends on how the source was created:
 - File- and table-backed sources default to a name derived from their location (the file
   path for `CSVSource`, the table folder's path or URI for `DeltaTableSource`), not from the
   rows.
-- If you pass `source_id` yourself, you are naming the source: its rows are then no part of
-  its identity, which is what the table above lists for its kind.
+- If you pass `source_id` yourself, that is the name. What the identity then holds is in the
+  table above.
 
 Two sources that differ only in their key columns name the same rows differently, so they
 are two sources: different content hashes (each gets its own cache), the same pipeline hash

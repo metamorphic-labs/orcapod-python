@@ -1023,12 +1023,10 @@ print(len({s.source_id for s in as_given}))
 # 3
 ```
 
-A source given a `source_id` is an address: its content hash is built from what
-[Identity](identity.md#content_hash-recursive-source-inclusive-identity) lists for its kind
-(for most kinds its `source_id`, schema and key columns), never from its rows, so changing the rows changes it only when the
-schema changes (a column of another type). This holds for `ListSource` too (developer,
-November 21, 2026, ITL-1272): its elements and its tag function enter its identity only through
-its default `source_id` and its output schema.
+What a source's content hash is built from is listed, for each kind of source, in
+[Identity](identity.md#content_hash-recursive-source-inclusive-identity). A `ListSource`
+has no rule of its own (developer, November 21, 2026, ITL-1272): its elements and its tag
+function enter its identity only through its default `source_id` and its output schema.
 
 These columns are hidden by default. You can reveal them using `ColumnConfig`:
 

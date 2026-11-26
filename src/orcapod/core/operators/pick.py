@@ -1,4 +1,4 @@
-"""Pick operator — keyed projection into dict/struct-typed columns."""
+"""Pick operator — keyed projection into dict-typed columns."""
 
 from __future__ import annotations
 
@@ -25,13 +25,16 @@ logger = logging.getLogger(__name__)
 
 
 class Pick(UnaryOperator):
-    """Extract a value from a struct- or dict-typed data column by key.
+    """Extract a value from a dict-typed data column by key.
 
     For ``dict[K, V]`` columns the lookup is per-packet; if the key is absent
     the packet is skipped (or an error is raised when ``fail_on_miss=True``).
 
-    For extension-type struct columns (Pydantic, dataclass) the field
-    existence is validated at build time and guaranteed at runtime.
+    ``dict[K, V]`` is the only built-in column type ``Pick`` reads. A column of a
+    logical type is read only when that type defines ``pick_field``, which gives
+    the type of the named field; no built-in type does. So an Arrow struct column
+    and a column of a dataclass, an ``orcapod.dataclass`` or a pydantic model are
+    refused with ``InputValidationError`` when the operator is applied (ITL-1494).
 
     The extracted column keeps the value's Arrow type (``dict[str, int16]``
     yields ``int16``). Its nullability follows the predicted output type, which
@@ -41,7 +44,8 @@ class Pick(UnaryOperator):
 
     Args:
         column: Name of the data column to project into.
-        key: Dict key or struct field name to extract.
+        key: Dict key to extract (for a logical type with ``pick_field``, the
+            field name).
         out: Output column name.  ``None`` (default) replaces ``column``
             in-place; a string adds a new column alongside the original.
         fail_on_miss: If ``True``, raise ``RuntimeError`` when the key is

@@ -1215,8 +1215,10 @@ type cannot be a tag (a list, a struct, your own class) are refused. The full ru
 
 `Pick(column, key)` extracts one entry from a dict-typed data column (`dict[K, V]`), and
 `Index(column, i)` extracts one element from a list-typed data column (for example, a column
-produced by `Batch` or `GroupBy`). See the [API reference](../api/operators.md). `Pick`
+produced by `Batch` or `GroupBy`). `dict[K, V]` is the only built-in type `Pick` reads: it
 refuses a struct column and a column of your own class today, with `InputValidationError`.
+A custom logical type can take part by defining `pick_field`; see the
+[API reference](../api/operators.md).
 
 With `out=None` the extracted value replaces the column in place; with `out="name"` it is added
 as a new column and the original is kept. When the column is a [data-tag](data-tags.md),
