@@ -1,0 +1,20 @@
+
+== 1. the pipeline table of g: columns and the nesting, recomputed from the row
+   layout: pdb_v2
+   id columns: ['__data_id', '__pipeline_instance_id', '__pipeline_record_id', '__pipeline_run_id']
+   entry id stored here? False
+   instance id = hash(entry id, tokens): 2/2 rows
+   record id (row key, __pipeline_record_id) = hash(instance id, result id): 2/2 rows
+
+== 2. the side-effect log: keyed by the entry id only, layout tdb_v2
+   layout: tdb_v2 | log columns: ['__log_key', 'record_id_hash', 'pipeline_run_id', 'executed_at', '__data_context']
+   log keys == entry ids of tell's input rows: True
+
+== 3. f's results are lost; a new job runs (only the tokens downstream change)
+   calls before {'f': 2, 'g': 2, 'fired': 2} after {'f': 4, 'g': 2, 'fired': 2}
+   g rows: 2 -> 4 | distinct instance ids: 4
+   g computed again? False | tell fired again? False
+
+== 4. a side-effect log of the old layout (tdb_v1) beside it: refused before delivery
+   SideEffectLogDataContextError: Node 'tell' performs side effects, and its stored completions were log ...
+   delivered: 0

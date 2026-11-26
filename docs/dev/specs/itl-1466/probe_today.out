@@ -1,0 +1,47 @@
+1 which objects have as_source
+  root source                              False
+  operator stream                          False
+  function stream                          False
+  raw stream                               False
+  SourceJobNode sessions                   False
+  SourceJobNode units                      False
+  FunctionJobNode single                   True
+  OperatorJobNode joined                   True
+  FunctionJobNode rated                    True
+2 plain as_source bound into a new job
+  single: 3
+  rated: SourceSpecMismatchError: SourceNode 'semantic_v1:1f7f31854fb648c02a17a819245eedbe63ce0848998062ec7e654f8995bf424d' is not compatible with the provided source. a source must carry exactly one source-id and one record-id system-tag column and no other, not 
+3 operator node, cache OFF / LOG
+  OFF rows 0 | node shows 3
+4 explicit source_id and the content hash
+  content equal: True ids derived_v1:a derived_v1:b
+  tags_as_data={} content equal: False | pipeline equal to plain: True
+5 what rows of a plain source carry (single-pair origin)
+  {'_source_dbl': [None, None, None]}
+6 same origin, plain against a fresh root, one downstream store (what breaking costs)
+  plain, then fresh root, same store: OrcapodDatabaseWriteError: Could not commit pending writes to the database for node 'next' (database 'next'): ArrowInvalid: Schema at index 1 was different: 
+__record_id: large_
+  function calls the second time: 0
+  next: stored system-tag columns []
+  plain, then an ordinary source of the same schema, same store: OrcapodDatabaseWriteError: Could not commit pending writes to the database for node 'next' (database 'next'): ArrowInvalid: Schema at index 1 was different: 
+__record_id: large_
+  fresh root, then ordinary: calls 0 rows 3
+  three rows of one value, plain: run 3 stored 3
+  three rows of one value, fresh: run 3 stored 3
+7 loaded job, moved store, warnings on
+  loaded single plain: SourceSpecMismatchError: SourceNode 'semantic_v1:3aba85fc5526c01153160b9aab3e4977395aa09d139db3db890adff88c3f9198' is not compatible with the provided source. a source must carry exactly one source-id and one record-id system-tag column and no other, not 
+  loaded rated plain: SourceSpecMismatchError: SourceNode 'semantic_v1:1f7f31854fb648c02a17a819245eedbe63ce0848998062ec7e654f8995bf424d' is not compatible with the provided source. a source must carry exactly one source-id and one record-id system-tag column and no other, not 
+  loaded joined (OFF) rows: 0
+  default id same after load: True
+  reloaded, unbound ['x']
+  reloaded stored rows: 3
+  reloaded load_only run: 0
+  moved, no database: 0
+  warnings ['OrcapodDatabaseContentWarning'] ["FunctionJobNode 'single': the job file records 3 rows for its run, but the database at '<tmp>' (tab"]
+8 two authors, same names, other data; both in one job
+  ids equal True content equal True
+  one job over both: {'a': [21, 61, 101]}
+  one store, one after the other: (stored for the node, second run's rows): ([21, 61, 101, 1999], [61, 101, 1999])
+9 stored history: a corrected value and shifted rows
+  corrected: run 3 as_source [{'subject': 'm1', 'unit': 'u1', 'dbl': 20}, {'subject': 'm1', 'unit': 'u2', 'dbl': 60}, {'subject': 'm2', 'unit': 'u1', 'dbl': 100}, {'subject': 'm1', 'unit': 'u1', 'dbl': 1998}]
+10 derived over a keyed source: record ids [['row_0', 'row_1', 'row_2']]
