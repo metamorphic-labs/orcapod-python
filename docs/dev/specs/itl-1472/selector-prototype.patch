@@ -1,0 +1,55 @@
+diff --git a/src/orcapod/core/function_pod.py b/src/orcapod/core/function_pod.py
+index 8a24c3b4..528e1179 100644
+--- a/src/orcapod/core/function_pod.py
++++ b/src/orcapod/core/function_pod.py
+@@ -844,7 +844,7 @@ class _FunctionPodBase(TraceableBase):
+             self._validate_input_schema(
+                 Schema({name: data_schema[name] for name in checked})
+             )
+-            from orcapod.core.operators import SelectDataColumns
++            from orcapod.core.operators.column_selection import FunctionInputSelect
+ 
+             logger.info(
+                 "Function pod %r: dropped data columns %s, which are not "
+@@ -855,7 +855,14 @@ class _FunctionPodBase(TraceableBase):
+             # The select is Orcapod's own step: the data-tags it turns into
+             # plain tags are not reported (ITL-1023).
+             with materialization_diagnostic_off():
+-                input_stream = SelectDataColumns(columns=kept)(input_stream)
++                served = (
++                    FallThroughPod(fall_through_pod, data_tags)
++                    if fall_through_pod is not None and data_tags
++                    else self
++                )
++                input_stream = FunctionInputSelect(columns=kept, pod=served)(
++                    input_stream
++                )
+         if fall_through_pod is not None and data_tags:
+             return FallThroughPod(fall_through_pod, data_tags).process(
+                 input_stream, label=label
+diff --git a/src/orcapod/core/operators/column_selection.py b/src/orcapod/core/operators/column_selection.py
+index cbc6570b..65ad2376 100644
+--- a/src/orcapod/core/operators/column_selection.py
++++ b/src/orcapod/core/operators/column_selection.py
+@@ -347,6 +347,21 @@ class SelectDataColumns(UnaryOperator):
+         )
+ 
+ 
++class FunctionInputSelect(SelectDataColumns):
++    """PROTOTYPE (ITL-1472, O34): the column selection a function pod adds for itself.
++
++    Its identity includes the pod it serves, so two pods taking the same columns of
++    one stream have two selector nodes.
++    """
++
++    def __init__(self, columns: str | Collection[str], pod: Any, **kwargs):
++        self.pod = pod
++        super().__init__(columns, strict=True, **kwargs)
++
++    def identity_structure(self) -> Any:
++        return (self.__class__.__name__, list(self.columns), self.pod)
++
++
+ class DropTagColumns(UnaryOperator):
+     """
+     Operator that drops specified columns from a stream.
