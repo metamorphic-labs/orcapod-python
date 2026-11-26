@@ -9,7 +9,7 @@ Evidence marks: **[read]** read on `main` (0d1e017c) or on the branch named; **[
 `docs/dev/scripts/itl_1472/prototype.py`, heading N: `main` with four replacements made in the script's own
 process (use keys in place of content hashes when recording, numbered slot names, job nodes equal by object, the
 restriction refusals off). The prototype is not the design: it leaves the restriction on the bound source. Each
-script's output is the `.out` file beside it.
+script's output is the `.out` file beside it. **[impact]** is the test run of section 12 on the prototype.
 
 ## 1. The problem on main
 
@@ -73,6 +73,9 @@ one join node as today (object identity counts at the leaves only: **D1**), and 
 two slots. Two separate objects are two slots even when equal in everything, a restriction included (decision 3;
 its consequence for a source built afresh at each use is **D2**). Checked [proto 7]: `f(a), f(b), f(a)` over two
 equal `DictSource` objects gives two slots and two nodes.
+
+A stream that is one of the pipeline's own compiled nodes (`Batch()(job.nodes["f"])` in a later `with` block)
+has that node's key, found by object; the prototype took it for a new leaf and built `f` twice [impact].
 
 **Compile.** Slots first, then pods in topological order; each node is created over its upstream *nodes*. Then
 names, then every map is re-keyed by name; build keys and handles are dropped. A build key is never saved.
@@ -266,6 +269,12 @@ probe on `(events_1, double_1, 0)` never sees rows of `events_2`.
 
 - [proto 1] the twins' content hash, pipeline hash and `node_uri` equal the single-use node's.
 - [proto] the golden suite run with the prototype applied (`prototype_plugin.py`): 2577 passed, 0 failed.
+- **[impact]** `tests/test_pipeline`, the `where` tests and `test_order_invariance.py` with the prototype applied
+  (`impact_run.out`): 7169 passed, 168 failed. 156 are in the `where` tests: by their names, the refusals of section 8 (switched
+  off) and tests that equal objects are one source (D2); not examined one by one. 6 are the
+  compiled-node case of section 4. 3 read `_source_streams` by content hash. 3 are D2 met in an existing test:
+  `test_job_node_rows_after_run.py` builds its source twice in one job and binds the slot `s`, which is now
+  `s_1` and `s_2`. No failure is a hash, a stored value or a row.
 - Nothing is added to a stored table; no layout marker changes.
 
 What does change, none of it a hash:
@@ -312,7 +321,7 @@ Each stage is one pull request against `main`; targeted tests locally, the suite
 | # | Question | Options | Recommendation |
 |---|---|---|---|
 | D1 | Where does object identity count while building? | (a) at leaves only; a stream above the leaves is keyed by its pod and its inputs. (b) at every stream | **(a)**: `f(a.join(b)); g(a.join(b))` keeps one join node, as today |
-| D2 | A source built afresh at each use (`A.where(day=1)` written twice; a helper that returns a new source object per call): one slot today | (a) decision 3 as written: two slots, two reads, numbered names. (b) merge separate objects of one identity and one restriction when the source has a location (not in-memory) | **(a)**: one object, one slot is the rule a user can predict; the docs say to keep a source in a variable. It changes one accepted test and any code that builds a source per use: confirm |
+| D2 | A source built afresh at each use (`A.where(day=1)` written twice; a helper that returns a new source object per call): one slot today | (a) decision 3 as written: two slots, two reads, numbered names. (b) merge separate objects of one identity and one restriction when the source has a location (not in-memory) | **(a)**: one object, one slot is the rule a user can predict; the docs say to keep a source in a variable. It changes two existing tests [impact] and any code that builds a source per use: confirm |
 | D3 | Edge identity: name or hash? | (a) the name triple. (b) a labelled hash of the triple | **(a)**: it is a name already; a hash adds a label and an inventory row and identifies nothing more |
 | D4 | Numbering uses that nothing else tells apart | (a) registration order, as an `ORDER_EXCEPTIONS` entry. (b) refuse them unless the pods are labelled | **(a)**; (b) refuses `f(a); f(b)` over equal sources, which decision 3 allows |
 | D5 | Two nodes of one identity as dictionary keys | (a) compiled nodes compare by object. (b) keep content equality and key every container by name | **(a)**: smaller, and a node is a place in a graph, not a value. Stage 1 alone shows what relied on content equality |

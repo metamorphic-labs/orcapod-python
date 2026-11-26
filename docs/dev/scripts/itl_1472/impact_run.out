@@ -1,0 +1,46 @@
+$ PYTHONPATH=docs/dev/scripts/itl_1472 uv run pytest -p prototype_plugin tests/test_pipeline \
+    tests/test_core/sources/test_spiraldb_table_source_where.py tests/test_core/test_order_invariance.py -q -rf
+===== 168 failed, 7169 passed, 6 skipped, 122 xfailed in 362.40s (0:06:02) =====
+
+Failures per file:
+ 156 tests/test_core/sources/test_spiraldb_table_source_where.py
+   6 tests/test_pipeline/test_async_error_policy.py
+   3 tests/test_pipeline/test_pipeline_base_recording.py
+   3 tests/test_pipeline/test_job_node_rows_after_run.py
+
+Failed tests:
+   4 tests/test_core/sources/test_spiraldb_table_source_where.py::TestASlotOverTwoTables::test_a_bind_reading_a_source_two_ways_is_refused_before_anything_changes
+   6 tests/test_core/sources/test_spiraldb_table_source_where.py::TestASlotOverTwoTables::test_a_cache_over_the_slot_is_refused_naming_each_restriction
+   3 tests/test_core/sources/test_spiraldb_table_source_where.py::TestASlotOverTwoTables::test_a_slot_rebound_directly_is_refused_when_the_run_starts
+   6 tests/test_core/sources/test_spiraldb_table_source_where.py::TestBindingTwoSlotsOverOneSource::test_conflicting_restrictions_are_refused_and_nothing_changes
+   2 tests/test_core/sources/test_spiraldb_table_source_where.py::TestBindingTwoSlotsOverOneSource::test_one_slot_changed_away_from_the_other_is_refused
+   8 tests/test_core/sources/test_spiraldb_table_source_where.py::TestBindOfADatabaseOverARestrictedSlot::test_a_slot_over_a_restricted_slot_is_refused_before_anything_changes
+   2 tests/test_core/sources/test_spiraldb_table_source_where.py::TestBindOfADatabaseOverARestrictedSlot::test_nothing_changes_and_a_second_bind_behaves_alike
+   3 tests/test_core/sources/test_spiraldb_table_source_where.py::TestConditionInstances::test_equal_float_conditions_are_one_restriction_in_a_pipeline
+   6 tests/test_core/sources/test_spiraldb_table_source_where.py::TestOneRestrictionPerSource::test_chains_built_before_the_job_over_two_restrictions_are_refused
+   2 tests/test_core/sources/test_spiraldb_table_source_where.py::TestOneRestrictionPerSource::test_one_restriction_through_two_chains_is_accepted
+  27 tests/test_core/sources/test_spiraldb_table_source_where.py::TestOneRestrictionPerSource::test_two_restrictions_of_one_source_are_refused_whatever_the_chains
+   8 tests/test_core/sources/test_spiraldb_table_source_where.py::TestOperatorCacheEntryPoints::test_assigning_restricted_upstreams_is_refused
+   2 tests/test_core/sources/test_spiraldb_table_source_where.py::TestOperatorCacheEntryPoints::test_async_execute_over_a_restricted_slot_is_refused
+   8 tests/test_core/sources/test_spiraldb_table_source_where.py::TestOperatorCacheEntryPoints::test_execute_over_restricted_streams_is_refused
+   6 tests/test_core/sources/test_spiraldb_table_source_where.py::TestOperatorCacheOverARestriction::test_a_slot_rebound_directly_is_refused_when_the_run_starts
+   8 tests/test_core/sources/test_spiraldb_table_source_where.py::TestOperatorCacheOverARestriction::test_binding_a_restricted_source_under_a_cache_is_refused
+  16 tests/test_core/sources/test_spiraldb_table_source_where.py::TestOperatorCacheOverARestriction::test_setting_the_cache_mode_over_a_restricted_source_is_refused
+   6 tests/test_core/sources/test_spiraldb_table_source_where.py::TestOperatorCacheOverARestriction::test_two_sources_feeding_one_operator
+   1 tests/test_core/sources/test_spiraldb_table_source_where.py::TestRestrictionsCheckedLive::test_a_slot_rebound_after_the_last_invocation_is_refused_at_compile
+   2 tests/test_core/sources/test_spiraldb_table_source_where.py::TestRestrictionsCheckedLive::test_a_slot_rebound_between_invocations_is_refused_at_the_next
+   1 tests/test_core/sources/test_spiraldb_table_source_where.py::TestRestrictionsCheckedLive::test_a_slot_rebound_to_an_equal_restriction_is_accepted
+   2 tests/test_core/sources/test_spiraldb_table_source_where.py::TestRestrictionThroughWrappers::test_a_proxy_and_a_source_restricted_two_ways_are_refused_at_capture
+  16 tests/test_core/sources/test_spiraldb_table_source_where.py::TestRestrictionThroughWrappers::test_a_proxy_bound_to_a_restricted_source_is_refused_under_a_cache
+   1 tests/test_core/sources/test_spiraldb_table_source_where.py::TestRunsAndSavedJobs::test_a_refused_invocation_records_nothing
+   6 tests/test_core/sources/test_spiraldb_table_source_where.py::TestRunsAndSavedJobs::test_a_stream_with_the_hash_of_a_captured_output_is_checked
+   1 tests/test_core/sources/test_spiraldb_table_source_where.py::TestRunsAndSavedJobs::test_one_table_restricted_two_ways_in_one_job_is_refused
+   1 tests/test_core/sources/test_spiraldb_table_source_where.py::TestRunsAndSavedJobs::test_one_table_with_two_limits_in_one_job_is_refused
+   1 tests/test_core/sources/test_spiraldb_table_source_where.py::TestRunsAndSavedJobs::test_streams_built_before_the_capture_are_checked_too
+   1 tests/test_core/sources/test_spiraldb_table_source_where.py::TestRunsAndSavedJobs::test_two_inputs_of_one_invocation_are_checked
+   6 tests/test_pipeline/test_async_error_policy.py::test_an_aggregate_downstream_stores_nothing_after_fail_fast
+   2 tests/test_pipeline/test_job_node_rows_after_run.py::TestSameJobRebound::test_each_run_returns_its_inputs_rows
+   1 tests/test_pipeline/test_job_node_rows_after_run.py::TestSameJobRebound::test_sync_and_async_agree_row_for_row
+   1 tests/test_pipeline/test_pipeline_base_recording.py::TestRecordFunctionPodInvocation::test_compile_creates_source_node_for_unregistered_upstream
+   1 tests/test_pipeline/test_pipeline_base_recording.py::TestRecordFunctionPodInvocation::test_record_function_pod_captures_source_stream
+   1 tests/test_pipeline/test_pipeline_base_recording.py::TestRecordOperatorPodInvocation::test_record_operator_captures_both_source_streams
