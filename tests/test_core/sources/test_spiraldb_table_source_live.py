@@ -14,10 +14,13 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
+from typing import Any
 
+import pyarrow as pa
+import pyarrow.compute as pc
 import pytest
 
-from orcapod import PipelineJob, function_pod
+from orcapod import PipelineJob, col, function_pod
 from orcapod.databases import DeltaTableDatabase
 from orcapod.errors import SourceTooLargeError
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
@@ -165,3 +168,71 @@ def test_tags_as_data_gives_each_unit_its_spike_times_in_time_order():
     assert sum(len(r["spike_time_us"]) for r in rows) == spikes.as_table().num_rows
     for row in rows:
         assert row["spike_time_us"] == sorted(row["spike_time_us"])
+
+
+def _one_unit() -> tuple[SpiralDBTableSource, list[Any]]:
+    """Return a source on the first unit's rows, and that unit's sorted timestamps."""
+    first = SpiralDBTableSource(PROJECT, "spike_event", limit=1, tag_only_columns=True)
+    unit_id = first.as_table().column("unit_id")[0].as_py()
+    unit = SpiralDBTableSource(
+        PROJECT, "spike_event", max_rows=None, tag_only_columns=True
+    ).where(unit_id=unit_id)
+    times: list[Any] = sorted(
+        t for t in unit.as_table().column("timestamp").to_pylist() if t is not None
+    )
+    if len(times) < 8:
+        pytest.skip("the first unit holds too few rows for a window")
+    return unit, times
+
+
+def test_a_window_reads_the_rows_a_local_filter_keeps():
+    """A window of ``timestamp`` (with the unit's equality) reads exactly the rows of
+    the whole unit that pyarrow keeps, with their record ids, in either argument order
+    (ITL-998)."""
+    unit, times = _one_unit()
+    start, stop = times[len(times) // 4], times[len(times) // 2]
+    whole = unit.as_table(all_info=True)
+    kind = whole.schema.field("timestamp").type
+    expected = whole.filter(
+        pc.and_(
+            pc.greater_equal(whole["timestamp"], pa.scalar(start, kind)),
+            pc.less(whole["timestamp"], pa.scalar(stop, kind)),
+        )
+    )
+
+    for bounds in (
+        (col("timestamp") >= start, col("timestamp") < stop),
+        (col("timestamp") < stop, col("timestamp") >= start),
+    ):
+        window = unit.where(*bounds)
+        assert window.as_table(all_info=True).equals(expected)
+        assert window.content_hash() == unit.content_hash()
+    assert expected.num_rows > 0
+
+
+def test_a_window_with_a_limit_and_head_reads_its_first_rows():
+    unit, times = _one_unit()
+    window = unit.where(col("timestamp") >= times[2])
+
+    first = window.as_table()["timestamp"].to_pylist()
+    assert first == [t for t in times if t >= times[2]]
+    assert (
+        unit.where(col("timestamp") >= times[2])
+        .head(3)
+        .as_table()["timestamp"]
+        .to_pylist()
+        == first[:3]
+    )
+    limited = SpiralDBTableSource(
+        PROJECT, "spike_event", limit=2, max_rows=None, tag_only_columns=True
+    ).where(unit.condition, col("timestamp") >= times[2])
+    assert limited.as_table()["timestamp"].to_pylist() == first[:2]
+
+
+def test_an_empty_window_reads_no_row_with_the_full_schema():
+    unit, times = _one_unit()
+    empty = unit.where(col("timestamp") >= times[3], col("timestamp") < times[3])
+
+    table = empty.as_table(all_info=True)
+    assert table.num_rows == 0
+    assert table.schema == unit.as_table(all_info=True).schema

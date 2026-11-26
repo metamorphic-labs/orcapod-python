@@ -7,6 +7,7 @@ A condition knows nothing of a source or a limit (ITL-1218); the source-side beh
 from __future__ import annotations
 
 import datetime as dt
+import itertools
 import json
 import math
 import zoneinfo
@@ -277,6 +278,28 @@ class TestText:
 class TestSavedForm:
     """``to_config`` / ``from_config``: the saved ``where`` mapping, unchanged on disk."""
 
+    def test_equalities_are_saved_in_canonical_order(self):
+        """Order never counts in what is saved (ITL-998): two equal conditions given in
+        either order are saved as the same text; one column is saved as before."""
+        texts = {
+            json.dumps(Condition.of(dict(order)).to_config())
+            for order in itertools.permutations(
+                [("unit", 106), ("label", "a"), ("day", _DAY), ("x", 1.5)]
+            )
+        }
+
+        assert texts == {
+            '{"day": {"date": "2026-11-20"}, "label": "a", "unit": 106, "x": 1.5}'
+        }
+        assert json.dumps(Condition.of(unit=106).to_config()) == '{"unit": 106}'
+
+    def test_a_mapping_saved_in_the_order_given_loads_equal(self):
+        """A file written before (keys in the order given) loads to the same condition."""
+        loaded = Condition.from_config({"unit": 106, "label": "a"})
+
+        assert loaded == Condition.of(label="a", unit=106)
+        assert json.dumps(loaded.to_config()) == '{"label": "a", "unit": 106}'
+
     def test_the_saved_form_is_the_mapping(self):
         """Dates, datetimes and bytes are tagged; other values are as they are."""
         condition = Condition.of(
@@ -308,9 +331,10 @@ class TestSavedForm:
         loaded = Condition.from_config(saved)
 
         assert loaded == condition
-        assert [type(v) for v in loaded.equalities.values()] == [
-            type(v) for v in condition.equalities.values()
-        ]
+        # By column: what is saved is in canonical order, not the order given.
+        assert {c: type(v) for c, v in loaded.equalities.items()} == {
+            c: type(v) for c, v in condition.equalities.items()
+        }
 
     def test_an_empty_mapping_reads_as_the_empty_condition(self):
         """A source saved without ``where`` reads as no condition."""

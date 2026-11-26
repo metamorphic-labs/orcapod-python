@@ -36,6 +36,7 @@ from orcapod.errors import (
 from orcapod.nodes import FunctionJobNode
 from orcapod.sources import DictSource, SpiralDBTableSource
 from orcapod.types import ColumnInfo
+from orcapod.types import Condition
 from tests.test_databases import fake_spiral_sdk as fake
 
 _ITEM = pa.field("item", pa.float32(), False)
@@ -364,7 +365,9 @@ def test_where_matches_as_the_service_does(
     project: Any, column: str, value: Any, expected: list[int]
 ) -> None:
     project.create_table("default.typed", key_schema=[("k", pa.int64())]).write(_TYPED)
-    batches = SpiralDBConnector("p").scan_batches("typed", where={column: value})
+    batches = SpiralDBConnector("p").scan_batches(
+        "typed", where=Condition.of({column: value})
+    )
     assert [k for b in batches for k in b.column("k").to_pylist()] == expected
 
 
@@ -379,7 +382,9 @@ def test_a_filter_applied_here_comes_before_the_limit(project: Any, limit: int) 
     )
     project.create_table("default.half", key_schema=[("k", pa.int64())]).write(rows)
     for where in ({"h": 2.0, "s": "x"}, {"s": "x", "h": 2.0}):
-        batches = SpiralDBConnector("p").scan_batches("half", where=where, limit=limit)
+        batches = SpiralDBConnector("p").scan_batches(
+            "half", where=Condition.of(where), limit=limit
+        )
         found = [k for b in batches for k in b.column("k").to_pylist()]
         assert found == [1, 3, 5, 7][:limit]
 
