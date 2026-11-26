@@ -239,13 +239,13 @@ def test_a_job_run_that_takes_in_new_data_makes_the_next_preview_read(
     runner = orchestrator() if orchestrator is not None else None
     _ = source.head()
     # A run that finds nothing new leaves the kept preview in use.
-    job.run(orchestrator=runner)
+    _ = job.run(orchestrator=runner)
     calls.clear()
     _ = source.head()
     assert calls == {}
     # A run that takes in a new version: the next preview reads it.
     _table().write(_rows([-2]))
-    job.run(orchestrator=runner)
+    _ = job.run(orchestrator=runner)
     calls.clear()
     after = source.head()
     assert calls["scan"] == 1
@@ -365,6 +365,9 @@ _OPTIONS: dict[str, dict[str, Any]] = {  # pyright: ignore[reportExplicitAny]
     "limit_above_rows": {"limit": 40},
     "where": {"where": {"subject": "s1"}},
     "where_limit": {"where": {"subject": "s1"}, "limit": 4},
+    # Two conditions, a tag and a data column, in both orders (CodeRabbit, 62db6a1a).
+    "where_two": {"where": {"subject": "s1", "x": 30}},
+    "where_two_reversed": {"where": {"x": 30, "subject": "s1"}},
 }
 
 
@@ -715,4 +718,117 @@ def test_a_late_store_of_the_same_key_keeps_what_is_known(
     _same_view(fewer, _fresh(tag_only_columns=True, **options).head(5))
     calls.clear()
     _ = source.head(50)
+    assert calls == {}
+
+
+# --------------------------------------------------------------------------------------
+# CodeRabbit review of 62db6a1a: a restriction of several conditions
+
+
+# Each restriction holds two conditions; its forms give them in both orders, as a
+# mapping, as keywords and as two chained ``where()`` calls.
+_TWO_CONDITIONS: dict[str, dict[str, Any]] = {  # pyright: ignore[reportExplicitAny]
+    "tag_and_data": {"subject": "s1", "x": 30},
+    "two_data": {"x": 50, "y": "v5"},
+    "two_tags": {"subject": "s0", "k": 4},
+}
+
+
+def _restricted(
+    source: SpiralDBTableSource,
+    conditions: dict[str, Any],  # pyright: ignore[reportExplicitAny]
+    form: str,
+) -> SpiralDBTableSource:
+    items = list(conditions.items())
+    if form == "mapping":
+        return source.where(dict(items))
+    if form == "mapping_reversed":
+        return source.where(dict(reversed(items)))
+    if form == "keywords_reversed":
+        return source.where(**dict(reversed(items)))
+    first, second = items if form == "chained" else list(reversed(items))
+    return source.where(dict([first])).where(dict([second]))
+
+
+_FORMS = [
+    "mapping",
+    "mapping_reversed",
+    "keywords_reversed",
+    "chained",
+    "chained_reversed",
+]
+
+
+@pytest.mark.parametrize("form", _FORMS)
+@pytest.mark.parametrize("conditions", sorted(_TWO_CONDITIONS))
+@pytest.mark.parametrize("tag_only", [True, ()], ids=["plain_tags", "data_tags"])
+def test_a_restriction_of_two_conditions_keeps_its_preview_in_any_order(
+    calls: collections.Counter[str],
+    tag_only: bool | tuple[str, ...],
+    conditions: str,
+    form: str,
+) -> None:
+    """Two conditions, given in any order and form, are one restriction: its kept
+    preview is the view a fresh source of the same form gives (the header names the
+    conditions in the order given, as on ``main``), its rows are those of the first
+    order, and a second preview makes no call."""
+    given = _TWO_CONDITIONS[conditions]
+
+    def fresh() -> SpiralDBTableSource:
+        return _restricted(_source(tag_only_columns=tag_only), given, form)
+
+    source = fresh()
+    reference = _source(tag_only_columns=tag_only).where(**given)
+    assert source.condition == reference.condition
+    calls.clear()
+    seen = source.head(10)
+    assert calls["scan"] == 1
+    assert seen.table.num_rows == 1
+    assert seen.table.equals(reference.head(10).table, check_metadata=True)
+    calls.clear()
+    for n in (10, 1, 0):
+        kept = source.head(n, columns={"source": True, "system_tags": True})
+        assert "scan" not in calls, n
+        _same_view(kept, fresh().head(n, columns={"source": True, "system_tags": True}))
+        calls.clear()
+        _ = source.head(n)
+        assert calls == {}, n
+
+
+@pytest.mark.parametrize("orchestrator", [None, AsyncPipelineOrchestrator])
+@pytest.mark.parametrize("reversed_order", [False, True], ids=["given", "reversed"])
+def test_a_job_over_a_source_of_two_conditions_keeps_and_renews_its_preview(
+    calls: collections.Counter[str],
+    orchestrator: type[AsyncPipelineOrchestrator] | None,
+    reversed_order: bool,
+) -> None:
+    """A run that finds nothing new leaves the kept preview of a two-condition
+    restriction in use; a run that takes in a new version makes the next preview read
+    it, on the sync and the async path."""
+    conditions = {"subject": "s1", "y": "v7"}
+    if reversed_order:
+        conditions = dict(reversed(list(conditions.items())))
+    source = _source(tag_only_columns=True, where=conditions)
+    job = PipelineJob(name="kept-preview-two", database=InMemoryArrowDatabase())
+    with job:
+        SelectColumns(["subject", "k", "x"])(source, label="read")
+    runner = orchestrator() if orchestrator is not None else None
+    assert source.head().table["k"].to_pylist() == [7]
+    _ = job.run(orchestrator=runner)
+    calls.clear()
+    _ = source.head()
+    assert calls == {}
+    # A new row that matches both conditions (k = 107 is odd: subject "s1").
+    _table().write(
+        pa.table(
+            {"subject": ["s1"], "k": [107], "x": [1070], "y": ["v7"]}, schema=_SCHEMA
+        )
+    )
+    _ = job.run(orchestrator=runner)
+    calls.clear()
+    after = source.head()
+    assert calls["scan"] == 1
+    assert set(after.table["k"].to_pylist()) == {7, 107}
+    calls.clear()
+    _ = source.head()
     assert calls == {}
