@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
 
-from orcapod.core.row_ids import RECORD_ID_COL
+from orcapod.core.row_ids import INSTANCE_ID_COL, RECORD_ID_COL
 from orcapod.errors import ProvenanceInconsistencyError
 from orcapod.system_constants import constants
 from orcapod.types.explanation import Step, plain_repr
@@ -336,6 +336,29 @@ def _source_snapshot(node: Any) -> pa.Table | None:
                 name = presented[0]
         renamed.append(name)
     return table.rename_columns(renamed)
+
+
+def _note_instance_ids(node: Any, rows: list[Row]) -> None:
+    """Give each held row of a function node the instance id the node holds it under.
+
+    A function node holds its rows in the order of ``held_instance_ids``: the id
+    each row was looked up and recorded under, made from the typed token columns
+    of its input (``row_ids.instance_id``). A trace selects the stored record of a
+    held row by it (ITL-1471), never by comparing token values. A node that does
+    not say (a loaded one, an operator, a source) leaves the rows as they are.
+
+    Args:
+        node: The node whose rows these are.
+        rows: Its held rows, in the node's order; changed in place.
+    """
+    held = getattr(node, "held_instance_ids", None)
+    if not callable(held):
+        return
+    ids = cast("list[bytes]", held())
+    if len(ids) != len(rows):
+        return
+    for row, instance in zip(rows, ids):
+        row[INSTANCE_ID_COL] = instance
 
 
 def _system_tags(row: Mapping[str, Any]) -> list[str]:
@@ -714,7 +737,10 @@ class _Reader:
         key = id(node)
         if key not in self.rows:
             table = self.table(node)
-            self.rows[key] = None if table is None else table.to_pylist()
+            rows = None if table is None else table.to_pylist()
+            if rows is not None:
+                _note_instance_ids(node, rows)
+            self.rows[key] = rows
         return self.rows[key]
 
     def entries(self, node: Any) -> list[Row]:
@@ -947,9 +973,13 @@ def _list_depth(cell: _Cell) -> int:
 
 
 def _entries_for(node: Any, row: Row, column: str, reader: _Reader) -> list[Row]:
-    """The node's stored entries for a held row: its system tags and its result id.
+    """The node's stored entries for a held row: its instance, system tags and result.
 
-    The entries are indexed once per call by those system-tag values.
+    The entries are indexed once per call by those system-tag values. When the node
+    says which instance it holds the row under (``_note_instance_ids``), only the
+    records of that instance are the row's: another run's record of the same entry,
+    with other input tokens, is not (ITL-1471). This holds on every branch of a
+    function step, over a source and over another node alike.
     """
     entries, _ = reader.provenance(node)
     token = row.get(constants.SOURCE_PREFIX + column)
@@ -962,19 +992,22 @@ def _entries_for(node: Any, row: Row, column: str, reader: _Reader) -> list[Row]
             by_tags.setdefault(tuple(e.get(c) for c in columns), []).append(e)
         reader.lookups[key] = by_tags
     found: list[Row] = reader.lookups[key].get(tuple(row[c] for c in columns), [])
+    instance = row.get(INSTANCE_ID_COL)
     return [
         e
         for e in found
-        if result_hex is None or bytes(e[constants.DATA_RECORD_ID]).hex() == result_hex
+        if (
+            result_hex is None or bytes(e[constants.DATA_RECORD_ID]).hex() == result_hex
+        )
+        and (instance is None or bytes(e[INSTANCE_ID_COL]) == bytes(instance))
     ]
 
 
 def _token_mismatch(entry: Row, input_row: Row) -> tuple[str, Any] | None:
     """The first input token an entry stores that is not the input row's, or ``None``.
 
-    An entry whose stored tokens are all the input row's is a record of that row's
-    instance: an instance is an entry (tags, system tags, input hash) arriving with
-    one set of source-info tokens.
+    A check of the stored record against the input row the trace found: the record
+    of a row's instance stores that row's input tokens.
 
     Args:
         entry: A stored pipeline entry.
@@ -998,8 +1031,8 @@ def _latest(entries: list[Row], node: Any) -> Row:
     """The one stored entry behind a held row; several are refused.
 
     The entries given have the row's system tags and name its result (and, past a
-    function's input, the input row's hash and its tokens: the records of the row's
-    instance). Entries for different inputs make the
+    function's input, the input row's hash), and are records of the row's instance
+    when the node says which it is. Entries for different inputs make the
     link ambiguous. Several entries for one input and one result (async execution
     can record two copies of an identical input, one reusing the other's result) each
     say something different (entry id, computed or reused, run, time recorded), and
@@ -1786,23 +1819,16 @@ class _Tracer:
             up_row = _one(
                 [r for r, _ in pairs], node, f"the input row in {upstream.label!r}"
             )
-            of_entry = [
-                e for r, e in pairs if r.get(_ROW_HASH) == up_row.get(_ROW_HASH)
-            ]
-            # The entries so far are those of the row's entry (system tags, input
-            # hash) that name its result. The row is one instance of that entry: the
-            # one with the input row's own tokens (ITL-1471). Another job's record of
-            # the same entry, with other tokens, is not this row's.
-            of_instance = [e for e in of_entry if _token_mismatch(e, up_row) is None]
-            if not of_instance:
-                name, stored = cast(
-                    "tuple[str, Any]", _token_mismatch(of_entry[0], up_row)
-                )
+            entry = _latest(
+                [e for r, e in pairs if r.get(_ROW_HASH) == up_row.get(_ROW_HASH)], node
+            )
+            mismatch = _token_mismatch(entry, up_row)
+            if mismatch is not None:
+                name, stored = mismatch
                 raise ProvenanceInconsistencyError(
                     f"node {node.label!r}: the stored entry's input token {name} "
                     f"is {stored!r}, the input row's is {up_row[name]!r}"
                 )
-            entry = _latest(of_instance, node)
             run = _function_run(node, entry, row, column, self.reader)
         else:
             up_row = _one(matched, node, f"the input row in {upstream.label!r}")
