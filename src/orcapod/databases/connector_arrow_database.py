@@ -824,67 +824,35 @@ class ConnectorArrowDatabase:
 
         Rows queued with ``skip_duplicates`` and rows queued without it are written
         as two batches, each with its own write policy, never as one (ITL-1381).
-        Each batch commits or leaves the queue on its own; the first failure is
-        raised after both were tried.
+        Each batch is taken from the queue only when it is written, so a batch not
+        yet sent stays queued, whatever interrupts the flush, and the table's schema
+        guard stays with it and checks its write too. Each batch commits or leaves
+        the queue on its own; the first failure is raised after both were tried.
         """
-        ready = self._pending_commits.take_ready(record_key)
-        if ready is None:
-            return
-        batch, ids = ready
-        skipped = self._pending_skip_existing.get(record_key, set())
-        groups = [
-            (group_ids, skip_existing)
-            for group_ids, skip_existing in (
-                (ids - skipped, False),
-                (ids & skipped, True),
-            )
-            if group_ids
-        ]
         first_error: Exception | None = None
         try:
-            for index, (group_ids, skip_existing) in enumerate(groups):
-                group = (
-                    batch
-                    if len(groups) == 1
-                    else batch.filter(
-                        pc.is_in(
-                            batch[self.RECORD_ID_COLUMN],
-                            pa.array(
-                                list(group_ids), type=batch[self.RECORD_ID_COLUMN].type
-                            ),
-                        )
-                    )
-                )
+            for skip_existing in (False, True):
+                skipped = self._pending_skip_existing.get(record_key, set())
+                queued = self._pending_record_ids.get(record_key, set())
+                among = queued & skipped if skip_existing else queued - skipped
+                ready = self._pending_commits.take_ready(record_key, among)
+                if ready is None:
+                    continue
+                batch, ids = ready
                 try:
-                    self._commit_batch(record_key, group, group_ids, skip_existing)
+                    self._commit_batch(record_key, batch, ids, skip_existing)
                 except Exception as error:
                     if first_error is None:
                         first_error = error
                     else:
                         first_error.add_note(f"The second batch also failed: {error}")
-                except BaseException:
-                    # Batches not yet tried were never sent: they stay queued.
-                    for untried_ids, _ in groups[index + 1 :]:
-                        self._pending_commits.restore(
-                            record_key,
-                            batch.filter(
-                                pc.is_in(
-                                    batch[self.RECORD_ID_COLUMN],
-                                    pa.array(
-                                        list(untried_ids),
-                                        type=batch[self.RECORD_ID_COLUMN].type,
-                                    ),
-                                )
-                            ),
-                            untried_ids,
-                        )
-                    raise
         finally:
             remaining = self._pending_record_ids.get(record_key)
-            if remaining:
-                skipped.intersection_update(remaining)
-            else:
+            skipped = self._pending_skip_existing.get(record_key)
+            if not remaining:
                 self._pending_skip_existing.pop(record_key, None)
+            elif skipped is not None:
+                skipped.intersection_update(remaining)
         if first_error is not None:
             raise first_error
 

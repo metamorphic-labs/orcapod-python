@@ -145,24 +145,41 @@ class PendingCommits:
             discarded.setdefault(key, set()).update(removed)
         self.finish_rows(key, removed, committed=False, discarded=discarded)
 
-    def take_ready(self, key: str) -> tuple[pa.Table, set[bytes]] | None:
-        """Take the records ready to commit, leaving blocked records readable."""
+    def take_ready(
+        self, key: str, among: set[bytes] | None = None
+    ) -> tuple[pa.Table, set[bytes]] | None:
+        """Take the records ready to commit, leaving blocked records readable.
+
+        Args:
+            key: The table's key.
+            among: Take only these ids (the rows of one write policy); the other
+                queued rows stay queued. ``None`` takes every ready row.
+
+        The taken and the remaining rows are built as new objects before the queue
+        is changed, so an interruption while splitting leaves the queue as it was.
+        """
         batch = self._batches.get(key)
         if batch is None or not batch.num_rows:
             return None
+        held = self._ids.get(key, set())
         blocked = {
             record_id
             for record_id, attempt in self._guards.get(key, {}).items()
             if not attempt.committed
         }
-        if not blocked:
-            return self._batches.pop(key), self._ids.pop(key, set())
-        ids = self._ids[key] - blocked
-        if not ids:
+        taken = (held if among is None else held & among) - blocked
+        if not taken:
             return None
-        self._batches[key] = self._select(batch, blocked, keep=True)
-        self._ids[key] = blocked
-        return self._select(batch, blocked, keep=False), ids
+        if taken == held:
+            self._batches.pop(key)
+            self._ids.pop(key, None)
+            return batch, taken
+        taken_rows = self._select(batch, taken, keep=True)
+        remaining_rows = self._select(batch, taken, keep=False)
+        remaining_ids = held - taken
+        self._batches[key] = remaining_rows
+        self._ids[key] = remaining_ids
+        return taken_rows, taken
 
     def restore(self, key: str, batch: pa.Table, ids: set[bytes]) -> None:
         """Restore a retryable write ahead of rows that were held back."""

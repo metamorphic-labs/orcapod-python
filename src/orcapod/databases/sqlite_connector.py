@@ -226,6 +226,11 @@ def _field_has_metadata(field: pa.Field) -> bool:
 # ---------------------------------------------------------------------------
 
 
+# The first SQLite with upsert (``INSERT ... ON CONFLICT``), which
+# ``SQLiteConnector.upsert_records`` uses (ITL-1490).
+_MIN_SQLITE_VERSION = (3, 24, 0)
+
+
 class SQLiteConnector:
     """DBConnectorProtocol implementation backed by stdlib sqlite3.
 
@@ -233,12 +238,24 @@ class SQLiteConnector:
     Thread-safe via an internal threading.RLock. Not suitable for use
     on network filesystems (NFS, SMB/CIFS) due to unreliable file locking.
 
+    Requires SQLite 3.24.0 or newer, the first with upsert
+    (``INSERT ... ON CONFLICT``).
+
     Args:
         db_path: Path to the SQLite database file, or ":memory:" for an
             in-process in-memory database. Defaults to ":memory:".
+
+    Raises:
+        RuntimeError: If the SQLite library Python uses is older than 3.24.0.
     """
 
     def __init__(self, db_path: str | os.PathLike = ":memory:") -> None:
+        if sqlite3.sqlite_version_info < _MIN_SQLITE_VERSION:
+            raise RuntimeError(
+                "SQLiteConnector needs SQLite 3.24.0 or newer (upsert, "
+                f"INSERT ... ON CONFLICT); this Python uses SQLite "
+                f"{sqlite3.sqlite_version}."
+            )
         self._db_path = db_path
         self._conn: sqlite3.Connection | None = sqlite3.connect(
             str(db_path), check_same_thread=False, isolation_level=None
@@ -464,12 +481,14 @@ class SQLiteConnector:
             records: Arrow table of records to write.
             id_column: Column used as the unique row identifier, the table's
                 primary key. Conflict handling covers this column only
-                (``ON CONFLICT (<id>)``), as PostgreSQL's does: every other
+                (``ON CONFLICT (<id>)``), as PostgreSQL's does: any other
                 constraint violation (``CHECK``, ``NOT NULL``, another ``UNIQUE``
-                column) raises and rolls the whole batch back (ITL-1490).
-            skip_existing: If True, keep the stored row of an id that already
-                exists (``DO NOTHING``). If False, update it in place
-                (``DO UPDATE``).
+                column) raises and rolls the whole batch back, unless the row is
+                skipped because its id already exists (ITL-1490).
+            skip_existing: If True, skip a row whose id already exists and keep
+                the stored row (``DO NOTHING``): nothing of that row is written,
+                so nothing else it would collide on is checked, and nothing is
+                deleted. If False, update the stored row in place (``DO UPDATE``).
         """
         with self._lock:
             conn = self._require_open()

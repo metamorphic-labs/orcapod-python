@@ -924,6 +924,76 @@ class TestFlushBehaviour:
                 b"new": 3,
             }
 
+    @staticmethod
+    def _mixed_policies(db: ConnectorArrowDatabase, path: tuple[str, ...]) -> None:
+        """Queue one ordinary row and one skip_duplicates row for one table."""
+        db.add_record(path, b"plain", make_table(v=[1]))
+        db.add_record(path, b"skipping", make_table(v=[2]), skip_duplicates=True)
+
+    @pytest.mark.parametrize(
+        "where", ["pyarrow.compute.is_in", "PendingCommits._select"]
+    )
+    def test_an_interrupt_while_splitting_by_policy_leaves_the_queue_whole(
+        self, monkeypatch: pytest.MonkeyPatch, where: str
+    ) -> None:
+        """Only a batch whose write was attempted leaves the queue: an interrupt
+        before the first policy batch is sent keeps every row queued
+        (ITL-1381, round 5)."""
+        from orcapod.databases._pending_commits import PendingCommits
+
+        with SQLiteConnector(":memory:") as connector:
+            db = ConnectorArrowDatabase(connector)
+            self._mixed_policies(db, self.PATH)
+            db.add_record(("other", "v1"), b"o", make_table(v=[3]))
+            interrupted: list[str] = []
+
+            def interrupt_once(original: Any) -> Any:
+                def wrapped(*args: Any, **kwargs: Any) -> Any:
+                    if not interrupted:
+                        interrupted.append(where)
+                        raise KeyboardInterrupt
+                    return original(*args, **kwargs)
+
+                return wrapped
+
+            with monkeypatch.context() as patch:
+                patch.setattr(pc, "is_in", interrupt_once(pc.is_in))
+                patch.setattr(
+                    PendingCommits, "_select", interrupt_once(PendingCommits._select)
+                )
+                with pytest.raises(KeyboardInterrupt):
+                    db.flush()
+            assert interrupted
+            db.flush()
+            assert self._stored_values(connector, self.PATH) == {
+                b"plain": 1,
+                b"skipping": 2,
+            }
+            assert self._stored_values(connector, ("other", "v1")) == {b"o": 3}
+
+    def test_each_policy_batch_is_checked_against_the_schema_guard(self) -> None:
+        """The table's schema guard checks every write of a split flush, not only
+        the first (ITL-1381, round 5)."""
+        checked: list[pa.Schema] = []
+
+        def refuse(schema: pa.Schema) -> None:
+            checked.append(schema)
+            raise ValueError("schema refused")
+
+        with SQLiteConnector(":memory:") as connector:
+            db = ConnectorArrowDatabase(connector)
+            with db.guard_table_schema(self.PATH, refuse):
+                self._mixed_policies(db, self.PATH)
+            with pytest.raises(
+                OrcapodDatabaseWriteError, match="schema refused"
+            ) as raised:
+                db.flush()
+            assert len(checked) == 2
+            assert "second batch also failed" in "\n".join(
+                getattr(raised.value, "__notes__", [])
+            )
+            assert ConnectorArrowDatabase(connector).get_all_records(self.PATH) is None
+
     def test_a_flush_interrupted_after_its_commit_is_never_replayed(self) -> None:
         """A BaseException during a flush removes the attempted batch as a
         failure does, names its keys, and propagates (ITL-1381, round 5)."""
