@@ -2,8 +2,8 @@
 
 Status: proposal, no library code. Round 2 (2026-11-26): this replaces the twin-node design of the first
 round. The model (section 1) is the developer's and is not reopened. Section 13 lists the decisions D1 to D11,
-each **decided on the developer's behalf, 2026-11-26, revertible**, and the one question still open, O34 (the
-automatic select as the first shared node). The implementation plan is `docs/dev/plans/itl-1472-plan.md`.
+each **decided on the developer's behalf, 2026-11-26, revertible**, and O34 (the automatic select), decided
+by the developer the same day: option (b). The implementation plan is `docs/dev/plans/itl-1472-plan.md`.
 
 Evidence marks: **[read]** read on `main` (5eb327ad); **[ran N]**
 `docs/dev/scripts/itl_1472/collapse_on_main.py`, heading N, on `main` as it is; **[proto N]**
@@ -98,11 +98,40 @@ both recording orders, and an accepted job has the same nodes, rows and scans in
 
 **The first shared node decides.** `op(A_x) -> f` and `op(A_y) -> g` conflict on `A -> op(A)` [proto 2].
 
-**Open, O34: the automatic select.** A function pod called on a table with columns it does not take adds an automatic
-`SelectDataColumns`, so `f(A_x)` and `h(A_y)` conflict whenever `f` and `h` take the same columns (one
-select node), and do not when the table has no other column or they take different ones [proto 1, 2]. The
-user wrote two different pods and no shared step. The options are in section 13; until it is answered the
-design is (a), the refusal.
+**The automatic select (O34, decided: option (b)).** A function pod called on a table with columns it does
+not take adds an automatic `SelectDataColumns`. Under the plain rule it would be the first shared node, and
+`f(A_x)` and `h(A_y)` would conflict whenever `f` and `h` take the same columns, though the user wrote two
+pods and no shared step ([proto 2] shows that refusal: the prototype has the plain rule, and (b) is designed
+here, not prototyped). So:
+
+- **Where the restriction lives.** A restriction written on the input of an automatic select passes through
+  it: it is recorded on the edge **after** the select, `select -> f`, and the edge `A -> select` is recorded
+  with none. `f(A_x)` and `h(A_y)` are then the edges `select -> f` with `x` and `select -> h` with `y`: one
+  shared select node, no conflict. `f(A_x)` and `f(A_y)` are still refused, on `select -> f`.
+- **Only the automatic select directly over the restricted source**, decided in the one place that adds it
+  (`_FunctionPodBase.__call__`), which records the select over the unrestricted source and gives the
+  restriction with its own invocation. A select the user writes (`A_x.select_data_columns(...)`) keeps the
+  plain rule: its restriction is on `A -> select`. A pod called with two inputs joins first; the restriction
+  is on the edge into the `Join`. The graph, hashes and stored tables stay those of the hand-written select.
+- **How it is read: pushed down, always.** The stream of `select -> f` under `x` is defined as the select
+  applied to the source's read under `x`, `select(A.restricted(x))`: the restriction is carried back
+  through the select to the source read. It is never a full read of the table followed by a filter of the
+  select's rows (that would be Orcapod's equality, which D7 refuses, and a column the select drops could
+  not be filtered on at all). The rule is by structure, with no mark in the record: a restriction on an edge
+  out of a `SelectDataColumns` node whose own input edge leaves a source is carried out at that source's
+  read. The condition is checked against the source's columns. Reads are counted as in section 5: one
+  pushed-down read per source and distinct restriction, shared by every edge that carries it.
+- **What the select node shows.** The full rows of its input, as the node `A` shows the whole table: the
+  select node's own rows are the select of everything, and it computes them (a full read of `A`) only when
+  its own rows are wanted: `select.run()`, or a run in which an edge out of it without a restriction feeds a
+  node that runs. A run in which every edge out of it is restricted does not run the select node; it reads
+  empty there, as a node that has not run does. The per-edge select is applied in flight and stores
+  nothing; the node's cache mode concerns its own run only.
+- **Staleness.** A node fed through such an edge does not depend on the select node having run: for the
+  state rule its upstream on that edge is the source (its bind and modified time), so `f` holds its run
+  while the select node has none.
+- **The edge view** of `select -> f` is the same stream, `select(A.restricted(x))`: a pushed-down read, with
+  the limit applied in that read.
 
 With `A.filter(x)` and `A.filter(y)` there is no conflict: seven nodes with the selects, one full scan
 [proto 3].
@@ -121,7 +150,7 @@ A node's input is the stream of its edge (section 6), in both orchestrators, thr
   is refused, **D7**). Edges with one restriction share the read [proto 5]; `MergeJoin(A, A)` is one scan [proto 4].
 - **Scans in a run:** per source node, one per distinct restriction on its edges into nodes that run, plus
   one full read only if such an edge has no restriction. `f(A_x)`, `g(A_y)`: two scans, both with a predicate,
-  none full [proto 1].
+  none full [proto 1]. An edge after an automatic select counts with its source (section 4, O34).
 - **The node `A` shows the whole table**, and reads it only when something reads `A`
   (`job.nodes["events"].as_table()`: one full scan, then [proto 1]). Being a node triggers no read: a run, the
   diagram and `head()` (a bounded read) never read `A` in full. A table too large to read whole still refuses
@@ -301,7 +330,7 @@ The stages, each one pull request against `main`, are in `docs/dev/plans/itl-147
    the unrestricted job's, scans counted (one per distinct restriction, none full); one restriction on several
    edges (one scan).
 2. Every conflict in every recording order, same error: two restrictions, restricted with unrestricted, a
-   limit against none, at the first shared node (an operator; the automatic select), across two `with` blocks;
+   limit against none, at the first shared node (an operator; a select the user wrote), across two `with` blocks;
    the same restriction written twice accepted; nothing recorded after a refusal; the filter remedy.
 3. Positions: `MergeJoin(A_x, A_y)` and `(A_y, A_x)`, `MergeJoin(A, A)`, `SemiJoin(A_x, A)` and `(A, A_x)`;
    `Join` and `Rejoin` of branches below two restricted edges; a pod called with two inputs.
@@ -335,14 +364,8 @@ the developer). The edge view (section 6, points 1 and 2) was confirmed by the d
 | D10 | Saved format | Edges as records, node keys unchanged, both format versions raised |
 | D11 | `RunSummary.conditions`, `limits`, `restricted_source_ids` | Kept, for a restriction inside a stream bound to a slot; edges in `restricted_edges` |
 
-**Open, for the developer.**
+**Decided by the developer, 2026-11-26.**
 
-| # | Question | Options | Coordinator's recommendation |
-|---|---|---|---|
-| O34 | A function pod's automatic `SelectDataColumns` is the first shared node, so `f(A_x)` and `h(A_y)` conflict when `f` and `h` take the same columns (section 4) | (a) keep the refusal. (b) a restriction on an automatic select's input passes to the edge after it (select to pod), so the two pods' edges differ. (c) a select node per pod | **(b)** |
-
-Note on (b), for whoever decides: the select node is then fed by an unrestricted edge and shared, and each
-edge after it carries a restriction on a non-source upstream. Carried out literally that is a full read of
-the table and a local filter (section 9, with Orcapod's equality, which D7 refuses for now); to stay a
-pushed-down read, the run must push the restriction back through the select to the source read. (c) changes
-node identity or count and so stored paths or names; (a) changes nothing.
+| # | Question | Decided |
+|---|---|---|
+| O34 | A function pod's automatic `SelectDataColumns` as the first shared node | **(b)**: a restriction on the automatic select's input passes through to the edge after it; the select node stays shared and shows the full rows of its input; the read stays pushed down (section 4). Not (a) the refusal, not (c) a select node per pod |

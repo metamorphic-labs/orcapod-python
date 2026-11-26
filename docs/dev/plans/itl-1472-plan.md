@@ -1,8 +1,8 @@
 # ITL-1472: implementation plan
 
 The design is `docs/dev/specs/itl-1472-edge-registration.md`; its decisions D1 to D11 were decided on the
-developer's behalf on 2026-11-26 and are revertible. One question is open for the developer, O34 (the
-automatic select as the first shared node); stage 3 implements option (a), the refusal, until it is answered.
+developer's behalf on 2026-11-26 and are revertible. O34 (the automatic select) was decided by the developer
+the same day: option (b), which stage 3 implements.
 
 Each stage is one pull request against `main`, with its own Linear issue. Targeted tests locally, one pytest
 process; the suite in CI. Across every stage: **no content hash, pipeline hash, stored path, stored column or
@@ -82,6 +82,13 @@ save and load round trip, an earlier format refused, the order-invariance case o
   restriction; `EdgeRestrictionConflictError` (in `errors.py`) for two different restrictions on one edge,
   before anything is recorded, in either order, naming the edge, both restrictions and the filter remedy.
   One node feeding a commutative operator twice is one edge (D2).
+- The automatic select (O34, option (b)): `_FunctionPodBase.__call__` records its automatic
+  `SelectDataColumns` over the unrestricted source and gives the restriction with its own invocation, so it
+  is held on the edge after the select (`select -> f`); `A -> select` holds none. That edge's stream is
+  `select(A.restricted(x))`: the restriction is carried back to the source read, never a full read and a
+  local filter. The select node itself is run in full only when its own rows are wanted (its `run()`, or an
+  unrestricted edge out of it into a node that runs); a node fed through such an edge is judged stale by the
+  source, not by the select node. A select the user writes keeps the plain rule.
 - Reads: one pushed-down read per source node and distinct restriction among its edges into nodes that
   run; the full read only for an edge without one; the source node itself reads the whole table when read.
 - `bind`: a source stating a restriction is refused (D5); a source that cannot push down is refused for a
@@ -93,6 +100,11 @@ save and load round trip, an earlier format refused, the order-invariance case o
 
 Tests: the design note's list, items 1 to 6, 8 and 9 (several restrictions, every conflict in every order,
 positions, roles of the restricted column, scans counted, state rule, side effects, save, load and bind).
+For O34: `f(A_x)` and `h(A_y)` taking the same columns are accepted in both recording orders, with one select
+node, two pushed-down scans and no full scan; `f(A_x)` and `f(A_y)` are refused on `select -> f`; a condition
+on a column the select drops; `f(A_x)` beside `h(A)`; the select node reads empty after such a run and shows
+every row after its own `run()`; `f` holds its run while the select node has none; hashes and stored tables
+equal the hand-written select's; sync and async.
 
 ## Stage 4: the old rules go; visibility
 
