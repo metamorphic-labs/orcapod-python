@@ -207,6 +207,40 @@ def test_fixed_sources_can_be_wrapped() -> None:
     _refused(left, wrapper, PipelineJob())
 
 
+@pytest.mark.parametrize("value", [1, 100])
+def test_bound_proxy_uses_its_live_arrow_schema_for_collision_checks(
+    value: int,
+) -> None:
+    def source(x: int) -> ArrowTableSource:
+        return ArrowTableSource(
+            pa.table({"x": pa.array([x], type=pa.int32())}),
+            infer_nullable=True,
+            source_id="shared",
+        )
+
+    first, delegate = source(1), source(value)
+    proxy = SourceProxy(
+        delegate.source_id,
+        delegate.content_hash().to_string(),
+        delegate.pipeline_hash().to_string(),
+        *delegate.output_schema(),
+    )
+    # An unbound proxy knows only the Python type, which defaults to int64.
+    assert proxy.arrow_schemas[1].field("x").type == pa.int64()
+    proxy.bind(delegate)
+
+    if value != 1:
+        _refused(first, proxy, PipelineJob())
+        return
+
+    with PipelineJob(database=InMemoryArrowDatabase()) as job:
+        increment.pod(first, label="fa")
+        increment.pod(proxy, label="fb")
+    assert set(job.function_pods) == {"fa"}
+    job.run()
+    assert job.fa.as_table()["out"].to_pylist() == [2]
+
+
 def test_implicit_projection_conflict_names_both_function_steps() -> None:
     first = DictSource([{"x": 1, "y": 2}], source_id="shared")
     second = DictSource([{"x": 100, "y": 2}], source_id="shared")

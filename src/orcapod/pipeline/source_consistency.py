@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from orcapod.pipeline.pod_invocation import PodInvocation
     from orcapod.pipeline.restrictions import Rebinding
     from orcapod.protocols.core_protocols import StreamProtocol
+    from orcapod.types import ContentHash
 
 SourceUse = tuple[str, "StreamProtocol"]
 
@@ -73,6 +74,19 @@ def root_source_uses(
             )
 
 
+def _comparison_schema(source: RootSource) -> tuple[ContentHash, ContentHash]:
+    """Use the live proxy schema for the comparison, even after an unbound read."""
+    from orcapod.core.sources.source_proxy import SourceProxy
+    from orcapod.core.streams.base import typed_arrow_schemas
+
+    if isinstance(source, SourceProxy) and source.is_bound:
+        # The cached schema can describe the unbound proxy's Python types.
+        schemas = typed_arrow_schemas(source, own=False)
+    else:
+        schemas = source.arrow_schemas
+    return arrow_schema_identity(*schemas, source.data_context)
+
+
 def require_consistent_sources(
     uses: Iterable[SourceUse],
     rebinding: Rebinding = (),
@@ -94,12 +108,9 @@ def require_consistent_sources(
         if len(group) < 2:
             continue
         first_location, first = group[0]
-        schema = arrow_schema_identity(*first.arrow_schemas, first.data_context)
+        schema = _comparison_schema(first)
         for location, source in group[1:]:
-            if (
-                arrow_schema_identity(*source.arrow_schemas, source.data_context)
-                != schema
-            ):
+            if _comparison_schema(source) != schema:
                 raise InconsistentSourceError(
                     f"Source {source_id!r} has different schemas in {first_location} "
                     f"and {location}. Give the sources different source_id values."
