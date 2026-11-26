@@ -1,0 +1,403 @@
+"""A job's graph edges carry their input position (ITL-1419, stage 1 of ITL-1472).
+
+An edge is ``(upstream, node, position)``: one upstream given to two inputs of an ordered
+operator is two edges, so ``MergeJoin()(a, a)`` and ``SemiJoin()(a, a)`` run in a job as
+they run standalone. ``Join``, ``Rejoin`` and a function pod given one stream twice are
+refused by the operator (or the pod's join) itself, standalone and in a job.
+
+Inputs have two tag columns (``id``, ``key``) and two data columns (``x``, ``y``), in two
+layouts (tag order and column order swapped).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+from typing import Any
+
+import pyarrow as pa
+import pytest
+
+from orcapod import Pipeline, PipelineJob, function_pod, sources
+from orcapod.core.operators import Join, MergeJoin, Rejoin, SemiJoin
+from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
+from orcapod.errors import InputValidationError
+from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
+
+
+LAYOUTS = ["tags_id_key", "tags_key_id"]
+MODES = ["sync", "async"]
+OPERATORS = {"MergeJoin": MergeJoin, "SemiJoin": SemiJoin}
+
+
+def _source(name: str, layout: str, rows: list[tuple[int, str, int, int]]) -> Any:
+    """A source over ``rows`` of ``(id, key, x, y)``, laid out by ``layout``."""
+    columns = {
+        "id": pa.array([r[0] for r in rows], pa.int64()),
+        "key": pa.array([r[1] for r in rows], pa.large_string()),
+        "x": pa.array([r[2] for r in rows], pa.int64()),
+        "y": pa.array([r[3] for r in rows], pa.int64()),
+    }
+    if layout == "tags_id_key":
+        order, tags = ["id", "key", "x", "y"], ["id", "key"]
+    else:
+        order, tags = ["y", "key", "x", "id"], ["key", "id"]
+    table = pa.table({name: columns[name] for name in order})
+    return sources.ArrowTableSource(
+        table, tag_columns=tags, tag_only_columns=True, source_id=name
+    )
+
+
+def _csv_a(tmp_path: Path, layout: str) -> Any:
+    """``_a`` as a CSV file, which a loaded job reads again from its saved config."""
+    return _csv(
+        tmp_path, "a", layout, [(1, "p", 1, 10), (2, "q", 2, 20), (3, "r", 3, 30)]
+    )
+
+
+def _csv(
+    tmp_path: Path, name: str, layout: str, rows: list[tuple[int, str, int, int]]
+) -> Any:
+    if layout == "tags_id_key":
+        header, tags = "id,key,x,y", ["id", "key"]
+        lines = [f"{i},{k},{x},{y}" for i, k, x, y in rows]
+    else:
+        header, tags = "y,key,x,id", ["key", "id"]
+        lines = [f"{y},{k},{x},{i}" for i, k, x, y in rows]
+    path = tmp_path / f"{name}.csv"
+    path.write_text("\n".join([header, *lines]) + "\n")
+    return sources.CSVSource(
+        str(path), tag_columns=tags, tag_only_columns=True, source_id=name
+    )
+
+
+def _a(layout: str) -> Any:
+    return _source("a", layout, [(1, "p", 1, 10), (2, "q", 2, 20), (3, "r", 3, 30)])
+
+
+def _b(layout: str) -> Any:
+    return _source("b", layout, [(1, "p", 100, 1000), (2, "q", 101, 1001)])
+
+
+def _rows(table: Any) -> list[str]:
+    return sorted(repr(sorted(row.items())) for row in table.to_pylist())
+
+
+def _run(job: Any, mode: str, **kwargs: Any) -> None:
+    if mode == "sync":
+        job.run(**kwargs)
+    else:
+        asyncio.run(job.run_async(**kwargs))
+
+
+def _standalone(operator: str, first: Any, second: Any) -> list[str]:
+    return _rows(OPERATORS[operator]()(first, second).as_table(all_info=True))
+
+
+# ── one stream given to both inputs ───────────────────────────────────────────
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("operator", sorted(OPERATORS))
+def test_one_stream_twice_runs_in_a_pipeline_job(
+    operator: str, layout: str, mode: str
+) -> None:
+    a = _a(layout)
+    job = PipelineJob(name="twice", database=InMemoryArrowDatabase())
+    with job:
+        OPERATORS[operator]()(a, a, label="step")
+    _run(job, mode)
+    assert _rows(job.step.as_table(all_info=True)) == _standalone(operator, a, a)
+    assert job.step.as_table().num_rows == 3
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("operator", sorted(OPERATORS))
+def test_one_stream_twice_runs_in_a_job_made_from_a_pipeline(
+    operator: str, layout: str, mode: str
+) -> None:
+    a = _a(layout)
+    pipeline = Pipeline(name="twice")
+    with pipeline:
+        OPERATORS[operator]()(a, a, label="step")
+    job = PipelineJob.from_pipeline(
+        pipeline, sources={"a": a}, database=InMemoryArrowDatabase()
+    )
+    _run(job, mode)
+    assert _rows(job.step.as_table(all_info=True)) == _standalone(operator, a, a)
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("operator", sorted(OPERATORS))
+def test_one_stream_twice_runs_after_save_and_load(
+    operator: str, layout: str, mode: str, tmp_path: Path
+) -> None:
+    a = _csv_a(tmp_path, layout)
+    db_path = tmp_path / "db"
+    job = PipelineJob(name="twice", database=DeltaTableDatabase(db_path))
+    with job:
+        OPERATORS[operator]()(a, a, label="step")
+    _run(job, mode)
+    live = _rows(job.step.as_table(all_info=True))
+    job.save(tmp_path / "job.json")
+    saved = json.loads((tmp_path / "job.json").read_text())["pipeline"]
+    # No format change: the edge list holds the pair once; the operator's inputs
+    # list holds the stream twice, in argument order.
+    step_key = next(k for k, d in saved["nodes"].items() if d.get("label") == "step")
+    a_key = next(k for k, d in saved["nodes"].items() if d.get("label") == "a")
+    assert saved["edges"] == [[a_key, step_key]]
+    assert saved["nodes"][step_key]["inputs"] == [a_key, a_key]
+
+    loaded = PipelineJob.load(
+        tmp_path / "job.json", database=DeltaTableDatabase(db_path)
+    )
+    assert [up.label for up in loaded.step.upstreams] == ["a", "a"]
+    _run(loaded, mode, load_only=True)
+    assert _rows(loaded.step.as_table(all_info=True)) == live
+    # Saving the loaded job writes the same pipeline.
+    loaded.save(tmp_path / "again.json")
+    assert json.loads((tmp_path / "again.json").read_text())["pipeline"] == saved
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("operator", sorted(OPERATORS))
+def test_one_stream_twice_runs_through_node_run(operator: str, layout: str) -> None:
+    """``node.run()`` with the upstream run first and held, and with nothing run."""
+    a = _a(layout)
+    job = PipelineJob(name="twice", database=InMemoryArrowDatabase())
+    with job:
+        selected = a.select_data_columns(["x", "y"], label="selected")
+        OPERATORS[operator]()(selected, selected, label="step")
+    expected = _standalone(
+        operator, a.select_data_columns(["x", "y"]), a.select_data_columns(["x", "y"])
+    )
+    job.step.run()
+    assert _rows(job.step.as_table(all_info=True)) == expected
+    job.step.clear_cache()
+    job.step.run()  # ``selected`` holds a current run: its rows feed both positions
+    assert _rows(job.step.as_table(all_info=True)) == expected
+
+
+@pytest.mark.parametrize("operator", sorted(OPERATORS))
+def test_one_stream_twice_holds_and_feeds_both_positions_async(operator: str) -> None:
+    """A held upstream feeds both positions on the async orchestrator."""
+    a = _a("tags_id_key")
+    job = PipelineJob(name="twice", database=InMemoryArrowDatabase())
+    with job:
+        selected = a.select_data_columns(["x", "y"], label="selected")
+        OPERATORS[operator]()(selected, selected, label="step")
+    expected = _standalone(
+        operator, a.select_data_columns(["x", "y"]), a.select_data_columns(["x", "y"])
+    )
+    job.selected.run()
+    job.run(orchestrator=AsyncPipelineOrchestrator())
+    assert _rows(job.step.as_table(all_info=True)) == expected
+
+
+# ── two streams, both orders ─────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("reverse", [False, True], ids=["a_b", "b_a"])
+@pytest.mark.parametrize("operator", sorted(OPERATORS))
+def test_two_streams_in_either_order_give_the_standalone_rows(
+    operator: str, reverse: bool, mode: str
+) -> None:
+    a, b = _a("tags_id_key"), _b("tags_key_id")
+    first, second = (b, a) if reverse else (a, b)
+    job = PipelineJob(name="two", database=InMemoryArrowDatabase())
+    with job:
+        OPERATORS[operator]()(first, second, label="step")
+    _run(job, mode)
+    assert _rows(job.step.as_table(all_info=True)) == _standalone(
+        operator, first, second
+    )
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("reverse", [False, True], ids=["a_first", "b_first"])
+def test_one_upstream_at_both_positions_of_two_nodes(reverse: bool, mode: str) -> None:
+    """``a`` at position 0 of one node and 1 of another, ``b`` the reverse."""
+    a, b = _a("tags_id_key"), _b("tags_id_key")
+    job = PipelineJob(name="cross", database=InMemoryArrowDatabase())
+    with job:
+        if reverse:
+            MergeJoin()(b, a, label="ba")
+            MergeJoin()(a, b, label="ab")
+        else:
+            MergeJoin()(a, b, label="ab")
+            MergeJoin()(b, a, label="ba")
+        MergeJoin()(a, a, label="aa")
+    _run(job, mode)
+    assert _rows(job.ab.as_table(all_info=True)) == _standalone("MergeJoin", a, b)
+    assert _rows(job.ba.as_table(all_info=True)) == _standalone("MergeJoin", b, a)
+    assert _rows(job.aa.as_table(all_info=True)) == _standalone("MergeJoin", a, a)
+
+
+# ── observer events of a source node ─────────────────────────────────────────
+
+
+class _Events:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str]] = []
+
+    def contextualize(self, *identity_path: str) -> _Events:
+        return self
+
+    def on_run_start(self, run_id: str, pipeline_uri: str = "") -> None:
+        pass
+
+    def on_run_end(self, run_id: str) -> None:
+        pass
+
+    def on_node_start(
+        self, node_label: str, node_hash: str, tag_schema: Any = None
+    ) -> None:
+        self.events.append(("start", node_label))
+
+    def on_node_end(self, node_label: str, node_hash: str) -> None:
+        self.events.append(("end", node_label))
+
+    def on_data_start(self, node_label: str, tag: Any, data: Any) -> None:
+        pass
+
+    def on_data_end(self, node_label: str, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def on_data_crash(self, node_label: str, *args: Any, **kwargs: Any) -> None:
+        pass
+
+    def create_data_logger(self, tag: Any, data: Any) -> Any:
+        from orcapod.pipeline.observer import NoOpObserver
+
+        return NoOpObserver().create_data_logger(tag, data)
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_a_source_fed_twice_has_the_events_of_a_source_fed_once(mode: str) -> None:
+    def events_of(twice: bool) -> list[tuple[str, str]]:
+        a, b = _a("tags_id_key"), _b("tags_id_key")
+        job = PipelineJob(name="events", database=InMemoryArrowDatabase())
+        with job:
+            MergeJoin()(a, a if twice else b, label="step")
+        observer = _Events()
+        _run(job, mode, observer=observer)
+        return [event for event in observer.events if event[1] == "a"]
+
+    assert events_of(twice=True) == events_of(twice=False)
+    assert events_of(twice=True) == [("start", "a"), ("end", "a")]
+
+
+# ── what stays refused ───────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("operator", [Join, Rejoin])
+def test_a_commutative_operator_given_one_stream_twice_is_refused(
+    operator: type,
+) -> None:
+    """Unchanged: the operator refuses its overlapping data columns, standalone and
+    when recorded into a job."""
+    a = _a("tags_id_key")
+    with pytest.raises(InputValidationError, match="overlapping"):
+        operator()(a, a)
+    job = PipelineJob(name="refused", database=InMemoryArrowDatabase())
+    with pytest.raises(InputValidationError, match="overlapping"):
+        with job:
+            operator()(a, a, label="step")
+
+
+def test_a_function_pod_given_one_stream_twice_is_refused() -> None:
+    """Unchanged: a function pod joins its inputs first, so one stream given for two
+    parameters is refused as ``Join(a, a)`` is."""
+
+    @function_pod(output_keys="s")
+    def add(x: int, y: int) -> int:
+        return x + y
+
+    a = _a("tags_id_key")
+    with pytest.raises(InputValidationError, match="overlapping"):
+        add.pod(a, a)
+    job = PipelineJob(name="refused", database=InMemoryArrowDatabase())
+    with pytest.raises(InputValidationError, match="overlapping"):
+        with job:
+            add.pod(a, a, label="step")
+
+
+# ── the positioned edges ─────────────────────────────────────────────────────
+
+
+def _edges_by_label(job: Any) -> list[tuple[str, str, int | None]]:
+    """The job's positioned edges, by node label (the graph is keyed by hashes)."""
+    label = {
+        key: node.label
+        for key, node in job._persistent_node_map.items()  # pyright: ignore[reportPrivateUsage]
+    }
+    return sorted(
+        (label[up], label[down], position)
+        for up, down, position in job._graph_edges  # pyright: ignore[reportPrivateUsage]
+        if down in label and label[down] in {"aa", "ab", "ba", "joined", "fn"}
+    )
+
+
+def test_each_input_is_one_edge_at_its_position(tmp_path: Path) -> None:
+    """An ordered operator's inputs are at their argument index, a commutative one's
+    have no position, a function pod's input is at 0; the same after save and load."""
+    a = _csv_a(tmp_path, "tags_id_key")
+    b = _csv(tmp_path, "b", "tags_key_id", [(1, "p", 100, 1000), (2, "q", 101, 1001)])
+
+    @function_pod(output_keys="s")
+    def total(x: int, y: int) -> int:
+        return x + y
+
+    db_path = tmp_path / "db"
+    job = PipelineJob(name="edges", database=DeltaTableDatabase(db_path))
+    with job:
+        MergeJoin()(a, a, label="aa")
+        MergeJoin()(b, a, label="ba")
+        Join()(
+            a.select_data_columns(["x"], label="ax"),
+            b.select_data_columns(["y"], label="by"),
+            label="joined",
+        )
+        total.pod(a, label="fn")
+    expected = [
+        ("a", "aa", 0),
+        ("a", "aa", 1),
+        ("a", "ba", 1),
+        ("a", "fn", 0),
+        ("ax", "joined", None),
+        ("b", "ba", 0),
+        ("by", "joined", None),
+    ]
+    assert _edges_by_label(job) == expected
+    job.run()
+    job.save(tmp_path / "job.json")
+    loaded = PipelineJob.load(
+        tmp_path / "job.json", database=DeltaTableDatabase(db_path)
+    )
+    assert _edges_by_label(loaded) == expected
+
+
+@pytest.mark.parametrize("repeat", [False, True], ids=["a_b", "a_a"])
+def test_the_saved_edge_list_is_the_one_main_wrote(
+    repeat: bool, tmp_path: Path
+) -> None:
+    """No format change: a saved file lists each ``(upstream, node)`` pair once, sorted,
+    exactly as ``main`` wrote it (``sorted(_hash_graph.edges())``); the positions are
+    rebuilt from the operators' ``inputs`` lists."""
+    a = _csv_a(tmp_path, "tags_id_key")
+    b = _csv(tmp_path, "b", "tags_id_key", [(1, "p", 100, 1000)])
+    job = PipelineJob(name="saved", database=InMemoryArrowDatabase())
+    with job:
+        b.select_data_columns(["y"], label="other")
+        MergeJoin()(a, a if repeat else b, label="step")
+        SemiJoin()(b, a, label="semi")
+    pipeline = job.compiled_pipeline
+    pipeline.save(tmp_path / "pipeline.json")
+    saved = json.loads((tmp_path / "pipeline.json").read_text())
+    main_edges = sorted(pipeline._hash_graph.edges())  # pyright: ignore[reportPrivateUsage]
+    assert saved["edges"] == [list(edge) for edge in main_edges]

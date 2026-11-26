@@ -434,20 +434,20 @@ def test_a_loaded_read_only_node_keeps_its_inputs(
 
 @pytest.mark.parametrize("mode", ["sync", "async"])
 @pytest.mark.parametrize("operator", [MergeJoin, SemiJoin])
-def test_one_stream_given_twice_fails_to_run_in_a_job(
+def test_one_stream_given_twice_runs_in_a_job(
     operator: type, mode: str, tmp_path: Path
 ) -> None:
-    """Finding 5 (pre-existing on main, pinned; ITL-1419): a job's
-    graph has one edge for two argument slots of one stream, so ``MergeJoin()(a, a)``
-    and ``SemiJoin()(a, a)`` fail when the job runs, though they run as plain
-    streams. A fix makes this test fail; it is then changed to the fixed behaviour."""
+    """Finding 5 (ITL-1419, fixed): a job's graph edges carry their input position,
+    so one stream given to both inputs of ``MergeJoin`` or ``SemiJoin`` is two edges
+    and the job runs it as the plain streams do."""
     a = _inputs(tmp_path)["a"]
-    assert operator()(a, a).as_table().num_rows == 3
+    expected = _rows(operator()(a, a).as_table(all_info=True))
+    assert len(expected) == 3
     job = PipelineJob(name="repeat", database=DeltaTableDatabase(tmp_path / "db"))
     with job:
         operator()(a, a, label="repeat")
-    with pytest.raises((ValueError, IndexError)):
-        _run(job, mode)
+    _run(job, mode)
+    assert _rows(job.repeat.as_table(all_info=True)) == expected
 
 
 @pytest.mark.parametrize("operator", [MergeJoin, SemiJoin])

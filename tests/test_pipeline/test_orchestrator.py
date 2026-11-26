@@ -336,7 +336,7 @@ class TestOrchestratorRunAsync:
         exec_dag: OrcaDAG = OrcaDAG()
         for node in job._persistent_node_map.values():
             exec_dag.add_node(node)
-        for u_hash, v_hash in job._graph_edges:
+        for u_hash, v_hash, _ in job._graph_edges:
             if (
                 u_hash in job._persistent_node_map
                 and v_hash in job._persistent_node_map

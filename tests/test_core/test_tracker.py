@@ -445,7 +445,7 @@ class TestPipelineRecording:
         # _graph_edges is populated by compile()
         tracker.compile()
         assert len(tracker._graph_edges) == 1
-        upstream_hash, node_hash = tracker._graph_edges[0]
+        upstream_hash, node_hash, _ = tracker._graph_edges[0]
         assert upstream_hash == stream.content_hash().to_string()
         assert node_hash in tracker._node_lut
 
