@@ -969,11 +969,37 @@ def _entries_for(node: Any, row: Row, column: str, reader: _Reader) -> list[Row]
     ]
 
 
+def _token_mismatch(entry: Row, input_row: Row) -> tuple[str, Any] | None:
+    """The first input token an entry stores that is not the input row's, or ``None``.
+
+    An entry whose stored tokens are all the input row's is a record of that row's
+    instance: an instance is an entry (tags, system tags, input hash) arriving with
+    one set of source-info tokens.
+
+    Args:
+        entry: A stored pipeline entry.
+        input_row: The held row of the node's input.
+
+    Returns:
+        The token column's name and the entry's value, or ``None`` when every token
+        column the two share is equal.
+    """
+    for name, stored in entry.items():
+        if (
+            name.startswith(constants.SOURCE_PREFIX)
+            and name in input_row
+            and input_row[name] != stored
+        ):
+            return name, stored
+    return None
+
+
 def _latest(entries: list[Row], node: Any) -> Row:
     """The one stored entry behind a held row; several are refused.
 
     The entries given have the row's system tags and name its result (and, past a
-    function's input, the input row's hash). Entries for different inputs make the
+    function's input, the input row's hash and its tokens: the records of the row's
+    instance). Entries for different inputs make the
     link ambiguous. Several entries for one input and one result (async execution
     can record two copies of an identical input, one reusing the other's result) each
     say something different (entry id, computed or reused, run, time recorded), and
@@ -1760,19 +1786,23 @@ class _Tracer:
             up_row = _one(
                 [r for r, _ in pairs], node, f"the input row in {upstream.label!r}"
             )
-            entry = _latest(
-                [e for r, e in pairs if r.get(_ROW_HASH) == up_row.get(_ROW_HASH)], node
-            )
-            for name, stored in entry.items():
-                if (
-                    name.startswith(constants.SOURCE_PREFIX)
-                    and name in up_row
-                    and up_row[name] != stored
-                ):
-                    raise ProvenanceInconsistencyError(
-                        f"node {node.label!r}: the stored entry's input token {name} "
-                        f"is {stored!r}, the input row's is {up_row[name]!r}"
-                    )
+            of_entry = [
+                e for r, e in pairs if r.get(_ROW_HASH) == up_row.get(_ROW_HASH)
+            ]
+            # The entries so far are those of the row's entry (system tags, input
+            # hash) that name its result. The row is one instance of that entry: the
+            # one with the input row's own tokens (ITL-1471). Another job's record of
+            # the same entry, with other tokens, is not this row's.
+            of_instance = [e for e in of_entry if _token_mismatch(e, up_row) is None]
+            if not of_instance:
+                name, stored = cast(
+                    "tuple[str, Any]", _token_mismatch(of_entry[0], up_row)
+                )
+                raise ProvenanceInconsistencyError(
+                    f"node {node.label!r}: the stored entry's input token {name} "
+                    f"is {stored!r}, the input row's is {up_row[name]!r}"
+                )
+            entry = _latest(of_instance, node)
             run = _function_run(node, entry, row, column, self.reader)
         else:
             up_row = _one(matched, node, f"the input row in {upstream.label!r}")
