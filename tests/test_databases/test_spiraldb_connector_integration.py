@@ -26,6 +26,7 @@ from typing import Any
 from unittest.mock import patch
 
 import pyarrow as pa
+import pyarrow.compute as pc
 import pytest
 
 from orcapod.databases import SpiralDBConnector
@@ -540,3 +541,39 @@ def test_what_the_store_codec_avoids_is_refused(
         _ = table.append(rows)
     again = client.keyed_table_by_id(table.resource_id)
     assert again.version_id == table.version_id
+
+
+def _written_and_read(place: _Place, name: str, column: pa.Table) -> pa.Table:
+    """Write ``column`` under keys r0... to a fixed table and read those rows back."""
+    client = _client(place)
+    key = pa.schema([pa.field("k", pa.large_string(), False)])
+    table = client.project(place.project).create_keyed_table(
+        place.dataset, name, key, exist_ok=True
+    )
+    keys = pa.array([f"r{i}" for i in range(column.num_rows)], pa.large_string())
+    table = table.append(column.add_column(0, "k", keys))
+    read = client.keyed_table_by_id(table.resource_id).scan().to_table()
+    return read.filter(pc.is_in(read.column("k"), keys)).sort_by("k")
+
+
+def test_a_zero_width_fixed_size_list_of_strings_round_trips(place: _Place) -> None:
+    """Review of PR 590, finding 3 (the fake's rebuild of a zero-width list)."""
+    value = [[], None, []]
+    column = pa.table({"z": pa.array(value, pa.list_(pa.large_string(), 0))})
+    got = _written_and_read(place, "zero_width_lists", column)
+    assert got.column("z").to_pylist() == value
+
+
+def test_nul_is_cut_in_nested_field_names(place: _Place) -> None:
+    """Review of PR 590, finding 4: the service cuts a name at NUL at every depth
+    (measured live with spiral-sdk 0.16.78)."""
+    inner = pa.struct([("x\0y", pa.int8()), ("z", pa.int8())])
+    column = pa.table(
+        {
+            "s": pa.array([{"x\0y": 1, "z": 2}], inner),
+            "l": pa.array([[{"x\0y": 3, "z": 4}]], pa.large_list(inner)),
+        }
+    )
+    got = _written_and_read(place, "nul_in_field_names", column)
+    assert got.column("s").to_pylist() == [{"x": 1, "z": 2}]
+    assert got.column("l").to_pylist() == [[{"x": 3, "z": 4}]]

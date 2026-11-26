@@ -1375,3 +1375,44 @@ def test_the_codec_needs_no_spiral_client() -> None:
         "assert not [m for m in sys.modules if m.split('.')[0] == 'spiral']"
     )
     assert subprocess.run([sys.executable, "-c", code], check=False).returncode == 0
+
+
+_NARROWED_MAP = """
+import pyarrow as pa
+from orcapod.databases import spiral_store as store
+
+maps = pa.map_(pa.string(), pa.int64())
+rows = pa.table(
+    {
+        store.KEY_COLUMN: pa.array([b"a", b"b", b"c"], pa.large_binary()),
+        "m": pa.array([[("x", 1), ("y", None)], None, []], maps),
+        "s": pa.array([{"m": [("x", 1)]}] * 3, pa.struct([("m", maps)])),
+        "l": pa.array([[[("x", 1)]], None, [[]]], pa.list_(maps)),
+    }
+)
+manifest = store.new_manifest(("p", "rdb_v1"), "k", rows.schema)
+got = store.decode_rows(store.encode_rows(rows), manifest, rows.schema)
+assert got.schema == rows.schema, got.schema
+assert got.to_pylist() == rows.to_pylist(), got.to_pylist()
+"""
+
+
+def test_a_map_given_back_in_small_variants_is_rebuilt_not_cast() -> None:
+    """Review of PR 590, finding 1: pyarrow aborts the process casting a map from large to
+    small variants. Run in a subprocess, so an abort fails this test only."""
+    done = subprocess.run(
+        [sys.executable, "-c", _NARROWED_MAP],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr[-2000:]
+
+
+def test_a_record_id_repeated_in_one_write_is_refused() -> None:
+    """Review of PR 590, finding 2: refused before anything is written."""
+    rows = keyed({"a": pa.array([1, 2])})
+    rows = rows.set_column(
+        rows.column_names.index(KEY), KEY, pa.array([b"x", b"x"], pa.large_binary())
+    )
+    refused(rows, "repeated")
