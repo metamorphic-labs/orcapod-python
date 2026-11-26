@@ -358,12 +358,12 @@ uv run --no-project --isolated --python 3.12 \
 
 uv run --no-project --isolated --python 3.12 \
   --with "orcapod[spiraldb] @ git+https://github.com/metamorphic-labs/orcapod-python@<new>" \
-  --with spiral-sdk==0.16.74 scripts/migrate_spiral_schemas.py \
+  --with spiral-sdk==0.16.78 scripts/migrate_spiral_schemas.py \
   write --project <project> --dataset <dataset> --plan plan.json --digest <printed digest>
 
 uv run --no-project --isolated --python 3.12 \
   --with "orcapod[spiraldb] @ git+https://github.com/metamorphic-labs/orcapod-python@<new>" \
-  --with spiral-sdk==0.16.74 scripts/migrate_spiral_schemas.py \
+  --with spiral-sdk==0.16.78 scripts/migrate_spiral_schemas.py \
   verify --project <project> --dataset <dataset> --plan plan.json
 ```
 

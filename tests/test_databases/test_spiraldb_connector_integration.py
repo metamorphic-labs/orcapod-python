@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime as dt
 import math
 import os
+import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -315,3 +316,58 @@ def test_an_early_close(place: _Place) -> None:
     batches: Any = place.connector().scan_batches("units")
     assert next(batches).num_rows > 0
     batches.close()
+
+
+def _client(place: _Place) -> Any:
+    """Return an SDK client on the place, for the test's own reads and writes."""
+    if place.overrides is None:
+        return fake.FakeClient()
+    return place.connector()._client  # pyright: ignore[reportPrivateUsage]  # the SDK's client, for the test's own writes
+
+
+def test_table_metadata(place: _Place) -> None:
+    """Table metadata as measured with spiral-sdk 0.16.78 (the fake's ``table-metadata``).
+
+    Fixed keys only, so a live table does not grow from run to run.
+    """
+    client = _client(place)
+    key = pa.schema([pa.field("k", pa.large_string(), False)])
+    table = client.project(place.project).create_keyed_table(
+        place.dataset, "table_metadata", key, exist_ok=True
+    )
+    token = uuid.uuid4().hex.encode()
+    table.set_metadata({"conformance.a": token, "conformance.b": b"before"})
+    table.set_metadata({"conformance.b": token, "conformance.empty": b""})
+    found = table.get_metadata()
+    assert found["conformance.a"] == token  # an upsert keeps the other keys
+    assert found["conformance.b"] == token
+    assert found["conformance.empty"] == b""  # stored as empty, not deleted
+
+    # Not versioned: a snapshot taken before a write sees metadata set after it, and a
+    # metadata write makes no snapshot.
+    before = client.keyed_table(place.project, place.dataset, "table_metadata")
+    after = before.append(
+        pa.table({"k": pa.array(["r"], pa.large_string()), "v": pa.array([token])})
+    )
+    after.set_metadata({"conformance.after": token})
+    assert before.get_metadata()["conformance.after"] == token
+    pinned = client.keyed_table_by_id(before.resource_id, asof=int(before.version_id))
+    assert pinned.get_metadata()["conformance.after"] == token
+    again = client.keyed_table(place.project, place.dataset, "table_metadata")
+    assert again.version_id == after.version_id
+
+    # Limits: a key up to 255 UTF-8 bytes, a key and its value together up to 8,192.
+    table.set_metadata(
+        {"m" * 255: b"x" * (8192 - 255), "conformance.max": b"x" * (8192 - 15)}
+    )
+    for refused in (
+        {"m" * 256: token},
+        {"conformance.big": b"x" * (8192 - 15 + 1)},
+        {"m" * 255: b"x" * (8192 - 255 + 1)},
+    ):
+        with pytest.raises(Exception, match=r"status 400"):  # noqa: PT011  # the SDK's error type differs from the fake's
+            table.set_metadata(refused)
+    found = table.get_metadata()
+    assert found["m" * 255] == b"x" * (8192 - 255)
+    assert "m" * 256 not in found
+    assert "conformance.big" not in found

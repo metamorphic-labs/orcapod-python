@@ -7,7 +7,8 @@ conformance tests run on it and, opt-in, on the service
 
 Each rule of ``RULES`` was seen on the service with spiral-sdk 0.16.74 and 0.16.75 on
 November 24, 2026, on throwaway tables, unless it says otherwise; its name is cited where
-the rule is applied.
+the rule is applied. The conformance tests passed live with spiral-sdk 0.16.78 on November
+26, 2026 (ITL-1495).
 """
 
 from __future__ import annotations
@@ -71,7 +72,15 @@ RULES = {
     "rows": "rows come in key order; filter before limit",
     "list": "the documented listing filters a dataset and pages; a page can be empty "
     "(documented, not seen)",
+    "table-metadata": "spiral-sdk 0.16.78 (November 26, 2026): get_metadata and "
+    "set_metadata hold bytes by text key, an upsert that never deletes (an empty value is "
+    "stored); not versioned (every snapshot, asof included, sees the latest; a write makes "
+    "no snapshot); readable before any row; a key over 255 UTF-8 bytes, or an entry whose "
+    "key and value together are over 8,192 bytes: 'status 400' and nothing written",
 }
+
+_MAX_METADATA_KEY_BYTES = 255
+_MAX_METADATA_ENTRY_BYTES = 8192
 
 _ROOT_ENV = "FAKE_SPIRAL_SDK_ROOT"
 _API_URL = "https://api.fake.invalid"
@@ -351,6 +360,29 @@ class _Store:
             path.unlink()
         folder.rmdir()
 
+    def metadata(self, table_id: str) -> dict[str, bytes]:
+        """Return a table's metadata (``table-metadata``)."""
+        self.by_id(table_id)
+        path = self.root / table_id / "metadata.json"
+        if not path.exists():
+            return {}
+        return {k: bytes.fromhex(v) for k, v in json.loads(path.read_text()).items()}
+
+    def set_metadata(self, table_id: str, entries: dict[str, bytes]) -> None:
+        """Upsert ``entries`` into a table's metadata (``table-metadata``)."""
+        for key, value in entries.items():
+            size = len(key.encode())
+            if (
+                size > _MAX_METADATA_KEY_BYTES
+                or size + len(value) > _MAX_METADATA_ENTRY_BYTES
+            ):
+                raise _status(400)
+        stored = self.metadata(table_id)
+        stored.update(entries)
+        (self.root / table_id / "metadata.json").write_text(
+            json.dumps({k: v.hex() for k, v in stored.items()})
+        )
+
     def keys(self, table_id: str) -> pa.Schema:
         """Return a table's key schema."""
         raw = (self.root / table_id / "keys.arrow").read_bytes()
@@ -625,6 +657,14 @@ class FakeKeyedTable:
     def key_columns(self) -> tuple[str, ...]:
         """The key columns, in key order."""
         return tuple(self._table["keys"])
+
+    def get_metadata(self) -> dict[str, bytes]:
+        """Return the table's metadata, the latest whatever the snapshot (``table-metadata``)."""
+        return self._store.metadata(self.resource_id)
+
+    def set_metadata(self, metadata: dict[str, bytes]) -> None:
+        """Upsert entries of the table's metadata (``table-metadata``)."""
+        self._store.set_metadata(self.resource_id, metadata)
 
     def schema(self) -> pa.Schema:
         """Return the snapshot's schema."""
