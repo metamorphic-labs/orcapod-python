@@ -77,7 +77,7 @@ from orcapod.databases.spiraldb_connector import (
 )
 from orcapod.errors import InputValidationError, RowIdentifierError, SourceTooLargeError
 from orcapod.types import ColumnConfig, Condition
-from orcapod.types.condition import check_restriction
+from orcapod.types.condition import check_float_equalities, check_restriction
 from orcapod.utils import arrow_utils
 from orcapod.utils.schema_utils import _normalize_column_list
 
@@ -530,11 +530,12 @@ class SpiralDBTableSource(RootSource):
         (``is_in``, a null test, ``!=``, two columns, ``|``, ``~``) is refused too.
 
         An equality is sent to SpiralDB as ``column == value``, and which rows it
-        selects is SpiralDB's own equality, not Orcapod's. For a float column that
-        means: whether a NaN value selects the NaN rows, and whether ``0.0`` selects
-        the ``-0.0`` rows, is decided by SpiralDB; under the usual floating-point rule
-        a NaN equals nothing, so such a condition may select no row. To select rows by
-        such values as Orcapod matches them, filter inside the pipeline.
+        selects is SpiralDB's own equality, not Orcapod's. For a float column,
+        ``0.0`` does not select the ``-0.0`` rows. An equality to ``-0.0`` or a NaN is
+        refused (``TypeError``): SpiralDB matches them by their bits, while Orcapod
+        counts ``-0.0`` equal to ``0.0`` and NaN equal to NaN, so the rows read would
+        depend on which of two equal values a condition kept (ITL-1480). To select
+        rows by such values as Orcapod matches them, filter inside the pipeline.
 
         A convenience: the arguments are given to ``Condition.of``, which builds the
         ``Condition`` (``orcapod.types``); the source checks it against its table and
@@ -563,9 +564,14 @@ class SpiralDBTableSource(RootSource):
                 clamped (a NumPy scalar, a date given as a string, ``-1`` for an
                 unsigned column), the column's type takes no such condition, or the
                 condition holds anything but equalities and ranges (filter the stream
-                instead).
+                instead), or a column is to equal ``-0.0`` or a NaN (ITL-1480).
         """
         condition = Condition.of(*conditions, **columns)
+        try:
+            # As given: merging may have kept 0.0 of 0.0 and -0.0 (ITL-1480).
+            check_float_equalities(*conditions, **columns)
+        except TypeError as exc:
+            raise TypeError(f"SpiralDB table {self._qualified!r}: {exc}") from exc
         restricted = self._copy()
         try:
             restricted._apply_restriction(condition)

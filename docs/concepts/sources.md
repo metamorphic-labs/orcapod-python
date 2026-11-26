@@ -497,10 +497,10 @@ the pipeline computes. Restrict on tag (key) columns where you can; a condition 
 column is allowed.
 
 `where` and `stream.filter` take the same equalities, written the same way, and keep the same
-rows (for a float column, `where` uses the table system's own equality for NaN and `-0.0`,
-`filter` Orcapod's: see [Filter](operators.md#filter). SpiralDB's equality tells the two zeros
-apart and a NaN by its bits, so `where(x=0.0)` does not read a row holding `-0.0`, and
-`where(x=float("nan"))` reads only the NaNs with the bits of Python's `nan`). One spelling differs: `filter` takes
+rows (for a float column, `where` uses the table system's own equality, `filter` Orcapod's:
+see [Filter](operators.md#filter). SpiralDB's equality tells the two zeros apart and a NaN by
+its bits, so `where(x=0.0)` does not read a row holding `-0.0`; `where` refuses `-0.0` and NaN,
+for which the two rules disagree, and points to `filter`). One spelling differs: `filter` takes
 `label=` (the step's label, as every stream method does), so a column named `label` is written
 `filter({"label": "x"})` or `filter(col("label") == "x")`, while `where(label="x")` restricts
 that column. Neither takes `None` as a value: both raise `ValueError` and point to
@@ -530,10 +530,9 @@ timestamp columns, on a source without a `limit`. With a `limit` it does not: th
 reads the first rows that match the `where`, so the `filter` sees other rows than it would
 over the source alone (with `limit=2` and unit ids `[1, 2, 2]`, `filter(unit_id=2)` alone
 keeps one row, the `where` and the `filter` together keep two). On a float column it does
-not either when the value is a NaN or a signed zero:
-`where` matches by the table system's equality (a NaN may match no row), `filter` by
-Orcapod's (a NaN matches the NaN rows), so `where` can drop rows the `filter` alone would
-keep. For such a value, filter without the `where`.
+not either when the value is `0.0`: `where` matches by the table system's equality (`0.0`
+does not match `-0.0`), `filter` by Orcapod's (it does), so `where` can drop rows the `filter`
+alone would keep. For such a value, filter without the `where`; `where` refuses `-0.0` and NaN.
 
 <!-- docs-test: skip -->
 ```python
@@ -607,14 +606,16 @@ print(Condition.of(day=day, started=started, recorded=recorded))
   Anything else raises `TypeError`, naming the column and both types. Columns of other types
   (lists, structs) take no condition.
 - **The table system's equality.** Each condition is sent to SpiralDB as `column == value`,
-  and which rows it selects is SpiralDB's own equality, not Orcapod's. For a float column, NaN
-  selects the NaN rows and `0.0` does not select the `-0.0` rows (seen on the service, not
-  documented by it). A value that no `float32` is exactly, such as `0.1`, selects no row of a
+  and which rows it selects is SpiralDB's own equality, not Orcapod's. For a float column,
+  `0.0` does not select the `-0.0` rows (seen on the service, not documented by it). An
+  equality to `-0.0` or a NaN raises `TypeError` and points to `filter`: SpiralDB matches
+  them by their bits, while Orcapod counts `-0.0` equal to `0.0` and NaN equal to NaN, so
+  the rows read would depend on which of two equal values a condition kept (ITL-1480). A value that no `float32` is exactly, such as `0.1`, selects no row of a
   `float32` column. SpiralDB cannot compare a `float16` column, so Orcapod reads the rows the
   other conditions select and compares them itself, by the same rule and before `limit`. To
   select rows by such values as Orcapod matches them, filter
-  inside the pipeline (`PolarsFilter`). A NaN or infinite value is saved as
-  `{"float": "nan"}`, `{"float": "inf"}` or `{"float": "-inf"}`, since JSON has no such number.
+  inside the pipeline (`PolarsFilter`). An infinite value is saved as `{"float": "inf"}` or
+  `{"float": "-inf"}`, since JSON has no such number.
 - **One restriction per table in a pipeline.** A restricted source has the unrestricted
   source's identity, so a pipeline holds one restriction (or none) per source: building a
   pipeline in which one table is read with two different restrictions (or with and without

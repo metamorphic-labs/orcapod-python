@@ -434,7 +434,7 @@ class TestRefusals:
         for conditions in ({"at": local, "unit": 1}, {"unit": 1, "at": local}):
             assert check_equality_conditions(conditions, schema) == conditions
 
-    @pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf, -0.0])
+    @pytest.mark.parametrize("value", [math.inf, -math.inf, 0.0])
     @pytest.mark.parametrize(
         "restrict",
         [
@@ -456,11 +456,12 @@ class TestRefusals:
             "Condition.of mapping",
         ],
     )
-    def test_a_non_finite_or_signed_zero_float_is_pushed_down_as_given(
+    def test_an_infinite_float_or_zero_is_pushed_down_as_given(
         self, project, restrict, value
     ):
         """Accepted, and sent to the table system as ``column == value``: which rows
-        it selects is that system's equality (developer decision, 2026-11-19)."""
+        it selects is that system's equality (developer decision, 2026-11-19). ``-0.0``
+        and NaN are refused (ITL-1480; ``test_spiraldb_table_source_float_equalities``)."""
         source = restrict(value)
         source.as_table()
 
@@ -1489,31 +1490,14 @@ class TestConditionInstances:
         [(0.0, -0.0), (-0.0, 0.0), (math.nan, math.nan)],
         ids=["0.0 then -0.0", "-0.0 then 0.0", "NaN twice"],
     )
-    def test_equal_float_conditions_are_one_restriction_in_a_pipeline(
-        self, project, tmp_path, values
-    ):
-        """``0.0`` and ``-0.0``, or NaN twice, are one restriction (as Polars matches
-        them), so one table read with both in one pipeline is accepted."""
-
-        @function_pod(output_keys="a")
-        def first(amplitude: float | None) -> float | None:
-            """Return ``amplitude``."""
-            return amplitude
-
-        @function_pod(output_keys="b")
-        def second(channel: int | None) -> int | None:
-            """Return ``channel``."""
-            return channel
-
+    def test_equal_float_conditions_of_two_reads_are_refused(self, project, values):
+        """``0.0`` and ``-0.0``, or NaN twice, are one condition to Orcapod but not to
+        SpiralDB, so ``where`` refuses the ``-0.0`` or NaN read (ITL-1480) before a
+        pipeline could hold both."""
         events = _source(source_id="events", tag_only_columns=True)
-        job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
-        with job:
-            first.pod(events.where(amplitude=values[0]), label="first")
-            second.pod(events.where(amplitude=values[1]), label="second")
-
-        summary = job.run()
-
-        assert summary.conditions == {"events": Condition.of(amplitude=values[0])}
+        with pytest.raises(TypeError, match="ITL-1480"):
+            for value in values:
+                events.where(amplitude=value)
 
 
 _RESTRICTED_FORMS: dict[str, tuple[Callable[[], SpiralDBTableSource], list[str]]] = {

@@ -175,6 +175,15 @@ follow-up ITL-1477. D6 would apply to such a bound (`0.1` is refused on a `float
   bit pattern only, so `where(x=0.0)` does not read a row holding `-0.0`, and `where(x=nan)` reads only the NaNs
   with the bits of Python's `nan` (the quiet NaN). `filter` follows Orcapod's rule (`-0.0` equals `0.0`, every
   NaN equals NaN).
+- *Changed here after review (D15):* an independent review of `d4115197` found that a `where` call that gives
+  one column both `-0.0` and `0.0` (or two NaNs) reads rows that depend on the order of the arguments:
+  `Condition.of` keeps one of two values Orcapod counts equal, and SpiralDB matches the one kept by its bits.
+  With a `float64` column holding `[-0.0, +0.0]`, `where(col("id") >= 0, {"v": -0.0}, v=0.0)` read id 1 and the
+  signs reversed id 0, under identical conditions, canonical forms and saved JSON. So a SpiralDB `where` refuses
+  an equality to `-0.0` or a NaN (`TypeError` pointing to `filter`, naming ITL-1480), checked on the arguments as
+  given (before merging) and on every restriction a source applies; every other float equality is unchanged.
+  One form stays out of reach: a condition the user combines beforehand with `&`
+  (`(col("v") == 0.0) & (col("v") == -0.0)`) has already kept `0.0`, which is pushed down as before.
 - *The test fake's `float-eq` rule says NaN equals NaN*, any NaN; the probe saw the service match a NaN by bit
   pattern only. The fake's comparison reads Python floats, so it cannot tell NaN payloads apart.
 
@@ -356,5 +365,6 @@ Decided by the developer on 2026-11-25 and 2026-11-26.
 | D12 | Live proof of the types | Throwaway tables now; the kept conformance test on the final code before ready | Approved; probes run, section 2 |
 | D13 | Scope | `SpiralDBTableSource` only; other sources stay with ITL-1219 | Approved |
 | D14 | Float ranges, given the service's float order | A: refused, pointing to `filter` (B, read then compare locally, and C, push down a rewritten range equal to the stance, were the other options) | Approved: A; C is ITL-1477 |
+| D15 | Float equality to `-0.0` or NaN in `where` (review of `d4115197`) | Refused, `TypeError` pointing to `filter`, naming ITL-1480; every other float equality as before | Decided on the developer's behalf by the coordinator (logged) |
 
 One restriction per table in a pipeline stays in force; lifting it is ITL-1472, not this change.

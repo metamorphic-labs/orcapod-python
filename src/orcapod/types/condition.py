@@ -729,7 +729,8 @@ def check_restriction(condition: Condition, schema: pa.Schema) -> None:
     Raises:
         ValueError: If a column is not in the table, or must equal two values.
         TypeError: If the condition holds anything else, a range names a column of
-            another type, or a value is not of its column's type or does not fit it.
+            another type, a value is not of its column's type or does not fit it,
+            or a column is to equal ``-0.0`` or a NaN (``check_float_equalities``).
     """
     terms: list[Term] = []
     for node in condition.root.children:
@@ -766,12 +767,61 @@ def check_restriction(condition: Condition, schema: pa.Schema) -> None:
             raise TypeError(f"column {column!r} {exc}") from exc
         if term.operator != EQUALS:
             continue
+        check_float_equalities({column: value})
         held = equal_to.setdefault(column, value)
         if not _same_condition_value(held, value):
             raise ValueError(
                 f"column {column!r} is already restricted to {held!r}; it cannot "
                 f"also equal {value!r} (a source reads one value per column; filter "
                 "the stream to state a condition that holds for no row)"
+            )
+
+
+def _matched_by_bits(value: object) -> bool:
+    """Return whether ``value`` is a float the table system and Orcapod match apart."""
+    return isinstance(value, float) and (
+        math.isnan(value) or (value == 0.0 and math.copysign(1.0, value) < 0)
+    )
+
+
+def check_float_equalities(
+    *conditions: Mapping[str, object] | Condition | None, **columns: object
+) -> None:
+    """Refuse a restriction's equality to ``-0.0`` or NaN, as given, before merging.
+
+    Orcapod counts ``-0.0`` equal to ``0.0`` and NaN equal to NaN, so ``Condition.of``
+    and ``combined`` keep one of two such values; SpiralDB matches a float by its bits
+    (``-0.0`` only ``-0.0``, a NaN only its own bit pattern). The rows read would then
+    depend on which of two equal values was kept, so neither is taken. Checked on the
+    arguments as given (each mapping, each condition's top-level equalities, the
+    keywords), since merging may already have dropped one; every other float
+    equality is pushed down as given. A comparison of a float column is refused
+    elsewhere (``check_restriction``).
+
+    Args:
+        *conditions: The mappings and conditions given to ``where``.
+        **columns: The keywords given to ``where``.
+
+    Raises:
+        TypeError: If a column is to equal ``-0.0`` or a NaN.
+    """
+    given: list[tuple[object, object]] = list(columns.items())
+    for argument in conditions:
+        if isinstance(argument, Condition):
+            given.extend(
+                (node.path.column, node.value)
+                for node in argument.root.children
+                if isinstance(node, Term) and node.operator == EQUALS
+            )
+        elif isinstance(argument, Mapping):
+            given.extend(argument.items())
+    for column, value in given:
+        if _matched_by_bits(value):
+            raise TypeError(
+                f"column {column!r}: where takes no equality to {value!r}. SpiralDB "
+                "matches -0.0 and NaN by their bits, while Orcapod counts -0.0 equal "
+                "to 0.0 and NaN equal to NaN, so which rows are read would depend on "
+                f"which of two equal values was kept (ITL-1480). {_TO_FILTER}"
             )
 
 
