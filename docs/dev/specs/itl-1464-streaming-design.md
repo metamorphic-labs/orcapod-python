@@ -109,9 +109,16 @@ A read from the database keeps the run's order. A database is a set of rows: the
 store returns them in (key order, file order) is never a result, and no stored column
 holds a position. So the reference of a function node or a `LOG`-mode operator node is
 the run's entry ids *in the order the run emitted them* (one id per row; held as rows
-are, so in the local cache above the in-memory threshold). A page read takes the ids of
-its page from that list, fetches those entries from the database, and puts them in the
-list's order before returning them. The sync read is then the emitted order (ITL-1441)
+are, so in the local cache above the in-memory threshold). An id here names one stored
+row, not an input: for a function node it is the base entry id together with the
+recomputation index of the row the run emitted (the base entry id alone is stable across
+recomputation, and a lookup by it alone returns the row with the greatest index, which a
+later recomputation can replace). Today's node holds base entry ids only, which is enough
+while it also holds the rows; a node that reads its rows back must hold the pair. A page
+read takes the ids of its page from that list, fetches exactly those rows from the
+database (base entry id and index both matched, never "the newest"), and puts them in the
+list's order before returning them. A row the run emitted is therefore the row every
+later read of that run returns, whatever is computed afterwards. The sync read is then the emitted order (ITL-1441)
 whatever the store's own order is; nothing is added to a stored table.
 
 Every read keeps its meaning: `node.as_table()` returns the current run's rows (now read
@@ -428,7 +435,7 @@ back-pressure, and why the worst case counts both sides.
 
 ### Order and determinism
 
-- Async: the output is the sync join's rows as a set; batches are sent as matches are
+- Async: the output is the sync join's rows, each as often, in any order; batches are sent as matches are
   found.
 - Sync: `Join.static_process` as today, over references. Its row order is today's (the
   order Polars gives the match, kept by ITL-1355's rule), so the stored and returned
@@ -445,8 +452,10 @@ back-pressure, and why the worst case counts both sides.
   move the peak; with the other side arriving entirely first (the early-arrival bound),
   the peak must grow by the index of those rows and by no more. 1:1 has a third run,
   inputs that share no key arriving in step, whose peak must be the index of both.
-- The differential of ITL-1347 for results: async equals sync as a set of rows, sync
-  equals pinned `main` byte for byte.
+- The differential of ITL-1347 for results: async equals sync row for row with
+  multiplicity (each row as often on one path as on the other, in any order; never a
+  comparison of sets, which a duplicated row passes), sync equals pinned `main` byte for
+  byte.
 - A violation test per certificate rule: a source that claims a key and repeats it late
   raises, the duplicate reaches no downstream node, and the run fails under both error
   policies.
@@ -492,6 +501,7 @@ With sections 2 to 7 in place, for a job run by the async orchestrator:
 |---|---|
 | A source | one batch read (65,536 rows at most), plus 16 bytes per row read if its key is verified as data flows, nothing if the store guarantees it |
 | A row-by-row operator, a function pod | the batch in hand |
+| A step that needs its whole input (`PolarsFilter` with a predicate not known to be row-wise, `Batch` without a size) | its whole input: outside the bound below |
 | A channel between two nodes | its buffered batches (a fixed number) |
 | `GroupBy` | its keys-only index, and one group |
 | A join | its keys-only index (section 6), and the pairs of one range being matched (at most the pair budget) |
@@ -508,6 +518,14 @@ does not limit them: 100 nodes each keeping 63 MiB hold 6.2 GiB. So the threshol
 with a total for the process (proposed 512 MiB, part of L2): a result that would take the
 kept total past it goes to the cache whatever its size, and the term is at most that
 total. The bound also assumes a cache root on disk (section 2).
+
+The formula covers a job whose every step is one of the bounded kinds of section 5. A
+step that needs its whole input by definition is outside it and adds that input, whole
+and in memory, for as long as the step runs: a `PolarsFilter` whose predicate is not
+known to be row-wise (B1; `pl.col("x") > pl.col("x").mean()`), and `Batch` without a
+size. So the statement to users is the formula
+`+ (the whole input of each such step running at once)`, and a job with none of them has
+the bound as written.
 
 **Proposed budget for the workshop** (**OPEN, M1**): a job over every table in scope of a
 sample dataset peaks below 4 GiB on the async path, checked on synthetic tables of the

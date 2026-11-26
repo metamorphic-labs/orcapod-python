@@ -1128,14 +1128,13 @@ class TestBetweenAcrossEveryOverlap:
     ],
     ids=["comparisons", "equality and membership", "null test and or"],
 )
-def test_python_and_between_conditions_keeps_the_second(first, second):
-    """CodeRabbit on PR 493 (the docstring of ``and``): a documented limit, pinned. A
-    condition that requires something is true, so ``a and b`` is ``b``; a change to
-    ``Condition.__bool__`` must update the documentation."""
+def test_python_and_between_conditions_raises(
+    first: Callable[[], object], second: Callable[[], object]
+) -> None:
+    """Every condition kind refuses a Python truth test."""
     a, b = first(), second()
-    assert (a and b) is b
-    with pytest.raises(TypeError, match="&"):
-        _ = col("t") and col("u")
+    with pytest.raises(TypeError, match="Condition has no truth value"):
+        _ = a and b
 
 
 @pytest.mark.parametrize("operator", ["==", "!=", "<", "<=", ">", ">="])
