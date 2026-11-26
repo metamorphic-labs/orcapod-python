@@ -977,7 +977,13 @@ class TestFlushBehaviour:
         of the queue bookkeeping or of a table's flush leaves each queued table's
         rows and ids consistent; every row is then stored once, or named as removed
         (ITL-1381, round 5). A batch leaves the queue before its write is tried, so
-        none is ever written twice."""
+        none is ever written twice.
+
+        Interrupts are injected between statements only, which is N58's scope: an
+        interrupt inside a single statement is out of scope. A repeated line event
+        of one line (a comprehension's loop) is inside a statement, and on Python
+        3.12 an exception a trace function raises there skips the frame's
+        ``except`` handlers, which a real ``KeyboardInterrupt`` does not."""
         import sys
         from pathlib import Path
 
