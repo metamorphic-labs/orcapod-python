@@ -1074,6 +1074,7 @@ def install(root: Path | str):
     with (
         patch.dict(os.environ, {_ROOT_ENV: str(root)}),
         patch("orcapod.databases.spiraldb_connector.sp", fake_module),
+        patch("orcapod.databases.spiraldb_store_tables.sp", fake_module),
         patch("orcapod.databases.spiraldb_connector.require_sign_in", lambda: None),
         patch(
             "orcapod.databases.spiraldb_connector._http_get_json", fake_http_get_json

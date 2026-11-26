@@ -134,7 +134,7 @@ def entries(schema: pa.Schema, path: tuple[str, ...] = PATH) -> bytes:
 
 
 def read(recorded: bytes, path: tuple[str, ...] = PATH) -> store.StoreManifest:
-    return store.read_manifest(recorded, path)
+    return store.read_manifest_bytes(recorded, path)
 
 
 def decode(rows: pa.Table, schema: pa.Schema) -> pa.Table:
@@ -1260,7 +1260,7 @@ def test_a_manifest_of_another_path_is_refused() -> None:
     recorded = entries(schema_of(BASE), ("a", "b"))
     for path in (("a",), ("b", "a"), ("a", "b", ""), ("a_b",), ()):
         with pytest.raises(store.ManifestError, match="recorded as"):
-            _ = store.read_manifest(recorded, path)
+            _ = store.read_manifest_bytes(recorded, path)
 
 
 @pytest.mark.parametrize("part", ["a/b", "a\0", "\udc00"])
@@ -1353,7 +1353,7 @@ def test_a_manifest_that_cannot_be_read_in_full_is_an_error(
 ) -> None:
     recorded = make(entries(schema_of(BASE)))
     with pytest.raises(store.ManifestError):
-        _ = store.read_manifest(recorded, PATH)
+        _ = store.read_manifest_bytes(recorded, PATH)
 
 
 def test_a_large_manifest_is_kept() -> None:
@@ -1416,3 +1416,56 @@ def test_a_record_id_repeated_in_one_write_is_refused() -> None:
         rows.column_names.index(KEY), KEY, pa.array([b"x", b"x"], pa.large_binary())
     )
     refused(rows, "repeated")
+
+
+# ------------------------------------------------- the manifest in a table's metadata
+
+
+def test_a_manifest_in_chunks_round_trips_within_the_entry_limit() -> None:
+    manifest = new(wide_schema(), PATH)
+    entries_ = store.manifest_entries(manifest)
+    assert len(entries_) > 2  # several chunks and the header
+    for key, value in entries_.items():
+        assert len(key.encode()) + len(value) <= 8192
+    others = {"orcapod.path": b"[]", "someone.else": b"x"}
+    assert store.read_manifest({**others, **entries_}, PATH) == manifest
+
+
+def test_a_table_without_a_manifest_header_has_none() -> None:
+    entries_ = store.manifest_entries(new(schema_of(BASE)))
+    chunks = {k: v for k, v in entries_.items() if k != store.MANIFEST_KEY}
+    assert store.read_manifest({}, PATH) is None
+    assert store.read_manifest(chunks, PATH) is None
+
+
+def test_chunks_of_an_earlier_longer_manifest_are_not_read() -> None:
+    longer = store.manifest_entries(new(wide_schema(), PATH))
+    shorter = store.manifest_entries(new(schema_of(BASE), PATH))
+    assert len(longer) > len(shorter)
+    assert store.read_manifest({**longer, **shorter}, PATH) == new(schema_of(BASE))
+
+
+def _header_changed(entries_: dict[str, bytes], **changes: Any) -> dict[str, bytes]:
+    header = {**json.loads(entries_[store.MANIFEST_KEY]), **changes}
+    return {**entries_, store.MANIFEST_KEY: json.dumps(header).encode()}
+
+
+_BROKEN_ENTRIES: list[Callable[[dict[str, bytes]], dict[str, bytes]]] = [
+    lambda e: {k: v for k, v in e.items() if k != f"{store.MANIFEST_KEY}/0"},
+    lambda e: {**e, f"{store.MANIFEST_KEY}/0": e[f"{store.MANIFEST_KEY}/0"] + b" "},
+    lambda e: {**e, store.MANIFEST_KEY: b"\xff"},
+    lambda e: {**e, store.MANIFEST_KEY: b"[]"},
+    lambda e: _header_changed(e, format="other"),
+    lambda e: _header_changed(e, chunks=0),
+    lambda e: _header_changed(e, chunks="1"),
+    lambda e: _header_changed(e, chunks=10**6),
+    lambda e: _header_changed(e, sha256="0" * 64),
+]
+
+
+@pytest.mark.parametrize("make", _BROKEN_ENTRIES)
+def test_a_manifest_in_chunks_that_cannot_be_read_is_an_error(
+    make: Callable[[dict[str, bytes]], dict[str, bytes]],
+) -> None:
+    with pytest.raises(store.ManifestError):
+        _ = store.read_manifest(make(store.manifest_entries(new(wide_schema()))), PATH)

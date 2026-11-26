@@ -577,3 +577,42 @@ def test_nul_is_cut_in_nested_field_names(place: _Place) -> None:
     got = _written_and_read(place, "nul_in_field_names", column)
     assert got.column("s").to_pylist() == [{"x": 1, "z": 2}]
     assert got.column("l").to_pylist() == [[{"x": 3, "z": 4}]]
+
+
+# ------------------------------------------------ store mode (ITL-1498)
+
+
+def test_a_store_writes_reads_and_lists_its_table(place: _Place) -> None:
+    """Store mode under ``ConnectorArrowDatabase``: a fixed path, so a fixed table; the
+    same rows are written on every run (an upsert)."""
+    from orcapod.databases import ConnectorArrowDatabase
+    from orcapod.databases import spiral_store_names as names
+
+    path = ("conformance_store", "0123456789abcdef" * 4, "rdb_v1")
+    written = _codec_rows()
+    store = SpiralDBConnector(
+        place.project, place.dataset, place.overrides, _store=True
+    )
+    db = ConnectorArrowDatabase(store)
+    db.add_records(path, written, record_id_column="__record_id", flush=True)
+    fresh = ConnectorArrowDatabase(
+        SpiralDBConnector(place.project, place.dataset, place.overrides, _store=True)
+    )
+    assert fresh.table_exists(path)
+    got = fresh.get_all_records(path, record_id_column="__record_id")
+    assert got is not None
+    got = got.sort_by("__record_id")
+    assert got.column_names == written.column_names
+    for name in written.column_names:
+        a, b = got.column(name).combine_chunks(), written.column(name).combine_chunks()
+        if pa.types.is_floating(a.type):
+            assert a.view(pa.uint32()).equals(b.view(pa.uint32())), name
+        else:
+            assert a.equals(b.cast(a.type)), name
+    assert path in fresh.list_table_paths(("conformance_store",))
+    client = _client(place)
+    table = client.keyed_table(
+        place.project, place.dataset, names.store_table_name(path)
+    )
+    record = names.read_store_table_metadata(table.get_metadata())
+    assert record is not None and record.path == path

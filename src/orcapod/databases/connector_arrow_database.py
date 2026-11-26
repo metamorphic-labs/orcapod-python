@@ -18,7 +18,6 @@ Example::
 
 from __future__ import annotations
 
-import re
 from collections import defaultdict
 from collections.abc import Callable, Collection, Mapping
 from contextlib import AbstractContextManager
@@ -163,17 +162,8 @@ class ConnectorArrowDatabase:
         return "/".join(self._path_prefix + record_path)
 
     def _path_to_table_name(self, record_path: tuple[str, ...]) -> str:
-        """Map a record_path to a safe SQL table name.
-
-        Each component is sanitized (non-alphanumeric chars → ``_``), then
-        joined with ``__`` as separator. A ``t_`` prefix is added if the result
-        starts with a digit to ensure a valid SQL identifier.
-        """
-        parts = [re.sub(r"[^a-zA-Z0-9_]", "_", part) for part in record_path]
-        name = "__".join(parts)
-        if name and name[0].isdigit():
-            name = "t_" + name
-        return name
+        """The connector's name of the table at a full record path (ITL-1498)."""
+        return self._connector.table_name(record_path)
 
     def _validate_record_path(self, record_path: tuple[str, ...]) -> None:
         if not record_path:
@@ -250,7 +240,7 @@ class ConnectorArrowDatabase:
         """Fetch all committed records for a path from the connector."""
         table_name = self._path_to_table_name(self._path_prefix + record_path)
         self._require_table_name(table_name)
-        if table_name not in self._connector.get_table_names():
+        if not self._connector.has_table(table_name):
             return None
         batches = list(self._connector.iter_batches(f'SELECT * FROM "{table_name}"'))
         if not batches:
@@ -260,17 +250,10 @@ class ConnectorArrowDatabase:
     def list_table_paths(self, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
         """List the paths of the tables stored under ``prefix``.
 
-        A table name in the backend does not keep the path it was made from (see
-        ``_path_to_table_name``), so this lists by name: the tables, committed or
-        pending, whose name starts with the name ``prefix`` maps to. The components
-        after ``prefix`` are the rest of the name split at ``__``. They are in the
-        backend's form: every character other than letters, digits and ``_`` is
-        ``_``, and a component that holds ``__`` comes back as two. Such a path
-        still names the same table. A table of another path that maps to a name
-        with the same beginning is listed as well. With an empty prefix at the
-        root, a name that got the ``t_`` prefix keeps it.
-
-        Costs one listing of the backend's table names; no table is read.
+        The connector lists them (``DBConnectorProtocol.table_paths``), committed or
+        pending. A relational connector's names lose information, so its paths are in
+        the names' form (``table_names.joined_table_paths``); a SpiralDB store gives the
+        paths its tables record.
 
         Args:
             prefix: Leading path components, relative to ``self.base_path``.
@@ -279,21 +262,9 @@ class ConnectorArrowDatabase:
             The table paths, relative to ``self.base_path``, sorted.
         """
         full_prefix = self._path_prefix + prefix
-        names = set(self._connector.get_table_names())
-        names.update(
-            self._path_to_table_name(tuple(key.split("/")))
-            for key in self._pending_batches
-        )
-        stem = self._path_to_table_name(full_prefix) if full_prefix else ""
-        found: set[tuple[str, ...]] = set()
-        for name in names:
-            if not stem:
-                found.add(tuple(name.split("__")))
-            elif name == stem:
-                found.add(prefix)
-            elif name.startswith(stem + "__"):
-                found.add(prefix + tuple(name[len(stem) + 2 :].split("__")))
-        return sorted(found)
+        pending = [tuple(key.split("/")) for key in self._pending_batches]
+        found = self._connector.table_paths(full_prefix, pending)
+        return sorted({path[len(self._path_prefix) :] for path in found})
 
     def table_exists(self, record_path: tuple[str, ...]) -> bool:
         """Return ``True`` if a table exists at ``record_path``.
@@ -313,7 +284,7 @@ class ConnectorArrowDatabase:
         record_key = self._get_record_key(record_path)
         if record_key in self._pending_batches:
             return True
-        return table_name in self._connector.get_table_names()
+        return self._connector.has_table(table_name)
 
     # ── Storable columns ──────────────────────────────────────────────────────
 
@@ -327,7 +298,7 @@ class ConnectorArrowDatabase:
         table_name = self._path_to_table_name(full_path)
         self._require_table_name(table_name)
         try:
-            if table_name not in self._connector.get_table_names():
+            if not self._connector.has_table(table_name):
                 pending = self._pending_batches.get(self._get_record_key(record_path))
                 return None if pending is None else pending.schema
             return pa.schema(
@@ -556,7 +527,7 @@ class ConnectorArrowDatabase:
         """The stored table's columns as the connector reports them now, in its order
         (``get_column_info``, large-normalized types), or ``None`` when it does not
         exist. Never remembered: each call asks the connector."""
-        if table_name not in self._connector.get_table_names():
+        if not self._connector.has_table(table_name):
             return None
         return [
             pa.field(
@@ -580,7 +551,7 @@ class ConnectorArrowDatabase:
             held.append(pending.schema)
         table_name = self._path_to_table_name(self._path_prefix + record_path)
         stored = self._stored_schemas.get(table_name)
-        if stored is None and table_name in self._connector.get_table_names():
+        if stored is None and self._connector.has_table(table_name):
             stored = self._read_stored_schema(table_name)
             if stored is not None:
                 self._stored_schemas[table_name] = stored

@@ -1,8 +1,10 @@
 # ITL-1498: the SpiralDB connector's store mode (stage 3)
 
 Stage 3 of `docs/dev/specs/itl-1446-round2-spiral-sdk.md` (PR 588), stacked on PR 590
-(ITL-1497, the codec) and PR 589 (ITL-1495, names and metadata). Proposal; the choices marked
-**Q** wait for the coordinator.
+(ITL-1497, the codec) and PR 589 (ITL-1495, names and metadata). Q1 to Q4 approved as
+recommended by the coordinator on the developer's behalf (2026-11-26); Q2 revises decision 4.
+Implemented in `databases/table_names.py`, `databases/spiraldb_store_tables.py`, the
+connector's `_store` flag, and the chunked manifest of `spiral_store.manifest_entries`.
 
 ## What the code does today
 

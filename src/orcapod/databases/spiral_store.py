@@ -14,11 +14,11 @@ what SpiralDB keeps was measured live with spiral-sdk 0.16.78
   and restored to the *logical* one (``decode_rows``). A type either comes back exactly
   or is refused. Every refusal of a type, a name or a value that may be lifted is an
   entry of one table, ``REFUSALS``.
-* **The manifest.** One a table, written at creation and never changed
-  (``manifest_bytes``, ``read_manifest``): the record path, the kind, the logical
-  schema, and the stored names at every depth. It is kept in the table's row of the
-  dataset's schema table; the table's own metadata holds only its identity
-  (``spiral_store_names``).
+* **The manifest.** One a table, written before its first rows (``manifest_entries``,
+  ``read_manifest``): the record path, the kind, the logical schema, and the stored names
+  at every depth. It is kept in the table's own metadata, in chunks, beside the table's
+  identity record (``spiral_store_names``); never in the dataset's schema table, which is
+  all or nothing under one completion marker (decision of 2026-11-26, ITL-1498).
 
 Logical types are handled by their identifier (extension name and metadata) alone, as
 ``ARROW:extension:*`` field metadata over the storage type: neither writing nor reading
@@ -34,9 +34,10 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import re
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, cast
@@ -835,11 +836,9 @@ def new_manifest(
 
 
 def manifest_bytes(manifest: StoreManifest) -> bytes:
-    """Return the bytes that record ``manifest``.
+    """Return the payload that records ``manifest``; equal manifests give equal bytes.
 
-    They are the ``schema`` cell of the table's row in its dataset's schema table
-    (``__orcapod_schemas__``), whose cells have no size limit; the row's ``format`` says
-    they are a store manifest. Equal manifests give equal bytes.
+    ``manifest_entries`` cuts it into a table's metadata entries.
 
     Args:
         manifest: The manifest.
@@ -878,11 +877,11 @@ def _schema_of(text: object) -> pa.Schema:
         raise ManifestError(f"a schema cannot be read ({exc})") from exc
 
 
-def read_manifest(recorded: bytes, record_path: tuple[str, ...]) -> StoreManifest:
+def read_manifest_bytes(recorded: bytes, record_path: tuple[str, ...]) -> StoreManifest:
     """Return the manifest ``manifest_bytes`` recorded.
 
     Args:
-        recorded: The bytes, as read from the table's row.
+        recorded: The payload.
         record_path: The record path the table was looked up for.
 
     Returns:
@@ -935,6 +934,92 @@ def read_manifest(recorded: bytes, record_path: tuple[str, ...]) -> StoreManifes
         raise ManifestError("the recorded stored schema is not the logical one's")
     _require_distinct(physical)
     return StoreManifest(record_path, kind, usable, physical)
+
+
+MANIFEST_KEY = "orcapod.manifest"
+"""The metadata key of a manifest's header; its chunks are ``<MANIFEST_KEY>/<i>``."""
+# SpiralDB holds a key and its value in 8,192 bytes together (measured with spiral-sdk
+# 0.16.78); a chunk leaves room for its key. Part of the format: one payload is always
+# cut at the same places.
+_CHUNK_BYTES = 8_000
+
+
+def manifest_entries(manifest: StoreManifest) -> dict[str, bytes]:
+    """Return the metadata entries that record ``manifest`` in its table.
+
+    The chunks of the payload, then the header: the format, the version, the number of
+    chunks and the SHA-256 of the payload, a checksum of what the chunks hold. Written in
+    one upsert; a header always names exactly its chunks, so chunks of an earlier,
+    interrupted manifest are never read.
+
+    Args:
+        manifest: The manifest.
+
+    Returns:
+        The entries, chunks first.
+    """
+    payload = manifest_bytes(manifest)
+    pieces = [
+        payload[i : i + _CHUNK_BYTES] for i in range(0, len(payload), _CHUNK_BYTES)
+    ]
+    header = {
+        "chunks": len(pieces),
+        "format": MANIFEST_FORMAT,
+        "sha256": _checksum(payload),
+        "version": MANIFEST_VERSION,
+    }
+    entries = {f"{MANIFEST_KEY}/{i}": piece for i, piece in enumerate(pieces)}
+    entries[MANIFEST_KEY] = json.dumps(
+        header, separators=(",", ":"), sort_keys=True
+    ).encode("ascii")
+    return entries
+
+
+def read_manifest(
+    metadata: Mapping[str, bytes], record_path: tuple[str, ...]
+) -> StoreManifest | None:
+    """Return the manifest in a table's metadata.
+
+    Args:
+        metadata: All of the table's metadata.
+        record_path: The record path the table was looked up for.
+
+    Returns:
+        The manifest, or ``None`` when the table holds no header (a creation that
+        stopped before its manifest).
+
+    Raises:
+        ManifestError: If the header or its chunks cannot be read in full, do not match
+            their checksum, or the manifest is not one of ``read_manifest_bytes``.
+    """
+    raw = metadata.get(MANIFEST_KEY)
+    if raw is None:
+        return None
+    try:
+        header = json.loads(raw.decode("ascii"))
+    except (ValueError, RecursionError) as exc:
+        raise ManifestError(f"a manifest header is not JSON ({exc})") from exc
+    if not isinstance(header, dict):
+        raise ManifestError("a manifest header is not a JSON object")
+    fields = cast("dict[str, Any]", header)
+    if fields.get("format") != MANIFEST_FORMAT:
+        raise ManifestError(f"unknown manifest format {fields.get('format')!r}")
+    count = fields.get("chunks")
+    if type(count) is not int or count < 1:
+        raise ManifestError(f"invalid chunk count {count!r}")
+    keys = [f"{MANIFEST_KEY}/{i}" for i in range(count)]
+    missing = [k for k in keys if k not in metadata]
+    if missing:
+        raise ManifestError(f"the manifest's chunks {missing} are missing")
+    payload = b"".join(metadata[k] for k in keys)
+    if fields.get("sha256") != _checksum(payload):
+        raise ManifestError("the manifest's chunks do not match its checksum")
+    return read_manifest_bytes(payload, record_path)
+
+
+def _checksum(payload: bytes) -> str:
+    """The SHA-256 of a manifest payload, as hex: the header's check of its chunks."""
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _without_names(fields: Any) -> list[object]:

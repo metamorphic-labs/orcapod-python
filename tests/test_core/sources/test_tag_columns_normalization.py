@@ -10,13 +10,14 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from typing import Any
 
 import pyarrow as pa
 import pytest
 
 from orcapod.utils.schema_utils import _normalize_column_list
+from orcapod.databases.table_names import joined_table_name, joined_table_paths
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +349,21 @@ class _MockConnector:
             )
         }
         self._pk_columns = pk_columns or {"events": ["session_id"]}
+
+    def table_name(self, path: tuple[str, ...]) -> str:
+        """Return the name of the table at a full record path: the joined rule."""
+        return joined_table_name(path)
+
+    def has_table(self, table_name: str) -> bool:
+        """Return whether the table exists."""
+        return table_name in self.get_table_names()
+
+    def table_paths(
+        self, prefix: tuple[str, ...], pending: Collection[tuple[str, ...]]
+    ) -> list[tuple[str, ...]]:
+        """Return the full paths of the tables under ``prefix``, in the names' form."""
+        names = {*self.get_table_names(), *(joined_table_name(p) for p in pending)}
+        return joined_table_paths(names, prefix)
 
     def get_table_names(self) -> list[str]:
         return list(self._tables.keys())
