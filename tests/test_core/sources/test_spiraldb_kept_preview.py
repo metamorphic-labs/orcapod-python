@@ -690,3 +690,29 @@ def test_only_a_sliced_column_is_copied() -> None:
     assert given_whole is not None
     assert kept_whole.address == given_whole.address
     assert compacted.column("sliced").chunk(0).get_total_buffer_size() < 2**10
+
+
+def test_a_late_store_of_the_same_key_keeps_what_is_known(
+    calls: collections.Counter[str],
+    after_the_read: Callable[[Callable[[], None]], None],
+) -> None:
+    """Verification of b18ce0e7: a cold filtered head(40) paused before it keeps its
+    rows; head(50) keeps the same 15 rows; head(10) counts and keeps the total; the
+    late head(40) keeps the same key and must not erase the count."""
+    options: dict[str, Any] = {"where": {"subject": "s1"}}  # pyright: ignore[reportExplicitAny]
+    source = _source(tag_only_columns=True, **options)
+
+    def others_first() -> None:
+        assert source.head(50).table.num_rows == 15
+        _ = source.head(10)
+
+    after_the_read(others_first)
+    late = source.head(40)
+    assert late.table.num_rows == 15
+    calls.clear()
+    fewer = source.head(5)
+    assert calls == {}
+    _same_view(fewer, _fresh(tag_only_columns=True, **options).head(5))
+    calls.clear()
+    _ = source.head(50)
+    assert calls == {}
