@@ -637,3 +637,50 @@ def test_a_join_over_a_repeated_rejoin_raises_the_rejoin_refusal(
     assert "Join: the same stream" not in message.replace("Rejoin: the same", "")
     if case.startswith("two-input function pod"):
         assert "in the inputs of the function pod of '_identity'" in message
+
+
+def _data_tag_source(layout: str) -> Any:
+    """Two data-tags (``id``, ``key``: tags that are also data columns) and two data
+    columns (``x``, ``y``), in two table layouts and tag orders."""
+    columns = {
+        "id": pa.array([1, 1, 2], pa.int64()),
+        "key": pa.array(["p", "q", "p"], pa.large_string()),
+        "x": pa.array([1, 2, 3], pa.int64()),
+        "y": pa.array([10, 20, 30], pa.int64()),
+    }
+    if layout == "tags_id_key":
+        order, tags = ["id", "key", "x", "y"], ["id", "key"]
+    else:
+        order, tags = ["y", "key", "x", "id"], ["key", "id"]
+    table = pa.table({name: columns[name] for name in order})
+    return sources.ArrowTableSource(
+        table, tag_columns=tags, tag_only_columns=False, source_id="t"
+    )
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("operator", sorted(OPERATORS))
+def test_one_data_tag_stream_twice_runs_in_a_job_with_the_standalone_schema(
+    operator: str, layout: str, mode: str
+) -> None:
+    """CodeRabbit on PR 587: the ordered self-join over a stream with data-tags runs in a
+    job, sync and async, with the standalone rows, Arrow schema and column roles: the
+    two positions keep each column's role (tag, data-tag, data) and type."""
+    from orcapod.core.data_tags import stream_data_tags
+
+    t = _data_tag_source(layout)
+    standalone = OPERATORS[operator]()(t, t)
+    expected = standalone.as_table(all_info=True)
+    job = PipelineJob(name="data_tags", database=InMemoryArrowDatabase())
+    with job:
+        OPERATORS[operator]()(t, t, label="step")
+    _run(job, mode)
+    table = job.step.as_table(all_info=True)
+    assert _rows(table) == _rows(expected)
+    assert {f.name: f.type for f in table.schema} == {
+        f.name: f.type for f in expected.schema
+    }
+    assert job.step.keys() == standalone.keys()
+    assert stream_data_tags(job.step) == stream_data_tags(standalone)
+    assert stream_data_tags(standalone)  # the data-tags are kept, in both roles
