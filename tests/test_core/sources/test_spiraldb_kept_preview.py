@@ -375,15 +375,21 @@ def test_every_kept_view_is_the_view_a_fresh_read_gives(
 ) -> None:
     source = _source(tag_only_columns=True, **_OPTIONS[options])
     _ = source.head(first)
+    counts = 0
     for n in (first, 7, 3, 0):
         calls.clear()
         kept = source.head(n)
-        # Every preview the kept record answers makes no call, its total included.
-        assert calls == {}, n
+        # Every preview the kept record answers reads no row. The one call: after a
+        # read of every row a condition chose (its total exact, so not counted then),
+        # the first smaller preview counts the table, once (round 3 of the review).
+        assert "scan" not in calls, n
+        assert set(calls) <= {"lookup", "open_schemas", "schema", "count"}, n
+        counts += calls["count"]
         _same_view(kept, _fresh(tag_only_columns=True, **_OPTIONS[options]).head(n))
         calls.clear()
         _ = source.head(n)
         assert calls == {}, n
+    assert counts <= (1 if "where" in _OPTIONS[options] else 0)
 
 
 @pytest.mark.parametrize(
@@ -407,8 +413,14 @@ def test_a_smaller_preview_makes_no_call(
     _ = source.head(**first)
     calls.clear()
     kept = source.head(**then)
-    assert calls == {}
+    # A read of every matching row counted nothing (round 3): the first smaller
+    # preview counts once; no row is read.
+    assert calls["scan"] == 0
+    assert calls["count"] == (1 if "where" in options else 0)
     _same_view(kept, _fresh(tag_only_columns=True, **options).head(**then))
+    calls.clear()
+    _ = source.head(**then)
+    assert calls == {}
 
 
 @pytest.fixture
@@ -531,10 +543,17 @@ def test_a_failing_count_never_fails_a_preview_that_read_every_row(
     assert seen.table.num_rows == 15
     assert seen.total_rows == 15
     assert not seen.total_is_estimate
-    # Nothing is kept without its count: the next preview reads again.
+    # Its rows are kept without a count (round 3): the same preview makes no call.
     calls.clear()
-    assert source.head(40).table.num_rows == 15
-    assert calls["scan"] == 1
+    _same_view(source.head(40), seen)
+    assert calls == {}
+    # A smaller preview needs the table's count, as on main, and its failure is its
+    # own; the kept rows stay.
+    with pytest.raises(fake_spiral_sdk.SpiralError, match="timed out"):
+        _ = source.head(10)
+    calls.clear()
+    _same_view(source.head(40), seen)
+    assert calls == {}
 
 
 def test_a_source_closed_before_the_count_still_answers_the_preview(
@@ -614,3 +633,60 @@ def test_rows_that_are_not_a_slice_are_not_copied() -> None:
     assert compacted is not sliced
     assert compacted.equals(sliced)
     assert compacted.get_total_buffer_size() < 2**10
+
+
+# --------------------------------------------------------------------------------------
+# Round 3 of the review (0a9ccfeb)
+
+
+def test_a_preview_that_read_every_matching_row_counts_nothing(
+    calls: collections.Counter[str],
+) -> None:
+    """Round 3, finding 1: its total is exact, so it never waits for a count. The
+    first smaller preview answered from its rows counts once, as main does, and keeps
+    the count."""
+    options: dict[str, Any] = {"where": {"subject": "s1"}}  # pyright: ignore[reportExplicitAny]
+    source = _source(tag_only_columns=True, **options)
+    calls.clear()
+    seen = source.head(40)
+    assert seen.table.num_rows == 15
+    assert "count" not in calls
+    calls.clear()
+    fewer = source.head(10)
+    assert "scan" not in calls
+    _same_view(fewer, _fresh(tag_only_columns=True, **options).head(10))
+    calls.clear()
+    _same_view(source.head(10), fewer)
+    _ = source.head(3)
+    assert calls == {}
+
+
+def test_unsliced_chunks_are_never_copied() -> None:
+    """Round 3, finding 2: many whole one-row chunks over many large-binary columns
+    hold a few bytes each beyond their values; together they are not a slice."""
+    columns = {
+        f"c{i}": pa.chunked_array(
+            [pa.array([b"v"], pa.large_binary()) for _ in range(8192)]
+        )
+        for i in range(17)
+    }
+    whole = pa.table(list(columns.values()), names=list(columns))
+    assert whole.get_total_buffer_size() > whole.nbytes + 2**20
+    assert spiral_module._compact(whole) is whole  # pyright: ignore[reportPrivateUsage]  # the subject
+
+
+def test_only_a_sliced_column_is_copied() -> None:
+    """Round 3, finding 2: a real slice in one column copies that column only."""
+    big = pa.array([b"a" * (3 * 2**20)], pa.large_binary())
+    sliced = pa.array([b"s", b"z" * (2 * 2**20)], pa.large_binary()).slice(0, 1)
+    rows = pa.table({"whole": big, "sliced": sliced})
+    compacted = spiral_module._compact(rows)  # pyright: ignore[reportPrivateUsage]  # the subject
+    assert compacted.equals(rows)
+    assert compacted.schema.equals(rows.schema, check_metadata=True)
+    # The whole column keeps its buffers; the slice holds only its own bytes.
+    kept_whole = compacted.column("whole").chunks[0].buffers()[2]
+    given_whole = rows.column("whole").chunks[0].buffers()[2]
+    assert kept_whole is not None
+    assert given_whole is not None
+    assert kept_whole.address == given_whole.address
+    assert compacted.column("sliced").chunk(0).get_total_buffer_size() < 2**10
