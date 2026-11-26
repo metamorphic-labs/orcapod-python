@@ -362,11 +362,12 @@ class _Store:
 
     def metadata(self, table_id: str) -> dict[str, bytes]:
         """Return a table's metadata (``table-metadata``)."""
-        self.by_id(table_id)
+        _ = self.by_id(table_id)
         path = self.root / table_id / "metadata.json"
         if not path.exists():
             return {}
-        return {k: bytes.fromhex(v) for k, v in json.loads(path.read_text()).items()}
+        stored = cast("dict[str, str]", json.loads(path.read_text()))
+        return {k: bytes.fromhex(v) for k, v in stored.items()}
 
     def set_metadata(self, table_id: str, entries: dict[str, bytes]) -> None:
         """Upsert ``entries`` into a table's metadata (``table-metadata``)."""
@@ -379,7 +380,7 @@ class _Store:
                 raise _status(400)
         stored = self.metadata(table_id)
         stored.update(entries)
-        (self.root / table_id / "metadata.json").write_text(
+        _ = (self.root / table_id / "metadata.json").write_text(
             json.dumps({k: v.hex() for k, v in stored.items()})
         )
 

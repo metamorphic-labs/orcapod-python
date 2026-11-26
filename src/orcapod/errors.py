@@ -596,6 +596,25 @@ class TableSchemaError(ValueError):
         super().__init__(_in_table(f"table schema: {reason}", table))
 
 
+class SpiralStoreTableCollisionError(ValueError):
+    """A SpiralDB table under a store table's name is not that store table (ITL-1495).
+
+    A store table's name is computed from its full path; its metadata records the path,
+    the store format and the layout. A table whose record names another path, another
+    format, or is incomplete or unreadable is refused: never read, written or adopted.
+
+    Attributes:
+        reason: What is wrong.
+        table: The table, as ``"<project>/<dataset>/<table>"``, added by the caller that
+            knows it; ``None`` otherwise.
+    """
+
+    def __init__(self, reason: str, *, table: str | None = None) -> None:
+        self.reason = reason
+        self.table = table
+        super().__init__(_in_table(f"not this store's table: {reason}", table))
+
+
 class SpiralDBWriteNotSupportedError(NotImplementedError):
     """Orcapod does not write SpiralDB through spiral-sdk yet (ITL-1186): it reads it.
 
