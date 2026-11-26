@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -365,6 +366,46 @@ class TestUpsertRecords:
             'SELECT value FROM "t" WHERE "__record_id" = \'a\''
         )
         assert cursor.fetchone()[0] == 1.0
+
+    @pytest.mark.parametrize("bad_first", [False, True])
+    def test_failed_upsert_rolls_back_the_whole_batch(
+        self, tmp_path: Path, bad_first: bool
+    ) -> None:
+        db_path = str(tmp_path / "store.db")
+        with SQLiteConnector(db_path) as writer, SQLiteConnector(db_path) as reader:
+            writer.create_table_if_not_exists(
+                "t",
+                [
+                    ColumnInfo("__record_id", pa.large_string(), nullable=False),
+                    ColumnInfo("value", pa.float64(), nullable=False),
+                ],
+                "__record_id",
+            )
+            seed = self._make_table(["changed"], [1.0])
+            writer.upsert_records("t", seed, "__record_id")
+            ids = (
+                ["bad", "changed", "later"]
+                if bad_first
+                else ["changed", "bad", "later"]
+            )
+            values = {"changed": 2.0, "bad": None, "later": 3.0}
+            with pytest.raises(sqlite3.IntegrityError, match="NOT NULL"):
+                writer.upsert_records(
+                    "t",
+                    self._make_table(ids, [values[row_id] for row_id in ids]),
+                    "__record_id",
+                )
+            committed = pa.Table.from_batches(
+                list(reader.iter_batches('SELECT * FROM "t"'))
+            )
+            assert committed.to_pylist() == seed.to_pylist()
+            reader.upsert_records(
+                "t", self._make_table(["changed"], [77.0]), "__record_id"
+            )
+            committed = pa.Table.from_batches(
+                list(writer.iter_batches('SELECT * FROM "t"'))
+            )
+            assert committed["value"].to_pylist() == [77.0]
 
     def test_raises_on_invalid_table_name(self, connector: SQLiteConnector) -> None:
         records = self._make_table(["a"], [1.0])

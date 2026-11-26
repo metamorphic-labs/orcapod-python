@@ -8,6 +8,12 @@ from contextlib import contextmanager
 import pyarrow as pa
 
 
+class RejectedWriteRow:
+    """Attach the rejected row's input position to an atomic connector error."""
+
+    row_index: int | None = None
+
+
 class PendingCommit:
     """The outcome of the current attempt to commit a table's pending rows."""
 

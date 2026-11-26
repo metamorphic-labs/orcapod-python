@@ -23,10 +23,15 @@ from typing import Any
 
 import pyarrow as pa
 
+from orcapod.databases._pending_commits import RejectedWriteRow
 from orcapod.databases.utils import is_direct_projection
 from orcapod.types import ColumnInfo
 
 logger = logging.getLogger(__name__)
+
+
+class _SQLiteRejectedWriteRow(sqlite3.IntegrityError, RejectedWriteRow):
+    """A native SQLite integrity error with the index of the rejected row."""
 
 
 # ---------------------------------------------------------------------------
@@ -457,7 +462,7 @@ class SQLiteConnector:
         id_column: str,
         skip_existing: bool = False,
     ) -> None:
-        """Write records to a table using upsert semantics.
+        """Write records to a table in one upsert transaction.
 
         Args:
             table_name: Target table (must already exist).
@@ -476,8 +481,37 @@ class SQLiteConnector:
             placeholders = ", ".join("?" for _ in cols)
             verb = "INSERT OR IGNORE" if skip_existing else "INSERT OR REPLACE"
             sql = f'{verb} INTO "{table_name}" ({col_list}) VALUES ({placeholders})'
-            rows = (tuple(row[c] for c in cols) for row in records.to_pylist())
-            conn.executemany(sql, rows)
+            row_index = -1
+
+            def rows() -> Iterator[tuple[Any, ...]]:
+                nonlocal row_index
+                for row_index, row in enumerate(records.to_pylist()):
+                    yield tuple(row[c] for c in cols)
+
+            conn.execute("BEGIN")
+            try:
+                conn.executemany(sql, rows())
+                row_index = -1  # Commit-time failures have no individual row.
+                conn.commit()
+            except BaseException as error:
+                conn.rollback()
+                # sqlite3 steps each row before asking the iterator for the next one.
+                # These two constraints diagnose the row being stepped.
+                if (
+                    isinstance(error, sqlite3.IntegrityError)
+                    and row_index >= 0
+                    and error.sqlite_errorcode
+                    in (
+                        sqlite3.SQLITE_CONSTRAINT_NOTNULL,
+                        sqlite3.SQLITE_CONSTRAINT_CHECK,
+                    )
+                ):
+                    rejected = _SQLiteRejectedWriteRow(*error.args)
+                    rejected.sqlite_errorcode = error.sqlite_errorcode
+                    rejected.sqlite_errorname = error.sqlite_errorname
+                    rejected.row_index = row_index
+                    raise rejected from error
+                raise
 
     @property
     def keeps_field_metadata(self) -> bool:

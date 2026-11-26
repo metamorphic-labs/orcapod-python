@@ -19,7 +19,7 @@ import os
 import sqlite3
 import uuid
 from collections.abc import Iterator
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from pathlib import Path
 from typing import Any, cast
 from unittest.mock import patch
@@ -1138,6 +1138,117 @@ def test_a_refused_batch_leaves_the_queued_rows_to_be_flushed(
         _check(db.get_all_records(PATH, record_id_column=ID), order, ns)
         db.flush()
         _check(db.get_all_records(PATH, record_id_column=ID), order, ns)
+
+
+def _nullable_values(
+    rows: list[tuple[bytes, int | None]], *, nullable: bool = True
+) -> pa.Table:
+    return pa.Table.from_arrays(
+        [
+            pa.array([key for key, _ in rows], pa.large_binary()),
+            pa.array([value for _, value in rows], pa.int64()),
+        ],
+        schema=pa.schema(
+            [
+                pa.field(ID, pa.large_binary()),
+                pa.field("v", pa.int64(), nullable=nullable),
+            ]
+        ),
+    )
+
+
+def _read_values(
+    database: ConnectorArrowDatabase, path: tuple[str, ...] = PATH
+) -> pa.Table:
+    rows = database.get_all_records(path, record_id_column=ID)
+    assert rows is not None
+    return rows.sort_by(ID)
+
+
+@pytest.mark.parametrize("bad_first", [False, True])
+@pytest.mark.parametrize("stored_at_enqueue", [False, True])
+def test_stored_not_null_refusal_preserves_other_rows_and_tables(
+    tmp_path: Path, bad_first: bool, stored_at_enqueue: bool
+) -> None:
+    """Refuse a known violation at add time and a concurrent schema change at flush."""
+    db_file = str(tmp_path / "store.db")
+    with (
+        SQLiteConnector(db_file) as connector,
+        SQLiteConnector(db_file) as reader_connector,
+    ):
+        writer = ConnectorArrowDatabase(connector)
+        reader = ConnectorArrowDatabase(reader_connector)
+        seed = _nullable_values([(b"changed", 1)], nullable=False)
+        good = _nullable_values([(b"valid", 2), (b"later", 3)])
+        bad_rows: list[tuple[bytes, int | None]] = [(b"bad", None), (b"also-bad", None)]
+        if stored_at_enqueue:
+            _add(reader, seed, flush=True)
+            bad_rows.insert(0, (b"changed", 2))
+        bad = _nullable_values(bad_rows).select(["v", ID])
+        for batch in (bad, good) if bad_first else (good, bad):
+            if batch is bad and stored_at_enqueue:
+                with pytest.raises(NullInNonNullableColumnError, match="'v'"):
+                    _add(writer, batch)
+            else:
+                _add(writer, batch)
+        if stored_at_enqueue:
+            _add(reader, _nullable_values([(b"changed", 77)]), flush=True)
+        else:
+            _add(reader, seed, flush=True)
+            with pytest.raises(NullInNonNullableColumnError, match="'v'"):
+                writer.flush()
+        expected = [
+            {ID: b"changed", "v": 77 if stored_at_enqueue else 1},
+            {ID: b"later", "v": 3},
+            {ID: b"valid", "v": 2},
+        ]
+        assert _read_values(writer).to_pylist() == expected
+        independent = _nullable_values([(b"ok", 5), (b"also-ok", 6)])
+        writer.add_records(
+            ("independent",), independent, record_id_column=ID, flush=True
+        )
+        assert _read_values(reader, ("independent",)).equals(independent.sort_by(ID))
+        writer.flush()
+        assert _read_values(reader).to_pylist() == expected
+
+
+@pytest.mark.parametrize("bad_first", [False, True])
+def test_sqlite_check_failure_drops_only_the_rejected_row(
+    tmp_path: Path, bad_first: bool
+) -> None:
+    db_file = str(tmp_path / "store.db")
+    # CHECK is backend metadata the Arrow schema cannot describe.
+    with closing(sqlite3.connect(db_file)) as sql:
+        sql.execute(
+            'CREATE TABLE t ("__record_id" BLOB PRIMARY KEY, v INTEGER CHECK (v > 0))'
+        )
+    with (
+        SQLiteConnector(db_file) as connector,
+        SQLiteConnector(db_file) as reader_connector,
+    ):
+        writer = ConnectorArrowDatabase(connector)
+        reader = ConnectorArrowDatabase(reader_connector)
+        _add(reader, _nullable_values([(b"seed", 1)]), flush=True)
+        good = _nullable_values([(b"good-1", 2), (b"good-2", 3)])
+        mixed = _nullable_values([(b"bad", -1), (b"good-3", 4)])
+        for batch in (mixed, good) if bad_first else (good, mixed):
+            _add(writer, batch)
+        independent_path = ("independent",)
+        independent = _nullable_values([(b"other-1", 5), (b"other-2", 6)])
+        writer.add_records(independent_path, independent, record_id_column=ID)
+        with pytest.raises(sqlite3.IntegrityError, match="CHECK"):
+            writer.flush()
+        assert _read_values(reader).to_pylist() == [{ID: b"seed", "v": 1}]
+        assert _read_values(reader, independent_path).equals(independent.sort_by(ID))
+        expected = [
+            {ID: b"good-1", "v": 2},
+            {ID: b"good-2", "v": 3},
+            {ID: b"good-3", "v": 4},
+            {ID: b"seed", "v": 1},
+        ]
+        assert _read_values(writer).to_pylist() == expected
+        writer.flush()
+        assert _read_values(reader).to_pylist() == expected
 
 
 def _int_list(values: list[int | None], *, declared: bool) -> Any:

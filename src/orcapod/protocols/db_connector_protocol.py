@@ -106,7 +106,10 @@ class DBConnectorProtocol(Protocol):
         id_column: str,
         skip_existing: bool = False,
     ) -> None:
-        """Write records to a table using upsert semantics.
+        """Write records to a table atomically using upsert semantics.
+
+        Roll back the batch on a rejected write so the caller can safely retain
+        uncommitted records for another attempt.
 
         Args:
             table_name: Target table (must already exist).

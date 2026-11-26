@@ -27,7 +27,11 @@ from typing import Any, cast
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from orcapod.databases._pending_commits import PendingCommit, PendingCommits
+from orcapod.databases._pending_commits import (
+    PendingCommit,
+    PendingCommits,
+    RejectedWriteRow,
+)
 from orcapod.databases.utils import (
     coerce_record_id,
     declared_null_path,
@@ -56,6 +60,17 @@ def _arrow_schema_to_column_infos(schema: pa.Schema) -> list[ColumnInfo]:
     return [
         ColumnInfo(name=field.name, arrow_type=field.type, nullable=field.nullable)
         for field in schema
+    ]
+
+
+def _stored_null_columns(records: pa.Table, stored: list[pa.Field[Any]]) -> list[str]:
+    """Find stored NOT NULL columns containing a null in incoming rows."""
+    return [
+        field.name
+        for field in stored
+        if not field.nullable
+        and field.name in records.column_names
+        and records[field.name].null_count
     ]
 
 
@@ -473,9 +488,8 @@ class ConnectorArrowDatabase:
         self.require_storable(
             normalize_schema_to_large_types(records.schema, keep_null=True)
         )
-        self._require_table_name(
-            self._path_to_table_name(self._path_prefix + record_path)
-        )
+        table_name = self._path_to_table_name(self._path_prefix + record_path)
+        self._require_table_name(table_name)
         # Against the schema these rows were given with: combined with queued rows
         # that declare the column nullable, the null would be stored (ITL-1381).
         # Before the normalization, which refuses some such rows with another error.
@@ -525,6 +539,15 @@ class ConnectorArrowDatabase:
                     f"Records with IDs {conflicts} already exist in the pending batch. "
                     "Use skip_duplicates=True to skip them."
                 )
+
+        # A nullable input can still violate a constraint of the durable table.
+        # Only rows that actually contain nulls require this lookup.
+        if any(column.null_count for column in records.columns):
+            null_columns = _stored_null_columns(
+                records, self._stored_columns(table_name) or []
+            )
+            if null_columns:
+                raise NullInNonNullableColumnError(null_columns[0], table=record_key)
 
         # Buffer in pending batch
         existing_pending = self._pending_batches.get(record_key)
@@ -761,9 +784,20 @@ class ConnectorArrowDatabase:
         )
 
     def flush(self) -> None:
-        """Commit pending batches via upsert, retaining a rejected batch for retry."""
+        """Try each table's pending batch and raise the first failure afterwards."""
+        first_error: Exception | None = None
         for record_key in list(self._pending_batches):
-            self._flush_by_key(record_key)
+            try:
+                self._flush_by_key(record_key)
+            except Exception as error:
+                if first_error is None:
+                    first_error = error
+                else:
+                    first_error.add_note(
+                        f"Flush of {record_key!r} also failed: {error}"
+                    )
+        if first_error is not None:
+            raise first_error
 
     def refresh_table(self, record_path: tuple[str, ...]) -> None:
         """Nothing to refresh: every read queries the connector's backend (ITL-1408)."""
@@ -784,6 +818,7 @@ class ConnectorArrowDatabase:
         if ready is None:
             return
         batch, ids = ready
+        retry_ids = ids
         pending = batch
         record_path = tuple(record_key.split("/"))
         table_name = self._path_to_table_name(record_path)
@@ -820,12 +855,30 @@ class ConnectorArrowDatabase:
                             + "}"
                         )
 
+                    retry_ids = set()
                     raise ValueError(
                         f"Schema mismatch for table {table_name!r}: "
                         f"existing={_fmt(existing_cols)}, "
                         f"pending={_fmt(pending_cols)}. "
                         "Schema evolution is not supported."
                     )
+
+                null_columns = _stored_null_columns(pending, existing)
+                if null_columns:
+                    valid = pc.is_valid(batch[null_columns[0]])
+                    for column in null_columns[1:]:
+                        valid = pc.and_(valid, pc.is_valid(batch[column]))
+                    batch = batch.filter(valid)
+                    retry_ids = set(
+                        cast(list[bytes], batch[self.RECORD_ID_COLUMN].to_pylist())
+                    )
+                    error = NullInNonNullableColumnError(
+                        null_columns[0], table=record_key
+                    )
+                    error.add_note(
+                        f"Dropped {len(ids - retry_ids)} invalid queued row(s)."
+                    )
+                    raise error
 
                 # Checked by exact name and type above: only then are the rows put
                 # in the stored order, by name (ITL-1367).
@@ -840,15 +893,24 @@ class ConnectorArrowDatabase:
                 id_column=self.RECORD_ID_COLUMN,
                 skip_existing=skip_existing,
             )
-        except BaseException:
-            # Keep the original queued order when the connector needed stored order.
-            # A rejected write cannot distinguish valid rows from the rest of the batch.
-            self._pending_commits.restore(record_key, batch, ids)
+        except BaseException as error:
+            if isinstance(error, RejectedWriteRow) and error.row_index is not None:
+                index = error.row_index
+                dropped = cast(bytes, batch[self.RECORD_ID_COLUMN][index].as_py())
+                retry_ids = ids - {dropped}
+                batch = pa.concat_tables(
+                    [batch.slice(0, index), batch.slice(index + 1)]
+                )
+                error.add_note(f"Dropped one invalid queued row from {record_key!r}.")
+            if retry_ids:
+                self._pending_commits.restore(record_key, batch, retry_ids)
             self._pending_commits.finish(record_key, committed=False)
+            self._pending_commits.forget(record_key, ids - retry_ids)
             raise
         else:
             self._pending_commits.finish(record_key, committed=True)
             self._pending_commits.forget(record_key, ids)
+        finally:
             if record_key not in self._pending_batches:
                 self._pending_skip_existing.pop(record_key, None)
 
