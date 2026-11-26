@@ -263,28 +263,18 @@ def test_trace_through_a_batch(tmp_path: Path, mode: str) -> None:
     job = build(tmp_path, fold="batch")
     run(job, mode)
     held = job.nodes["means"].as_table().to_pylist()
-    # Batch keeps every tag, list-valued: the first batch's tags select it.
-    first = held[0]
-    trace = job.nodes["means"].trace(
-        {
-            "unit": first["unit"],
-            "session": first["session"],
-            "subject": first["subject"],
-        },
-        "mean_hz",
-    )
+    # The singleton remainder can appear first in the held results.
+    full_batch = next(row for row in held if len(row["unit"]) == 2)
+    tags = {name: full_batch[name] for name in ("unit", "session", "subject")}
+    trace = job.nodes["means"].trace(tags, "mean_hz")
     members = [s for s in trace.root.walk() if s.node == "unit_rates"]
     assert [m.member for m in members] == [0, 1]
-    assert [dict(m.tags)["unit"] for m in members] == first["unit"]
+    assert [dict(m.tags)["unit"] for m in members] == full_batch["unit"]
     # The selection feeding means (by structure: numbered labels follow hashes).
     selection = job.nodes["means"].upstreams[0].label
     grouped = [s for s in trace.root.walk() if s.node == selection]
     held_batch = job.nodes[selection].as_table().to_pylist()
-    (batch,) = [
-        b
-        for b in held_batch
-        if b["unit"] == first["unit"] and b["session"] == first["session"]
-    ]
+    (batch,) = [b for b in held_batch if all(b[name] == v for name, v in tags.items())]
     assert [m.value for m in members] == batch["rate_hz"]
     assert len(grouped) == 1
 
