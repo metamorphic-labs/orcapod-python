@@ -398,7 +398,9 @@ class TestStreams:
         """A join of two inputs sharing a data column fails with a short message naming both."""
         stream = _guarded_build(shape, monkeypatch)
         left = stream.map_data({"x": "y"}, label="left_branch")
-        right = stream.map_data({"x": "y"}, label="right_branch")
+        # Another computation with the column ``y``: two equal branches would be one
+        # stream given twice, which a join refuses before comparing columns (ITL-1419).
+        right = stream.map_data({"x": "z"}).map_data({"z": "y"}, label="right_branch")
         with _count_schema_queries(monkeypatch, _budget(shape)):
             with pytest.raises(InputValidationError) as excinfo:
                 left.join(right)

@@ -16,19 +16,36 @@ with one predecessor: the sync orchestrator hands the operator one stream ("Bina
 requires exactly two input streams"), the async one one reader. Pinned by
 `tests/test_pipeline/test_loaded_argument_order.py::test_one_stream_given_twice_fails_to_run_in_a_job`.
 
-## What one stream given twice does elsewhere (unchanged by this stage)
+## One stream given twice to a commutative pod: refused
 
-- `Join()(a, a)` and `Rejoin()(a, a)`: refused by the operator itself (overlapping data
-  columns, `InputValidationError`), standalone and when recorded into a pipeline. Kept.
-- A function pod given one stream for two parameters, `pod(a, a)`: the pod joins its inputs
-  first, so it is refused as `Join(a, a)` is, standalone and when recorded. Kept.
+Independent review of the first head found that a commutative operator hashes its operands
+as a set, so `Join()(d)` and `Join()(d, d)` (where `d` has no data column besides its
+data-tags, so no overlap refuses it) shared one content hash and cache path but gave
+different rows (5 against 3 for `id = [1, 1, 2]`), and which one a job kept followed the
+order the steps were recorded in. Decided on the developer's behalf (2026-11-26): a
+commutative operator (`Join`, `Rejoin`, any pod whose `argument_symmetry` is a
+`frozenset`) or a function pod given the same stream more than once is refused with
+`InputValidationError` before anything is recorded, naming the pod and the stream and
+pointing to `MergeJoin` for a self-join. One rule,
+`core/operators/repeated_operands.refuse_repeated_operands`: an operator's `process` and a
+function pod's `handle_input_streams` call it with the operands' identity (the same object
+twice), and `_record_invocation` with their content hashes (also two streams of one
+identity, which would be one step of the pipeline). Called on its own, a pod computes no
+content hash of its inputs (hashing a raw stream reads its rows, and not every value type
+can be hashed), and the rule asks `argument_symmetry` (which builds a `frozenset` of the
+streams, hashing them) only once a repeat is found. Before, standalone `Join()(d, d)` ran when no data column overlapped and was
+refused (overlapping data columns) otherwise.
+
+A commutative operator's inputs have no position also when it has one input (`Join()(a)`):
+only a function or side-effect pod gets position 0 for its one input.
 
 ## Change
 
 1. **One rule for positions** (new `src/orcapod/pipeline/edges.py`): `input_positions(pod,
-   inputs)` gives each input its position, the argument index when the pod's
-   `argument_symmetry` is a tuple (function and side-effect pods: 0; `MergeJoin`, `SemiJoin`:
-   0 and 1) and `None` when it is a `frozenset` (`Join`, `Rejoin`). Used by
+   inputs)` gives each input of an operator its argument index when the operator's
+   `argument_symmetry` is a tuple (`MergeJoin`, `SemiJoin`: 0 and 1) and `None` when it is a
+   `frozenset` (`Join`, `Rejoin`, with any number of inputs); a function or side-effect pod's
+   one input is at 0. Used by
    `_record_invocation`, `compile`, the `PipelineJob` rebuild of a blueprint and the loader.
 2. **Hash-level edges are triples.** `_graph_edges` becomes a sorted list of
    `(upstream key, node key, position)`. `_hash_graph` (networkx, used for topological order and
@@ -77,7 +94,8 @@ New file `tests/test_pipeline/test_edge_positions.py`, inputs with two tag and t
   another at 1 and the reverse, give the standalone rows.
 - A source node's observer events are the same for `MergeJoin(A, A)` as for `MergeJoin(A, B)`
   per source (one start and end per run).
-- `Join(A, A)`, `Rejoin(A, A)` and a function pod given `(A, A)` stay refused.
+- `Join`, `Rejoin` and a function pod given one stream twice are refused, standalone and
+  at recording, in both recording orders, sync and async; `Join(a)` has position `None`.
 - The saved file of a job with `MergeJoin(A, A)` has one edge pair and `inputs` `[A, A]`;
   saving a loaded job writes the same bytes.
 - `test_one_stream_given_twice_fails_to_run_in_a_job` becomes the test that it runs.

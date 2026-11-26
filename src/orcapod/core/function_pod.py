@@ -647,6 +647,13 @@ class _FunctionPodBase(TraceableBase):
         if len(streams) == 0:
             raise ValueError("At least one input stream is required")
         elif len(streams) > 1:
+            from orcapod.core.operators.repeated_operands import (
+                refuse_repeated_operands,
+            )
+
+            # The pod joins its inputs: one stream twice is refused, naming the pod
+            # (ITL-1419), before the join is built or recorded.
+            refuse_repeated_operands(self, streams)
             # TODO: simplify the multi-stream handling logic
             multi_stream_handler = self.multi_stream_handler()
             joined_stream = multi_stream_handler.process(*streams)

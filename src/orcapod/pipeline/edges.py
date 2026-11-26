@@ -44,13 +44,15 @@ def input_positions(
 ) -> tuple[Position, ...]:
     """The position of each of ``inputs`` of ``pod``.
 
-    A pod with one input gives it position 0. Otherwise the kind of
-    ``pod.argument_symmetry(inputs)`` decides: a ``tuple`` (ordered: ``MergeJoin``,
-    ``SemiJoin``) gives each input its argument index, a ``frozenset`` (commutative:
-    ``Join``, ``Rejoin``) gives every input ``None``. Only the kind of the returned
-    group is read, so ``inputs`` may hold one stream twice. A pod that is not known
-    (``None``: a node a loaded file keeps read-only, or of a kind this version does not
-    restore) has its inputs in the argument order the file gives, so each its index.
+    For an operator, the kind of ``pod.argument_symmetry(inputs)`` decides, with any
+    number of inputs: a ``tuple`` (ordered: ``MergeJoin``, ``SemiJoin``, a unary
+    operator) gives each input its argument index, a ``frozenset`` (commutative:
+    ``Join``, ``Rejoin``, also given one input) gives every input ``None``. Only the
+    kind of the returned group is read. A function pod is recorded with its one
+    (joined) input and a side-effect pod takes one input: position 0. A pod that is not
+    known (``None``: a node a loaded file keeps read-only, or of a kind this version
+    does not restore) has its inputs in the argument order the file gives, so each its
+    index.
 
     Args:
         pod: The pod the inputs are given to, or ``None`` when it is not known.
@@ -60,7 +62,9 @@ def input_positions(
     Returns:
         One position per input, in argument order.
     """
-    if len(inputs) <= 1 or pod is None:
+    from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+
+    if not isinstance(pod, StaticOutputOperatorPod) or not inputs:
         return tuple(range(len(inputs)))
     streams = cast("Sequence[StreamProtocol]", inputs)
     if isinstance(pod.argument_symmetry(streams), frozenset):

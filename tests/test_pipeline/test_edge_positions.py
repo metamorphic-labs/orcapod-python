@@ -295,36 +295,115 @@ def test_a_source_fed_twice_has_the_events_of_a_source_fed_once(mode: str) -> No
 # ── what stays refused ───────────────────────────────────────────────────────
 
 
-@pytest.mark.parametrize("operator", [Join, Rejoin])
-def test_a_commutative_operator_given_one_stream_twice_is_refused(
-    operator: type,
+def _data_tags_only(name: str = "d") -> Any:
+    """A source whose one tag is a data-tag and which has no other data column: no
+    data column overlaps when it is given twice. ``id`` repeats a value, so
+    ``Join(d, d)`` would give 5 rows where ``Join(d)`` gives 3."""
+    table = pa.table({"id": pa.array([1, 1, 2], pa.int64())})
+    return sources.ArrowTableSource(
+        table, tag_columns=["id"], tag_only_columns=False, source_id=name
+    )
+
+
+def _data_tags_and_data(name: str = "w") -> Any:
+    """Two data-tags (``id``, ``key``) and two data columns (``x``, ``y``)."""
+    table = pa.table(
+        {
+            "key": pa.array(["p", "p", "q"], pa.large_string()),
+            "x": pa.array([1, 2, 3], pa.int64()),
+            "id": pa.array([1, 1, 2], pa.int64()),
+            "y": pa.array([10, 20, 30], pa.int64()),
+        }
+    )
+    return sources.ArrowTableSource(
+        table, tag_columns=["id", "key"], tag_only_columns=False, source_id=name
+    )
+
+
+@function_pod(output_keys="s")
+def _identity(id: int | None) -> int | None:
+    return id
+
+
+COMMUTATIVE = {
+    "Join": lambda *streams, **kw: Join()(*streams, **kw),
+    "Rejoin": lambda *streams, **kw: Rejoin()(*streams, **kw),
+    "function_pod": lambda *streams, **kw: _identity.pod(*streams, **kw),
+}
+INPUTS = {"data_tags_only": _data_tags_only, "data_tags_and_data": _data_tags_and_data}
+
+
+@pytest.mark.parametrize("inputs", sorted(INPUTS))
+@pytest.mark.parametrize("pod", sorted(COMMUTATIVE))
+def test_a_repeated_operand_of_a_commutative_pod_is_refused_standalone(
+    pod: str, inputs: str
 ) -> None:
-    """Unchanged: the operator refuses its overlapping data columns, standalone and
-    when recorded into a job."""
-    a = _a("tags_id_key")
-    with pytest.raises(InputValidationError, match="overlapping"):
-        operator()(a, a)
+    """A commutative operator, or a function pod (which joins its inputs), hashes its
+    operands as a set, so ``Join(d)`` and ``Join(d, d)`` would share one identity
+    and cache path but give different rows. The same stream object twice is refused,
+    naming the pod and the stream."""
+    stream = INPUTS[inputs]()
+    name = "FunctionPod" if pod == "function_pod" else pod
+    with pytest.raises(InputValidationError, match=rf"{name}.*same stream.*MergeJoin"):
+        COMMUTATIVE[pod](stream, stream)
+
+
+@pytest.mark.parametrize("pod", sorted(COMMUTATIVE))
+def test_two_sources_of_one_identity_are_one_stream_when_recorded(pod: str) -> None:
+    """Two source objects of one identity: a pod called on its own compares objects
+    (it computes no content hash), so ``Join(d1, d2)`` is not refused for being one
+    stream there; recorded in a pipeline, their one content hash makes them one stream,
+    refused before anything is recorded (the function pod's join is the step refused)."""
+    d1, d2 = _data_tags_only(), _data_tags_only()
+    assert d1 is not d2 and d1.content_hash() == d2.content_hash()
+    COMMUTATIVE[pod](d1, d2)  # not refused as one stream on its own
     job = PipelineJob(name="refused", database=InMemoryArrowDatabase())
-    with pytest.raises(InputValidationError, match="overlapping"):
+    name = "Rejoin" if pod == "Rejoin" else "Join"
+    with pytest.raises(InputValidationError, match=rf"{name} is given the same stream"):
         with job:
-            operator()(a, a, label="step")
+            COMMUTATIVE[pod](d1, d2, label="twice")
+    assert "twice" not in job.nodes
 
 
-def test_a_function_pod_given_one_stream_twice_is_refused() -> None:
-    """Unchanged: a function pod joins its inputs first, so one stream given for two
-    parameters is refused as ``Join(a, a)`` is."""
+@pytest.mark.parametrize("pod", ["Join", "Rejoin"])
+def test_a_repeat_among_three_operands_is_refused(pod: str) -> None:
+    d, w = _data_tags_only("d"), _data_tags_and_data("w")
+    with pytest.raises(InputValidationError, match="same stream"):
+        COMMUTATIVE[pod](d, w.select_data_columns(["x"]), d)
 
-    @function_pod(output_keys="s")
-    def add(x: int, y: int) -> int:
-        return x + y
 
-    a = _a("tags_id_key")
-    with pytest.raises(InputValidationError, match="overlapping"):
-        add.pod(a, a)
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("repeated_first", [False, True])
+@pytest.mark.parametrize("pod", sorted(COMMUTATIVE))
+def test_a_repeated_operand_is_refused_when_recorded_in_either_order(
+    pod: str, repeated_first: bool, mode: str
+) -> None:
+    """Refused before anything is recorded, whether the one-operand step is recorded
+    before or after: the job keeps only that step, and runs it (sync and async) with
+    the rows of the standalone step."""
+    d = _data_tags_only()
+    # Tags and data only: a function's result record id (in its source info) is
+    # not the standalone pod's inside a job, whatever this test does.
+    expected = _rows(COMMUTATIVE[pod](d).as_table())
     job = PipelineJob(name="refused", database=InMemoryArrowDatabase())
-    with pytest.raises(InputValidationError, match="overlapping"):
-        with job:
-            add.pod(a, a, label="step")
+    with job:
+        if not repeated_first:
+            COMMUTATIVE[pod](d, label="once")
+        with pytest.raises(InputValidationError, match="same stream"):
+            COMMUTATIVE[pod](d, d, label="twice")
+        if repeated_first:
+            COMMUTATIVE[pod](d, label="once")
+    assert "twice" not in job.nodes
+    _run(job, mode)
+    assert _rows(job.once.as_table()) == expected
+    assert len(expected) == 3
+
+
+def test_an_ordered_operator_still_takes_one_stream_twice() -> None:
+    """The refusal is for commutative pods only: ``MergeJoin(d, d)`` is two edges."""
+    d = _data_tags_only()
+    assert MergeJoin()(d, d).as_table().num_rows == 5
+    assert SemiJoin()(d, d).as_table().num_rows == 3
 
 
 # ── the positioned edges ─────────────────────────────────────────────────────
@@ -339,13 +418,15 @@ def _edges_by_label(job: Any) -> list[tuple[str, str, int | None]]:
     return sorted(
         (label[up], label[down], position)
         for up, down, position in job._graph_edges  # pyright: ignore[reportPrivateUsage]
-        if down in label and label[down] in {"aa", "ab", "ba", "joined", "fn"}
+        if down in label
+        and label[down] in {"aa", "ab", "ba", "joined", "fn", "join1", "rejoin1"}
     )
 
 
 def test_each_input_is_one_edge_at_its_position(tmp_path: Path) -> None:
     """An ordered operator's inputs are at their argument index, a commutative one's
-    have no position, a function pod's input is at 0; the same after save and load."""
+    have no position (also with one input), a function pod's input is at 0; the same
+    after save and load."""
     a = _csv_a(tmp_path, "tags_id_key")
     b = _csv(tmp_path, "b", "tags_key_id", [(1, "p", 100, 1000), (2, "q", 101, 1001)])
 
@@ -364,13 +445,17 @@ def test_each_input_is_one_edge_at_its_position(tmp_path: Path) -> None:
             label="joined",
         )
         total.pod(a, label="fn")
+        Join()(a, label="join1")
+        Rejoin()(b, label="rejoin1")
     expected = [
         ("a", "aa", 0),
         ("a", "aa", 1),
         ("a", "ba", 1),
         ("a", "fn", 0),
+        ("a", "join1", None),
         ("ax", "joined", None),
         ("b", "ba", 0),
+        ("b", "rejoin1", None),
         ("by", "joined", None),
     ]
     assert _edges_by_label(job) == expected
