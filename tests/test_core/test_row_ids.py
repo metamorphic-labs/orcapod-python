@@ -567,3 +567,65 @@ class TestTokensOfBuiltAndChangedRows:
                 {"_source_y": "f::r::y", "_source_z": "f::r::z"}
             ]
             assert row_ids.instance_id(HASHER, _tag(), joined)
+
+
+class TestARenameMovesTheToken:
+    """A rename moves a column's token with it, in every view (review of PR #583).
+
+    A token given earlier for the destination name, while the row had no such
+    column, is dropped: it never wins over the renamed column's own token.
+    """
+
+    def _rows(self) -> list[Data]:
+        values = {"weight": 21.5, "length": 9, "note": "ok"}
+        built = Data(values, source_info=TOKENS)
+        table = built.as_table(columns={"source": True})
+        (streamed,) = Data.rows_of(table, get_default_context())
+        return [built, Data(table), streamed]
+
+    @pytest.mark.parametrize("stale_first", [True, False])
+    @pytest.mark.parametrize(
+        "mapping",
+        [
+            {"weight": "mass"},
+            {"note": "mass", "weight": "size"},
+            {"weight": "size", "note": "mass"},
+        ],
+    )
+    def test_every_view_gives_the_renamed_columns_own_token(
+        self, mapping: dict[str, str], stale_first: bool
+    ) -> None:
+        stale = {new: f"stale::row_9::{new}" for new in mapping.values()}
+        ids = set()
+        for data in self._rows():
+            if stale_first:
+                told = data.with_source_info(**stale)
+            else:
+                # The stale tokens after the row's own, in the order they are held.
+                told = data.with_source_info(**stale).with_source_info(**TOKENS)
+            renamed = told.rename(mapping)
+            expected = {mapping.get(name, name): TOKENS[name] for name in data.keys()}
+            assert renamed.source_info() == expected
+            as_dict = renamed.as_dict(columns={"source": True})
+            assert {name: as_dict[f"_source_{name}"] for name in expected} == expected
+            table = renamed.as_table(columns={"source": True})
+            tokens_table = renamed.source_info_table()
+            for name, token in expected.items():
+                assert table.column(f"_source_{name}").to_pylist() == [token]
+                assert tokens_table.column(f"_source_{name}").to_pylist() == [token]
+            assert tokens_table.column_names == [f"_source_{n}" for n in renamed.keys()]
+            # The id is the one of the row renamed without any stale token.
+            clean = data.rename(mapping)
+            assert row_ids.instance_id(HASHER, _tag(), renamed) == row_ids.instance_id(
+                HASHER, _tag(), clean
+            )
+            preimage = row_ids.instance_id_preimage(
+                row_ids.entry_id(HASHER, _tag(), renamed), renamed
+            )
+            for name, token in expected.items():
+                assert preimage.column(f"_source_{name}").to_pylist() == [token]
+            ids.add(row_ids.instance_id(HASHER, _tag(), renamed))
+            # Renaming back gives the first row's tokens again.
+            back = renamed.rename({new: old for old, new in mapping.items()})
+            assert back.source_info() == data.source_info()
+        assert len(ids) == 1
