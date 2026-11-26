@@ -66,7 +66,10 @@ def databases(tmp_path: Path) -> Iterator[Databases]:
 
 
 def _sources(
-    order: tuple[str, str] = ("left", "right"), *, data_tags: bool = False
+    order: tuple[str, str] = ("left", "right"),
+    *,
+    tag_order: tuple[str, str] = ("a", "b"),
+    data_tags: bool = False,
 ) -> dict[str, Any]:
     left = pa.table(
         {"a": [1, 2, 3], "b": ["x", "y", "z"], "p": [1.0, 2.0, 3.0], "q": [4, 5, 6]}
@@ -76,7 +79,7 @@ def _sources(
     return {
         name: ArrowTableSource(
             tables[name],
-            tag_columns=["a", "b"],
+            tag_columns=list(tag_order),
             source_id=name,
             tag_only_columns=() if data_tags else True,
         )
@@ -90,11 +93,12 @@ def _save(
     run_async: bool = False,
     input_order: tuple[str, str] = ("left", "right"),
     selected: tuple[str, str] = ("s", "p"),
+    tag_order: tuple[str, str] = ("a", "b"),
     data_tags: bool = False,
     **databases: Any,
 ) -> tuple[PipelineJob, dict[str, Any]]:
     """An operator-only job, run and saved, and its file's bindings."""
-    sources = _sources(data_tags=data_tags)
+    sources = _sources(tag_order=tag_order, data_tags=data_tags)
     first, second = input_order
     job = PipelineJob(name="j", **databases)
     with job:
@@ -199,6 +203,7 @@ def test_a_connector_result_database_beside_a_delta_database(
     [(("left", "right"), ("s", "p")), (("right", "left"), ("p", "s"))],
 )
 @pytest.mark.parametrize("data_tags", [False, True])
+@pytest.mark.parametrize("tag_order", [("a", "b"), ("b", "a")])
 def test_load_with_the_database_then_load_only(
     databases: Databases,
     tmp_path: Path,
@@ -208,6 +213,7 @@ def test_load_with_the_database_then_load_only(
     input_order: tuple[str, str],
     selected: tuple[str, str],
     data_tags: bool,
+    tag_order: tuple[str, str],
 ) -> None:
     path = tmp_path / "job.json"
     job, bindings = _save(
@@ -215,17 +221,30 @@ def test_load_with_the_database_then_load_only(
         run_async=saved_async,
         input_order=input_order,
         selected=selected,
+        tag_order=tag_order,
         data_tags=data_tags,
         database=databases.make("sqlite", "a"),
     )
     assert _values(job) == EXPECTED
-    hashes = {label: n.content_hash().to_string() for label, n in job.nodes.items()}
+    assert {
+        name: config["tag_columns"] for name, config in bindings["sources"].items()
+    } == {"left": list(tag_order), "right": list(tag_order)}
+    hashes = {
+        label: (node.pipeline_hash(), node.content_hash())
+        for label, node in job.nodes.items()
+    }
 
     # A new handle over the same place, as another process would make.
     loaded = PipelineJob.load(path, database=databases.make("sqlite", "a"))
-    loaded.bind(sources=_sources(bind_order, data_tags=data_tags))
+    first_tag, second_tag = tag_order
+    loaded.bind(
+        sources=_sources(
+            bind_order, tag_order=(second_tag, first_tag), data_tags=data_tags
+        )
+    )
     assert {
-        label: n.content_hash().to_string() for label, n in loaded.nodes.items()
+        label: (node.pipeline_hash(), node.content_hash())
+        for label, node in loaded.nodes.items()
     } == hashes
     if loaded_async:
         asyncio.run(loaded.run_async(load_only=True))
