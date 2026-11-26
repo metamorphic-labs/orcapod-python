@@ -18,13 +18,19 @@ import logging
 import os
 import sqlite3
 import threading
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator, Mapping
+from contextlib import AbstractContextManager, nullcontext
 from typing import Any
 
 import pyarrow as pa
 
 from orcapod.databases.utils import is_direct_projection
 from orcapod.types import ColumnInfo
+from orcapod.databases.table_names import (
+    joined_table_name,
+    joined_table_paths,
+    whole_table,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -270,6 +276,35 @@ class SQLiteConnector:
             )
 
     # ── Schema introspection ──────────────────────────────────────────────────
+
+    def run_scope(self) -> AbstractContextManager[None]:
+        """Hold nothing across a run: an empty scope."""
+        return nullcontext()
+
+    def read_candidates(
+        self,
+        table_name: str,
+        *,
+        keys: Collection[bytes] | None = None,
+        equal: Mapping[str, Any] | None = None,
+    ) -> pa.Table | None:
+        """Return the whole table: the database filters it."""
+        return whole_table(self.iter_batches(f'SELECT * FROM "{table_name}"'))
+
+    def table_name(self, path: tuple[str, ...]) -> str:
+        """Return the name of the table at a full record path: the joined rule."""
+        return joined_table_name(path)
+
+    def has_table(self, table_name: str) -> bool:
+        """Return whether the table exists."""
+        return table_name in self.get_table_names()
+
+    def table_paths(
+        self, prefix: tuple[str, ...], pending: Collection[tuple[str, ...]]
+    ) -> list[tuple[str, ...]]:
+        """Return the full paths of the tables under ``prefix``, in the names' form."""
+        names = {*self.get_table_names(), *(joined_table_name(p) for p in pending)}
+        return joined_table_paths(names, prefix)
 
     def get_table_names(self) -> list[str]:
         """Return all user table names in this database (excludes views and SQLite internals).
@@ -522,7 +557,7 @@ class SQLiteConnector:
             return "SQLite reserves table names that start with 'sqlite_'"
         return None
 
-    def validate_records(self, records: pa.Table) -> None:
+    def validate_records(self, records: pa.Table, *, table_name: str | None) -> None:
         """Reject tables carrying any Arrow field or schema metadata.
 
         ``SQLiteConnector`` does not preserve Arrow field or schema metadata
@@ -533,6 +568,7 @@ class SQLiteConnector:
 
         Args:
             records: Arrow table to validate.
+            table_name: Ignored: the check does not depend on the table.
 
         Raises:
             UnstorableColumnError: If a ``double`` column holds a NaN or ``-0.0``,

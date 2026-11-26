@@ -7,7 +7,8 @@ conformance tests run on it and, opt-in, on the service
 
 Each rule of ``RULES`` was seen on the service with spiral-sdk 0.16.74 and 0.16.75 on
 November 24, 2026, on throwaway tables, unless it says otherwise; its name is cited where
-the rule is applied.
+the rule is applied. The conformance tests passed live with spiral-sdk 0.16.78 on November
+26, 2026 (ITL-1495).
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import threading
 import types
 import urllib.parse
 import uuid
@@ -22,7 +24,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 from unittest.mock import patch
 
 import pyarrow as pa
@@ -59,8 +61,12 @@ RULES = {
     "null-key": "a null key is refused",
     "key-only": "a write without a value column is refused",
     "no-key": "a write without a key column is refused",
-    "reserved": "a value column starting with '__' or '$', or any with '.', is refused",
-    "nul": "a column name is cut at a NUL character",
+    "reserved": "a value column or struct field starting with '__' or '$', any with '.', "
+    "and one named '' or '*' (spiral-sdk 0.16.78, November 26, 2026) is refused",
+    "time-of-day": "spiral-sdk 0.16.78 (November 26, 2026): a time32 or time64 value outside "
+    "one day, at any depth, refuses the whole write",
+    "nul": "a column name is cut at a NUL character; so is a struct field name, at every "
+    "depth (spiral-sdk 0.16.78, November 26, 2026)",
     "type-conflict": "a column of another type than stored is refused",
     "unsupported": "duration, interval, fixed-size binary, union, an empty struct and a "
     "null struct outside a list are refused",
@@ -69,9 +75,22 @@ RULES = {
     "literal": "a literal must have the column's exact type (large_string is none)",
     "float-eq": "0.0 does not equal -0.0, and NaN equals NaN",
     "rows": "rows come in key order; filter before limit",
+    "key-ranges": "spiral-sdk 0.16.78 (November 26, 2026): a scan with key ranges gives the "
+    "rows of each range in the order of the ranges; a key no row has gives no row",
     "list": "the documented listing filters a dataset and pages; a page can be empty "
     "(documented, not seen)",
+    "table-metadata": "spiral-sdk 0.16.78 (November 26, 2026): get_metadata and "
+    "set_metadata hold bytes by text key, an upsert that never deletes (an empty value is "
+    "stored); not versioned (every snapshot, asof included, sees the latest; a write makes "
+    "no snapshot); readable before any row; a key over 255 UTF-8 bytes, or an entry whose "
+    "key and value together are over 8,192 bytes: 'status 400' and nothing written",
 }
+
+_MAX_METADATA_KEY_BYTES = 255
+# Upserts of metadata are atomic on the service (two clients' keys are all kept); the
+# fake's stores are in one process.
+_metadata_lock = threading.Lock()
+_MAX_METADATA_ENTRY_BYTES = 8192
 
 _ROOT_ENV = "FAKE_SPIRAL_SDK_ROOT"
 _API_URL = "https://api.fake.invalid"
@@ -194,9 +213,126 @@ def _refused_type(t: pa.DataType) -> str | None:
 
 def _reserved(name: str) -> str | None:
     """Return the refusal of a reserved column name (``reserved``)."""
-    if name.startswith(("__", "$")) or "." in name:
+    if name.startswith(("__", "$")) or "." in name or name in ("", "*"):
         return f'Column name "{name}" is reserved'
     return None
+
+
+_DAY = {"s": 86_400, "ms": 86_400_000, "us": 86_400_000_000, "ns": 86_400_000_000_000}
+
+
+def _decoded(array: Any) -> Any:
+    """``array`` with every dictionary and run-end encoding at its top undone, as the
+    service stores it (``types``); a run-end-encoded struct included, which pyarrow
+    cannot decode itself."""
+    if isinstance(array, pa.ExtensionArray):
+        array = array.storage
+    if pa.types.is_dictionary(array.type):
+        return _decoded(array.dictionary_decode())
+    if pa.types.is_run_end_encoded(array.type):
+        return _decoded(array.values.take(pa.array(_run_indices(array), pa.int64())))
+    return array
+
+
+def _run_indices(array: Any) -> list[int]:
+    """The run of each row of a run-end-encoded array (a slice of one included): only
+    the runs that overlap the slice are expanded, and only where they overlap it."""
+    start, stop = array.offset, array.offset + len(array)
+    indices: list[int] = []
+    begin = 0
+    for run, end in enumerate(array.run_ends.to_pylist()):
+        low, high = max(begin, start), min(end, stop)
+        if low < high:
+            indices.extend([run] * (high - low))
+        if end >= stop:
+            break
+        begin = end
+    return indices
+
+
+def _needs_decoding(t: Any, *, in_extension: bool = False) -> bool:
+    """Whether a column must be rebuilt as the service stores it before its names are
+    cut (``types``, ``nul``): it holds a dictionary or run-end encoding at any depth, or
+    an extension type whose storage holds a struct field name with NUL."""
+    if pa.types.is_dictionary(t) or pa.types.is_run_end_encoded(t):
+        return True
+    if isinstance(t, pa.BaseExtensionType):
+        return _needs_decoding(t.storage_type, in_extension=True)
+    if in_extension and pa.types.is_struct(t):
+        if any("\0" in t.field(i).name for i in range(t.num_fields)):
+            return True
+    return any(
+        _needs_decoding(t.field(i).type, in_extension=in_extension)
+        for i in range(t.num_fields)
+    )
+
+
+def _deep_decoded(array: Any) -> Any:
+    """``array`` with every dictionary and run-end encoding undone, at any depth, as the
+    service stores it (``types``), so nested names are cut as at the top (``nul``)."""
+    a = _decoded(array)
+    if a.offset:
+        a = pa.concat_arrays([a])  # rebuilt from offset zero: pyarrow builds no slice
+    t = a.type
+    mask = a.is_null() if a.null_count else None
+    if pa.types.is_struct(t):
+        children = [_deep_decoded(a.field(i)) for i in range(t.num_fields)]
+        fields = [t.field(i).with_type(c.type) for i, c in enumerate(children)]
+        return pa.StructArray.from_arrays(children, fields=fields, mask=mask)
+    if pa.types.is_list(t) or pa.types.is_large_list(t):
+        values = _deep_decoded(a.values)
+        kind: Any = pa.list_ if pa.types.is_list(t) else pa.large_list
+        cls: Any = pa.ListArray if pa.types.is_list(t) else pa.LargeListArray
+        target = kind(t.value_field.with_type(values.type))
+        return cls.from_arrays(a.offsets, values, type=target, mask=mask)
+    if pa.types.is_fixed_size_list(t):
+        size = t.list_size
+        values = _deep_decoded(a.values.slice(a.offset * size, len(a) * size))
+        target = pa.list_(t.value_field.with_type(values.type), size)
+        if size == 0:  # no values to count the rows by: from buffers
+            valid = pc.is_valid(a).buffers()[1] if a.null_count else None
+            return pa.Array.from_buffers(
+                target,
+                len(a),
+                cast(Any, [valid]),  # the stubs take no None for an absent buffer
+                null_count=a.null_count,
+                children=[values],
+            )
+        return cast(Any, pa.FixedSizeListArray).from_arrays(
+            values, type=target, mask=mask
+        )
+    if pa.types.is_map(t):
+        keys, items = _deep_decoded(a.keys), _deep_decoded(a.items)
+        target = cast(Any, pa.map_)(
+            t.key_field.with_type(keys.type),
+            t.item_field.with_type(items.type),
+            keys_sorted=t.keys_sorted,
+        )
+        return cast(Any, pa.MapArray).from_arrays(
+            a.offsets, keys, items, type=target, mask=mask
+        )
+    return a
+
+
+def _time_outside_a_day(array: Any) -> bool:
+    """Whether a time value outside one day is in ``array``, at any depth (``time-of-day``)."""
+    array = _decoded(array)
+    t = array.type
+    if pa.types.is_time(t):
+        ticks = array.view(pa.int32() if pa.types.is_time32(t) else pa.int64())
+        day = _DAY[t.unit]
+        return any(v is not None and not 0 <= v < day for v in ticks.to_pylist())
+    if pa.types.is_struct(t):
+        return any(_time_outside_a_day(array.field(i)) for i in range(t.num_fields))
+    if pa.types.is_map(t):
+        return _time_outside_a_day(array.keys) or _time_outside_a_day(array.items)
+    if (
+        pa.types.is_list(t)
+        or pa.types.is_large_list(t)
+        or pa.types.is_fixed_size_list(t)
+    ):
+        return _time_outside_a_day(array.flatten())
+    return False
 
 
 def _stored_array(array: pa.Array[Any], target: pa.DataType) -> pa.Array[Any]:
@@ -212,10 +348,7 @@ def _stored_array(array: pa.Array[Any], target: pa.DataType) -> pa.Array[Any]:
     a: Any = array
     if isinstance(a, pa.ExtensionArray):
         a = a.storage
-    if pa.types.is_dictionary(a.type):
-        a = a.dictionary_decode()
-    if pa.types.is_run_end_encoded(a.type):
-        a = cast(Any, pc).run_end_decode(a)
+    a = _decoded(a)
     if a.type == target:
         return a
     t: Any = target
@@ -249,10 +382,52 @@ def _stored_array(array: pa.Array[Any], target: pa.DataType) -> pa.Array[Any]:
         values = _stored_array(
             a.values.slice(a.offset * t.list_size, len(a) * t.list_size), t.value_type
         )
+        if t.list_size == 0:  # no values to count the rows by: from buffers
+            valid = pc.is_valid(a).buffers()[1] if a.null_count else None
+            return pa.Array.from_buffers(
+                t,
+                len(a),
+                cast(Any, [valid]),  # the stubs take no None for an absent buffer
+                null_count=a.null_count,
+                children=[values],
+            )
         return cast(Any, pa.FixedSizeListArray).from_arrays(
             values, type=t, mask=a.is_null() if a.null_count else None
         )
     return a.cast(target)
+
+
+def _names_cut_at_nul(t: Any) -> Any:
+    """Return ``t`` with every struct field name cut at its first NUL (``nul``)."""
+    if isinstance(t, pa.BaseExtensionType):
+        return t
+    if pa.types.is_struct(t):
+        return pa.struct(
+            [
+                pa.field(
+                    f.name.split("\0")[0],
+                    _names_cut_at_nul(f.type),
+                    f.nullable,
+                    f.metadata,
+                )
+                for f in t
+            ]
+        )
+    if pa.types.is_large_list(t) or pa.types.is_list(t):
+        item = t.value_field
+        kind: Any = pa.large_list if pa.types.is_large_list(t) else pa.list_
+        return kind(item.with_type(_names_cut_at_nul(item.type)))
+    if pa.types.is_fixed_size_list(t):
+        item = t.value_field
+        return pa.list_(item.with_type(_names_cut_at_nul(item.type)), t.list_size)
+    if pa.types.is_map(t):
+        map_of: Any = pa.map_  # the stubs take no fields and keys_sorted together
+        return map_of(
+            t.key_field.with_type(_names_cut_at_nul(t.key_type)),
+            t.item_field.with_type(_names_cut_at_nul(t.item_type)),
+            keys_sorted=t.keys_sorted,
+        )
+    return t
 
 
 def _check_nulls(array: Any, field: pa.Field[Any], *, in_list: bool) -> None:
@@ -351,6 +526,33 @@ class _Store:
             path.unlink()
         folder.rmdir()
 
+    def metadata(self, table_id: str) -> dict[str, bytes]:
+        """Return a table's metadata (``table-metadata``)."""
+        _ = self.by_id(table_id)
+        path = self.root / table_id / "metadata.json"
+        if not path.exists():
+            return {}
+        stored = cast("dict[str, str]", json.loads(path.read_text()))
+        return {k: bytes.fromhex(v) for k, v in stored.items()}
+
+    def set_metadata(self, table_id: str, entries: dict[str, bytes]) -> None:
+        """Upsert ``entries`` into a table's metadata (``table-metadata``)."""
+        for key, value in entries.items():
+            size = len(key.encode())
+            if (
+                size > _MAX_METADATA_KEY_BYTES
+                or size + len(value) > _MAX_METADATA_ENTRY_BYTES
+            ):
+                raise _status(400)
+        with _metadata_lock:  # one upsert at a time: concurrent keys are all kept
+            stored = self.metadata(table_id)
+            stored.update(entries)
+            # Written beside, then put in place: a reader sees a whole mapping.
+            target = self.root / table_id / "metadata.json"
+            written = target.with_suffix(".json.tmp")
+            _ = written.write_text(json.dumps({k: v.hex() for k, v in stored.items()}))
+            _ = written.replace(target)
+
     def keys(self, table_id: str) -> pa.Schema:
         """Return a table's key schema."""
         raw = (self.root / table_id / "keys.arrow").read_bytes()
@@ -385,6 +587,22 @@ def _staged(rows: pa.Table, keys: list[str], stored: pa.Schema) -> pa.Table:
     """Validate ``rows`` and return them as they are stored (``stage``)."""
     names = [name.split("\0")[0] for name in rows.column_names]  # nul
     rows = rows.rename_columns(names)
+    for i, field in enumerate(rows.schema):  # nul, at every depth
+        if _needs_decoding(field.type):
+            # Stored as its values (``types``): decoded first, so its names are cut.
+            decoded = pa.chunked_array(
+                [_deep_decoded(c) for c in rows.column(i).chunks]
+            )
+            rows = rows.set_column(i, field.with_type(decoded.type), decoded)
+            field = rows.schema.field(i)
+        cut = _names_cut_at_nul(field.type)
+        if cut != field.type:
+            column = rows.column(i)
+            rows = rows.set_column(
+                i,
+                field.with_type(cut),  # the field, flag and metadata kept
+                pa.chunked_array([c.view(cut) for c in column.chunks], type=cut),
+            )
     for key in keys:
         if key not in names:
             raise _refuse(f"Input batch is missing key field '{key}'")
@@ -405,6 +623,11 @@ def _staged(rows: pa.Table, keys: list[str], stored: pa.Schema) -> pa.Table:
             rows.column(field.name).chunks or [pa.array([], field.type)]
         )
         _check_nulls(array, field, in_list=False)
+        if _time_outside_a_day(array):
+            raise SpiralError(
+                "Scandal:Internal (message: Vortex error: Invalid time scalar: adding "
+                "duration to time overflowed)"
+            )
         target = _stored_type(field.type)
         if field.name in stored.names:
             kept = stored.field(field.name).type
@@ -581,6 +804,35 @@ class FakeReader:
         self._record.closed = True
 
 
+class KeyBound(NamedTuple):
+    """Stands in for ``spiral.KeyBound``: a full key as literals in key order."""
+
+    values: tuple[_Literal, ...]
+    inclusive: bool = True
+
+
+class KeyRange(NamedTuple):
+    """Stands in for ``spiral.KeyRange``; the fake reads ranges of one key only."""
+
+    start: KeyBound | None = None
+    end: KeyBound | None = None
+
+
+def _in_key_ranges(rows: pa.Table, keys: list[str], ranges: list[KeyRange]) -> pa.Table:
+    """The rows of each one-key range, in the order of the ranges (``key-ranges``)."""
+    stored = list(zip(*(rows.column(k).to_pylist() for k in keys)))
+    picks: list[int] = []
+    for key_range in ranges:
+        start, end = key_range.start, key_range.end
+        if start is None or end is None or start != end:
+            raise NotImplementedError("the fake reads ranges of one key only")
+        if not (start.inclusive and end.inclusive):
+            raise NotImplementedError("the fake reads inclusive ranges of one key only")
+        wanted = tuple(v.value for v in start.values)
+        picks.extend(i for i, key in enumerate(stored) if key == wanted)
+    return rows.take(pa.array(picks, pa.int64()))
+
+
 class FakeScan:
     """Stands in for ``spiral.tables.Scan``: rows are read when asked for."""
 
@@ -626,6 +878,14 @@ class FakeKeyedTable:
         """The key columns, in key order."""
         return tuple(self._table["keys"])
 
+    def get_metadata(self) -> dict[str, bytes]:
+        """Return the table's metadata, the latest whatever the snapshot (``table-metadata``)."""
+        return self._store.metadata(self.resource_id)
+
+    def set_metadata(self, metadata: dict[str, bytes]) -> None:
+        """Upsert entries of the table's metadata (``table-metadata``)."""
+        self._store.set_metadata(self.resource_id, metadata)
+
     def schema(self) -> pa.Schema:
         """Return the snapshot's schema."""
         return self._store.read(self.resource_id, self._version).schema
@@ -637,9 +897,12 @@ class FakeKeyedTable:
         filter: FakePredicate | None = None,
         limit: int | None = None,
         batch_rows: int | None = None,
+        key_ranges: list[KeyRange] | None = None,
     ) -> FakeScan:
-        """Plan a scan (``rows``, ``literal``, ``float-eq``)."""
+        """Plan a scan (``rows``, ``literal``, ``float-eq``, ``key-ranges``)."""
         rows = self._store.read(self.resource_id, self._version)
+        if key_ranges is not None:
+            rows = _in_key_ranges(rows, self._table["keys"], key_ranges)
         for name, wanted in filter.terms if filter else ():
             if rows.schema.field(name).type != wanted.type:
                 raise SpiralError(
@@ -871,6 +1134,8 @@ fake_module = types.SimpleNamespace(
     literal=literal,
     eq=eq,
     and_=and_,
+    KeyBound=KeyBound,
+    KeyRange=KeyRange,
     drop_column=drop_column,
 )
 
@@ -943,6 +1208,7 @@ def install(root: Path | str):
     with (
         patch.dict(os.environ, {_ROOT_ENV: str(root)}),
         patch("orcapod.databases.spiraldb_connector.sp", fake_module),
+        patch("orcapod.databases.spiraldb_store_tables.sp", fake_module),
         patch("orcapod.databases.spiraldb_connector.require_sign_in", lambda: None),
         patch(
             "orcapod.databases.spiraldb_connector._http_get_json", fake_http_get_json

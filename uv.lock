@@ -1961,8 +1961,8 @@ requires-dist = [
     { name = "redis", marker = "extra == 'all'", specifier = ">=6.2.0" },
     { name = "redis", marker = "extra == 'redis'", specifier = ">=6.2.0" },
     { name = "s3fs", specifier = ">=2025.12.0" },
-    { name = "spiral-sdk", marker = "extra == 'all'", specifier = "==0.16.74" },
-    { name = "spiral-sdk", marker = "extra == 'spiraldb'", specifier = "==0.16.74" },
+    { name = "spiral-sdk", marker = "extra == 'all'", specifier = "==0.16.78" },
+    { name = "spiral-sdk", marker = "extra == 'spiraldb'", specifier = "==0.16.78" },
     { name = "starfix", specifier = ">=0.6.0,<0.7" },
     { name = "torch", marker = "sys_platform == 'linux' and extra == 'all'", specifier = ">=2.6", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torch", marker = "sys_platform == 'linux' and extra == 'torch'", specifier = ">=2.6", index = "https://download.pytorch.org/whl/cpu" },
@@ -3294,16 +3294,16 @@ wheels = [
 
 [[package]]
 name = "spiral-sdk"
-version = "0.16.74"
+version = "0.16.78"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "opentelemetry-api" },
     { name = "pyarrow" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e4/35/68f43088c6d1ec1db947620a58ea9d3096b6871b22367cb7aee86da88387/spiral_sdk-0.16.74-cp311-abi3-macosx_11_0_arm64.whl", hash = "sha256:3f624ce767c074fbc04e0d2c96db6b4587fae2f8b653f1b15a8c9d35bc524586", size = 78387050, upload-time = "2026-11-24T19:03:05.807Z" },
-    { url = "https://files.pythonhosted.org/packages/b4/23/47a6e94f2b86ed7113f1c2ee2c7289667168829d8098d5a3cdcd75bd1b9a/spiral_sdk-0.16.74-cp311-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:ab2278a9b47828f98d93f76e2b93d57f16cf0b2008fc723ae7f788ea8607d495", size = 87372785, upload-time = "2026-11-24T19:03:11.829Z" },
-    { url = "https://files.pythonhosted.org/packages/b9/d0/96107cf185d1bef4cfd427775553594c4decf420997019913a26eb8e5c38/spiral_sdk-0.16.74-cp311-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:46bb6f94583e507fcf31b2a3344ab4a582129c495c1bd782aaf64b4dd513ac9b", size = 90075516, upload-time = "2026-11-24T19:03:17.262Z" },
+    { url = "https://files.pythonhosted.org/packages/75/c3/80e29ea91bc97ed13e87314b43a7780673dd9cef08683fb7b40a9ab85e8f/spiral_sdk-0.16.78-cp311-abi3-macosx_11_0_arm64.whl", hash = "sha256:c311e5399c4c3e2e6cc1d9dc52dde9d2130a9cbbefb9c31734a82cd80532a4bf", size = 79354908, upload-time = "2026-11-25T16:33:03.323Z" },
+    { url = "https://files.pythonhosted.org/packages/93/e3/e87291bff0b8dce545ab1aa0d7d96bb209f4886da20abf423a6e2049cd5a/spiral_sdk-0.16.78-cp311-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:7b0c86ca9401fc3240ead2ef362c21d7a64c37bfd595762b8718786388870865", size = 88577354, upload-time = "2026-11-25T16:33:08.39Z" },
+    { url = "https://files.pythonhosted.org/packages/93/eb/1b555e169a221a4e2a18cb243415b385b01935c02ac8f45da98b245b3670/spiral_sdk-0.16.78-cp311-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:88602ed50666e705e953ddceba379119465500d04d4bb4756f92179bc59175fa", size = 91210197, upload-time = "2026-11-25T16:33:13.945Z" },
 ]
 
 [[package]]

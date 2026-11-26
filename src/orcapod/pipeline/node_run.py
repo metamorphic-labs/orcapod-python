@@ -15,6 +15,7 @@ the commit ``job.run()`` makes.
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -128,6 +129,11 @@ def refuse_unloadable_inputs(node: Any) -> None:
         )
 
 
+def databases_of(nodes: list[Any]) -> list[ArrowDatabaseProtocol]:
+    """The distinct databases the given nodes write to (``_databases``)."""
+    return _databases(nodes)
+
+
 def _databases(nodes: list[Any]) -> list[ArrowDatabaseProtocol]:
     """The distinct databases the given nodes write to, each node's results first.
 
@@ -144,6 +150,23 @@ def _databases(nodes: list[Any]) -> list[ArrowDatabaseProtocol]:
             if database is not None and not any(database is d for d in found):
                 found.append(database)
     return found
+
+
+@contextmanager
+def run_scopes(databases: Sequence[ArrowDatabaseProtocol]) -> Iterator[None]:
+    """Enter the run scope of each distinct database once, for one run (ITL-1502).
+
+    What a database holds for a run (a SpiralDB store's existence answers and listing)
+    lives until this scope exits, also when the run raises; a scope entered again
+    inside it (a job node's run inside a job's) keeps the same state.
+    """
+    with ExitStack() as stack:
+        entered: list[ArrowDatabaseProtocol] = []
+        for database in databases:
+            if not any(database is other for other in entered):
+                entered.append(database)
+                stack.enter_context(database.run_scope())
+        yield
 
 
 def _job_name(node: Any) -> str:
@@ -444,24 +467,27 @@ def run_with_dependencies(
             graph.add_edge(upstream, node)
 
     visit(target)
-    plan = plan_run(graph, load_only=load_only, outside=outside)
-    databases = _databases(plan.to_run)
-    counter = RunCountingObserver()
-    try:
-        _ = SyncPipelineOrchestrator().run(
-            plan.dag, observer=counter, load_only=load_only, held=plan.held
-        )
-    except BaseException as run_error:
-        if isinstance(run_error, Exception) and not load_only:
-            # Commit the writes that succeeded before the failure, as job.run() does;
-            # a load-only run writes nothing, so it commits nothing (ITL-1095).
-            flush_best_effort(run_error, *databases)
-        # A run that raised leaves no node it ran holding rows: whether their writes
-        # were committed is unknown.
-        clear_run_rows(plan.to_run)
-        raise
-    if not load_only:
-        commit_run(databases, plan.to_run)
+    # One scope per database for the whole run (ITL-1502).
+    with run_scopes(_databases(seen)):
+        plan = plan_run(graph, load_only=load_only, outside=outside)
+        databases = _databases(plan.to_run)
+        counter = RunCountingObserver()
+        try:
+            _ = SyncPipelineOrchestrator().run(
+                plan.dag, observer=counter, load_only=load_only, held=plan.held
+            )
+        except BaseException as run_error:
+            if isinstance(run_error, Exception) and not load_only:
+                # Commit the writes that succeeded before the failure, as job.run()
+                # does; a load-only run writes nothing, so it commits nothing
+                # (ITL-1095).
+                flush_best_effort(run_error, *databases)
+            # A run that raised leaves no node it ran holding rows: whether their
+            # writes were committed is unknown.
+            clear_run_rows(plan.to_run)
+            raise
+        if not load_only:
+            commit_run(databases, plan.to_run)
     return RunSummary(
         _job_name(target),
         run_node_summaries(graph, counter, held=plan.held_counts),

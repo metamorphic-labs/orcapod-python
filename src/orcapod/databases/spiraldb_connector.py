@@ -24,8 +24,8 @@ import re
 import urllib.parse
 import urllib.request
 import warnings
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Collection, Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from copy import copy
 from threading import local
 from typing import TYPE_CHECKING, Any, cast
@@ -39,6 +39,7 @@ from orcapod.databases.spiraldb_nullability import (
     check_no_nulls,
     schema_paths,
 )
+from orcapod.databases.spiraldb_store_tables import StoreTables
 from orcapod.databases.spiraldb_schema_table import (
     SCHEMA_TABLE,
     SchemaTable,
@@ -46,6 +47,11 @@ from orcapod.databases.spiraldb_schema_table import (
     describe_difference,
 )
 from orcapod.databases.spiraldb_sign_in import require_sign_in
+from orcapod.databases.table_names import (
+    joined_table_name,
+    joined_table_paths,
+    whole_table,
+)
 from orcapod.errors import (
     NullInNonNullableColumnError,
     SpiralDBWriteNotSupportedError,
@@ -624,6 +630,9 @@ class SpiralDBConnector:
         dataset: Dataset within the project. Defaults to ``"default"``.
         overrides: Optional: ``{"server.url": "https://api.spiraldb.dev"}``, the address
             of the service. Any other key is refused.
+        _store: Open the dataset as a pipeline store (``spiraldb_store_tables``):
+            tables named from their paths, rows through the store codec. Private until
+            the store is switched on (ITL-1446, stage 5): such a connector is not saved.
     """
 
     def __init__(
@@ -631,6 +640,8 @@ class SpiralDBConnector:
         project_id: str,
         dataset: str = "default",
         overrides: dict[str, str] | None = None,
+        *,
+        _store: bool = False,
     ) -> None:
         self._project_id = project_id
         self._dataset = dataset
@@ -641,6 +652,19 @@ class SpiralDBConnector:
         # Shared by every connector on this client (``share_client``).
         self._counts: dict[tuple[str, str], tuple[int, bool]] = {}
         client = self._client
+        # Whether this connector is in store mode: kept after ``close`` releases the
+        # store's tables, so a closed store connector never acts as a plain one.
+        self._store_mode = _store
+        self._store: StoreTables | None = None
+        if _store:
+            self._store = StoreTables(
+                client,
+                project_id,
+                dataset,
+                lambda name: _open_keyed_table(client, project_id, dataset, name),
+                lambda: _list_keyed_tables(client, project_id, dataset),
+                lambda doing: _service_call(f"{doing} of {project_id}/{dataset}"),
+            )
         self._schemas = SchemaTable(
             project_id,
             dataset,
@@ -653,6 +677,17 @@ class SpiralDBConnector:
         if self._closed:
             raise RuntimeError("SpiralDBConnector is closed")
         require_same_process(self._pid)
+
+    def _store_tables(self) -> StoreTables | None:
+        """The store's tables, or ``None`` on a plain connector.
+
+        Raises:
+            RuntimeError: If this is a store-mode connector and it has been closed.
+        """
+        if not self._store_mode:
+            return None
+        self._require_open()
+        return self._store
 
     def share_client(self) -> SpiralDBConnector:
         """Return an independently closable connector in the same SDK client scope."""
@@ -675,6 +710,72 @@ class SpiralDBConnector:
                 f"the tables of dataset {self._dataset!r}"
             )
 
+    def table_name(self, path: tuple[str, ...]) -> str:
+        """Return the name of the table at a full record path.
+
+        A store names it from the path (``spiral_store_names``); otherwise the joined
+        rule of the relational connectors (``table_names.joined_table_name``).
+        """
+        if (store := self._store_tables()) is not None:
+            return store.table_name(path)
+        return joined_table_name(path)
+
+    def has_table(self, table_name: str) -> bool:
+        """Return whether the table exists; a store opens it by name, with no listing."""
+        self._require_open()
+        if (store := self._store_tables()) is not None:
+            return store.has_table(table_name)
+        return table_name in self.get_table_names()
+
+    def table_paths(
+        self, prefix: tuple[str, ...], pending: Collection[tuple[str, ...]]
+    ) -> list[tuple[str, ...]]:
+        """Return the full paths of the tables under ``prefix``, stored or pending.
+
+        A store gives the paths its tables record; otherwise the joined rule's form.
+        """
+        self._require_open()
+        if (store := self._store_tables()) is not None:
+            return store.table_paths(prefix, pending)
+        names = {*self.get_table_names(), *(joined_table_name(p) for p in pending)}
+        return joined_table_paths(names, prefix)
+
+    def run_scope(self) -> AbstractContextManager[None]:
+        """The scope of one run: a store holds one existence answer per table and one
+        listing in it (``StoreTables.run_scope``); a plain connector holds nothing.
+
+        Raises:
+            RuntimeError: If this is a store-mode connector and it has been closed.
+        """
+        if (store := self._store_tables()) is not None:
+            return store.run_scope()
+        return nullcontext()
+
+    def read_candidates(
+        self,
+        table_name: str,
+        *,
+        keys: Collection[bytes] | None = None,
+        equal: Mapping[str, Any] | None = None,
+    ) -> pa.Table | None:
+        """Return the rows of a table that may match a lookup (ITL-1502).
+
+        A store reads only the asked keys and pushes equality down to the scan
+        (``StoreTables.read_candidates``); a plain connector reads the whole table.
+        """
+        self._require_open()
+        if (store := self._store_tables()) is not None:
+            return store.read_candidates(table_name, keys=keys, equal=equal)
+        return whole_table(self.iter_batches(f'SELECT * FROM "{table_name}"'))
+
+    def _refuse_in_store_mode(self, what: str) -> None:
+        """Refuse an operation on raw tables in a store-mode connector."""
+        if self._store_mode:
+            raise ValueError(
+                f"{what} reads raw SpiralDB tables; a store-mode connector reads its "
+                "tables through the store codec only"
+            )
+
     def get_table_names(self) -> list[str]:
         """Return all table names in this connector's dataset, sorted alphabetically.
 
@@ -687,6 +788,8 @@ class SpiralDBConnector:
         Returns:
             Sorted list of plain table name strings (no ``dataset.`` prefix).
         """
+        if (store := self._store_tables()) is not None:
+            return store.table_names()
         self._require_open()
         with self._service_call("list the tables of", "*"):
             listed = _list_keyed_tables(self._client, self._project_id, self._dataset)
@@ -716,6 +819,7 @@ class SpiralDBConnector:
             SpiralDBTableNotFoundError: If there is no such table.
             ValueError: If the name is the schema table's.
         """
+        self._refuse_in_store_mode("lookup_table")
         self._require_open()
         self._require_user_table(table_name)
         missing = f"Table not found: {self._project_id}.{self._dataset}.{table_name}"
@@ -792,6 +896,8 @@ class SpiralDBConnector:
         Returns:
             List of PK column names.
         """
+        if (store := self._store_tables()) is not None:
+            return [store.key_column]
         return self.lookup_table(table_name).key_columns
 
     def get_column_info(self, table_name: str) -> list[ColumnInfo]:
@@ -818,6 +924,8 @@ class SpiralDBConnector:
             SpiralDBTableNotFoundError: If the table does not exist.
             TableSchemaError: If the table's row cannot be read or disagrees with it.
         """
+        if (store := self._store_tables()) is not None:
+            return store.column_info(table_name)
         return [
             ColumnInfo(name=f.name, arrow_type=f.type, nullable=f.nullable)
             for f in self.lookup_table(table_name).arrow_schema()
@@ -868,6 +976,9 @@ class SpiralDBConnector:
                 "Ignoring batch_size=%r",
                 batch_size,
             )
+        if (store := self._store_tables()) is not None:
+            yield from store.scan(_parse_table_name(query))
+            return
         yield from self.scan_batches(_parse_table_name(query))
 
     def scan_batches(
@@ -901,6 +1012,7 @@ class SpiralDBConnector:
             NullInNonNullableColumnError: If a batch holds a null in a recorded
                 non-nullable column (naming the table and the column).
         """
+        self._refuse_in_store_mode("scan_batches")
         yield from self.lookup_table(table_name).scan_batches(
             where=where, limit=limit, asof=asof
         )
@@ -918,6 +1030,8 @@ class SpiralDBConnector:
         Raises:
             TableSchemaError: If the table's row cannot be read or disagrees with it.
         """
+        if (store := self._store_tables()) is not None:
+            return store.arrow_schema(table_name)
         return self.lookup_table(table_name).arrow_schema()
 
     def get_spiral_table_id(self, table_name: str) -> str:
@@ -977,13 +1091,26 @@ class SpiralDBConnector:
         columns: list[ColumnInfo],
         pk_column: str,
     ) -> None:
-        """Refuse to create a table: Orcapod does not write SpiralDB yet.
+        """Create a store table; refuse it on a plain connector.
+
+        A store creates the table at a name it computed, unless it exists or is to be
+        adopted (``spiraldb_store_tables``). Its columns are recorded by its first
+        write.
+
+        Args:
+            table_name: A name ``table_name`` returned.
+            columns: The columns (recorded by the first write, from its rows).
+            pk_column: The key column: the store's ``__record_id``.
 
         Raises:
-            SpiralDBWriteNotSupportedError: Always (ITL-1186).
+            SpiralDBWriteNotSupportedError: On a plain connector (ITL-1186).
+            ValueError: If the key column is not the store's.
         """
         self._require_open()
-        raise SpiralDBWriteNotSupportedError(_NO_WRITES)
+        if (store := self._store_tables()) is None:
+            raise SpiralDBWriteNotSupportedError(_NO_WRITES)
+        store.require_key_column(pk_column)
+        store.create(table_name)
 
     def upsert_records(
         self,
@@ -992,13 +1119,25 @@ class SpiralDBConnector:
         id_column: str,
         skip_existing: bool = False,
     ) -> None:
-        """Refuse to write rows: Orcapod does not write SpiralDB yet.
+        """Write rows to a store table; refuse them on a plain connector.
+
+        Args:
+            table_name: A name ``table_name`` returned, of a table ``create_table_if_not_exists``
+                made.
+            records: The rows, the key column included.
+            id_column: The key column: the store's ``__record_id``.
+            skip_existing: Leave out rows whose key the table holds.
 
         Raises:
-            SpiralDBWriteNotSupportedError: Always (ITL-1186).
+            SpiralDBWriteNotSupportedError: On a plain connector (ITL-1186).
+            ValueError: If the key column is not the store's, the rows hold no single data
+                context, or their columns are not the table's.
         """
         self._require_open()
-        raise SpiralDBWriteNotSupportedError(_NO_WRITES)
+        if (store := self._store_tables()) is None:
+            raise SpiralDBWriteNotSupportedError(_NO_WRITES)
+        store.require_key_column(id_column)
+        store.write(table_name, records, skip_existing)
 
     @property
     def keeps_field_metadata(self) -> bool:
@@ -1010,8 +1149,9 @@ class SpiralDBConnector:
     def unstorable_column_reason(
         self, name: str, arrow_type: pa.DataType, *, primary_key: bool
     ) -> str | None:
-        """Refuse every column: Orcapod does not write SpiralDB yet. A job whose database
-        is on this connector is refused when the database is attached, before it runs.
+        """Say why a store cannot keep a column; refuse every column on a plain connector.
+
+        A store keeps what the store codec keeps (``spiral_store``).
 
         Args:
             name: The column's name.
@@ -1019,14 +1159,20 @@ class SpiralDBConnector:
             primary_key: Whether the column is the table's primary key.
 
         Raises:
-            SpiralDBWriteNotSupportedError: Always (ITL-1186).
+            SpiralDBWriteNotSupportedError: On a plain connector: Orcapod does not write
+                its tables (ITL-1186). A job whose database is on one is refused when the
+                database is attached, before it runs.
         """
-        raise SpiralDBWriteNotSupportedError(_NO_WRITES)
+        if (store := self._store_tables()) is None:
+            raise SpiralDBWriteNotSupportedError(_NO_WRITES)
+        return store.unstorable_column_reason(name, arrow_type, primary_key)
 
     def unstorable_table_name_reason(self, table_name: str) -> str | None:
         """Say why SpiralDB cannot hold a table of this name: it holds every name.
 
-        The database's table names are letters, digits and ``_``.
+        A plain connector's names are letters, digits and ``_``; a store's are names it
+        computed (``spiral_store_names``), within SpiralDB's 255 characters by
+        construction.
 
         Args:
             table_name: The table name.
@@ -1036,25 +1182,38 @@ class SpiralDBConnector:
         """
         return None
 
-    def validate_records(self, records: pa.Table) -> None:
-        """Refuse the rows: Orcapod does not write SpiralDB yet. Called before a database
-        on this connector buffers them.
+    def validate_records(self, records: pa.Table, *, table_name: str | None) -> None:
+        """Check rows before a database buffers them; refuse them on a plain connector.
+
+        A store runs the store codec on them (the last row of each key, as the database
+        keeps), so a row it cannot keep is refused before anything is written, and
+        checks their data context against the one ``table_name``'s table records.
 
         Args:
             records: The rows.
+            table_name: The table they are for (computed by ``table_name(path)``), or
+                ``None`` for no table in particular.
 
         Raises:
-            SpiralDBWriteNotSupportedError: Always (ITL-1186).
+            SpiralDBWriteNotSupportedError: On a plain connector (ITL-1186).
+            UnstorableInSpiralError: If the store codec refuses the rows.
+            InputValidationError: If their data context is not one this Orcapod has,
+                or not the one the table records.
         """
-        raise SpiralDBWriteNotSupportedError(_NO_WRITES)
+        if (store := self._store_tables()) is None:
+            raise SpiralDBWriteNotSupportedError(_NO_WRITES)
+        store.validate(records, table_name)
 
     def close(self) -> None:
         """Close this connector and release its SDK client. Idempotent."""
         if not self._closed:
             self._closed = True
-            # spiral-sdk's client has no close method. Drop the owning references.
+            # spiral-sdk's client has no close method. Drop the owning references,
+            # the store's tables included (they hold the client); a connector from
+            # ``share_client`` keeps its own reference to them.
             del self._client
             del self._schemas
+            self._store = None
 
     def __enter__(self) -> SpiralDBConnector:
         return self
@@ -1072,6 +1231,11 @@ class SpiralDBConnector:
         Raises:
             RuntimeError: If this connector has been closed.
         """
+        if self._store_mode:
+            raise ValueError(
+                "a store-mode SpiralDB connector is not saved yet: the store is not "
+                "switched on (ITL-1446)"
+            )
         self._require_open()
         return {
             "connector_type": "spiraldb",

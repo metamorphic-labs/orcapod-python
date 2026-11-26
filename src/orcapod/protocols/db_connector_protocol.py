@@ -12,7 +12,8 @@ Planned implementations:
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator, Mapping
+from contextlib import AbstractContextManager
 from typing import Any, Protocol, TYPE_CHECKING, runtime_checkable
 
 from orcapod.types import ColumnInfo
@@ -63,7 +64,74 @@ class DBConnectorProtocol(Protocol):
         """Return column metadata for a table, with types mapped to Arrow."""
         ...
 
+    # ── Table names (ITL-1498) ────────────────────────────────────────────────
+
+    def table_name(self, path: tuple[str, ...]) -> str:
+        """Return the name of the table that holds the records at a full path.
+
+        ``ConnectorArrowDatabase`` names every table through this. The relational
+        connectors join the sanitized components (``table_names.joined_table_name``).
+
+        Args:
+            path: The full record path (the database's base path, then the record path).
+        """
+        ...
+
+    def has_table(self, table_name: str) -> bool:
+        """Return whether the table exists.
+
+        Args:
+            table_name: A name ``table_name`` returned.
+        """
+        ...
+
+    def table_paths(
+        self, prefix: tuple[str, ...], pending: Collection[tuple[str, ...]]
+    ) -> list[tuple[str, ...]]:
+        """Return the full paths of the tables under ``prefix``, stored or pending.
+
+        Args:
+            prefix: Leading full path components; empty for every table.
+            pending: The full paths of tables whose rows are not written yet.
+
+        Returns:
+            The paths, sorted. A connector whose names lose information gives them in
+            its names' form (``table_names.joined_table_paths``).
+        """
+        ...
+
+    def run_scope(self) -> AbstractContextManager[None]:
+        """Return the scope of one run (``ArrowDatabaseProtocol.run_scope``): what the
+        connector may hold for one run lives until the outermost scope exits. The
+        relational connectors hold nothing and return an empty scope."""
+        ...
+
     # ── Read ──────────────────────────────────────────────────────────────────
+
+    def read_candidates(
+        self,
+        table_name: str,
+        *,
+        keys: Collection[bytes] | None = None,
+        equal: Mapping[str, Any] | None = None,
+    ) -> pa.Table | None:
+        """Return the rows of a table that may match a lookup (ITL-1502).
+
+        At least every row whose key (``__record_id``) is in ``keys`` and whose columns
+        equal ``equal``; possibly more. ``ConnectorArrowDatabase`` filters what comes
+        back exactly, so a connector only decides how much it reads: the relational
+        connectors read the whole table, a SpiralDB store reads by key range and pushes
+        equality down to the scan where SpiralDB compares as Arrow does.
+
+        Args:
+            table_name: A name ``table_name`` returned, of a table that exists.
+            keys: Record ids, or ``None`` for any.
+            equal: Column values, or ``None`` for any.
+
+        Returns:
+            The rows, or ``None`` for a table with no rows.
+        """
+        ...
 
     def iter_batches(
         self,
@@ -156,7 +224,7 @@ class DBConnectorProtocol(Protocol):
         """
         ...
 
-    def validate_records(self, records: pa.Table) -> None:
+    def validate_records(self, records: pa.Table, *, table_name: str | None) -> None:
         """Validate that ``records`` are safe to write through this connector.
 
         Implementations should raise ``ValueError`` if ``records`` contain
@@ -168,6 +236,11 @@ class DBConnectorProtocol(Protocol):
 
         Args:
             records: Arrow table to validate before writing.
+            table_name: The table (a name from ``table_name(path)``) the rows are for,
+                so a connector that records something per table (a SpiralDB store,
+                its data context) checks the rows against it before they are
+                buffered; ``None`` when the rows are checked for no table in
+                particular.
 
         Raises:
             ValueError: If any column is incompatible with this connector.

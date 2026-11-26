@@ -30,7 +30,9 @@ from orcapod.pipeline.node_run import (
     RunPlan,
     check_sources,
     clear_run_rows,
+    databases_of,
     plan_run,
+    run_scopes,
 )
 from orcapod.pipeline.restrictions import (
     refuse_restricted_operator_caches,
@@ -1074,46 +1076,51 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         """
         from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 
-        prepared = self._prepare_run(commit_every_rows, load_only=load_only)
-        # The state rule (ITL-1095): a node that holds a current run is not run again.
-        plan = prepared.plan
-        counter = RunCountingObserver()
-        effective_orchestrator = orchestrator or SyncPipelineOrchestrator()
-        is_sync = isinstance(effective_orchestrator, SyncPipelineOrchestrator)
-        with self._executing(prepared, plan, commit_every_rows, load_only=load_only):
-            if is_sync:
-                # Held nodes give their output streams on the sync path (ITL-1347).
-                _ = effective_orchestrator.run(
-                    plan.dag,
-                    observer=_with_counter(observer, counter),
-                    run_id=prepared.run_id,
-                    pipeline_uri=prepared.pipeline_uri,
-                    materialize_results=materialize_results,
-                    load_only=load_only,
-                    held=plan.held,
-                )
-            else:
-                # The async path sends the rows the plan took (until stage 5).
-                _ = effective_orchestrator.run(
-                    plan.dag,
-                    observer=_with_counter(observer, counter),
-                    run_id=prepared.run_id,
-                    pipeline_uri=prepared.pipeline_uri,
-                    materialize_results=materialize_results,
-                    load_only=load_only,
-                    held_rows=plan.held_rows,
-                )
-        summary = self._finish_run(
-            prepared,
-            counter,
-            plan,
-            load_only=load_only,
-            unchecked_sources=prepared.unchecked_sources,
-            asynchronous=not is_sync,
-        )
-        if not summary.ok:
-            warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
-        return summary
+        # One scope per database for the whole run, its preparation included: what a
+        # database holds for a run is dropped at its end, also when it raises (ITL-1502).
+        with run_scopes(self._run_databases()):
+            prepared = self._prepare_run(commit_every_rows, load_only=load_only)
+            # The state rule (ITL-1095): a node that holds a current run is not run again.
+            plan = prepared.plan
+            counter = RunCountingObserver()
+            effective_orchestrator = orchestrator or SyncPipelineOrchestrator()
+            is_sync = isinstance(effective_orchestrator, SyncPipelineOrchestrator)
+            with self._executing(
+                prepared, plan, commit_every_rows, load_only=load_only
+            ):
+                if is_sync:
+                    # Held nodes give their output streams on the sync path (ITL-1347).
+                    _ = effective_orchestrator.run(
+                        plan.dag,
+                        observer=_with_counter(observer, counter),
+                        run_id=prepared.run_id,
+                        pipeline_uri=prepared.pipeline_uri,
+                        materialize_results=materialize_results,
+                        load_only=load_only,
+                        held=plan.held,
+                    )
+                else:
+                    # The async path sends the rows the plan took (until stage 5).
+                    _ = effective_orchestrator.run(
+                        plan.dag,
+                        observer=_with_counter(observer, counter),
+                        run_id=prepared.run_id,
+                        pipeline_uri=prepared.pipeline_uri,
+                        materialize_results=materialize_results,
+                        load_only=load_only,
+                        held_rows=plan.held_rows,
+                    )
+            summary = self._finish_run(
+                prepared,
+                counter,
+                plan,
+                load_only=load_only,
+                unchecked_sources=prepared.unchecked_sources,
+                asynchronous=not is_sync,
+            )
+            if not summary.ok:
+                warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
+            return summary
 
     async def run_async(
         self,
@@ -1161,31 +1168,36 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 f"{type(orchestrator).__name__}. Use job.run(orchestrator=...) to run "
                 "it."
             )
-        prepared = self._prepare_run(commit_every_rows, load_only=load_only)
-        # The state rule (ITL-1095): a node that holds a current run is not run again.
-        plan = prepared.plan
-        counter = RunCountingObserver()
-        with self._executing(prepared, plan, commit_every_rows, load_only=load_only):
-            _ = await orchestrator.run_async(
-                plan.dag,
-                observer=_with_counter(observer, counter),
-                run_id=prepared.run_id,
-                pipeline_uri=prepared.pipeline_uri,
-                materialize_results=materialize_results,
+        # One scope per database for the whole run, its preparation included: what a
+        # database holds for a run is dropped at its end, also when it raises (ITL-1502).
+        with run_scopes(self._run_databases()):
+            prepared = self._prepare_run(commit_every_rows, load_only=load_only)
+            # The state rule (ITL-1095): a node that holds a current run is not run again.
+            plan = prepared.plan
+            counter = RunCountingObserver()
+            with self._executing(
+                prepared, plan, commit_every_rows, load_only=load_only
+            ):
+                _ = await orchestrator.run_async(
+                    plan.dag,
+                    observer=_with_counter(observer, counter),
+                    run_id=prepared.run_id,
+                    pipeline_uri=prepared.pipeline_uri,
+                    materialize_results=materialize_results,
+                    load_only=load_only,
+                    held_rows=plan.held_rows,
+                )
+            summary = self._finish_run(
+                prepared,
+                counter,
+                plan,
                 load_only=load_only,
-                held_rows=plan.held_rows,
+                unchecked_sources=prepared.unchecked_sources,
+                asynchronous=True,
             )
-        summary = self._finish_run(
-            prepared,
-            counter,
-            plan,
-            load_only=load_only,
-            unchecked_sources=prepared.unchecked_sources,
-            asynchronous=True,
-        )
-        if not summary.ok:
-            warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
-        return summary
+            if not summary.ok:
+                warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
+            return summary
 
     def _prepare_run(
         self, commit_every_rows: int, *, load_only: bool = False
@@ -1426,6 +1438,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             plan=plan,
             unchecked_sources=unchecked,
         )
+
+    def _run_databases(self) -> list[ArrowDatabaseProtocol]:
+        """Every database the job's nodes and the job itself use, for the run scope."""
+        own = [d for d in (self._database, self._result_database) if d is not None]
+        return [*own, *databases_of(list(self.nodes.values()))]
 
     @contextlib.contextmanager
     def _executing(

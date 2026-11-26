@@ -873,7 +873,7 @@ def measure(row: Row, database: str, root: Path) -> Cell:
         if database == "PostgreSQL":
             try:
                 db.require_storable(written.schema)
-                db._connector.validate_records(written)  # pyright: ignore[reportPrivateUsage]
+                db._connector.validate_records(written, table_name=None)  # pyright: ignore[reportPrivateUsage]
             except Exception as exc:  # noqa: BLE001
                 if _names_a_column(exc):
                     return Cell(REFUSED, f"{type(exc).__name__}")

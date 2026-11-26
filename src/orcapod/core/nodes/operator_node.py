@@ -1893,61 +1893,65 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
 
         if self._loaded and not load_only:
             raise self._cannot_compute_error()
-        # A source read under two restrictions, or a caching operator over a restricted
-        # source, is refused before any source is checked and before anything is
-        # computed or written (ITL-1218).
-        refuse_restriction_conflicts([self])
-        # Every source feeding the run first takes in any new data (ITL-1102).
-        unchecked = check_sources([self])
-        if self.holds_current_run(load_only=load_only):
-            return self._run_view(computed=False)
-        if depends_on_job_nodes(self):
-            summary = run_with_dependencies(
-                self, load_only=load_only, unchecked_sources=unchecked
-            )
-            self._last_run = summary
-            if not summary.ok:
-                warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
-            return self._run_view(computed=False)
-        if self._loaded:
-            raise self._cannot_compute_error()
-        if load_only:
-            refuse_unloadable_inputs(self)
-        if self.is_stale or not self._holds_run(load_only=load_only):
-            # Stale, or a load-only run's output asked for by a full run: run again.
-            self.clear_cache()
+        from orcapod.pipeline.node_run import databases_of, run_scopes
 
-        computed = False
-        if self._cached_output_stream is None:
-            try:
-                if self._pipeline_database is not None:
-                    if self._cache_mode == CacheMode.REPLAY:
-                        self._replay_from_cache()
-                    else:
-                        self._compute_and_store(store=not load_only)
-                        computed = True
-                        if self._cache_mode == CacheMode.LOG and not load_only:
-                            # Committed before run() returns, as at the end of a job
-                            # run.
-                            from orcapod.pipeline.node_run import commit_run
-
-                            commit_run([self._pipeline_database], [self])
-                    self._run_load_only = load_only
-                else:
-                    self._cached_output_stream = self._compute_output()
-                    # As in the branches with a database (ITL-1121).
-                    self._run_load_only = load_only
-                    self._update_modified_time()
-                    computed = True
-                if computed:
-                    # Building the view is part of the run: a failure there clears the
-                    # node (ITL-1121).
-                    return self._run_view(computed=True)
-            except BaseException:
-                # A run that raised defines no rows.
+        # Every run that can write holds one run scope per database (ITL-1502).
+        with run_scopes(databases_of([self])):
+            # A source read under two restrictions, or a caching operator over a restricted
+            # source, is refused before any source is checked and before anything is
+            # computed or written (ITL-1218).
+            refuse_restriction_conflicts([self])
+            # Every source feeding the run first takes in any new data (ITL-1102).
+            unchecked = check_sources([self])
+            if self.holds_current_run(load_only=load_only):
+                return self._run_view(computed=False)
+            if depends_on_job_nodes(self):
+                summary = run_with_dependencies(
+                    self, load_only=load_only, unchecked_sources=unchecked
+                )
+                self._last_run = summary
+                if not summary.ok:
+                    warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
+                return self._run_view(computed=False)
+            if self._loaded:
+                raise self._cannot_compute_error()
+            if load_only:
+                refuse_unloadable_inputs(self)
+            if self.is_stale or not self._holds_run(load_only=load_only):
+                # Stale, or a load-only run's output asked for by a full run: run again.
                 self.clear_cache()
-                raise
-        return self._run_view(computed=computed)
+
+            computed = False
+            if self._cached_output_stream is None:
+                try:
+                    if self._pipeline_database is not None:
+                        if self._cache_mode == CacheMode.REPLAY:
+                            self._replay_from_cache()
+                        else:
+                            self._compute_and_store(store=not load_only)
+                            computed = True
+                            if self._cache_mode == CacheMode.LOG and not load_only:
+                                # Committed before run() returns, as at the end of a job
+                                # run.
+                                from orcapod.pipeline.node_run import commit_run
+
+                                commit_run([self._pipeline_database], [self])
+                        self._run_load_only = load_only
+                    else:
+                        self._cached_output_stream = self._compute_output()
+                        # As in the branches with a database (ITL-1121).
+                        self._run_load_only = load_only
+                        self._update_modified_time()
+                        computed = True
+                    if computed:
+                        # Building the view is part of the run: a failure there clears the
+                        # node (ITL-1121).
+                        return self._run_view(computed=True)
+                except BaseException:
+                    # A run that raised defines no rows.
+                    self.clear_cache()
+                    raise
+            return self._run_view(computed=computed)
 
     def _run_view(self, *, computed: bool) -> StreamView:
         """The ``run()`` view of the node's output.

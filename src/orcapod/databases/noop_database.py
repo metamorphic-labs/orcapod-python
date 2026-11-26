@@ -105,6 +105,10 @@ class NoOpArrowDatabase:
     def fail_pending_result(self, record_path: tuple[str, ...]) -> None:
         """There are no buffered writes to withdraw."""
 
+    def run_scope(self) -> AbstractContextManager[None]:
+        """Hold nothing across a run: an empty scope (ITL-1502)."""
+        return nullcontext()
+
     def refresh_table(self, record_path: tuple[str, ...]) -> None:
         """Nothing to refresh: the no-op store holds no table (ITL-1408)."""
 
