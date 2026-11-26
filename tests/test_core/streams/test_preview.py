@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import gc
 import weakref
 from collections.abc import Callable
@@ -16,7 +17,7 @@ from orcapod import PipelineJob, col, function_pod
 from orcapod.core.cached_function_pod import CachedFunctionPod
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
-from orcapod.core.operators import Join, MapData, MergeJoin, PolarsFilter
+from orcapod.core.operators import Join, MapData, MergeJoin, PolarsFilter, SemiJoin
 from orcapod.core.sources import ArrowTableSource, CachedSource, DerivedSource
 from orcapod.core.sources.polling_source import PollingSource
 from orcapod.core.streams import ArrowTableStream
@@ -27,6 +28,7 @@ from orcapod.errors import PreviewRefusedError, RowIdentifierError
 from orcapod.side_effects import SideEffectPod
 from orcapod.sources import SpiralDBTableSource
 from orcapod.streams import StreamView, ViewStatus
+from orcapod.types import Schema
 from tests.test_core.streams.test_head_and_preview import _FakeDynamicSource
 from tests.test_databases import fake_spiral_sdk
 
@@ -485,6 +487,13 @@ def test_the_limit_reaches_the_scan(spiral: Any) -> None:
         (lambda s: s.map_data({"note": "text"}).add_tags(a=1), 5, 1),
         (lambda s: s.drop_nulls(["x"]), None, 2),
         (lambda s: s.filter(subject="m0"), None, 1),
+        (
+            lambda s: DerivedSource(
+                s, tags_as_data={"timestamp": "time"}, source_id="derived"
+            ),
+            5,
+            1,
+        ),
     ]
     for chain, limit, batches in cases:
         stream = chain(spiral())
@@ -597,16 +606,138 @@ def test_what_would_act_is_refused_before_any_call(source: Any) -> None:
     assert (fake.polls, fake.fetches) == (0, 0)
 
 
-def test_a_derived_source_is_read_whole(source: Any) -> None:
-    """Refused, since its origin may compute; allowed by ``compute_all``."""
+def test_a_derived_source_reads_only_the_rows_shown(source: Any) -> None:
+    """Its origin's first rows, as its origin previews them; nothing is kept."""
     derived = DerivedSource(
         source(), tags_as_data={"timestamp": "time"}, source_id="derived"
     )
-    with pytest.raises(PreviewRefusedError, match="compute_all"):
-        derived.preview(3)
-    _same(
-        derived.preview(3, compute_all=True).as_table(), derived.as_table().slice(0, 3)
+    shown = [derived.preview(3).as_table(), derived.preview(3, compute_all=True)]
+    assert derived._held_rows() is None  # pyright: ignore[reportPrivateUsage]
+    whole = derived.as_table()
+    for view in shown:
+        _same(view if isinstance(view, pa.Table) else view.as_table(), whole[:3])
+    _same(derived.preview(500).as_table(), whole)
+
+
+@pytest.mark.parametrize("origin", ["cached", "polling"])
+def test_a_derived_source_never_writes_or_polls_its_origin(
+    source: Any, origin: str
+) -> None:
+    """Refused by the origin, compute_all or not: no cache table, no poll, nothing kept.
+
+    Review of 2dda2d82: the derived source read its origin whole through
+    ``as_table()``, which wrote a cache table, polled, and kept the rows.
+    """
+    store = InMemoryArrowDatabase()
+    fake = _FakeDynamicSource(declared=Schema({"id": int, "val": int}))
+    made: Any = (
+        CachedSource(source(), cache_database=store)
+        if origin == "cached"
+        else PollingSource(fake, tag_columns="id", record_id_columns="id")
     )
+    tag = "subject" if origin == "cached" else "id"
+    derived = DerivedSource(made, tags_as_data={tag: "copy"}, source_id="derived")
+    before = (fake.polls, fake.fetches)
+    for compute_all in (False, True):
+        with pytest.raises(PreviewRefusedError, match=r"run\(\) computes every row"):
+            derived.preview(1, compute_all=compute_all)
+    assert store.list_table_paths() == []
+    assert (fake.polls, fake.fetches) == before
+    assert derived._held_rows() is None  # pyright: ignore[reportPrivateUsage]
+    if origin == "cached":
+        assert made.head().status is ViewStatus.NOT_COMPUTED
+
+
+@pytest.mark.parametrize("tags_as_data", [None, {"subject": "who"}])
+def test_a_derived_source_over_a_node_keeps_nothing(
+    source: Any, tags_as_data: dict[str, str] | None
+) -> None:
+    """The node's stored rows, read whole only with compute_all and not kept."""
+    job = PipelineJob(name="itl1464_derived", database=InMemoryArrowDatabase())
+    with job:
+        _ = _Calls().pod(_with_time(source), label="triple")
+    _ = job.run()
+    node = job.nodes["triple"]
+    derived = (
+        DerivedSource(node)
+        if tags_as_data is None
+        else DerivedSource(node, tags_as_data=tags_as_data, source_id="derived")
+    )
+    with pytest.raises(PreviewRefusedError, match="compute_all"):
+        derived.preview(2)
+    shown = derived.preview(2, compute_all=True).as_table()
+    assert derived._held_rows() is None  # pyright: ignore[reportPrivateUsage]
+    _same(shown, derived.as_table()[:2])
+
+
+def _unrelated() -> Any:
+    """A source tagged ``unrelated`` and ``batch``, whose data a ``_Calls`` pod takes."""
+    return ArrowTableSource(
+        pa.table(
+            {
+                "unrelated": ["u0", "u1", "u2"],
+                "batch": ["b0", "b1", "b2"],
+                "timestamp": pa.array([0, 1, 2], pa.uint64()),
+                "x": pa.array([1, 2, 3], pa.int64()),
+            }
+        ),
+        tag_columns=["unrelated", "batch"],
+        source_id="other",
+        tag_only_columns=True,
+    )
+
+
+@pytest.mark.parametrize("n", [1, 3, 40, 41])
+@pytest.mark.parametrize("form", ["method", "operator", "renamed_tag"])
+def test_a_semi_join_without_a_shared_tag_computes_no_right_input(
+    source: Any, n: int, form: str
+) -> None:
+    """The left input's first rows, with no call of the right input's function.
+
+    Review of 2dda2d82: preview computed both inputs before SemiJoin gave back its
+    left input, so it called (and raised in) a function the full read never calls.
+    """
+    calls = _Calls(fail_at=0)
+
+    def joined() -> Any:
+        """A fresh stream each time: a read keeps its result, which a preview uses."""
+        right = calls.pod(_unrelated())
+        left = source()
+        if form == "method":
+            return left.semi_join(right)
+        if form == "renamed_tag":
+            left = left.map_tags({"subject": "who"})
+        return SemiJoin()(left, right)
+
+    whole = joined().as_table()
+    assert calls.seen == []
+    assert _row_set(asyncio.run(_async_rows(joined()))) == _row_set(whole.to_pylist())
+    for compute_all in (False, True):
+        _same(joined().preview(n, compute_all=compute_all).as_table(), whole[:n])
+    assert calls.seen == []
+
+
+def _row_set(rows: list[dict[str, Any]]) -> set[tuple[tuple[str, Any], ...]]:
+    """The rows as a set, for an order the async path does not promise."""
+    return {tuple(sorted(row.items())) for row in rows}
+
+
+async def _async_rows(stream: Any) -> list[dict[str, Any]]:
+    """Every row of the stream's async read, as dicts of its tags and data."""
+    return [
+        {**tag.as_dict(), **data.as_dict()}
+        async for tag, data in stream.async_iter_data()
+    ]
+
+
+def test_a_semi_join_with_a_shared_tag_still_reads_both(source: Any) -> None:
+    """With a shared tag both inputs are needed, as in the full read."""
+    left = source()
+    right = source().filter(subject="m1")
+    joined = left.semi_join(right)
+    with pytest.raises(PreviewRefusedError, match="compute_all"):
+        joined.preview(2)
+    _same(joined.preview(5, compute_all=True).as_table(), joined.as_table()[:5])
 
 
 def test_nodes_are_refused(source: Any) -> None:

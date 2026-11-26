@@ -261,7 +261,11 @@ own needs every row of its input, so `preview` refuses it (`PreviewRefusedError`
 step). `preview(n, compute_all=True)` computes that step and everything beneath it in full,
 functions included, and keeps none of it. A side-effect pod, a function that takes the
 invocation context, a `CachedSource`, a `PollingSource` and a node of a pipeline or job are
-refused always: a preview never acts.
+refused always: a preview never acts. A `semi_join` whose inputs share no tag keeps every row
+of its left input and never reads its right one, so `preview` reads only the left input, as
+the full read does. A `DerivedSource` over a source shows its origin's first rows through
+the origin's own `preview` (refused for a `CachedSource` or `PollingSource` origin); over a
+job node it reads the stored rows, only with `compute_all=True`. It keeps none of them.
 
 What `run()` does on each kind of object:
 

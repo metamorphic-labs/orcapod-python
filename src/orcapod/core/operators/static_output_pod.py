@@ -839,6 +839,19 @@ class StaticOutputOperatorPod(TraceableBase):
         """
         return None
 
+    def input_given_back(self, inputs: Sequence[StreamProtocol]) -> int | None:
+        """The position of the input this operator gives back unchanged over
+        ``inputs``, or ``None`` (the default): it computes its result.
+
+        Decided from the inputs' schemas only: nothing is computed or read. A preview
+        then reads only that input, as the full read does (``SemiJoin`` without a
+        shared tag gives back its left input and never reads its right one).
+
+        Args:
+            inputs: The operator's inputs, in order.
+        """
+        return None
+
     def head_rows(self, stream: StreamProtocol, table: pa.Table) -> pa.Table | None:
         """The rows ``head`` may show of this operator over ``stream``, from the rows
         ``stream``'s own ``head`` shows (``table``), before the result is computed.
@@ -2652,6 +2665,12 @@ class DynamicPodStream(StreamBase):
             with closing(preview_batches(self._upstreams[0], wanted)) as batches:
                 for batch in batches:
                     yield pod.static_process(batch)
+            return
+        given_back = pod.input_given_back(self._upstreams)
+        if given_back is not None:
+            # The result is that input as it is: no other input is read, as in the
+            # full read.
+            yield from preview_batches(self._upstreams[given_back], request)
             return
         refuse_without_compute_all(self, request, "needs every row of its input")
         result = pod.static_process(

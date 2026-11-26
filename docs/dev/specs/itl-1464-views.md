@@ -92,7 +92,12 @@ never computes.
   read in batches and closed at `n`.
 - `Join`, `MergeJoin`, `SemiJoin`, `Rejoin`, `GroupBy`, `Batch`, `TagBy`, `PolarsFilter`
   and user operators need a whole input. Refused, naming the step and `run()`;
-  `preview(n, compute_all=True)` computes that step in full.
+  `preview(n, compute_all=True)` computes that step in full. An operator that gives one
+  input back unchanged, decided from the schemas (`input_given_back`: `SemiJoin` without a
+  shared tag), is previewed as that input, and its other inputs are not read.
+- A `DerivedSource` takes its origin's preview (a source origin; refused where the origin
+  would poll or write its cache) or, with `compute_all`, a job node's stored rows; it keeps
+  nothing.
 - A side-effect pod, or a function that takes the invocation context, is refused: a
   preview has no effects.
 - A kept result (an already computed stream) is sliced and nothing is computed.
