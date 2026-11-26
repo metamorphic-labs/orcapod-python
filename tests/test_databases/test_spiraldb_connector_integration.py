@@ -17,10 +17,12 @@ from __future__ import annotations
 import datetime as dt
 import math
 import os
+import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pyarrow as pa
 import pytest
@@ -315,3 +317,128 @@ def test_an_early_close(place: _Place) -> None:
     batches: Any = place.connector().scan_batches("units")
     assert next(batches).num_rows > 0
     batches.close()
+
+
+def _client(place: _Place) -> Any:
+    """Return an SDK client on the place, for the test's own reads and writes."""
+    if place.overrides is None:
+        return fake.FakeClient()
+    return place.connector()._client  # pyright: ignore[reportPrivateUsage]  # the SDK's client, for the test's own writes
+
+
+def test_table_metadata(place: _Place) -> None:
+    """Table metadata as measured with spiral-sdk 0.16.78 (the fake's ``table-metadata``).
+
+    Fixed keys only, so a live table does not grow from run to run.
+    """
+    client = _client(place)
+    key = pa.schema([pa.field("k", pa.large_string(), False)])
+    table = client.project(place.project).create_keyed_table(
+        place.dataset, "table_metadata", key, exist_ok=True
+    )
+    token = uuid.uuid4().hex.encode()
+    table.set_metadata({"conformance.a": token, "conformance.b": b"before"})
+    table.set_metadata({"conformance.b": token, "conformance.empty": b""})
+    found = table.get_metadata()
+    assert found["conformance.a"] == token  # an upsert keeps the other keys
+    assert found["conformance.b"] == token
+    assert found["conformance.empty"] == b""  # stored as empty, not deleted
+
+    # Not versioned: a snapshot taken before a write sees metadata set after it, and a
+    # metadata write makes no snapshot.
+    before = client.keyed_table(place.project, place.dataset, "table_metadata")
+    after = before.append(
+        pa.table({"k": pa.array(["r"], pa.large_string()), "v": pa.array([token])})
+    )
+    after.set_metadata({"conformance.after": token})
+    assert before.get_metadata()["conformance.after"] == token
+    pinned = client.keyed_table_by_id(before.resource_id, asof=int(before.version_id))
+    assert pinned.get_metadata()["conformance.after"] == token
+    again = client.keyed_table(place.project, place.dataset, "table_metadata")
+    assert again.version_id == after.version_id
+
+    # Limits: a key up to 255 UTF-8 bytes, a key and its value together up to 8,192.
+    table.set_metadata(
+        {"m" * 255: b"x" * (8192 - 255), "conformance.max": b"x" * (8192 - 15)}
+    )
+    for refused in (
+        {"m" * 256: token},
+        {"conformance.big": b"x" * (8192 - 15 + 1)},
+        {"m" * 255: b"x" * (8192 - 255 + 1)},
+    ):
+        with pytest.raises(Exception, match=r"status 400"):  # noqa: PT011  # the SDK's error type differs from the fake's
+            table.set_metadata(refused)
+    found = table.get_metadata()
+    assert found["m" * 255] == b"x" * (8192 - 255)
+    assert "m" * 256 not in found
+    assert "conformance.big" not in found
+
+
+def test_the_fake_keeps_concurrent_upserts_of_different_keys(tmp_path: Path) -> None:
+    """Two clients upserting different keys at once keep both (measured live, 0.16.78).
+
+    Review of PR 589, finding 1: each read waits for the other writer's read, so an
+    upsert that is not atomic would lose one key.
+    """
+    import threading
+
+    with fake.install(tmp_path):
+        key = pa.schema([pa.field("k", pa.large_string(), False)])
+        made = fake.FakeClient().project("p").create_keyed_table("d", "t", key)
+        both_read = threading.Barrier(2, timeout=0.5)
+        original = fake._Store.metadata  # pyright: ignore[reportPrivateUsage]  # the read an upsert starts from
+
+        def metadata_after_the_other_read(self: Any, table_id: str) -> dict[str, bytes]:
+            found = original(self, table_id)
+            try:
+                _ = both_read.wait()
+            except threading.BrokenBarrierError:
+                pass  # an atomic upsert holds the other writer back: no meeting
+            return found
+
+        def upsert(name: str) -> None:
+            fake.FakeClient().keyed_table_by_id(made.resource_id).set_metadata(
+                {name: b"1"}
+            )
+
+        with patch.object(fake._Store, "metadata", metadata_after_the_other_read):  # pyright: ignore[reportPrivateUsage]
+            writers = [threading.Thread(target=upsert, args=(n,)) for n in "ab"]
+            for w in writers:
+                w.start()
+            for w in writers:
+                w.join()
+        assert made.get_metadata() == {"a": b"1", "b": b"1"}
+
+
+def test_the_fake_never_shows_a_half_written_metadata_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CodeRabbit on PR 589: a reader during a metadata write sees a whole mapping.
+
+    Every file write is made to call a reader after it has truncated its file and before
+    it has written anything.
+    """
+    with fake.install(tmp_path):
+        key = pa.schema([pa.field("k", pa.large_string(), False)])
+        table = fake.FakeClient().project("p").create_keyed_table("d", "t", key)
+        table.set_metadata({"a": b"1"})
+        seen: list[dict[str, bytes]] = []
+        original = Path.write_text
+
+        def write_text_with_a_reader(
+            self: Path, data: str, *args: Any, **kw: Any
+        ) -> int:
+            with self.open("w") as handle:
+                handle.flush()
+                seen.append(
+                    fake.FakeClient()
+                    .keyed_table_by_id(table.resource_id)
+                    .get_metadata()
+                )
+            return original(self, data, *args, **kw)
+
+        monkeypatch.setattr(Path, "write_text", write_text_with_a_reader)
+        table.set_metadata({"b": b"2"})
+        monkeypatch.undo()
+        assert seen == [{"a": b"1"}]
+        assert table.get_metadata() == {"a": b"1", "b": b"2"}
