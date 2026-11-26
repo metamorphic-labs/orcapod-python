@@ -507,6 +507,99 @@ def test_the_limit_reaches_the_scan(spiral: Any) -> None:
     assert fake_spiral_sdk.scan_log[0].limit == 5
 
 
+DERIVED_CHAINS: dict[
+    str, tuple[dict[str, Any], dict[str, str], Callable[[Any], Any]]
+] = {
+    "filter": ({}, {"timestamp": "time"}, lambda d: d.filter(col("time") >= 0)),
+    "drop_nulls": ({}, {"timestamp": "time"}, lambda d: d.drop_nulls(["x"])),
+    "function": (
+        {"tag_only_columns": ["subject"]},
+        {"subject": "who"},
+        lambda d: _Calls().pod(d.drop_nulls(["x"])),
+    ),
+}
+
+
+@pytest.mark.parametrize("keys", [(), ("subject",)])
+@pytest.mark.parametrize("name", list(DERIVED_CHAINS))
+def test_a_derived_source_below_a_step_that_drops_rows_reads_what_it_needs(
+    spiral: Any, name: str, keys: tuple[str, ...]
+) -> None:
+    """The origin is read batch by batch, and its scan closed once enough rows passed.
+
+    Review of fdf70e94: with no limit (a step above may drop rows), the derived
+    source read every batch of its origin before giving its first row.
+    """
+    options, tags_as_data, chain = DERIVED_CHAINS[name]
+    key_columns = (*keys, "timestamp") if keys else ()
+
+    def derived() -> Any:
+        return DerivedSource(
+            spiral(**options),
+            tags_as_data=tags_as_data,
+            source_id="derived",
+            record_id_columns=key_columns or None,
+        )
+
+    stream = chain(derived())
+    view = stream.preview(5)
+    (scan,) = fake_spiral_sdk.scan_log
+    assert scan.limit is None
+    assert scan.batches_read <= 2
+    assert scan.closed
+    _same(view.as_table(), chain(derived()).as_table().slice(0, 5))
+
+
+@pytest.mark.parametrize("keys", [(), ("timestamp", "subject")])
+def test_a_derived_source_read_in_batches_names_its_rows_as_read_whole(
+    spiral: Any, keys: tuple[str, ...]
+) -> None:
+    """Record ids, system tags and source info of every batch: as in one read.
+
+    Positional record ids continue from one batch to the next.
+    """
+
+    def derived() -> Any:
+        return DerivedSource(
+            spiral(),
+            tags_as_data={"timestamp": "time"},
+            source_id="derived",
+            record_id_columns=keys or None,
+        )
+
+    request = preview_module.PreviewRequest(limit=None)
+    batches = list(preview_module.preview_batches(derived(), request))
+    assert len(batches) > 1
+    read = pa.concat_tables(
+        b.as_table(columns=preview_module.PREVIEW_COLUMNS) for b in batches
+    )
+    _same(read, derived().as_table(columns=preview_module.PREVIEW_COLUMNS))
+    rows = asyncio.run(_async_rows(derived()))
+    assert _row_set(rows) == _row_set(
+        read.select(derived().keys()[0] + derived().keys()[1]).to_pylist()
+    )
+
+
+def test_a_repeated_key_across_batches_is_refused_when_reached(spiral: Any) -> None:
+    """A key repeated in a later batch raises when that row is reached, not before."""
+    derived = DerivedSource(
+        spiral(),
+        tags_as_data={"timestamp": "time"},
+        source_id="derived",
+        record_id_columns="subject",
+    )
+    assert len(derived.preview(1)) == 1
+    with pytest.raises(RowIdentifierError, match="unique"):
+        derived.preview(30)
+    with pytest.raises(RowIdentifierError, match="unique"):
+        DerivedSource(
+            spiral(),
+            tags_as_data={"timestamp": "time"},
+            source_id="derived",
+            record_id_columns="subject",
+        ).as_table()
+
+
 def test_a_source_limit_and_where_hold(spiral: Any) -> None:
     """The smaller of the two limits; ``where`` in the scan."""
     view = spiral(limit=3, where={"subject": "m1"}).preview(10)
