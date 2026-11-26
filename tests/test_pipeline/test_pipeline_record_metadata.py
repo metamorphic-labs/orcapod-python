@@ -667,12 +667,15 @@ def test_pipeline_record_requires_an_output(
         assert store.list_table_paths() == []
 
 
-@pytest.mark.parametrize(("orchestrator", "rows"), [("sync", 1), ("async", 2)])
-def test_identical_inputs_without_system_tags(orchestrator: str, rows: int) -> None:
-    """Sync reuses the first entry, while async can schedule both copies as misses.
+@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
+def test_identical_inputs_without_system_tags(orchestrator: str) -> None:
+    """Two copies of one input are one instance, with one row per result.
 
-    Both copies are one instance. On the async path each computed its own result,
-    so each has its own record id and both rows are stored.
+    Sync reuses the first entry: one row. Async can schedule both copies as misses
+    before either result is stored; when each then computed its own result, each
+    has its own record id and both rows are stored, and when the second took the
+    first's result, the second write is the same record and is skipped. Which of
+    the two happens depends on scheduling, so both are accepted on the async path.
     """
     table = source().as_table().select(["site", "group", "x", "y"]).take([0, 0])
     stream = ArrowTableStream(table, tag_columns=["site", "group"])
@@ -682,6 +685,6 @@ def test_identical_inputs_without_system_tags(orchestrator: str, rows: int) -> N
     node = FunctionJobNode(pod, stream, pipeline_database=store)
     assert execute_standalone(node, stream, orchestrator) == 2
     stored = pipeline_rows(store)
-    assert stored.num_rows == rows
+    assert stored.num_rows in ((1,) if orchestrator == "sync" else (1, 2))
     assert len(set(stored[INSTANCE].to_pylist())) == 1
-    assert len(set(stored["__data_id"].to_pylist())) == rows
+    assert len(set(stored["__data_id"].to_pylist())) == stored.num_rows

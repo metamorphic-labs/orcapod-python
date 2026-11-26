@@ -181,7 +181,7 @@ already stored, so the table keeps every distinct record:
 
 During a sync run, a repeated identical input without system tags reuses the
 first entry. During an async run, both copies can be scheduled before either
-entry is available; each then gets its own result, and so its own row.
+entry is available; when each then computes its own result, each has its own row.
 A load-only run writes nothing. Neither recording column enters any hash.
 
 Read these columns on joined records with
