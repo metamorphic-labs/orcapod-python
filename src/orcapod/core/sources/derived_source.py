@@ -17,6 +17,7 @@ from orcapod.core.data_tags import (
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
+from orcapod.core.sources.held_sources import HELD_LIBRARY_SOURCES
 from orcapod.core.sources.provisional import warn_provisional_source
 from orcapod.core.sources.reload import same_rows
 from orcapod.core.sources.source_ids import hash_source_name
@@ -33,13 +34,12 @@ from orcapod.core.streams.base import (
     check_head_size,
     schema_requires_io,
     typed_arrow_schemas,
-    reads_as_its_class,
     typed_zero_row_table,
 )
 from orcapod.core.streams.preview import (
     PreviewRequest,
     preview_batches,
-    is_library_object,
+    is_exact_library_instance,
     refuse_without_compute_all,
     refused,
     slices_of,
@@ -856,7 +856,7 @@ class DerivedSource(RootSource):
         full, then the first rows.
         """
         self._note_provisional_identity_use()
-        if not reads_as_its_class(self, DerivedSource):
+        if not is_exact_library_instance(self, frozenset({DerivedSource})):
             yield from self._preview_of_its_read(request)
             return
         if self._tags_as_data is not None and self._cached_stream is not None:
@@ -933,7 +933,7 @@ def _origin_read_keeping_nothing(origin: Any, *, read_by_this_class: bool) -> An
     """
     from orcapod.core.sources.spiraldb_table_source import SpiralDBTableSource
 
-    if reads_as_its_class(origin, DerivedSource):
+    if is_exact_library_instance(origin, frozenset({DerivedSource})):
         # Exactly this class: its state is known, so a copy keeps what it reads.
         twin = copy.copy(origin)
         twin._origin = _origin_read_keeping_nothing(  # pyright: ignore[reportPrivateUsage]  # the copy's own origin
@@ -949,10 +949,9 @@ def _origin_read_keeping_nothing(origin: Any, *, read_by_this_class: bool) -> An
             "read it in full, and it may keep what is read",
         )
     if isinstance(origin, RootSource):
-        holds_its_rows = isinstance(
-            getattr(origin, "_stream", None), ArrowTableStream
-        ) and is_library_object(origin)
-        if holds_its_rows or reads_as_its_class(origin, SpiralDBTableSource):
+        if is_exact_library_instance(
+            origin, HELD_LIBRARY_SOURCES | {SpiralDBTableSource}
+        ):
             return origin
     elif read_by_this_class:
         return origin

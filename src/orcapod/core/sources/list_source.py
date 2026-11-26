@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+from collections.abc import Generator
+from orcapod.core.sources.base import held_table_batches
+from orcapod.core.streams.preview import PreviewRequest
+from orcapod.protocols.core_protocols import StreamProtocol
+
 from collections.abc import Callable, Collection
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -156,3 +161,9 @@ class ListSource(RootSource):
             "ListSource cannot be reconstructed from config — "
             "original list data is not serializable."
         )
+
+    def _preview_batches(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """Slices of the table it holds, for exactly this class (``held_table_batches``)."""
+        yield from held_table_batches(self, ListSource, request)

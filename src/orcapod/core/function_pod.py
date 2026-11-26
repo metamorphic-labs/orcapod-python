@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import functools
+
 import asyncio
 import itertools
 import dataclasses
@@ -24,6 +26,7 @@ from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
 from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
+from orcapod.core.data_function_preview import require_previewable_function
 from orcapod.core.datagrams import Data
 from orcapod.core.data_tags import (
     materialization_diagnostic_off,
@@ -43,7 +46,7 @@ from orcapod.core.streams.preview import (
     preview_batches,
     refused,
     slices_of,
-    exactly_its_class,
+    is_exact_library_instance,
 )
 from orcapod.core.streams.view import (
     SCHEMA_NEEDS_POLL_NOTE,
@@ -409,18 +412,9 @@ class _FunctionPodBase(TraceableBase):
         raise PreviewRefusedError(f"{type(self).__name__} has no preview")
 
     def _require_own_processing(self) -> None:
-        """Refuse a pod that is not exactly the class its ``preview_data`` was written
-        for: a subclass may compute, look up or act in a way the preview does not know
-        (``exactly_its_class``; review of PR 571).
-
-        Raises:
-            PreviewRefusedError: If so.
-        """
-        if not exactly_its_class(self, "preview_data"):
-            raise PreviewRefusedError(
-                f"{type(self).__name__} is a subclass of a pod of the library: "
-                "its preview is not known"
-            )
+        """Refuse a pod that is not exactly one of the library's previewable pods
+        (``require_previewable_pod``)."""
+        require_previewable_pod(self)
 
     async def async_process_data(
         self,
@@ -1009,6 +1003,7 @@ class FunctionPod(_FunctionPodBase):
             raise PreviewRefusedError(
                 "its function takes the invocation context: it performs an action"
             )
+        require_previewable_function(self.data_function)
         self.data_function.require_preview()
 
     def preview_data(self, data: DataProtocol) -> DataProtocol | None:
@@ -1846,6 +1841,9 @@ class FunctionPodStream(StreamBase):
         """
         pod = self._pod_base()
         try:
+            # The pod's kind first: none of its methods is called unless it is exactly
+            # a library pod.
+            require_previewable_pod(pod)
             pod.require_preview()
         except PreviewRefusedError as error:
             raise refused(self, f"cannot be previewed: {error}") from error
@@ -1868,18 +1866,38 @@ class FunctionPodStream(StreamBase):
         )
         wanted = request if one_per_row else request.without_limit()
         given = False
-        index = 0
-        with closing(preview_batches(self._input_stream, wanted)) as batches:
-            for batch in batches:
-                for tag, data in batch.iter_data():
-                    if index in known:
-                        tag, output = known[index]
-                    else:
-                        output = pod.preview_data(data)
-                    index += 1
-                    if output is not None:
-                        given = True
-                        yield self._preview_batch([(tag, output)])
+        # The held results of the first inputs come first: the input is opened only
+        # when more rows are asked for than they give, and not at all when every
+        # input's result is held (an iteration ran to the end).
+        held = 0
+        while held in known:
+            tag, output = known[held]
+            held += 1
+            if output is not None:
+                given = True
+                yield self._preview_batch([(tag, output)])
+        every_input_held = (
+            current
+            and not self._needs_iterator
+            and not self._input_interrupted
+            and self._cached_input_iterator is None
+        )
+        if not every_input_held:
+            index = 0
+            with closing(preview_batches(self._input_stream, wanted)) as batches:
+                for batch in batches:
+                    for tag, data in batch.iter_data():
+                        if index < held:
+                            index += 1
+                            continue
+                        if index in known:
+                            tag, output = known[index]
+                        else:
+                            output = pod.preview_data(data)
+                        index += 1
+                        if output is not None:
+                            given = True
+                            yield self._preview_batch([(tag, output)])
         if not given:
             yield self._preview_batch([])
 
@@ -2274,6 +2292,7 @@ class FallThroughPod(WrappedFunctionPod):
     def require_preview(self) -> None:
         """See ``_FunctionPodBase.require_preview``."""
         self._require_own_processing()
+        require_previewable_pod(self._plain_pod)
         self._plain_pod.require_preview()
 
     def preview_data(self, data: DataProtocol) -> DataProtocol | None:
@@ -2528,3 +2547,28 @@ def side_effect_function_pod(
     if fn is not None:
         return decorator(fn)
     return decorator
+
+
+@functools.cache
+def previewable_pods() -> frozenset[type]:
+    """The library's function pod classes with a preview (``preview_data``), written
+    for exactly these classes (N55)."""
+    from orcapod.core.cached_function_pod import CachedFunctionPod
+
+    return frozenset({FunctionPod, FallThroughPod, CachedFunctionPod})
+
+
+def require_previewable_pod(pod: object) -> None:
+    """Refuse a pod that is not exactly one of ``previewable_pods``.
+
+    Checked before any of the pod's preview methods is called, so none is ever a
+    subclass's own.
+
+    Raises:
+        PreviewRefusedError: If so.
+    """
+    if not is_exact_library_instance(pod, previewable_pods()):
+        raise PreviewRefusedError(
+            f"{type(pod).__name__} is not a pod of the library: its preview is not "
+            "known"
+        )

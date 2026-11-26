@@ -63,8 +63,8 @@ from orcapod.core.sources.stream_builder import (
     row_identifiers,
 )
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
-from orcapod.core.streams.base import check_head_size, reads_as_its_class
-from orcapod.core.streams.preview import PreviewRequest
+from orcapod.core.streams.base import check_head_size
+from orcapod.core.streams.preview import PreviewRequest, is_exact_library_instance
 from orcapod.core.streams.view import ViewStatus, StreamView
 from orcapod.databases.spiraldb_connector import (
     SpiralDBConnector,
@@ -1130,7 +1130,7 @@ class SpiralDBTableSource(RootSource):
 
     @override
     def _reads_in_batches(self) -> bool:
-        return reads_as_its_class(self, SpiralDBTableSource)
+        return is_exact_library_instance(self, frozenset({SpiralDBTableSource}))
 
     @override
     def _batch_streams_of_rows(self) -> Generator[StreamProtocol, None, None]:
@@ -1144,7 +1144,7 @@ class SpiralDBTableSource(RootSource):
     ) -> Generator[StreamProtocol, None, None]:
         """One scan, limited by SpiralDB when the rows wanted are known, else closed when
         enough were read. ``max_rows`` holds only when every row is asked for."""
-        if not reads_as_its_class(self, SpiralDBTableSource):
+        if not is_exact_library_instance(self, frozenset({SpiralDBTableSource})):
             yield from super()._preview_batches(request)
             return
         limits = [n for n in (self._limit, request.limit) if n is not None]

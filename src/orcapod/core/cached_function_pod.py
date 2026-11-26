@@ -15,8 +15,10 @@ from orcapod.core.function_pod import (
     FunctionPodStream,
     WrappedFunctionPod,
     function_zero_row_table,
+    previewable_pods,
 )
 from orcapod.core.streams.view import StreamView
+from orcapod.core.streams.preview import is_exact_library_instance
 from orcapod.errors import PreviewRefusedError
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
@@ -319,7 +321,9 @@ class CachedFunctionPod(WrappedFunctionPod):
             PreviewRefusedError: If it is not a pod of the library.
         """
         inner: object = self._function_pod
-        if not isinstance(inner, _FunctionPodBase):
+        if not isinstance(inner, _FunctionPodBase) or not is_exact_library_instance(
+            inner, previewable_pods()
+        ):
             raise PreviewRefusedError(
                 f"its inner pod {type(inner).__name__} has no preview"
             )

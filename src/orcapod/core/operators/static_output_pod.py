@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import functools
+
 import asyncio
 import dataclasses
 import logging
@@ -61,8 +63,7 @@ from orcapod.core.streams.preview import (
     PREVIEW_COLUMNS,
     PreviewRequest,
     preview_batches,
-    exactly_its_class,
-    is_library_class,
+    is_exact_library_instance,
     refuse_without_compute_all,
 )
 from orcapod.core.streams.view import (
@@ -1783,6 +1784,8 @@ class _RowsOfStream(ArrowTableStream):
         pipeline_hash: The pipeline hash of the stream the rows came from.
         upstreams: The upstreams of the stream the rows came from, if any.
         data_context: The rows' data context; ``None`` for the default.
+        producer: The producer of the stream the rows came from, if any (a preview's
+            whole input, which an operator may read as the full read gives it).
     """
 
     def __init__(
@@ -1794,11 +1797,13 @@ class _RowsOfStream(ArrowTableStream):
         data_tags: Collection[str] = (),
         upstreams: tuple[StreamProtocol, ...] = (),
         data_context: DataContext | None = None,
+        producer: PodProtocol | None = None,
     ) -> None:
         super().__init__(
             table,
             tag_columns=tag_columns,
             data_tags=data_tags,
+            producer=producer,
             upstreams=upstreams,
             data_context=data_context,
         )
@@ -2149,7 +2154,7 @@ class DynamicPodStream(StreamBase):
         if (
             len(self._upstreams) == 1
             and applied_by_batch(pod)
-            and is_library_class(type(pod))
+            and is_exact_library_instance(pod, library_batch_operators())
         ):
             keeps_every_row = pod.rows_dropped_text(0, (), self._upstreams) is None
             wanted = request if keeps_every_row else request.without_limit()
@@ -2159,7 +2164,7 @@ class DynamicPodStream(StreamBase):
             return
         given_back = (
             pod.input_given_back(self._upstreams)
-            if exactly_its_class(pod, "input_given_back")
+            if is_exact_library_instance(pod, operators_giving_back_an_input())
             else None
         )
         if given_back is not None:
@@ -2193,6 +2198,8 @@ class DynamicPodStream(StreamBase):
             rows.as_table(columns=PREVIEW_COLUMNS),
             tag_columns=rows.keys()[0],
             pipeline_hash=upstream.pipeline_hash(),
+            # The upstream as the full read gives it to the operator: its producer too.
+            producer=upstream.producer,
             data_tags=stream_data_tags(rows),
             upstreams=upstream.upstreams,
             data_context=StaticOutputOperatorPod._upstream_context(upstream),  # pyright: ignore[reportPrivateUsage]  # the one place that resolves an upstream's context
@@ -2354,6 +2361,49 @@ class DynamicPodStream(StreamBase):
             f"{self.__class__.__name__}(label={self.label!r}, kernel={self.producer}, "
             f"upstreams=({upstreams}))"
         )
+
+
+@functools.cache
+def library_batch_operators() -> frozenset[type]:
+    """The library's operators a preview applies batch by batch: each declares
+    ``BATCHES_GIVE_THE_WHOLE`` for exactly its own class (N55)."""
+    from orcapod.core.operators.add_tags import AddTags
+    from orcapod.core.operators.column_selection import (
+        DropColumns,
+        DropDataColumns,
+        DropTagColumns,
+        SelectColumns,
+        SelectDataColumns,
+        SelectTagColumns,
+    )
+    from orcapod.core.operators.drop_nulls import DropNulls
+    from orcapod.core.operators.filter import Filter
+    from orcapod.core.operators.mappers import MapColumns, MapData, MapTags
+
+    return frozenset(
+        {
+            AddTags,
+            DropColumns,
+            DropDataColumns,
+            DropTagColumns,
+            DropNulls,
+            Filter,
+            MapColumns,
+            MapData,
+            MapTags,
+            SelectColumns,
+            SelectDataColumns,
+            SelectTagColumns,
+        }
+    )
+
+
+@functools.cache
+def operators_giving_back_an_input() -> frozenset[type]:
+    """The library's operators whose ``input_given_back`` a preview follows (N55)."""
+    from orcapod.core.operators.semijoin import SemiJoin
+
+    return frozenset({SemiJoin})
 
 
 def applied_by_batch(pod: object) -> bool:

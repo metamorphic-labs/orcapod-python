@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import functools
+
 import itertools
 import logging
 from collections.abc import Collection, Generator, Iterator
@@ -17,7 +19,7 @@ from orcapod.core.streams.base import (
 )
 from orcapod.core.streams.preview import (
     PreviewRequest,
-    is_library_object,
+    is_exact_library_instance,
     refuse_without_compute_all,
     slices_of,
 )
@@ -393,7 +395,7 @@ class ArrowTableStream(StreamBase):
         A subclass of your own may compute its rows in ``as_table``: it is read in
         full, only with ``compute_all`` (N55).
         """
-        if not is_library_object(self):
+        if not is_exact_library_instance(self, previewable_streams()):
             refuse_without_compute_all(
                 self, request, "is a subclass that reads its rows its own way"
             )
@@ -516,3 +518,14 @@ class ArrowTableStream(StreamBase):
             f"{self.__class__.__name__}(table={self._table.column_names}, "
             f"tag_columns={self._tag_columns}{refs})"
         )
+
+
+@functools.cache
+def previewable_streams() -> frozenset[type]:
+    """The library's raw stream classes whose ``as_table`` computes nothing: a preview
+    slices their rows (N55)."""
+    from orcapod.core.operators.static_output_pod import (
+        _RowsOfStream,  # pyright: ignore[reportPrivateUsage]  # the library's stand-in
+    )
+
+    return frozenset({ArrowTableStream, _RowsOfStream})

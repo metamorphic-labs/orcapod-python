@@ -1117,7 +1117,7 @@ def test_a_pod_subclass_with_its_own_processing_is_refused(
         pod = _FilteringCachedPod(calls.pod, result_database=store)
     stream = pod.process(_with_time(source).select_data_columns(["timestamp", "x"]))
     for compute_all in (False, True):
-        with pytest.raises(PreviewRefusedError, match="subclass of a pod"):
+        with pytest.raises(PreviewRefusedError, match="not a pod of the library"):
             stream.preview(2, compute_all=compute_all)
     assert calls.seen == []
     _untouched(store)
@@ -1169,7 +1169,7 @@ def test_a_cached_pod_with_its_own_lookup_is_refused(source: Any) -> None:
     stream = _Synthetic(calls.pod, result_database=store).process(
         _with_time(source).select_data_columns(["timestamp", "x"])
     )
-    with pytest.raises(PreviewRefusedError, match="subclass of a pod"):
+    with pytest.raises(PreviewRefusedError, match="not a pod of the library"):
         stream.preview(2)
     assert calls.seen == []
     _untouched(store)
@@ -1452,7 +1452,7 @@ def test_a_pod_writing_its_own_preview_data_is_refused(source: Any) -> None:
     stream = _OwnPreview(calls.pod.data_function).process(
         _with_time(source).select_data_columns(["timestamp", "x"])
     )
-    with pytest.raises(PreviewRefusedError, match="subclass of a pod"):
+    with pytest.raises(PreviewRefusedError, match="not a pod of the library"):
         stream.preview(2)
     assert calls.seen == []
 
@@ -1609,3 +1609,194 @@ def test_a_mapping_of_several_entries_is_previewed_as_read(
     ):
         for n in (1, 5, 41):
             _same(stream.preview(n).as_table(), stream.as_table()[:n])
+
+
+# ---------------------------------------------------------------------------
+# Verification of 48f8533e: one exact-set gate (N55)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_a_data_function_overriding_both_preview_methods_is_refused(
+    source: Any, wrapped: bool
+) -> None:
+    """A subclass writing ``require_preview`` and ``preview_call`` both: neither runs,
+    plain or beneath a cached layer."""
+    effects: list[Any] = []
+
+    class _Both(PythonDataFunction):
+        def require_preview(self) -> None:
+            effects.append("checked")
+
+        def preview_call(self, data: Any) -> Any:
+            effects.append(data)
+            return self.call(data)
+
+    calls = _Calls()
+    inner: Any = calls.pod.data_function
+    function: Any = _Both(inner._function, output_keys="y")
+    store = InMemoryArrowDatabase()
+    if wrapped:
+        function = CachedDataFunction(function, result_database=store)
+    stream = FunctionPod(function).process(
+        _with_time(source).select_data_columns(["timestamp", "x"])
+    )
+    with pytest.raises(PreviewRefusedError, match="no read-only call"):
+        stream.preview(2)
+    assert effects == []
+    assert calls.seen == []
+    _untouched(store)
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_a_pod_overriding_both_preview_methods_is_refused(
+    source: Any, wrapped: bool
+) -> None:
+    """A pod subclass writing ``require_preview`` and ``preview_data`` both: neither
+    runs, plain or beneath a cached pod."""
+    effects: list[Any] = []
+
+    class _Both(FunctionPod):
+        def require_preview(self) -> None:
+            effects.append("checked")
+
+        def preview_data(self, data: Any) -> Any:
+            effects.append(data)
+            return self.data_function.call(data)
+
+    calls = _Calls()
+    pod: Any = _Both(calls.pod.data_function)
+    store = InMemoryArrowDatabase()
+    if wrapped:
+        pod = CachedFunctionPod(pod, result_database=store)
+    stream = pod.process(_with_time(source).select_data_columns(["timestamp", "x"]))
+    with pytest.raises(PreviewRefusedError):
+        stream.preview(2)
+    assert effects == []
+    assert calls.seen == []
+    _untouched(store)
+
+
+class _DropsAfterAProducer(MapData):
+    """An operator of your own that drops the first row when its input has a
+    producer: it reads its input as the full read gives it."""
+
+    def unary_static_process(self, stream: Any) -> Any:
+        result = super().unary_static_process(stream)
+        if stream.producer is None:
+            return result
+        table = result.as_table(columns={"source": True, "system_tags": True})
+        return ArrowTableStream(
+            table.slice(1),
+            tag_columns=result.keys()[0],
+            data_context=result.data_context_key,
+        )
+
+
+def test_a_whole_input_keeps_its_producer(source: Any) -> None:
+    """The whole input a preview computes is given with its producer, so the rows are
+    the first of the full read."""
+
+    def stream() -> Any:
+        return _DropsAfterAProducer({"y": "z"})(_Calls().pod(_with_time(source)))
+
+    whole = stream().as_table()
+    _same(stream().preview(2, compute_all=True).as_table(), whole[:2])
+
+
+def test_a_data_function_without_preview_methods_is_refused(source: Any) -> None:
+    """A data function written to the protocol before ``preview_call``: refused with
+    ``PreviewRefusedError``, not ``AttributeError``."""
+    calls = _Calls()
+
+    class _Legacy:
+        """Delegates every method but the preview ones."""
+
+        def __init__(self, function: Any) -> None:
+            self._function = function
+
+        def __getattr__(self, name: str) -> Any:
+            if name in ("require_preview", "preview_call"):
+                raise AttributeError(name)
+            return getattr(self._function, name)
+
+    function: Any = _Legacy(calls.pod.data_function)
+    stream = FunctionPod(function).process(
+        _with_time(source).select_data_columns(["timestamp", "x"])
+    )
+    with pytest.raises(PreviewRefusedError, match="no read-only call"):
+        stream.preview(2)
+    assert calls.seen == []
+
+
+def _all_columns_pod(seen: list[int], store: InMemoryArrowDatabase | None) -> Any:
+    """A pod that takes every data column of the SpiralDB source, so it reads the
+    source directly (no selection step between them), cached or not."""
+
+    @function_pod(output_keys="y")
+    def triple_all(timestamp: int | None, x: int | None, note: str | None) -> int:
+        seen.append(timestamp or 0)
+        return 3 * (x or 0)
+
+    pod: Any = triple_all.pod
+    if store is None:
+        return pod
+    return FunctionPod(CachedDataFunction(pod.data_function, result_database=store))
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_held_results_are_shown_without_reading_the_input(
+    spiral: Any, cached: bool
+) -> None:
+    """Rows held by an iteration are shown first; the source is scanned only when
+    more rows are asked for than they give, with or without a limit pushed down."""
+    seen: list[int] = []
+    store = InMemoryArrowDatabase()
+    stream = _all_columns_pod(seen, store if cached else None).process(
+        spiral(tag_only_columns=["subject"])
+    )
+    rows = iter(stream)
+    _ = [next(rows) for _ in range(2)]
+    fake_spiral_sdk.scan_log.clear()
+    seen.clear()
+    shown = stream.preview(2).table
+    assert fake_spiral_sdk.scan_log == []
+    assert seen == []
+    assert shown.column("timestamp").to_pylist() == [0, 1]
+    more = stream.preview(3).table
+    assert more.column("timestamp").to_pylist() == [0, 1, 2]
+    assert seen == [2]
+    _same(more, stream.as_table().select(more.column_names)[:3])
+
+
+def test_held_results_of_every_input_read_no_input(spiral: Any) -> None:
+    """After an iteration to the end, a preview past the last row reads nothing."""
+    seen: list[int] = []
+    stream = _all_columns_pod(seen, None).process(spiral(tag_only_columns=["subject"]))
+    _ = list(stream.iter_data())
+    fake_spiral_sdk.scan_log.clear()
+    seen.clear()
+    view = stream.preview(41)
+    assert len(view) == 40
+    assert fake_spiral_sdk.scan_log == []
+    assert seen == []
+
+
+def test_an_operator_in_the_library_namespace_is_not_the_library(
+    source: Any,
+) -> None:
+    """A batch-declaring operator of your own named into the ``orcapod`` namespace is
+    still not one of the library's classes."""
+
+    class _Named(_BatchDeclaringMapData):
+        BATCHES_GIVE_THE_WHOLE = True
+
+    _Named.__module__ = "orcapod.local_extension"
+
+    def stream() -> Any:
+        return _Named({"note": "text"})(source())
+
+    whole = stream().as_table()
+    with pytest.raises(PreviewRefusedError, match="compute_all"):
+        stream().preview(2)
+    _same(stream().preview(2, compute_all=True).as_table(), whole[:2])

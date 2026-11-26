@@ -180,12 +180,15 @@ class DataFunctionProxy(DataFunctionBase):
         ``DataFunctionUnavailableError``, as ``call`` does.
 
         Raises:
-            PreviewRefusedError: If this is a subclass, or the bound function has no
-                read-only call.
+            PreviewRefusedError: If the bound function has no read-only call.
         """
-        super().require_preview()
         if self._bound_function is not None:
             self._bound_function.require_preview()
+
+    @property
+    def bound_function(self) -> DataFunctionProtocol | None:
+        """The function bound to this proxy, or ``None``."""
+        return self._bound_function
 
     def preview_call(self, data: DataProtocol) -> DataProtocol | None:
         """The bound function's ``preview_call``; unbound, raises as ``call`` does.

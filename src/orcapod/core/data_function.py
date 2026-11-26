@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+
 import inspect
 import io
 import logging
@@ -28,7 +29,6 @@ from orcapod.hashing.semantic_hashing.builtin_handlers import (
     hash_default_value,
 )
 from orcapod.core.result_cache import ResultCache
-from orcapod.core.streams.preview import exactly_its_class
 from orcapod.errors import (
     NoOutputsDeclaredError,
     PreviewRefusedError,
@@ -423,22 +423,19 @@ class DataFunctionBase(TraceableBase, Generic[E]):
     # ==================== Preview ====================
 
     def require_preview(self) -> None:
-        """Refuse a preview unless this function's ``preview_call`` is read-only.
+        """Refuse a preview: this kind of data function has no read-only call.
 
-        A kind with a read-only call (``PythonDataFunction``, ``DataFunctionWrapper``,
-        ``CachedDataFunction``, a bound ``DataFunctionProxy``) has it for an object of
-        exactly that class (``exactly_its_class``): a subclass is refused, since what it
-        does when called (an output builder, a store) is not known (review of PR 571).
-        Any other kind has none.
+        Only the library's kinds with one (``data_function_preview``) answer otherwise;
+        a caller checks that every layer is exactly one of them
+        (``require_previewable_function``) before it calls this or ``preview_call``,
+        so a subclass's own methods are never called (N55).
 
         Raises:
-            PreviewRefusedError: If this function has no read-only call.
+            PreviewRefusedError: Always, for a kind with no read-only call.
         """
-        definer = next(c for c in type(self).__mro__ if "preview_call" in vars(c))
-        if definer is DataFunctionBase or not exactly_its_class(self, "preview_call"):
-            raise PreviewRefusedError(
-                f"its data function {type(self).__name__} has no read-only call"
-            )
+        raise PreviewRefusedError(
+            f"its data function {type(self).__name__} has no read-only call"
+        )
 
     def preview_call(self, data: DataProtocol) -> DataProtocol | None:
         """Refused: this kind of data function has no read-only call.
@@ -1338,14 +1335,12 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             version=inner.get("version", "v0.0"),
         )
 
-    def preview_call(self, data: DataProtocol) -> DataProtocol | None:
-        """Call the function (``DataFunctionProtocol.preview_call``): it stores nothing.
+    def require_preview(self) -> None:
+        """Nothing refused: calling the function stores nothing
+        (``DataFunctionProtocol.require_preview``)."""
 
-        Raises:
-            PreviewRefusedError: If a subclass computes in its own way
-                (``require_preview``).
-        """
-        self.require_preview()
+    def preview_call(self, data: DataProtocol) -> DataProtocol | None:
+        """Call the function (``DataFunctionProtocol.preview_call``): it stores nothing."""
         return self.call(data)
 
 
@@ -1502,9 +1497,14 @@ class DataFunctionWrapper(DataFunctionBase[E]):
     ) -> DataProtocol | None:
         return await self._data_function.direct_async_call(data, **kwargs)
 
+    @property
+    def wrapped(self) -> DataFunctionProtocol:
+        """The data function this wrapper wraps."""
+        return self._data_function
+
     def require_preview(self) -> None:
-        """This wrapper's answer, then the wrapped function's (``DataFunctionBase``)."""
-        super().require_preview()
+        """The wrapped function's answer: a wrapper adds nothing to a call that a
+        preview cannot do (``CachedDataFunction`` reads its store and writes none)."""
         self._data_function.require_preview()
 
     def preview_call(self, data: DataProtocol) -> DataProtocol | None:
