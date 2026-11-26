@@ -13,19 +13,25 @@ The content hash captures schema, topology, and the **identity of the sources** 
 pipeline. It is computed recursively: each element's content hash depends on its own identity
 plus the content hashes of all its upstream elements, all the way back to the sources.
 
-For an ordinary source (a table, file or database source), the identity is its `source_id`,
-its schema and its key columns (the `record_id_columns` that name its rows, or none when rows
-are named by position). The `source_id` is the kind of source, the version of that kind and
-the source's name, as in `csv_v1:subjects`. The Python class is not part of the identity: a
-subclass with the same `source_id`, schema and key columns is the same source, and two kinds
-of source given one name differ in their `source_id`.
+What a source's identity holds depends on its kind:
 
-Two kinds of source have a rule of their own, so a shared `source_id` alone does not make
-two of them one source. A `DerivedSource` over a job node uses that node's content hash, and
-one with `tags_as_data` adds its mapping to the ordinary rule. A `PollingSource` uses what
-its implementation states as its identity in place of the schema.
+| Kind of source | Its identity |
+|---|---|
+| A table, file or database source (`ArrowTableSource`, `DictSource`, `ListSource`, `DataFrameSource`, `CSVSource`, `DeltaTableSource`, the SQLite, PostgreSQL and SpiralDB table sources), without `tags_as_data` | its `source_id`, its schema and its key columns |
+| `DerivedSource` without `tags_as_data` (`node.as_source()`) | the content hash of the job node it reads, and nothing else: a `source_id` you give changes its name, not its content hash |
+| `DerivedSource` or `SpiralDBTableSource` with `tags_as_data` | its `source_id`, its schema, its key columns and the `tags_as_data` mapping |
+| `PollingSource` | its `source_id`, what its implementation states as its identity (`impl.identity()`), its tag columns and its key columns; not its schema |
+| `CachedSource` | the identity of the source it wraps |
 
-What the name is depends on how the source was created:
+- The `source_id` is the kind of source, the version of that kind and the source's name, as
+  in `csv_v1:subjects`.
+- The key columns are the `record_id_columns` that name the rows, or none when rows are named
+  by position.
+- The Python class is not part of any identity. Two sources are one source when everything in
+  their row of the table is equal, whatever their classes; two kinds of source given one name
+  differ in their `source_id`.
+
+What the name in the `source_id` is depends on how the source was created:
 
 - If you do not pass `source_id`, an in-memory source such as `DictSource` or
   `ArrowTableSource` derives it from the data, so two sources with different rows have
@@ -33,9 +39,9 @@ What the name is depends on how the source was created:
 - File- and table-backed sources default to a name derived from their location (the file
   path for `CSVSource`, the table folder's path or URI for `DeltaTableSource`), not from the
   rows.
-- If you pass `source_id` yourself, you are naming the source: two sources of the same kind
-  with the same name, schema and key columns have the same content hash even when their rows
-  differ.
+- If you pass `source_id` yourself, you are naming the source. For a table, file or database
+  source, two sources of the same kind with the same name, schema and key columns then have
+  the same content hash even when their rows differ.
 
 Two sources that differ only in their key columns name the same rows differently, so they
 are two sources: different content hashes (each gets its own cache), the same pipeline hash

@@ -81,6 +81,14 @@ With polars, keep the frame `with_columns` returns:
 a pandas or polars `DataFrame` stored whole in one column is a library value, not a dictionary
 column. See [Arrow types of a source](concepts/sources.md#arrow-types-of-a-source).
 
+### `TypeError: Object of type PosixPath is not JSON serializable` from `job.save`
+
+**Cause.** A source in the job was built from a `pathlib.Path`, as in
+`CSVSource(Path("units.csv"), ...)`. The source reads, but a job over it cannot be saved
+yet. This is a known defect (ITL-1489).
+
+**Fix.** Pass the path as a string: `CSVSource(str(path), ...)`.
+
 ### `ValueError: Parameter 'x' has no type annotation and is not specified in input_types.`
 
 **Cause.** A function passed to `@function_pod` has a parameter without a type annotation.

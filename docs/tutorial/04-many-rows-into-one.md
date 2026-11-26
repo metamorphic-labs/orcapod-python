@@ -268,7 +268,8 @@ then `group_by`.)
     The join brings `genotype` in as a data column, `tag_by` makes it a tag, and `group_by`
     gathers the four session means of each genotype into one list.
 
-    With `genotype` as a tag of the source, `tag_by` is not needed: load the subjects table
-    with `tag_columns=["subject_id", "genotype"]`, and `group_by(["genotype"])` works right
-    after the join. In your own sources, make a column a tag if you expect to group or match
-    by it.
+    With `genotype` as a tag of the source, `tag_by` is not needed. Load the subjects table
+    with `tag_columns=["subject_id", "genotype"]` and join it as it is,
+    `session_means.join(subjects)`: `genotype` is then no data column, so
+    `select_data_columns(["genotype"])` would fail. `group_by(["genotype"])` works right after
+    that join. In your own sources, make a column a tag if you expect to group or match by it.
