@@ -60,3 +60,8 @@ dot is **not** enough."
 - "Key points" ends the text, before the exercises. It repeats what the part taught and adds
   nothing: no new term, link or feature, and no preview of the next part.
 - No "Next: ..." line. The site has its own next-page link.
+- The section is a core course (Parts 0 to 6, read in order) and short tutorials on one subject
+  each (ITL-1460). A short tutorial has no part number, says which core parts it needs in a
+  "**Before you start:**" line after its opening, and runs on its own from `make_dataset()`.
+- List a job's steps with `print(job.diagram())`; do not write a helper that walks
+  `node.upstreams`.
