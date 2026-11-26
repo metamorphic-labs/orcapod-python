@@ -153,9 +153,9 @@ class StoreTables:
         self._paths: dict[str, tuple[str, ...]] = {}
         self._found: dict[str, _Found] = {}
         self._records_by_id: dict[str, names.StoreTableRecord] = {}
-        # The manifest header each table had when it was last judged new (``None``:
-        # absent or without one): a first write may record a table only as it was then.
-        self._judged: dict[str, bytes | None] = {}
+        # What each table recorded when it was last judged new (``_seen_manifest``): a
+        # first write may record a table only as it was then.
+        self._judged: dict[str, _Seen] = {}
         # What one run holds, while a run scope is open (ITL-1502).
         self._run: _Run | None = None
         self._run_depth: int = 0
@@ -291,7 +291,7 @@ class StoreTables:
             return None  # found absent in this run, and not created by it since
         table = self._open_table(table_name)
         if table is None:
-            self._judged[table_name] = None
+            self._judged[table_name] = ("none", None)
             if self._run is not None:
                 self._run.absent.add(table_name)
             return None
@@ -308,7 +308,7 @@ class StoreTables:
             ) from exc
         if not self._holds_rows(table):
             # New: its first write records it, unless what it saw here changed.
-            self._judged[table_name] = metadata.get(codec.MANIFEST_KEY)
+            self._judged[table_name] = _seen_manifest(metadata, path)
             return None
         try:
             manifest = None if record is None else codec.read_manifest(metadata, path)
@@ -519,9 +519,12 @@ class StoreTables:
         self._created(table_name, table)
         return table, created
 
-    def _unchanged_since_judged(self, table: _KeyedTable, seen: bytes | None) -> bool:
-        """Whether a table opened to be recorded is still as it was judged new: the same
-        manifest header (or none) and no rows.
+    def _unchanged_since_judged(
+        self, table: _KeyedTable, path: tuple[str, ...], seen: _Seen
+    ) -> bool:
+        """Whether a table opened to be recorded is still as it was judged new: an
+        equivalent manifest (or none; compared by name, never by order or bytes) and no
+        rows.
 
         Read immediately before the manifest is written, so a record that read shows is
         never overwritten (N45). It narrows, and cannot close, the window in which two
@@ -529,8 +532,8 @@ class StoreTables:
         record the table between this read and the write. Concurrent writers are not
         supported until the lease (O37; N53)."""
         with self._service_call("read the metadata of a store table"):
-            header = table.get_metadata().get(codec.MANIFEST_KEY)
-        return header == seen and not self._holds_rows(table)
+            now = _seen_manifest(table.get_metadata(), path)
+        return _same_seen(now, seen) and not self._holds_rows(table)
 
     def _require_same_manifest(
         self,
@@ -587,12 +590,12 @@ class StoreTables:
             encoded = _encoded(records)
             if encoded.num_rows == 0:
                 return  # nothing to write, so nothing is created
-            seen = self._judged.pop(table_name, None)
+            seen = self._judged.pop(table_name, ("none", None))
             table, created = self._create_or_open(table_name)
             if not created:
                 self._require_key(table, table_name)
             # A table this call created is empty and nobody's: nothing to compare.
-            if created or self._unchanged_since_judged(table, seen):
+            if created or self._unchanged_since_judged(table, path, seen):
                 with self._service_call(f"record {table_name}"):
                     table.set_metadata(metadata)
             else:
@@ -739,5 +742,36 @@ def _same_manifest(one: codec.StoreManifest, other: codec.StoreManifest) -> bool
         one.record_path == other.record_path
         and one.kind == other.kind
         and codec.schema_difference(one.schema, other.schema) is None
-        and one.physical.equals(other.physical)
+        and _by_name(one.physical) == _by_name(other.physical)
     )
+
+
+def _by_name(schema: pa.Schema) -> dict[str, pa.Field[Any]]:
+    """A stored schema's fields by name: their order never counts."""
+    return {field.name: field for field in schema}
+
+
+_Seen = tuple[str, object]
+"""What a table recorded when judged: ``("none", None)``, ``("manifest", manifest)``, or
+``("unreadable", header bytes)`` for a manifest that cannot be decoded."""
+
+
+def _seen_manifest(metadata: Mapping[str, bytes], path: tuple[str, ...]) -> _Seen:
+    """What a table's metadata records, to compare later (``_same_seen``)."""
+    try:
+        manifest = codec.read_manifest(metadata, path)
+    except codec.ManifestError:
+        return ("unreadable", metadata.get(codec.MANIFEST_KEY))
+    return ("none", None) if manifest is None else ("manifest", manifest)
+
+
+def _same_seen(one: _Seen, other: _Seen) -> bool:
+    """Whether two readings record the same: equivalent manifests compared by name; a
+    manifest that cannot be decoded only as its raw header, the one form it has."""
+    if one[0] != other[0]:
+        return False
+    if one[0] == "manifest":
+        return _same_manifest(
+            cast(codec.StoreManifest, one[1]), cast(codec.StoreManifest, other[1])
+        )
+    return one[1] == other[1]
