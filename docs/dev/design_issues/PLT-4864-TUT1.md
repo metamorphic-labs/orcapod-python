@@ -3,7 +3,7 @@
 ### TUT1 — Newcomer-facing defects found while writing the tutorial
 **Status:** open
 **Severity:** medium
-**Issue:** PLT-4864 (related: ITL-821, ITL-817)
+**Issue:** PLT-4864 (related: ITL-821, ITL-817, ITL-1489)
 
 Writing `docs/tutorial/` against the library exercised paths the existing docs did not. The
 tutorial and `docs/troubleshooting.md` describe each of these as it behaves today; none is
@@ -13,6 +13,8 @@ items found then to be fixed were removed.
 1. **`CSVSource` rejects a `pathlib.Path`.** `CSVSource(Path("f.csv"), tag_columns=["a"])`
    raises `TypeError: 'PosixPath' object is not iterable`; the `file_path` parameter is typed
    `str` and the path is used as the default `source_id`. `CSVSource(str(path), ...)` works.
+   **Fix (ITL-1489):** `CSVSource` accepts `pathlib.Path` directly and stores its
+   filesystem text, so job saving works with both given and default source names.
 2. **`list(job.nodes)` order depends on `PYTHONHASHSEED`** for source nodes: a job over two
    sources `units` and `sessions` lists `['units', 'sessions', 'Join', 'fn']` under some
    seeds and `['sessions', 'units', 'Join', 'fn']` under others. Cosmetic, but it makes

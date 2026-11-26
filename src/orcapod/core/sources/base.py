@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
@@ -33,6 +34,14 @@ if TYPE_CHECKING:
     from orcapod.core.sources.cached_source import CachedSource
     from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
     from orcapod.protocols.hashing_protocols import SemanticHasherProtocol
+
+
+def source_path_text(path: str | bytes | os.PathLike[str] | os.PathLike[bytes]) -> str:
+    """Return the supplied path text, rejecting byte paths before opening a source."""
+    text = os.fspath(path)
+    if isinstance(text, bytes):
+        raise TypeError("Source paths must be str or os.PathLike[str], not bytes")
+    return text
 
 
 def saved_tag_only_columns(config: dict[str, Any]) -> bool | list[str]:

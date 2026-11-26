@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 import sqlite3
 import warnings
 from collections.abc import Mapping, Sequence
@@ -80,9 +81,11 @@ def _write_csv(path: Path, rows: Sequence[Mapping[str, object]]) -> Path:
     return path
 
 
-def _csv(path: Path, tags: list[str] | None = None, **kwargs) -> CSVSource:
+def _csv(
+    path: str | os.PathLike[str], tags: list[str] | None = None, **kwargs
+) -> CSVSource:
     return CSVSource(
-        str(path),
+        path,
         tag_columns=tags or KEY,
         record_id_columns=KEY,
         tag_only_columns=True,
@@ -428,9 +431,11 @@ def _write_delta(path: Path) -> None:
     write_deltalake(str(path), pa.Table.from_pylist(ROWS, schema=SCHEMA))
 
 
-def _reader(kind: str, location: str, **kwargs):
+def _reader(
+    kind: str, location: str | os.PathLike[str], **kwargs
+) -> CSVSource | DeltaTableSource | SQLiteTableSource:
     if kind == "csv":
-        return _csv(Path(location), **kwargs)
+        return _csv(location, **kwargs)
     if kind == "delta":
         return DeltaTableSource(
             location,
@@ -458,6 +463,71 @@ def _rebuild(source):
 
 
 READERS = ["csv", "delta", "sqlite"]
+
+
+def test_a_job_over_a_csv_path_saves_and_loads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    path = _write_csv(Path("units.csv"), ROWS)
+    source = CSVSource(path, tag_columns=KEY, tag_only_columns=True, source_id="units")
+    job = PipelineJob(database=DeltaTableDatabase(tmp_path / "db"))
+    with job:
+        _ = ratio.pod(source, label="ratio")
+
+    saved = tmp_path / "job.json"
+    job.save(saved)
+    reloaded = PipelineJob.load(saved).sources["units"]
+    assert isinstance(reloaded, CSVSource)
+    assert reloaded.source_id == source.source_id == "csv_v1:units"
+    assert reloaded.to_config()["file_path"] == "units.csv"
+    assert reloaded.as_table().num_rows == len(ROWS)
+
+
+class _CountingPath:
+    def __init__(self, text: str) -> None:
+        self.text: str = text
+        self.calls: int = 0
+
+    def __fspath__(self) -> str:
+        self.calls += 1
+        return self.text
+
+
+@pytest.mark.parametrize(
+    "kind, path_key, kind_part, name_suffix",
+    [
+        ("csv", "file_path", "csv_v1", ""),
+        ("delta", "delta_table_path", "delta_table_v1", ""),
+        ("sqlite", "db_path", "sqlite_table_v1", ":main.records"),
+    ],
+)
+def test_a_path_like_source_uses_its_text_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    path_key: str,
+    kind_part: str,
+    name_suffix: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    filename = f"units.{kind}"
+    _write(kind, tmp_path / filename)
+    path = _CountingPath(f"./{filename}")
+    source = _reader(kind, path)
+    config = source.to_config()
+    _ = json.dumps(config)
+    assert config[path_key] == (
+        str((tmp_path / filename).resolve()) if kind == "delta" else path.text
+    )
+    reloaded = type(source).from_config(config)
+    assert (
+        reloaded.source_id
+        == source.source_id
+        == f"{kind_part}:{path.text}{name_suffix}"
+    )
+    assert reloaded.as_table().num_rows == len(ROWS)
+    assert path.calls == 1
 
 
 class TestSecondReview1ExplicitNameOverAnUnusableLocation:
