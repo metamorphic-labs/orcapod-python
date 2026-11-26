@@ -94,6 +94,7 @@ LOCATION_KEYS = [
 
 
 def _constant(value: Any, kind: pa.DataType, rows: int) -> pa.Array[Any]:
+    """Return an array of ``rows`` copies of one value."""
     return pa.array([value] * rows, kind)
 
 
@@ -194,12 +195,14 @@ def setup(rows: int) -> None:
 
 
 def _source(name: str) -> Any:
+    """Return the SpiralDB source over the named synthetic table, with no row limit."""
     from orcapod.core.sources import SpiralDBTableSource
 
     return SpiralDBTableSource(PROJECT, name, max_rows=None)
 
 
 def _raw(name: str) -> pa.Table:
+    """Return the named synthetic table as the fake store holds it."""
     store = fake._store()
     found = store.find(PROJECT, "default", name)
     assert found is not None
@@ -215,11 +218,23 @@ def step_raw_copy() -> tuple[int, int, Any]:
 
 
 def step_as_table() -> tuple[int, int, Any]:
+    """Read the time series with ``as_table()``.
+
+    Returns:
+        The input's Arrow bytes, the output's Arrow bytes (0 when no table is
+        returned), and the result, which the caller keeps alive while it measures.
+    """
     table = _source(SERIES).as_table()
     return _raw(SERIES).nbytes, table.nbytes, table
 
 
 def step_as_table_all_info() -> tuple[int, int, Any]:
+    """Read the time series with every column group; report each group's bytes.
+
+    Returns:
+        The input's Arrow bytes, the output's Arrow bytes (0 when no table is
+        returned), and the result, which the caller keeps alive while it measures.
+    """
     table = _source(SERIES).as_table(all_info=True)
     groups: dict[str, int] = {"user": 0, "source_info": 0, "system_tags": 0, "other": 0}
     for name in table.column_names:
@@ -237,11 +252,23 @@ def step_as_table_all_info() -> tuple[int, int, Any]:
 
 
 def step_run() -> tuple[int, int, Any]:
+    """Call ``run()`` on the time series source and keep its view.
+
+    Returns:
+        The input's Arrow bytes, the output's Arrow bytes (0 when no table is
+        returned), and the result, which the caller keeps alive while it measures.
+    """
     view = _source(SERIES).run()
     return _raw(SERIES).nbytes, 0, view
 
 
 def step_run_then_as_table() -> tuple[int, int, Any]:
+    """Call ``run()`` and then ``as_table()`` on one source.
+
+    Returns:
+        The input's Arrow bytes, the output's Arrow bytes (0 when no table is
+        returned), and the result, which the caller keeps alive while it measures.
+    """
     source = _source(SERIES)
     view = source.run()
     table = source.as_table()
@@ -249,11 +276,23 @@ def step_run_then_as_table() -> tuple[int, int, Any]:
 
 
 def step_as_polars_df() -> tuple[int, int, Any]:
+    """Read the time series as a Polars data frame.
+
+    Returns:
+        The input's Arrow bytes, the output's Arrow bytes (0 when no table is
+        returned), and the result, which the caller keeps alive while it measures.
+    """
     frame = _source(SERIES).as_polars_df()
     return _raw(SERIES).nbytes, int(frame.estimated_size()), frame
 
 
 def step_iterate() -> tuple[int, int, Any]:
+    """Iterate the time series row by row, reading no value.
+
+    Returns:
+        The input's Arrow bytes, the output's Arrow bytes (0 when no table is
+        returned), and the result, which the caller keeps alive while it measures.
+    """
     count = 0
     for _tag, _data in _source(SERIES):
         count += 1
@@ -261,6 +300,12 @@ def step_iterate() -> tuple[int, int, Any]:
 
 
 def step_iterate_read_one_value() -> tuple[int, int, Any]:
+    """Iterate the time series row by row, reading one value of each row.
+
+    Returns:
+        The input's Arrow bytes, the output's Arrow bytes (0 when no table is
+        returned), and the result, which the caller keeps alive while it measures.
+    """
     total = 0.0
     for _tag, data in _source(SERIES):
         total += data["level"]
@@ -268,16 +313,34 @@ def step_iterate_read_one_value() -> tuple[int, int, Any]:
 
 
 def step_flow() -> tuple[int, int, Any]:
+    """Call ``flow()`` on the time series source.
+
+    Returns:
+        The input's Arrow bytes, the output's Arrow bytes (0 when no table is
+        returned), and the result, which the caller keeps alive while it measures.
+    """
     pairs = _source(SERIES).flow()
     return _raw(SERIES).nbytes, 0, pairs
 
 
 def step_drop_nulls() -> tuple[int, int, Any]:
+    """Apply ``drop_nulls`` to the time series and read the result.
+
+    Returns:
+        The input's Arrow bytes, the output's Arrow bytes (0 when no table is
+        returned), and the result, which the caller keeps alive while it measures.
+    """
     table = _source(SERIES).drop_nulls(["x_small", "y_small"]).as_table()
     return _raw(SERIES).nbytes, table.nbytes, table
 
 
 def step_polars_filter() -> tuple[int, int, Any]:
+    """Apply ``polars_filter`` to the time series and read the result.
+
+    Returns:
+        The input's Arrow bytes, the output's Arrow bytes (0 when no table is
+        returned), and the result, which the caller keeps alive while it measures.
+    """
     import polars as pl
 
     table = _source(SERIES).polars_filter(pl.col("level") > 0.5).as_table()
@@ -285,16 +348,29 @@ def step_polars_filter() -> tuple[int, int, Any]:
 
 
 def step_map_data() -> tuple[int, int, Any]:
+    """Rename one data column of the time series and read the result.
+
+    Returns:
+        The input's Arrow bytes, the output's Arrow bytes (0 when no table is
+        returned), and the result, which the caller keeps alive while it measures.
+    """
     table = _source(SERIES).map_data({"level": "pupil"}).as_table()
     return _raw(SERIES).nbytes, table.nbytes, table
 
 
 def step_join() -> tuple[int, int, Any]:
+    """Join the event table with its lookup table and read the result.
+
+    Returns:
+        The input's Arrow bytes, the output's Arrow bytes (0 when no table is
+        returned), and the result, which the caller keeps alive while it measures.
+    """
     table = _source(EVENTS).join(_source(LOCATIONS)).as_table()
     return _raw(EVENTS).nbytes + _raw(LOCATIONS).nbytes, table.nbytes, table
 
 
 def _grouped_series() -> Any:
+    """Return the time series with nulls dropped, grouped by block, one column renamed."""
     return (
         _source(SERIES)
         .drop_nulls(["x_small", "y_small"])
@@ -304,22 +380,36 @@ def _grouped_series() -> Any:
 
 
 def step_group_by() -> tuple[int, int, Any]:
+    """Group the time series by block and read the result.
+
+    Returns:
+        The input's Arrow bytes, the output's Arrow bytes (0 when no table is
+        returned), and the result, which the caller keeps alive while it measures.
+    """
     table = _source(SERIES).group_by(BLOCK_KEY).as_table()
     return _raw(SERIES).nbytes, table.nbytes, table
 
 
 def step_group_by_chain() -> tuple[int, int, Any]:
+    """Read the three-operator chain of ``_grouped_series``.
+
+    Returns:
+        The input's Arrow bytes, the output's Arrow bytes (0 when no table is
+        returned), and the result, which the caller keeps alive while it measures.
+    """
     table = _grouped_series().as_table()
     return _raw(SERIES).nbytes, table.nbytes, table
 
 
 def _onsets_pod() -> Any:
+    """Return the function pod that finds onsets in one block's samples."""
     from orcapod import function_pod
 
     @function_pod(output_keys="onset")
     def onsets(
         sample_time: list[int], x_small: list[float], y_small: list[float]
     ) -> list[int]:
+        """Return the times at which the speed falls below the threshold."""
         t, x, y = np.asarray(sample_time), np.asarray(x_small), np.asarray(y_small)
         speed = np.hypot(np.diff(x), np.diff(y)) / (np.diff(t) / 1_000_000)
         moving = speed > 40
@@ -330,6 +420,12 @@ def _onsets_pod() -> Any:
 
 
 def step_function_pod() -> tuple[int, int, Any]:
+    """Apply the onsets function pod to the grouped time series, outside a job.
+
+    Returns:
+        The input's Arrow bytes, the output's Arrow bytes (0 when no table is
+        returned), and the result, which the caller keeps alive while it measures.
+    """
     table = _onsets_pod().pod(_grouped_series()).as_table()
     return _raw(SERIES).nbytes, table.nbytes, table
 
@@ -346,6 +442,7 @@ def _fresh_results(store: Path, step: str) -> str:
 
 
 def _job(store: Path, step: str) -> Any:
+    """Return the job of the whole chain, storing into the step's own fresh location."""
     from orcapod import PipelineJob
     from orcapod.databases import DeltaTableDatabase
 
@@ -356,12 +453,24 @@ def _job(store: Path, step: str) -> Any:
 
 
 def step_job_run(store: Path) -> tuple[int, int, Any]:
+    """Run the whole chain as a job on the sync orchestrator.
+
+    Returns:
+        The input's Arrow bytes, the output's Arrow bytes (0 when no table is
+        returned), and the result, which the caller keeps alive while it measures.
+    """
     job = _job(store, "job_run")
     job.run()
     return _raw(SERIES).nbytes, 0, job
 
 
 def step_job_run_async_unkept(store: Path) -> tuple[int, int, Any]:
+    """Run the whole chain as a job on the async orchestrator, which keeps no rows.
+
+    Returns:
+        The input's Arrow bytes, the output's Arrow bytes (0 when no table is
+        returned), and the result, which the caller keeps alive while it measures.
+    """
     from orcapod.pipeline import AsyncPipelineOrchestrator
 
     job = _job(store, "job_run_async_unkept")
@@ -370,6 +479,12 @@ def step_job_run_async_unkept(store: Path) -> tuple[int, int, Any]:
 
 
 def step_job_run_async(store: Path) -> tuple[int, int, Any]:
+    """Run the whole chain as a job on the async orchestrator.
+
+    Returns:
+        The input's Arrow bytes, the output's Arrow bytes (0 when no table is
+        returned), and the result, which the caller keeps alive while it measures.
+    """
     from orcapod.pipeline import AsyncPipelineOrchestrator
 
     job = _job(store, "job_run_async")
@@ -378,6 +493,7 @@ def step_job_run_async(store: Path) -> tuple[int, int, Any]:
 
 
 def _operator_chains() -> dict[str, Callable[[], Any]]:
+    """Return, by name, a builder of each one-operator stream measured as a job."""
     import polars as pl
 
     return {
@@ -393,6 +509,12 @@ def _operator_job(chain: str, orchestrator: str) -> Callable[[Path], Any]:
     """A job of one operator over its sources, run by the named orchestrator."""
 
     def step(store: Path) -> tuple[int, int, Any]:
+        """Run the one-operator job on the named orchestrator.
+
+        Returns:
+            The input's Arrow bytes, the output's Arrow bytes (0 when no table is
+            returned), and the result, which the caller keeps alive while it measures.
+        """
         from orcapod import PipelineJob
         from orcapod.databases import DeltaTableDatabase
         from orcapod.pipeline import AsyncPipelineOrchestrator
@@ -444,11 +566,13 @@ STEPS: dict[str, Callable[..., tuple[int, int, Any]]] = {
 
 
 def _peak_rss_bytes() -> int:
+    """Return this process's peak resident memory, in bytes."""
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     return peak if sys.platform == "darwin" else peak * 1024
 
 
 def main() -> None:
+    """Run one step, or the setup, and print the step's measurements as one JSON line."""
     parser = argparse.ArgumentParser()
     parser.add_argument("step", choices=["setup", *STEPS])
     parser.add_argument("--store", required=True, type=Path)

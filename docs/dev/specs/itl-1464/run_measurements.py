@@ -42,6 +42,7 @@ DEFAULT_STEPS = [
 
 
 def _rss_bytes(pid: int) -> int:
+    """Return the resident memory of a process, in bytes (0 once it has ended)."""
     found = subprocess.run(
         ["ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True
     ).stdout.strip()
@@ -109,6 +110,7 @@ def run_step(
 
 
 def main() -> None:
+    """Run the setup, then every requested step, appending one JSON record per step."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--store", required=True, type=Path)
     parser.add_argument("--rows", type=int, default=2_200_000)
