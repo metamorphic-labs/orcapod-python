@@ -170,7 +170,7 @@ One row per function node: `rows` is every input row the run accounted for in th
 how many its function computed in this run, `from store` how many it read back from the
 database instead, `failed` how many raised, and `first error` the first of those errors, with the call that
 prints its full traceback (`job.last_run.print_traceback("rates")`). Here one `rates` row
-was found in the store during the run itself ([Part 5](../tutorial/05-pipeline-job.md#record-then-run)
+was found in the store during the run itself ([Part 5](../tutorial/05-pipeline-job.md#run-a-recorded-job)
 of the tutorial explains why). A load-only run (`job.run(load_only=True)`) shows how many
 rows each node loaded and how many had no stored result instead. The job keeps the summary as
 `job.last_run`. A cell that ends with `job.run();` (a semicolon) shows nothing. What a run
@@ -218,7 +218,7 @@ print(job.nodes["rates"].run().header())
 
 A view holds the default columns only (tags and data). For system tags, source info and
 the other hidden columns, ask the node: `as_table(columns=...)`, as in
-[Part 8 of the tutorial](../tutorial/08-inspecting-and-tracing.md). `run()` on each kind of
+the tutorial [Inspecting results](../tutorial/inspecting-results.md#tracing-rows). `run()` on each kind of
 object is the table "What `run()` does on each kind of object" in
 [Streams](streams.md#computing-a-stream-outside-a-job-run).
 
