@@ -2,8 +2,7 @@
 
 Operators are structural transforms that reshape [streams](streams.md). They never compute a
 data value. A few read data values: the filters, to decide which rows exist, and `Pick` and
-`Index`, to give out a value held inside a data value, in place of the column or as a new data
-column. They join, filter, batch, group, rename, select
+`Index`, to give out a value held inside a data value. They join, filter, batch, group, rename, select
 columns and add tags -- operations that affect the *structure* of the data (which rows exist, which columns are
 present, how columns are named) but never compute new values from data content. This is the
 key distinction from [function pods](function-pods.md), which do the opposite: they transform
@@ -45,12 +44,9 @@ Two groups of operators read data columns. The first is the filters: `Filter` an
 `PolarsFilter` evaluate their conditions on values, and `DropNulls` reads only whether a value is present (its
 validity), never the value. They decide which rows exist; none synthesizes a value.
 
-The second is [`Pick` and `Index`](#pick-and-index). `Pick` reads inside a struct or dict
-value and `Index` inside a list value, and each gives one entry out as a data column: in
-place of the column it read, or with `out="name"` as a new data column beside it. A row whose
-value lacks the key or is too short is skipped by default, and raises `RuntimeError` with
-`fail_on_miss=True`. The value given out was already held in the input's data, so nothing is
-computed.
+The second is `Pick` and `Index`. `Pick` reads inside a dict value and `Index` inside a list
+value, and each gives one entry out as a data column. The value given out was already held in
+the input's data, so nothing is computed. [Pick and Index](#pick-and-index) has the rules.
 
 No operator carries its inputs' meta columns: the `__`-prefixed columns, such as a cached
 function pod's `__computed`, that describe how an input row was produced. An operator's
@@ -1217,12 +1213,15 @@ type cannot be a tag (a list, a struct, your own class) are refused. The full ru
 
 ### Pick and Index
 
-`Pick(column, key)` extracts one entry from a struct- or dict-typed data column, and
+`Pick(column, key)` extracts one entry from a dict-typed data column (`dict[K, V]`), and
 `Index(column, i)` extracts one element from a list-typed data column (for example, a column
-produced by `Batch` or `GroupBy`). See the [API reference](../api/operators.md).
+produced by `Batch` or `GroupBy`). See the [API reference](../api/operators.md). `Pick`
+refuses a struct column and a column of your own class today, with `InputValidationError`.
 
 With `out=None` the extracted value replaces the column in place; with `out="name"` it is added
-as a new column and the original is kept. A row whose list is too short, or whose dict lacks the
+as a new column and the original is kept. When the column is a [data-tag](data-tags.md),
+`out` is required: replacing the column in place would change the tag's value, so both
+operators refuse it. A row whose list is too short, or whose dict lacks the
 key, is skipped (or raises `RuntimeError` with `fail_on_miss=True`).
 
 Every other column keeps its input Arrow type, and the extracted column takes the input's

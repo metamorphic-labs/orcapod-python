@@ -6,7 +6,7 @@ introduction. Every signature and docstring on the published page comes from the
 code. See site/README.md.
 -->
 
-Operators perform structural transformations on streams. They never compute a data value. A few read data values: the filters (`Filter`, `PolarsFilter`, `DropNulls`), to decide which rows exist, and `Pick` and `Index`, to give out a value held inside a data value, in place of the column or as a new data column (`out=`); a row without that value is skipped, or raises with `fail_on_miss=True`. An operator may add a tag (`AddTags`), never data.
+Operators perform structural transformations on streams. They never compute a data value. A few read data values: the filters (`Filter`, `PolarsFilter`, `DropNulls`), to decide which rows exist, and `Pick` and `Index`, to give out a value held inside a data value. An operator may add a tag (`AddTags`), never data.
 
 ::: orcapod.core.operators.Join
 
