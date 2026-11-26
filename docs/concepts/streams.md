@@ -253,7 +253,8 @@ print(first.as_table().column("age_months").to_pylist())
 A source reads no more than is needed, an operator takes batches until enough rows have
 passed, and **your functions are called**, on one row after another until `n` rows have come
 out. Nothing is kept on a stream, nothing is stored (a pod with stored results reads them and
-adds none), and no hook fires; calling `preview` again computes again. Results a stream
+adds none, and so does every cached layer of a data function: none writes or creates a table),
+and no hook fires; calling `preview` again computes again. Results a stream
 already holds are used. A view of fewer rows than asked for says it shows all of them.
 
 A join, `group_by`, `batch`, `polars_filter`, `tag_by`, `pick`, `index` or an operator of your
@@ -261,7 +262,10 @@ own needs every row of its input, so `preview` refuses it (`PreviewRefusedError`
 step). `preview(n, compute_all=True)` computes that step and everything beneath it in full,
 functions included, and keeps none of it. A side-effect pod, a function that takes the
 invocation context, a `CachedSource`, a `PollingSource` and a node of a pipeline or job are
-refused always: a preview never acts. A `semi_join` whose inputs share no tag keeps every row
+refused always: a preview never acts. So is a function pod or data function of your own
+class that overrides how its class computes a row (`process_data`, `call`): what it does is
+not known. A subclass of an operator that overrides how it computes its result is treated as
+an operator of your own. A `semi_join` whose inputs share no tag keeps every row
 of its left input and never reads its right one, so `preview` reads only the left input, as
 the full read does. A `DerivedSource` over a source shows its origin's first rows through
 the origin's own `preview` (refused for a `CachedSource` or `PollingSource` origin); over a

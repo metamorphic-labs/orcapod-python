@@ -43,6 +43,7 @@ from orcapod.core.streams.preview import (
     preview_batches,
     refused,
     slices_of,
+    written_for_its_processing,
 )
 from orcapod.core.streams.view import (
     SCHEMA_NEEDS_POLL_NOTE,
@@ -100,6 +101,11 @@ def _executor_supports_concurrent(
     """Return True if the data function's executor supports concurrent execution."""
     executor = data_function.executor
     return executor is not None and executor.supports_concurrent_execution
+
+
+POD_PROCESSING = ("process_data", "_invoke_with_hooks")
+"""The methods that compute a function pod's rows: a ``preview_data`` written for a
+class holds for a subclass only when it overrides neither (``written_for_its_processing``)."""
 
 
 class _FunctionPodBase(TraceableBase):
@@ -406,6 +412,23 @@ class _FunctionPodBase(TraceableBase):
             PreviewRefusedError: As ``preview_data`` would.
         """
         raise PreviewRefusedError(f"{type(self).__name__} has no preview")
+
+    def _require_own_processing(self) -> None:
+        """Refuse a pod whose ``preview_data`` was not written for its processing.
+
+        A kind's ``preview_data`` stands for its ``process_data`` and
+        ``_invoke_with_hooks``; a subclass that overrides either without writing
+        ``preview_data`` again computes in a way the preview does not know (review of
+        PR 571).
+
+        Raises:
+            PreviewRefusedError: If so.
+        """
+        if not written_for_its_processing(self, "preview_data", POD_PROCESSING):
+            raise PreviewRefusedError(
+                f"{type(self).__name__} computes its rows in its own way "
+                "(process_data): its preview is not known"
+            )
 
     async def async_process_data(
         self,
@@ -987,19 +1010,19 @@ class FunctionPod(_FunctionPodBase):
         )
 
     def require_preview(self) -> None:
-        """See ``_FunctionPodBase.require_preview``."""
+        """See ``_FunctionPodBase.require_preview``; the data function must have a
+        read-only call at every layer (``DataFunctionProtocol.require_preview``)."""
+        self._require_own_processing()
         if self._ctx_arg_name is not None:
             raise PreviewRefusedError(
                 "its function takes the invocation context: it performs an action"
             )
+        self.data_function.require_preview()
 
     def preview_data(self, data: DataProtocol) -> DataProtocol | None:
-        """See ``_FunctionPodBase.preview_data``."""
+        """See ``_FunctionPodBase.preview_data``: the data function's read-only call."""
         self.require_preview()
-        function = self.data_function
-        if isinstance(function, CachedDataFunction):
-            return function.call(data, skip_cache_insert=True)
-        return function.call(data)
+        return self.data_function.preview_call(data)
 
     @property
     def pod_config(self) -> PodConfig:
@@ -2249,6 +2272,7 @@ class FallThroughPod(WrappedFunctionPod):
 
     def require_preview(self) -> None:
         """See ``_FunctionPodBase.require_preview``."""
+        self._require_own_processing()
         self._plain_pod.require_preview()
 
     def preview_data(self, data: DataProtocol) -> DataProtocol | None:

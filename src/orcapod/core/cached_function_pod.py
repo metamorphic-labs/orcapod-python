@@ -303,6 +303,7 @@ class CachedFunctionPod(WrappedFunctionPod):
 
     def require_preview(self) -> None:
         """See ``_FunctionPodBase.require_preview``: the inner pod's answer."""
+        self._require_own_processing()
         cast(_FunctionPodBase, cast(object, self._function_pod)).require_preview()
 
     def preview_data(self, data: DataProtocol) -> DataProtocol | None:

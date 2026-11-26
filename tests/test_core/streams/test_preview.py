@@ -873,3 +873,232 @@ def test_an_inactive_function_gives_no_row(source: Any) -> None:
     function.set_active(False)
     view = calls.pod(_with_time(source)).preview(3)
     assert (len(view), view.status, calls.seen) == (0, ViewStatus.ROWS, [])
+
+
+# ---------------------------------------------------------------------------
+# Review of 342d8bb0: read-only at every layer; shortcuts only for their own class
+# ---------------------------------------------------------------------------
+
+
+def _nested_cached(calls: _Calls, stores: list[InMemoryArrowDatabase]) -> Any:
+    """``calls``' function wrapped in one ``CachedDataFunction`` per store, the first
+    store innermost."""
+    function: Any = calls.pod.data_function
+    for store in stores:
+        function = CachedDataFunction(function, result_database=store)
+    return FunctionPod(function)
+
+
+def _untouched(store: InMemoryArrowDatabase) -> None:
+    assert store.list_table_paths() == []
+
+
+@pytest.mark.parametrize("depth", [2, 3])
+def test_nested_cached_functions_write_at_no_layer(source: Any, depth: int) -> None:
+    """Review of 342d8bb0 (blocker): with two cached layers, preview created and wrote
+    the inner result table. Every layer reads; none writes or creates a table."""
+    calls = _Calls()
+    stores = [InMemoryArrowDatabase() for _ in range(depth)]
+    stream = _nested_cached(calls, stores).process(
+        _with_time(source).select_data_columns(["timestamp", "x"])
+    )
+    shown = stream.preview(3).as_table()
+    assert calls.seen == [0, 1, 2]
+    for store in stores:
+        _untouched(store)
+    expected = (
+        _nested_cached(_Calls(), [InMemoryArrowDatabase() for _ in range(depth)])
+        .process(_with_time(source).select_data_columns(["timestamp", "x"]))
+        .as_table()
+    )
+    _same(shown, expected.select(shown.column_names).slice(0, 3))
+
+
+@pytest.mark.parametrize("depth", [2, 3])
+def test_nested_cached_functions_read_every_layer(source: Any, depth: int) -> None:
+    """A result stored only by the innermost layer is read through the outer ones,
+    which add nothing."""
+    calls = _Calls()
+    stores = [InMemoryArrowDatabase() for _ in range(depth)]
+    rows = iter(
+        _nested_cached(calls, stores[:1]).process(
+            _with_time(source).select_data_columns(["timestamp", "x"])
+        )
+    )
+    _ = [next(rows) for _ in range(2)]
+    (inner_path,) = stores[0].list_table_paths()
+    calls.seen.clear()
+    view = (
+        _nested_cached(calls, stores)
+        .process(_with_time(source).select_data_columns(["timestamp", "x"]))
+        .preview(4)
+    )
+    assert calls.seen == [2, 3]
+    assert view.table.column("y").to_pylist() == [0, 3, 6, 0]
+    assert stores[0].list_table_paths() == [inner_path]
+    inner = stores[0].get_all_records(inner_path)
+    assert inner is not None and inner.num_rows == 2
+    for store in stores[1:]:
+        _untouched(store)
+
+
+def _python_function_calling_twice() -> Any:
+    class _CalledTwice(PythonDataFunction):
+        """A subclass whose ``call`` does more than its class's: it calls twice."""
+
+        def call(self, data: Any, **kwargs: Any) -> Any:
+            _ = super().call(data, **kwargs)
+            return super().call(data, **kwargs)
+
+    calls = _Calls()
+    inner: Any = calls.pod.data_function
+    return calls, _CalledTwice(inner._function, output_keys="y")
+
+
+def _wrapper_writing() -> Any:
+    from orcapod.core.data_function import DataFunctionWrapper
+
+    written: list[Any] = []
+
+    class _Writing(DataFunctionWrapper[Any]):
+        """A wrapper whose ``call`` records every output: an effect."""
+
+        def call(self, data: Any, **kwargs: Any) -> Any:
+            output = super().call(data, **kwargs)
+            written.append(output)
+            return output
+
+    calls = _Calls()
+    return calls, _Writing(calls.pod.data_function)
+
+
+@pytest.mark.parametrize(
+    "make", [_python_function_calling_twice, _wrapper_writing], ids=["leaf", "wrapper"]
+)
+@pytest.mark.parametrize("cached", [False, True])
+def test_a_data_function_overriding_call_is_refused_before_any_call(
+    source: Any, make: Callable[[], Any], cached: bool
+) -> None:
+    """A layer that cannot be made read-only makes preview refuse, never write: a
+    subclass whose ``call`` is its own, also beneath a cached layer."""
+    calls, function = make()
+    store = InMemoryArrowDatabase()
+    if cached:
+        function = CachedDataFunction(function, result_database=store)
+    stream = FunctionPod(function).process(
+        _with_time(source).select_data_columns(["timestamp", "x"])
+    )
+    for compute_all in (False, True):
+        with pytest.raises(PreviewRefusedError, match="no read-only call"):
+            stream.preview(2, compute_all=compute_all)
+    assert calls.seen == []
+    _untouched(store)
+
+
+def test_a_plain_wrapper_is_previewed_through(source: Any) -> None:
+    """A ``DataFunctionWrapper`` subclass that keeps its class's ``call`` is read-only
+    when what it wraps is."""
+    from orcapod.core.data_function import DataFunctionWrapper
+
+    class _Plain(DataFunctionWrapper[Any]):
+        pass
+
+    calls = _Calls()
+    store = InMemoryArrowDatabase()
+    function = _Plain(
+        CachedDataFunction(calls.pod.data_function, result_database=store)
+    )
+    stream = FunctionPod(function).process(
+        _with_time(source).select_data_columns(["timestamp", "x"])
+    )
+    assert stream.preview(2).table.column("y").to_pylist() == [0, 3]
+    assert calls.seen == [0, 1]
+    _untouched(store)
+
+
+class _DiscardingSemiJoin(SemiJoin):
+    """A SemiJoin that drops the first left row: its own ``binary_static_process``."""
+
+    def binary_static_process(self, left_stream: Any, right_stream: Any) -> Any:
+        result = super().binary_static_process(left_stream, right_stream)
+        table = result.as_table(columns={"source": True, "system_tags": True})
+        return ArrowTableStream(
+            table.slice(1),
+            tag_columns=result.keys()[0],
+            data_context=result.data_context_key,
+        )
+
+
+def test_a_semi_join_subclass_is_not_given_back_its_left_input(source: Any) -> None:
+    """Review of 342d8bb0 (high): the shortcut gave back the left input past a
+    subclass's own processing. A subclass runs the full operation."""
+
+    def joined() -> Any:
+        return _DiscardingSemiJoin()(source(), _unrelated())
+
+    whole = joined().as_table()
+    with pytest.raises(PreviewRefusedError, match="compute_all"):
+        joined().preview(1)
+    for n in (1, 3):
+        _same(joined().preview(n, compute_all=True).as_table(), whole[:n])
+
+
+class _DiscardingMapData(MapData):
+    """A MapData that drops the first row: its own ``unary_static_process``."""
+
+    def unary_static_process(self, stream: Any) -> Any:
+        result = super().unary_static_process(stream)
+        table = result.as_table(columns={"source": True, "system_tags": True})
+        return ArrowTableStream(
+            table.slice(1),
+            tag_columns=result.keys()[0],
+            data_context=result.data_context_key,
+        )
+
+
+def test_a_batch_operator_subclass_is_not_applied_by_batch(source: Any) -> None:
+    """The batch shortcut is its class's: a subclass with its own processing is
+    applied to its whole input."""
+    stream = _DiscardingMapData({"note": "text"})(source())
+    assert not reads_in_batches(stream)
+    with pytest.raises(PreviewRefusedError, match="compute_all"):
+        stream.preview(1)
+    whole = _DiscardingMapData({"note": "text"})(source()).as_table()
+    for n in (1, 3):
+        _same(stream.preview(n, compute_all=True).as_table(), whole[:n])
+
+
+class _FilteringPod(FunctionPod):
+    """A pod whose ``process_data`` is its own: it gives no row."""
+
+    def process_data(self, tag: Any, data: Any, **kwargs: Any) -> Any:
+        tag, _ = super().process_data(tag, data, **kwargs)
+        return tag, None
+
+
+class _FilteringCachedPod(CachedFunctionPod):
+    """A cached pod whose ``process_data`` is its own: it gives no row."""
+
+    def process_data(self, tag: Any, data: Any, **kwargs: Any) -> Any:
+        tag, _ = super().process_data(tag, data, **kwargs)
+        return tag, None
+
+
+@pytest.mark.parametrize("kind", ["plain", "cached"])
+def test_a_pod_subclass_with_its_own_processing_is_refused(
+    source: Any, kind: str
+) -> None:
+    """A pod's preview stands for its class's ``process_data``; a subclass's own is
+    not known, so the preview is refused before any call."""
+    calls = _Calls()
+    store = InMemoryArrowDatabase()
+    if kind == "plain":
+        pod: Any = _FilteringPod(calls.pod.data_function)
+    else:
+        pod = _FilteringCachedPod(calls.pod, result_database=store)
+    stream = pod.process(_with_time(source).select_data_columns(["timestamp", "x"]))
+    for compute_all in (False, True):
+        with pytest.raises(PreviewRefusedError, match="its own way"):
+            stream.preview(2, compute_all=compute_all)
+    assert calls.seen == []
+    _untouched(store)
