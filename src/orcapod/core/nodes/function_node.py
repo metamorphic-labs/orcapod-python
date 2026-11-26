@@ -4607,8 +4607,27 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                                     found_tag, found = self._empty_data_cache_hit(
                                         tag, data, instance_id
                                     )
-                                except (OrcapodDatabaseError, TypeIdentityError):
-                                    # Never a row failure, whatever the policy.
+                                except OrcapodDatabaseError as exc:
+                                    # Never a row failure, whatever the policy:
+                                    # the run stops, after the row's crash is
+                                    # reported, as on the sync path.
+                                    exc.add_context(
+                                        node_label=node_label, tag=tag.as_dict()
+                                    )
+                                    with keep_database_error(
+                                        exc, "Observer on_data_crash"
+                                    ):
+                                        ctx_obs.on_data_crash(
+                                            node_label, tag, data, exc
+                                        )
+                                    raise
+                                except TypeIdentityError as exc:
+                                    with keep_database_error(
+                                        exc, "Observer on_data_crash"
+                                    ):
+                                        ctx_obs.on_data_crash(
+                                            node_label, tag, data, exc
+                                        )
                                     raise
                                 except Exception as exc:
                                     ctx_obs.on_data_crash(node_label, tag, data, exc)
