@@ -261,11 +261,11 @@ class TestText:
         assert condition.text() == expected
         assert str(condition) == expected
 
-    def test_empty_text_and_truth(self):
-        """The empty condition reads ``no condition`` and is false."""
+    def test_empty_text_and_emptiness(self):
+        """The empty condition reads ``no condition`` and reports its emptiness."""
         assert Condition().text() == "no condition"
-        assert not Condition()
-        assert Condition.of(x=1)
+        assert Condition().is_empty
+        assert not Condition.of(x=1).is_empty
 
     def test_repr_rebuilds(self):
         """``repr`` is a call that builds an equal condition."""
