@@ -1,9 +1,9 @@
 """A saved connector database is supplied at load, never rebuilt (ITL-1391).
 
 The connectors cannot hold a function node's tables (entry CA3, ITL-1162), so the jobs
-here hold operators only. PostgreSQL cannot hold an operator node's tables either (a
-table name is cut at 63 bytes), so a file naming it as the job's database is made by
-putting its configuration into a saved file; as a result database it is saved directly.
+here hold operators only. SQLite can store their tables. For PostgreSQL, which limits
+table names to 63 bytes, and read-only SpiralDB, the test inserts the connector's
+configuration into a saved file. All three can be saved directly as a result database.
 """
 
 from __future__ import annotations
@@ -31,11 +31,9 @@ from orcapod.databases import (
 )
 from orcapod.pipeline.serialization import SOURCE_REGISTRY
 from orcapod.sources import ArrowTableSource
-from tests.test_databases import fake_pyspiral
+from tests.test_databases import fake_spiral_sdk
 
 KINDS = ("sqlite", "postgresql", "spiraldb")
-# The kinds an operator-only job runs on.
-RUNNABLE = ("sqlite", "spiraldb")
 MARKER = "marker-in-dsn"
 
 
@@ -54,42 +52,54 @@ class Databases:
             return ConnectorArrowDatabase(
                 PostgreSQLConnector(f"postgresql://u:{MARKER}@h/{name}")
             )
-        fake_pyspiral.FakeSpiral().project(name)
         return ConnectorArrowDatabase(SpiralDBConnector(name))
 
 
 @pytest.fixture
 def databases(tmp_path: Path) -> Iterator[Databases]:
     with (
-        fake_pyspiral.install(tmp_path / "spiral"),
+        fake_spiral_sdk.install(tmp_path / "spiral"),
         patch("psycopg.connect") as connect,
     ):
         connect.return_value = MagicMock()
         yield Databases(tmp_path)
 
 
-def _sources() -> dict[str, Any]:
+def _sources(
+    order: tuple[str, str] = ("left", "right"), *, data_tags: bool = False
+) -> dict[str, Any]:
     left = pa.table(
         {"a": [1, 2, 3], "b": ["x", "y", "z"], "p": [1.0, 2.0, 3.0], "q": [4, 5, 6]}
     )
     right = pa.table({"b": ["z", "x"], "a": [3, 1], "r": [30, 10], "s": ["u", "v"]})
+    tables = {"left": left, "right": right}
     return {
         name: ArrowTableSource(
-            table, tag_columns=["a", "b"], source_id=name, tag_only_columns=True
+            tables[name],
+            tag_columns=["a", "b"],
+            source_id=name,
+            tag_only_columns=() if data_tags else True,
         )
-        for name, table in (("left", left), ("right", right))
+        for name in order
     }
 
 
 def _save(
-    path: Path, *, run_async: bool = False, **databases: Any
+    path: Path,
+    *,
+    run_async: bool = False,
+    input_order: tuple[str, str] = ("left", "right"),
+    selected: tuple[str, str] = ("s", "p"),
+    data_tags: bool = False,
+    **databases: Any,
 ) -> tuple[PipelineJob, dict[str, Any]]:
     """An operator-only job, run and saved, and its file's bindings."""
-    sources = _sources()
+    sources = _sources(data_tags=data_tags)
+    first, second = input_order
     job = PipelineJob(name="j", **databases)
     with job:
-        joined = sources["left"].join(sources["right"], label="joined")
-        joined.select_data_columns(["s", "p"], label="picked")
+        joined = sources[first].join(sources[second], label="joined")
+        joined.select_data_columns(selected, label="picked")
     if run_async:
         asyncio.run(job.run_async())
     else:
@@ -100,7 +110,7 @@ def _save(
 
 def _save_over(path: Path, databases: Databases, kind: str, **given: Any) -> None:
     """A saved job file whose database is of ``kind`` (see the module docstring)."""
-    if kind in RUNNABLE:
+    if kind == "sqlite":
         _save(path, database=databases.make(kind, "a"), **given)
         return
     _save(path, database=databases.make("sqlite", "a"), **given)
@@ -181,26 +191,39 @@ def test_a_connector_result_database_beside_a_delta_database(
     assert isinstance(loaded.database, DeltaTableDatabase)
 
 
-@pytest.mark.parametrize("kind", RUNNABLE)
 @pytest.mark.parametrize("saved_async", [False, True])
 @pytest.mark.parametrize("loaded_async", [False, True])
+@pytest.mark.parametrize("bind_order", [("left", "right"), ("right", "left")])
+@pytest.mark.parametrize(
+    ("input_order", "selected"),
+    [(("left", "right"), ("s", "p")), (("right", "left"), ("p", "s"))],
+)
+@pytest.mark.parametrize("data_tags", [False, True])
 def test_load_with_the_database_then_load_only(
     databases: Databases,
     tmp_path: Path,
-    kind: str,
     saved_async: bool,
     loaded_async: bool,
+    bind_order: tuple[str, str],
+    input_order: tuple[str, str],
+    selected: tuple[str, str],
+    data_tags: bool,
 ) -> None:
     path = tmp_path / "job.json"
     job, bindings = _save(
-        path, run_async=saved_async, database=databases.make(kind, "a")
+        path,
+        run_async=saved_async,
+        input_order=input_order,
+        selected=selected,
+        data_tags=data_tags,
+        database=databases.make("sqlite", "a"),
     )
     assert _values(job) == EXPECTED
     hashes = {label: n.content_hash().to_string() for label, n in job.nodes.items()}
 
     # A new handle over the same place, as another process would make.
-    loaded = PipelineJob.load(path, database=databases.make(kind, "a"))
-    loaded.bind(sources=_sources())
+    loaded = PipelineJob.load(path, database=databases.make("sqlite", "a"))
+    loaded.bind(sources=_sources(bind_order, data_tags=data_tags))
     assert {
         label: n.content_hash().to_string() for label, n in loaded.nodes.items()
     } == hashes
@@ -209,6 +232,11 @@ def test_load_with_the_database_then_load_only(
     else:
         loaded.run(load_only=True)
     assert _values(loaded) == EXPECTED
+    assert loaded.nodes["picked"].as_table().column_names == (
+        job.nodes["picked"].as_table().column_names
+    )
+    _, joined_data = loaded.nodes["joined"].output_schema()
+    assert {"a", "b"}.issubset(joined_data) is data_tags
 
     again = tmp_path / "again.json"
     loaded.save(again)
@@ -390,30 +418,38 @@ def test_a_connector_the_file_does_not_name_is_refused_too(
         PipelineJob.load(path)
 
 
+@pytest.mark.parametrize("slot", ["database", "result_database"])
 def test_saving_a_loaded_job_keeps_a_database_that_could_not_be_rebuilt(
-    tmp_path: Path,
+    tmp_path: Path, slot: str
 ) -> None:
     path, again = tmp_path / "job.json", tmp_path / "again.json"
     _save(path, database=DeltaTableDatabase(tmp_path / "delta"))
     data = json.loads(path.read_text())
     saved = {"type": "no_such_database", "place": ["x", "y"]}
-    data["bindings"]["database"] = saved
+    data["bindings"][slot] = saved
     path.write_text(json.dumps(data))
 
     loaded = PipelineJob.load(path)
-    assert loaded.database is None
+    assert getattr(loaded, slot) is None
     loaded.save(again)
-    assert json.loads(again.read_text())["bindings"]["database"] == saved
+    assert json.loads(again.read_text())["bindings"][slot] == saved
 
-    # A bind of sources or a result database leaves it; a bound database replaces it.
+    # Rebinding sources or the other database leaves this slot untouched.
     loaded.bind(sources=_sources())
-    loaded.bind(result_database=DeltaTableDatabase(tmp_path / "results"))
+    other_database = DeltaTableDatabase(tmp_path / "other")
+    if slot == "database":
+        loaded.bind(result_database=other_database)
+    else:
+        loaded.bind(database=other_database)
     loaded.save(again)
-    assert json.loads(again.read_text())["bindings"]["database"] == saved
+    assert json.loads(again.read_text())["bindings"][slot] == saved
     given = DeltaTableDatabase(tmp_path / "given")
-    loaded.bind(database=given)
+    if slot == "database":
+        loaded.bind(database=given)
+    else:
+        loaded.bind(result_database=given)
     loaded.save(again)
-    assert json.loads(again.read_text())["bindings"]["database"] == given.to_config()
+    assert json.loads(again.read_text())["bindings"][slot] == given.to_config()
 
 
 SAVED_SOURCE_KINDS = (*sorted(SOURCE_REGISTRY), "db_table", "polling_source", TEXT)
@@ -431,7 +467,7 @@ def _raise_chained(config: dict[str, Any], **_: Any) -> Any:
 
 
 @pytest.mark.parametrize("kind", SAVED_SOURCE_KINDS)
-@pytest.mark.parametrize("slots", [["left"], ["right", "left"]])
+@pytest.mark.parametrize("slots", [["left"], ["left", "right"], ["right", "left"]])
 def test_a_source_that_cannot_be_rebuilt_logs_the_slot_kind_and_error_type_only(
     tmp_path: Path,
     kind: str,
@@ -443,8 +479,10 @@ def test_a_source_that_cannot_be_rebuilt_logs_the_slot_kind_and_error_type_only(
     path = tmp_path / "job.json"
     _save(path, database=DeltaTableDatabase(tmp_path / "delta"))
     data = json.loads(path.read_text())
-    for slot in slots:
-        data["bindings"]["sources"][slot].update(source_type=kind, entry=TEXT)
+    sources = data["bindings"]["sources"]
+    data["bindings"]["sources"] = {
+        slot: {**sources[slot], "source_type": kind, "entry": TEXT} for slot in slots
+    } | {slot: value for slot, value in sources.items() if slot not in slots}
     path.write_text(json.dumps(data))
     caplog.set_level(logging.DEBUG)
     with ExitStack() as stack:
