@@ -549,24 +549,71 @@ class TestTokensOfBuiltAndChangedRows:
             ids.add(row_ids.instance_id(HASHER, _tag(), changed))
         assert len(ids) == 3
 
-    def test_columns_taken_from_another_row_keep_its_typed_tokens(self) -> None:
-        for other in self._nested_rows():
-            own = Data({"y": 1, "z": "t"}, source_info={"y": "f::r::y", "z": "f::r::z"})
-            joined = own.with_columns_of(other, ["b", "a"])
-            tokens = joined.source_info_table()
-            assert tokens.column_names == [
-                "_source_b",
-                "_source_a",
-                "_source_y",
-                "_source_z",
-            ]
-            theirs = other.source_info_table()
-            for name in ("_source_a", "_source_b"):
-                assert tokens.column(name).equals(theirs.column(name))
-            assert tokens.select(["_source_y", "_source_z"]).to_pylist() == [
-                {"_source_y": "f::r::y", "_source_z": "f::r::z"}
-            ]
-            assert row_ids.instance_id(HASHER, _tag(), joined)
+    def test_columns_taken_from_another_row_have_tokens_typed_from_their_values(
+        self,
+    ) -> None:
+        """``with_columns_of`` (a data-tag falling through a function) types from values.
+
+        The taken columns' tokens are typed from their values, as the edge between
+        two nodes types them on the sync route and as a stored result gives them
+        (decision of November 26, 2026): one type, so one instance id, on every
+        route. A fixed-size list token becomes a large list; a nested token that
+        cannot be typed from its value fails here. Keeping the typed column from
+        end to end is ITL-1491.
+        """
+        fixed = pa.list_(pa.large_string(), 2)
+        table = pa.Table.from_arrays(
+            [
+                pa.array([1, 2], pa.int64()),
+                pa.array([0.5, 1.5], pa.float64()),
+                pa.array([["p", "q"], ["r", "s"]], fixed),
+                pa.array(["s::row_0::b", None], pa.large_string()),
+            ],
+            schema=pa.schema(
+                [
+                    pa.field("a", pa.int64(), nullable=False),
+                    pa.field("b", pa.float64(), nullable=False),
+                    pa.field("_source_a", fixed),
+                    pa.field("_source_b", pa.large_string()),
+                ]
+            ),
+        )
+        ids = set()
+        for other in Data.rows_of(table, get_default_context()):
+            assert other.source_info_table().schema.field("_source_a").type == fixed
+            for names in (["b", "a"], ["a", "b"]):
+                own = Data(
+                    {"y": 1, "z": "t"}, source_info={"y": "f::r::y", "z": "f::r::z"}
+                )
+                joined = own.with_columns_of(other, names)
+                tokens = joined.source_info_table()
+                assert tokens.column_names == [
+                    *(f"_source_{name}" for name in names),
+                    "_source_y",
+                    "_source_z",
+                ]
+                assert tokens.schema.field("_source_a").type == pa.large_list(
+                    pa.large_string()
+                )
+                assert tokens.schema.field("_source_b").type == pa.large_string()
+                # Every view gives the same tokens, and the table view the same types.
+                as_table = joined.as_table(columns={"source": True})
+                for name in ("a", "b", "y", "z"):
+                    column = f"_source_{name}"
+                    assert tokens.column(column).to_pylist() == [
+                        joined.source_info()[name]
+                    ]
+                    if joined.source_info()[name] is not None:
+                        assert as_table.schema.field(column).type == (
+                            tokens.schema.field(column).type
+                        )
+                ids.add(row_ids.instance_id(HASHER, _tag(), joined))
+        # Two rows, each with one id whatever the order the columns were taken in.
+        assert len(ids) == 2
+        for other in self._nested_rows()[:2]:
+            own = Data({"y": 1}, source_info={"y": "f::r::y"})
+            with pytest.raises(pa.ArrowTypeError):
+                own.with_columns_of(other, ["a"]).source_info_table()
 
 
 class TestARenameMovesTheToken:

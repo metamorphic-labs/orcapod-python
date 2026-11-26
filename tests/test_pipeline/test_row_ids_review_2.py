@@ -737,3 +737,136 @@ def test_a_fatal_error_in_a_placeholders_lookup_gives_the_same_events_on_both_ro
         ], path
         seen[path] = events
     assert seen["sync"] == seen["async"]
+
+
+# ---------------------------------------------------------------------------
+# A data-tag's token through two function nodes: one type on both routes
+# ---------------------------------------------------------------------------
+
+
+@function_pod(output_keys="y")
+def plus_one(x: int) -> int:
+    """Return ``x + 1``."""
+    calls["plus_one"] += 1
+    return x + 1
+
+
+@function_pod(output_keys="z")
+def doubled(y: int) -> int:
+    """Return ``2 * y``."""
+    calls["doubled"] += 1
+    return 2 * y
+
+
+_FIXED = pa.list_(pa.large_string(), 2)
+
+
+def _data_tag_stream(tags: tuple[str, ...]) -> ArrowTableStream:
+    """Three rows; ``d`` and ``e`` are data-tags, ``d``'s token a fixed-size list."""
+    columns: dict[str, tuple[Any, pa.DataType, bool]] = {
+        "k": (["a", "b", "c"], pa.large_string(), False),
+        "d": ([1, 2, 3], pa.int64(), False),
+        "e": ([0.5, 1.5, 2.5], pa.float64(), False),
+        "x": ([10, 20, 30], pa.int64(), False),
+        "_source_d": ([["p", "q"], ["r", "s"], ["t", "u"]], _FIXED, True),
+        "_source_e": (["s::0::e", None, "s::2::e"], pa.large_string(), True),
+        "_source_x": (["s::0::x", "s::1::x", "s::2::x"], pa.large_string(), True),
+    }
+    names = [*tags, *(name for name in columns if name not in tags)]
+    table = pa.Table.from_arrays(
+        [pa.array(columns[n][0], columns[n][1]) for n in names],
+        schema=pa.schema(
+            [pa.field(n, columns[n][1], nullable=columns[n][2]) for n in names]
+        ),
+    )
+    return ArrowTableStream(table, tag_columns=list(tags), data_tags=["d", "e"])
+
+
+def _two_nodes_on(
+    route: str, database: InMemoryArrowDatabase, tags: tuple[str, ...]
+) -> list[Any]:
+    """Run ``plus_one`` then ``doubled`` over the stream on one route; return the rows."""
+    from orcapod.core.function_pod import FallThroughPod
+
+    def pod(function: Any) -> Any:
+        return FallThroughPod(function.pod, ["d", "e"])
+
+    stream = _data_tag_stream(tags)
+    first = FunctionJobNode(pod(plus_one), stream, pipeline_database=database)
+    if route == "sync":
+        between = first.execute(stream)
+        second = FunctionJobNode(pod(doubled), between, pipeline_database=database)
+        return list(second.execute(between).iter_data())
+
+    def through(node: Any, rows: list[Any]) -> list[Any]:
+        async def run() -> list[Any]:
+            incoming: Channel[Any] = Channel(buffer_size=16)
+            outgoing: Channel[Any] = Channel(buffer_size=16)
+            for row in rows:
+                await incoming.writer.send(row)
+            await incoming.writer.close()
+            await node.async_execute(incoming.reader, outgoing.writer)
+            return await outgoing.reader.collect()
+
+        return asyncio.run(run())
+
+    rows = through(first, list(stream.iter_data()))
+    second = FunctionJobNode(pod(doubled), first, pipeline_database=database)
+    return through(second, rows)
+
+
+@pytest.mark.parametrize(
+    "routes",
+    [
+        ("sync", "async"),
+        ("async", "sync"),
+        ("sync", "sync", "async", "async"),
+        ("async", "async", "sync", "sync"),
+    ],
+)
+@pytest.mark.parametrize("tags", [("k", "d", "e"), ("e", "k", "d")])
+def test_both_routes_record_one_instance_per_row_in_a_shared_store(
+    routes: tuple[str, ...], tags: tuple[str, ...]
+) -> None:
+    """Sessions on either route over one store: one instance id per row, no refusal.
+
+    A data-tag falls through both functions with its token. The token's type is
+    the same whether the row was just computed or is served from the stored
+    result, and on the sync as on the async route (review of PR #583: the async
+    route kept a fixed-size list where the sync edge gave a large list, so one
+    function output had two instance ids, and the second route's write was
+    refused for the token column's type). Each later session finds the first
+    one's records: nothing is computed again and no row is added.
+    """
+    database = InMemoryArrowDatabase()
+    stored: list[tuple[Any, ...]] = []
+    for index, route in enumerate(routes):
+        out = _two_nodes_on(route, database, tags)
+        assert sorted(data.as_dict()["z"] for _, data in out) == [22, 42, 62]
+        for _, data in out:
+            assert data.source_info_table().schema.field(
+                "_source_d"
+            ).type == pa.large_list(pa.large_string())
+        database.flush()
+        (path,) = [
+            p
+            for p in database.list_sources()
+            if p[-1] == "pdb_v2" and p[0] == "doubled"
+        ]
+        table = database.get_all_records(path)
+        assert table is not None
+        assert table.num_rows == 3, (index, route)
+        assert table.schema.field("_source_d").type == pa.large_list(pa.large_string())
+        assert table.column("_source_e").null_count == 1
+        stored.append(
+            tuple(
+                sorted(
+                    cast(
+                        "list[bytes]",
+                        table.column("__pipeline_instance_id").to_pylist(),
+                    )
+                )
+            )
+        )
+    assert len(set(stored)) == 1 and len(set(stored[0])) == 3
+    assert calls["plus_one"] == 3 and calls["doubled"] == 3
