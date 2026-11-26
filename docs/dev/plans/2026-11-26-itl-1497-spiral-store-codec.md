@@ -9,7 +9,10 @@ coordinator on the developer's behalf (decision 4). It stacks on PR 589 (ITL-149
 `src/orcapod/databases/spiral_store.py` and `tests/test_databases/test_spiral_store.py`, from
 PR 545's branch, with these changes:
 
-- **The manifest is one payload**, `manifest_bytes` / `read_manifest`. Where it is kept is
+- **The manifest is one payload**: `manifest_bytes` gives its bytes and `read_manifest_bytes`
+  reads them back. Kept in a table's metadata, it is `manifest_entries` (the chunks and their
+  header), read back by `read_manifest`, which takes the table's whole metadata mapping, never
+  raw payload bytes. Where it is kept is
   stage 3's: decision 4 was revised on 2026-11-26 (ITL-1498), and stage 3 keeps it in the
   table's own metadata, in chunks of at most 8 KiB (a key and its value together), beside the
   identity record (`spiral_store_names`, PR 589). It is not kept in the dataset's schema table,

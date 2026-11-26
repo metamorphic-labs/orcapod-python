@@ -125,6 +125,7 @@ PATH = ("run", "fn", "pdb_v1")
 
 
 def new(schema: pa.Schema, path: tuple[str, ...] = PATH) -> store.StoreManifest:
+    """A manifest of a table of ``schema`` at ``path``, in memory (not serialized)."""
     return store.new_manifest(path, "function_pipeline", schema)
 
 
@@ -134,6 +135,7 @@ def entries(schema: pa.Schema, path: tuple[str, ...] = PATH) -> bytes:
 
 
 def read(recorded: bytes, path: tuple[str, ...] = PATH) -> store.StoreManifest:
+    """Parse a raw manifest payload (``manifest_bytes``), not a table's metadata."""
     return store.read_manifest_bytes(recorded, path)
 
 
@@ -143,10 +145,12 @@ def decode(rows: pa.Table, schema: pa.Schema) -> pa.Table:
 
 
 def large_type(arrow_type: Any) -> Any:
+    """An Arrow type in its large variants, at every depth (no other change)."""
     return normalize_to_large_types(arrow_type, keep_null=True)
 
 
 def large(schema: pa.Schema) -> pa.Schema:
+    """A schema with every field's type in its large variants, metadata kept."""
     return schema_of(
         [f.with_type(normalize_to_large_types(f.type, keep_null=True)) for f in schema],
         metadata=cast(Any, schema.metadata),
@@ -166,6 +170,31 @@ def assert_same(got: pa.Table, expected: pa.Table) -> None:
     got.validate()
 
 
+def _storage_form(schema: pa.Schema) -> pa.Schema:
+    """What a read gives without making logical types live, derived from the input,
+    never by the codec: large variants, every field's metadata kept at every depth, and
+    a top-level logical type as its storage type with its identifier as metadata."""
+    fields: list[Any] = []
+    for field in schema:
+        arrow_type = field.type
+        metadata = dict(field.metadata or {})
+        if isinstance(arrow_type, pa.BaseExtensionType):
+            metadata[NAME_KEY] = arrow_type.extension_name.encode()
+            metadata[METADATA_KEY] = cast(Any, arrow_type).__arrow_ext_serialize__()
+            arrow_type = arrow_type.storage_type
+        elif NAME_KEY in metadata:
+            metadata.setdefault(METADATA_KEY, b"")
+        fields.append(
+            pa.field(
+                field.name,
+                large_type(arrow_type),
+                field.nullable,
+                cast(Any, metadata or None),
+            )
+        )
+    return schema_of(fields, metadata=cast(Any, schema.metadata))
+
+
 def round_trip(rows: pa.Table, *, live: bool = False) -> pa.Table:
     """Write, return as SpiralDB does, and restore through the manifest: every slice,
     both variants."""
@@ -176,7 +205,7 @@ def round_trip(rows: pa.Table, *, live: bool = False) -> pa.Table:
         converter = get_default_context().type_converter
         schema = declaration_form_schema(schema, converter)
     else:
-        expected_schema = store.logical_schema(rows.schema)
+        expected_schema = _storage_form(rows.schema)
     result = None
     assert rows.num_rows
     for piece in (rows, rows.slice(1), rows.slice(0, 1)):
@@ -1357,7 +1386,9 @@ def test_a_manifest_that_cannot_be_read_in_full_is_an_error(
 
 
 def test_a_large_manifest_is_kept() -> None:
-    """A schema row's cell has no metadata entry's limit: no chunks, no bound."""
+    """A raw manifest payload has no size bound of its own: 7 MB of field metadata
+    round-trips through ``manifest_bytes`` and ``read_manifest_bytes``. The chunk
+    tests below cover the metadata entry limit of a table."""
     field = pa.field("a", pa.int8(), metadata={"k": "v" * 7_000_000})
     schema = schema_of([field, (KEY, pa.large_binary())])
     assert read(entries(schema)).schema.equals(schema, check_metadata=True)
@@ -1498,3 +1529,61 @@ def test_a_recorded_name_that_is_not_utf8_is_a_manifest_error(where: str) -> Non
         recorded = _payload(physical=_ipc(_physical(0, renamed)))
     with pytest.raises(store.ManifestError, match="UTF-8"):
         _ = store.read_manifest_bytes(recorded, PATH)
+
+
+# --------------------------------------- CodeRabbit on PR 595 (49f1642d)
+
+
+def test_an_impossible_chunk_count_is_refused_before_any_key_is_listed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A header naming more chunks than the metadata holds entries is refused at once:
+    no key is built for each (a count of 10**12 would exhaust memory)."""
+    entries_ = store.manifest_entries(new(schema_of(BASE)))
+    real_range = range
+
+    def bounded(*args: Any) -> Any:
+        stop = args[0] if len(args) == 1 else args[1]
+        if stop > len(entries_):
+            raise AssertionError(f"a key listed for each of {stop} declared chunks")
+        return real_range(*args)
+
+    monkeypatch.setattr(store, "range", bounded, raising=False)
+    with pytest.raises(store.ManifestError, match="10000000000"):
+        _ = store.read_manifest(_header_changed(entries_, chunks=10**10), PATH)
+    monkeypatch.undo()
+    # A complete manifest of many chunks still reads, and a surplus chunk of an earlier
+    # manifest beside it is still ignored.
+    longer = store.manifest_entries(new(wide_schema(), PATH))
+    assert store.read_manifest(longer, PATH) == new(wide_schema())
+
+
+@pytest.mark.parametrize("version", [1, -1, "0", 0.0, None, True])
+def test_a_manifest_header_of_another_version_is_refused(version: Any) -> None:
+    """The header's version is checked as the payload's is: an exact integer."""
+    entries_ = store.manifest_entries(new(schema_of(BASE)))
+    changed = _header_changed(entries_, version=version)
+    with pytest.raises(store.ManifestError, match="header version"):
+        _ = store.read_manifest(changed, PATH)
+    without = json.loads(entries_[store.MANIFEST_KEY])
+    del without["version"]
+    missing = {**entries_, store.MANIFEST_KEY: json.dumps(without).encode()}
+    with pytest.raises(store.ManifestError, match="header version"):
+        _ = store.read_manifest(missing, PATH)
+
+
+@pytest.mark.parametrize("annotated", [False, True])
+def test_a_dictionary_of_a_logical_types_values_is_refused_as_unstorable(
+    annotated: bool,
+) -> None:
+    """A dictionary whose values are a logical type, live or annotated, raises the
+    codec's ``UnstorableInSpiralError`` naming the column (it raised AttributeError)."""
+    live = Labelled(pa.large_string(), "test.dictionary", b"")
+    value_type: Any = pa.large_string() if annotated else live
+    values: Any = pa.dictionary(pa.int32(), value_type)
+    metadata = {NAME_KEY: b"test.dictionary", METADATA_KEY: b""} if annotated else None
+    field = pa.field("bad", values, True, cast(Any, metadata))
+    schema = schema_of([("a", pa.int64()), field, (KEY, pa.large_binary())])
+    for call in (store.physical_schema, store.logical_schema, entries):
+        with pytest.raises(store.UnstorableInSpiralError, match="'bad'"):
+            _ = call(schema)

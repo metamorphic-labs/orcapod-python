@@ -7,6 +7,7 @@ On the fake (``fake_spiral_sdk``). The live run of the same operations is in
 from __future__ import annotations
 
 import datetime as dt
+import json
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, cast
@@ -882,6 +883,11 @@ def test_a_table_judged_new_stays_new_beside_an_equivalent_record() -> None:
         RESULT, record_id_column="__record_id"
     )
     assert got is not None and got["__record_id"].to_pylist() == [b"a0"]
+    # Recorded again by this writer: its own column order, not the other's.
+    kept = codec.read_manifest(_table(name).get_metadata(), RESULT)
+    assert kept is not None
+    assert kept.schema.names == rows(["a0"]).schema.names
+    assert kept.schema.names != _reordered(rows(["x"])).schema.names
 
 
 # ------------------------------------- review r4 of PR 599 (a6a06638)
@@ -1074,3 +1080,199 @@ def test_an_unsigned_column_is_not_pushed_down(
     )
     assert narrowed == whole
     assert all(s.get("filter") is None for s in calls.scans)
+
+
+# ------------------------------------- CodeRabbit on PR 595 (49f1642d)
+
+
+def _rename(table_name: str, new_name: str) -> None:
+    """Rename a table in the fake, keeping its id (as the service does)."""
+    found = fake._store().find("p", "d", table_name)  # pyright: ignore[reportPrivateUsage]
+    assert found is not None
+    found["name"] = new_name
+    root = fake._store().root  # pyright: ignore[reportPrivateUsage]
+    (root / found["id"] / "table.json").write_text(json.dumps(found))
+
+
+@pytest.mark.usefixtures("root")
+def test_a_listed_table_renamed_since_its_record_was_read_is_refused() -> None:
+    """A rename keeps the table id: the name it is listed under now is checked against
+    its record also when the record is cached, as a fresh connector checks it."""
+    db = ConnectorArrowDatabase(store())
+    db.add_records(RESULT, rows(["r0"]), record_id_column="__record_id", flush=True)
+    assert db.list_table_paths(("my_fn",)) == [RESULT]
+    other = (*RESULT[:-1], "rdb_v9")
+    _rename(names.store_table_name(RESULT), names.store_table_name(other))
+    with pytest.raises(SpiralStoreTableCollisionError, match="another name"):
+        _ = db.list_table_paths(("my_fn",))
+    with pytest.raises(SpiralStoreTableCollisionError, match="another name"):
+        _ = ConnectorArrowDatabase(store()).list_table_paths(("my_fn",))
+
+
+def _made_meanwhile(connector: SpiralDBConnector, make: Any) -> None:
+    """Run ``make`` (another party's act) just before ``connector`` creates or opens a
+    table for its first write."""
+    tables = connector._store  # pyright: ignore[reportPrivateUsage]
+    assert tables is not None
+    create_or_open = tables._create_or_open  # pyright: ignore[reportPrivateUsage]
+
+    def other_first(table_name: str) -> Any:
+        make(table_name)
+        return create_or_open(table_name)
+
+    tables._create_or_open = other_first  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.usefixtures("root")
+def test_an_identity_of_another_path_made_meanwhile_is_never_recorded_over() -> None:
+    """A table judged absent that appears, empty, with another path's identity and no
+    manifest, before the first write records it: refused, its identity kept."""
+    other = names.store_table_metadata(("another", "rdb_v1"), CONTEXT)
+    connector = store()
+    db = ConnectorArrowDatabase(connector)
+    db.add_records(RESULT, rows(["a0"]), record_id_column="__record_id")
+    _made_meanwhile(connector, lambda name: _make_table(name, other, with_rows=False))
+    with pytest.raises(SpiralStoreTableCollisionError, match="another"):
+        db.flush()
+    metadata = _table(names.store_table_name(RESULT)).get_metadata()
+    assert names.read_store_table_metadata(metadata) == names.read_store_table_metadata(
+        other
+    )
+    assert codec.MANIFEST_KEY not in metadata
+
+
+@pytest.mark.usefixtures("root")
+def test_skip_existing_holds_when_another_writer_filled_the_table_meanwhile() -> None:
+    """At the first-write recheck, a table another writer recorded (the same manifest)
+    and filled: ``skip_duplicates`` keeps that writer's rows, and writes the rest."""
+    connector = store()
+    db = ConnectorArrowDatabase(connector)
+    db.add_records(
+        RESULT,
+        rows(["r1", "r9"], offset=100),
+        record_id_column="__record_id",
+        skip_duplicates=True,
+    )
+
+    def the_other_writer(_: str) -> None:
+        ConnectorArrowDatabase(store()).add_records(
+            RESULT, rows(["r1"]), record_id_column="__record_id", flush=True
+        )
+
+    _made_meanwhile(connector, the_other_writer)
+    db.flush()
+    got = ConnectorArrowDatabase(store()).get_all_records(
+        RESULT, record_id_column="__record_id"
+    )
+    assert got is not None
+    values = dict(zip(got["__record_id"].to_pylist(), got["a.b"].to_pylist()))
+    assert values == {b"r1": 0, b"r9": 101}
+
+
+@pytest.mark.usefixtures("root")
+def test_skip_existing_writes_nothing_when_another_writer_holds_every_key() -> None:
+    connector = store()
+    db = ConnectorArrowDatabase(connector)
+    db.add_records(
+        RESULT,
+        rows(["r1"], offset=100),
+        record_id_column="__record_id",
+        skip_duplicates=True,
+    )
+
+    def the_other_writer(_: str) -> None:
+        ConnectorArrowDatabase(store()).add_records(
+            RESULT, rows(["r1"]), record_id_column="__record_id", flush=True
+        )
+
+    _made_meanwhile(connector, the_other_writer)
+    db.flush()
+    got = ConnectorArrowDatabase(store()).get_all_records(
+        RESULT, record_id_column="__record_id"
+    )
+    assert got is not None and got["a.b"].to_pylist() == [0]
+    assert db.table_exists(RESULT)
+
+
+@pytest.mark.usefixtures("root")
+def test_a_writer_beside_an_equivalent_manifest_keeps_the_recorded_one() -> None:
+    """The writer's own connector reads the columns as the table records them (the
+    other writer's order), as a fresh connector does."""
+    db1, _ = _interleaved(rows(["a0"]), _reordered(rows(["b0"])))
+    db1.flush()
+    mine = db1.get_table_schema(RESULT)
+    fresh = ConnectorArrowDatabase(store()).get_table_schema(RESULT)
+    assert mine is not None and fresh is not None
+    assert mine.names == fresh.names == _reordered(rows(["b0"])).schema.names
+
+
+@pytest.mark.usefixtures("root")
+def test_an_existing_empty_table_is_read_as_no_rows() -> None:
+    """``iter_batches`` yields nothing for an existing table with no rows (one a first
+    write left before its rows); a missing table is still a ``KeyError``."""
+    connector = store()
+    name = connector.table_name(RESULT)
+    with pytest.raises(KeyError):
+        _ = list(connector.iter_batches(f'SELECT * FROM "{name}"'))
+    _make_table(name, names.store_table_metadata(RESULT, CONTEXT), with_rows=False)
+    fresh = store()
+    assert fresh.table_name(RESULT) == name
+    assert not fresh.has_table(name)
+    assert list(fresh.iter_batches(f'SELECT * FROM "{name}"')) == []
+    other = store()
+    _ = other.table_name(RESULT)
+    assert list(other.iter_batches(f'SELECT * FROM "{name}"')) == []
+
+
+@pytest.mark.usefixtures("root")
+def test_logical_types_are_read_with_the_data_context_the_table_records(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The converter of the table's recorded data context makes logical types live,
+    and rows of another data context are refused for that table."""
+    import orcapod.contexts as contexts
+
+    db = ConnectorArrowDatabase(store())
+    db.add_records(RESULT, rows(["r0"]), record_id_column="__record_id", flush=True)
+    asked: list[object] = []
+    real = contexts.resolve_context
+
+    def resolve(context_info: Any = None) -> Any:
+        asked.append(context_info)
+        return real(context_info)
+
+    monkeypatch.setattr(contexts, "resolve_context", resolve)
+    fresh = ConnectorArrowDatabase(store())
+    assert fresh.get_all_records(RESULT, record_id_column="__record_id") is not None
+    assert CONTEXT in asked
+    with pytest.raises(ValueError, match="data context"):
+        fresh.add_records(
+            RESULT,
+            rows(["r1"], context="std:v9:other"),
+            record_id_column="__record_id",
+            flush=True,
+        )
+
+
+@pytest.mark.usefixtures("root")
+def test_a_closed_store_connector_refuses_every_call_and_releases_its_tables() -> None:
+    connector = store()
+    name = connector.table_name(RESULT)
+    shared = connector.share_client()
+    connector.close()
+    assert connector._store is None  # pyright: ignore[reportPrivateUsage]
+    for call in (
+        lambda: connector.get_pk_columns(name),
+        lambda: connector.table_name(RESULT),
+        lambda: connector.has_table(name),
+        lambda: connector.get_table_names(),
+        lambda: connector.validate_records(rows(["r0"])),
+        lambda: connector.unstorable_column_reason("a", pa.int64(), primary_key=False),
+    ):
+        with pytest.raises(RuntimeError, match="closed"):
+            _ = call()
+    with pytest.raises(ValueError, match="store-mode"):
+        _ = connector.to_config()
+    # the connector sharing its client keeps its own reference
+    assert shared.get_pk_columns(name) == ["__record_id"]
+    assert not shared.has_table(name)

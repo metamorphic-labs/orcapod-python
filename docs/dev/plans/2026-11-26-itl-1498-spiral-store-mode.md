@@ -34,16 +34,24 @@ copies of that machinery can drift.
 **Store mode** (`SpiralDBConnector(project, dataset, _store=True)`):
 
 - `table_name(path)`: `spiral_store_names.store_table_name`. The connector remembers each
-  name's path; a name it has not seen is resolved from the table's metadata.
+  name's path. A name it has not computed is not resolved from the table's metadata: every
+  other call on a name raises `KeyError` unless `table_name(path)` was called on the same
+  connector first (as `ConnectorArrowDatabase` does), never with a name taken from another
+  connector.
 - `has_table(name)`: opens the table by name, with no listing. Its record is read and checked:
   another path or format raises `SpiralStoreTableCollisionError`.
 - `table_paths(prefix)`: one listing, then the names starting with
   `store_table_name_prefix(prefix)`, then each candidate's metadata (cached by table id), then
   the recorded paths under `prefix`. Stale-layout checks use this unchanged (ITL-954).
-- `create_table_if_not_exists`: `create_keyed_table(exist_ok=False)` with the key column. A 409
-  means the name exists: it is judged as `has_table` judges it.
-- First `upsert_records` on a table: write the identity metadata, then the manifest, then the
-  rows. **Q4**: the data context recorded is the one of the rows' `__data_context`, which must
+- `create_table_if_not_exists`: checks the key column and that the name is one this connector
+  computed; it creates no table (as built, after the review of fe4145c7: every check runs
+  before a table is created).
+- First non-empty `upsert_records` on a table: after every check of the rows, create the table
+  (`create_keyed_table` with the key column; a 409 means it was made meanwhile and is judged
+  again), or adopt the empty one found; write the identity record and the manifest together,
+  in one metadata upsert; then append the rows. If that write stops part way, what can remain
+  is an empty table with no record, or a recorded table with no rows: a later first writer
+  adopts either one, since a table with no rows is new (N42). **Q4**: the data context recorded is the one of the rows' `__data_context`, which must
   be a single value. A table found without a record, and with no rows and the expected key, is
   adopted; otherwise it is refused (decision 3).
 - `upsert_records`: rows through `spiral_store.encode_rows`; `skip_existing` reads the key

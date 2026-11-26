@@ -163,6 +163,8 @@ class StoreTables:
         # What one run holds, while a run scope is open (ITL-1502).
         self._run: _Run | None = None
         self._run_depth: int = 0
+        # Tables last judged to exist with no rows: new to a writer, and read as no rows.
+        self._empty: set[str] = set()
 
     key_column: str = codec.KEY_COLUMN
     """The key column of every store table."""
@@ -251,6 +253,13 @@ class StoreTables:
         if self._run is not None and self._run.handles is not None:
             self._run.handles[str(written.resource_id)] = written
 
+    def _forget_judgment(self, table_name: str) -> None:
+        """Drop what a table was judged as (new, and what it recorded then), so the
+        next use reads it again."""
+        _ = self._judged.pop(table_name, None)
+        if self._run is not None and self._run.new is not None:
+            self._run.new.discard(table_name)
+
     def _created(self, table_name: str, table: _KeyedTable) -> None:
         """Note in the run a table this process made or found while creating it."""
         if self._run is None:
@@ -301,6 +310,7 @@ class StoreTables:
             self._judged[table_name] = ("none", None)
             if self._run is not None:
                 self._run.absent.add(table_name)
+            self._empty.discard(table_name)
             return None
         self._require_key(table, table_name)
         with self._service_call(f"read the metadata of {table_name}"):
@@ -318,6 +328,7 @@ class StoreTables:
             self._judged[table_name] = _seen_manifest(metadata, path)
             if self._run is not None and self._run.new is not None:
                 self._run.new.add(table_name)
+            self._empty.add(table_name)
             return None
         try:
             manifest = None if record is None else codec.read_manifest(metadata, path)
@@ -332,6 +343,7 @@ class StoreTables:
             )
         found = _Found(str(table.resource_id), record, manifest)
         self._found[table_name] = found
+        self._empty.discard(table_name)
         return found
 
     def has_table(self, table_name: str) -> bool:
@@ -394,8 +406,12 @@ class StoreTables:
     def _record_of(
         self, table_id: str, table_name: str
     ) -> names.StoreTableRecord | None:
-        """The record of a listed table, read once per id; ``None`` without one."""
-        if table_id not in self._records_by_id:
+        """The record of a listed table, read once per id; ``None`` without one.
+
+        The name it is listed under now is checked against its record on every call,
+        the cached one included: a table renamed keeps its id."""
+        record = self._records_by_id.get(table_id)
+        if record is None:
             with self._service_call(f"read the metadata of {table_name}"):
                 metadata = self._by_id(table_id).get_metadata()
             try:
@@ -404,15 +420,15 @@ class StoreTables:
                 raise SpiralStoreTableCollisionError(
                     str(exc), table=self._qualified(table_name)
                 ) from exc
-            if record is not None and names.store_table_name(record.path) != table_name:
-                raise SpiralStoreTableCollisionError(
-                    f"it records path {list(record.path)}, whose table has another name",
-                    table=self._qualified(table_name),
-                )
             if record is None:
                 return None  # never kept: its record may be written later
             self._records_by_id[table_id] = record
-        return self._records_by_id[table_id]
+        if names.store_table_name(record.path) != table_name:
+            raise SpiralStoreTableCollisionError(
+                f"it records path {list(record.path)}, whose table has another name",
+                table=self._qualified(table_name),
+            )
+        return record
 
     def table_names(self) -> list[str]:
         """The names of the dataset's tables that start as store tables do, sorted."""
@@ -430,7 +446,8 @@ class StoreTables:
 
     def arrow_schema(self, table_name: str) -> pa.Schema:
         """The schema rows of the table are read with: logical types live."""
-        return _live(self._require(table_name).manifest.schema)
+        found = self._require(table_name)
+        return _live(found.manifest.schema, found.record.data_context_key)
 
     def column_info(self, table_name: str) -> list[ColumnInfo]:
         """The table's columns, as ``arrow_schema`` gives them."""
@@ -440,9 +457,17 @@ class StoreTables:
         ]
 
     def scan(self, table_name: str) -> Iterator[pa.RecordBatch]:
-        """Every row of the table, decoded; nothing for a table with no rows."""
-        found = self._require(table_name)
-        schema = _live(found.manifest.schema)
+        """Every row of the table, decoded; nothing for a table with no rows.
+
+        Raises:
+            KeyError: If there is no table at the name.
+        """
+        found = self._judge(table_name)
+        if found is None:
+            if table_name in self._empty:
+                return  # it exists, with no rows
+            raise KeyError(f"no store table {self._qualified(table_name)}")
+        schema = _live(found.manifest.schema, found.record.data_context_key)
         with self._service_call(f"read {table_name}"):
             stored = self._by_id(found.table_id).scan().to_table()
         if stored.num_rows == 0:
@@ -468,7 +493,7 @@ class StoreTables:
         found = self._judge(table_name)
         if found is None:
             return None
-        schema = _live(found.manifest.schema)
+        schema = _live(found.manifest.schema, found.record.data_context_key)
         predicate: _Expression | None = None
         for column, value in (equal or {}).items():
             if column == codec.KEY_COLUMN or column not in found.manifest.schema.names:
@@ -530,7 +555,7 @@ class StoreTables:
         return table, created
 
     def _unchanged_since_judged(
-        self, table: _KeyedTable, path: tuple[str, ...], seen: _Seen
+        self, table: _KeyedTable, table_name: str, path: tuple[str, ...], seen: _Seen
     ) -> bool:
         """Whether a table opened to be recorded is still as it was judged new: an
         equivalent manifest (or none; compared by name, never by order or bytes) and no
@@ -540,9 +565,24 @@ class StoreTables:
         never overwritten (N45). It narrows, and cannot close, the window in which two
         writers race: spiral-sdk has no compare-and-set, so another writer can still
         record the table between this read and the write. Concurrent writers are not
-        supported until the lease (O37; N53)."""
-        with self._service_call("read the metadata of a store table"):
-            now = _seen_manifest(table.get_metadata(), path)
+        supported until the lease (O37; N53).
+
+        Raises:
+            SpiralStoreTableCollisionError: If the table's identity record, read with
+                the manifest, is of another path or cannot be read: an identity is
+                never recorded over.
+        """
+        with self._service_call(f"read the metadata of {table_name}"):
+            metadata = table.get_metadata()
+        try:
+            record = names.read_store_table_metadata(metadata)
+            if record is not None:
+                names.require_store_table_path(record, path)
+        except SpiralStoreTableCollisionError as exc:
+            raise SpiralStoreTableCollisionError(
+                str(exc), table=self._qualified(table_name)
+            ) from exc
+        now = _seen_manifest(metadata, path)
         return _same_seen(now, seen) and not self._holds_rows(table)
 
     def _require_same_manifest(
@@ -551,9 +591,13 @@ class StoreTables:
         table_name: str,
         path: tuple[str, ...],
         manifest: codec.StoreManifest,
-    ) -> None:
+    ) -> _Found:
         """Refuse a table another writer recorded since it was judged, unless it records
         the same manifest (N45): another writer's record is never overwritten.
+
+        Returns:
+            The table as it is recorded: its record and manifest stay, not this
+            writer's equivalent ones.
 
         Raises:
             SpiralStoreTableCollisionError: If it records another path or manifest, or
@@ -570,11 +614,12 @@ class StoreTables:
             raise SpiralStoreTableCollisionError(
                 str(exc), table=self._qualified(table_name)
             ) from exc
-        if current is None or not _same_manifest(current, manifest):
+        if record is None or current is None or not _same_manifest(current, manifest):
             raise SpiralStoreTableCollisionError(
                 "another writer recorded it since it was judged, with another manifest",
                 table=self._qualified(table_name),
             )
+        return _Found(str(table.resource_id), record, current)
 
     def write(self, table_name: str, records: pa.Table, skip_existing: bool) -> None:
         """Upsert rows; the first write creates the table and records its identity and
@@ -582,8 +627,8 @@ class StoreTables:
 
         Raises:
             ValueError: If the rows hold no ``__data_context`` column, or several data
-                contexts, their path cannot be recorded, or their columns are not the
-                table's.
+                contexts, or another than the table records, their path cannot be
+                recorded, or their columns are not the table's.
             UnstorableInSpiralError: If the codec refuses the rows.
             SpiralStoreTableCollisionError: If the table under the name is not this
                 path's store table.
@@ -605,23 +650,38 @@ class StoreTables:
             if not created:
                 self._require_key(table, table_name)
             # A table this call created is empty and nobody's: nothing to compare.
-            if created or self._unchanged_since_judged(table, path, seen):
+            if created or self._unchanged_since_judged(table, table_name, path, seen):
                 with self._service_call(f"record {table_name}"):
                     table.set_metadata(metadata)
+                recorded = _Found(
+                    str(table.resource_id),
+                    names.StoreTableRecord(path, path[-1], context),
+                    manifest,
+                )
             else:
-                self._require_same_manifest(table, table_name, path, manifest)
-            with self._service_call(f"write {table_name}"):
-                self._appended(table, encoded)
-            self._found[table_name] = _Found(
-                str(table.resource_id),
-                names.StoreTableRecord(path, path[-1], context),
-                manifest,
-            )
+                recorded = self._require_same_manifest(
+                    table, table_name, path, manifest
+                )
+                _require_data_context(recorded, context)
+                if skip_existing:
+                    # Another writer may have written these keys meanwhile.
+                    encoded = _encoded(self._without_stored_keys(recorded, records))
+            if encoded.num_rows > 0:
+                try:
+                    with self._service_call(f"write {table_name}"):
+                        self._appended(table, encoded)
+                except BaseException:
+                    # Its record may now be written: judge the table again, so a
+                    # retry finds it as it is (its own record), never the judgment
+                    # made before this write.
+                    self._forget_judgment(table_name)
+                    raise
+            self._found[table_name] = recorded
+            self._empty.discard(table_name)
             # Recorded and written: no longer new.
-            _ = self._judged.pop(table_name, None)
-            if self._run is not None and self._run.new is not None:
-                self._run.new.discard(table_name)
+            self._forget_judgment(table_name)
             return
+        _require_data_context(found, context)
         difference = codec.schema_difference(found.manifest.schema, records.schema)
         if difference is not None:
             raise ValueError(
@@ -688,11 +748,26 @@ def _one_data_context(records: pa.Table) -> str:
     return values[0]
 
 
-def _live(schema: pa.Schema) -> pa.Schema:
-    """A manifest's schema with its logical types live, as the rows were given."""
-    from orcapod.contexts import get_default_context
+def _require_data_context(found: _Found, context: str) -> None:
+    """Refuse rows of another data context than the table records: a table's logical
+    types are read back with its data context's type converter (``_live``).
 
-    return declaration_form_schema(schema, get_default_context().type_converter)
+    Raises:
+        ValueError: If ``context`` is not the table's.
+    """
+    if context != found.record.data_context_key:
+        raise ValueError(
+            f"the rows are of data context {context!r}; the table records "
+            f"{found.record.data_context_key!r}"
+        )
+
+
+def _live(schema: pa.Schema, data_context: str) -> pa.Schema:
+    """A manifest's schema with its logical types live, as the rows were given: by the
+    type converter of the data context the table records."""
+    from orcapod.contexts import resolve_context
+
+    return declaration_form_schema(schema, resolve_context(data_context).type_converter)
 
 
 class _Expression(Protocol):

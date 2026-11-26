@@ -239,6 +239,10 @@ def _logical_field(field: pa.Field[Any]) -> pa.Field[Any]:
     if not node.known:
         raise UnstorableInSpiralError("its extension type cannot be identified")
     arrow_type = field.type
+    if pa.types.is_dictionary(arrow_type):
+        # An encoding, not a type: refused here, before a dictionary of a logical
+        # type's values is taken for that type (``identity_node`` looks through it).
+        raise UnstorableInSpiralError(f"a SpiralDB store keeps no type {arrow_type}")
     if node.identifier is not None and EXTENSION_NAME_KEY not in (field.metadata or {}):
         arrow_type = arrow_type.storage_type
     _refuse_nested_identifier(arrow_type)
@@ -1004,8 +1008,9 @@ def read_manifest(
         stopped before its manifest).
 
     Raises:
-        ManifestError: If the header or its chunks cannot be read in full, do not match
-            their checksum, or the manifest is not one of ``read_manifest_bytes``.
+        ManifestError: If the header or its chunks cannot be read in full, the header
+            is of another format or version, the chunks do not match their checksum,
+            or the manifest is not one of ``read_manifest_bytes``.
     """
     raw = metadata.get(MANIFEST_KEY)
     if raw is None:
@@ -1019,9 +1024,22 @@ def read_manifest(
     fields = cast("dict[str, Any]", header)
     if fields.get("format") != MANIFEST_FORMAT:
         raise ManifestError(f"unknown manifest format {fields.get('format')!r}")
+    version = fields.get("version")
+    if type(version) is not int or version != MANIFEST_VERSION:
+        raise ManifestError(
+            f"unsupported manifest header version {version!r} "
+            f"(this Orcapod reads {MANIFEST_VERSION})"
+        )
     count = fields.get("chunks")
     if type(count) is not int or count < 1:
         raise ManifestError(f"invalid chunk count {count!r}")
+    if count > len(metadata):
+        # More chunks than the metadata has entries: some must be missing. Refused
+        # before a key is listed for each, so a corrupt count allocates nothing.
+        raise ManifestError(
+            f"the manifest names {count} chunks; the metadata holds "
+            f"{len(metadata)} entries"
+        )
     keys = [f"{MANIFEST_KEY}/{i}" for i in range(count)]
     missing = [k for k in keys if k not in metadata]
     if missing:
