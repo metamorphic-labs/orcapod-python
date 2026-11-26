@@ -6,7 +6,7 @@ import dataclasses
 import logging
 from datetime import datetime, timezone
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from orcapod.core.data_function import CachedDataFunction
 from orcapod.core.datagrams import Datagram
@@ -17,6 +17,7 @@ from orcapod.core.function_pod import (
     function_zero_row_table,
 )
 from orcapod.core.streams.view import StreamView
+from orcapod.errors import PreviewRefusedError
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
 from orcapod.contexts.stored import (
@@ -302,9 +303,27 @@ class CachedFunctionPod(WrappedFunctionPod):
         return tag, output
 
     def require_preview(self) -> None:
-        """See ``_FunctionPodBase.require_preview``: the inner pod's answer."""
+        """See ``_FunctionPodBase.require_preview``: the inner pod's answer.
+
+        Raises:
+            PreviewRefusedError: If this pod is a subclass, or the inner pod is not a
+                pod of the library (it has no preview), or refuses.
+        """
         self._require_own_processing()
-        cast(_FunctionPodBase, cast(object, self._function_pod)).require_preview()
+        self._inner_for_preview().require_preview()
+
+    def _inner_for_preview(self) -> _FunctionPodBase:
+        """The inner pod, which a preview reads through.
+
+        Raises:
+            PreviewRefusedError: If it is not a pod of the library.
+        """
+        inner: object = self._function_pod
+        if not isinstance(inner, _FunctionPodBase):
+            raise PreviewRefusedError(
+                f"its inner pod {type(inner).__name__} has no preview"
+            )
+        return inner
 
     def preview_data(self, data: DataProtocol) -> DataProtocol | None:
         """The stored result, else the inner pod's, which is not stored."""
@@ -312,9 +331,7 @@ class CachedFunctionPod(WrappedFunctionPod):
         stored = self.lookup_cached_data(data)
         if stored is not None:
             return stored
-        output = cast(_FunctionPodBase, cast(object, self._function_pod)).preview_data(
-            data
-        )
+        output = self._inner_for_preview().preview_data(data)
         if output is None:
             return None
         return output.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: True})

@@ -62,6 +62,7 @@ from orcapod.core.streams.preview import (
     PreviewRequest,
     preview_batches,
     exactly_its_class,
+    is_library_class,
     refuse_without_compute_all,
 )
 from orcapod.core.streams.view import (
@@ -2143,7 +2144,13 @@ class DynamicPodStream(StreamBase):
             yield from preview_batches(self._cached_stream, request)
             return
         pod = cast(StaticOutputOperatorPod, self._pod)
-        if len(self._upstreams) == 1 and applied_by_batch(pod):
+        # A shortcut of the library holds for its own classes only (N55); an operator
+        # of your own that declares it still takes it in run().
+        if (
+            len(self._upstreams) == 1
+            and applied_by_batch(pod)
+            and is_library_class(type(pod))
+        ):
             keeps_every_row = pod.rows_dropped_text(0, (), self._upstreams) is None
             wanted = request if keeps_every_row else request.without_limit()
             with closing(preview_batches(self._upstreams[0], wanted)) as batches:
@@ -2158,7 +2165,14 @@ class DynamicPodStream(StreamBase):
         if given_back is not None:
             # The result is that input as it is: no other input is read, as in the
             # full read.
-            yield from preview_batches(self._upstreams[given_back], request)
+            from orcapod.core.operators.meta_columns import without_input_meta
+
+            # Without the input's meta columns, as the full read (static_process).
+            with closing(
+                preview_batches(self._upstreams[given_back], request)
+            ) as batches:
+                for batch in batches:
+                    yield without_input_meta(batch, (batch,))
             return
         refuse_without_compute_all(self, request, "needs every row of its input")
         result = pod.static_process(

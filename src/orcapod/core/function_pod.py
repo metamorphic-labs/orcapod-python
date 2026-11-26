@@ -1851,12 +1851,21 @@ class FunctionPodStream(StreamBase):
             raise refused(self, f"cannot be previewed: {error}") from error
         current = not self.is_stale
         if current and self._cached_output_table is not None:
-            yield from slices_of(self, request)
+            from orcapod.core.operators.meta_columns import without_input_meta
+
+            # Without the meta columns, as the rows computed below.
+            for batch in slices_of(self, request):
+                yield without_input_meta(batch, (batch,))
             return
         known = dict(self._cached_output_datas) if current else {}
         function = pod.data_function
-        # An inactive function gives no row; any other gives one per input row.
-        one_per_row = type(function) is PythonDataFunction and function.is_active()
+        # An inactive function gives no row; any other gives one per input row. A
+        # held result that gave none (the function was inactive then) breaks that.
+        one_per_row = (
+            type(function) is PythonDataFunction
+            and function.is_active()
+            and all(output is not None for _, output in known.values())
+        )
         wanted = request if one_per_row else request.without_limit()
         given = False
         index = 0

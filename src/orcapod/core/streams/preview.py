@@ -120,8 +120,9 @@ def exactly_its_class(obj: object, shortcut: str) -> bool:
     A preview shortcut or read-only path (an operator's ``input_given_back``, a pod's
     ``preview_data``, a data function's ``preview_call``) is written for one class of
     the library. It holds only for an object of exactly that class, with no member
-    replaced on the instance (``reads_as_its_class``): a subclass, however small, can
-    compute or act in a way the shortcut does not know (developer decision N55,
+    replaced on the instance (``reads_as_its_class``), and only when that class is the
+    library's: a subclass, however small, can compute or act in a way the shortcut
+    does not know, also when it writes the shortcut again (developer decision N55,
     review of PR 571).
 
     Args:
@@ -134,7 +135,26 @@ def exactly_its_class(obj: object, shortcut: str) -> bool:
     from orcapod.core.streams.base import reads_as_its_class
 
     definer = next((c for c in type(obj).__mro__ if shortcut in vars(c)), None)
-    return definer is not None and reads_as_its_class(obj, definer)
+    return (
+        definer is not None
+        and is_library_class(definer)
+        and reads_as_its_class(obj, definer)
+    )
+
+
+def is_library_class(cls: type) -> bool:
+    """Whether ``cls`` is a class of the library (defined in ``orcapod``), not one of
+    your own: a shortcut a subclass writes again is not the library's (N55)."""
+    return cls.__module__ == "orcapod" or cls.__module__.startswith("orcapod.")
+
+
+def is_library_object(obj: object) -> bool:
+    """Whether ``obj`` is exactly a class of the library, with no member replaced on
+    the instance (``reads_as_its_class``): what the library wrote for that class holds
+    for it (N55)."""
+    from orcapod.core.streams.base import reads_as_its_class
+
+    return is_library_class(type(obj)) and reads_as_its_class(obj, type(obj))
 
 
 def refused(stream: Any, why: str) -> PreviewRefusedError:

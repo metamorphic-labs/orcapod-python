@@ -15,6 +15,7 @@ from orcapod.core.streams.base import (
 from orcapod.errors import SourceNameWarning, SourceVersionWarning
 from orcapod.core.streams.preview import (
     PreviewRequest,
+    is_library_object,
     refuse_without_compute_all,
     slices_of,
 )
@@ -597,12 +598,16 @@ class RootSource(StreamBase):
     ) -> Generator[StreamProtocol, None, None]:
         """Slices of the rows a source holds (``preview_batches``).
 
-        A source of the library that holds its table (``_stream``) reads nothing. Any
-        other read of a whole source is refused unless ``compute_all`` was given.
+        A source of exactly a library class that holds its table (``_stream``) reads
+        nothing. Any other read of a whole source (a subclass of your own included,
+        N55) is refused unless ``compute_all`` was given.
         """
         from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 
-        if not isinstance(getattr(self, "_stream", None), ArrowTableStream):
+        if not (
+            isinstance(getattr(self, "_stream", None), ArrowTableStream)
+            and is_library_object(self)
+        ):
             refuse_without_compute_all(self, request, "reads its rows whole")
         yield from slices_of(self, request)
 

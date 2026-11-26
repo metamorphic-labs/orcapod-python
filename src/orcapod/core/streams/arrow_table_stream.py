@@ -15,7 +15,12 @@ from orcapod.core.streams.base import (
     StreamBase,
     check_head_size,
 )
-from orcapod.core.streams.preview import PreviewRequest, slices_of
+from orcapod.core.streams.preview import (
+    PreviewRequest,
+    is_library_object,
+    refuse_without_compute_all,
+    slices_of,
+)
 from orcapod.core.streams.view import StreamView
 from orcapod.protocols.core_protocols import PodProtocol, StreamProtocol, TagProtocol
 from orcapod.protocols.hashing_protocols import PipelineElementProtocol
@@ -383,7 +388,15 @@ class ArrowTableStream(StreamBase):
     def _preview_batches(
         self, request: PreviewRequest
     ) -> Generator[StreamProtocol, None, None]:
-        """Slices of the rows this stream holds (``preview_batches``)."""
+        """Slices of the rows this stream holds (``preview_batches``).
+
+        A subclass of your own may compute its rows in ``as_table``: it is read in
+        full, only with ``compute_all`` (N55).
+        """
+        if not is_library_object(self):
+            refuse_without_compute_all(
+                self, request, "is a subclass that reads its rows its own way"
+            )
         yield from slices_of(self, request)
 
     def _typed_zero_row_table(self) -> "pa.Table":

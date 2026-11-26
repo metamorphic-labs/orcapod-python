@@ -40,6 +40,7 @@ _KEYS = pa.schema(
 
 
 def _rows(n: int = ROWS) -> pa.Table:
+    """The test table: ``n`` rows over three subjects, ``x`` null on every seventh."""
     return pa.table(
         {
             "subject": [f"m{i * 3 // n}" for i in range(n)],
@@ -124,6 +125,8 @@ def _with_time(source: Any) -> Any:
 
 
 def _same(left: pa.Table, right: pa.Table) -> None:
+    """Assert two tables are equal in values and in schema, Arrow metadata included
+    (field metadata carries logical types and data-tags)."""
     assert left.schema.equals(right.schema, check_metadata=True)
     assert left.equals(right)
 
@@ -427,7 +430,7 @@ def test_no_hook_fires(source: Any) -> None:
     fired: list[Any] = []
     calls = _Calls()
     pod = calls.pod
-    pod._post_run_hooks.append(fired.append)  # pyright: ignore[reportPrivateUsage]  # a registered hook
+    pod.add_post_run_hook(fired.append)
     _ = pod(_with_time(source)).preview(3)
     assert calls.seen == [0, 1, 2]
     assert fired == []
@@ -580,24 +583,43 @@ def test_a_derived_source_read_in_batches_names_its_rows_as_read_whole(
     )
 
 
-def test_a_repeated_key_across_batches_is_refused_when_reached(spiral: Any) -> None:
-    """A key repeated in a later batch raises when that row is reached, not before."""
-    derived = DerivedSource(
-        spiral(),
-        tags_as_data={"timestamp": "time"},
-        source_id="derived",
-        record_id_columns="subject",
+def test_a_repeated_key_across_batches_is_refused_when_reached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A key repeated in a later batch raises when that row is reached, not before.
+
+    Each batch holds unique keys; only the third repeats one of the first: preview
+    succeeds through the first two batches (CodeRabbit, PR 571).
+    """
+    monkeypatch.setattr(preview_module, "FIRST_BATCH_ROWS", 2)
+    keys = ["a", "b", "c", "d", "e", "f", "a", "g"]
+    origin = ArrowTableSource(
+        pa.table(
+            {
+                "key": keys,
+                "time": pa.array(range(len(keys)), pa.int64()),
+                "x": pa.array(range(len(keys)), pa.int64()),
+            }
+        ),
+        tag_columns=["key", "time"],
+        source_id="keys",
+        tag_only_columns=True,
     )
-    assert len(derived.preview(1)) == 1
-    with pytest.raises(RowIdentifierError, match="unique"):
-        derived.preview(30)
-    with pytest.raises(RowIdentifierError, match="unique"):
-        DerivedSource(
-            spiral(),
-            tags_as_data={"timestamp": "time"},
+
+    def derived() -> Any:
+        """Read in batches of 2, 4, 8: a filter above takes the limit away."""
+        return DerivedSource(
+            origin,
+            tags_as_data={"time": "t"},
             source_id="derived",
-            record_id_columns="subject",
-        ).as_table()
+            record_id_columns="key",
+        ).filter(col("x") >= 0)
+
+    assert derived().preview(6).table.column("key").to_pylist() == keys[:6]
+    with pytest.raises(RowIdentifierError, match="unique"):
+        derived().preview(7)
+    with pytest.raises(RowIdentifierError, match="unique"):
+        derived().as_table()
 
 
 def test_a_source_limit_and_where_hold(spiral: Any) -> None:
@@ -890,6 +912,7 @@ def _nested_cached(calls: _Calls, stores: list[InMemoryArrowDatabase]) -> Any:
 
 
 def _untouched(store: InMemoryArrowDatabase) -> None:
+    """Assert nothing was written to ``store``: it holds no table."""
     assert store.list_table_paths() == []
 
 
@@ -1364,3 +1387,225 @@ def test_a_derived_source_subclass_refuses_an_origin_of_your_own_class(
     assert origin.kept == []
     assert origin._held_rows() is None  # pyright: ignore[reportPrivateUsage]
     assert derived._held_rows() is None  # pyright: ignore[reportPrivateUsage]
+
+
+# ---------------------------------------------------------------------------
+# CodeRabbit review of 8987839d
+# ---------------------------------------------------------------------------
+
+
+def test_a_cached_pod_over_a_pod_without_a_preview_is_refused(source: Any) -> None:
+    """An inner pod that is not a pod of the library is refused with
+    ``PreviewRefusedError``, not an ``AttributeError``."""
+    calls = _Calls()
+
+    class _Bare:
+        """A function pod by protocol only: it delegates all but the preview."""
+
+        def __init__(self, pod: Any) -> None:
+            self._pod = pod
+
+        def __getattr__(self, name: str) -> Any:
+            if name in ("require_preview", "preview_data"):
+                raise AttributeError(name)
+            return getattr(self._pod, name)
+
+    store = InMemoryArrowDatabase()
+    pod = CachedFunctionPod(_Bare(calls.pod), result_database=store)  # pyright: ignore[reportArgumentType]  # conforms at runtime
+    stream = pod.process(_with_time(source).select_data_columns(["timestamp", "x"]))
+    with pytest.raises(PreviewRefusedError, match="inner pod _Bare"):
+        stream.preview(2)
+    assert calls.seen == []
+    _untouched(store)
+
+
+def test_a_data_function_writing_its_own_preview_call_is_refused(source: Any) -> None:
+    """A subclass that writes ``preview_call`` again is not the library's class."""
+    effects: list[Any] = []
+
+    class _OwnPreview(PythonDataFunction):
+        def preview_call(self, data: Any) -> Any:
+            self.require_preview()
+            effects.append(data)
+            return self.call(data)
+
+    calls = _Calls()
+    inner: Any = calls.pod.data_function
+    function: Any = _OwnPreview(inner._function, output_keys="y")
+    stream = FunctionPod(function).process(
+        _with_time(source).select_data_columns(["timestamp", "x"])
+    )
+    with pytest.raises(PreviewRefusedError, match="no read-only call"):
+        stream.preview(2)
+    assert calls.seen == []
+    assert effects == []
+
+
+def test_a_pod_writing_its_own_preview_data_is_refused(source: Any) -> None:
+    """A pod subclass that writes ``preview_data`` again is not the library's."""
+
+    class _OwnPreview(FunctionPod):
+        def preview_data(self, data: Any) -> Any:
+            return None
+
+    calls = _Calls()
+    stream = _OwnPreview(calls.pod.data_function).process(
+        _with_time(source).select_data_columns(["timestamp", "x"])
+    )
+    with pytest.raises(PreviewRefusedError, match="subclass of a pod"):
+        stream.preview(2)
+    assert calls.seen == []
+
+
+def test_a_held_result_shows_no_meta_columns(source: Any) -> None:
+    """A held result of a cached function shows the columns a cold preview shows."""
+    store = InMemoryArrowDatabase()
+    calls = _Calls()
+
+    def stream() -> Any:
+        return _cached_function(calls, store).process(
+            _with_time(source).select_data_columns(["timestamp", "x"])
+        )
+
+    cold = stream().preview(3).table
+    held = stream()
+    _ = held.as_table()
+    shown = held.preview(3).table
+    assert not any(name.startswith("__") for name in shown.column_names)
+    assert shown.column_names == cold.column_names
+    assert shown.column("y").to_pylist() == cold.column("y").to_pylist()
+
+
+def test_a_held_empty_result_does_not_limit_the_input(source: Any) -> None:
+    """A held input that gave no row (the function was inactive then) uses a row of
+    the input without giving one: the limit is not pushed down."""
+    calls = _Calls()
+    function: Any = calls.pod.data_function
+    function.set_active(False)
+    pod = calls.pod
+    pod.add_post_run_hook(lambda *_: function.set_active(True))
+    stream = pod(_with_time(source).select_data_columns(["timestamp", "x"]))
+    rows = iter(stream)
+    _ = next(rows)
+    shown = stream.preview(2).as_table()
+    _same(shown, stream.as_table().select(shown.column_names)[:2])
+
+
+class _BatchDeclaringMapData(MapData):
+    """A MapData of your own that declares batches and drops each batch's first row."""
+
+    BATCHES_GIVE_THE_WHOLE = True
+
+    def unary_static_process(self, stream: Any) -> Any:
+        result = super().unary_static_process(stream)
+        table = result.as_table(columns={"source": True, "system_tags": True})
+        return ArrowTableStream(
+            table.slice(1),
+            tag_columns=result.keys()[0],
+            data_context=result.data_context_key,
+        )
+
+
+def test_an_operator_of_your_own_declaring_batches_is_computed_in_full(
+    source: Any,
+) -> None:
+    """The batch shortcut is the library's: an operator of your own that declares it
+    is computed in full by preview, only with compute_all."""
+
+    def stream() -> Any:
+        return _BatchDeclaringMapData({"note": "text"})(source())
+
+    whole = stream().as_table()
+    with pytest.raises(PreviewRefusedError, match="compute_all"):
+        stream().preview(2)
+    _same(stream().preview(2, compute_all=True).as_table(), whole[:2])
+
+
+def test_a_semi_join_given_back_input_shows_no_meta_columns() -> None:
+    """A left input with a meta column, given back by a SemiJoin with no shared tag:
+    the preview has the columns of the full read."""
+    left = ArrowTableStream(
+        pa.table(
+            {
+                "k": ["a", "b", "c"],
+                "x": pa.array([1, 2, 3], pa.int64()),
+                "__debug": ["d1", "d2", "d3"],
+            }
+        ),
+        tag_columns=["k"],
+    )
+    joined = SemiJoin()(left, _unrelated())
+    shown = joined.preview(2).as_table()
+    _same(shown, joined.as_table()[:2])
+    assert "__debug" not in shown.column_names
+
+
+def test_a_source_subclass_is_read_in_full_only_with_compute_all(
+    spiral: Any,
+) -> None:
+    """A SpiralDB source of your own reads its whole table: only with compute_all."""
+
+    class _Mine(SpiralDBTableSource):
+        pass
+
+    mine = _Mine(_PROJECT, "event", tag_only_columns=True)
+    with pytest.raises(PreviewRefusedError, match="compute_all"):
+        mine.preview(1)
+    _same(mine.preview(2, compute_all=True).as_table(), mine.as_table()[:2])
+
+
+def test_a_derived_source_subclass_refuses_an_origin_read_replaced_on_it(
+    source: Any,
+) -> None:
+    """An origin of a library class whose ``as_table`` is replaced on the instance
+    (it keeps what it reads) is refused, not read."""
+    origin = source()
+    kept: list[Any] = []
+    read = origin.as_table
+
+    def keeping(*args: Any, **kwargs: Any) -> Any:
+        table = read(*args, **kwargs)
+        kept.append(table)
+        return table
+
+    origin.as_table = keeping
+    derived = _DroppingDerived(origin, tags_as_data={"timestamp": "t"}, source_id="d")
+    with pytest.raises(PreviewRefusedError):
+        derived.preview(2, compute_all=True)
+    assert kept == []
+
+
+def test_a_stream_subclass_is_read_in_full_only_with_compute_all() -> None:
+    """A raw stream of your own may compute its rows in ``as_table``."""
+
+    class _Dropping(ArrowTableStream):
+        def as_table(self, *args: Any, **kwargs: Any) -> Any:
+            return super().as_table(*args, **kwargs).slice(1)
+
+    stream = _Dropping(_rows(), tag_columns=["subject", "timestamp"])
+    with pytest.raises(PreviewRefusedError, match="compute_all"):
+        stream.preview(2)
+    _same(stream.preview(2, compute_all=True).as_table(), stream.as_table()[:2])
+
+
+@pytest.mark.parametrize(
+    "mapping",
+    [
+        {"note": "text", "x": "value"},
+        {"x": "value", "note": "text"},
+    ],
+    ids=["note_first", "x_first"],
+)
+def test_a_mapping_of_several_entries_is_previewed_as_read(
+    source: Any, mapping: dict[str, str]
+) -> None:
+    """Several mapping entries, in two orders, on data and on tags (with data-tags):
+    the preview is the first rows of the sync read. ``preview`` is sync only."""
+    tags = {"subject": "who", "timestamp": "t"}
+    for stream in (
+        source().map_data(mapping),
+        source(tag_only_columns=False).map_tags(tags),
+        source().map_tags(dict(reversed(list(tags.items())))),
+    ):
+        for n in (1, 5, 41):
+            _same(stream.preview(n).as_table(), stream.as_table()[:n])

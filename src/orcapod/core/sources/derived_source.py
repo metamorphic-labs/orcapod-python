@@ -39,6 +39,7 @@ from orcapod.core.streams.base import (
 from orcapod.core.streams.preview import (
     PreviewRequest,
     preview_batches,
+    is_library_object,
     refuse_without_compute_all,
     refused,
     slices_of,
@@ -950,7 +951,7 @@ def _origin_read_keeping_nothing(origin: Any, *, read_by_this_class: bool) -> An
     if isinstance(origin, RootSource):
         holds_its_rows = isinstance(
             getattr(origin, "_stream", None), ArrowTableStream
-        ) and type(origin).__module__.startswith("orcapod.")
+        ) and is_library_object(origin)
         if holds_its_rows or reads_as_its_class(origin, SpiralDBTableSource):
             return origin
     elif read_by_this_class:
