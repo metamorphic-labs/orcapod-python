@@ -577,3 +577,65 @@ def test_nul_is_cut_in_nested_field_names(place: _Place) -> None:
     got = _written_and_read(place, "nul_in_field_names", column)
     assert got.column("s").to_pylist() == [{"x": 1, "z": 2}]
     assert got.column("l").to_pylist() == [[{"x": 3, "z": 4}]]
+
+
+def test_the_fake_never_shows_a_half_written_metadata_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """CodeRabbit on PR 589: a reader during a metadata write sees a whole mapping.
+
+    Every file write is made to call a reader after it has truncated its file and before
+    it has written anything.
+    """
+    with fake.install(tmp_path):
+        key = pa.schema([pa.field("k", pa.large_string(), False)])
+        table = fake.FakeClient().project("p").create_keyed_table("d", "t", key)
+        table.set_metadata({"a": b"1"})
+        seen: list[dict[str, bytes]] = []
+        original = Path.write_text
+
+        def write_text_with_a_reader(
+            self: Path, data: str, *args: Any, **kw: Any
+        ) -> int:
+            with self.open("w") as handle:
+                handle.flush()
+                seen.append(
+                    fake.FakeClient()
+                    .keyed_table_by_id(table.resource_id)
+                    .get_metadata()
+                )
+            return original(self, data, *args, **kw)
+
+        monkeypatch.setattr(Path, "write_text", write_text_with_a_reader)
+        table.set_metadata({"b": b"2"})
+        monkeypatch.undo()
+        assert seen == [{"a": b"1"}]
+        assert table.get_metadata() == {"a": b"1", "b": b"2"}
+
+
+@pytest.mark.parametrize("child", ["x", "x\0y"])
+def test_a_null_under_a_non_null_column_is_refused_whatever_its_names(
+    place: _Place, child: str
+) -> None:
+    """Review of PR 590 (round 2): cutting a nested name at NUL keeps the column's flag."""
+    client = _client(place)
+    key = pa.schema([pa.field("k", pa.large_string(), False)])
+    table = client.project(place.project).create_keyed_table(
+        place.dataset, "nul_names_non_null", key, exist_ok=True
+    )
+    item = pa.struct([(child, pa.int8())])
+    schema = pa.schema(
+        [
+            pa.field("k", pa.large_string(), False),
+            pa.field("l", pa.large_list(item), nullable=False),
+        ]
+    )
+    rows = pa.Table.from_arrays(
+        [
+            pa.array(["r0", "r1"], pa.large_string()),
+            pa.array([[{child: 1}], None], pa.large_list(item)),
+        ],
+        schema=schema,
+    )
+    with pytest.raises(Exception):  # noqa: B017, PT011  # the SDK's error type differs from the fake's
+        _ = table.append(rows)
