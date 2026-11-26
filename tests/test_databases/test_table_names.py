@@ -85,9 +85,7 @@ def test_listings_are_the_old_rule(seed: int) -> None:
                     path_prefix + prefix,
                 )
             ]
-            assert full == _old_list_table_paths(
-                stored, pending, path_prefix, prefix
-            )
+            assert full == _old_list_table_paths(stored, pending, path_prefix, prefix)
 
 
 def test_a_database_on_sqlite_names_and_lists_as_before(tmp_path: Path) -> None:
