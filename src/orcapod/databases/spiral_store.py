@@ -219,9 +219,9 @@ and signed zeros; timestamps of every unit with their zone, ``datetime.max`` and
 
 def _without_identifier(field: pa.Field[Any]) -> dict[bytes, bytes]:
     """The field's metadata without the two keys that hold a logical type identifier."""
-    metadata = cast("dict[bytes, bytes]", dict(field.metadata or {}))
-    metadata.pop(EXTENSION_NAME_KEY, None)
-    metadata.pop(EXTENSION_METADATA_KEY, None)
+    metadata = dict(field.metadata or {})
+    _ = metadata.pop(EXTENSION_NAME_KEY, None)
+    _ = metadata.pop(EXTENSION_METADATA_KEY, None)
     return metadata
 
 
@@ -237,7 +237,7 @@ def _logical_field(field: pa.Field[Any]) -> pa.Field[Any]:
         raise UnstorableInSpiralError("its extension type cannot be identified")
     arrow_type = field.type
     if node.identifier is not None and EXTENSION_NAME_KEY not in (field.metadata or {}):
-        arrow_type = cast(Any, arrow_type).storage_type
+        arrow_type = arrow_type.storage_type
     _refuse_nested_identifier(arrow_type)
     if _holds(arrow_type, _types.is_string_view) or _holds(
         arrow_type, _types.is_binary_view

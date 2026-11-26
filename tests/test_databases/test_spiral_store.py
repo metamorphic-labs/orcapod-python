@@ -16,6 +16,7 @@ import random
 import re
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
@@ -244,7 +245,7 @@ def _assert_physical(schema: pa.Schema) -> None:
 
 def refused(rows: pa.Table, *words: str) -> store.UnstorableInSpiralError:
     with pytest.raises(store.UnstorableInSpiralError) as info:
-        store.encode_rows(rows)
+        _ = store.encode_rows(rows)
     for word in words:
         assert word in str(info.value)
     return info.value
@@ -363,15 +364,15 @@ def test_the_key_is_not_a_value_column_of_the_same_name() -> None:
         ["ox_" + KEY if n == KEY else n for n in encoded.column_names]
     )
     with pytest.raises(store.StoredRowsError, match="missing"):
-        decode(renamed, table.schema)
+        _ = decode(renamed, table.schema)
 
 
 @pytest.mark.parametrize("name", ["\ud800", "a\udfff", "__\ud800.b"])
 def test_a_lone_surrogate_is_refused(name: str) -> None:
     with pytest.raises(store.UnstorableInSpiralError, match="UTF-8"):
-        store.encode_name(name)
+        _ = store.encode_name(name)
     with pytest.raises(store.UnstorableInSpiralError, match="UTF-8"):
-        new(schema_of([("a", pa.int8()), (KEY, pa.large_binary())]), (name,))
+        _ = new(schema_of([("a", pa.int8()), (KEY, pa.large_binary())]), (name,))
 
 
 def test_a_name_that_is_not_utf8_is_refused_at_every_depth() -> None:
@@ -383,7 +384,7 @@ def test_a_name_that_is_not_utf8_is_refused_at_every_depth() -> None:
         pa.field("i", pa.list_(bad)),
     ):
         with pytest.raises(store.UnstorableInSpiralError, match="UTF-8"):
-            store.logical_schema(schema_of([field, (KEY, pa.large_binary())]))
+            _ = store.logical_schema(schema_of([field, (KEY, pa.large_binary())]))
 
 
 def wrappings(inner: Any) -> list[Any]:
@@ -401,7 +402,7 @@ def test_duplicate_sibling_names_are_refused_at_every_depth() -> None:
     twice = pa.struct([("a.b", pa.int8()), ("c", pa.int8()), ("a.b", pa.int8())])
     for ty in wrappings(twice):
         with pytest.raises(store.UnstorableInSpiralError, match="more than once"):
-            store.logical_schema(schema_of([("x", ty), (KEY, pa.large_binary())]))
+            _ = store.logical_schema(schema_of([("x", ty), (KEY, pa.large_binary())]))
     same_in_two_structs = pa.struct([("a", pa.struct([("a", pa.int8())]))])
     _ = store.logical_schema(
         schema_of([("a", same_in_two_structs), (KEY, pa.large_binary())])
@@ -430,7 +431,7 @@ def test_a_struct_parent_must_be_valid_also_in_a_logical_types_storage(
         if as_storage:
             live = Labelled(ty, "test.parent", b"")
             array = pa.ExtensionArray.from_storage(live, array)
-        refused(keyed({"c": array}), "'c'", "null struct")
+        _ = refused(keyed({"c": array}), "'c'", "null struct")
 
 
 # --------------------------------------------------------------------------- types
@@ -470,10 +471,10 @@ def test_every_row_of_the_type_matrix_is_kept_or_refused(
         _ = pytest.importorskip("torch")
     rows = build_table(row, tmp_path).rename_columns([KEY, "x", "y"])
     if row.label in REFUSED_ROWS:
-        refused(rows, REFUSED_ROWS[row.label], "'x'")
+        _ = refused(rows, REFUSED_ROWS[row.label], "'x'")
         return
     if row.label in NULL_STRUCT_ROWS:
-        refused(rows, "null struct", "'y'")
+        _ = refused(rows, "null struct", "'y'")
         rows = rows.drop_columns(["y"])
     _ = round_trip(rows)
     _ = round_trip(rows, live=True)
@@ -734,7 +735,7 @@ def test_what_a_null_list_or_map_hides_is_not_written() -> None:
 
 
 def test_no_rows_are_never_written() -> None:
-    refused(keyed({"a": pa.array([1])}).slice(1), "no rows")
+    _ = refused(keyed({"a": pa.array([1])}).slice(1), "no rows")
 
 
 @pytest.mark.parametrize(
@@ -751,7 +752,7 @@ def test_no_rows_are_never_written() -> None:
     ],
 )
 def test_a_null_struct_at_any_depth_is_refused(make: Any) -> None:
-    refused(keyed({"ok": pa.array([1, 2]), "bad": make()}), "'bad'", "null")
+    _ = refused(keyed({"ok": pa.array([1, 2]), "bad": make()}), "'bad'", "null")
 
 
 def test_a_null_struct_hidden_by_a_null_list_is_not_written() -> None:
@@ -772,7 +773,7 @@ def test_a_null_under_a_non_null_field_is_refused_at_any_depth() -> None:
         table = keyed({"x": pa.array(value, arrow_type)})
         error = refused(table, "'x'", "non-nullable")
         assert error.path[0] == "x" and len(error.path) > 1
-    refused(
+    _ = refused(
         keyed(
             {"x": pa.array([None], pa.int8())},
             [not_null.with_name("x").with_type(pa.int8())],
@@ -820,7 +821,7 @@ def test_a_type_the_store_does_not_keep_is_refused_at_every_depth(
         )
         for call in (store.physical_schema, store.logical_schema, entries):
             with pytest.raises(store.UnstorableInSpiralError, match="'bad'"):
-                call(schema)
+                _ = call(schema)
 
 
 def test_every_refusal_is_in_one_table() -> None:
@@ -842,13 +843,13 @@ def test_lifting_a_type_is_one_entry(monkeypatch: pytest.MonkeyPatch) -> None:
     """A type shown to be kept natively moves from one table to the other."""
     matches = pa.types.is_duration
     table = keyed({"d": pa.array([1, None, -2], duration("us"))})
-    refused(table, "duration", "refuses")
+    _ = refused(table, "duration", "refuses")
     monkeypatch.setattr(
         store,
         "REFUSALS",
         tuple(r for r in store.REFUSALS if r.matches is not matches),
     )
-    refused(table, "keeps no type duration")
+    _ = refused(table, "keeps no type duration")
     monkeypatch.setattr(store, "_NATIVE", (*store._NATIVE, matches))  # pyright: ignore[reportPrivateUsage]
     encoded = store.encode_rows(table)
     assert_same(decode(as_spiral_returns(encoded), table.schema), table)
@@ -870,9 +871,9 @@ def test_a_null_key_is_refused_whatever_the_schema_says(nullable: bool) -> None:
     key = pa.array([b"a", None], pa.large_binary())
     schema = schema_of([pa.field(KEY, pa.large_binary(), nullable), ("a", pa.int8())])
     column = pa.array([1, 2], pa.int8())
-    refused(pa.Table.from_arrays([key, column], schema=schema), KEY)
+    _ = refused(pa.Table.from_arrays([key, column], schema=schema), KEY)
     with pytest.raises(store.StoredRowsError, match="null key"):
-        decode(pa.table({KEY: key, "a": column}), schema)
+        _ = decode(pa.table({KEY: key, "a": column}), schema)
 
 
 @pytest.mark.parametrize(
@@ -894,7 +895,7 @@ def test_a_null_key_is_refused_whatever_the_schema_says(nullable: bool) -> None:
 )
 def test_a_table_the_store_cannot_hold_is_refused(fields: Any, words: str) -> None:
     with pytest.raises(store.UnstorableInSpiralError, match=words):
-        store.physical_schema(schema_of(fields))
+        _ = store.physical_schema(schema_of(fields))
 
 
 # ------------------------------------------------------------------- logical types
@@ -986,11 +987,11 @@ def test_a_logical_type_below_a_plain_type_is_refused() -> None:
         ):
             schema = schema_of([("c", arrow_type), (KEY, pa.large_binary())])
             with pytest.raises(store.UnstorableInSpiralError, match="nested"):
-                store.logical_schema(schema)
+                _ = store.logical_schema(schema)
     # A live type whose field is annotated as another one is two logical types.
     both = pa.field("c", live, metadata={NAME_KEY: b"n"})
     with pytest.raises(store.UnstorableInSpiralError, match="nested"):
-        store.logical_schema(schema_of([both, (KEY, pa.large_binary())]))
+        _ = store.logical_schema(schema_of([both, (KEY, pa.large_binary())]))
 
 
 # ------------------------------------------------------------------- rows, as read
@@ -1068,12 +1069,12 @@ def test_rows_that_are_not_what_was_written_are_refused() -> None:
     bad("m", pa.array([1]), "int64")
     for rows in (good.drop_columns(["n"]), good.append_column("m", pa.array([1]))):
         with pytest.raises(store.StoredRowsError, match="'(n|m)'"):
-            decode(rows, schema)
+            _ = decode(rows, schema)
     repeated = pa.Table.from_arrays(
         [*good.columns, good.column("n")], names=[*good.column_names, "n"]
     )
     with pytest.raises(store.StoredRowsError, match="repeated"):
-        decode(repeated, schema)
+        _ = decode(repeated, schema)
 
 
 def test_rows_are_given_the_recorded_schema_only() -> None:
@@ -1086,7 +1087,7 @@ def test_rows_are_given_the_recorded_schema_only() -> None:
         table.schema.set(0, pa.field("a", pa.int64(), metadata={"k": "v"})),
     ):
         with pytest.raises(store.ManifestError, match="not the recorded schema"):
-            store.decode_rows(stored, manifest, schema)
+            _ = store.decode_rows(stored, manifest, schema)
 
 
 def test_a_table_with_a_manifest_and_no_rows_reads_as_no_rows() -> None:
@@ -1259,13 +1260,13 @@ def test_a_manifest_of_another_path_is_refused() -> None:
     recorded = entries(schema_of(BASE), ("a", "b"))
     for path in (("a",), ("b", "a"), ("a", "b", ""), ("a_b",), ()):
         with pytest.raises(store.ManifestError, match="recorded as"):
-            store.read_manifest(recorded, path)
+            _ = store.read_manifest(recorded, path)
 
 
 @pytest.mark.parametrize("part", ["a/b", "a\0", "\udc00"])
 def test_a_path_component_the_store_cannot_name_is_refused(part: str) -> None:
     with pytest.raises(store.UnstorableInSpiralError):
-        new(schema_of(BASE), ("x", part))
+        _ = new(schema_of(BASE), ("x", part))
 
 
 def test_stored_names_come_from_the_manifest_not_from_the_rule(
@@ -1280,7 +1281,11 @@ def test_stored_names_come_from_the_manifest_not_from_the_rule(
         }
     )
     metadata, stored = entries(table.schema), _stored(table)
-    monkeypatch.setattr(store, "encode_name", lambda name: "new_" + name.encode().hex())
+
+    def renamed(name: str) -> str:
+        return "new_" + name.encode().hex()
+
+    monkeypatch.setattr(store, "encode_name", renamed)
     manifest = read(metadata)
     assert "ox_a;2Eb" in manifest.physical.names
     got = store.decode_rows(stored, manifest)
@@ -1314,39 +1319,41 @@ def test_the_changed_payload_helper_builds_a_readable_manifest() -> None:
     assert read(_payload()) == new(schema_of(BASE))
 
 
-@pytest.mark.parametrize(
-    "make",
-    [
-        lambda m: b"",
-        lambda m: b"[]",
-        lambda m: b"\xff",
-        lambda m: m + b" junk",
-        lambda m: b'"text"',
-        lambda m: _payload(format="other"),
-        lambda m: _payload(format=None),
-        lambda m: _payload(version=1),
-        lambda m: _payload(version=False),
-        lambda m: _payload(kind=1),
-        lambda m: _payload(record_path=["other"]),
-        lambda m: _payload(physical=_ipc(schema_of([("a", pa.int8())]))),
-        lambda m: _payload(physical=_ipc(_physical(0, pa.field("a", pa.int8())))),
-        lambda m: _payload(physical=_ipc(_physical(0, pa.field(KEY, _A)))),
-        lambda m: _payload(physical=_ipc(_physical(3, pa.field("k", _B)))),
-        lambda m: _payload(physical=_ipc(_physical(1, pa.field("f", _L)))),
-        lambda m: _payload(physical=_ipc(_physical(0, pa.field("a", _TWICE)))),
-        lambda m: _payload(record_path="a"),
-        lambda m: _payload(record_path=[1]),
-        lambda m: _payload(schema=1),
-        lambda m: _payload(schema="!!"),
-        lambda m: _payload(schema=base64.b64encode(b"junk").decode()),
-        lambda m: _payload(schema=_ipc(schema_of([("a", pa.int8())]))),
-        lambda m: _payload(schema=_ipc(schema_of([*BASE, ("m", pa.binary(2))]))),
-    ],
-)
-def test_a_manifest_that_cannot_be_read_in_full_is_an_error(make: Any) -> None:
+_BROKEN_MANIFESTS: list[Callable[[bytes], bytes]] = [
+    lambda m: b"",
+    lambda m: b"[]",
+    lambda m: b"\xff",
+    lambda m: m + b" junk",
+    lambda m: b'"text"',
+    lambda m: _payload(format="other"),
+    lambda m: _payload(format=None),
+    lambda m: _payload(version=1),
+    lambda m: _payload(version=False),
+    lambda m: _payload(kind=1),
+    lambda m: _payload(record_path=["other"]),
+    lambda m: _payload(physical=_ipc(schema_of([("a", pa.int8())]))),
+    lambda m: _payload(physical=_ipc(_physical(0, pa.field("a", pa.int8())))),
+    lambda m: _payload(physical=_ipc(_physical(0, pa.field(KEY, _A)))),
+    lambda m: _payload(physical=_ipc(_physical(3, pa.field("k", _B)))),
+    lambda m: _payload(physical=_ipc(_physical(1, pa.field("f", _L)))),
+    lambda m: _payload(physical=_ipc(_physical(0, pa.field("a", _TWICE)))),
+    lambda m: _payload(record_path="a"),
+    lambda m: _payload(record_path=[1]),
+    lambda m: _payload(schema=1),
+    lambda m: _payload(schema="!!"),
+    lambda m: _payload(schema=base64.b64encode(b"junk").decode()),
+    lambda m: _payload(schema=_ipc(schema_of([("a", pa.int8())]))),
+    lambda m: _payload(schema=_ipc(schema_of([*BASE, ("m", pa.binary(2))]))),
+]
+
+
+@pytest.mark.parametrize("make", _BROKEN_MANIFESTS)
+def test_a_manifest_that_cannot_be_read_in_full_is_an_error(
+    make: Callable[[bytes], bytes],
+) -> None:
     recorded = make(entries(schema_of(BASE)))
     with pytest.raises(store.ManifestError):
-        store.read_manifest(recorded, PATH)
+        _ = store.read_manifest(recorded, PATH)
 
 
 def test_a_large_manifest_is_kept() -> None:
