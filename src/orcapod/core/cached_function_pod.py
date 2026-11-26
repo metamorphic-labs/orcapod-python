@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 from datetime import datetime, timezone
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from typing import TYPE_CHECKING, Any
 
 from orcapod.core.data_function import CachedDataFunction
@@ -52,19 +52,26 @@ class CachedFunctionPod(WrappedFunctionPod):
 
     Uses a shared ``ResultCache`` for lookup/store/conflict-resolution
     logic (same mechanism as ``CachedDataFunction``).
+
+    A caller may supply a read-only fallback lookup. A fallback hit is marked
+    on the returned tag so the caller can record which database holds the result.
     """
 
     # Expose RESULT_COMPUTED_FLAG from the shared ResultCache
     RESULT_COMPUTED_FLAG = ResultCache.RESULT_COMPUTED_FLAG
+    FALLBACK_RESULT_TAG = "_orcapod_result_from_fallback"
 
     def __init__(
         self,
         function_pod: FunctionPodProtocol,
         result_database: ArrowDatabaseProtocol,
         auto_flush: bool = True,
+        *,
+        fallback_lookup: Callable[[DataProtocol], DataProtocol | None] | None = None,
         **kwargs,
     ) -> None:
         super().__init__(function_pod, **kwargs)
+        self._fallback_lookup = fallback_lookup
         self._cache = ResultCache(
             result_database=result_database,
             record_path=self.uri,  # no prefix; db is pre-scoped
@@ -193,6 +200,20 @@ class CachedFunctionPod(WrappedFunctionPod):
             return None
         return cached.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: False})
 
+    def _lookup_result(
+        self, tag: TagProtocol, data: DataProtocol
+    ) -> tuple[TagProtocol, DataProtocol | None]:
+        """Read the primary cache, then mark a hit from the read-only fallback."""
+        cached = self.lookup_cached_data(data)
+        if cached is not None:
+            module_logger.info("Pod-level cache hit")
+            return tag, cached
+        if self._fallback_lookup is not None:
+            cached = self._fallback_lookup(data)
+            if cached is not None:
+                return tag.with_meta_columns(**{self.FALLBACK_RESULT_TAG: True}), cached
+        return tag, None
+
     def process_data(
         self,
         tag: TagProtocol,
@@ -220,10 +241,8 @@ class CachedFunctionPod(WrappedFunctionPod):
             A ``(tag, output_data)`` tuple; output_data is ``None``
             if the inner function filters the data out.
         """
-        cached = self._cache.lookup(data, data_context_key=self.data_context_key)
+        tag, cached = self._lookup_result(tag, data)
         if cached is not None:
-            module_logger.info("Pod-level cache hit")
-            cached = cached.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: False})
             return tag, cached
 
         tag, output = self._function_pod.process_data(
@@ -273,10 +292,8 @@ class CachedFunctionPod(WrappedFunctionPod):
             A ``(tag, output_data)`` tuple; output_data is ``None``
             if the inner function filters the data out.
         """
-        cached = self._cache.lookup(data, data_context_key=self.data_context_key)
+        tag, cached = self._lookup_result(tag, data)
         if cached is not None:
-            module_logger.info("Pod-level cache hit")
-            cached = cached.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: False})
             return tag, cached
 
         tag, output = await self._function_pod.async_process_data(
