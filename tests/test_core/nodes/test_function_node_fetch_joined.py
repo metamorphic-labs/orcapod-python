@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pyarrow as pa
 import pytest
 
@@ -111,6 +113,45 @@ class TestFetchJoinedRecords:
         assert result is not None
         assert result.table.num_rows == 1
         assert result.table.column(INSTANCE_ID_COL)[0].as_py() == instance_id_0
+
+    @pytest.mark.parametrize("requested", [(0, 2), (2, 0), (1, 2), (2, 1, 0)])
+    def test_several_instance_ids_return_exactly_their_rows(self, requested):
+        """Several instance ids, in more than one order, return those rows only."""
+        table = pa.table(
+            {
+                "key": pa.array(["a", "b", "c"], type=pa.large_string()),
+                "part": pa.array([1, 2, 3], type=pa.int64()),
+                "value": pa.array([1, 2, 3], type=pa.int64()),
+            }
+        )
+        src = ArrowTableSource(
+            table,
+            tag_columns=["key", "part"],
+            tag_only_columns=True,
+            infer_nullable=True,
+        )
+        # The protocol's declared members are wider than the class states them
+        # (the fixtures above are in the baseline for the same call).
+        function: Any = PythonDataFunction(double_value, output_keys="result")
+        pod = FunctionPod(function)
+        node = FunctionJobNode(
+            pod,
+            src,
+            pipeline_database=InMemoryArrowDatabase(),
+            result_database=InMemoryArrowDatabase(),
+        )
+        pairs = list(node._input_stream.iter_data())
+        for tag, data in pairs:
+            node.execute_data(tag, data)
+        ids = [node.compute_instance_id(tag, data) for tag, data in pairs]
+        assert len(set(ids)) == 3
+
+        result = node._fetch_joined_records(instance_ids=[ids[i] for i in requested])
+        assert result is not None
+        found = cast("list[bytes]", result.table.column(INSTANCE_ID_COL).to_pylist())
+        assert sorted(found) == sorted(ids[i] for i in requested)
+        keys = cast("list[str]", result.table.column("key").to_pylist())
+        assert sorted(keys) == sorted("abc"[i] for i in requested)
 
     def test_empty_instance_ids_returns_zero_rows(self, executed_node):
         """Passing instance_ids=[] returns a 0-row table, not None."""

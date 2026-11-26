@@ -301,6 +301,26 @@ def test_a_trace_over_the_source_finds_the_record_of_the_rows_own_instance(
     stored = first.get_all_records()
     assert stored is not None and stored.num_rows == 6
 
+    # The stored instance id of every record id, read from the pipeline table.
+    (path,) = [p for p in database.list_sources() if p[-1] == "pdb_v2"]
+    pipeline_rows = database.get_all_records(path)
+    assert pipeline_rows is not None
+    instance_of_record = {
+        ContentHash.from_prefixed_digest(
+            record
+        ).to_string(): ContentHash.from_prefixed_digest(instance).to_string()
+        for record, instance in zip(
+            cast(
+                "list[bytes]", pipeline_rows.column("__pipeline_record_id").to_pylist()
+            ),
+            cast(
+                "list[bytes]",
+                pipeline_rows.column("__pipeline_instance_id").to_pylist(),
+            ),
+        )
+    }
+    assert len(instance_of_record) == 6
+
     records: list[set[str]] = []
     for index, job in enumerate(jobs):
         node: Any = job.nodes["f"]
@@ -321,8 +341,9 @@ def test_a_trace_over_the_source_finds_the_record_of_the_rows_own_instance(
             for tag, data in node._input_stream.iter_data()
         }
         assert len(held) == 3
+        assert {instance_of_record[record] for record in found} == held
     assert records[0].isdisjoint(records[1])
-    (root,) = jobs[0].nodes["f"].trace({"k": 2, "j": 4}, "y").roots  # pyright: ignore[reportAttributeAccessIssue]
+    (root,) = jobs[0].nodes["f"].trace({"k": 2, "j": 4}, "y").roots  # pyright: ignore[reportAttributeAccessIssue]  # job.nodes is typed by the node protocol; "f" is a function node
     assert root.value == 12
 
 

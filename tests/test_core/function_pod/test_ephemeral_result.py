@@ -10,7 +10,6 @@ import pytest
 
 from orcapod.channels import Channel
 from orcapod.core.data_function import PythonDataFunction
-from orcapod.core.datagrams import Data, Tag
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes import FunctionNode
 from orcapod.core.nodes.function_node import FunctionJobNode
@@ -379,25 +378,33 @@ class TestBulkResolution:
         vals = {tag.as_dict()["id"]: data.as_dict()["result"] for tag, data in results}
         assert vals == {0: 20, 1: 40}
 
-    def test_persistent_result_outcompetes_ephemeral(self):
-        """Persistent result wins when both persistent and ephemeral rows share the same entry_id.
+    @pytest.mark.parametrize("later", ["persistent", "ephemeral"])
+    def test_of_two_records_of_one_instance_the_one_recorded_last_wins(self, later):
+        """A persistent and an ephemeral record of one instance: the later one is read.
 
-        Verifies the anti-join priority merge in ``_fetch_joined_records``:
-        when both ``persistent_df`` and ``ephemeral_df`` have a row for the same
-        ``RECORD_ID_COL`` value, the ephemeral row is excluded by anti-join,
-        and the persistent result is returned (not recomputed).
+        Among the records of one instance, the one recorded last
+        (``__recorded_at``) is the current one, whichever database holds its
+        result. The two results have the same value and different ids, so the
+        id of the result read back says which record won. Nothing is computed
+        again.
 
-        Because ``add_pipeline_record`` with ``skip_cache_lookup=True`` deduplicates
-        at the DB level, constructing this scenario requires direct DB manipulation:
-        - write the persistent row normally
-        - ``flush()`` pipeline_db so it moves to committed tables (not pending)
-        - insert the ephemeral row via ``add_record(skip_duplicates=False)`` — succeeds
-          because the committed row is not in ``_pending_record_ids``
+        The node's writer records one instance once per result, so the second
+        record is written through the database: a valid record of the same
+        instance (a new result id, the record id made from the two, the row key
+        made from the node and the record id), one minute before or after the
+        first.
         """
-        import pyarrow as pa
-        from orcapod.system_constants import constants
+        import datetime
 
-        RECORD_ID_COL = "__row_key"  # the name the row key is read under here
+        import pyarrow as pa
+
+        from orcapod.contexts import get_default_context
+        from orcapod.core import row_ids
+        from orcapod.system_constants import constants
+        from orcapod.types import ContentHash
+
+        ROW_KEY = "__row_key"  # the name the row key is read under here
+        hasher = get_default_context().arrow_hasher
 
         call_count = {"n": 0}
 
@@ -418,75 +425,67 @@ class TestBulkResolution:
         )
         node.set_ephemeral_database(ephemeral_store)
 
-        # Step 1: Write the persistent result (IS_EPHEMERAL=False)
-        node.execute(stream)
+        # The persistent record, written by the node.
+        ((_, persistent_output),) = list(node.execute(stream).iter_data())
         assert call_count["n"] == 1
-
-        # Step 2: Write a real result to ephemeral_store so the ephemeral inner-join
-        # produces a row (this makes ephemeral_df.height > 0, triggering the anti-join branch).
-        # This computation increments call_count — capture it here for the later assertion.
-        tag_obj = Tag({"id": 0})
-        data_obj = Data({"x": 10})
-        _, eph_output = node._ephemeral_cached_pod.process_data(tag_obj, data_obj)
-        assert eph_output is not None
-        eph_data_record_id = eph_output.datagram_uuid
-        count_after_setup = call_count["n"]  # 2: once from step 1, once from this call
-
-        # Step 3: Flush pipeline_db — moves the persistent row from _pending to _tables
-        # After this, _pending_record_ids is cleared for this path
         pipeline_db.flush()
-
-        # Step 4: Get the committed row and its entry_id bytes
         existing = pipeline_db.get_all_records(
-            node._versioned_pipeline_path,
-            record_id_column=RECORD_ID_COL,
+            node._versioned_pipeline_path, record_id_column=ROW_KEY
         )
         assert existing is not None and existing.num_rows == 1
-        entry_id_bytes = existing[RECORD_ID_COL][0].as_py()
-
-        # Step 5: Build an ephemeral copy of the row with IS_EPHEMERAL=True and the
-        # ephemeral_store's data_record_id
-        row_without_id = existing.drop([RECORD_ID_COL])
-        eph_col_idx = row_without_id.schema.get_field_index(constants.IS_EPHEMERAL_COL)
-        rid_col_idx = row_without_id.schema.get_field_index(constants.DATA_RECORD_ID)
-        ephemeral_row = row_without_id.set_column(
-            eph_col_idx,
-            constants.IS_EPHEMERAL_COL,
-            pa.array([True], type=pa.bool_()),
-        )
-        ephemeral_row = ephemeral_row.set_column(
-            rid_col_idx,
-            constants.DATA_RECORD_ID,
-            pa.array([eph_data_record_id.bytes], type=pa.large_binary()),
+        persistent_result_id = uuid.UUID(
+            bytes=existing[constants.DATA_RECORD_ID][0].as_py()
         )
 
-        # Step 6: Insert the ephemeral row with the SAME entry_id, skip_duplicates=False.
-        # This succeeds because the flushed row is in _tables (not _pending_record_ids).
+        # A result of the same input in the ephemeral store, with its own id.
+        tag_obj, data_obj = next(iter(stream.iter_data()))
+        _, eph_output = node._ephemeral_cached_pod.process_data(tag_obj, data_obj)
+        assert eph_output is not None
+        ephemeral_result_id = eph_output.datagram_uuid
+        assert ephemeral_result_id != persistent_result_id
+        count_after_setup = call_count["n"]
+
+        # The ephemeral record of the same instance.
+        instance = ContentHash.from_prefixed_digest(
+            existing["__pipeline_instance_id"][0].as_py()
+        )
+        record = row_ids.record_id(hasher, instance, ephemeral_result_id)
+        recorded = existing["__recorded_at"][0].as_py()
+        shift = datetime.timedelta(minutes=1 if later == "ephemeral" else -1)
+        ephemeral_row = existing.drop([ROW_KEY])
+        for column, value in {
+            constants.IS_EPHEMERAL_COL: True,
+            constants.DATA_RECORD_ID: ephemeral_result_id.bytes,
+            "__pipeline_record_id": record.to_prefixed_digest(),
+            "__recorded_at": recorded + shift,
+        }.items():
+            index = ephemeral_row.schema.get_field_index(column)
+            field = ephemeral_row.schema.field(index)
+            ephemeral_row = ephemeral_row.set_column(
+                index, field, pa.array([value], type=field.type)
+            )
         pipeline_db.add_record(
             node._versioned_pipeline_path,
-            entry_id_bytes,
+            row_ids.pipeline_row_key(node.content_hash(), record),
             ephemeral_row,
-            skip_duplicates=False,
         )
-
-        # Now pipeline_db has two rows for the same entry_id:
-        #   IS_EPHEMERAL=False → persistent result (result=20)
-        #   IS_EPHEMERAL=True  → ephemeral result (result=20, same value but different store)
-        both = pipeline_db.get_all_records(
-            node._versioned_pipeline_path,
-            record_id_column=RECORD_ID_COL,
-        )
+        pipeline_db.flush()
+        both = pipeline_db.get_all_records(node._versioned_pipeline_path)
         assert both is not None and both.num_rows == 2
+        assert len(set(both["__pipeline_instance_id"].to_pylist())) == 1
+        assert len(set(both["__pipeline_record_id"].to_pylist())) == 2
 
-        # Step 7: Clear in-memory cache to force _fetch_joined_records lookup
-        node._cached_output_datas.clear()
-
-        # The anti-join should exclude the ephemeral row (entry_id clash with persistent row),
-        # returning only the persistent result. No recomputation.
-        results = list(node.execute(stream).iter_data())
-        assert len(results) == 1
-        assert results[0][1].as_dict()["result"] == 20
-        # call_count did not increase — persistent hit from anti-join merge, no recomputation
+        # A new node over the same stores reads the record recorded last.
+        reader = FunctionJobNode(
+            function_pod=pod,
+            input_stream=stream,
+            pipeline_database=pipeline_db,
+        )
+        reader.set_ephemeral_database(ephemeral_store)
+        ((_, read),) = list(reader.execute(stream).iter_data())
+        assert read.as_dict()["result"] == 20
+        expected = ephemeral_result_id if later == "ephemeral" else persistent_result_id
+        assert read.datagram_uuid == expected
         assert call_count["n"] == count_after_setup
 
 

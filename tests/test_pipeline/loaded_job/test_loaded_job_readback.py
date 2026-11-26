@@ -549,9 +549,35 @@ def test_newer_unavailable_result_does_not_expose_old_persistent_result(
     (table_path,) = [p for p in store.list_sources() if p[-1] == "pdb_v2"]
     records = store.get_all_records(table_path, record_id_column="__rid")
     assert records is not None
-    # Public database writes reproduce historical recomputations without executing a pod.
+    # Public database writes reproduce historical recomputations without executing a pod:
+    # each is a valid record of its instance, with a new result id, the record id made
+    # from the two and the row key made from the node and the record id.
+    from orcapod.contexts import get_default_context
+    from orcapod.core import row_ids
+    from orcapod.types import ContentHash
+
+    hasher = get_default_context().arrow_hasher
+    result_ids = [uuid.uuid4() for _ in range(records.num_rows)]
+    record_ids = [
+        row_ids.record_id(hasher, ContentHash.from_prefixed_digest(instance), result)
+        for instance, result in zip(
+            cast("list[bytes]", records.column("__pipeline_instance_id").to_pylist()),
+            result_ids,
+        )
+    ]
     for column, values in {
-        "__rid": [uuid.uuid4().bytes for _ in range(records.num_rows)],
+        "__rid": [
+            row_ids.pipeline_row_key(ContentHash.from_prefixed_digest(node), record)
+            for node, record in zip(
+                cast(
+                    "list[bytes]",
+                    records.column(constants.NODE_CONTENT_HASH_COL).to_pylist(),
+                ),
+                record_ids,
+            )
+        ],
+        "__pipeline_record_id": [r.to_prefixed_digest() for r in record_ids],
+        constants.DATA_RECORD_ID: [r.bytes for r in result_ids],
         constants.IS_EPHEMERAL_COL: [True] * records.num_rows,
         "__recorded_at": [
             recorded + datetime.timedelta(minutes=1)

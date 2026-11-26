@@ -272,11 +272,26 @@ class TestFunctionNodeExecuteData:
         assert all_records.num_rows >= 1
 
     def test_execute_data_second_call_same_input_is_one_record(self, node):
+        """``execute_data`` called twice with one input gives one pipeline record."""
+        tag = Tag({"id": 0})
+        data = Data({"x": 3})
+        _, first = node.execute_data(tag, data)
+        _, second = node.execute_data(tag, data)
+        assert first.as_dict() == second.as_dict()
+        db = node._pipeline_database
+        db.flush()
+        all_records = db.get_all_records(node._versioned_pipeline_path)
+        assert all_records is not None
+        assert all_records.num_rows == 1
+
+    def test_process_data_internal_second_call_same_input_is_one_record(self, node):
         """The same input processed twice gives one pipeline record (ITL-1471).
 
-        The second call takes the stored result, so its record id (instance id
-        and result id) is the first call's, and the write is skipped. Under the
-        recomputation index (ITL-508) this wrote a second row.
+        About ``_process_data_internal``, the step below the node's in-memory
+        cache: the second call reaches the pipeline writer again. It takes the
+        stored result, so its record id (instance id and result id) is the first
+        call's, and the write is skipped. Under the recomputation index (ITL-508)
+        this wrote a second row.
         """
         tag = Tag({"id": 0})
         data = Data({"x": 3})
