@@ -127,6 +127,33 @@ def _compact(rows: "pa.Table") -> "pa.Table":
     return pa.Table.from_arrays(columns, schema=rows.schema)
 
 
+def _merged(held: _KeptPreview, new: _KeptPreview) -> _KeptPreview:
+    """Return one record of ``held`` and ``new``, two reads under one key: the larger
+    rows, with every count either knows that still holds for them.
+
+    Both reads are of one version, condition and limit, so the rows of the smaller are
+    the first rows of the larger. A count is ``None``, exact (at most its
+    ``counted_to``), or "more than ``counted_to``"; an exact count holds for any rows,
+    and a "more" count for rows whose bound is no larger.
+    """
+    larger, smaller = (
+        (held, new)
+        if held.complete
+        and not new.complete
+        or held.complete == new.complete
+        and held.asked >= new.asked
+        else (new, held)
+    )
+    if larger.table_rows is not None or smaller.table_rows is None:
+        return larger
+    if (
+        smaller.table_rows <= smaller.counted_to
+        or smaller.counted_to >= larger.counted_to
+    ):
+        return dataclasses.replace(larger, table_rows=smaller.table_rows)
+    return larger
+
+
 class _Head(NamedTuple):
     """The first rows of a source, and what is known of how many rows it reads.
 
@@ -1206,10 +1233,14 @@ class SpiralDBTableSource(RootSource):
     def _keep(self, kept: _KeptPreview) -> None:
         """Keep ``kept`` as the source's preview while the source is open and still
         reads its version, condition and limit: a late read of an older version never
-        replaces a newer record."""
+        replaces a newer record, and a record of the same key never discards what the
+        kept one knows (``_merged``)."""
         with self._connection_lock:
             current = (self._asof, self._condition, self._limit)
             if not self._closed and current == kept.key:
+                held = self._kept_preview
+                if held is not None and held.key == kept.key:
+                    kept = _merged(held, kept)
                 self._kept_preview = kept
 
     def _count_bound(self, shown: int) -> int | None:
