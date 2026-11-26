@@ -389,6 +389,39 @@ def test_a_filter_applied_here_comes_before_the_limit(project: Any, limit: int) 
         assert found == [1, 3, 5, 7][:limit]
 
 
+@pytest.mark.parametrize("limit", [None, 1, 3])
+@pytest.mark.parametrize(
+    "values",
+    [(1.0, 2.0), (2.0, 1.0), (2.0, 2.0)],
+    ids=["1 then 2", "2 then 1", "2 twice"],
+)
+def test_every_equality_applied_here_holds(
+    project: Any, values: tuple[float, float], limit: int | None
+) -> None:
+    """CodeRabbit on PR 574 (connector:550): two equalities of one ``float16`` column
+    are both applied here, so different values read no row (the last one used to
+    replace the first), and equal values read that value's rows."""
+    rows = pa.table(
+        {
+            "k": list(range(8)),
+            "h": pa.array([1.0, 2.0] * 4, pa.float64()).cast(pa.float16()),
+            "s": ["x", "x", "y", "x"] * 2,
+        }
+    )
+    project.create_table("default.half", key_schema=[("k", pa.int64())]).write(rows)
+    first, second = values
+    for where in (
+        Condition.of(Condition.of(h=first), Condition.of(h=second)),
+        Condition.of(Condition.of(h=first), Condition.of(s="x", h=second)),
+    ):
+        batches = SpiralDBConnector("p").scan_batches("half", where=where, limit=limit)
+        found = [k for b in batches for k in b.column("k").to_pylist()]
+        if first != second:
+            assert found == []
+        else:
+            assert found == [1, 3, 5, 7][:limit]
+
+
 # --------------------------------------------------------------------------------- counts
 
 

@@ -545,7 +545,8 @@ class SpiralDBTable:
         table = self._at(asof)
         reading = self._reading(table)
         predicate = None
-        local: dict[str, object] = {}
+        # Every equality compared here, in the order given: two of one column both hold.
+        local: list[tuple[str, object]] = []
         for term in _scan_terms(where):
             column, value = term.path.column, term.value
             column_type = reading.found.field(column).type
@@ -559,7 +560,7 @@ class SpiralDBTable:
                 # match the float32 nearest to it; a comparison of the values does not.
                 return
             if literal is None:
-                local[column] = value
+                local.append((column, value))
                 continue
             equals = sp.eq(sp.column(column), literal)
             predicate = equals if predicate is None else sp.and_(predicate, equals)
@@ -578,7 +579,7 @@ class SpiralDBTable:
                 if batch is None:
                     return
                 batch = reading.prepare(batch)
-                for column, value in local.items():
+                for column, value in local:
                     batch = batch.filter(_equals(batch.column(column), value))
                 if local and left is not None:
                     batch = batch.slice(0, left)

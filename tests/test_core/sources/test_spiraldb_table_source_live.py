@@ -171,12 +171,18 @@ def test_tags_as_data_gives_each_unit_its_spike_times_in_time_order():
 
 
 def _one_unit() -> tuple[SpiralDBTableSource, list[Any]]:
-    """Return a source on the first unit's rows, and that unit's sorted timestamps."""
+    """Return a source on the first unit's rows, and that unit's sorted timestamps.
+
+    The unit is every key column of the first row but ``timestamp`` (CodeRabbit on
+    PR 574): ``unit_id`` alone can name units of several sessions or probes, whose
+    timestamps the scan reads one group after another, not in one sorted run.
+    """
     first = SpiralDBTableSource(PROJECT, "spike_event", limit=1, tag_only_columns=True)
-    unit_id = first.as_table().column("unit_id")[0].as_py()
+    row = first.as_table().to_pylist()[0]
+    unit_key = {c: row[c] for c in first.keys()[0] if c != "timestamp"}
     unit = SpiralDBTableSource(
         PROJECT, "spike_event", max_rows=None, tag_only_columns=True
-    ).where(unit_id=unit_id)
+    ).where(unit_key)
     times: list[Any] = sorted(
         t for t in unit.as_table().column("timestamp").to_pylist() if t is not None
     )
