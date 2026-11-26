@@ -634,14 +634,21 @@ class SpiralDBConnector:
     ) -> None:
         self._project_id = project_id
         self._dataset = dataset
-        self._overrides = overrides
+        # A copy, so that what is saved and checked stays the address the client was
+        # made with, whatever the caller does with theirs.
+        self._overrides = None if overrides is None else dict(overrides)
         self._closed = False
-        self._client = _new_client(overrides)
+        self._client = _new_client(self._overrides)
         self._pid = os.getpid()
         # Shared by every connector on this client (``share_client``).
         self._counts: dict[tuple[str, str], tuple[int, bool]] = {}
-        client = self._client
-        self._schemas = SchemaTable(
+        self._schemas = self._new_schema_table()
+
+    def _new_schema_table(self) -> SchemaTable:
+        """Return a ``SchemaTable`` of this connector's dataset, read through its client,
+        that has read nothing yet."""
+        client, project_id, dataset = self._client, self._project_id, self._dataset
+        return SchemaTable(
             project_id,
             dataset,
             lambda: _open_keyed_table(client, project_id, dataset, SCHEMA_TABLE),
@@ -658,6 +665,19 @@ class SpiralDBConnector:
         """Return an independently closable connector in the same SDK client scope."""
         self._require_open()
         return copy(self)
+
+    def _for_source(self) -> SpiralDBConnector:
+        """Return ``share_client()`` for a source that is given this connector (ITL-1457).
+
+        Only the client is shared. What one source counted is not taken as counted by
+        another, and each source reads the schema table as a source that makes its own
+        connector does, so a connector that already read a version skips no call and no
+        check of it (no refusal is missed).
+        """
+        shared = self.share_client()
+        shared._counts = {}
+        shared._schemas = shared._new_schema_table()
+        return shared
 
     def _qualified(self, table_name: str) -> str:
         """Return ``"<project>/<dataset>/<table>"``, the table as errors name it."""
@@ -1077,7 +1097,7 @@ class SpiralDBConnector:
             "connector_type": "spiraldb",
             "project_id": self._project_id,
             "dataset": self._dataset,
-            "overrides": self._overrides,
+            "overrides": None if self._overrides is None else dict(self._overrides),
         }
 
     @classmethod
