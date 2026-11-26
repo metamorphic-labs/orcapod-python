@@ -3287,8 +3287,9 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         function of its value (``Data.source_info_table``: a null is a
         ``large_string`` null, a list a list), so rows whose tokens of one column
         differ in kind (a list token and a string or null token) cannot share a
-        table. The types are those of the stored table, read once, and of the
-        rows this node recorded since.
+        table. The types are those of the stored table (read once, by
+        ``_preflight_pipeline_write_schema``) and of the rows this node recorded
+        since.
 
         Args:
             tokens: The row's source-info columns, as it is about to be recorded.
@@ -3296,17 +3297,12 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         Raises:
             InputValidationError: Naming the column and both types.
         """
+        # The stored table's types were read by the preflight, with its one read of
+        # the table's schema.
+        self._preflight_pipeline_write_schema()
         known = self._token_column_types
         if known is None:
-            known = {}
-            database = self._require_pipeline_database()
-            stored = database.get_table_schema(self._versioned_pipeline_path)
-            for field in stored or ():
-                if field.name.startswith(constants.SOURCE_PREFIX):
-                    known[field.name] = arrow_utils.normalize_to_large_types(
-                        field.type, keep_null=True
-                    )
-            self._token_column_types = known
+            known = self._token_column_types = {}
         for field in tokens.schema:
             row_type = arrow_utils.normalize_to_large_types(field.type, keep_null=True)
             recorded = known.setdefault(field.name, row_type)
@@ -3332,6 +3328,13 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         existing = database.get_table_schema(path)
         if existing is not None:
             self._check_pipeline_write_schema(database, path, existing)
+        # The type of each token column the table holds, for
+        # ``_require_one_type_per_token_column``.
+        self._token_column_types = {
+            field.name: arrow_utils.normalize_to_large_types(field.type, keep_null=True)
+            for field in existing or ()
+            if field.name.startswith(constants.SOURCE_PREFIX)
+        }
         self._pipeline_preflight_checked = True
 
     def _check_pipeline_write_schema(
