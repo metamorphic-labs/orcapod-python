@@ -44,7 +44,11 @@ from orcapod.pipeline.run_summary import (
     run_node_summaries,
     warn_row_failures,
 )
-from orcapod.pipeline.source_consistency import require_consistent_sources
+from orcapod.pipeline.source_consistency import (
+    invocation_source_uses,
+    require_consistent_sources,
+    root_source_uses,
+)
 from orcapod.protocols import core_protocols as cp
 from orcapod.databases.utils import as_table_committing
 from orcapod.types import NodeConfig
@@ -56,6 +60,8 @@ if TYPE_CHECKING:
     from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
     from orcapod.pipeline.execution_context import ExecutionContext
     from orcapod.pipeline.graph import Pipeline
+    from orcapod.pipeline.pod_invocation import PodInvocation
+    from orcapod.pipeline.source_consistency import SourceUse
     from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
     from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
@@ -193,6 +199,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # hash; avoids name collisions when multiple concrete sources share
         # the same class name (e.g. two ArrowTableSource objects).
         self._sources_by_hash: dict[str, cp.StreamProtocol] = {}
+        self._rebound_source_keys: set[str] = set()
         self._has_run: bool = False
         # True only while the last run started has finished and committed its writes:
         # what the database then holds for each node is what that run left (ITL-1043).
@@ -219,6 +226,29 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         )
         if exc_type is None and self._auto_compile:
             self.compile()
+
+    def _source_uses(self, extra: PodInvocation | None = None) -> Iterator[SourceUse]:
+        """Use current bindings for history and check new inputs as supplied."""
+        bound_leaves = {
+            key: slot
+            for key in self._rebound_source_keys
+            if isinstance(slot := self._persistent_node_map.get(key), SourceJobNode)
+        }
+        recorded = super()._source_uses()
+        if bound_leaves:
+            yield from root_source_uses(recorded, bound_leaves=bound_leaves)
+        else:
+            yield from recorded
+        if extra is not None:
+            yield from invocation_source_uses(extra)
+
+    def _source_node_from_recording(self, key: str) -> SourceJobNode:
+        """Preserve an explicit binding when recompiling its slot."""
+        if key in self._rebound_source_keys:
+            slot = self._persistent_node_map.get(key)
+            if isinstance(slot, SourceJobNode):
+                return self.source_node_class.from_stream(slot)
+        return self.source_node_class.from_stream(self._source_streams[key])
 
     def compile(self) -> None:
         """Compile recorded invocations into a frozen DAG of job nodes.
@@ -549,6 +579,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             for h, job_node in (self._persistent_node_map or {}).items():
                 if isinstance(job_node, SourceJobNode) and job_node.name in sources:
                     job_node.bound_source = sources[job_node.name]
+                    self._rebound_source_keys.add(h)
                     self._sources_by_hash[h] = sources[job_node.name]
                     # Also index by schema-based hash (matches blueprint pipeline keys).
                     schema_hash = job_node.as_node().content_hash().to_string()
@@ -1304,10 +1335,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         # --- Build hash-keyed OrcaDAG for topological ordering + exclusion ---
         # A caller can change a slot or proxy directly after binding the job.
-        require_consistent_sources(
+        source_uses = [
             (f"node {node.label!r}", node)
             for node in self._persistent_node_map.values()
-        )
+        ]
+        require_consistent_sources(source_uses)
         hash_dag: OrcaDAG[str] = OrcaDAG()
         for u, v in self._graph_edges:
             hash_dag.add_edge(u, v)
@@ -1397,6 +1429,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # Every source first takes in any new data, moving its modified time, before
         # the state rule judges any node (ITL-1102).
         unchecked = check_sources(exec_dag.nodes())
+        # Refresh can replace cached derived rows after their initial comparison.
+        require_consistent_sources(source_uses)
         # A restricted source under an aggregation is allowed, and said (ITL-1218).
         warn_restricted_aggregation(exec_dag)
         # The state rule (ITL-1095): a node that holds a current run is not run again.

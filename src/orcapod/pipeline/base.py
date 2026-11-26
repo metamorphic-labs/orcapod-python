@@ -398,6 +398,10 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         for stream in self._source_streams.values():
             yield f"source {stream.label!r}", stream
 
+    def _source_node_from_recording(self, key: str) -> Any:
+        """Create the source node for a recorded leaf."""
+        return self.source_node_class.from_stream(self._source_streams[key])
+
     # ------------------------------------------------------------------
     # Diagram (ITL-1197)
     # ------------------------------------------------------------------
@@ -538,7 +542,7 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         # 1. Resolve source nodes in hash order, then insert them by their slot
         # labels. The original stream hash breaks ties between identical labels.
         sources = [
-            (h, source_node_cls.from_stream(self._source_streams[h]))
+            (h, self._source_node_from_recording(h))
             for h in sorted(self._source_streams.keys() - self._invocation_lut.keys())
         ]
         node_map: dict[str, Any] = dict(

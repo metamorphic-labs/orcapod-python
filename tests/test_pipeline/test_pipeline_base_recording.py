@@ -15,6 +15,15 @@ from orcapod.core.operators import Join
 from orcapod.core.sources import ArrowTableSource
 from orcapod.pipeline import Pipeline
 
+from ..test_core.operators.several_items import (
+    DATA_FIRST_REVERSED,
+    MAIN,
+    P,
+    PLAIN,
+    Arrangement,
+    make_source,
+)
+
 
 def _src(tag_col: str, data_col: str) -> ArrowTableSource:
     table = pa.table(
@@ -208,41 +217,25 @@ class TestSourceNodeNaming:
         )
         assert names == ["left_input", "right_input"]
 
-    def test_same_source_id_different_schema_raises_inconsistent_source_error(self):
+    @pytest.mark.parametrize("reverse", [False, True])
+    def test_same_source_id_different_schema_raises_inconsistent_source_error(
+        self, reverse: bool
+    ) -> None:
         """Two sources with the same source_id but different schemas raise an error."""
         from orcapod.errors import InconsistentSourceError
 
-        s1 = ArrowTableSource(
-            pa.table(
-                {
-                    "key": pa.array(["a"], type=pa.large_string()),
-                    "value": pa.array([1], type=pa.int64()),
-                }
-            ),
-            tag_columns=["key"],
-            tag_only_columns=True,
+        main = make_source(MAIN, source_id="shared_id")
+        partner = make_source(
+            P,
+            Arrangement(tuple(reversed(P.tags)), DATA_FIRST_REVERSED, PLAIN),
             source_id="shared_id",
-            infer_nullable=True,
         )
-        s2 = ArrowTableSource(
-            pa.table(
-                {
-                    "key": pa.array(["a"], type=pa.large_string()),
-                    "score": pa.array(
-                        [1.0], type=pa.float64()
-                    ),  # different data column
-                }
-            ),
-            tag_columns=["key"],
-            tag_only_columns=True,
-            source_id="shared_id",
-            infer_nullable=True,
-        )
+        inputs = (partner, main) if reverse else (main, partner)
         join = Join()
         pipeline = Pipeline(name="test", auto_compile=False)
         with pytest.raises(InconsistentSourceError, match="shared_id"):
             with pipeline:
-                join(s1, s2, label="joined")
+                join(*inputs, label="joined")
 
 
 class TestRecordOperatorPodInvocation:

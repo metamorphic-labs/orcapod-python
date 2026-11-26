@@ -31,6 +31,17 @@ from orcapod.sources import (
     ListSource,
 )
 
+from ..test_core.operators.several_items import (
+    DATA_FIRST_REVERSED,
+    MIXED,
+    P,
+    PLAIN,
+    ROLES,
+    TAGS_FIRST,
+    Arrangement,
+    make_table,
+)
+
 
 @function_pod(output_keys="out")
 def increment(x: int) -> int:
@@ -45,6 +56,11 @@ def increment_again(x: int) -> int:
 @function_pod(output_keys="out")
 def both(x: int, y: int) -> int:
     return x + y
+
+
+@function_pod(output_keys="out")
+def with_pair(p1: int, p2: str) -> int:
+    return p1 + len(p2)
 
 
 @function_pod(output_keys="out")
@@ -65,6 +81,11 @@ def with_array(x: list[np.ndarray]) -> int:  # pyright: ignore[reportMissingType
 @function_pod(output_keys="out")
 def with_string(x: str) -> int:
     return len(x)
+
+
+@function_pod(output_keys="next")
+def consume_output(out: int) -> int:
+    return out * 2
 
 
 def _dict(x: int, name: str = "shared") -> DictSource:
@@ -93,42 +114,69 @@ def test_issue_reproduction(graph: type[Pipeline] | type[PipelineJob]) -> None:
     _refused(first, second, graph("conflicts"))
 
 
-@pytest.mark.parametrize("kind", ["arrow", "dict", "frame", "list"])
+@pytest.mark.parametrize("kind", ["arrow", "dict", "frame"])
+@pytest.mark.parametrize("role", ROLES)
+@pytest.mark.parametrize("reverse", [False, True])
 @pytest.mark.parametrize(
     "orchestrator", [SyncPipelineOrchestrator, AsyncPipelineOrchestrator]
 )
-def test_fixed_types(kind: str, orchestrator: type) -> None:
-    def source(x: int) -> RootSource:
-        rows = [{"t1": "a", "t2": "b", "x": x}]
-        if kind == "list":
-            return ListSource(
-                "x",
-                [x],
-                tag_function=lambda _x, _i: {"t1": "a", "t2": "b"},
-                source_id="shared",
-            )
-        rows[0]["y"] = 10
+def test_fixed_types(kind: str, role: str, reverse: bool, orchestrator: type) -> None:
+    def source(row: int, arrangement: Arrangement) -> RootSource:
+        table = make_table(P, arrangement, rows=[row])
+        tag_only = True if role == PLAIN else [P.mixed_plain] if role == MIXED else []
         if kind == "arrow":
             return ArrowTableSource(
-                pa.Table.from_pylist(rows),
-                infer_nullable=True,
-                tag_columns=["t1", "t2"],
-                tag_only_columns=True,
+                table,
+                tag_columns=arrangement.tag_order,
+                tag_only_columns=tag_only,
                 source_id="shared",
             )
         cls = DictSource if kind == "dict" else DataFrameSource
         return cls(
-            data=rows,
-            tag_columns=["t1", "t2"],
-            tag_only_columns=True,
+            data=table.to_pylist(),
+            tag_columns=arrangement.tag_order,
+            tag_only_columns=tag_only,
             source_id="shared",
         )
 
-    job = PipelineJob(database=InMemoryArrowDatabase())
-    pod = increment.pod if kind == "list" else both.pod
-    _refused(source(1), source(100), job, pod)
+    arrangements = [
+        Arrangement(P.tags, TAGS_FIRST, role),
+        Arrangement(tuple(reversed(P.tags)), DATA_FIRST_REVERSED, role),
+    ]
+    first, second = arrangements[::-1] if reverse else arrangements
+    with PipelineJob(database=InMemoryArrowDatabase()) as job:
+        with_pair.pod(source(0, first), label="fa")
+        with_pair.pod(source(0, second), label="same")
+        with pytest.raises(InconsistentSourceError, match="different rows"):
+            with_pair.pod(source(1, second), label="conflict")
+    assert set(job.function_pods) == {"fa"}
     job.run(orchestrator=orchestrator())
-    assert job.fa.as_table()["out"].to_pylist() == ([2] if kind == "list" else [11])
+    assert job.fa.as_table()["out"].to_pylist() == [8]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize(
+    "orchestrator", [SyncPipelineOrchestrator, AsyncPipelineOrchestrator]
+)
+def test_fixed_list_source(reverse: bool, orchestrator: type) -> None:
+    def source(x: int, tag_order: tuple[str, ...]) -> ListSource:
+        tags = {"t1": "a", "t2": "b"}
+        return ListSource(
+            "x",
+            [x],
+            tag_function=lambda _x, _i: {name: tags[name] for name in tag_order},
+            source_id="shared",
+        )
+
+    tags = ("t2", "t1") if reverse else ("t1", "t2")
+    with PipelineJob(database=InMemoryArrowDatabase()) as job:
+        increment.pod(source(1, tags), label="fa")
+        increment.pod(source(1, tags[::-1]), label="same")
+        with pytest.raises(InconsistentSourceError, match="different rows"):
+            increment.pod(source(100, tags[::-1]), label="conflict")
+    assert set(job.function_pods) == {"fa"}
+    job.run(orchestrator=orchestrator())
+    assert job.fa.as_table()["out"].to_pylist() == [2]
 
 
 @pytest.mark.parametrize("column", ["t1", "t2", "x", "y"])
@@ -347,6 +395,62 @@ def test_run_checks_slots_changed_outside_job_bind(orchestrator: type) -> None:
         job.run(orchestrator=orchestrator())
     assert not job.fa.as_table().num_rows
     assert not job.fb.as_table().num_rows
+
+
+@pytest.mark.parametrize(
+    "orchestrator", [SyncPipelineOrchestrator, AsyncPipelineOrchestrator]
+)
+def test_run_rechecks_derived_rows_after_refresh(orchestrator: type) -> None:
+    def origin(x: int) -> DictSource:
+        return DictSource(
+            [{"t1": "a", "t2": "b", "x": x, "y": 2}],
+            tag_columns=["t1", "t2"],
+            tag_only_columns=True,
+            source_id="origin",
+        )
+
+    def derived(source: RootSource, name: str) -> DerivedSource:
+        return DerivedSource(source, tags_as_data={"t1": "tag_value"}, source_id=name)
+
+    original = origin(1)
+    proxy = SourceProxy(
+        original.source_id,
+        original.content_hash().to_string(),
+        original.pipeline_hash().to_string(),
+        *original.output_schema(),
+    )
+    proxy.bind(original)
+    first, second = derived(original, "shared"), derived(proxy, "shared")
+    with PipelineJob(database=InMemoryArrowDatabase()) as job:
+        with_copy.pod(derived(original, "left"), label="fa")
+        with_copy.pod(derived(original, "right"), label="fb")
+
+    job.bind(sources={"left": first, "right": second})
+    proxy.bind(origin(100))
+    assert second.as_table()["x"].to_pylist() == [1]
+    with pytest.raises(InconsistentSourceError, match="different rows") as error:
+        job.run(orchestrator=orchestrator())
+    assert "slot 'left'" in str(error.value)
+    assert "slot 'right'" in str(error.value)
+    assert second.as_table()["x"].to_pylist() == [100]
+    assert job.last_run is None
+
+
+def test_additive_recording_uses_the_current_binding() -> None:
+    with PipelineJob(database=InMemoryArrowDatabase()) as job:
+        increment.pod(_dict(1), label="fa")
+
+    replacement = _dict(100)
+    job.bind(sources={"shared": replacement})
+    with job:
+        with pytest.raises(InconsistentSourceError, match="different rows"):
+            increment.pod(_dict(2), label="conflict")
+        consume_output.pod(job.fa, label="next")
+
+    assert job.nodes["shared"].bound_source is replacement
+    job.run()
+    assert job.fa.as_table()["out"].to_pylist() == [101]
+    assert job.next.as_table()["next"].to_pylist() == [202]
 
 
 def test_load_checks_schema_of_reconstructed_sources(tmp_path: Path) -> None:

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import TYPE_CHECKING
+from collections.abc import Iterable, Mapping
+from typing import TYPE_CHECKING, cast
 
 from orcapod.errors import InconsistentSourceError
 from orcapod.utils.schema_utils import arrow_schema_identity
 
 if TYPE_CHECKING:
+    from orcapod.core.nodes.source_node import SourceJobNode
     from orcapod.core.sources.base import RootSource
     from orcapod.pipeline.pod_invocation import PodInvocation
     from orcapod.pipeline.restrictions import Rebinding
@@ -29,33 +30,44 @@ def invocation_source_uses(invocation: PodInvocation) -> Iterable[SourceUse]:
         yield name, stream
 
 
-def _root_uses(
+def root_source_uses(
     uses: Iterable[SourceUse],
-    rebinding: Rebinding,
+    rebinding: Rebinding = (),
+    *,
+    bound_leaves: Mapping[str, SourceJobNode] | None = None,
 ) -> Iterable[tuple[str, RootSource]]:
-    """Walk to each source object, carrying its step or slot name."""
+    """Walk to each source object, using live bindings for replaced graph leaves."""
     from orcapod.core.nodes.source_node import SourceJobNode
     from orcapod.core.sources.base import RootSource
 
     replacements = {id(slot): source for slot, source in rebinding}
-    visited: set[int] = set()
-    pending = list(reversed(list(uses)))
+    visited: set[tuple[int, bool]] = set()
+    pending = [
+        (location, stream, bool(bound_leaves))
+        for location, stream in reversed(list(uses))
+    ]
     while pending:
-        location, stream = pending.pop()
-        if id(stream) in visited:
+        location, stream, recorded = pending.pop()
+        key = (id(stream), recorded)
+        if key in visited:
             continue
-        visited.add(id(stream))
+        visited.add(key)
+        if recorded and bound_leaves is not None:
+            slot = bound_leaves.get(stream.content_hash().to_string())
+            if slot is not None:
+                pending.append((location, slot, False))
+                continue
         if isinstance(stream, RootSource):
             yield location, stream
         elif isinstance(stream, SourceJobNode):
             bound = replacements.get(id(stream), stream.bound_source)
             if bound is not None:
-                pending.append((f"slot {stream.name!r}", bound))
+                pending.append((f"slot {stream.name!r}", bound, False))
         else:
             # Loaded nodes can have inputs that could not be reconstructed.
-            upstreams: tuple[StreamProtocol | None, ...] = stream.upstreams
+            upstreams = cast("tuple[StreamProtocol | None, ...]", stream.upstreams)
             pending.extend(
-                (location, upstream)
+                (location, upstream, recorded)
                 for upstream in reversed(upstreams)
                 if upstream is not None
             )
@@ -75,7 +87,7 @@ def require_consistent_sources(
         InconsistentSourceError: Naming the sources and remedy for a conflict.
     """
     by_id: dict[str, list[tuple[str, RootSource]]] = {}
-    for location, source in _root_uses(uses, rebinding):
+    for location, source in root_source_uses(uses, rebinding):
         by_id.setdefault(source.source_id, []).append((location, source))
 
     for source_id, group in by_id.items():
