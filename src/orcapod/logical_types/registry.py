@@ -78,6 +78,11 @@ def make_arrow_extension_type(
     and exposes it via ``get_arrow_extension_type()``. See PLT-1656 for the
     built-in implementations (``Path``, ``UPath``, ``UUID``).
 
+    A metaclass unrelated to the generated class's metaclass causes a conflict
+    when creating a subclass. Given a generated class ``Generated``, define
+    ``class CombinedMeta(type(Generated), ABCMeta): ...`` and use
+    ``metaclass=CombinedMeta`` on the subclass.
+
     Args:
         extension_name: The Arrow extension name (``ARROW:extension:name``).
         storage_type: The underlying Arrow storage type.

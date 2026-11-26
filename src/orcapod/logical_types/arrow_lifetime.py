@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import os
 import threading
 from typing import Any, cast
 
@@ -16,7 +17,17 @@ _REFERENCE_TO = ctypes.py_object
 # interruptions can also use the table.
 # A signal handler that interrupts the main thread while it holds this lock can
 # deadlock if it waits for another thread to construct an extension type.
-_LOCK = threading.RLock()
+_publication_lock = threading.RLock()
+
+
+def _reset_lock_after_fork() -> None:
+    """Give a forked child a lock that no vanished parent thread holds."""
+    global _publication_lock
+    _publication_lock = threading.RLock()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_lock_after_fork)
 
 
 def keep_for_process(extension_type: pa.ExtensionType) -> pa.ExtensionType:
@@ -58,7 +69,9 @@ class KeptInstances(type):
     that only a hook reads, and that the metadata does not hold, makes no type of its
     own: the first instance stored is returned for every such argument. That
     distinction could not survive a write and a read anyway; put it into the metadata
-    to keep it.
+    to keep it. When a subclass's ``__new__`` returns an already published instance,
+    normal Python construction can run ``__init__`` on it again, so the subclass
+    should preserve any hook state that callers expect to stay stable.
 
     The instances are per concrete class, never per family of classes: a subclass is
     another Arrow type, with its own hooks (``__arrow_ext_scalar_class__``,
@@ -89,18 +102,19 @@ class KeptInstances(type):
     If insertion fails, the prepared entry is discarded in the same way.
     """
 
-    # (id of the concrete class, Arrow identity) -> (class, owning reference).
+    # (id of the candidate's class, Arrow identity) -> (class, owning reference).
     _kept: dict[tuple[int, bytes], tuple[type, ctypes.py_object]] = {}
     # This permanent reference keeps every published entry alive through shutdown.
     _ADD_REFERENCE(_REFERENCE_TO(_kept))
 
     def __call__(cls, *args: Any, **kwargs: Any) -> Any:
-        """Return the kept instance of ``cls`` that these arguments describe."""
+        """Return the kept instance matching the constructed candidate."""
         candidate = cast(pa.ExtensionType, super().__call__(*args, **kwargs))
-        key = (id(cls), _arrow_identity(candidate))
-        prepared = (cls, _REFERENCE_TO(candidate))
+        concrete_class = type(candidate)
+        key = (id(concrete_class), _arrow_identity(candidate))
+        prepared = (concrete_class, _REFERENCE_TO(candidate))
         kept = KeptInstances._kept
-        with _LOCK:
+        with _publication_lock:
             entry = kept.setdefault(key, prepared)
         return cast(pa.ExtensionType, entry[1].value)
 

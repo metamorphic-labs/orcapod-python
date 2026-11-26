@@ -379,7 +379,8 @@ Arrow type you wrote as a class: build it with `make_arrow_extension_type`, whic
   `atexit` handlers and other cleanup, so close files and flush databases first.
 - When reading local Delta tables directly with deltalake, pass a native filesystem. Resolve
   `dt.table_uri` first: it is percent-encoded, and newer deltalake versions return a
-  `file://` URI.
+  `file://` URI. A native filesystem avoids Python filesystem cleanup at shutdown.
+  Handwritten Arrow extension types still require separate lifetime management.
 
   For example, with a small local Delta table opened as `dt`:
 

@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import copy
 import gc
+import os
 import struct
 import subprocess
 import sys
 import textwrap
 import threading
 import weakref
+from abc import ABCMeta, abstractmethod
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from ctypes import py_object
@@ -112,6 +114,7 @@ def registered() -> Iterator[Callable[[Any], Any]]:
     names: list[str] = []
 
     def register(extension: Any) -> Any:
+        """Register a type and record its name for fixture teardown."""
         pa.register_extension_type(extension)
         names.append(extension.extension_name)
         return extension
@@ -122,6 +125,7 @@ def registered() -> Iterator[Callable[[Any], Any]]:
 
 
 def _made(name: str) -> type[pa.ExtensionType]:
+    """Create a generated Arrow type over int64 storage."""
     return make_arrow_extension_type(name, pa.int64(), b"1")
 
 
@@ -658,8 +662,11 @@ def test_threads_constructing_cold_subclasses_at_once_get_one_instance_each() ->
     start = threading.Barrier(classes * callers, timeout=30)
 
     def subclass(index: int) -> type[Any]:
+        """Make a subclass that joins the barrier on its first construction."""
+
         class Cold(made):
             def __init__(self, unit: str) -> None:
+                """Wait for one cold constructor per class during the first phase."""
                 self.unit = unit
                 self.index = index
                 if unit == "together" and first_pass.is_set():
@@ -670,9 +677,11 @@ def test_threads_constructing_cold_subclasses_at_once_get_one_instance_each() ->
                 )
 
             def __arrow_ext_serialize__(self) -> bytes:
+                """Encode the unit so the two phases use distinct keys."""
                 return self.unit.encode()
 
             def __arrow_ext_scalar_class__(self) -> type[pa.ExtensionScalar]:
+                """Use a scalar that exposes which subclass supplied it."""
                 return _TaggedScalar
 
         Cold.__name__ = f"Cold{index}"
@@ -684,10 +693,13 @@ def test_threads_constructing_cold_subclasses_at_once_get_one_instance_each() ->
         together = list(pool.map(lambda cls: cls("together"), cold))
     first_pass.clear()
     assert [type(t) for t in together] == cold
-    assert [cls("together") for cls in cold] == together
+    assert all(
+        cls("together") is kept for cls, kept in zip(cold, together, strict=True)
+    )
 
     # Then many threads race to make the same cold instance of each class.
     def construct(cls: type[Any]) -> Any:
+        """Start all callers together before they race to publish each key."""
         start.wait()
         return cls("raced")
 
@@ -793,10 +805,12 @@ def test_gc_during_pin_preparation_can_wait_for_another_type(
     finished_during_gc: list[bool] = []
 
     def construct_inner() -> None:
+        """Construct the other type and record completion for the GC callback."""
         made.append(make_inner())
         finished.set()
 
     def on_gc(phase: str, _info: dict[str, int]) -> None:
+        """On the first collection, wait for a constructor on another thread."""
         if phase == "start" and not threads:
             thread = threading.Thread(target=construct_inner, daemon=True)
             threads.append(thread)
@@ -804,6 +818,7 @@ def test_gc_during_pin_preparation_can_wait_for_another_type(
             finished_during_gc.append(finished.wait(timeout=5))
 
     def collect_before_referencing(value: object) -> py_object:
+        """Collect while the outer type's owning reference is prepared."""
         if type(value) is outer_type:
             # Collect here deterministically instead of relying on the GC threshold.
             gc.callbacks.append(on_gc)
@@ -832,6 +847,7 @@ def test_reentry_during_failed_pin_preparation_keeps_one_instance(
     interrupted = False
 
     def reenter_before_referencing(value: object) -> py_object:
+        """Construct the same type once before interrupting outer preparation."""
         nonlocal interrupted
         if type(value) is extension_type and not interrupted:
             interrupted = True
@@ -942,6 +958,138 @@ def test_a_new_that_returns_the_kept_instance_adds_no_reference(order: str) -> N
         assert Returning() is kept
         assert Plain() is first[classes.index(Plain)]  # pyright: ignore[reportCallIssue]  # the synthesized class takes no arguments
     assert sys.getrefcount(kept) - before == 0
+
+
+def test_a_reused_instance_runs_its_initializer_again() -> None:
+    """Identity sharing does not freeze a reused instance's hook-only state."""
+    made = _made("test.lifetime.reinitialized")
+    created: list[Reused] = []
+
+    class Reused(made):
+        def __new__(cls, label: str) -> "Reused":
+            """Return the original object when it already exists."""
+            return created[0] if created else super().__new__(cls)
+
+        def __init__(self, label: str) -> None:
+            """Set a label that the Arrow descriptor never stores."""
+            if not created:
+                super().__init__()  # pyright: ignore[reportCallIssue]  # generated initializer
+                created.append(self)
+            self.label: str = label
+
+    first = Reused("first")
+    assert first.label == "first"
+    assert Reused("second") is first
+    assert first.label == "second"
+
+
+@pytest.mark.parametrize("parent_first", [True, False])
+def test_a_constructor_returning_a_subclass_shares_the_subclass_instance(
+    parent_first: bool,
+) -> None:
+    """The class of the candidate defines the key, even via another constructor."""
+    made = _made("test.lifetime.subclass_candidate")
+
+    class Parent(made):
+        def __new__(cls) -> "Parent":
+            """Allocate the concrete child from either entry point."""
+            return pa.ExtensionType.__new__(Child)
+
+        def __init__(self) -> None:
+            """Initialize the synthesized type without extra arguments."""
+            super().__init__()  # pyright: ignore[reportCallIssue]  # generated initializer
+
+    class Child(Parent):
+        """The concrete Arrow type allocated by both constructors."""
+
+    first, second = (Parent, Child) if parent_first else (Child, Parent)
+    winner = first()
+    assert type(winner) is Child
+    assert second() is winner
+    assert first() is winner
+
+
+def test_a_custom_metaclass_can_join_the_generated_metaclass() -> None:
+    """Composing metaclasses preserves both abstract methods and sharing."""
+    made = _made("test.lifetime.abstract")
+    generated_meta = cast(type[KeptInstances], type(made))
+
+    class CombinedMeta(generated_meta, ABCMeta):
+        """Combine the generated type's metaclass with ABCMeta."""
+
+    class Abstract(made, metaclass=CombinedMeta):  # pyright: ignore[reportImplicitAbstractClass]  # CombinedMeta includes ABCMeta
+        """An extension type that requires a label hook."""
+
+        def __init__(self) -> None:
+            """Initialize the synthesized type without extra arguments."""
+            super().__init__()  # pyright: ignore[reportCallIssue]  # generated initializer
+
+        @abstractmethod
+        def label(self) -> str:
+            """Return the hook label."""
+
+    class Concrete(Abstract):
+        """An instantiable extension type with a custom hook."""
+
+        def label(self) -> str:
+            """Return the concrete hook label."""
+            return "concrete"
+
+    with pytest.raises(TypeError, match="abstract"):
+        _ = Abstract()  # pyright: ignore[reportAbstractUsage]  # exercise ABCMeta
+    kept = Concrete()
+    assert Concrete() is kept
+    assert kept.label() == "concrete"
+
+
+_FORK_WITH_LOCK_HELD = '''
+    import os
+    import signal
+    import threading
+
+    import pyarrow as pa
+
+    from orcapod.logical_types import arrow_lifetime, make_arrow_extension_type
+
+    extension_type = make_arrow_extension_type("test.lifetime.fork", pa.int64())
+    winner = extension_type()
+    locked = threading.Event()
+    release = threading.Event()
+
+    def hold_publication_lock():
+        """Keep the lock held by a thread that will not exist in the child."""
+        with arrow_lifetime._publication_lock:
+            locked.set()
+            assert release.wait(timeout=10)
+
+    thread = threading.Thread(target=hold_publication_lock)
+    thread.start()
+    try:
+        assert locked.wait(timeout=5)
+        child = os.fork()
+        if child == 0:
+            signal.alarm(3)
+            os._exit(0 if extension_type() is winner else 1)
+        _, status = os.waitpid(child, 0)
+        assert os.waitstatus_to_exitcode(status) == 0, status
+    finally:
+        release.set()
+        thread.join(timeout=5)
+    assert extension_type() is winner
+'''
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="fork requires POSIX")
+def test_a_child_can_construct_a_type_after_fork_with_the_lock_held() -> None:
+    """The child inherits the kept instance and gets a usable publication lock."""
+    process = subprocess.run(
+        [sys.executable, "-c", textwrap.dedent(_FORK_WITH_LOCK_HELD)],
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+    assert process.returncode == 0, process.stderr[-3000:]
 
 
 class _FailingOnce(dict):  # pyright: ignore[reportMissingTypeArgument]  # the table's own types
@@ -1172,7 +1320,7 @@ def test_a_scan_reads_the_shared_instances(tmp_path: Path) -> None:
     assert read.num_rows == 2
 
 
-_CHILD = """
+_CHILD = '''
     import asyncio
     import sys
     from dataclasses import dataclass
@@ -1183,14 +1331,26 @@ _CHILD = """
 
     @dataclass(frozen=True)
     class Reading:
+        """Two fields stored together as a logical type."""
+
         label: str
         level: int
 
-    @function_pod(output_keys=["members", "reading"])
-    def produce(i: int, name: str) -> tuple[set[bytes], Reading]:
-        return {name.encode(), str(i).encode()}, Reading(label=name, level=i)
+    work, mode, path, arrangement, output_order = sys.argv[1:]
+    if output_order == "members_first":
+        OUTPUT_KEYS = ("members", "reading")
 
-    work, mode, path, arrangement = sys.argv[1:]
+        @function_pod(output_keys=OUTPUT_KEYS)
+        def produce(i: int, name: str) -> tuple[set[bytes], Reading]:
+            """Return the set before the reading."""
+            return {name.encode(), str(i).encode()}, Reading(label=name, level=i)
+    else:
+        OUTPUT_KEYS = ("reading", "members")
+
+        @function_pod(output_keys=OUTPUT_KEYS)
+        def produce(i: int, name: str) -> tuple[Reading, set[bytes]]:
+            """Return the reading before the set."""
+            return Reading(label=name, level=i), {name.encode(), str(i).encode()}
 
     ROWS = [
         {"subject": "s2", "session": 1, "i": 3, "name": "c"},
@@ -1216,6 +1376,7 @@ _CHILD = """
     }[arrangement]
 
     def source():
+        """Build the source with the selected tag and input-column order."""
         return DictSource(
             [{column: row[column] for column in COLUMNS} for row in ROWS],
             tag_columns=TAGS,
@@ -1224,11 +1385,13 @@ _CHILD = """
         )
 
     def run(job, **options):
+        """Run the job through the selected synchronous or asynchronous path."""
         if path == "async":
             return asyncio.run(job.run_async(**options))
         return job.run(**options)
 
     def rows_of(stream):
+        """Compare rows by tag values and set members in sorted order."""
         return sorted(
             (
                 tag.as_dict()["subject"],
@@ -1255,23 +1418,27 @@ _CHILD = """
         produced = summary.nodes["produce"]
         assert (produced.reused, produced.computed, produced.failed) == (4, 0, 0), summary
     node = job.nodes["produce"]
+    assert node.keys()[1] == OUTPUT_KEYS, node.keys()
+    columns = node.as_table().column_names
+    assert tuple(column for column in columns if column in OUTPUT_KEYS) == OUTPUT_KEYS, columns
     assert rows_of(node) == EXPECTED, rows_of(node)
     assert rows_of(node.as_source()) == EXPECTED, rows_of(node.as_source())
     print("read", len(EXPECTED), flush=True)
-"""
+'''
 
 
 @pytest.mark.parametrize("path", ["sync", "async"])
 @pytest.mark.parametrize("arrangement", ["tags_first", "data_first", "mixed"])
+@pytest.mark.parametrize("output_order", ["members_first", "reading_first"])
 def test_a_process_that_read_logical_types_exits_cleanly(
-    tmp_path: Path, path: str, arrangement: str
+    tmp_path: Path, path: str, arrangement: str, output_order: str
 ) -> None:
     """Processes that run, save, load and read a job's rows exit with code 0.
 
     Four rows, two tags and two outputs of two logical types (``set[bytes]`` and a
-    dataclass), on the sync and the async job path, with the tags declared in either
-    order and the rows' columns laid out three ways: the first process computes and
-    stores them, each later one loads the saved job and reads them from the store.
+    dataclass), on the sync and the async job path, with both tag and output orders
+    and three input-column layouts. The first process stores the rows and each later
+    one loads the saved job and reads them from the store.
     """
     for mode in ["save", *["load"] * 5]:
         result = subprocess.run(
@@ -1283,6 +1450,7 @@ def test_a_process_that_read_logical_types_exits_cleanly(
                 mode,
                 path,
                 arrangement,
+                output_order,
             ],
             capture_output=True,
             text=True,
