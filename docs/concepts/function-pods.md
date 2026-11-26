@@ -871,7 +871,9 @@ Inside `job.run()`, each function node commits its results and pipeline records 
 store in batches: every `commit_every_rows` rows (default 100), when the node finishes,
 before a failed run raises, and when the job ends. Committing in batches keeps a run's time
 linear in its rows; on a `DeltaTableDatabase` each commit is one Delta version per table, so
-a 1,000-row node writes 10 versions per table instead of 1,000.
+a 1,000-row node writes 10 pipeline table versions instead of 1,000.
+In an async run, the result store can group writes differently depending on which calls
+have finished when a pipeline batch is ready to commit.
 
 ```python
 job.run(commit_every_rows=500)  # fewer, larger commits
