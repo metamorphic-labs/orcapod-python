@@ -1,7 +1,8 @@
 # Operators
 
 Operators are structural transforms that reshape [streams](streams.md). They never compute a
-data value; only the filters read data values. They join, filter, batch, group, rename, select
+data value. A few read data values: the filters, to decide which rows exist, and `Pick` and
+`Index`, to give out a value held inside a data value. They join, filter, batch, group, rename, select
 columns and add tags -- operations that affect the *structure* of the data (which rows exist, which columns are
 present, how columns are named) but never compute new values from data content. This is the
 key distinction from [function pods](function-pods.md), which do the opposite: they transform
@@ -13,7 +14,7 @@ This separation is a core Orcapod design principle:
 
 |  | Operator | Function Pod |
 |---|---|---|
-| Inspects data content | Never, except filters (see below) | Yes |
+| Inspects data content | Never, except the filters, `Pick` and `Index` (see below) | Yes |
 | Inspects / uses tags | Yes | No |
 | Can rename columns | Yes | No |
 | Adds or synthesizes data | Never (may add a tag) | Yes |
@@ -42,6 +43,11 @@ unchanged.
 The filters are the operators that read data columns: `Filter` and `PolarsFilter` evaluate
 their conditions on values, and `DropNulls` reads only whether a value is present (its
 validity), never the value. They decide which rows exist; none synthesizes a value.
+
+[`Pick` and `Index`](#pick-and-index) read data values too. `Pick` reads inside a struct or
+dict value and `Index` inside a list value, and each gives one entry out as a data column. A
+row whose value lacks the key or is too short is skipped. The value given out was already
+held in the input's data, so nothing is computed.
 
 No operator carries its inputs' meta columns: the `__`-prefixed columns, such as a cached
 function pod's `__computed`, that describe how an input row was produced. An operator's

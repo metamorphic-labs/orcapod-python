@@ -13,12 +13,19 @@ The content hash captures schema, topology, and the **identity of the sources** 
 pipeline. It is computed recursively: each element's content hash depends on its own identity
 plus the content hashes of all its upstream elements, all the way back to the sources.
 
-A source's identity is its `source_id`, its schema and its key columns (the
-`record_id_columns` that name its rows, or none when rows are named by position). The
-`source_id` is the kind of source, the version of that kind and the source's name, as in
-`csv_v1:subjects`. The Python class is not part of the identity: a subclass with the same
-`source_id` is the same source, and two kinds of source given one name differ in their
-`source_id`. What the name is depends on how the source was created:
+For an ordinary source (a table, file or database source), the identity is its `source_id`,
+its schema and its key columns (the `record_id_columns` that name its rows, or none when rows
+are named by position). The `source_id` is the kind of source, the version of that kind and
+the source's name, as in `csv_v1:subjects`. The Python class is not part of the identity: a
+subclass with the same `source_id`, schema and key columns is the same source, and two kinds
+of source given one name differ in their `source_id`.
+
+Two kinds of source have a rule of their own, so a shared `source_id` alone does not make
+two of them one source. A `DerivedSource` over a job node uses that node's content hash, and
+one with `tags_as_data` adds its mapping to the ordinary rule. A `PollingSource` uses what
+its implementation states as its identity in place of the schema.
+
+What the name is depends on how the source was created:
 
 - If you do not pass `source_id`, an in-memory source such as `DictSource` or
   `ArrowTableSource` derives it from the data, so two sources with different rows have

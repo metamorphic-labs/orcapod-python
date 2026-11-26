@@ -1024,7 +1024,9 @@ print(len({s.source_id for s in as_given}))
 ```
 
 A source given a `source_id` is an address: its content hash is built from its `source_id`
-(kind, version and name), schema and key columns, never from its rows, so changing the rows changes it only when the
+(kind, version and name), schema and key columns (a `DerivedSource` and a `PollingSource`
+have a rule of their own: see [Identity](identity.md#content_hash-recursive-source-inclusive-identity)),
+never from its rows, so changing the rows changes it only when the
 schema changes (a column of another type). This holds for `ListSource` too (developer,
 November 21, 2026, ITL-1272): its elements and its tag function enter its identity only through
 its default `source_id` and its output schema.

@@ -154,8 +154,8 @@ print(by_group.as_table().num_rows)
 ```
 
 `tag_by` changes no value. Each column you name is now a tag and is still a data column, so
-it shows in both schemas. The same works for a column that a function pod computed. A tag
-holds one value per row and no missing value, so `tag_by` refuses a list column and a column
+it shows in both schemas. The same works for a column that a function pod computed. `tag_by` takes
+a column with one value per row and no missing value: it refuses a list column and a column
 that may hold nulls; see [Adding the tag role](../concepts/data-tags.md#adding-the-tag-role-tag_by).
 
 If you know from the start that you will group or match by a column, make it a tag in the
