@@ -22,7 +22,7 @@ versions pinned in `uv.lock`.
 
 ## The checks a pull request must pass
 
-CI runs these four commands, and you can run the same ones locally:
+These four commands are the local form of what CI runs:
 
 ```bash
 uv run --with ruff ruff check .
@@ -37,8 +37,10 @@ uv run pytest tests/
   error fails the check. The existing errors are recorded in `.basedpyright/baseline.json`.
   Fix a new error, and do not regenerate the baseline to hide it.
 - **Tests.** The full suite takes a while; while you work, run the folder or file you
-  changed, for example `uv run pytest tests/test_docs/`. On a pull request CI runs the suite
-  on Python 3.13, and on `main` on 3.11, 3.12 and 3.13.
+  changed, for example `uv run pytest tests/test_docs/`. CI's own test command differs from
+  the local one: it names the Python version (3.13 on a pull request; 3.11, 3.12 and 3.13 on
+  `main`), runs in parallel with coverage, and leaves out the PostgreSQL tests, which a
+  separate job runs.
 
 Two more commands were not run while writing this page:
 
@@ -47,11 +49,12 @@ Two more commands were not run while writing this page:
   copy of the suite's memory, so use it only on a machine with cores and memory to spare,
   and not beside another heavy process.
 - **PostgreSQL integration tests.** They are skipped unless asked for:
-  `uv run pytest -m postgres --postgres`. They need a running PostgreSQL server, reached
-  through the standard `PG*` environment variables (`PGHOST`, `PGPORT`, `PGUSER`,
-  `PGPASSWORD`, `PGDATABASE`);
+  `uv run pytest -m postgres --postgres`. That command needs two things. Most of the tests
+  need a running PostgreSQL server, reached through the standard `PG*` environment variables
+  (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`);
   [the workflow that runs them](.github/workflows/run-postgres-tests.yml) shows a working
-  setup.
+  setup. The `PostgresHashCacher` tests (`tests/test_hashing/test_postgres_hash_cacher.py`)
+  start a PostgreSQL container of their own, so they need Docker.
 
 Tests drive the library through its public interface: call an operator on a stream and read
 the result through the stream's public methods.
@@ -71,10 +74,14 @@ The format and an example are in [changelog.d/README.md](changelog.d/README.md).
 
 ## Documentation
 
-The documentation is the Markdown under `docs/` (outside `docs/dev/`) and `README.md`. Every
-`python` block on those pages is executed by a test, and every line a block prints must
-appear in the block as a `# ...` comment. If a sample fails because the library changed, fix
-the page to match the code. Run the documentation tests with:
+The documentation is the Markdown under `docs/` (outside `docs/dev/`) and `README.md`. A
+test executes every `python` block of `README.md`, `docs/index.md`,
+`docs/getting-started.md`, `docs/troubleshooting.md` and the pages in `docs/concepts/`,
+`docs/reference/` and `docs/tutorial/`; blocks on other pages are not run. Every line a block
+prints must appear in the block as a `# ...` comment. A block that needs infrastructure the
+test run lacks (a PostgreSQL server, for example) carries `<!-- docs-test: skip -->` on the
+line above its fence; the marker is not for hiding a wrong sample. If a sample fails because
+the library changed, fix the page to match the code. Run the documentation tests with:
 
 ```bash
 uv run pytest tests/test_docs/
@@ -100,9 +107,21 @@ uv run python tests/test_hashing/golden/generate_golden_hashes.py --check
 ```
 
 A failing golden entry means your change moved a hash. Treat that as a bug in the change.
-Never edit or regenerate a golden file to make the test pass. If the hash is meant to
-change, stop and raise it with the maintainers: it needs their approval of each entry that
-moves. Adding new golden values is always allowed. The whole mechanism is described in
+Never edit or regenerate a golden file to make the test pass. Adding new golden values is
+always allowed.
+
+If the hash is meant to change, stop and raise it with the maintainers. What it takes
+depends on the value:
+
+- A value no release has frozen changes only with their approval of each entry that moves.
+- A value frozen in a release does not change within its data context: the change needs a
+  new data context version.
+- The values of provisional operators, sources and library value types, and of everything
+  computed downstream of them, are outside the freeze. They are pinned and checked like the
+  others, and still change only with approval, but no release freezes them and a change
+  needs no new data context.
+
+The whole mechanism is described in
 [docs/reference/golden-hashes.md](docs/reference/golden-hashes.md).
 
 ## Design documents
@@ -122,8 +141,8 @@ moves. Adding new golden values is always allowed. The whole mechanism is descri
 - Specs and plans written during development go under `docs/dev/specs/` and
   `docs/dev/plans/`. Nothing under `docs/dev/` is published on the site.
 
-Orcapod is before version 1.0 and keeps no old interface alive: change the code and every
-reference to it directly, without compatibility shims, aliases or deprecation wrappers.
+Orcapod is a greenfield project: do not add backward-compatibility shims, re-exports,
+aliases or deprecation wrappers. Change the code and update every reference directly.
 
 ## Branches, commits and pull requests
 
