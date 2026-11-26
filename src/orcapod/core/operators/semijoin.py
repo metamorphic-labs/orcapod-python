@@ -190,6 +190,11 @@ class SemiJoin(BinaryOperator):
             stacklevel=outside_orcapod_stacklevel(),
         )
 
+    def input_given_back(self, inputs: Sequence[StreamProtocol]) -> int | None:
+        """The left input, when the inputs share no tag column: every left row is
+        kept and the right input is never read (``binary_static_process``)."""
+        return None if self._checked_match_keys(*inputs) else 0
+
     def _checked_match_keys(
         self, left_stream: StreamProtocol, right_stream: StreamProtocol
     ) -> tuple[str, ...]:

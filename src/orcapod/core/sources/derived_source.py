@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import dataclasses
-from collections.abc import Collection, Mapping
+from contextlib import closing
+from collections.abc import Collection, Generator, Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -33,6 +34,12 @@ from orcapod.core.streams.base import (
     typed_arrow_schemas,
     typed_zero_row_table,
 )
+from orcapod.core.streams.preview import (
+    PreviewRequest,
+    preview_batches,
+    refuse_without_compute_all,
+    slices_of,
+)
 from orcapod.errors import InputValidationError
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
@@ -40,6 +47,7 @@ from orcapod.utils import schema_utils
 from orcapod.utils.provisional import provisional_class_name
 
 if TYPE_CHECKING:
+    from orcapod.protocols.core_protocols import StreamProtocol
     from orcapod.core.nodes.function_node import FunctionJobNode
     from orcapod.core.nodes.operator_node import OperatorJobNode
 
@@ -791,6 +799,36 @@ class DerivedSource(RootSource):
         return dataclasses.replace(
             head.for_stream(self, origin="stored"), total_rows=records.num_rows
         )
+
+    @override
+    def _preview_batches(
+        self, request: PreviewRequest
+    ) -> Generator[StreamProtocol, None, None]:
+        """This source's first rows (``preview_batches``), read without keeping them.
+
+        The rows it holds are sliced. Otherwise an origin source gives its first rows
+        through its own preview, which refuses a source that would poll or write its
+        cache when read, so nothing is polled or written. An origin job node's stored
+        rows are read whole, only with ``compute_all``. Nothing read here is kept by
+        this source.
+        """
+        self._note_provisional_identity_use()
+        if self._tags_as_data is not None and self._cached_stream is not None:
+            yield from slices_of(self._cached_stream, request)
+            return
+        if self._tags_as_data is None and self._cached_table is not None:
+            yield from slices_of(self._stream_over(self._cached_table), request)
+            return
+        if isinstance(self._origin, RootSource):
+            # The derived rows are the origin's, one for one and in order: its first
+            # rows give this source's first rows.
+            with closing(preview_batches(self._origin, request)) as batches:
+                rows = pa.concat_tables([batch.as_table() for batch in batches])
+        else:
+            refuse_without_compute_all(self, request, "reads its origin's rows whole")
+            records = self._origin_records()
+            rows = self._empty_origin_table() if records is None else records
+        yield from slices_of(self._stream_over(rows), request)
 
     def _stream_over(self, table: "pa.Table") -> ArrowTableStream:
         """Return this source's stream over the origin rows ``table``."""
