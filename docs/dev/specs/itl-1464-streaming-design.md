@@ -61,6 +61,15 @@ One mechanism holds rows that are computed but not in memory.
   cache root is `OrcapodConfig.local_cache_dir`, by default the system's temporary
   directory. **OPEN (L1)**: the default location, and whether a job's cache may live
   beside the job's database.
+- **The cache root must be on disk.** The memory promise of section 8 holds only when the
+  cache root is on storage backed by a disk. On a memory-backed file system (`tmpfs` or
+  `ramfs`, which some Linux systems mount as the temporary directory) a cache file's
+  bytes are memory however the file is read, and dropping mapped pages frees nothing: the
+  job then holds every cached row in memory, as before this design. Proposed (part of
+  L1): the default stays the system's temporary directory; where Orcapod can tell that
+  the cache root is memory-backed (Linux: the file system type of the directory), it
+  issues one warning per process naming the directory and `local_cache_dir`, and the
+  stated bound then does not apply. It never moves the cache to another place on its own.
 - **Reading.** A reader memory-maps the file. Pages of a mapped file are the operating
   system's to drop under pressure, so they are not memory the process holds: this is
   what makes "fetch the row by reference, emit it, let it go" cheap. Rows are fetched in
@@ -95,6 +104,15 @@ current run's rows, not the rows:
 - an operator node in `OFF` mode, and a side-effect node, read them from the local
   cache, where the run wrote them;
 - below the in-memory threshold, the rows are kept as today.
+
+A read from the database keeps the run's order. A database is a set of rows: the order a
+store returns them in (key order, file order) is never a result, and no stored column
+holds a position. So the reference of a function node or a `LOG`-mode operator node is
+the run's entry ids *in the order the run emitted them* (one id per row; held as rows
+are, so in the local cache above the in-memory threshold). A page read takes the ids of
+its page from that list, fetches those entries from the database, and puts them in the
+list's order before returning them. The sync read is then the emitted order (ITL-1441)
+whatever the store's own order is; nothing is added to a stored table.
 
 Every read keeps its meaning: `node.as_table()` returns the current run's rows (now read
 from the reference, memory-mapped where it is the cache), iteration yields them a batch
@@ -153,7 +171,9 @@ Decisions the issue lists:
   sync path would produce when every source has a defined read order (in-memory, CSV,
   Delta: the order given; SpiralDB and database tables: key order). A source without one
   (none today) would say "some `n` rows".
-- A preview delivers no side effect: a `SideEffectPod` in the chain is refused.
+- A preview refuses a `SideEffectPod` in the chain. That is all it enforces: it does not
+  exclude what a user function in a function pod does outside Orcapod (a write to an
+  external service). Whether a preview runs user functions is open (P2).
 
 ## 5. Batch-wise execution, per operator kind
 
@@ -163,7 +183,7 @@ join kernels). This design finishes the wiring and adds what the memory bound ne
 
 | Kind | Operators | Holds |
 |---|---|---|
-| Row by row (`ROW_BY_ROW`) | `Select*`/`Drop*` columns, `MapTags`, `MapData`, `MapColumns`, `DropNulls`, `Filter`, `PolarsFilter`, `AddTags`, `TagBy`, `Pick`, `Index` | the batch in hand |
+| Row by row (`ROW_BY_ROW`) | `Select*`/`Drop*` columns, `MapTags`, `MapData`, `MapColumns`, `DropNulls`, `Filter`, `PolarsFilter` with a predicate known to be row-wise (below), `AddTags`, `TagBy`, `Pick`, `Index` | the batch in hand |
 | Per row, user code | function pods, side-effect pods | the batch in hand; results go to the database as they are computed |
 | Probe against one small or indexed side | `SemiJoin` | a keys-only index of the right input (section 6) |
 | Joins | `Join`, `MergeJoin`, `Rejoin` | a keys-only index, section 6 |
@@ -173,11 +193,21 @@ join kernels). This design finishes the wiring and adds what the memory bound ne
 
 Notes:
 
-- `PolarsFilter` is row by row but has no async form today, so it gathers its input; it
-  gets `ROW_BY_ROW`. Its predicate is applied per batch; a predicate is an expression
-  over one row's columns (an expression that reads other rows, such as a window, is
-  already outside what the sync path's identity describes). **OPEN (B1)**: refuse
-  expressions that are not row-wise (they exist in Polars), or document.
+- `PolarsFilter` has no async form today, so it gathers its input. The sync path applies
+  the predicate to the whole table and accepts any expression, also one that reads other
+  rows (`pl.col("x") > pl.col("x").mean()`, a window, a rank): applied per batch, such a
+  predicate would keep other rows than the sync path does. So a predicate runs per batch
+  only when it is known to be row-wise, and otherwise over the whole input, as today
+  (a barrier: the same rows as the sync path, and no memory bound for that filter).
+  Nothing the sync path accepts is refused and no result changes. "Known to be row-wise"
+  is decided from the expression's tree, by a closed list of node kinds (a column, a
+  literal, comparison, boolean and arithmetic operators, null and NaN tests, `is_in` a
+  literal list, `is_between`, string predicates on a literal pattern, casts); a node not
+  on the list means the whole input. Polars offers no public test for this, so the list
+  is Orcapod's and starts short. The choice is per predicate, not per class: the
+  `ROW_BY_ROW` declaration of `PolarsFilter` is read from the instance. **OPEN (B1)**:
+  the list, and whether a filter that falls back to the whole input says so (proposed: one
+  info log naming the node kind, no warning).
 - `GroupBy` sorts its input by key and member order. Batch-wise: the input goes to the
   local cache while a keys-only index is built (the prepared key columns, the
   member-order tags, record id and source id, and the row's reference); the index is
@@ -239,6 +269,17 @@ join keeps, per row that can still match, an index entry:
   preparation), as a Polars frame, so matching stays one vectorized join per arriving
   batch with the sync path's own rule (`join._matched_pairs`); and
 - the row's reference, `(batch number, row number)`: 8 bytes.
+
+**The pairs of one match are bounded too.** The size of an arriving batch does not bound
+the number of pairs it matches: rows of the batch that share a key with many indexed rows
+give their product. So no match builds its whole pair frame at once. Before matching, the
+join counts the pairs per arriving row (the batch's keys against a count of index entries
+per key, kept beside the index: at most one count per arriving row) and cuts the batch
+into row ranges whose pairs fit a pair budget (proposed 1,048,576 pairs, 16 MiB of row
+references). One arriving row whose matches alone pass the budget is matched against
+successive ranges of that key's index entries. Each range is matched, fetched, sent and
+let go before the next, so the transient is `16 bytes × pair budget` plus one output
+batch, whatever the keys hold. **OPEN (J3)**: the pair budget.
 
 For each batch of matches the join fetches the matched rows of the other side from the
 cache by reference (one `take` per input per batch of pairs), builds the output batch
@@ -329,7 +370,8 @@ uniqueness over the key, Orcapod trusts it without the running check.
 
 | Source | Guaranteed by the store? |
 |---|---|
-| SQLite, PostgreSQL table, key = the table's primary key | yes: the database enforces it |
+| PostgreSQL table, key = the table's primary key | yes: the database enforces it (a primary key column is never null) |
+| SQLite table, key = the table's primary key | yes when every key column is declared `NOT NULL`, or is the `INTEGER PRIMARY KEY`, or the table is `WITHOUT ROWID`; otherwise no (such a column can hold NULL, and SQLite keeps rows with a NULL key apart): running check |
 | The same, key = columns of a `UNIQUE` constraint, all `NOT NULL` | yes, once the connector reads constraints (not today: running check until then) |
 | The same, `record_id_columns` given and not such a key | no: running check |
 | `DBTableSource` over a generic connector | only if the connector reports an enforced key; otherwise running check |
@@ -355,10 +397,11 @@ uniqueness over the key, Orcapod trusts it without the running check.
 
 | Case | What is held in memory | Bound |
 |---|---|---|
-| Both inputs certified unique on the join key (the tags fully overlap): 1:1 | the index of rows not yet matched; an entry is dropped the moment it matches, and both rows are emitted and let go | index × (unmatched rows). Worst case, one input arriving entirely before the other: index × max(n, m). With both inputs in key order: the out-of-order window only |
+| Both inputs certified unique on the join key (the tags fully overlap): 1:1 | the index of rows not yet matched; an entry is dropped the moment it matches, and both rows are emitted and let go | index × (unmatched rows of both inputs, while both are open). Worst case, inputs that share no key and arrive in step (sorted or not): nothing matches and both indexes are whole, index × (n + m). One input arriving entirely before the other: index × (that input), since nothing more is kept for the second once the first has closed. Inputs with the same keys arriving in step: the out-of-order window only. Without an "in tag order" certificate (J2) an unmatched entry cannot be dropped before the other input closes |
 | One input certified unique on the join key (a large table against its lookup table) | the unique side's index for the whole join; rows of the other side that arrive before the unique side has closed are indexed until then, after which each arriving row matches at most one row, is emitted and is not kept | index × (unique side) + index × (rows of the other side that arrived early). Worst case index × (n + m): still keys only |
 | Neither unique (many to many) | the index of both sides | index × (n + m). The output can be n × m rows; it is sent a batch at a time and never held |
 | Any case, a side whose other side has closed | nothing more is kept for it (the kernels' present rule) | |
+| Any case, while one range of pairs is matched | the pairs of that range (two row references each) and its output batch | 16 bytes × pair budget + one output batch, whatever the keys hold |
 
 In every case the memory is keys only, so it is below the full size of one input by the
 ratio of row size to key size (here 120 bytes against 70 to 100, without tokens; 4.2 KiB
@@ -370,7 +413,9 @@ rows between the two read positions. That needs a second certificate, "in tag or
 which a source can give (a SpiralDB or database scan in key order) and which few
 operators preserve on the async path, where arrival order is not a result. **OPEN (J2)**:
 proposed not in the first version; the 1:1 early release already gives the window bound
-whenever the inputs happen to arrive in step.
+whenever the inputs hold the same keys and happen to arrive in step. It gives nothing for
+keys that never match: only this certificate would let a join drop an entry whose key
+the other input has passed.
 
 **Three or more inputs.** `Join` folds pairwise in its canonical order, as today; each
 step is one of the cases above, and a step's output goes to the next step as batches,
@@ -394,8 +439,12 @@ back-pressure, and why the worst case counts both sides.
 - A measurement in `measure.py` style for each case (1:1 in step, 1:1 one side first,
   unique side small, many to many), at two sizes a factor of 10 apart, recording peak
   resident memory less mapped file pages, and the peak of the Arrow pool: the peak must
-  grow as the index does (key bytes × rows), not as the rows do, and a 10 times larger
-  non-indexed side must not move it.
+  grow as the index does (key bytes × rows), not as the rows do. For "unique side small",
+  the arrival order is fixed by the test: with the unique side read to its end and closed
+  before the first row of the other side arrives, a 10 times larger other side must not
+  move the peak; with the other side arriving entirely first (the early-arrival bound),
+  the peak must grow by the index of those rows and by no more. 1:1 has a third run,
+  inputs that share no key arriving in step, whose peak must be the index of both.
 - The differential of ITL-1347 for results: async equals sync as a set of rows, sync
   equals pinned `main` byte for byte.
 - A violation test per certificate rule: a source that claims a key and repeats it late
@@ -445,14 +494,20 @@ With sections 2 to 7 in place, for a job run by the async orchestrator:
 | A row-by-row operator, a function pod | the batch in hand |
 | A channel between two nodes | its buffered batches (a fixed number) |
 | `GroupBy` | its keys-only index, and one group |
-| A join | its keys-only index (section 6) |
-| A job node after the run | a reference (a file name or a set of stored entries) |
+| A join | its keys-only index (section 6), and the pairs of one range being matched (at most the pair budget) |
+| A job node after the run | a reference (a file name, or the run's entry ids in emitted order, themselves in the cache when large), or its rows when they are below the in-memory threshold (section 2) |
 | A view | the rows shown |
 
 **The bound to state to users**: peak memory of an async job is
-`(batches in flight) × (batch bytes) + (key bytes + 8) × (rows indexed by joins and groupings) + 16 × (rows of verified sources) + the largest single row`.
+`(batches in flight) × (batch bytes) + (key bytes + 8) × (rows indexed by joins and groupings) + 16 × (rows of verified sources) + 16 × (pair budget) × (joins matching at once) + (small results kept in memory) + the largest single row`.
 For the measured session (2.2 million rows of 120 bytes, one grouping, one function
 pod) that is under 0.5 GiB, against about 210 GiB today.
+
+Small results kept in memory are part of the bound, and a per-stream threshold alone
+does not limit them: 100 nodes each keeping 63 MiB hold 6.2 GiB. So the threshold comes
+with a total for the process (proposed 512 MiB, part of L2): a result that would take the
+kept total past it goes to the cache whatever its size, and the term is at most that
+total. The bound also assumes a cache root on disk (section 2).
 
 **Proposed budget for the workshop** (**OPEN, M1**): a job over every table in scope of a
 sample dataset peaks below 4 GiB on the async path, checked on synthetic tables of the
@@ -491,7 +546,8 @@ value.
    8,192 rows, never as a list of pairs (async now costs about what sync does). Remaining:
    rows on the async path as record batches: wire `async_execute_batches` and the
    record-batch channels into the nodes and the async orchestrator (ITL-1347's remaining
-   stages), give `PolarsFilter` `ROW_BY_ROW`. Removes the 18 to 110 KiB per row.
+   stages), run a `PolarsFilter` whose predicate is known to be row-wise per batch (B1).
+   Removes the 18 to 110 KiB per row.
 3. The local cache, and job nodes that keep a reference (section 3). Removes "every node
    holds its output".
 4. The view and `run()` on the cache; `preview(n)`.
@@ -511,15 +567,16 @@ holds rows (cache files, `as_table()`, the sync path).
 | N1 | A job node keeps a reference to its run's rows (database or local cache), not the rows in memory: changes the ITL-1095 promise | yes |
 | N2 | The view is backed by the cache (keeps every method's meaning, nothing computed twice) rather than a bounded window of first and last rows | cache-backed |
 | N3 | A source that holds no rows: its `run()` view keeps a cache file of the read | yes |
-| L1 | Where the local cache lives by default | the system temporary directory, configurable |
-| L2 | The size below which rows stay in memory | 64 MiB per stream |
+| L1 | Where the local cache lives by default; what happens when that place is memory-backed | the system temporary directory, configurable; a warning when it is memory-backed, and no bound then |
+| L2 | The size below which rows stay in memory, and the total kept in memory per process | 64 MiB per stream, 512 MiB in total |
 | P1 | `preview(n)` over a step that needs its whole input: compute in full or refuse | refuse unless `compute_all=True` |
 | P2 | `preview` calls user functions | yes |
 | P3 | `preview` results are stored | no; not offered on job nodes at first |
 | P4 | `preview` order | the first `n` of the sync order |
-| B1 | `PolarsFilter` with an expression that is not row-wise | refuse |
+| B1 | `PolarsFilter` with an expression that is not known to be row-wise | run it over the whole input, as today (same rows as sync, no bound); per batch only for a closed list of row-wise node kinds |
 | J1 | The join index holds the key or a 128-bit hash of it | the key first; measure |
 | J2 | An "in tag order" certificate for a streaming merge | not in the first version |
+| J3 | The pair budget of one match range | 1,048,576 pairs (16 MiB) |
 | C1 | Certificate as a set of unique keys or as yes/no | set of unique keys |
 | C2 | The duplicate-key error names the earlier row's position (8 bytes per key) | no |
 | C3 | `DerivedSource` over a node's records: certificate | the node's, verified on read |

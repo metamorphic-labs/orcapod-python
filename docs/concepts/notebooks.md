@@ -218,7 +218,7 @@ print(job.nodes["rates"].run().header())
 
 A view holds the default columns only (tags and data). For system tags, source info and
 the other hidden columns, ask the node: `as_table(columns=...)`, as in
-[Part 8 of the tutorial](../tutorial/08-inspecting-and-tracing.md). `run()` on each kind of
+the tutorial [Inspecting results](../tutorial/inspecting-results.md#tracing-rows). `run()` on each kind of
 object is the table "What `run()` does on each kind of object" in
 [Streams](streams.md#computing-a-stream-outside-a-job-run).
 

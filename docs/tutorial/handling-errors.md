@@ -1,8 +1,10 @@
-# Part 9: Handling errors
+# Handling errors
 
 Orcapod catches some mistakes before any function runs: a misspelt column, or a function that
 does not fit its input. Others happen in the middle of a run: one file out of a thousand is
-corrupt, and your function raises. This part shows what to do about both.
+corrupt, and your function raises. This tutorial shows what to do about both.
+
+**Before you start:** Parts 0 to 6 of the [core course](index.md#core-course).
 
 You will:
 

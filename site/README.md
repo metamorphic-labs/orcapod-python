@@ -123,7 +123,7 @@ accent of its own:
   Every text colour meets WCAG AA against its background.
 
 The home page opens with a hero (Starlight's `splash` template, so it has no sidebar):
-the logo, the name in Lexend Exa, a tagline and three buttons (Get started, Tutorial,
+the logo, the name in Lexend Exa, a tagline and three buttons (Get started, Tutorials,
 GitHub). `docs/index.md` stays a plain page; the content build adds the hero as its front
 matter (`HOME_HERO` in `../scripts/docs_site_content.py`), and its buttons are links
 checked like any other. The hero's logo is the header's file: Astro could only resize
