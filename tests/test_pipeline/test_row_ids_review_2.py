@@ -645,3 +645,74 @@ def test_a_session_mixing_null_and_list_tokens_in_one_column_is_refused(
     message = _refusal(raised.value)
     assert "_source_a" in message
     assert "large_string" in message and "large_list<" in message
+
+
+class _AllEvents(_Events):
+    """``_Events`` that also records the node's start and end."""
+
+    def on_node_start(
+        self, node_label: str, node_hash: str, tag_schema: Any = None
+    ) -> None:
+        self.events.append(("node_start", None, None))
+
+    def on_node_end(self, node_label: str, node_hash: str) -> None:
+        self.events.append(("node_end", None, None))
+
+
+def _run_with_a_failing_lookup(
+    path: str, error: Exception, policy: str
+) -> tuple[BaseException, list[tuple[str, Any, Any]]]:
+    """Run three placeholders with the result lookup raising ``error``.
+
+    Returns:
+        The error the run raised (the leaf of an exception group) and the events.
+    """
+    from unittest.mock import patch
+
+    node, placeholders, _ = _stored_then_placeholders(1)
+    observer = _AllEvents()
+    with (
+        patch.object(
+            type(node._cached_function_pod), "lookup_cached_data", side_effect=error
+        ),
+        pytest.raises((type(error), ExceptionGroup)) as raised,
+    ):
+        _run_placeholders(
+            node, placeholders, path, observer=observer, error_policy=policy
+        )
+    leaf: BaseException = raised.value
+    while isinstance(leaf, BaseExceptionGroup):
+        (leaf,) = leaf.exceptions
+    return leaf, observer.events
+
+
+@pytest.mark.parametrize("policy", ["continue", "fail_fast"])
+@pytest.mark.parametrize("kind", ["database_read", "type_identity"])
+def test_a_fatal_error_in_a_placeholders_lookup_gives_the_same_events_on_both_routes(
+    policy: str, kind: str
+) -> None:
+    """A database read error (or an identity error) in the lookup stops the run.
+
+    It is never a row failure, whatever the policy. On both routes the row starts,
+    its crash is reported with the error, and the error is the one raised (third
+    review of PR #583: the async route reported the start only).
+    """
+    from orcapod.errors import OrcapodDatabaseReadError, TypeIdentityError
+
+    seen = {}
+    for path in ("sync", "async"):
+        error: Exception = (
+            OrcapodDatabaseReadError("injected", ("result",))
+            if kind == "database_read"
+            else TypeIdentityError("injected")
+        )
+        raised, events = _run_with_a_failing_lookup(path, error, policy)
+        assert raised is error, path
+        crash = f"crash:{type(error).__name__}"
+        # The first row starts and crashes; no other row is started, none ends.
+        assert [e for e in events if e[0] not in ("node_start", "node_end")] == [
+            ("start", "m1", 1),
+            (crash, "m1", 1),
+        ], path
+        seen[path] = events
+    assert seen["sync"] == seen["async"]
