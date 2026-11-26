@@ -25,7 +25,7 @@ from __future__ import annotations
 from collections.abc import Callable, Collection, Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import Any, Protocol
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -35,13 +35,11 @@ import orcapod.databases.spiral_store_names as names
 from orcapod.errors import SpiralStoreTableCollisionError
 from orcapod.logical_types.canonical_form import declaration_form_schema
 from orcapod.types import ColumnInfo
+from orcapod.utils.lazy_module import LazyModule
 
-if TYPE_CHECKING:
-    import spiral as sp
-else:
-    from orcapod.utils.lazy_module import LazyModule
-
-    sp = LazyModule("spiral")
+# Only ``SpiralError`` is read, at run time; the optional extra is never needed to
+# type-check this module.
+sp: Any = LazyModule("spiral")
 
 DATA_CONTEXT_COLUMN = "__data_context"
 """The column every stored row's data context is in (``constants.DATA_CONTEXT_COL``)."""
