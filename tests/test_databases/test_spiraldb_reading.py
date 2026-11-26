@@ -629,7 +629,7 @@ def test_every_write_is_refused_and_writes_nothing(project: Any) -> None:
         lambda: connector.upsert_records("units", _rows(), "k1", skip_existing=True),
         lambda: connector.delete_table("units"),
         lambda: connector.delete_table("absent"),
-        lambda: connector.validate_records(_rows()),
+        lambda: connector.validate_records(_rows(), table_name=None),
         lambda: connector.unstorable_column_reason("v", pa.int64(), primary_key=False),
     ):
         with pytest.raises(SpiralDBWriteNotSupportedError, match="ITL-1186"):

@@ -18,11 +18,10 @@ Example::
 
 from __future__ import annotations
 
-import re
 from collections import defaultdict
 from collections.abc import Callable, Collection, Mapping
 from contextlib import AbstractContextManager
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -48,6 +47,11 @@ from orcapod.utils.arrow_utils import (
     normalize_to_large_types,
 )
 
+if TYPE_CHECKING:
+    from orcapod.logical_types.protocols import (
+        TypeConverterProtocol as LogicalTypeConverterProtocol,
+    )
+
 
 def _arrow_schema_to_column_infos(schema: pa.Schema) -> list[ColumnInfo]:
     """Convert a PyArrow schema to a list of ColumnInfo."""
@@ -55,6 +59,53 @@ def _arrow_schema_to_column_infos(schema: pa.Schema) -> list[ColumnInfo]:
         ColumnInfo(name=field.name, arrow_type=field.type, nullable=field.nullable)
         for field in schema
     ]
+
+
+def _with_live_logical_types(records: pa.Table) -> pa.Table:
+    """Return ``records`` with every registered logical type given in storage form live.
+
+    A column in storage form carries its identifier as ``ARROW:extension:*`` field
+    metadata. When the default data context's type converter has the type registered,
+    the column is wrapped as that live type, the form a database reads back, so one
+    column is compared in one form. Any other column, an identifier no type is
+    registered for included, is kept exactly as given: nothing is registered here.
+    """
+    from orcapod.contexts import get_default_context
+
+    # The context's converter implements the logical-type side of
+    # ``logical_types.protocols.TypeConverterProtocol`` (as Delta's read uses it).
+    converter = cast(
+        "LogicalTypeConverterProtocol",
+        cast(object, get_default_context().type_converter),
+    )
+
+    def registered(name: bytes) -> bool:
+        try:
+            text = name.decode()
+        except UnicodeDecodeError:
+            return False  # no type is registered under bytes: kept as given
+        return converter.get_logical_type_by_arrow_extension_name(text) is not None
+
+    known = [
+        i
+        for i, field in enumerate(records.schema)
+        if (name := (field.metadata or {}).get(b"ARROW:extension:name")) is not None
+        and registered(name)
+    ]
+    if not known:
+        return records
+    wrapped = converter.apply_logical_types(records.select(known))
+    for i, position in enumerate(known):
+        field = wrapped.schema.field(i)
+        metadata = dict(field.metadata or {})
+        if isinstance(field.type, pa.BaseExtensionType):
+            # A wrapped column states its identifier in its type: not in metadata too.
+            _ = metadata.pop(b"ARROW:extension:name", None)
+            _ = metadata.pop(b"ARROW:extension:metadata", None)
+        records = records.set_column(
+            position, field.with_metadata(cast(Any, metadata)), wrapped.column(i)
+        )
+    return records
 
 
 def _alike(parts: list[pa.Table]) -> list[pa.Table]:
@@ -163,17 +214,8 @@ class ConnectorArrowDatabase:
         return "/".join(self._path_prefix + record_path)
 
     def _path_to_table_name(self, record_path: tuple[str, ...]) -> str:
-        """Map a record_path to a safe SQL table name.
-
-        Each component is sanitized (non-alphanumeric chars → ``_``), then
-        joined with ``__`` as separator. A ``t_`` prefix is added if the result
-        starts with a digit to ensure a valid SQL identifier.
-        """
-        parts = [re.sub(r"[^a-zA-Z0-9_]", "_", part) for part in record_path]
-        name = "__".join(parts)
-        if name and name[0].isdigit():
-            name = "t_" + name
-        return name
+        """The connector's name of the table at a full record path (ITL-1498)."""
+        return self._connector.table_name(record_path)
 
     def _validate_record_path(self, record_path: tuple[str, ...]) -> None:
         if not record_path:
@@ -250,7 +292,7 @@ class ConnectorArrowDatabase:
         """Fetch all committed records for a path from the connector."""
         table_name = self._path_to_table_name(self._path_prefix + record_path)
         self._require_table_name(table_name)
-        if table_name not in self._connector.get_table_names():
+        if not self._connector.has_table(table_name):
             return None
         batches = list(self._connector.iter_batches(f'SELECT * FROM "{table_name}"'))
         if not batches:
@@ -260,17 +302,10 @@ class ConnectorArrowDatabase:
     def list_table_paths(self, prefix: tuple[str, ...] = ()) -> list[tuple[str, ...]]:
         """List the paths of the tables stored under ``prefix``.
 
-        A table name in the backend does not keep the path it was made from (see
-        ``_path_to_table_name``), so this lists by name: the tables, committed or
-        pending, whose name starts with the name ``prefix`` maps to. The components
-        after ``prefix`` are the rest of the name split at ``__``. They are in the
-        backend's form: every character other than letters, digits and ``_`` is
-        ``_``, and a component that holds ``__`` comes back as two. Such a path
-        still names the same table. A table of another path that maps to a name
-        with the same beginning is listed as well. With an empty prefix at the
-        root, a name that got the ``t_`` prefix keeps it.
-
-        Costs one listing of the backend's table names; no table is read.
+        The connector lists them (``DBConnectorProtocol.table_paths``), committed or
+        pending. A relational connector's names lose information, so its paths are in
+        the names' form (``table_names.joined_table_paths``); a SpiralDB store gives the
+        paths its tables record.
 
         Args:
             prefix: Leading path components, relative to ``self.base_path``.
@@ -279,21 +314,9 @@ class ConnectorArrowDatabase:
             The table paths, relative to ``self.base_path``, sorted.
         """
         full_prefix = self._path_prefix + prefix
-        names = set(self._connector.get_table_names())
-        names.update(
-            self._path_to_table_name(tuple(key.split("/")))
-            for key in self._pending_batches
-        )
-        stem = self._path_to_table_name(full_prefix) if full_prefix else ""
-        found: set[tuple[str, ...]] = set()
-        for name in names:
-            if not stem:
-                found.add(tuple(name.split("__")))
-            elif name == stem:
-                found.add(prefix)
-            elif name.startswith(stem + "__"):
-                found.add(prefix + tuple(name[len(stem) + 2 :].split("__")))
-        return sorted(found)
+        pending = [tuple(key.split("/")) for key in self._pending_batches]
+        found = self._connector.table_paths(full_prefix, pending)
+        return sorted({path[len(self._path_prefix) :] for path in found})
 
     def table_exists(self, record_path: tuple[str, ...]) -> bool:
         """Return ``True`` if a table exists at ``record_path``.
@@ -313,7 +336,7 @@ class ConnectorArrowDatabase:
         record_key = self._get_record_key(record_path)
         if record_key in self._pending_batches:
             return True
-        return table_name in self._connector.get_table_names()
+        return self._connector.has_table(table_name)
 
     # ── Storable columns ──────────────────────────────────────────────────────
 
@@ -327,7 +350,7 @@ class ConnectorArrowDatabase:
         table_name = self._path_to_table_name(full_path)
         self._require_table_name(table_name)
         try:
-            if table_name not in self._connector.get_table_names():
+            if not self._connector.has_table(table_name):
                 pending = self._pending_batches.get(self._get_record_key(record_path))
                 return None if pending is None else pending.schema
             return pa.schema(
@@ -426,7 +449,7 @@ class ConnectorArrowDatabase:
         Args:
             records: The rows (any number, none included) to check.
         """
-        self._connector.validate_records(records)
+        self._connector.validate_records(records, table_name=None)
 
     def add_records(
         self,
@@ -471,11 +494,14 @@ class ConnectorArrowDatabase:
         self.require_storable(
             normalize_schema_to_large_types(records.schema, keep_null=True)
         )
-        self._require_table_name(
-            self._path_to_table_name(self._path_prefix + record_path)
-        )
+        table_name = self._path_to_table_name(self._path_prefix + record_path)
+        self._require_table_name(table_name)
         records = normalize_table_to_large_types(records, keep_null=True)
-        self._connector.validate_records(records)
+        if self.keeps_field_metadata:
+            # A logical type given in its storage form is the same column as one given
+            # live: compared, buffered and stored in one form (ITL-1498).
+            records = _with_live_logical_types(records)
+        self._connector.validate_records(records, table_name=table_name)
 
         record_key = self._get_record_key(record_path)
         # Columns match by name: rows with the held columns in another order are
@@ -556,7 +582,7 @@ class ConnectorArrowDatabase:
         """The stored table's columns as the connector reports them now, in its order
         (``get_column_info``, large-normalized types), or ``None`` when it does not
         exist. Never remembered: each call asks the connector."""
-        if table_name not in self._connector.get_table_names():
+        if not self._connector.has_table(table_name):
             return None
         return [
             pa.field(
@@ -580,7 +606,7 @@ class ConnectorArrowDatabase:
             held.append(pending.schema)
         table_name = self._path_to_table_name(self._path_prefix + record_path)
         stored = self._stored_schemas.get(table_name)
-        if stored is None and table_name in self._connector.get_table_names():
+        if stored is None and self._connector.has_table(table_name):
             stored = self._read_stored_schema(table_name)
             if stored is not None:
                 self._stored_schemas[table_name] = stored
@@ -754,6 +780,11 @@ class ConnectorArrowDatabase:
             # names and Arrow types match before writing.  Schema evolution is
             # intentionally out of scope; a clear ValueError is preferable to a
             # cryptic DB-level error or a silent partial write.
+            # The connector's check of the rows against the table as it is now (a
+            # table may have appeared since they were buffered: a store refuses rows
+            # of another data context than it records), before the stored table's
+            # columns are read in that table's terms.
+            self._connector.validate_records(pending, table_name=table_name)
             # Looked up now, as the check needs: nothing about the stored table is
             # trusted from an earlier call (ITL-1367).
             existing = self._stored_columns(table_name)

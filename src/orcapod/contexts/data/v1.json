@@ -253,13 +253,14 @@
                 "digest": "373ad66e7e9cc3a411708a4470a30d2176aedf9c9ba1ecdbe1111359ceb25867"
             },
             {
-                "date": "2026-11-23",
+                "date": "2026-11-26",
                 "release": null,
                 "added": {
-                    "pipeline-02.json": "af19c4b5bafcd7428011db8bf5ddb125f8b59083b7c085613411eae36e9e23c2"
+                    "pipeline-02.json": "af19c4b5bafcd7428011db8bf5ddb125f8b59083b7c085613411eae36e9e23c2",
+                    "spiral_table_name-01.json": "23f16efb72cafe90692e1b19bc0cdb7aee694cb255e5685f7b7892fb3d2c80c9"
                 },
                 "previous": "373ad66e7e9cc3a411708a4470a30d2176aedf9c9ba1ecdbe1111359ceb25867",
-                "digest": "57215540370eca6c81d5170c471e0d979482ee04235e47e4bfd05317936f2a27"
+                "digest": "9954784272f13773cec21434ccb441b064ab640707f556f556ed789c6d5a229f"
             }
         ],
         "provisional": {

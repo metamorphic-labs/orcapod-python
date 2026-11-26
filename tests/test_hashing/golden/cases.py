@@ -45,7 +45,15 @@ from orcapod import function_pod
 
 CaseFn = Callable[[], dict[str, Any]]
 
-GROUPS = ("semantic", "schema", "arrow", "datagram", "pipeline", "torch")
+GROUPS = (
+    "semantic",
+    "schema",
+    "arrow",
+    "datagram",
+    "pipeline",
+    "torch",
+    "spiral_table_name",
+)
 
 OPTIONAL_GROUPS: dict[str, str] = {"torch": "torch"}
 """Groups that need an optional dependency, mapped to the module they need (ITL-871).
@@ -3765,3 +3773,48 @@ def _group_key_identity(stream: Any, unsigned: Any) -> dict[str, Any]:  # pyrigh
         if source_info is not None:
             out[f"row[{row}]._source_k"] = _jsonable(source_info)
     return out
+
+
+# ---------------------------------------------------------------------------
+# SpiralDB store table names (ITL-1495): a store finds its tables by these names, so
+# the function from a full path to a name is pinned like any hash in a name.
+# ---------------------------------------------------------------------------
+
+_HEX_A = "0123456789abcdef" * 4
+_HEX_B = "fedcba9876543210" * 4
+SPIRAL_STORE_PATHS: dict[str, tuple[str, ...]] = {
+    "function_result": ("my_fn", _HEX_A, "v0", "python.function.v1", "rev1", "rdb_v1"),
+    "function_pipeline": (
+        "my_fn",
+        _HEX_A,
+        "v0",
+        "python.function.v1",
+        f"schema:{_HEX_B}",
+        "pdb_v1",
+    ),
+    "side_effect_log": ("side_effects", "Notify Pod", f"schema:{_HEX_B}", "tdb_v1"),
+    "operator_cache": ("job", "Join", f"node:{_HEX_A}", "odb_v1"),
+    "cached_source": ("prefix", "source", f"instance:{_HEX_B}", "sdb_v1"),
+    "base_path": (
+        "team",
+        "store",
+        "my_fn",
+        _HEX_A,
+        "v1",
+        "python.function.v1",
+        "rev1",
+        "rdb_v1",
+    ),
+    "upper_case_and_punctuation": ("My-Fn.v2", "A B:C", "rdb_v1"),
+    "non_ascii": ("función", "数据", "rdb_v1"),
+    "long_component": ("f" * 150, _HEX_A, "rdb_v1"),
+    "one_component": ("x",),
+}
+
+
+@case("spiral_table_name", "name")
+def spiral_table_names() -> dict[str, Any]:
+    """The SpiralDB name of a store table at each path of ``SPIRAL_STORE_PATHS``."""
+    from orcapod.databases.spiral_store_names import store_table_name
+
+    return {k: store_table_name(v) for k, v in SPIRAL_STORE_PATHS.items()}
