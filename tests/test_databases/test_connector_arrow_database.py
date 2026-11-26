@@ -23,6 +23,7 @@ Test sections:
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Iterator
 from typing import Any
@@ -35,6 +36,7 @@ import pytest
 # Imports under test — all of these will fail until the modules are created
 # ---------------------------------------------------------------------------
 
+from orcapod.errors import UnsupportedValueError
 from orcapod.protocols.db_connector_protocol import DBConnectorProtocol
 from orcapod.types import ColumnInfo
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
@@ -750,6 +752,67 @@ class TestPathToTableName:
         assert db._path_to_table_name(path) == db._path_to_table_name(path)
 
 
+@pytest.mark.parametrize("invalid_first", [False, True])
+@pytest.mark.parametrize("order", [["id", "s", "y"], ["y", "id", "s"]])
+@pytest.mark.parametrize("run_async", [False, True])
+def test_validate_records_refuses_null_structs_without_discarding_valid_rows(
+    invalid_first: bool, order: list[str], run_async: bool
+) -> None:
+    class RejectsNullStructs(MockDBConnector):
+        def validate_records(self, records: pa.Table) -> None:
+            super().validate_records(records)
+            if records["s"].null_count:
+                raise UnsupportedValueError("column 's' holds a null struct")
+
+    path = ("t",)
+    valid_rows = [
+        {"id": b"valid-1", "s": {"val": 10}, "y": 100},
+        {"id": b"valid-2", "s": {"val": 20}, "y": 200},
+    ]
+    invalid_rows = [
+        {"id": b"bad-1", "s": {"val": 30}, "y": 300},
+        {"id": b"bad-2", "s": None, "y": 400},
+    ]
+    fields = {
+        "id": pa.field("id", pa.large_binary()),
+        "s": pa.field("s", pa.struct([("val", pa.int64())])),
+        "y": pa.field("y", pa.int64(), nullable=False),
+    }
+    valid = pa.Table.from_pylist(valid_rows, schema=pa.schema(fields.values()))
+    fields["y"] = fields["y"].with_nullable(True)
+    invalid = pa.Table.from_pylist(
+        invalid_rows, schema=pa.schema([fields[name] for name in order])
+    )
+
+    connector = RejectsNullStructs()
+
+    def check() -> None:
+        db = ConnectorArrowDatabase(connector)
+        for table in (invalid, valid) if invalid_first else (valid, invalid):
+            if table is invalid:
+                with pytest.raises(UnsupportedValueError, match="'s'.*null struct"):
+                    db.add_records(path, table, record_id_column="id")
+            else:
+                db.add_records(path, table, record_id_column="id")
+        queued = db.get_all_records(path, record_id_column="id")
+        db.flush()
+        committed = ConnectorArrowDatabase(connector).get_all_records(
+            path, record_id_column="id"
+        )
+        for rows in (queued, committed):
+            assert rows is not None
+            assert rows.sort_by("id").to_pylist() == valid_rows
+            assert not rows.schema.field("y").nullable
+
+    async def on_loop() -> None:
+        check()
+
+    if run_async:
+        asyncio.run(on_loop())
+    else:
+        check()
+
+
 # ===========================================================================
 # 11. Flush behaviour
 # ===========================================================================
@@ -784,6 +847,39 @@ class TestFlushBehaviour:
         result = db.get_all_records(self.PATH)
         assert result is not None
         assert result.num_rows == 2
+
+    def test_failed_flush_retains_queued_rows_and_duplicate_policy(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        connector = MockDBConnector()
+        db = ConnectorArrowDatabase(connector)
+        path = self.PATH
+        db.add_record(path, b"old", make_table(v=[1]), flush=True)
+        db.add_record(path, b"old", make_table(v=[99]), skip_duplicates=True)
+        db.add_record(path, b"first", make_table(v=[2]))
+        db.add_record(path, b"second", make_table(v=[3]))
+
+        def refuse_write(*args: Any, **kwargs: Any) -> None:
+            raise UnsupportedValueError("write refused by the store")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(connector, "upsert_records", refuse_write)
+            with pytest.raises(UnsupportedValueError, match="write refused"):
+                db.flush()
+
+        pending_and_stored = db.get_all_records(path, record_id_column="id")
+        assert pending_and_stored is not None
+        assert pending_and_stored.sort_by("v")["v"].to_pylist() == [1, 2, 3, 99]
+        db.flush()
+
+        reader = ConnectorArrowDatabase(connector)
+        stored = reader.get_all_records(path, record_id_column="id")
+        assert stored is not None
+        assert stored.sort_by("id").to_pylist() == [
+            {"id": b"first", "v": 2},
+            {"id": b"old", "v": 1},
+            {"id": b"second", "v": 3},
+        ]
 
     def test_second_flush_on_existing_table_upserts(self, db):
         """Flushing the same path twice should not duplicate rows."""

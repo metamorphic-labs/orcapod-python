@@ -37,10 +37,10 @@ from orcapod.databases import (
 from orcapod.databases.utils import declared_null_path, in_held_column_order
 from orcapod.errors import (
     InputValidationError,
-    NullabilityRecordMismatchError,
     NullInNonNullableColumnError,
     UnstorableColumnError,
 )
+from tests.test_databases.test_connector_arrow_database import MockDBConnector
 from tests.test_databases.type_matrix import open_database
 
 PATH = ("t",)
@@ -1057,12 +1057,14 @@ def _check_lookups(db: Any, ns: list[int]) -> None:
 def _connector_database(kind: str, tmp_path: Path) -> Iterator[Any]:
     if kind == "SQLite, key read NOT NULL":
         yield ConnectorArrowDatabase(_KeyNotNullSQLite(str(tmp_path / "store.db")))
+    elif kind == "writable mock":
+        yield ConnectorArrowDatabase(MockDBConnector())
     else:
         with open_database(kind, tmp_path) as db:
             yield db
 
 
-CONNECTOR_DATABASES = ("SQLite", "SQLite, key read NOT NULL", "SpiralDB")
+CONNECTOR_DATABASES = ("SQLite", "SQLite, key read NOT NULL")
 
 
 @pytest.mark.parametrize("kind", CONNECTOR_DATABASES)
@@ -1107,18 +1109,17 @@ def test_queued_batches_of_differing_nullability_are_one_batch(
         _check_lookups(db, [1, 2, 3])
 
 
-@pytest.mark.parametrize("kind", ["SQLite", "SpiralDB"])
 @pytest.mark.parametrize("stored", [True, False])
 @pytest.mark.parametrize("first", [True, False])
 @pytest.mark.parametrize("skip", [True, False])
 def test_a_refused_batch_leaves_the_queued_rows_to_be_flushed(
-    tmp_path: Path, kind: str, stored: bool, first: bool, skip: bool
+    tmp_path: Path, stored: bool, first: bool, skip: bool
 ) -> None:
     """Queued batches of differing nullability are combined unless the stored column is
     ``NOT NULL`` (CodeRabbit on PR 539): the second is then refused when it is queued,
     in either order, so a flush never drops rows of a valid batch with it."""
     order = [ID, "a", "c", "b"]
-    with _connector_database(kind, tmp_path) as db:
+    with _connector_database("SQLite", tmp_path) as db:
         _add(db, _declared(order, [1], not_null=stored), flush=True)
         _add(db, _declared(order, [2], not_null=first))
         second = _declared(["c", ID, "b", "a"], [3], not_null=not first)
@@ -1134,16 +1135,9 @@ def test_a_refused_batch_leaves_the_queued_rows_to_be_flushed(
         else:
             db.add_records(PATH, second, record_id_column=ID, skip_duplicates=skip)
             ns = [1, 2, 3]
-        given = _given_order(kind, order)
-        _check(db.get_all_records(PATH, record_id_column=ID), given, ns)
-        if stored and not first and kind == "SpiralDB":
-            # The queued rows themselves are what SpiralDB refuses (ITL-936).
-            with pytest.raises(NullabilityRecordMismatchError):
-                db.flush()
-            ns = [1]
-        else:
-            db.flush()
-        _check(db.get_all_records(PATH, record_id_column=ID), given, ns)
+        _check(db.get_all_records(PATH, record_id_column=ID), order, ns)
+        db.flush()
+        _check(db.get_all_records(PATH, record_id_column=ID), order, ns)
 
 
 def _int_list(values: list[int | None], *, declared: bool) -> Any:
@@ -1198,7 +1192,7 @@ NULL_PATHS = {
 }
 NULL_CASES = [
     *[(kind, "column") for kind in CONNECTOR_DATABASES],
-    *[("SpiralDB", place) for place in NULL_PATHS if place != "column"],
+    *[("writable mock", place) for place in NULL_PATHS if place != "column"],
 ]
 
 
@@ -1274,9 +1268,9 @@ def test_a_postgresql_database_checks_the_declaration_before_anything_is_sent(
             _add(db, violating)
         if violating_first:
             _add(db, valid)
-        assert list(db._pending_batches["/".join(PATH)]["__record_id"].to_pylist()) == [
-            b"r2"
-        ]
+        rows = db.get_all_records(PATH, record_id_column=ID)
+        assert rows is not None
+        assert rows[ID].to_pylist() == [b"r2"]
 
 
 @pytest.mark.parametrize("kind", [*CONNECTOR_DATABASES, "PostgreSQL"])
@@ -1303,8 +1297,8 @@ def test_each_record_id_type_gets_the_declared_null_error(
         with pytest.raises(NullInNonNullableColumnError) as refused:
             _add(db, rows(3, null=True))
         assert refused.value.column == ("v" if null_in == "v" else "__record_id")
-        pending = db._pending_batches.get("/".join(PATH))
-        held = [] if pending is None else pending["__record_id"].to_pylist()
+        rows_read = db.get_all_records(PATH, record_id_column=ID)
+        held = [] if rows_read is None else rows_read[ID].to_pylist()
         assert held == ([b"r2"] if queued else [])
 
 

@@ -761,7 +761,7 @@ class ConnectorArrowDatabase:
         )
 
     def flush(self) -> None:
-        """Commit all pending batches to the connector via upsert."""
+        """Commit pending batches via upsert, retaining a rejected batch for retry."""
         for record_key in list(self._pending_batches):
             self._flush_by_key(record_key)
 
@@ -783,12 +783,11 @@ class ConnectorArrowDatabase:
         ready = self._pending_commits.take_ready(record_key)
         if ready is None:
             return
-        pending, ids = ready
+        batch, ids = ready
+        pending = batch
         record_path = tuple(record_key.split("/"))
         table_name = self._path_to_table_name(record_path)
         skip_existing = self._pending_skip_existing.get(record_key, False)
-        if record_key not in self._pending_batches:
-            self._pending_skip_existing.pop(record_key, None)
 
         try:
             self._require_table_name(table_name)
@@ -842,12 +841,16 @@ class ConnectorArrowDatabase:
                 skip_existing=skip_existing,
             )
         except BaseException:
+            # Keep the original queued order when the connector needed stored order.
+            # A rejected write cannot distinguish valid rows from the rest of the batch.
+            self._pending_commits.restore(record_key, batch, ids)
             self._pending_commits.finish(record_key, committed=False)
             raise
         else:
             self._pending_commits.finish(record_key, committed=True)
-        finally:
             self._pending_commits.forget(record_key, ids)
+            if record_key not in self._pending_batches:
+                self._pending_skip_existing.pop(record_key, None)
 
     # ── Read methods ──────────────────────────────────────────────────────────
 
