@@ -149,7 +149,7 @@ def main() -> None:
     warnings.simplefilter("ignore")
     kinds = ["in-memory", "Delta", "SQLite", "SpiralDB"]
     with tempfile.TemporaryDirectory() as tmp:
-        from tests.test_databases import fake_pyspiral
+        from tests.test_databases import fake_pyspiral  # pyright: ignore[reportAttributeAccessIssue]  # historical: ran on the pyspiral fake, removed in ITL-1186
 
         with fake_pyspiral.install(Path(tmp) / "spiral"):
             fake_pyspiral.FakeSpiral().project("p")

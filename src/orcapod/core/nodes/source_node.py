@@ -1967,6 +1967,16 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
             return table
         return self._declared_form.apply(table)
 
+    def _display_name(self) -> str:
+        """The name a preview header shows: the bound source's assigned label, else the
+        node's own. The node's label and the slot's name are not changed (ITL-1454)."""
+        from orcapod.core.sources.display_names import labelled_source
+
+        source = labelled_source(self._bound_source)
+        if source is None or self.has_assigned_label:
+            return self.label
+        return source.label
+
     def _schema_requires_io(self, config: ColumnConfig) -> bool:
         """Whether reading the schema with ``config`` would poll: as for the bound source."""
         return self._bound_source is not None and schema_requires_io(

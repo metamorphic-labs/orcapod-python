@@ -47,7 +47,7 @@ from tests.test_core.sources.test_postgresql_table_source import (
     DSN,
     _make_mock_connector,
 )
-from tests.test_databases import fake_pyspiral
+from tests.test_databases import fake_spiral_sdk
 
 # Builds one source over the rows ``id`` a/b, ``x`` 1/2 in ``tmp``; the keyword is either
 # absent or ``tag_only_columns=...``.
@@ -132,8 +132,8 @@ def _postgresql(_tmp: Path, **option: Unpack[Option]) -> SourceProtocol:
 @pytest.fixture()
 def spiral_root(tmp_path: Path) -> Iterator[None]:
     """Provide a fake Spiral root holding table ``default.r`` keyed on ``id``."""
-    with fake_pyspiral.install(tmp_path / "spiral"):
-        project = fake_pyspiral.FakeSpiral().project("p")
+    with fake_spiral_sdk.install(tmp_path / "spiral"):
+        project = fake_spiral_sdk.ExternalProject("p")
         table = project.create_table(
             "default.r", key_schema=pa.schema([pa.field("id", pa.string())])
         )

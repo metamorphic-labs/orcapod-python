@@ -241,7 +241,7 @@ HOME_HERO = Hero(
     image=SITE_DIR / "src" / "assets" / "orcapod-icon.png",
     actions=(
         HeroAction("Get started", "getting-started.md", "primary", "right-arrow"),
-        HeroAction("Tutorial", "tutorial/index.md", "secondary"),
+        HeroAction("Tutorials", "tutorial/index.md", "secondary"),
         HeroAction(
             "GitHub",
             "https://github.com/metamorphic-labs/orcapod-python",

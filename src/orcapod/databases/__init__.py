@@ -5,7 +5,6 @@ from .in_memory_databases import InMemoryArrowDatabase
 from .noop_database import NoOpArrowDatabase
 from .postgresql_connector import PostgreSQLConnector
 from .spiraldb_connector import SpiralDBConnector
-from .spiraldb_nullability import read_nullability_record, write_nullability_record
 from .sqlite_connector import SQLiteConnector
 
 __all__ = [
@@ -17,8 +16,6 @@ __all__ = [
     "SpiralDBConnector",
     "SQLiteConnector",
     "PostgreSQLConnector",
-    "read_nullability_record",
-    "write_nullability_record",
 ]
 
 # Relational DB connector implementations satisfy DBConnectorProtocol

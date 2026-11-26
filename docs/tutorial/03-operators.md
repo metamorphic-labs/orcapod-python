@@ -1,17 +1,15 @@
 # Part 3: Reshaping with operators
 
-Function pods compute new values. Everything else you do to a table (combine it with another
-one, keep some rows, rename or drop columns) is done by **operators**. An operator
-rearranges a stream; it never computes a new value from the data. Keeping the two apart is
-deliberate: when a number in your result looks wrong, it can only have come from one of your
-functions.
+Function pods compute new values. **Operators** rearrange streams: they combine two tables,
+keep some rows, and rename or drop columns. When a number in a result looks wrong, it was
+computed by one of your functions or was already in the source.
 
 You will:
 
 - combine tables with `join`
 - keep a subset of rows with `filter` and `semi_join`
 - rename columns with `map_data`
-- see what to do when two tables have a column of the same name
+- combine tables that have a data column of the same name
 
 ```python
 from workshop_data import make_dataset
@@ -34,12 +32,11 @@ units = CSVSource(
 )
 ```
 
-Most operators are available as methods on a stream, and that is the form used here. All of
-them exist as classes in `orcapod.operators` (`Join`, `Filter`, ...); see
-[Operators](../concepts/operators.md). `MergeJoin`, at the end of this page, is used as a
-class.
+Most operators are available as methods on a stream, which is the form used here. All of them
+are classes in `orcapod.operators` (`Join`, `Filter`, ...); see
+[Operators](../concepts/operators.md).
 
-## Join: combine tables on their shared tags
+## Join
 
 `join` matches rows of two streams that have the same values in the tag columns they share,
 and puts their data columns side by side:
@@ -58,22 +55,14 @@ print(narrow.as_pandas_df().sort_values(unit_tags, ignore_index=True).head(3))
 # 2   mouse_01      s1  imec0     2       662        60.0
 ```
 
-You do not say what to join on. `units` has tags `subject_id, session, probe, unit`;
-`sessions` has `subject_id, session`; the shared ones are used. The result has the union of
-the tags and all data columns of both. This is the step the two-stream function pod in Part 2
-did for you.
+The join uses every tag column the two streams share, here `subject_id` and `session`. The
+result has the tags and the data columns of both.
 
-The column order is chosen by Orcapod, not by the order you wrote the streams in. Refer to
-columns by name, never by position.
-
-Four things to know:
-
-- It does not promise a row order. The samples on this page sort by the tags before
-  showing the first rows; do the same when the order matters to you.
 - It is an **inner** join: a row with no partner in the other stream is dropped.
-- The order of the streams does not matter. `units.join(sessions)` and
-  `sessions.join(units)` give the same rows and the same columns.
 - If the streams share **no** tag column, every row is paired with every row.
+- `units.join(sessions)` and `sessions.join(units)` give the same rows and columns.
+- The order of rows and columns is not promised. Sort the rows when their order matters, as
+  the samples here do, and refer to columns by name.
 
 Joins chain. This attaches both the session and the animal to every unit:
 
@@ -81,16 +70,12 @@ Joins chain. This attaches both the session and the animal to every unit:
 everything = units.join(sessions).join(subjects)
 print(everything.keys()[1])
 # ('region', 'depth_um', 'n_spikes', 'date', 'duration_s', 'sex', 'age_weeks', 'genotype')
-print(everything.as_table().num_rows)
-# 64
+
 ```
 
-## Filter: keep some rows
+## Filter
 
-`filter` keeps the rows that satisfy a condition. The simplest form is equality on one or more
-columns, written as keyword arguments. The first filter prints a `ProvisionalHashWarning`
-(see [Messages you can ignore](00-setup.md#messages-you-can-ignore)); `polars_filter` and `MergeJoin`, below, print
-one each too:
+`filter` keeps the rows that satisfy a condition. Keyword arguments test equality:
 
 ```python
 knockouts = subjects.filter(genotype="knockout")
@@ -100,8 +85,7 @@ print(knockouts.as_pandas_df())
 # 1   mouse_04   M         13  knockout
 ```
 
-A filter tests tag columns and data columns alike. Join first, and you can filter on
-columns from either table. Several keywords must all hold:
+Join first to filter on columns from two tables. Several keywords must all hold:
 
 ```python
 knockout_units = units.join(subjects).filter(genotype="knockout", probe="imec1")
@@ -109,7 +93,7 @@ print(knockout_units.as_table().num_rows)
 # 16
 ```
 
-For anything other than equality, name the column with `col` and compare it:
+For any other condition, name the column with `col`:
 
 ```python
 from orcapod import col
@@ -122,9 +106,9 @@ print(busy.as_pandas_df().sort_values(unit_tags, ignore_index=True))
 # 2   mouse_02      s2  imec1     3    CA1      2360      1233
 ```
 
-`col` offers the comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=`), `is_in` for a set of
-values, `between` for a range (both ends included), and `is_null` / `is_not_null`. Give
-`filter` several conditions and keywords at once, and every one must hold; combine them with
+`col` offers `==`, `!=`, `<`, `<=`, `>`, `>=`, `is_in` for a set of values, `between` for a
+range (both ends included), and `is_null` / `is_not_null`. Given several conditions and
+keywords, `filter` keeps the rows where all of them hold. Combine conditions with `&` (and),
 `|` (or) and `~` (not):
 
 ```python
@@ -140,26 +124,16 @@ print(v1_or_busy.as_table().num_rows)
 # 34
 ```
 
-The order of the conditions, of the keywords and of the `is_in` values never matters. Write
-`&` and `|` between two conditions and `~` before one (`~(col("probe") == "imec0")`), never
-`and`, `or` and `not`, and put each comparison in parentheses, as in Polars.
+As in Polars, write `&`, `|` and `~` instead of `and`, `or` and `not`, and put each comparison
+in parentheses. Python applies `&`, `|` and `~` before a comparison, so leaving the
+parentheses out raises `TypeError`. With `and`, the first condition is lost without an error.
 
 A value must have its column's type: `n_spikes` holds integers, so `col("n_spikes") > 1200.0`
-is refused (`InputValidationError`), and `col("n_spikes") > 1200` is the way to write it.
-Orcapod converts no value.
+is refused (`InputValidationError`). Write `col("n_spikes") > 1200`.
 
-The filter is a step of the pipeline: its conditions are part of the filtered stream's
-identity, so a filtered stream can be used anywhere any other stream can: in a join, before
-a function pod, or inside a `PipelineJob` (Part 5).
-
-```python
-print(busy.join(subjects).as_table().num_rows)
-# 3
-```
-
-`filter` reads every row of its input and then keeps the matching ones. `explain()` (new in
-this release) shows what each source applies itself and what is applied after reading; it
-computes nothing:
+`explain()` shows which conditions each source applies itself and which are applied after
+reading. Here the source applies none: the whole table is read, and the `Filter` step then
+keeps the matching rows.
 
 ```python
 print(busy.explain())
@@ -180,25 +154,17 @@ print(fast.as_table().num_rows)
 # 13
 ```
 
-Orcapod has to be able to hash the expression, and it knows the common building blocks:
-comparisons, arithmetic, `&`, `|`, `~`, `is_in`, `is_between`, `is_null` and a few string
-tests. An expression that calls your own Python code (`map_elements`, `map_batches`) is
-refused as soon as Orcapod needs to hash it (in a join, a pod or a job), with an error that
-names the expression and lists what can be hashed; compute such a test in a function pod
-instead. The full list is in [PolarsFilter](../concepts/operators.md#polarsfilter); `filter`
-itself is described in [Filter](../concepts/operators.md#filter).
+The expression can use comparisons, arithmetic, `&`, `|`, `~`, `is_in`, `is_between`,
+`is_null` and a few string tests. One that calls your own Python code (`map_elements`,
+`map_batches`) is refused when the stream is used in a join, a pod or a job; compute such a
+test in a function pod. The full list is in
+[PolarsFilter](../concepts/operators.md#polarsfilter).
 
-One more filter, `drop_nulls`, keeps the rows that have a value in the columns you name. The
-workshop data has no missing values, so it is not needed here; see
-[DropNulls](../concepts/operators.md#dropnulls) for when it is.
+## Semi-join
 
-## Semi-join: keep the rows that appear in another table
-
-Sometimes the list of rows to keep is itself a table: a curation sheet, a list of sessions
-that passed quality control. `semi_join` keeps the rows of the first stream whose tags appear
-in the second, and adds nothing from the second.
-
-Suppose three sessions passed quality control, and the list is in a CSV file:
+`semi_join` keeps the rows of the first stream whose tags appear in the second, and adds no
+columns. Use it when the list of rows to keep is itself a table. Suppose three sessions passed
+quality control, and the list is in a CSV file:
 
 ```python
 (data_dir / "passed_qc.csv").write_text(
@@ -220,15 +186,14 @@ print(good_units.as_table().num_rows)
 # 24
 ```
 
-Three sessions, eight units each. The columns are those of `units`; `checked_by` was used
-for nothing. Unlike `join`, the order matters: the first stream is the one being filtered.
+Three sessions, eight units each. Unlike `join`, the order matters: the first stream is the
+one being filtered.
 
 Rows are matched only on the tag columns the two streams share, here `subject_id` and
-`session`. Data columns of the second stream are never read. (If the two streams happen to
-share a data column name, that column is not used for matching either, and Orcapod warns
-about it with a `SemiJoinIgnoredColumnWarning`.)
+`session`. If the two streams share a data column name, that column is not used for matching,
+and Orcapod issues a `SemiJoinIgnoredColumnWarning`.
 
-The second stream can be any stream, for example the filtered `knockouts` from above. It
+The second stream can be any stream, for example the filtered `knockouts` from above, which
 shares only `subject_id` with `units`:
 
 ```python
@@ -249,8 +214,8 @@ print(units.join(subjects).filter(genotype="knockout").keys()[1])
 
 ## Rename and select
 
-`select_data_columns` and `drop_data_columns` you know from Part 2. There are matching
-`select_tag_columns` and `drop_tag_columns`.
+`select_tag_columns` and `drop_tag_columns` do for tags what `select_data_columns` and
+`drop_data_columns` (Part 2) do for data columns.
 
 `map_data` renames data columns and `map_tags` renames tag columns. Both take a dictionary of
 old name to new name:
@@ -282,9 +247,8 @@ print(subjects.map_data({"age_weeks": "age"}, drop_unmapped=True).keys())
 
 ## When two tables have the same data column
 
-`join` refuses to combine streams that both have a data column of the same name, because it
-cannot keep both under one name. To see this, split the units by probe. Each half has an
-`n_spikes` column:
+`join` refuses streams that both have a data column of the same name. To see this, split the
+units by probe. Each half has an `n_spikes` column:
 
 ```python
 imec0 = (
@@ -307,15 +271,11 @@ except InputValidationError as err:
 # Input streams are not compatible: Datas should not have overlapping keys, but ['n_spikes'] found in SelectDataColumns and SelectDataColumns.
 ```
 
-The split above only serves to produce the clash. Unit numbers restart on each probe
-(Part 1), so unit 0 of `imec0` and unit 0 of `imec1` are different cells, and the two joins
-below pair unrelated units: run them to see how the operators behave, not as an analysis.
-The pairing means something when the two columns describe the same thing, for example the
-spike counts of one unit from two spike-sorting runs.
+Overlapping data on the same tags can be meaningful, for example the spike counts of one unit
+from two analysis runs. In this example it is not: unit 0 of `imec0` and unit 0 of `imec1` are
+different units. There are two ways to combine such streams:
 
-There are two ways out, and they mean different things.
-
-**Rename**, when the two columns are different quantities that happen to share a name:
+**Rename** when the two columns are different quantities:
 
 ```python
 side_by_side = imec0.map_data({"n_spikes": "n_imec0"}).join(
@@ -329,8 +289,8 @@ print(side_by_side.as_pandas_df().sort_values(pair_tags, ignore_index=True).head
 # 2   mouse_01      s1     2      135      662
 ```
 
-**`MergeJoin`**, when they are repeated measurements of the same quantity and you want them
-collected into a list:
+**`MergeJoin`** when they are repeated measurements of one quantity, to collect them into a
+list:
 
 ```python
 from orcapod.operators import MergeJoin
@@ -345,17 +305,16 @@ print(merged.as_pandas_df().sort_values(pair_tags, ignore_index=True).head(3))
 # 2   mouse_01      s1     2  [662, 135]
 ```
 
-Each list holds the first input's value, then the second's: `imec0` first, `imec1` second,
-on every row. `MergeJoin()(imec1, imec0)` would put `imec1` first, and is a different step
-with a different content hash.
+Each list holds the first input's value, then the second's. `MergeJoin()(imec1, imec0)` puts
+`imec1` first and is a different step.
 
-## What to remember
+## Key points
 
-- Operators rearrange streams; they never compute new values.
+- Operators rearrange streams.
 - `join` matches on shared tags, keeps only matching rows, and needs distinct data column
-  names.
+  names. Rename, or use `MergeJoin`, when names clash.
 - `filter` keeps rows by equality (`column=value`) or by conditions built with `col`
-  (comparisons, `is_in`, `between`, null tests, `&`, `|`, `~`); it is a step of the pipeline.
+  (comparisons, `is_in`, `between`, null tests, `&`, `|`, `~`), with each comparison in parentheses.
   `polars_filter` takes a Polars expression for anything else.
 - `semi_join` filters one stream by the shared tags of another and adds no columns.
 - `map_data` and `map_tags` rename columns and keep the rest unless you pass
@@ -397,9 +356,7 @@ with exactly two data columns: `n_spikes` and `age_weeks`. How many rows does it
 listed in `passed_qc.csv`. Use `semi_join` and a single-stream call to the pod.
 
 ??? success "Solution"
-    Filter the units first, then join the durations. Narrowing to the function's two
-    parameters is optional, since the pod would drop the other columns itself, but it shows
-    at a glance what the function receives.
+    Filter the units first, then join the durations.
 
     ```python
     from orcapod import function_pod
@@ -419,5 +376,3 @@ listed in `passed_qc.csv`. Use `semi_join` and a single-stream call to the pod.
     print(rates.as_table().num_rows)
     # 24
     ```
-
-Next: [Part 4: Many rows into one](04-many-rows-into-one.md).

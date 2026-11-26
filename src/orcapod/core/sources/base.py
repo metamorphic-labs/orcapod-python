@@ -127,6 +127,10 @@ class RootSource(StreamBase):
     values, other Arrow types, another record id): a new version is a new source id.
     """
 
+    # The attributes holding what tells two sources of one label apart in a display,
+    # nearest first (``core/sources/display_names.py``); ``""`` for a kind without them.
+    DISPLAY_PARTS: ClassVar[tuple[str, str]] = ("", "")
+
     @classmethod
     def kind_part(cls) -> str:
         """The kind part of this class's source ids: ``<SOURCE_KIND>_v<SOURCE_VERSION>``."""

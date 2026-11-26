@@ -49,7 +49,7 @@ from tests.test_core.operators.several_items import (
     Spec,
     make_source,
 )
-from tests.test_databases import fake_pyspiral
+from tests.test_databases import fake_spiral_sdk
 
 pytestmark = [
     pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning"),
@@ -96,8 +96,8 @@ def spiral(tmp_path: Path):
     keys = pa.schema(
         [pa.field("subject_id", pa.string()), pa.field("timestamp", pa.uint64())]
     )
-    with fake_pyspiral.install(tmp_path / "spiral"):
-        project = fake_pyspiral.FakeSpiral().project(_PROJECT)
+    with fake_spiral_sdk.install(tmp_path / "spiral"):
+        project = fake_spiral_sdk.ExternalProject(_PROJECT)
         project.create_table("default.event", key_schema=keys).write(
             pa.table(
                 {
@@ -107,9 +107,9 @@ def spiral(tmp_path: Path):
                 }
             )
         )
-        fake_pyspiral.scan_log.clear()
+        fake_spiral_sdk.scan_log.clear()
         yield project
-        fake_pyspiral.scan_log.clear()
+        fake_spiral_sdk.scan_log.clear()
 
 
 def _event(**kwargs: Any) -> SpiralDBTableSource:
@@ -120,9 +120,9 @@ class TestSectionFiveCases:
     def test_a_restricted_source_under_a_filter(self, spiral):
         source = _event().where(subject_id="m1")
         stream = source.filter(col("amplitude") >= 1.0, label="loud")
-        fake_pyspiral.scan_log.clear()
+        fake_spiral_sdk.scan_log.clear()
         text = stream.explain().text()
-        assert fake_pyspiral.scan_log == []  # nothing read
+        assert fake_spiral_sdk.scan_log == []  # nothing read
         assert text == (
             "DynamicPodStream[loud] reads:\n"
             f"  source {source.source_id!r} (SpiralDBTableSource)\n"
