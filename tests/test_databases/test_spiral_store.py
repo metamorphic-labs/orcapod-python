@@ -1433,8 +1433,15 @@ def test_a_schema_override_that_is_not_a_store_schema_is_a_manifest_error() -> N
 
 @pytest.mark.parametrize("where", ["schema", "physical"])
 def test_a_recorded_name_that_is_not_utf8_is_a_manifest_error(where: str) -> None:
-    """``read_manifest`` raises only ``ManifestError``, also for a name of bytes."""
-    bad: Any = pa.field(cast(Any, b"a\xff"), pa.int8())
-    recorded = _payload(**{where: _ipc(schema_of([bad, (KEY, pa.large_binary())]))})
-    with pytest.raises(store.ManifestError):
+    """``read_manifest`` raises only ``ManifestError``, also for a name of bytes: in the
+    logical schema, and in a stored schema of the right shape (so that the name, not the
+    shape, is what is refused)."""
+    if where == "schema":
+        bad: Any = pa.field(cast(Any, b"a\xff"), pa.int8())
+        recorded = _payload(schema=_ipc(schema_of([bad, (KEY, pa.large_binary())])))
+    else:
+        first = store.physical_schema(schema_of(BASE)).field(0)
+        renamed: Any = pa.field(cast(Any, b"a\xff"), first.type, first.nullable)
+        recorded = _payload(physical=_ipc(_physical(0, renamed)))
+    with pytest.raises(store.ManifestError, match="UTF-8"):
         _ = store.read_manifest(recorded, PATH)

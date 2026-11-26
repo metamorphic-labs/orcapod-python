@@ -682,3 +682,18 @@ def test_the_fake_cuts_nul_in_names_inside_encoded_arrays(
         )
         stored = table.append(rows).scan().to_table()
         assert stored.column("s").to_pylist() == [{"x": 1}, {"x": 1}]
+
+
+def test_the_fake_cuts_nul_in_names_inside_nested_encoded_arrays(
+    tmp_path: Path,
+) -> None:
+    """CodeRabbit on PR 590 (round 2): an encoded struct inside a list is cut too."""
+    with fake.install(tmp_path):
+        key = pa.schema([pa.field("k", pa.large_string(), False)])
+        table = fake.FakeClient().project("p").create_keyed_table("d", "t", key)
+        one = pa.array([{"x\0y": 1}], pa.struct([("x\0y", pa.int8())]))
+        encoded = pa.DictionaryArray.from_arrays(pa.array([0, 0], pa.int32()), one)
+        lists = pa.LargeListArray.from_arrays(pa.array([0, 1, 2], pa.int64()), encoded)
+        rows = pa.table({"k": pa.array(["a", "b"], pa.large_string()), "l": lists})
+        stored = table.append(rows).scan().to_table()
+        assert stored.column("l").to_pylist() == [[{"x": 1}], [{"x": 1}]]

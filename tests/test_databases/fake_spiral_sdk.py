@@ -239,6 +239,51 @@ def _decoded(array: Any) -> Any:
     return array
 
 
+def _holds_encoding(t: Any) -> bool:
+    """Whether a type is, or holds at any depth, a dictionary or run-end encoding."""
+    if pa.types.is_dictionary(t) or pa.types.is_run_end_encoded(t):
+        return True
+    if isinstance(t, pa.BaseExtensionType):
+        return False
+    return any(_holds_encoding(t.field(i).type) for i in range(t.num_fields))
+
+
+def _deep_decoded(array: Any) -> Any:
+    """``array`` with every dictionary and run-end encoding undone, at any depth, as the
+    service stores it (``types``), so nested names are cut as at the top (``nul``)."""
+    a = _decoded(array)
+    t = a.type
+    mask = a.is_null() if a.null_count else None
+    if pa.types.is_struct(t):
+        children = [_deep_decoded(a.field(i)) for i in range(t.num_fields)]
+        fields = [t.field(i).with_type(c.type) for i, c in enumerate(children)]
+        return pa.StructArray.from_arrays(children, fields=fields, mask=mask)
+    if pa.types.is_list(t) or pa.types.is_large_list(t):
+        values = _deep_decoded(a.values)
+        kind: Any = pa.list_ if pa.types.is_list(t) else pa.large_list
+        cls: Any = pa.ListArray if pa.types.is_list(t) else pa.LargeListArray
+        target = kind(t.value_field.with_type(values.type))
+        return cls.from_arrays(a.offsets, values, type=target, mask=mask)
+    if pa.types.is_fixed_size_list(t):
+        size = t.list_size
+        values = _deep_decoded(a.values.slice(a.offset * size, len(a) * size))
+        target = pa.list_(t.value_field.with_type(values.type), size)
+        return cast(Any, pa.FixedSizeListArray).from_arrays(
+            values, type=target, mask=mask
+        )
+    if pa.types.is_map(t):
+        keys, items = _deep_decoded(a.keys), _deep_decoded(a.items)
+        target = cast(Any, pa.map_)(
+            t.key_field.with_type(keys.type),
+            t.item_field.with_type(items.type),
+            keys_sorted=t.keys_sorted,
+        )
+        return cast(Any, pa.MapArray).from_arrays(
+            a.offsets, keys, items, type=target, mask=mask
+        )
+    return a
+
+
 def _time_outside_a_day(array: Any) -> bool:
     """Whether a time value outside one day is in ``array``, at any depth (``time-of-day``)."""
     array = _decoded(array)
@@ -513,11 +558,11 @@ def _staged(rows: pa.Table, keys: list[str], stored: pa.Schema) -> pa.Table:
     names = [name.split("\0")[0] for name in rows.column_names]  # nul
     rows = rows.rename_columns(names)
     for i, field in enumerate(rows.schema):  # nul, at every depth
-        if pa.types.is_dictionary(field.type) or pa.types.is_run_end_encoded(
-            field.type
-        ):
+        if _holds_encoding(field.type):
             # Stored as its values (``types``): decoded first, so its names are cut.
-            decoded = pa.chunked_array([_decoded(c) for c in rows.column(i).chunks])
+            decoded = pa.chunked_array(
+                [_deep_decoded(c) for c in rows.column(i).chunks]
+            )
             rows = rows.set_column(i, field.with_type(decoded.type), decoded)
             field = rows.schema.field(i)
         cut = _names_cut_at_nul(field.type)

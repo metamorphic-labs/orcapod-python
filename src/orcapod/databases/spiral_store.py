@@ -888,7 +888,8 @@ def read_manifest(recorded: bytes, record_path: tuple[str, ...]) -> StoreManifes
     """Return the manifest ``manifest_bytes`` recorded.
 
     Args:
-        recorded: The bytes, as read from the table's row.
+        recorded: The payload, as reassembled from the chunks in the table's metadata
+            (stage 3).
         record_path: The record path the table was looked up for.
 
     Returns:
