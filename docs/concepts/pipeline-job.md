@@ -58,8 +58,8 @@ The three stages:
    and failed; see
    [Reading the run summary](function-pods.md#reading-the-run-summary).
 
-Among `job.run()`'s optional arguments, the tutorial's
-[Part 9](../tutorial/09-when-things-go-wrong.md) demonstrates `orchestrator=` (for example
+Among `job.run()`'s optional arguments, the tutorial
+[Handling errors](../tutorial/handling-errors.md) demonstrates `orchestrator=` (for example
 `SyncPipelineOrchestrator(error_policy="fail_fast")` to stop at the first failing row; the
 default policy skips failed rows and continues) and `observer=` (`StatusObserver`,
 `LoggingObserver`) to record what happened during the run. An observer only watches: one
