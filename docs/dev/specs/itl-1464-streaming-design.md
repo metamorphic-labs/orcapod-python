@@ -15,8 +15,8 @@ a session of them is a different problem. Nothing here is designed or tested for
   and is asked about.
 - **Sync results stay exact and deterministic**: every value, type, row order, stored row
   and error of the sync path stays as it is today (the rule of ITL-1347 and ITL-1441).
-- **Async results equal the sync results as a set of rows** (each row as often as it
-  occurs); row order is not a result on the async path (developer, November 22, 2026).
+- **Async results equal the sync results row for row with multiplicity** (each row as
+  often as it occurs, in any order; never a comparison of sets); row order is not a result on the async path (developer, November 22, 2026).
 - **The async path is the primary memory-bounded path** (developer, November 25, 2026).
   The sync path gets what it can get without giving up its order.
 - **Fewest special cases.** One mechanism for rows that are not in memory (the local
@@ -54,9 +54,19 @@ memory. `head()` and the notebook display still never compute.
 One mechanism holds rows that are computed but not in memory.
 
 - **What it is.** Arrow IPC files (the file format, uncompressed, so they can be
-  memory-mapped), one per stream of rows, written a record batch at a time as the rows
-  are produced, in the form the rows have on a job's edges (ITL-1347's row-built form).
-  A row is addressed by `(batch number, row number)`.
+  memory-mapped), holding a stream's rows in the form the rows have on a job's edges
+  (ITL-1347's row-built form). A row is addressed by its number in the stream.
+- **Segments: nothing reads a file that is being written.** An Arrow IPC file has its
+  footer (schema and batch offsets) only once it is closed, so an open file cannot be
+  read. A stream's rows are therefore kept as a sequence of *segments*: arriving rows
+  wait in memory until they pass the segment size (the in-memory threshold below), then
+  are written as one file of one record batch, which is closed before anything reads it.
+  A read, at any moment, takes rows from closed segments (mapped) and from the waiting
+  rows (in memory); a join that fetches rows of an input still arriving reads exactly
+  these. The waiting rows of each open stream are memory the process holds: at most one
+  segment size per stream being written, counted in section 8. A segment is deleted when
+  every row of it is let go, so a stream's files shrink as a join releases rows. This is
+  what `core/row_spool.py` (PR 559) implements.
 - **Where.** A directory per process run, `<cache root>/orcapod-<pid>-<random>/`. The
   cache root is `OrcapodConfig.local_cache_dir`, by default the system's temporary
   directory. **OPEN (L1)**: the default location, and whether a job's cache may live
@@ -160,7 +170,12 @@ never run. `preview(n)` computes only what `n` rows need:
 - the limit is passed down: a source reads at most the rows asked of it (a SpiralDB or
   database source as a pushed-down `limit`, a file source by stopping the read);
 - row-by-row steps (section 5) are applied to batches until `n` rows have come out; the
-  batch size doubles when a batch yields too few (a selective filter);
+  batch size doubles when a batch yields too few (a selective filter). Each further
+  batch continues after the last row read: the preview holds one open read of each source
+  for its whole duration and asks it for the next rows; it never starts a read again, so
+  no row is read or computed twice. A limit is pushed down into a source only when no
+  step of the chain can remove a row (then `n` source rows are enough); with a filter in
+  the chain the source read is open-ended and stopped when `n` rows have come out;
 - a step that needs its whole input (`GroupBy`, `Batch`, a join) is **computed in full**
   under `preview`, with a note in the view saying so. **OPEN (P1)**: compute in full, or
   refuse and point to `run()`. Proposed: refuse by default with
@@ -275,13 +290,19 @@ join keeps, per row that can still match, an index entry:
 - the row's join key in prepared form (`arrow_keys.polars_ready`, the present
   preparation), as a Polars frame, so matching stays one vectorized join per arriving
   batch with the sync path's own rule (`join._matched_pairs`); and
-- the row's reference, `(batch number, row number)`: 8 bytes.
+- the row's reference, its row number in the cached input: 8 bytes.
+
+For an input that is not certified unique on the join key the join also keeps one count
+per distinct key of its index (the key and 8 bytes), which the pair bound below needs.
+Distinct keys can be as many as the indexed rows, so this can double that input's index;
+a certified-unique input needs no counts (every count is 1). "Index" in the bounds below
+includes these counts.
 
 **The pairs of one match are bounded too.** The size of an arriving batch does not bound
 the number of pairs it matches: rows of the batch that share a key with many indexed rows
 give their product. So no match builds its whole pair frame at once. Before matching, the
-join counts the pairs per arriving row (the batch's keys against a count of index entries
-per key, kept beside the index: at most one count per arriving row) and cuts the batch
+join counts the pairs per arriving row (the batch's keys against the counts per key kept
+beside the index: the lookup gives at most one count per arriving row) and cuts the batch
 into row ranges whose pairs fit a pair budget (proposed 1,048,576 pairs, 16 MiB of row
 references). One arriving row whose matches alone pass the budget is matched against
 successive ranges of that key's index entries. Each range is matched, fetched, sent and
@@ -400,7 +421,8 @@ uniqueness over the key, Orcapod trusts it without the running check.
 ### The bound for each case
 
 `n` and `m` are the rows of the two inputs; "index" is the per-row cost above (key plus
-8 bytes); rows themselves are in the cache, on disk.
+8 bytes), with the per-key counts of an input that is not certified unique (at most as
+much again); rows themselves are in the cache, on disk.
 
 | Case | What is held in memory | Bound |
 |---|---|---|
@@ -444,7 +466,10 @@ back-pressure, and why the worst case counts both sides.
 ### Test plan that proves the bound
 
 - A measurement in `measure.py` style for each case (1:1 in step, 1:1 one side first,
-  unique side small, many to many), at two sizes a factor of 10 apart, recording peak
+  unique side small, many to many), at two sizes a factor of 10 apart (the expected index
+  includes the per-key counts for the many-to-many case and for the non-unique side, and
+  each run reads rows of an input that is still arriving, so across segments and the
+  waiting rows), recording peak
   resident memory less mapped file pages, and the peak of the Arrow pool: the peak must
   grow as the index does (key bytes × rows), not as the rows do. For "unique side small",
   the arrival order is fixed by the test: with the unique side read to its end and closed
@@ -501,7 +526,8 @@ With sections 2 to 7 in place, for a job run by the async orchestrator:
 |---|---|
 | A source | one batch read (65,536 rows at most), plus 16 bytes per row read if its key is verified as data flows, nothing if the store guarantees it |
 | A row-by-row operator, a function pod | the batch in hand |
-| A step that needs its whole input (`PolarsFilter` with a predicate not known to be row-wise, `Batch` without a size) | its whole input: outside the bound below |
+| A step that needs its whole input (`PolarsFilter` with a predicate not known to be row-wise, `Batch` without a size) | its whole input, its whole output and its conversion buffers: outside the bound below |
+| A stream being written to the cache | its waiting rows, at most one segment size (section 2) |
 | A channel between two nodes | its buffered batches (a fixed number) |
 | `GroupBy` | its keys-only index, and one group |
 | A join | its keys-only index (section 6), and the pairs of one range being matched (at most the pair budget) |
@@ -509,7 +535,7 @@ With sections 2 to 7 in place, for a job run by the async orchestrator:
 | A view | the rows shown |
 
 **The bound to state to users**: peak memory of an async job is
-`(batches in flight) × (batch bytes) + (key bytes + 8) × (rows indexed by joins and groupings) + 16 × (rows of verified sources) + 16 × (pair budget) × (joins matching at once) + (small results kept in memory) + the largest single row`.
+`(batches in flight) × (batch bytes) + (key bytes + 8) × (rows indexed by joins and groupings) + 16 × (rows of verified sources) + 16 × (pair budget) × (joins matching at once) + (segment size) × (streams being written to the cache at once) + (small results kept in memory) + the largest single row`.
 For the measured session (2.2 million rows of 120 bytes, one grouping, one function
 pod) that is under 0.5 GiB, against about 210 GiB today.
 
@@ -523,9 +549,11 @@ The formula covers a job whose every step is one of the bounded kinds of section
 step that needs its whole input by definition is outside it and adds that input, whole
 and in memory, for as long as the step runs: a `PolarsFilter` whose predicate is not
 known to be row-wise (B1; `pl.col("x") > pl.col("x").mean()`), and `Batch` without a
-size. So the statement to users is the formula
-`+ (the whole input of each such step running at once)`, and a job with none of them has
-the bound as written.
+size. Such a step also builds its output while it still holds its input, and a
+`PolarsFilter` holds the Polars copy of the columns it evaluates. So the statement to
+users is the formula
+`+ (the whole input and the whole output of each such step running at once, plus the conversion buffers it holds)`,
+and a job with none of them has the bound as written.
 
 **Proposed budget for the workshop** (**OPEN, M1**): a job over every table in scope of a
 sample dataset peaks below 4 GiB on the async path, checked on synthetic tables of the
