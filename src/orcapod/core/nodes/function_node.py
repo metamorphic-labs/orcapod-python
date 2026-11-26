@@ -4514,6 +4514,20 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                                 # order is the order downstream received (a parked
                                 # send can resume after a later one).
                                 run_entry_ids.append(instance_id)
+                            elif isinstance(data, EmptyData):
+                                # A placeholder whose instance is not stored: the
+                                # result store answers by its input hash, nothing
+                                # is computed and no pipeline row is written, as
+                                # on the sync path (``_empty_data_cache_hit``).
+                                found_tag, found = self._empty_data_cache_hit(
+                                    tag, data, instance_id
+                                )
+                                ctx_obs.on_data_start(node_label, tag, data)
+                                ctx_obs.on_data_end(
+                                    node_label, tag, data, found, cached=True
+                                )
+                                await output.send((found_tag, found))
+                                run_entry_ids.append(instance_id)
                             else:
                                 self._preflight_pipeline_write_schema()
                                 correlation_key = uuid.uuid4().bytes
