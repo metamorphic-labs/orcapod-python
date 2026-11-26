@@ -10,7 +10,11 @@ from __future__ import annotations
 import re
 import threading
 
-from orcapod.hashing.file_hashers import FileHashKey
+from orcapod.hashing.file_hashers import (
+    FileHashKey,
+    parse_stored_file_hash,
+    require_storable,
+)
 from orcapod.types import ContentHash
 
 try:
@@ -233,9 +237,10 @@ class PostgresHashCacher:
             ).fetchone()
         if row is None:
             return None
-        blob: bytes = bytes(row[0])
-        method_bytes, digest = blob.split(b":", 1)
-        return ContentHash(method=method_bytes.decode("ascii"), digest=digest)
+        stored = row[0]
+        if not isinstance(stored, (bytes, bytearray, memoryview)):
+            return None
+        return parse_stored_file_hash(bytes(stored), key.label)
 
     def put(self, key: FileHashKey, value: ContentHash) -> None:
         """Store ``value`` under ``key``.
@@ -249,7 +254,13 @@ class PostgresHashCacher:
         Args:
             key: File hash cache key.
             value: ``ContentHash`` to store.
+
+        Raises:
+            ValueError: If ``value`` is not a hash of the key's algorithm (another
+                label, or a digest of another length; ``require_storable``),
+                checked before the read-only and size guards.
         """
+        require_storable(key, value)
         if self._read_only:
             return
         if (

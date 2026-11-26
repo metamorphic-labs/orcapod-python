@@ -23,6 +23,14 @@ the default (SHA-256) file handler returned the MD5 value with caching on.
 - `populate_hash_cache` (`warm-cache`) builds keys with its hasher's label, also in a dry
   run, so another algorithm's entry counts as not cached.
 
+## Review follow-up (independent review of 0254962d)
+
+- `put` on every cacher calls `require_storable` first: a hash whose label is not the key's,
+  or whose digest is not that algorithm's length (`hash_utils.file_hash_digest_size`), raises
+  `ValueError` and stores nothing.
+- The persistent cachers read a stored value with `parse_stored_file_hash`: exactly the key's
+  label, `:`, and a digest of that algorithm's length; anything else is a miss.
+
 ## Tests
 
 `tests/test_hashing/test_file_hash_cache_algorithm.py`: two algorithms on one file over one

@@ -122,6 +122,34 @@ def _to_path(file_path: PathLike) -> Path | UPath:
     return Path(file_path)
 
 
+_FIXED_DIGEST_SIZES = {"hash_path": 32, "xxh64": 8, "crc32": 4}
+
+
+def file_hash_digest_size(algorithm: str) -> int:
+    """Return the digest length in bytes of a ``hash_file`` hash made with ``algorithm``.
+
+    Args:
+        algorithm: An algorithm ``hash_file`` accepts (its hashes' label).
+
+    Returns:
+        The exact length of every digest ``hash_file`` returns for ``algorithm``.
+
+    Raises:
+        ValueError: If ``hash_file`` has no fixed-length digest for ``algorithm``.
+    """
+    if algorithm in _FIXED_DIGEST_SIZES:
+        return _FIXED_DIGEST_SIZES[algorithm]
+    try:
+        size = hashlib.new(algorithm).digest_size
+    except ValueError:
+        raise ValueError(f"No file hash algorithm named {algorithm!r}") from None
+    if size == 0:  # an extendable-output function (shake_*): no fixed length
+        raise ValueError(
+            f"File hash algorithm {algorithm!r} has no fixed digest length"
+        )
+    return size
+
+
 def hash_file(
     file_path: PathLike, algorithm="sha256", buffer_size=65536
 ) -> ContentHash:

@@ -526,6 +526,9 @@ class TestPostgresReprRedaction:
 # ---------------------------------------------------------------------------
 
 
+_SIZES = {"sha256": 32, "md5": 16}
+
+
 def _key_with_label(label: str) -> FileHashKey:
     return FileHashKey(path=UPath("/a/b.txt"), mtime_ns=1000, size=100, label=label)
 
@@ -535,35 +538,166 @@ class TestPostgresHashCacherAlgorithmLabel:
     @pytest.mark.parametrize(
         ("first", "second"), [("sha256", "md5"), ("md5", "sha256")]
     )
-    def test_entry_of_another_label_is_miss(self, cacher, first, second):
-        cacher.put(_key_with_label(first), ContentHash(first, b"\x01" * 16))
+    def test_entry_of_another_label_is_miss(
+        self, cacher: PostgresHashCacher, first: str, second: str
+    ):
+        cacher.put(
+            _key_with_label(first), ContentHash(first, bytes([1]) * _SIZES[first])
+        )
         assert cacher.get(_key_with_label(second)) is None
-        assert cacher.get(_key_with_label(first)) == ContentHash(first, b"\x01" * 16)
+        assert cacher.get(_key_with_label(first)) == ContentHash(
+            first, bytes([1]) * _SIZES[first]
+        )
 
     @pytest.mark.parametrize(
         ("first", "second"), [("sha256", "md5"), ("md5", "sha256")]
     )
-    def test_put_of_another_label_replaces_entry(self, cacher, first, second):
-        cacher.put(_key_with_label(first), ContentHash(first, b"\x01" * 16))
-        cacher.put(_key_with_label(second), ContentHash(second, b"\x02" * 16))
-        assert cacher.get(_key_with_label(second)) == ContentHash(second, b"\x02" * 16)
+    def test_put_of_another_label_replaces_entry(
+        self, cacher: PostgresHashCacher, first: str, second: str
+    ):
+        cacher.put(
+            _key_with_label(first), ContentHash(first, bytes([1]) * _SIZES[first])
+        )
+        cacher.put(
+            _key_with_label(second), ContentHash(second, bytes([2]) * _SIZES[second])
+        )
+        assert cacher.get(_key_with_label(second)) == ContentHash(
+            second, bytes([2]) * _SIZES[second]
+        )
         assert cacher.get(_key_with_label(first)) is None
 
     @pytest.mark.parametrize(
         ("first", "second"), [("sha256", "md5"), ("md5", "sha256")]
     )
     def test_match_mtime_false_skips_newer_entry_of_another_label(
-        self, pg_conninfo, first, second
+        self, pg_conninfo: str, first: str, second: str
     ):
         c = PostgresHashCacher(pg_conninfo, match_mtime=False)
         c.clear()
         try:
             older = FileHashKey(UPath("/a/b.txt"), 1000, 100, first)
             newer = FileHashKey(UPath("/a/b.txt"), 2000, 100, second)
-            c.put(older, ContentHash(first, b"\x01" * 16))
-            c.put(newer, ContentHash(second, b"\x02" * 16))
+            c.put(older, ContentHash(first, bytes([1]) * _SIZES[first]))
+            c.put(newer, ContentHash(second, bytes([2]) * _SIZES[second]))
             assert c.get(FileHashKey(UPath("/a/b.txt"), 3000, 100, first)) == (
-                ContentHash(first, b"\x01" * 16)
+                ContentHash(first, bytes([1]) * _SIZES[first])
             )
         finally:
             c.close()
+
+
+_CRAFTED_BLOBS = [
+    pytest.param(b"sha256:" + b"\x07" * 25, id="raw-32-byte-blob-starting-with-prefix"),
+    pytest.param(b"sha256:" + b"\x07" * 33, id="digest-too-long"),
+    pytest.param(b"sha256:", id="empty-digest"),
+    pytest.param(b"sha256" + b"\x07" * 32, id="no-separator"),
+    pytest.param(b"md5:" + b"\x07" * 32, id="other-label"),
+]
+
+
+@pytest.mark.postgres
+class TestPostgresHashCacherStrictStore:
+    @pytest.mark.parametrize("match_mtime", [True, False])
+    @pytest.mark.parametrize(
+        ("key_label", "value_label"), [("sha256", "md5"), ("md5", "sha256")]
+    )
+    def test_put_of_another_algorithms_hash_is_refused(
+        self, pg_conninfo: str, match_mtime: bool, key_label: str, value_label: str
+    ):
+        c = PostgresHashCacher(pg_conninfo, match_mtime=match_mtime)
+        c.clear()
+        try:
+            value = ContentHash(value_label, b"\x01" * _SIZES[value_label])
+            with pytest.raises(ValueError, match="label"):
+                c.put(_key_with_label(key_label), value)
+            assert c.get(_key_with_label(key_label)) is None
+            assert c.get(_key_with_label(value_label)) is None
+        finally:
+            c.close()
+
+    def test_put_of_a_digest_of_the_wrong_length_is_refused(
+        self, cacher: PostgresHashCacher
+    ):
+        with pytest.raises(ValueError, match="digest"):
+            cacher.put(_key_with_label("sha256"), ContentHash("sha256", b"\x01" * 31))
+        assert cacher.get(_key_with_label("sha256")) is None
+
+    @pytest.mark.parametrize("match_mtime", [True, False])
+    @pytest.mark.parametrize("blob", _CRAFTED_BLOBS)
+    def test_malformed_stored_hash_is_a_miss(
+        self, pg_conninfo: str, match_mtime: bool, blob: bytes
+    ):
+        c = PostgresHashCacher(pg_conninfo, match_mtime=match_mtime)
+        c.clear()
+        try:
+            with psycopg.connect(pg_conninfo) as conn:
+                conn.execute(
+                    "INSERT INTO file_hash_cache (path, mtime_ns, size, hash) "
+                    "VALUES (%s, %s, %s, %s)",
+                    ("/a/b.txt", 1000, 100, blob),
+                )
+            assert c.get(_key_with_label("sha256")) is None
+        finally:
+            c.close()
+
+    def test_well_formed_stored_hash_is_read(
+        self, pg_conninfo: str, cacher: PostgresHashCacher
+    ):
+        with psycopg.connect(pg_conninfo) as conn:
+            conn.execute(
+                "INSERT INTO file_hash_cache (path, mtime_ns, size, hash) "
+                "VALUES (%s, %s, %s, %s)",
+                ("/a/b.txt", 1000, 100, b"sha256:" + b"\x07" * 32),
+            )
+        assert cacher.get(_key_with_label("sha256")) == ContentHash(
+            "sha256", b"\x07" * 32
+        )
+
+    def test_two_algorithms_written_concurrently_never_cross(self, pg_conninfo: str):
+        """Concurrent puts of two algorithms on one file: no error, no wrong hit.
+
+        One row per (path, mtime_ns, size): whichever put lands last owns the row,
+        and a lookup of the other label is a miss, never the other algorithm's hash.
+        """
+        setup = PostgresHashCacher(pg_conninfo)
+        setup.clear()
+        setup.close()
+        values = {
+            label: ContentHash(label, bytes([n]) * _SIZES[label])
+            for n, label in ((1, "sha256"), (2, "md5"))
+        }
+        errors: list[Exception] = []
+        barrier = threading.Barrier(8)
+
+        def write(label: str) -> None:
+            c = PostgresHashCacher(pg_conninfo)
+            try:
+                barrier.wait()
+                for _ in range(20):
+                    c.put(_key_with_label(label), values[label])
+                    got = c.get(_key_with_label(label))
+                    assert got is None or got == values[label]
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                c.close()
+
+        threads = [
+            threading.Thread(target=write, args=(label,))
+            for label in ("sha256", "md5") * 4
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        assert errors == []
+
+        reader = PostgresHashCacher(pg_conninfo)
+        try:
+            found = {label: reader.get(_key_with_label(label)) for label in values}
+        finally:
+            reader.close()
+        assert [found[label] for label in values if found[label] is not None] == [
+            values[label] for label in values if found[label] is not None
+        ]
+        assert sum(v is not None for v in found.values()) == 1

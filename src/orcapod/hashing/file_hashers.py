@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from upath import UPath
 
-from orcapod.hashing.hash_utils import hash_file
+from orcapod.hashing.hash_utils import file_hash_digest_size, hash_file
 from orcapod.protocols.hashing_protocols import (
     CacherProtocol,
     FileContentHasherProtocol,
@@ -42,6 +42,62 @@ class FileHashKey:
         starts with these bytes, and matches an entry's label on them.
         """
         return f"{self.label}:".encode("ascii")
+
+
+def require_storable(key: FileHashKey, value: ContentHash) -> None:
+    """Refuse to store ``value`` under ``key`` unless it is a hash of the key's algorithm.
+
+    Every file hash cacher calls this first in ``put``, so a store never holds a
+    value under another algorithm's key (ITL-1488): the value's label must be the
+    key's, and its digest exactly that algorithm's length.
+
+    Args:
+        key: The key the value would be stored under.
+        value: The hash to store.
+
+    Raises:
+        ValueError: If the labels differ, the label names no algorithm with a fixed
+            digest length, or the digest has another length.
+    """
+    if value.method != key.label:
+        raise ValueError(
+            f"A {value.method!r} hash cannot be stored under a key whose label is "
+            f"{key.label!r}"
+        )
+    size = file_hash_digest_size(key.label)
+    if len(value.digest) != size:
+        raise ValueError(
+            f"A {key.label!r} digest is {size} bytes, not {len(value.digest)}"
+        )
+
+
+def parse_stored_file_hash(blob: bytes, label: str) -> ContentHash | None:
+    """Read a stored ``<label>:<digest>`` value strictly, for one algorithm.
+
+    A persistent cacher stores ``ContentHash.to_prefixed_digest()``. The value is
+    read only when it is exactly ``label``, a ``:`` and a digest of that
+    algorithm's length; anything else (another label, a raw digest whose bytes
+    happen to begin with ``<label>:``, a digest of another length) is a miss.
+
+    Args:
+        blob: The stored bytes.
+        label: The label of the key that was looked up.
+
+    Returns:
+        The stored hash, or ``None`` when the value is not a well-formed hash of
+        ``label``.
+    """
+    prefix = f"{label}:".encode("ascii")
+    if not blob.startswith(prefix):
+        return None
+    try:
+        size = file_hash_digest_size(label)
+    except ValueError:
+        return None
+    digest = blob[len(prefix) :]
+    if len(digest) != size:
+        return None
+    return ContentHash(method=label, digest=digest)
 
 
 class FileHasher:

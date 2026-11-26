@@ -10,7 +10,11 @@ import sqlite3
 import threading
 from pathlib import Path
 
-from orcapod.hashing.file_hashers import FileHashKey
+from orcapod.hashing.file_hashers import (
+    FileHashKey,
+    parse_stored_file_hash,
+    require_storable,
+)
 from orcapod.types import ContentHash
 
 # Current SQLite schema version.  Stored in PRAGMA user_version.
@@ -96,7 +100,13 @@ class InMemoryHashCacher:
         Args:
             key: File hash cache key.
             value: ``ContentHash`` to store.
+
+        Raises:
+            ValueError: If ``value`` is not a hash of the key's algorithm (another
+                label, or a digest of another length; ``require_storable``),
+                checked before the read-only and size guards.
         """
+        require_storable(key, value)
         if self._read_only:
             return
         if (
@@ -296,9 +306,7 @@ class SqliteHashCacher:
         row = cursor.fetchone()
         if row is None:
             return None
-        blob: bytes = row[0]
-        method_bytes, digest = blob.split(b":", 1)
-        return ContentHash(method=method_bytes.decode("ascii"), digest=digest)
+        return parse_stored_file_hash(bytes(row[0]), key.label)
 
     def put(self, key: FileHashKey, value: ContentHash) -> None:
         """Store ``value`` under ``key``.
@@ -310,7 +318,13 @@ class SqliteHashCacher:
         Args:
             key: File hash cache key.
             value: ``ContentHash`` to store.
+
+        Raises:
+            ValueError: If ``value`` is not a hash of the key's algorithm (another
+                label, or a digest of another length; ``require_storable``),
+                checked before the read-only and size guards.
         """
+        require_storable(key, value)
         if self._read_only:
             return
         if (

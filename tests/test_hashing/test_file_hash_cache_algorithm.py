@@ -8,6 +8,7 @@ change what the default ``sha256`` hasher returns.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -17,6 +18,8 @@ from orcapod.hashing.cache_population import populate_hash_cache
 from orcapod.hashing.file_hashers import CachedFileHasher, FileHasher, FileHashKey
 from orcapod.hashing.hash_cachers import InMemoryHashCacher, SqliteHashCacher
 from orcapod.types import ContentHash, PathLike
+
+Cacher = InMemoryHashCacher | SqliteHashCacher
 
 ALGORITHM_ORDERS = [("sha256", "md5"), ("md5", "sha256"), ("sha256", "xxh64")]
 
@@ -29,7 +32,7 @@ def data_file(tmp_path: Path) -> Path:
 
 
 @pytest.fixture(params=["in_memory", "sqlite"])
-def cacher(request, tmp_path: Path):
+def cacher(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Cacher]:
     if request.param == "in_memory":
         yield InMemoryHashCacher()
     else:
@@ -39,7 +42,7 @@ def cacher(request, tmp_path: Path):
 
 @pytest.mark.parametrize(("first", "second"), ALGORITHM_ORDERS)
 def test_shared_cache_returns_each_algorithms_own_hash(
-    cacher, data_file: Path, first: str, second: str
+    cacher: Cacher, data_file: Path, first: str, second: str
 ):
     """Two algorithms over one cache, one file: each gets its own hash, in any order."""
     expected = {
@@ -115,10 +118,10 @@ def _key(label: str, mtime_ns: int = 1000) -> FileHashKey:
 
 
 @pytest.mark.parametrize(("first", "second"), [("sha256", "md5"), ("md5", "sha256")])
-def test_cacher_entry_of_another_label_is_miss(cacher, first: str, second: str):
-    cacher.put(_key(first), ContentHash(first, b"\x01" * 16))
+def test_cacher_entry_of_another_label_is_miss(cacher: Cacher, first: str, second: str):
+    cacher.put(_key(first), _hash_of(first, 1))
     assert cacher.get(_key(second)) is None
-    assert cacher.get(_key(first)) == ContentHash(first, b"\x01" * 16)
+    assert cacher.get(_key(first)) == _hash_of(first, 1)
 
 
 @pytest.mark.parametrize("kind", ["in_memory", "sqlite"])
@@ -131,14 +134,14 @@ def test_match_mtime_false_skips_a_newer_entry_of_another_label(
         c = InMemoryHashCacher(match_mtime=False)
     else:
         c = SqliteHashCacher(tmp_path / "cache.db", match_mtime=False)
-    c.put(_key(first, 1000), ContentHash(first, b"\x01" * 16))
-    c.put(_key(second, 2000), ContentHash(second, b"\x02" * 16))
-    assert c.get(_key(first, 3000)) == ContentHash(first, b"\x01" * 16)
-    assert c.get(_key(second, 3000)) == ContentHash(second, b"\x02" * 16)
+    c.put(_key(first, 1000), _hash_of(first, 1))
+    c.put(_key(second, 2000), _hash_of(second, 2))
+    assert c.get(_key(first, 3000)) == _hash_of(first, 1)
+    assert c.get(_key(second, 3000)) == _hash_of(second, 2)
 
 
 @pytest.fixture
-def restore_file_handlers():
+def restore_file_handlers() -> Iterator[None]:
     """Put the default context's File and Directory handlers back afterwards."""
     from orcapod.contexts import get_default_context
     from orcapod.logical_types.directory_type import Directory
@@ -182,8 +185,8 @@ class _CountingHasher:
     """A ``FileHasher`` that counts the files it actually reads."""
 
     def __init__(self, algorithm: str) -> None:
-        self.inner = FileHasher(algorithm=algorithm)
-        self.reads = 0
+        self.inner: FileHasher = FileHasher(algorithm=algorithm)
+        self.reads: int = 0
 
     @property
     def hash_label(self) -> str:
@@ -214,3 +217,128 @@ def test_sqlite_alternating_algorithms_evict_but_never_hit_wrongly(
 
         assert cached[second].hash_file(data_file).method == second
         assert inner[second].reads == 2  # same algorithm again: a hit
+
+
+# ---------------------------------------------------------------------------
+# The store never holds a value under another algorithm's key, and reads strictly
+# ---------------------------------------------------------------------------
+
+DIGEST_SIZES = {
+    "sha256": 32,
+    "md5": 16,
+    "sha1": 20,
+    "sha512": 64,
+    "xxh64": 8,
+    "crc32": 4,
+}
+
+
+def _hash_of(label: str, fill: int = 1) -> ContentHash:
+    """A well-formed hash of ``label``: its algorithm's exact digest length."""
+    return ContentHash(label, bytes([fill]) * DIGEST_SIZES[label])
+
+
+@pytest.fixture(params=["in_memory", "sqlite"])
+def any_mtime_cacher(
+    request: pytest.FixtureRequest, tmp_path: Path
+) -> Iterator[Cacher]:
+    """In-memory and SQLite cachers, with and without the mtime match."""
+    match_mtime = request.node.callspec.params.get("match_mtime", True)
+    if request.param == "in_memory":
+        yield InMemoryHashCacher(match_mtime=match_mtime)
+    else:
+        with SqliteHashCacher(tmp_path / "c.db", match_mtime=match_mtime) as c:
+            yield c
+
+
+@pytest.mark.parametrize("match_mtime", [True, False])
+@pytest.mark.parametrize(
+    ("key_label", "value_label"), [("sha256", "md5"), ("md5", "sha256")]
+)
+def test_put_of_another_algorithms_hash_is_refused(
+    any_mtime_cacher: Cacher, match_mtime: bool, key_label: str, value_label: str
+):
+    """Putting an md5 hash under a sha256 key raises and stores nothing."""
+    with pytest.raises(ValueError, match="label"):
+        any_mtime_cacher.put(_key(key_label), _hash_of(value_label))
+    assert any_mtime_cacher.get(_key(key_label)) is None
+    assert any_mtime_cacher.get(_key(value_label)) is None
+
+
+def test_mislabelled_put_cannot_poison_a_cached_file_hasher(
+    cacher: Cacher, data_file: Path
+):
+    """A refused put leaves CachedFileHasher computing the true hash."""
+    stat = data_file.resolve().stat()
+    key = FileHashKey(
+        UPath(data_file).resolve(), stat.st_mtime_ns, stat.st_size, "sha256"
+    )
+    with pytest.raises(ValueError):
+        cacher.put(key, FileHasher(algorithm="md5").hash_file(data_file))
+    hashed = CachedFileHasher(FileHasher(), cacher).hash_file(data_file)
+    assert hashed == FileHasher().hash_file(data_file)
+
+
+@pytest.mark.parametrize(
+    ("label", "length"), [("sha256", 31), ("sha256", 33), ("md5", 32)]
+)
+def test_put_of_a_digest_of_the_wrong_length_is_refused(
+    cacher: Cacher, label: str, length: int
+):
+    with pytest.raises(ValueError, match="digest"):
+        cacher.put(_key(label), ContentHash(label, b"\x01" * length))
+    assert cacher.get(_key(label)) is None
+
+
+def test_put_of_an_unknown_algorithm_is_refused(cacher: Cacher):
+    with pytest.raises(ValueError):
+        cacher.put(_key("no_such_algo"), ContentHash("no_such_algo", b"\x01" * 32))
+
+
+@pytest.mark.parametrize("label", sorted(DIGEST_SIZES))
+def test_every_supported_algorithm_round_trips(
+    cacher: Cacher, data_file: Path, label: str
+):
+    value = FileHasher(algorithm=label).hash_file(data_file)
+    assert len(value.digest) == DIGEST_SIZES[label]
+    cacher.put(_key(label), value)
+    assert cacher.get(_key(label)) == value
+
+
+def _insert_raw(db_path: Path, blob: bytes, mtime_ns: int = 1000) -> None:
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO file_hash_cache (path, mtime_ns, size, hash) "
+            "VALUES (?, ?, ?, ?)",
+            ("/a/b.txt", mtime_ns, 100, blob),
+        )
+
+
+CRAFTED_BLOBS = [
+    pytest.param(b"sha256:" + b"\x07" * 25, id="raw-32-byte-blob-starting-with-prefix"),
+    pytest.param(b"sha256:" + b"\x07" * 33, id="digest-too-long"),
+    pytest.param(b"sha256:", id="empty-digest"),
+    pytest.param(b"sha256" + b"\x07" * 32, id="no-separator"),
+    pytest.param(b"SHA256:" + b"\x07" * 32, id="other-case-label"),
+    pytest.param(b"md5:" + b"\x07" * 32, id="other-label"),
+]
+
+
+@pytest.mark.parametrize("match_mtime", [True, False])
+@pytest.mark.parametrize("blob", CRAFTED_BLOBS)
+def test_sqlite_reads_a_malformed_stored_hash_as_a_miss(
+    tmp_path: Path, match_mtime: bool, blob: bytes
+):
+    db_path = tmp_path / "c.db"
+    with SqliteHashCacher(db_path, match_mtime=match_mtime) as c:
+        _insert_raw(db_path, blob)
+        assert c.get(_key("sha256")) is None
+
+
+def test_sqlite_reads_a_well_formed_stored_hash(tmp_path: Path):
+    db_path = tmp_path / "c.db"
+    with SqliteHashCacher(db_path) as c:
+        _insert_raw(db_path, b"sha256:" + b"\x07" * 32)
+        assert c.get(_key("sha256")) == ContentHash("sha256", b"\x07" * 32)
