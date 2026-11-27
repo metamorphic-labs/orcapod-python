@@ -1318,14 +1318,18 @@ ITL-1491):
 | `large_list<int64>`, `int64`, `large_binary` | any type | refused: under its layers a token is a string |
 
 - Both types are compared in their large variants, so a plain `list` counts as a large list.
-- A token that has a layer is never null. An element inside it may be: a `Batch` over three
+- A token's list is never null at any level: a null is allowed only at the innermost level,
+  where the element is a string. So `[null, ["a"]]` under a two-level token type is refused,
+  and the error says at which list level the null list is (level 0 is the token itself).
+  A null string inside a list is valid at any depth: a `Batch` over three
   rows of which one has no recorded provenance gives `["a::row_0::x", null, "a::row_2::x"]`.
   A plain string token may be null.
 - A layer's item field (its name, nullability and metadata) is not compared between a token
   and its data.
 - The rule is checked where a stream is built from a table (so for every source, every
-  operator result and every table built from rows), from the columns' types and the token
-  column's null count only: no value is read. A stream that breaks it is refused with
+  operator result and every table built from rows), from the columns' types and the
+  validity of every list level of a list-typed token column (the null count of each
+  level's arrays): no value is read. A table with no rows is never refused for a null. A stream that breaks it is refused with
   `InputValidationError` naming the token column, the data column and both types
   (`schema_utils.token_layers_fit` is the rule). The error lists the violating columns
   in name order.
@@ -1335,7 +1339,8 @@ ITL-1491):
   the token columns that are not plain strings with the types the row holds (empty for a
   row with plain string tokens, and shared by the rows read from one table). The type rule
   is applied once per distinct layout, not once per row, and only a list-typed token column
-  is asked, per row, whether its token is null. No table is built and no data value is
+  is asked, per row, whether a list of its token is null at any level (read from the token
+  the row already holds). No table is built and no data value is
   read. A row built from Python values gets no Arrow table: its data types come from its
   schema and a list token's type from the list it is. Rows that no running node reads (a
   held node that is terminal, or whose successors are all held) are not checked on either
@@ -1348,17 +1353,15 @@ ITL-1491):
   `MergeJoin` build are parallel by origin row, data and tokens alike. Only a table built by
   hand can break the rule.
 
+`Index`, `Join`, `MergeJoin` and the record-batch join kernels need the inner lists of a
+token. They keep a guard for a null one, which no stream can hold: it can only reach them
+in rows built by hand and sent over a bare row channel, or in hand-built record batches,
+and it raises `InputValidationError` naming the column.
+
 What the check does not cover:
 
-- What is inside a token list. A list-of-lists token whose inner list is null
-  (`[null, ["a"]]`) is accepted in a stream. An operator that needs that inner list refuses
-  the row with `InputValidationError` naming the column, on the sync and on the async path:
-  `Index` when it takes that element (the element's token would be a null list), and `Join`
-  and `MergeJoin` when they merge the tokens of a data-tag both inputs hold (the tokens are
-  merged position by position, and a null list has no position). The record-batch join
-  kernels refuse it with the same error.
 - A record batch sent into a record-batch channel. The channels are not wired into nodes
-  yet; the stream built from a channel's batches is checked.
+  yet; the stream built from a channel's batches is checked. Checking a batch where it is sent is ITL-1526.
 - A `Data` row built by hand outside a stream.
 
 Where a null token is stored or hashed (the inputs of site 8, above) it is a `large_string`
@@ -1379,13 +1382,13 @@ Ordinary sources can reach this refusal. `Batch(1)` over a source of single valu
 lists with a list of tokens (one token per member). A source that already holds such lists
 has one plain token per value. The two have the same data type and two token types, so a
 `Join` on that data-tag, or a `MergeJoin` on that column, refuses them. Bring both inputs
-to one form before the join: batch both, or neither.
+to one form before the join: batch both, or neither. Whether the two forms should join is ITL-1522.
 
 The decision comes from the declared types, not from which rows match. The sync path reads
 its inputs' tables. The async `Join` takes each input's first row as its declaration and
 compares it with every other input's as it arrives. An input that sends no row over a bare
 row channel (`Join().async_execute(...)` called directly, outside a job) declares nothing
-there; in a job the node knows its inputs' types, and both orchestrators refuse.
+there; in a job the node knows its inputs' types, and both orchestrators refuse. Carrying the declared types over row channels is ITL-1527.
 
 Item fields that differ only in name or metadata between two inputs' declarations are not
 refused: both paths give the first input's type (in the join's canonical input order).

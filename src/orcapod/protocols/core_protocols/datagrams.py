@@ -716,15 +716,17 @@ class DataProtocol(DatagramProtocol, Protocol):
         """
         ...
 
-    def token_is_null(self, name: str) -> bool:
+    def token_null_level(self, name: str, layers: int) -> int | None:
         """
-        Whether the token of a data column of ``token_layout()`` is null in this row.
+        Return the list level at which a token of ``token_layout()`` holds a null list.
 
         Args:
             name: The data column.
+            layers: The number of list layers of its token's type.
 
         Returns:
-            Whether the token is null.
+            The outermost level of a null list (0 is the token itself), or
+            ``None`` when no list of the token is null.
         """
         ...
 

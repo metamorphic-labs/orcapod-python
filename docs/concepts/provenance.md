@@ -146,14 +146,17 @@ columns (`stream.as_table(columns={"source": True})`).
 - **The values may be deeper than their tokens.** A source column that holds lists has one
   plain token per value, so after a `Batch` its values are lists of lists and its tokens a
   list of plain tokens.
-- **A list of tokens is never missing, but a token inside it may be.** A batch of three
-  rows of which one has no token gives `["a::row_0::x", null, "a::row_2::x"]`.
+- **A list of tokens is never missing, at any level; only a token inside the innermost
+  list may be.** A batch of three rows of which one has no token gives
+  `["a::row_0::x", null, "a::row_2::x"]`. In a list of lists of tokens, `[null, ["a"]]` is
+  not valid: the missing inner list would have to be a list, `[[], ["a"]]` or
+  `[[null], ["a"]]`.
 
 Orcapod's sources, operators and functions always keep these rules. They matter when you
 build a table with `_source_*` columns by hand and hand it to `ArrowTableStream`: a list
 token over a value that is not a list, a list of another kind (a fixed-size list of tokens
 needs a fixed-size list of values of the same size), more list levels in the token than in
-the value, a token that is not text, or a missing list token is refused with
+the value, a token that is not text, or a missing list of tokens at any level is refused with
 `InputValidationError`, which names the token column, its data column and both types.
 
 One case reaches ordinary pipelines. A `Batch` of single values and a source that already

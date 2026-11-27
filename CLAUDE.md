@@ -1176,9 +1176,10 @@ are defined in one module, `core/row_ids.py`; never build one of these preimages
   `large_string` token has no layer, so it fits any data. A data column of a logical list
   type (the extension type built for a list of a logical element, such as a list of `Path`)
   is read as its storage: one large-list layer per list level, which is what `Batch`,
-  `GroupBy` and `MergeJoin` build over a logical element. A token with a layer is never
-  null (an element inside it may be: `["a::row_0::x", null]`); a plain string token may be
-  null. Valid: `large_list<large_string>` over `large_list<int64>`;
+  `GroupBy` and `MergeJoin` build over a logical element. A token's list is never null AT ANY
+  LEVEL (developer, November 27, 2026): a null is allowed only at the innermost level,
+  where the element is a string (`["a::row_0::x", null]` is valid; `[null, ["a"]]` under
+  a two-level token type is not); a plain string token may be null. Valid: `large_list<large_string>` over `large_list<int64>`;
   `fixed_size_list<large_string>[2]` over `fixed_size_list<int64>[2]`; `large_string` over
   anything. Invalid: `large_list<large_string>` over `int64`; a large list over a
   fixed-size list or the reverse; two list levels over one; a null list token;
@@ -1213,16 +1214,18 @@ are defined in one module, `core/row_ids.py`; never build one of these preimages
   `token_shape_error` words the `InputValidationError`, which names the token column, the
   data column and both types. Never loosen it. NOT covered: a record batch sent into an
   `OutputChannel` (the channels are not wired into nodes; the stream `result()` builds is
-  checked), a `Data` built by hand outside a stream, and what is INSIDE a token list (a
-  null inner list of a list-of-lists token is accepted in a stream). No source, operator
-  or function builds a violating stream; an operator that would need one from a valid
-  hand-built input refuses instead, with `InputValidationError` naming the column, on both
-  paths: `Index` on a null inner list of a list-of-lists token, and `Join` / `MergeJoin`
-  merging the tokens of a shared data-tag where one holds a null inner list
-  (`join.NullTokenListError`, worded by `join.null_token_list_error`; the streaming-join
-  kernels word it the same way). Whether a null
-  inner list is a valid token at all is open (the developer's rule names the token and its
-  elements, not an inner list); until decided, never add a construction-time check for it.
+  checked; the follow-up is ITL-1526), and a `Data` built by hand outside a stream. The null check reads the
+  validity of EVERY list level of a list-typed token column (`schema_utils.null_list_level`:
+  the null count of each level's arrays, no value; for a held row the token it already
+  holds, `arrow_utils.null_token_list_level`), and the error says at which level (0 is the
+  token itself). A typed zero-row table and a plain string token are unaffected. No
+  source, operator or function builds a violating stream. The operators that need an
+  inner list keep a guard for input no stream can hold any more (rows built by hand and
+  sent over a bare row channel, hand-built record batches): `Index` on a null inner list,
+  and `Join` / `MergeJoin` and the streaming-join kernels merging the tokens of a shared
+  data-tag (`join.NullTokenListError`, which says what it found, worded for the user by
+  `join.null_token_list_error`). Each guard has a unit test; never remove one, and never
+  raise a blank internal exception from one.
 - Two inputs that declare one token column with two types are refused, on the sync and the
   async path, with `require_shared_arrow_type`'s error naming the column and both types
   (developer, November 27, 2026): a column that collides under `MergeJoin`, and the token
@@ -1232,12 +1235,12 @@ are defined in one module, `core/row_ids.py`; never build one of these preimages
   data with LIST tokens, a source that already holds such lists has STRING tokens, and
   joining the two on that data-tag (or merging that column) is refused; the remedy is to
   bring both inputs to one form before the join (it is a known limitation in the
-  changelog, and the developer is deciding it). The decision comes from the declared
+  changelog; keep refusing; the follow-up is ITL-1522). The decision comes from the declared
   types: the sync path reads its inputs' tables; the async `Join` takes each input's first
   row as its declaration and compares it with every other input's as it arrives, whether
   or not any row matches. An input that sends NO row over a bare row channel
   (`Join().async_execute` called directly) declares nothing there, as for the shared-key
-  type check; in a job the node knows its inputs' types and both orchestrators refuse.
+  type check (a stated limit, never fix it here: ITL-1527); in a job the node knows its inputs' types and both orchestrators refuse.
   `MergeJoin` reports its first disagreement in name order (`_output_types` iterates
   sorted names, never a set). The async `Join` folds only the tokens of columns it merged
   (`merged_so_far`, one set per join, shared by the steps of a staggered chain): a
@@ -1969,7 +1972,7 @@ data. The rules:
   tokens supplied as Python values: `ArrowTableStream.iter_data` hands each row's source info
   to `Data` as Arrow columns, so a type the stream already has is never re-inferred. A
   many→one operator must emit a list for **every** row of a list-valued column: a token
-  with a list layer is never null (the token-shape rule, ITL-1491), and a stream that
+  has no null list at any level (the token-shape rule, ITL-1491), and a stream that
   holds one is refused when it is built. Rows read from a table keep its column type, so
   they always make one table; only rows built from Python values, where a bare `None` is
   typed `large_string` and a list a list, give per-row `as_table()` schemas that diverge.

@@ -732,21 +732,29 @@ class Data(Datagram):
             if name in token_types
         )
 
-    def token_is_null(self, name: str) -> bool:
-        """Whether the token of data column ``name`` is null in this row.
+    def token_null_level(self, name: str, layers: int) -> int | None:
+        """Return the list level at which the token of ``name`` holds a null list.
 
         Read from the token the row already holds (a null of a row's token column
         is held as ``None``); no Arrow is read or built. Asked only of a column of
         ``token_layout()``: there a row built from Python values never holds a
-        ``None``, which is a plain string token.
+        ``None`` token, which is a plain string token.
 
         Args:
             name: A data column of ``token_layout()``.
+            layers: The number of list layers of its token's type.
 
         Returns:
-            Whether the token is null.
+            The outermost level of a null list (0 is the token itself), or
+            ``None`` when no list of the token is null
+            (``arrow_utils.null_token_list_level``).
         """
-        return self._source_info.get(name) is None
+        token = self._source_info.get(name)
+        if token is None:
+            return 0
+        if layers == 1:
+            return None
+        return arrow_utils.null_token_list_level(token, layers)
 
     def _token_columns(
         self, kept: "Mapping[str, pa.ChunkedArray[Any]]", *, every_column: bool = False

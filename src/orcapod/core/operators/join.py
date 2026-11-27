@@ -222,7 +222,10 @@ def _merge_typed(left: Any, right: Any, kind: pa.DataType | None) -> Any:
     if not _is_token_list(kind):
         return _merge_pending(left, right)
     if left is None or right is None:
-        raise NullTokenListError
+        raise NullTokenListError(
+            f"a null where a list of tokens (type {kind}) is declared: no stream "
+            + "holds one (a token's list is never null at any level)"
+        )
     if not (isinstance(left, list) and isinstance(right, list)):
         return _merge_pending(left, right)
     if len(left) != len(right):

@@ -923,6 +923,36 @@ def split_by_column_groups(
 # source info as Python values; a ``Data`` that kept the Arrow source-info table
 # it was built from would not need to re-type anything. Raised in review on
 # PR #250 and PR #281.
+def null_token_list_level(token: "SourceInfoValue", layers: int) -> int | None:
+    """Return the outermost list level at which a token holds a null list.
+
+    The rule of ``schema_utils.null_list_level`` for a token held as a Python
+    value: a token's list is never null at any level, and a ``None`` at the
+    innermost level is a null string, which is valid.
+
+    Args:
+        token: The token.
+        layers: The number of list layers of the token's type.
+
+    Returns:
+        The level (0 is the token itself), or ``None`` when no list is null.
+    """
+    if layers == 0:
+        return None
+    if token is None:
+        return 0
+    if layers == 1 or isinstance(token, str):
+        return None
+    found: int | None = None
+    for element in token:
+        level = null_token_list_level(element, layers - 1)
+        if level is not None and (found is None or level + 1 < found):
+            found = level + 1
+            if found == 1:
+                break
+    return found
+
+
 def source_info_arrow_type(value: SourceInfoValue) -> "pa.DataType":
     """Return the Arrow type of one source-info provenance token.
 
