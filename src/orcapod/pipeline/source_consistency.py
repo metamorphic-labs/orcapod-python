@@ -97,7 +97,10 @@ def _key_columns_conflict(
     distinct named slots is ITL-1506, after the multi-slot binding work (ITL-1442).
     Call only after the schemas and fixed rows of ``group`` were found to agree. Only
     the sources whose key columns are known are compared: one whose key columns are
-    unknown (an unbound proxy) neither causes nor suppresses a refusal.
+    unknown (an unbound proxy) neither causes nor suppresses a refusal. The message
+    says they differ only in key columns when every source of the group holds fixed
+    rows (all compared and equal); any other source, read later or unbound, means
+    its rows were not compared, and the message says so.
 
     Args:
         source_id: The shared source id.
@@ -115,7 +118,9 @@ def _key_columns_conflict(
         "named slots (ITL-1506). For now, give each source its own name with "
         "source_id=... when it is built."
     )
-    if all(source.holds_fixed_rows for _, source in known):
+    # "Only" claims the rows are equal: true only when every source of the group,
+    # known key columns or not, holds rows that ``_differing_fixed_rows`` compared.
+    if all(source.holds_fixed_rows for _, source in group):
         return (
             f"Sources with source id {source_id!r} in {where} share one schema and "
             "the same rows, and differ only in key columns (record_id_columns), so "
