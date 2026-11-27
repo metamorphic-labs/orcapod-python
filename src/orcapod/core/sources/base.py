@@ -427,6 +427,44 @@ class RootSource(StreamBase):
         """
         return None
 
+    @property
+    def key_columns(self) -> tuple[str, ...] | None:
+        """The resolved key columns that name this source's rows, in key order.
+
+        ``()`` means a row is named by its position. Key columns belong to how the
+        rows are read, not to the dataset the source id names. A source over another
+        (``CachedSource``, ``SourceProxy``) answers with what it wraps, or ``None``
+        when that is unknown (an unbound proxy).
+        """
+        return self._key_columns
+
+    @property
+    def fixed_row_multiset(self) -> bytes | None:
+        """Digest of the held rows as a multiset of tags and data, or None for a live read.
+
+        Used to compare two fixed readings of one dataset whose key columns differ
+        (ITL-1506): record ids, which follow the key columns, are left out, and so is
+        row order. Every row counts as often as it occurs. Rows are put in the
+        canonical row order of an identity table
+        (``arrow_utils.canonical_identity_row_order``) and digested under the Arrow
+        float rule, so ``-0.0`` equals ``0.0`` and every NaN equals every other. It is
+        ``None`` exactly when ``fixed_content`` is.
+        """
+        if self.fixed_content is None:
+            return None
+        from orcapod.hashing.starfix_digest import digest_orcapod_table
+        from orcapod.utils.arrow_utils import canonical_identity_row_order
+
+        table = canonical_identity_row_order(
+            self.as_table(), tuple(self.keys()[0]), self.data_context.arrow_hasher
+        )
+        return digest_orcapod_table(
+            table,
+            include_metadata=False,
+            ordered_columns=False,
+            ordered_struct_fields=False,
+        )
+
     def _digest_fixed_rows(self) -> bytes:
         """Compare tags, data and record IDs under the normal Arrow float rule."""
         from orcapod.hashing.starfix_digest import digest_orcapod_table

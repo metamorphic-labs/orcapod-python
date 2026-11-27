@@ -79,12 +79,16 @@ record id names a row within its source and never holds the source id. A job nam
 slot by the source's name (`job.bind(sources={"units": ...})`).
 
 Within a pipeline or job, sources sharing a `source_id` must have the same Arrow schema.
-If both sources hold their rows in memory, their tags, data and record IDs must also
-agree. This applies to `ArrowTableSource`, `DictSource`, `ListSource`,
-`DataFrameSource` and wrappers over their fixed rows. Row order counts with positional
-IDs (`row_0`, `row_1`, and so on). With key columns, the same rows can arrive in any
-order. The comparison follows Orcapod's Arrow value rule, which treats signed zeros
-as equal and all NaNs as equal. Sources that read again later, including files,
+If both sources hold their rows in memory, their rows must also agree. This applies to
+`ArrowTableSource`, `DictSource`, `ListSource`, `DataFrameSource` and wrappers over
+their fixed rows. A source id names a dataset, and key columns only name its rows, so
+what is compared depends on the key columns. With the same key columns, tags, data and
+record IDs must agree: row order counts with positional IDs (`row_0`, `row_1`, and so
+on), and with key columns the same rows can arrive in any order. With different key
+columns the record IDs necessarily differ, so the rows are compared as a multiset of
+tags and data: every row counts as often as it occurs, and order does not count. The
+comparison follows Orcapod's Arrow value rule, which treats signed zeros as equal and
+all NaNs as equal. Sources that read again later, including files,
 databases, caches and stored job outputs, use the ID and schema without a row
 comparison. Capture and binding reject conflicts with `InconsistentSourceError`.
 Give the conflicting sources different `source_id` values.
@@ -1009,9 +1013,13 @@ order or content can vary between runs, pass an explicit, stable `source_id` **a
 key columns that are unique per row; this avoids both the duplicate entries and the repeated
 deliveries.
 
-A pipeline currently refuses sources that share a `source_id` and differ only in their
-key columns. ITL-1506 will allow them to share that ID when each reading has a distinct
-slot name.
+A pipeline currently refuses sources that share a `source_id` and schema but have
+different key columns: they are two readings of one dataset that would take one slot
+name. When both hold their rows in memory, the rows are compared first (as a multiset,
+above), so the error says they differ only in key columns; the rows of a source read
+later (a file, a database) are not compared, and the error says so. ITL-1506 will allow
+distinct readings of one dataset in distinct named slots. Until then, give each source
+its own `source_id`.
 
 An in-memory source with key columns and no `source_id` can instead hash its rows in key
 order: pass `hash_in_key_order=True` (`ArrowTableSource`, `DictSource`, `DataFrameSource`,

@@ -104,6 +104,14 @@ class SourceProxy(RootSource):
         return None
 
     @property
+    @override
+    def key_columns(self) -> tuple[str, ...] | None:
+        """The bound source's key columns, or ``None`` while unbound."""
+        if isinstance(self._delegate, RootSource):
+            return self._delegate.key_columns
+        return None
+
+    @property
     def is_bound(self) -> bool:
         """``True`` if a live source has been bound via `bind`."""
         return self._delegate is not None

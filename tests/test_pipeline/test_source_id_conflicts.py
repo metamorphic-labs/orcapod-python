@@ -669,9 +669,7 @@ def test_fixed_same_rows_with_different_keys_differ_only_in_key_columns(
     assert "source_id=" in message
 
 
-def test_fixed_same_rows_with_signed_zero_and_nan_differ_only_in_key_columns() -> (
-    None
-):
+def test_fixed_same_rows_with_signed_zero_and_nan_differ_only_in_key_columns() -> None:
     @function_pod(output_keys="out")
     def with_float(x: int, y: float) -> float:
         return x + y
@@ -712,7 +710,9 @@ def test_fixed_row_multiset_counts_duplicates_and_ignores_order() -> None:
         _keyed([a, a, b], None).fixed_row_multiset
         != _keyed([a, b, b], None).fixed_row_multiset
     )
-    assert _keyed([a, b], None).fixed_row_multiset != _keyed([a], None).fixed_row_multiset
+    assert (
+        _keyed([a, b], None).fixed_row_multiset != _keyed([a], None).fixed_row_multiset
+    )
 
 
 @pytest.mark.parametrize("reverse", [False, True])
@@ -741,9 +741,7 @@ def test_live_sources_with_different_keys_do_not_claim_only_key_columns(
     assert "source_id=" in message
 
 
-def _derived(
-    origin: RootSource, tag: str, keys: list[str] | None
-) -> DerivedSource:
+def _derived(origin: RootSource, tag: str, keys: list[str] | None) -> DerivedSource:
     return DerivedSource(
         origin,
         tags_as_data={tag: "tag_value"},

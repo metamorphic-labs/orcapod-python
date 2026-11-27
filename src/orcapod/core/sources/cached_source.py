@@ -267,6 +267,14 @@ class CachedSource(RootSource):
         """The name part of the wrapped source's source id."""
         return parse_source_id(self._source.source_id).name
 
+    @property
+    @override
+    def key_columns(self) -> tuple[str, ...] | None:
+        """The wrapped source's key columns, or ``None`` when it is not a root source."""
+        if isinstance(self._source, RootSource):
+            return self._source.key_columns
+        return None
+
     def _compute_arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema]":
         """The wrapped source's Arrow schemas: the cache stores that source's rows."""
         return typed_arrow_schemas(self._source)

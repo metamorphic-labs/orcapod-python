@@ -87,6 +87,30 @@ def _comparison_schema(source: RootSource) -> tuple[ContentHash, ContentHash]:
     return arrow_schema_identity(*schemas, source.data_context)
 
 
+def _same_fixed_rows(first: RootSource, other: RootSource) -> bool:
+    """Tell whether two fixed readings of one source id hold the same rows.
+
+    A source id names a dataset; key columns only name its rows and belong to the
+    reading. With equal (or unknown) key columns, compare tags, data and record ids
+    (``fixed_content``), so positional row order counts as it always has. With
+    different key columns the record ids necessarily differ, so compare the rows as a
+    multiset of tags and data (``fixed_row_multiset``): every occurrence counts, order
+    does not, and floats compare by the Arrow value rule (``-0.0`` equals ``0.0``, NaN
+    equals NaN).
+
+    Args:
+        first: A source whose ``fixed_content`` is not ``None``.
+        other: Another such source with the same source id and schema.
+
+    Returns:
+        ``True`` when the two readings hold the same rows.
+    """
+    first_keys, other_keys = first.key_columns, other.key_columns
+    if first_keys is None or other_keys is None or first_keys == other_keys:
+        return first.fixed_content == other.fixed_content
+    return first.fixed_row_multiset == other.fixed_row_multiset
+
+
 def require_consistent_sources(
     uses: Iterable[SourceUse],
     rebinding: Rebinding = (),
@@ -95,7 +119,9 @@ def require_consistent_sources(
 
     Compare distinct objects only. A live source has no fixed rows to compare,
     but does not prevent comparing two fixed sources that share its address.
-    For a bind, use the prospective sources alongside every unchanged binding.
+    Fixed sources are compared by ``_same_fixed_rows``: record ids count only when
+    their key columns are equal. For a bind, use the prospective sources alongside
+    every unchanged binding.
 
     Raises:
         InconsistentSourceError: Naming the sources and remedy for a conflict.
@@ -116,15 +142,14 @@ def require_consistent_sources(
                     f"and {location}. Give the sources different source_id values."
                 )
 
-        fixed = None
+        fixed: RootSource | None = None
         fixed_location = first_location
         for location, source in group:
-            content = source.fixed_content
-            if content is None:
+            if source.fixed_content is None:
                 continue
             if fixed is None:
-                fixed, fixed_location = content, location
-            elif fixed != content:
+                fixed, fixed_location = source, location
+            elif not _same_fixed_rows(fixed, source):
                 raise InconsistentSourceError(
                     f"Source {source_id!r} has different rows in {fixed_location} "
                     f"and {location}. Give the sources different source_id values."
