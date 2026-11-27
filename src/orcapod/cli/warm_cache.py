@@ -125,3 +125,5 @@ def warm_cache(
         )
         if stats.hashed > 0:
             typer.echo(f"Average hashing speed: {speed_gb:.2f} GB/s")
+        if stats.errors:
+            raise typer.Exit(code=1)
