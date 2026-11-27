@@ -41,30 +41,18 @@ class FileHashKey:
     algorithm: str
 
 
-def stored_hash_prefix(label: str) -> bytes | None:
-    """The leading bytes of a stored hash of ``label`` (``<label>:``), if it is valid.
-
-    A persistent cacher stores ``ContentHash.to_prefixed_digest()``, which starts
-    with these bytes.
-
-    Args:
-        label: The label of a key.
-
-    Returns:
-        ``<label>:`` as ASCII bytes, or ``None`` when ``label`` is not an ASCII
-        name of an algorithm with a fixed digest length: no hash of it can be
-        stored, so every lookup with it is a miss.
-    """
+def stored_hash_format(label: str) -> tuple[bytes, int] | None:
+    """Return the ASCII prefix and digest size for a supported cache label."""
     if not label.isascii():
         return None
     try:
-        _ = file_hash_digest_size(label)
+        digest_size = file_hash_digest_size(label)
     except ValueError:
         return None
-    return f"{label}:".encode("ascii")
+    return f"{label}:".encode("ascii"), digest_size
 
 
-def require_storable(key: FileHashKey, value: ContentHash) -> None:
+def require_storable(key: FileHashKey, value: ContentHash) -> int:
     """Refuse to store ``value`` under ``key`` unless it is a hash of the key's algorithm.
 
     Every file hash cacher calls this first in ``put``, so a store never holds a
@@ -74,6 +62,9 @@ def require_storable(key: FileHashKey, value: ContentHash) -> None:
     Args:
         key: The key the value would be stored under.
         value: The hash to store.
+
+    Returns:
+        The validated digest size.
 
     Raises:
         ValueError: If the labels differ, the label names no algorithm with a fixed
@@ -89,9 +80,23 @@ def require_storable(key: FileHashKey, value: ContentHash) -> None:
         raise ValueError(
             f"A {key.algorithm!r} digest is {size} bytes, not {len(value.digest)}"
         )
+    return size
 
 
-def parse_stored_file_hash(blob: object, label: str) -> ContentHash | None:
+def matches_stored_file_hash(blob: object, prefix: bytes, digest_size: int) -> bool:
+    """Check the stored binary format using an already validated algorithm."""
+    if isinstance(blob, memoryview):
+        blob = blob.tobytes()
+    return (
+        isinstance(blob, (bytes, bytearray))
+        and len(blob) == len(prefix) + digest_size
+        and blob.startswith(prefix)
+    )
+
+
+def parse_stored_file_hash(
+    blob: object, label: str, prefix: bytes, digest_size: int
+) -> ContentHash | None:
     """Read a stored ``<label>:<digest>`` value strictly, for one algorithm.
 
     A persistent cacher stores ``ContentHash.to_prefixed_digest()``. The value is
@@ -102,6 +107,8 @@ def parse_stored_file_hash(blob: object, label: str) -> ContentHash | None:
     Args:
         blob: The stored value, expected to contain binary data.
         label: The label of the key that was looked up.
+        prefix: The validated ASCII prefix of that label.
+        digest_size: The validated digest size for that label.
 
     Returns:
         The stored hash, or ``None`` when the value is not a well-formed hash of
@@ -111,15 +118,11 @@ def parse_stored_file_hash(blob: object, label: str) -> ContentHash | None:
         blob = blob.tobytes()
     elif isinstance(blob, bytearray):
         blob = bytes(blob)
-    if not isinstance(blob, bytes):
+    if not isinstance(blob, bytes) or not matches_stored_file_hash(
+        blob, prefix, digest_size
+    ):
         return None
-    prefix = stored_hash_prefix(label)
-    if prefix is None or not blob.startswith(prefix):
-        return None
-    digest = blob[len(prefix) :]
-    if len(digest) != file_hash_digest_size(label):
-        return None
-    return ContentHash(method=label, digest=digest)
+    return ContentHash(method=label, digest=blob[len(prefix) :])
 
 
 class FileHasher:
@@ -221,7 +224,7 @@ class CachedFileHasher:
         hit = self.cacher.get(key)
         if isinstance(hit, ContentHash):
             try:
-                require_storable(key, hit)
+                _ = require_storable(key, hit)
             except ValueError:
                 pass  # Custom backends can return an incompatible cached hash.
             else:

@@ -14,9 +14,10 @@ import threading
 from orcapod.hashing.file_hashers import (
     FILE_HASH_CACHE_SCHEMA_VERSION,
     FileHashKey,
+    matches_stored_file_hash,
     parse_stored_file_hash,
     require_storable,
-    stored_hash_prefix,
+    stored_hash_format,
 )
 from orcapod.types import ContentHash
 
@@ -175,7 +176,8 @@ class PostgresHashCacher:
         Returns:
             Cached ``ContentHash``, or ``None`` if not found.
         """
-        if stored_hash_prefix(key.algorithm) is None:
+        hash_format = stored_hash_format(key.algorithm)
+        if hash_format is None:
             return None  # Invalid labels can include NULs, which PostgreSQL rejects.
         conn = self._connection()
         if self._match_mtime:
@@ -191,7 +193,9 @@ class PostgresHashCacher:
                 "ORDER BY mtime_ns DESC LIMIT 1",
                 (str(key.path), key.size, key.algorithm),
             ).fetchone()
-        return None if row is None else parse_stored_file_hash(row[0], key.algorithm)
+        if row is None:
+            return None
+        return parse_stored_file_hash(row[0], key.algorithm, *hash_format)
 
     def put(self, key: FileHashKey, value: ContentHash) -> None:
         """Store ``value`` under ``key``.
@@ -209,7 +213,7 @@ class PostgresHashCacher:
                 (checked before the write guards), or if a write finds a different
                 well-formed hash under the same key.
         """
-        require_storable(key, value)
+        digest_size = require_storable(key, value)
         if self._read_only:
             return
         if (
@@ -221,6 +225,7 @@ class PostgresHashCacher:
         conn = self._connection()
         fields = (str(key.path), key.mtime_ns, key.size, key.algorithm)
         stored_value = value.to_prefixed_digest()
+        prefix = stored_value[:-digest_size]
         with conn.transaction():
             while True:
                 inserted = conn.execute(
@@ -248,7 +253,7 @@ class PostgresHashCacher:
                     continue
                 if existing == (stored_value,):
                     return
-                if parse_stored_file_hash(existing[0], key.algorithm) is not None:
+                if matches_stored_file_hash(existing[0], prefix, digest_size):
                     raise ValueError(f"Different hash already cached for {key!r}")
                 _ = conn.execute(
                     """

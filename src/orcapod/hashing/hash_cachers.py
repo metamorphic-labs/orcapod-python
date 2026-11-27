@@ -17,9 +17,10 @@ from typing import cast
 from orcapod.hashing.file_hashers import (
     FILE_HASH_CACHE_SCHEMA_VERSION,
     FileHashKey,
+    matches_stored_file_hash,
     parse_stored_file_hash,
     require_storable,
-    stored_hash_prefix,
+    stored_hash_format,
 )
 from orcapod.types import ContentHash
 
@@ -111,7 +112,7 @@ class InMemoryHashCacher:
                 (checked before the write guards), or if a write finds a different
                 hash under the same key.
         """
-        require_storable(key, value)
+        _ = require_storable(key, value)
         if self._read_only:
             return
         if (
@@ -268,24 +269,25 @@ class SqliteHashCacher:
         Returns:
             Cached ``ContentHash``, or ``None`` if not found.
         """
-        if stored_hash_prefix(key.algorithm) is None:
+        hash_format = stored_hash_format(key.algorithm)
+        if hash_format is None:
             return None
         conn = self._connection()
         if self._match_mtime:
             row = conn.execute(
-                "SELECT hash FROM file_hash_cache_v2 "
+                "SELECT CASE WHEN typeof(hash)='blob' THEN hash END FROM file_hash_cache_v2 "
                 "WHERE path=? AND mtime_ns=? AND size=? AND algorithm=?",
                 (str(key.path), key.mtime_ns, key.size, key.algorithm),
             ).fetchone()
         else:
             row = conn.execute(
-                "SELECT hash FROM file_hash_cache_v2 "
+                "SELECT CASE WHEN typeof(hash)='blob' THEN hash END FROM file_hash_cache_v2 "
                 "WHERE path=? AND size=? AND algorithm=? ORDER BY mtime_ns DESC LIMIT 1",
                 (str(key.path), key.size, key.algorithm),
             ).fetchone()
         if row is None or not isinstance(row[0], bytes):
             return None
-        return parse_stored_file_hash(row[0], key.algorithm)
+        return parse_stored_file_hash(row[0], key.algorithm, *hash_format)
 
     def put(self, key: FileHashKey, value: ContentHash) -> None:
         """Store ``value`` under ``key``.
@@ -303,7 +305,7 @@ class SqliteHashCacher:
                 (checked before the write guards), or if a write finds a different
                 well-formed hash under the same key.
         """
-        require_storable(key, value)
+        digest_size = require_storable(key, value)
         if self._read_only:
             return
         if (
@@ -315,6 +317,7 @@ class SqliteHashCacher:
         conn = self._connection()
         fields = (str(key.path), key.mtime_ns, key.size, key.algorithm)
         stored_value = value.to_prefixed_digest()
+        prefix = stored_value[:-digest_size]
         # The INSERT starts a write transaction, even when it encounters a
         # conflict. Keep the writer lock through the comparison.
         with conn:
@@ -332,7 +335,7 @@ class SqliteHashCacher:
                 "tuple[object, ...] | None",
                 conn.execute(
                     """
-                    SELECT hash FROM file_hash_cache_v2
+                    SELECT CASE WHEN typeof(hash)='blob' THEN hash END FROM file_hash_cache_v2
                     WHERE path=? AND mtime_ns=? AND size=? AND algorithm=?
                     """,
                     fields,
@@ -340,9 +343,8 @@ class SqliteHashCacher:
             )
             if existing == (stored_value,):
                 return
-            if (
-                existing is None
-                or parse_stored_file_hash(existing[0], key.algorithm) is not None
+            if existing is None or matches_stored_file_hash(
+                existing[0], prefix, digest_size
             ):
                 raise ValueError(f"Different hash already cached for {key!r}")
             _ = conn.execute(

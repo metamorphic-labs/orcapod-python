@@ -7,14 +7,15 @@ To run them, pass ``--postgres``::
 
 When ``PGHOST`` is set, the fixture uses the configured PostgreSQL server and
 needs permission to create schemas. Otherwise it uses Docker to start a
-``postgres:16`` container. Each test uses its own schema as its sole explicit
-search path.
+``postgres:16`` container. Each test puts its own schema first in the search
+path, followed by ``pg_catalog``.
 Tests in ``TestPostgresReprRedaction`` do **not** carry the postgres marker and
 run unconditionally because they test the pure ``_redact_conninfo()`` helper.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 import threading
 from collections.abc import Iterator
@@ -27,7 +28,7 @@ from upath import UPath
 
 psycopg = pytest.importorskip("psycopg")
 
-from psycopg import sql  # noqa: E402
+from psycopg import Connection, sql  # noqa: E402
 from testcontainers.postgres import PostgresContainer  # noqa: E402
 
 from orcapod.hashing.file_hashers import FileHashKey  # noqa: E402
@@ -60,6 +61,17 @@ def _insert_raw(pg_conninfo: str, key: FileHashKey, blob: bytes) -> None:
         )
 
 
+def _assert_resolved_table_schema(
+    conn: Connection[tuple[object, ...]], *tables: str
+) -> None:
+    for table in tables:
+        assert conn.execute(
+            "SELECT relnamespace = to_regnamespace(current_schema()) "
+            "FROM pg_catalog.pg_class WHERE oid = to_regclass(%s)",
+            (table,),
+        ).fetchone() == (True,), f"{table} must resolve to the test schema"
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -82,20 +94,35 @@ def pg_server_conninfo() -> Iterator[str]:
 
 
 @pytest.fixture()
-def pg_conninfo(pg_server_conninfo: str) -> Iterator[str]:
-    """Give each test a schema it owns, with no fallback to a shared schema."""
+def pg_schema_conninfo(pg_server_conninfo: str) -> Iterator[str]:
+    """Give each test an empty schema ahead of the PostgreSQL catalog."""
     schema = f"orcapod_hash_cache_test_{uuid4().hex}"
     identifier = sql.Identifier(schema)
     conninfo = psycopg.conninfo.make_conninfo(
-        pg_server_conninfo, options=f"-c search_path={schema}"
+        pg_server_conninfo, options=f"-c search_path={schema},pg_catalog"
     )
     with psycopg.connect(pg_server_conninfo) as conn:
         conn.execute(sql.SQL("CREATE SCHEMA {}").format(identifier))
     try:
+        with psycopg.connect(conninfo) as conn:
+            assert conn.execute("SELECT current_schemas(true)").fetchone() == (
+                [schema, "pg_catalog"],
+            )
         yield conninfo
     finally:
         with psycopg.connect(pg_server_conninfo) as conn:
             conn.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(identifier))
+
+
+@pytest.fixture()
+def pg_conninfo(pg_schema_conninfo: str) -> str:
+    """Initialize and verify the cache tables before a test can write to them."""
+    PostgresHashCacher(pg_schema_conninfo).close()
+    with psycopg.connect(pg_schema_conninfo) as conn:
+        _assert_resolved_table_schema(
+            conn, "file_hash_cache_v2", "file_hash_cache_v2_meta"
+        )
+    return pg_schema_conninfo
 
 
 @pytest.fixture()
@@ -293,6 +320,42 @@ class TestPostgresHashCacherThreshold:
 
 @pytest.mark.postgres
 class TestPostgresHashCacherConcurrency:
+    @pytest.mark.parametrize("fail_on_call", [1, 2])
+    def test_hash_provider_failure_preserves_valid_row(
+        self,
+        pg_conninfo: str,
+        cacher: PostgresHashCacher,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        fail_on_call: int,
+    ):
+        key = make_key()
+        original = make_hash().to_prefixed_digest()
+        _insert_raw(pg_conninfo, key, original)
+        real_new = hashlib.new
+        calls = 0
+
+        def transient_new(name: str) -> object:
+            nonlocal calls
+            calls += 1
+            if calls == fail_on_call:
+                raise MemoryError("hash constructor allocation failed")
+            return real_new(name)
+
+        monkeypatch.setattr(hashlib, "new", transient_new)
+        if fail_on_call == 1:
+            with pytest.raises(MemoryError, match="allocation failed"):
+                cacher.put(key, make_hash(bytes(32)))
+        else:
+            with pytest.raises(ValueError, match="Different hash"):
+                cacher.put(key, make_hash(bytes(32)))
+        assert calls == 1
+        with psycopg.connect(pg_conninfo) as conn:
+            assert conn.execute(
+                "SELECT hash, cached_at FROM file_hash_cache_v2"
+            ).fetchone() == (original, 1)
+        assert not caplog.records
+
     @pytest.mark.parametrize("same_hash", [True, False])
     @pytest.mark.parametrize("malformed_existing", [False, True])
     def test_concurrent_puts(
@@ -477,15 +540,21 @@ class TestEnableFileHashCachingPostgres:
 
 @pytest.mark.postgres
 class TestPostgresSchemaVersion:
-    def test_fixture_search_path_contains_only_its_test_schema(self, pg_conninfo: str):
+    def test_fixture_resolves_its_test_schema_before_pg_catalog(self, pg_conninfo: str):
         with psycopg.connect(pg_conninfo) as conn:
             row = conn.execute(
-                "SELECT current_schema(), current_schemas(false)"
+                "SELECT current_schema(), current_schemas(true)"
             ).fetchone()
         assert row is not None
         schema, search_path = row
         assert isinstance(schema, str) and schema.startswith("orcapod_hash_cache_test_")
-        assert search_path == [schema]
+        assert search_path == [schema, "pg_catalog"]
+        with psycopg.connect(pg_conninfo) as conn:
+            assert conn.execute(
+                "SELECT relnamespace = to_regnamespace(%s) FROM pg_class "
+                "WHERE oid = to_regclass('file_hash_cache_v2')",
+                (schema,),
+            ).fetchone() == (True,)
 
     @pytest.mark.usefixtures("public_cache_sentinels")
     def test_fixture_isolates_public_cache_tables(self, request: pytest.FixtureRequest):
@@ -493,8 +562,10 @@ class TestPostgresSchemaVersion:
         conninfo = cast(str, request.getfixturevalue("pg_conninfo"))
         with psycopg.connect(conninfo) as conn:
             assert conn.execute(
-                "SELECT to_regclass('file_hash_cache'), to_regclass('file_hash_cache_v2')"
-            ).fetchone() == (None, None)
+                "SELECT to_regclass('file_hash_cache') IS DISTINCT FROM "
+                "to_regclass('public.file_hash_cache')"
+            ).fetchone() == (True,)
+            _assert_resolved_table_schema(conn, "file_hash_cache_v2")
         with PostgresHashCacher(conninfo) as cacher:
             key = make_key()
             value = make_hash()
@@ -513,7 +584,8 @@ class TestPostgresSchemaVersion:
             ).fetchone()
         assert row == ("2",)
 
-    def test_old_cache_is_preserved_beside_new_table(self, pg_conninfo: str):
+    def test_old_cache_is_preserved_beside_new_table(self, pg_schema_conninfo: str):
+        pg_conninfo = pg_schema_conninfo
         key = make_key()
         old_hash = make_hash()
         new_hash = make_hash(b"\x01" * 32)
@@ -528,6 +600,7 @@ class TestPostgresSchemaVersion:
                 )
                 """
             )
+            _assert_resolved_table_schema(conn, "file_hash_cache")
             conn.execute(
                 "INSERT INTO file_hash_cache VALUES (%s, %s, %s, %s, %s)",
                 (
@@ -545,6 +618,7 @@ class TestPostgresSchemaVersion:
             conn.execute(
                 "CREATE TABLE file_hash_cache_meta (key TEXT PRIMARY KEY, value TEXT)"
             )
+            _assert_resolved_table_schema(conn, "file_hash_cache_meta")
             conn.execute(
                 "INSERT INTO file_hash_cache_meta VALUES ('schema_version', '1')"
             )
@@ -574,6 +648,10 @@ class TestPostgresSchemaVersion:
 
         original = old_snapshot()
         with PostgresHashCacher(pg_conninfo) as c:
+            with psycopg.connect(pg_conninfo) as conn:
+                _assert_resolved_table_schema(
+                    conn, "file_hash_cache_v2", "file_hash_cache_v2_meta"
+                )
             assert c.get(key) is None
             c.put(key, new_hash)
             assert c.get(key) == new_hash

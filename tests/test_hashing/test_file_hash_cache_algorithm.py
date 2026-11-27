@@ -8,6 +8,7 @@ change what the default ``sha256`` hasher returns.
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import time
 from collections.abc import Iterator
@@ -473,6 +474,77 @@ def test_sqlite_reads_a_well_formed_stored_hash(tmp_path: Path):
         assert c.get(_key("sha256")) == ContentHash("sha256", b"\x07" * 32)
 
 
+@pytest.mark.parametrize("fail_on_call", [1, 2])
+def test_sqlite_hash_provider_failure_preserves_valid_row(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    fail_on_call: int,
+):
+    db_path = tmp_path / "cache.db"
+    key = _key("sha256")
+    original = _hash_of("sha256").to_prefixed_digest()
+    real_new = hashlib.new
+    calls = 0
+
+    def transient_new(name: str) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == fail_on_call:
+            raise MemoryError("hash constructor allocation failed")
+        return real_new(name)
+
+    with SqliteHashCacher(db_path) as cache:
+        _insert_raw(db_path, original)
+        monkeypatch.setattr(hashlib, "new", transient_new)
+        if fail_on_call == 1:
+            with pytest.raises(MemoryError, match="allocation failed"):
+                cache.put(key, _hash_of("sha256", 2))
+        else:
+            with pytest.raises(ValueError, match="Different hash"):
+                cache.put(key, _hash_of("sha256", 2))
+        assert calls == 1
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "SELECT hash, cached_at FROM file_hash_cache_v2"
+        ).fetchone() == (
+            original,
+            1,
+        )
+    assert not caplog.records
+
+
+@pytest.mark.parametrize("operation", ["get", "put"])
+@pytest.mark.parametrize("match_mtime", [True, False])
+def test_sqlite_invalid_utf8_text_is_a_miss_or_repaired(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, operation: str, match_mtime: bool
+):
+    db_path = tmp_path / "cache.db"
+    key = _key("sha256")
+    value = _hash_of("sha256")
+    with SqliteHashCacher(db_path, match_mtime=match_mtime) as cache:
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "INSERT INTO file_hash_cache_v2 (path, mtime_ns, size, algorithm, hash, cached_at) "
+                "VALUES (?, ?, ?, ?, CAST(X'ff' AS TEXT), 1)",
+                (str(key.path), key.mtime_ns, key.size, key.algorithm),
+            )
+        if operation == "get":
+            assert cache.get(key) is None
+            assert not caplog.records
+            return
+        cache.put(key, value)
+        assert cache.get(key) == value
+        with sqlite3.connect(db_path) as conn:
+            assert conn.execute(
+                "SELECT typeof(hash), cached_at > 1 FROM file_hash_cache_v2"
+            ).fetchone() == ("blob", 1)
+    (warning,) = caplog.records
+    assert warning.levelname == "WARNING"
+    assert str(key.path) in warning.getMessage()
+    assert key.algorithm in warning.getMessage()
+
+
 # ---------------------------------------------------------------------------
 # An invalid label is refused on put and a miss on read, on every cacher
 # ---------------------------------------------------------------------------
@@ -509,18 +581,11 @@ def test_sqlite_read_with_an_invalid_label_is_a_miss(
 
 
 @pytest.mark.parametrize("kind", ["in_memory", "sqlite"])
-def test_any_refusal_of_hashlib_is_value_error_on_put_and_a_miss_on_read(
+def test_unknown_hashlib_algorithm_is_value_error_on_put_and_a_miss_on_read(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kind: str
 ):
-    """A hashlib backend may refuse a name with another exception (RuntimeError)."""
-    import hashlib
-
-    real_new = hashlib.new
-
-    def refusing_new(name: str, *args: object, **kwargs: object) -> object:
-        if name == "refused_algo":
-            raise RuntimeError("backend refuses this algorithm")
-        return real_new(name, *args, **kwargs)  # pyright: ignore[reportArgumentType] -- passes the caller's arguments through
+    def refusing_new(name: str) -> object:
+        raise ValueError(f"Unsupported hash type {name}")
 
     db_path = tmp_path / "c.db"
     c: Cacher = (
