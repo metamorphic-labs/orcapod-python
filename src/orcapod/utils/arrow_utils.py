@@ -1665,6 +1665,41 @@ def _parse_system_tag_column(
     return field_type, provenance_path, position
 
 
+def _system_tag_position_groups(
+    names: Collection[str],
+) -> dict[str, dict[str, dict[str, str]]]:
+    """Group system-tag columns by provenance path, position, and field kind."""
+    groups: dict[str, dict[str, dict[str, str]]] = {}
+    for name in names:
+        if (parsed := _parse_system_tag_column(name)) is not None:
+            field_type, provenance_path, position = parsed
+            groups.setdefault(provenance_path, {}).setdefault(position, {})[
+                field_type
+            ] = name
+    return groups
+
+
+def sorted_system_tag_nullability(
+    nullable_by_name: Mapping[str, bool],
+) -> dict[str, bool]:
+    """Give each movable system-tag field the nullability of all its inputs."""
+    nullable = dict(nullable_by_name)
+    for positions in _system_tag_position_groups(nullable).values():
+        if len(positions) <= 1:
+            continue
+        for prefix in (
+            constants.SYSTEM_TAG_SOURCE_ID_PREFIX,
+            constants.SYSTEM_TAG_RECORD_ID_PREFIX,
+        ):
+            kind = prefix.removeprefix(constants.SYSTEM_TAG_PREFIX)
+            names = [fields[kind] for fields in positions.values() if kind in fields]
+            can_hold_null = len(names) != len(positions) or any(
+                nullable_by_name[name] for name in names
+            )
+            nullable.update(dict.fromkeys(names, can_hold_null))
+    return nullable
+
+
 def sort_system_tag_values(table: "pa.Table") -> "pa.Table":
     """Sort paired system tag values for columns that share the same provenance path.
 
@@ -1688,17 +1723,10 @@ def sort_system_tag_values(table: "pa.Table") -> "pa.Table":
     if not sys_tag_cols:
         return table
 
-    # Parse all system tag columns and group by provenance_path
-    # groups[provenance_path][position] = {field_type: col_name}
-    groups: dict[str, dict[str, dict[str, str]]] = {}
-    for col in sys_tag_cols:
-        parsed = _parse_system_tag_column(col)
-        if parsed is None:
-            continue
-        field_type, provenance_path, position = parsed
-        groups.setdefault(provenance_path, {}).setdefault(position, {})[field_type] = (
-            col
-        )
+    groups = _system_tag_position_groups(sys_tag_cols)
+    nullable = sorted_system_tag_nullability(
+        {name: table.schema.field(name).nullable for name in sys_tag_cols}
+    )
 
     source_id_field = constants.SYSTEM_TAG_SOURCE_ID_PREFIX[
         len(constants.SYSTEM_TAG_PREFIX) :
@@ -1708,7 +1736,7 @@ def sort_system_tag_values(table: "pa.Table") -> "pa.Table":
     ]
 
     # For each provenance_path group with >1 position, sort paired tuples per row
-    for provenance_path, positions in groups.items():
+    for positions in groups.values():
         if len(positions) <= 1:
             continue
 
@@ -1762,7 +1790,7 @@ def sort_system_tag_values(table: "pa.Table") -> "pa.Table":
                 if name is not None:
                     index = table.schema.get_field_index(name)
                     field = pa.field(
-                        name, table.schema.field(index).type, nullable=False
+                        name, table.schema.field(index).type, nullable=nullable[name]
                     )
                     table = table.set_column(
                         index, field, pa.array(values, type=field.type)

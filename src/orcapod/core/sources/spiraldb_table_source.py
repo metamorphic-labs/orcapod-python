@@ -428,7 +428,11 @@ class SpiralDBTableSource(RootSource):
                     tag_columns=resolved_tags,
                     source_name=self._source_name,
                     kind_part=self.kind_part(),
-                    system_tag_columns=system_tag_columns,
+                    system_tag_columns=tuple(
+                        name
+                        for name in system_tag_columns
+                        if name not in self._tags_as_data.values()
+                    ),
                     data_tags=self._data_tags,
                 )
             except ValueError as exc:
@@ -454,7 +458,7 @@ class SpiralDBTableSource(RootSource):
                     tag_columns=template.tag_columns,
                     source_name=self._source_name,
                     kind_part=self.kind_part(),
-                    system_tag_columns=template.system_tag_columns,
+                    system_tag_columns=system_tag_columns,
                     data_tags=self._data_tags,
                 )
             self._stream = template.stream
@@ -894,11 +898,10 @@ class SpiralDBTableSource(RootSource):
             limit=limit,
             asof=asof,
         ):
-            for start in range(0, batch.num_rows, self._batch_rows):
+            for start in range(0, max(batch.num_rows, 1), self._batch_rows):
                 raw = pa.Table.from_batches([batch.slice(start, self._batch_rows)])
                 require_supported_nullable_types(raw.schema)
                 rows = arrow_utils.drop_system_columns(raw)
-                require_custom_system_tags(rows, self._system_tag_columns)
                 # Metadata too: field metadata is how a column's logical type is
                 # recorded, and the schema hash was computed at construction.
                 if not rows.schema.equals(self._table_schema, check_metadata=True):
@@ -921,9 +924,13 @@ class SpiralDBTableSource(RootSource):
                         f"{sorted(repeated)[0]} appears in two rows; key values "
                         "must be unique, so each row has its own identifier"
                     )
+                rows = self._with_tag_copies(rows)
+                require_custom_system_tags(rows, self._system_tag_columns)
+                if not rows.num_rows:
+                    continue
                 identifiers.update(tokens)
                 yield self._builder.attach_provenance(
-                    self._with_tag_copies(rows),
+                    rows,
                     tag_columns=self._tag_columns,
                     system_tag_columns=self._system_tag_columns,
                     schema_hash=self._schema_hash,

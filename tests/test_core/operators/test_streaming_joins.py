@@ -34,6 +34,7 @@ from decimal import Decimal
 from typing import Any
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from orcapod.core.operators import Join, MergeJoin, SemiJoin
@@ -846,8 +847,7 @@ def test_merge_join_over_a_join_of_inputs_of_one_pipeline_hash() -> None:
     columns = {"system_tags": True}
     operator = Join()
     expected_values = None
-    for ordered in itertools.permutations(tied_inputs):
-        inputs = (*ordered, other)
+    for inputs in itertools.permutations((*tied_inputs, other)):
         joined = operator(*inputs)
         computed = operator.static_process(*inputs)
         table = joined.as_table(columns=columns)
@@ -883,14 +883,67 @@ def test_merge_join_over_a_join_of_inputs_of_one_pipeline_hash() -> None:
         tied_hash = tied_inputs[0].pipeline_hash().to_hex()
         tied_names = [name for name in names if f"::{tied_hash}:" in name]
         assert len(tied_names) == 6
-        emitted = pa.Table.from_batches(out).sort_by("k").select(tied_names)
-        assert emitted.schema == table.select(tied_names).schema
-        assert emitted.to_pylist() == table.sort_by("k").select(tied_names).to_pylist()
+        emitted = pa.Table.from_batches(out).sort_by("k").select(names)
+        assert emitted.schema == fields
+        assert emitted.to_pylist() == values
 
     joined = operator(*tied_inputs)
     for inputs in ((joined, other), (other, joined)):
         _check(_merge_kernel, MergeJoin().static_process, inputs)
         _check(_join_kernel, Join().static_process, inputs, seeds=range(4))
+
+
+def test_join_keeps_nullable_tied_raw_system_tag_fields() -> None:
+    schema = pa.schema(
+        [
+            pa.field("k", pa.int64(), False),
+            pa.field("_tag_source_id::seed", pa.large_string(), False),
+            pa.field("_tag_record_id::seed", pa.large_string(), True),
+        ]
+    )
+    inputs = tuple(
+        ArrowTableStream(
+            pa.Table.from_arrays(
+                [
+                    pa.array([1]),
+                    pa.array([source], pa.large_string()),
+                    pa.array([record], pa.large_string()),
+                ],
+                schema=schema,
+            ),
+            tag_columns=["k"],
+            data_tags=["k"],
+        )
+        for source, record in (("a", None), ("b", "r"), ("c", "s"))
+    )
+    assert len({stream.pipeline_hash() for stream in inputs}) == 1
+    columns = {"system_tags": True}
+    for ordered in itertools.permutations(inputs):
+        operator = Join()
+        joined = operator(*ordered)
+        expected = joined.as_table(columns=columns)
+        record_fields = [
+            f for f in expected.schema if f.name.startswith("_tag_record_id")
+        ]
+        assert len(record_fields) == 3
+        assert all(f.nullable for f in record_fields)
+        pq.write_table(expected, pa.BufferOutputStream())
+        assert joined.output_schema(columns=columns) == operator.static_process(
+            *ordered
+        ).output_schema(columns=columns)
+        kernel = StreamingJoin(operator, ordered)
+        names = expected.column_names
+        assert (
+            kernel.zero_row_result.as_table(columns=columns).select(names).schema
+            == expected.schema
+        )
+        emitted = [
+            result
+            for i, stream in enumerate(ordered)
+            for batch in _transport(stream).to_batches()
+            for result in kernel.push(i, batch)
+        ]
+        assert pa.Table.from_batches(emitted).select(names).equals(expected)
 
 
 # ---------------------------------------------------------------------------

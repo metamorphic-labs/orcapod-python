@@ -15,6 +15,7 @@ import pytest
 
 from orcapod import PipelineJob
 from orcapod.contexts.stored import with_data_context
+from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.sources import (
     ArrowTableSource,
     CachedSource,
@@ -35,7 +36,7 @@ from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import InputValidationError
 from orcapod.operators import DropNulls
 from orcapod.protocols.core_protocols import StreamProtocol
-from orcapod.types import ColumnInfo, Cursor
+from orcapod.types import CacheMode, ColumnInfo, Cursor
 from tests.test_core.sources.test_db_table_source import MockDBConnector
 from tests.test_databases import fake_spiral_sdk
 
@@ -413,3 +414,104 @@ def test_derived_source_refuses_stored_null_in_its_direct_table_view(
         InputValidationError, match=r"'__unused'.*declare a supported nullable type"
     ):
         derived.as_table()
+
+
+@pytest.mark.parametrize("copy_tags", [False, True])
+def test_derived_source_checks_reserved_columns_before_filtering_storage(
+    copy_tags: bool,
+) -> None:
+    class NullMetadataStore(InMemoryArrowDatabase):
+        """Inject a reserved Arrow Null column at the database read boundary."""
+
+        def get_all_records(
+            self, record_path: tuple[str, ...], *args: Any, **kwargs: Any
+        ) -> pa.Table | None:
+            """Add a reserved column to the stored operator table."""
+            table = super().get_all_records(record_path, *args, **kwargs)
+            if table is not None and record_path[-1] == "odb_v2":
+                return table.append_column("__raw_missing", pa.nulls(table.num_rows))
+            return table
+
+    source = ArrowTableSource(
+        _table(pa.field("extra", pa.string(), nullable=False), ["a", "b"]),
+        tag_columns=TAGS,
+        tag_only_columns=True,
+        source_id="rows",
+    )
+    store = NullMetadataStore()
+    job = PipelineJob(name="derived", database=store)
+    with job:
+        DropNulls(["x", "y"])(source, label="origin")
+    node = job.nodes["origin"]
+    assert isinstance(node, OperatorJobNode)
+    node.attach_databases(pipeline_database=store, cache_mode=CacheMode.LOG)
+    job.run()
+    derived = (
+        node.as_source(tags_as_data={"k": "copied"}, source_id="new")
+        if copy_tags
+        else node.as_source()
+    )
+    with pytest.raises(
+        InputValidationError,
+        match=r"'__raw_missing'.*declare a supported nullable type",
+    ):
+        derived.as_table()
+
+
+def test_spiral_can_nominate_a_tag_copy_as_a_custom_system_tag(
+    tmp_path: Path,
+) -> None:
+    schema = pa.schema(
+        [pa.field("k", pa.string(), False), pa.field("x", pa.int8(), False)]
+    )
+    table = pa.Table.from_pylist([{"k": "a", "x": 1}, {"k": "b", "x": 2}], schema)
+    with fake_spiral_sdk.install(tmp_path):
+        external = fake_spiral_sdk.ExternalProject("project").create_table(
+            "default.rows", key_schema=pa.schema([schema.field("k")])
+        )
+        external.write(table)
+        external.record(schema)
+        source = SpiralDBTableSource(
+            "project",
+            "rows",
+            tag_columns=["k"],
+            tag_only_columns=True,
+            tags_as_data={"k": "copy"},
+            system_tag_columns=["copy"],
+        )
+        columns = {"system_tags": True}
+        assert source.as_table(columns=columns).column("_tag_copy").to_pylist() == [
+            "a",
+            "b",
+        ]
+        assert [tag.system_tags()["_tag_copy"] for tag, _ in source.iter_data()] == [
+            "a",
+            "b",
+        ]
+
+
+def test_spiral_validates_reserved_null_in_an_empty_scan_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    schema = pa.schema(
+        [pa.field("k", pa.string(), False), pa.field("x", pa.int8(), False)]
+    )
+    table = pa.Table.from_pylist([{"k": "a", "x": 1}], schema)
+    with fake_spiral_sdk.install(tmp_path):
+        external = fake_spiral_sdk.ExternalProject("project").create_table(
+            "default.rows", key_schema=pa.schema([schema.field("k")])
+        )
+        external.write(table)
+        external.record(schema)
+        source = SpiralDBTableSource("project", "rows", tag_only_columns=True)
+        handle = source._lookup_table()  # pyright: ignore[reportPrivateUsage]  # intercept the scan boundary
+        invalid = schema.append(pa.field("__unused", pa.null()))
+        batch = pa.RecordBatch.from_arrays(
+            [pa.array([], f.type) for f in invalid], schema=invalid
+        )
+        monkeypatch.setattr(source, "_lookup_table", lambda: handle)
+        monkeypatch.setattr(handle, "scan_batches", lambda **kwargs: iter([batch]))
+        with pytest.raises(
+            InputValidationError, match=r"'__unused'.*declare a supported nullable type"
+        ):
+            source.as_table()

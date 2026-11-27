@@ -37,7 +37,7 @@ from orcapod.core.streams.base import (
 from orcapod.errors import InputValidationError
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
-from orcapod.utils import schema_utils
+from orcapod.utils import arrow_utils, schema_utils
 from orcapod.utils.provisional import provisional_class_name
 
 if TYPE_CHECKING:
@@ -484,10 +484,18 @@ class DerivedSource(RootSource):
         """
         if isinstance(self._origin, RootSource):
             return self._origin.as_table()
-        records = self._origin.get_all_records()
+        records = self._origin.get_all_records(all_info=True)
         if records is None:
             return None
         require_supported_nullable_types(records.schema)
+        records = arrow_utils.drop_columns_with_prefix(
+            records,
+            (
+                constants.META_PREFIX,
+                constants.SOURCE_PREFIX,
+                constants.SYSTEM_TAG_PREFIX,
+            ),
+        )
         try:
             stored = stored_data_tags(records.schema)
         except ValueError as exc:

@@ -148,7 +148,9 @@ def _settled_by_values(schema: pa.Schema, *, system_tags: bool = True) -> pa.Sch
     )
 
 
-def _row_built_zero_rows(stream: StreamProtocol) -> tuple[StreamProtocol, bool]:
+def _row_built_zero_rows(
+    stream: StreamProtocol, *, keep_system_tag_flags: bool = False
+) -> tuple[StreamProtocol, bool]:
     """``stream`` with no rows, as an input rebuilt from rows of it reads.
 
     The zero-row input (``_materialize_upstream`` with no rows) put through F: what
@@ -156,6 +158,7 @@ def _row_built_zero_rows(stream: StreamProtocol) -> tuple[StreamProtocol, bool]:
 
     Args:
         stream: An input stream (its description).
+        keep_system_tag_flags: Use the input's declared system-tag nullability.
 
     Returns:
         The zero-row stream in the row-built form, and whether its Arrow types differ
@@ -166,6 +169,14 @@ def _row_built_zero_rows(stream: StreamProtocol) -> tuple[StreamProtocol, bool]:
     zero = pod._materialize_upstream([], stream)  # pyright: ignore[reportPrivateUsage]  # the operators' one form of an input
     table = zero.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
     row_built = pod._flag_by_values(row_built_columns(table, stream.keys()))  # pyright: ignore[reportPrivateUsage]  # F's last step
+    if keep_system_tag_flags:
+        fields = [
+            field.with_nullable(table.schema.field(field.name).nullable)
+            if field.name.startswith(constants.SYSTEM_TAG_PREFIX)
+            else field
+            for field in row_built.schema
+        ]
+        row_built = pa.Table.from_arrays(row_built.columns, schema=pa.schema(fields))
     differs = any(
         field.type != table.schema.field(field.name).type for field in row_built.schema
     )
@@ -413,6 +424,7 @@ class StreamingJoinKernel(ABC):
 
     # How many inputs the operator takes; ``None`` for one or more.
     ARITY: ClassVar[int | None] = None
+    KEEP_SYSTEM_TAG_FLAGS: ClassVar[bool] = False
 
     def __init__(
         self, operator: StaticOutputOperatorPod, inputs: Sequence[StreamProtocol]
@@ -427,13 +439,21 @@ class StreamingJoinKernel(ABC):
         self.inputs: tuple[StreamProtocol, ...] = tuple(inputs)
         # Each input as the sync path reads rows of it, with no rows (the row-built
         # form), and whether that differs from how it reads the input with none.
-        built = [_row_built_zero_rows(stream) for stream in self.inputs]
+        built = [
+            _row_built_zero_rows(
+                stream, keep_system_tag_flags=self.KEEP_SYSTEM_TAG_FLAGS
+            )
+            for stream in self.inputs
+        ]
         self._zero_rows: tuple[StreamProtocol, ...] = tuple(z for z, _ in built)
         self._null_typed: tuple[bool, ...] = tuple(d for _, d in built)
         # The schema of every batch of an input, in its row-built layout; the fields a
         # complete table decides by values declared nullable.
         self._layouts: tuple[pa.Schema, ...] = tuple(
-            _settled_by_values(stream.as_table(columns=TRANSPORT_COLUMNS).schema)
+            _settled_by_values(
+                stream.as_table(columns=TRANSPORT_COLUMNS).schema,
+                system_tags=not self.KEEP_SYSTEM_TAG_FLAGS,
+            )
             for stream in self._zero_rows
         )
         self._closed: list[bool] = [False] * len(self.inputs)
@@ -686,6 +706,8 @@ class StreamingJoin(StreamingJoinKernel):
         operator: The ``Join``.
         inputs: Its input streams, in call order.
     """
+
+    KEEP_SYSTEM_TAG_FLAGS: ClassVar[bool] = True
 
     def __init__(self, operator: Join, inputs: Sequence[StreamProtocol]) -> None:
         super().__init__(operator, inputs)
