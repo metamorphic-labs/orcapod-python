@@ -525,18 +525,17 @@ class SpiralDBTableSource(RootSource):
         ``col("t").between(a, b)``, which includes both ends). Write a window half-open,
         ``>= start`` and ``< stop``: adjacent windows then neither overlap nor leave a
         gap. Ranges of one column add up, and may select no row; a null meets no
-        condition. A range of another type (a float, a string) is refused: SpiralDB
-        orders floats by IEEE 754 total order, not as Orcapod does, so filter the
-        stream instead (a float range applied by SpiralDB is ITL-1477). Anything else
+        condition. Float ranges are refused for now (ITL-1477). Use ``filter`` for
+        ranges of unsupported types such as floats and strings. Anything else
         (``is_in``, a null test, ``!=``, two columns, ``|``, ``~``) is refused too.
 
         An equality is sent to SpiralDB as ``column == value``, and which rows it
         selects is SpiralDB's own equality, not Orcapod's. For a float column,
         ``0.0`` does not select the ``-0.0`` rows. An equality to ``-0.0`` or a NaN is
-        refused (``TypeError``): SpiralDB matches them by their bits, while Orcapod
+        refused for now (``TypeError``). SpiralDB matches them by their bits, while Orcapod
         counts ``-0.0`` equal to ``0.0`` and NaN equal to NaN, so the rows read would
-        depend on which of two equal values a condition kept (ITL-1480). To select
-        rows by such values as Orcapod matches them, filter inside the pipeline.
+        depend on which of two equal values a condition kept. ITL-1480 tracks revisiting
+        the float refusals. Use ``filter`` to compare these values by Orcapod's rules.
 
         A convenience: the arguments are given to ``Condition.of``, which builds the
         ``Condition`` (``orcapod.types``); the source checks it against its table and
@@ -565,7 +564,8 @@ class SpiralDBTableSource(RootSource):
                 clamped (a NumPy scalar, a date given as a string, ``-1`` for an
                 unsigned column), the column's type takes no such condition, or the
                 condition holds anything but equalities and ranges (filter the stream
-                instead), or a column is to equal ``-0.0`` or a NaN (ITL-1480).
+                instead), or a column is to equal ``-0.0`` or a NaN (refused for now,
+                ITL-1480).
         """
         try:
             # As given, before merging: merging may keep 0.0 of 0.0 and -0.0, or

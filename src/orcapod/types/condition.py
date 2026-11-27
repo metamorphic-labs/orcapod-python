@@ -728,11 +728,9 @@ def is_range_type(arrow_type: pa.DataType) -> bool:
     """Return whether a source's restriction takes a range of a column of ``arrow_type``.
 
     Integers of every width, timestamps of every unit and zone, and dates: the table
-    system orders their values as Orcapod does. Floats are not: SpiralDB orders them by
-    IEEE 754 total order (a NaN beyond the infinities, ``-0.0`` below ``0.0``), not as
-    Orcapod does (a NaN is in no range, ``-0.0`` equals ``0.0``); ITL-1477. Strings
-    and binary follow the table system's collation. Each of these is left to
-    ``filter``.
+    system orders their values as Orcapod does. Float ranges are refused for now
+    (ITL-1477) because SpiralDB uses IEEE 754 total order. Strings and binary follow
+    the table system's collation. Use ``filter`` for these ranges.
 
     Args:
         arrow_type: The column's Arrow type.
@@ -832,7 +830,7 @@ def _matched_by_bits(value: object) -> bool:
 def check_float_equalities(
     *conditions: Mapping[str, object] | Condition | None, **columns: object
 ) -> None:
-    """Refuse a restriction's equality to ``-0.0`` or NaN, as given, before merging.
+    """For now, refuse equality to ``-0.0`` or NaN before merging (ITL-1480).
 
     Orcapod counts ``-0.0`` equal to ``0.0`` and NaN equal to NaN, so ``Condition.of``
     and ``combined`` keep one of two such values; SpiralDB matches a float by its bits
@@ -840,8 +838,8 @@ def check_float_equalities(
     depend on which of two equal values was kept, so neither is taken. Checked on the
     arguments as given (each mapping, each condition's top-level equalities, the
     keywords), since merging may already have dropped one; every other float
-    equality is pushed down as given. A comparison of a float column is refused
-    elsewhere (``check_restriction``).
+    equality is handled as before. Float ranges are refused for now by
+    ``check_restriction`` (ITL-1477).
 
     Args:
         *conditions: The mappings and conditions given to ``where``.
