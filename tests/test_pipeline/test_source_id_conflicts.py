@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 import json
 from pathlib import Path
 import struct
@@ -20,7 +21,9 @@ from orcapod.errors import (
     InputValidationError,
     SourceSlotNameCollisionError,
 )
+from orcapod.operators import SemiJoin
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
+from orcapod.pipeline.source_consistency import require_consistent_sources
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 from orcapod.sources import (
     ArrowTableSource,
@@ -830,3 +833,108 @@ def test_equal_keys_still_compare_record_ids() -> None:
         both.pod(_keyed(_ROWS, ["t1"]), label="fa")
         both.pod(_keyed(list(reversed(_ROWS)), ["t1"]), label="fb")
     assert set(job.function_pods) == {"fa"}
+
+
+# Re-review of b197756f.
+
+
+def test_unknown_key_columns_never_hide_a_conflict_between_known_ones() -> None:
+    # An unbound proxy of the same id and schema has unknown key columns: it neither
+    # causes nor suppresses a refusal between the sources whose keys are known.
+    positional = DictSource([{"x": 1}, {"x": 2}], source_id="shared")
+    keyed = DictSource([{"x": 1}, {"x": 2}], record_id_columns="x", source_id="shared")
+    proxy = SourceProxy(
+        positional.source_id,
+        positional.content_hash().to_string(),
+        positional.pipeline_hash().to_string(),
+        *positional.output_schema(),
+    )
+    assert proxy.key_columns is None
+    for uses in itertools.permutations(
+        [("slot 'p'", proxy), ("slot 'a'", positional), ("slot 'b'", keyed)]
+    ):
+        with pytest.raises(InconsistentSourceError) as error:
+            require_consistent_sources(uses)
+        assert "differ only in key columns" in str(error.value)
+    # Alone with either known source, the proxy causes nothing.
+    require_consistent_sources([("slot 'p'", proxy), ("slot 'a'", positional)])
+    require_consistent_sources([("slot 'p'", proxy), ("slot 'b'", keyed)])
+
+
+def _three_slot_job() -> PipelineJob:
+    with PipelineJob(database=InMemoryArrowDatabase()) as job:
+        increment.pod(_dict(2, "a"), label="fa")
+        increment.pod(_dict(3, "b"), label="fb")
+        increment.pod(_dict(4, "c"), label="fc")
+    return job
+
+
+@pytest.mark.parametrize(
+    "order", list(itertools.permutations(["keyed", "forward", "backward"]))
+)
+def test_three_way_diagnosis_does_not_follow_slot_order(order: tuple[str, ...]) -> None:
+    sources = {
+        "keyed": DictSource(
+            [{"x": 1}, {"x": 2}], record_id_columns="x", source_id="shared"
+        ),
+        "forward": DictSource([{"x": 1}, {"x": 2}], source_id="shared"),
+        # Positional ids: another order is other rows than "forward".
+        "backward": DictSource([{"x": 2}, {"x": 1}], source_id="shared"),
+    }
+    job = _three_slot_job()
+    with pytest.raises(InconsistentSourceError, match="different rows"):
+        job.bind(sources=dict(zip("abc", (sources[name] for name in order))))
+
+
+@function_pod(output_keys="out")
+def increment_matched(x: int) -> int:
+    return x + 1
+
+
+def _semi_join_job() -> PipelineJob:
+    def source(name: str) -> DictSource:
+        return DictSource(
+            [{"k": "a", "x": 1}, {"k": "b", "x": 2}],
+            tag_columns="k",
+            tag_only_columns=True,
+            source_id=name,
+        )
+
+    with PipelineJob(database=InMemoryArrowDatabase()) as job:
+        matched = SemiJoin()(source("left"), source("right"), label="matched")
+        increment_matched.pod(matched, label="fm")
+    return job
+
+
+def _rebind_outside_bind(job: PipelineJob, right_keys: str | None, x: int) -> None:
+    job.nodes["left"].bound_source = DictSource(
+        [{"k": "a", "x": 1}, {"k": "b", "x": 2}],
+        tag_columns="k",
+        tag_only_columns=True,
+        source_id="shared",
+    )
+    job.nodes["right"].bound_source = DictSource(
+        [{"k": "a", "x": 1}, {"k": "b", "x": x}],
+        tag_columns="k",
+        tag_only_columns=True,
+        record_id_columns=right_keys,
+        source_id="shared",
+    )
+
+
+@pytest.mark.parametrize("node", ["matched", "fm"])
+@pytest.mark.parametrize(
+    ("right_keys", "x", "message"),
+    [("k", 2, "differ only in key columns"), (None, 200, "different rows")],
+)
+def test_node_run_checks_its_sources_like_job_run(
+    node: str, right_keys: str | None, x: int, message: str
+) -> None:
+    job = _semi_join_job()
+    _rebind_outside_bind(job, right_keys, x)
+    with pytest.raises(InconsistentSourceError, match=message):
+        job.run()
+    with pytest.raises(InconsistentSourceError, match=message):
+        job.nodes[node].run()
+    assert not job.matched.as_table().num_rows
+    assert not job.fm.as_table().num_rows
