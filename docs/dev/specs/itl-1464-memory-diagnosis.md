@@ -1,7 +1,7 @@
 # Where the memory goes (ITL-1464, phase 1: diagnosis)
 
 Status: measured on `origin/main` 0d1e017c, November 25, 2026. The design that follows from
-it is `itl-1464-streaming-design.md`.
+it is in [draft PR 603](https://github.com/metamorphic-labs/orcapod-python/pull/603).
 
 ## Summary
 
