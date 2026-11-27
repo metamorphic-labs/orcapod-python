@@ -44,6 +44,7 @@ import dataclasses
 import os
 from collections.abc import AsyncIterator, Collection, Generator, Iterator, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from threading import Lock
 from types import TracebackType
 from typing import Any, ClassVar, NamedTuple, TYPE_CHECKING
@@ -62,7 +63,7 @@ from orcapod.core.sources.stream_builder import (
     row_identifiers,
 )
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
-from orcapod.core.streams.base import check_head_size
+from orcapod.core.streams.base import check_head_size, reads_as_its_class
 from orcapod.core.streams.view import ViewStatus, StreamView
 from orcapod.databases.spiraldb_connector import (
     SpiralDBConnector,
@@ -79,7 +80,11 @@ from orcapod.utils.schema_utils import _normalize_column_list
 if TYPE_CHECKING:
     from orcapod import contexts
     from orcapod.config import OrcapodConfig
-    from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
+    from orcapod.protocols.core_protocols import (
+        DataProtocol,
+        StreamProtocol,
+        TagProtocol,
+    )
 
 DEFAULT_MAX_ROWS = 100_000
 DEFAULT_BATCH_ROWS = 8_192
@@ -1125,11 +1130,45 @@ class SpiralDBTableSource(RootSource):
             ),
         )
 
-    def run(self) -> StreamView:
-        """Read the whole table into memory and return a ``StreamView`` of every row.
+    @override
+    def _reads_in_batches(self) -> bool:
+        return reads_as_its_class(self, SpiralDBTableSource)
 
-        Does what ``as_table()`` does: one scan of every row the source reads (``where``,
-        ``limit``, ``max_rows`` and the pinned version applied), held in memory. The
+    @override
+    def _batch_streams_of_rows(self) -> Generator[StreamProtocol, None, None]:
+        """One scan of the table, each batch shaped as ``as_table()`` shapes the whole
+        (``run()``, ITL-1464)."""
+        columns = {"source": True, "system_tags": True, "context": True}
+        read = False
+        with closing(self._batch_streams()) as streams:
+            for stream in streams:
+                read = True
+                yield ArrowTableStream(
+                    self._whole_table(
+                        iter([stream]),
+                        columns=columns,
+                        all_info=False,
+                    ),
+                    tag_columns=self._tag_columns,
+                    data_tags=self._data_tags,
+                    data_context=self.data_context_key,
+                )
+        if not read:
+            # No row: the typed table of none that ``as_table()`` gives, without a
+            # second scan.
+            yield ArrowTableStream(
+                self._stream.as_table(columns=columns),
+                tag_columns=self._tag_columns,
+                data_tags=self._data_tags,
+                data_context=self.data_context_key,
+            )
+
+    def run(self) -> StreamView:
+        """Read every row the source reads and return a ``StreamView`` of them.
+
+        One scan (``where``, ``limit``, ``max_rows`` and the pinned version applied),
+        read in batches: a large table (``RunSize``) gives a
+        bounded view (``BoundedStreamView``) and is not held. The
         source holds no rows, so every call scans again. ``head(n)`` and the notebook
         preview are the bounded read: they read only the first ``n`` rows.
         """

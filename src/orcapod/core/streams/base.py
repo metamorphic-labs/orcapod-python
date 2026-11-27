@@ -9,12 +9,13 @@ from collections.abc import (
     AsyncIterator,
     Callable,
     Collection,
+    Generator,
     Iterable,
     Iterator,
     Mapping,
     Sequence,
 )
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from contextvars import ContextVar
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, cast
@@ -28,8 +29,10 @@ from orcapod.core.data_tags import data_tag_names
 from orcapod.core.streams.record_batch_input import SOURCE_BATCH_ROWS, InputChannel
 from orcapod.core.streams.view import (
     SCHEMA_NEEDS_POLL_NOTE,
+    BoundedStreamView,
     ViewStatus,
     StreamView,
+    WindowOfRows,
     default_note,
     preview_html,
 )
@@ -82,6 +85,23 @@ def reads_as_its_class(obj: object, cls: type) -> bool:
         if callable(member) or hasattr(type(member), "__get__"):
             return False
     return True
+
+
+def reads_in_batches(stream: object) -> bool:
+    """Whether ``run()`` reads ``stream``'s rows batch by batch (ITL-1464).
+
+    True for a source that reads its rows on demand and holds none, and for operators
+    applied batch by batch over one; decided by the kind of stream and its operators,
+    never by its rows.
+    """
+    check = getattr(stream, "_reads_in_batches", None)
+    return bool(check()) if callable(check) else False
+
+
+def batch_streams_of(stream: object) -> Generator[StreamProtocol, None, None]:
+    """The rows of a stream that ``reads_in_batches``, in order, one stream per batch: at
+    least one, with no row when there is none."""
+    return cast("StreamBase", stream)._batch_streams_of_rows()  # pyright: ignore[reportPrivateUsage]  # shared by the stream kinds
 
 
 def system_tags_as_rows_give(table: pa.Table) -> bool:
@@ -1591,11 +1611,16 @@ class StreamBase(TraceableBase):
 
         The one way to compute any stream outside a job (developer, November 13, 2026,
         ITL-1081): ``head()`` and the notebook preview never compute a row (see
-        ``head``). ``run()`` does
-        exactly the work ``as_table()`` does, through the same code path and cache, so
-        a stream already computed is not computed again, and one whose inputs changed is
-        computed again. The view holds every row with the default column configuration;
-        its ``head``, ``tail`` and ``sort_by_tags`` choose what is shown. For other
+        ``head``). ``run()`` computes every row, in the order of ``as_table()``, with
+        every effect, and promises nothing about how the rows are produced or held
+        (developer, November 24, 2026, ITL-1464). A stream that keeps its computed rows
+        is not computed again, and one whose inputs changed is computed again. The view
+        has the default column configuration;
+        its ``head``, ``tail`` and ``sort_by_tags`` choose what is shown. The view holds
+        every row, except over a source that reads its rows on demand
+        (``reads_in_batches``): its rows, and those of operators applied batch by batch
+        over it, are read in batches, and a large result (``RunSize``) gives a
+        ``BoundedStreamView``. For other
         column groups, use ``as_table(columns=...)`` or ``head(columns=...)`` after
         ``run()``. On a stream that keeps its rows (a pod's or operator's output stream,
         a job node, a job's side-effect node included, an in-memory source) they read the
@@ -1605,9 +1630,31 @@ class StreamBase(TraceableBase):
 
         Returns:
             A ``StreamView`` of all the rows ``as_table()`` returns, with status
-            ``ROWS``.
+            ``ROWS``; bounded as said above.
         """
+        if self._reads_in_batches():
+            return self._run_in_batches()
         return self._view_of_rows(self.as_table(), self._RUN_ORIGIN)
+
+    def _reads_in_batches(self) -> bool:
+        """See ``reads_in_batches``; a stream reads its rows whole unless it says."""
+        return False
+
+    def _batch_streams_of_rows(self) -> Generator[StreamProtocol, None, None]:
+        """See ``batch_streams_of``; asked only when ``_reads_in_batches``."""
+        raise NotImplementedError(f"{type(self).__name__} has no rows in batches")
+
+    def _run_in_batches(self) -> StreamView:
+        """The ``run()`` view of rows read batch by batch, in one read."""
+        rows = WindowOfRows()
+        with closing(self._batch_streams_of_rows()) as batches:
+            for batch in batches:
+                rows.add(batch.as_table())
+        complete = rows.complete
+        if complete is not None:
+            return self._view_of_rows(complete, self._RUN_ORIGIN)
+        first = self._view_of_rows(rows.first, self._RUN_ORIGIN)
+        return BoundedStreamView(first, rows.last, rows.total)
 
     def _view_of_rows(self, table: "pa.Table", origin: str) -> StreamView:
         """Return the ``run()`` view of ``table``, every row of this stream."""
