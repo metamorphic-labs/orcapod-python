@@ -766,6 +766,8 @@ class SourceSlotNameCollisionError(ValueError):
     different sources (another kind, another version or another id) whose names are
     equal would share one slot and one would replace the other. The job refuses
     them; give one of them its own name (``source_id=`` when it is built).
+    ITL-1506 will lift this refusal for sources that differ only in key columns
+    when they have distinct named slots.
     """
 
 

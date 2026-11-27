@@ -50,6 +50,8 @@ def _refuse_sources_sharing_a_slot_name(
     would share one ``job.sources`` and ``bind`` key, and one would replace the other.
     Only sources are refused here: a slot of another stream is named by its label and
     content hash.
+    ITL-1506 will lift the refusal for sources that differ only in key columns
+    once they can occupy distinct named slots.
 
     Raises:
         SourceSlotNameCollisionError: Naming every full source id and the remedy.
@@ -62,6 +64,19 @@ def _refuse_sources_sharing_a_slot_name(
     from orcapod.errors import SourceSlotNameCollisionError
 
     ids = sorted({s.source_id for s in sources})
+    if len(ids) == 1:
+        keys = {getattr(s, "_key_columns", None) for s in sources}
+        # Schema agreement was checked before slot naming. ITL-1506 will let
+        # readings with different keys occupy distinct named slots.
+        if None not in keys and len(keys) == len(sources):
+            raise SourceSlotNameCollisionError(
+                f"{len(sources)} sources with source id {ids[0]!r} share one schema "
+                f"and differ only in key columns (record_id_columns). They would "
+                f"take the same slot name {slot_name!r}, so this is refused for now. "
+                "A later version will allow this with distinct slot names (ITL-1506). "
+                "For now, give each source its own name with source_id=... when it "
+                "is built."
+            )
     described = (
         ", ".join(repr(i) for i in ids)
         if len(ids) > 1

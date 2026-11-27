@@ -1009,6 +1009,10 @@ order or content can vary between runs, pass an explicit, stable `source_id` **a
 key columns that are unique per row; this avoids both the duplicate entries and the repeated
 deliveries.
 
+A pipeline currently refuses sources that share a `source_id` and differ only in their
+key columns. ITL-1506 will allow them to share that ID when each reading has a distinct
+slot name.
+
 An in-memory source with key columns and no `source_id` can instead hash its rows in key
 order: pass `hash_in_key_order=True` (`ArrowTableSource`, `DictSource`, `DataFrameSource`,
 `ListSource`; ITL-1272). The table is hashed sorted by the key columns, in the order you list
