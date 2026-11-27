@@ -16,7 +16,12 @@ with one predecessor: the sync orchestrator hands the operator one stream ("Bina
 requires exactly two input streams"), the async one one reader. Pinned by
 `tests/test_pipeline/test_loaded_argument_order.py::test_one_stream_given_twice_fails_to_run_in_a_job`.
 
-## One stream given twice to a commutative pod: refused
+## One stream given twice to a commutative pod: refused for now (a stopgap until ITL-1511)
+
+The refusal below is temporary, not a principle. A commutative operator taking one stream
+more than once is meaningful, and ITL-1511 ("Allow a commutative operator to take one stream
+more than once: multiset identity and the unique/repeat toggle") is to allow it; it must be
+settled before 0.4.0.
 
 Independent review of the first head found that a commutative operator hashes its operands
 as a set, so `Join()(d)` and `Join()(d, d)` (where `d` has no data column besides its
@@ -27,7 +32,7 @@ missed two separate sources of one identity (standalone hashes still collided, a
 recorded over them compiled in one order and failed in the other), and that the check
 added its own error for an operand that cannot be hashed.
 
-Decided on the developer's behalf (2026-11-26): refuse exactly where the identity is formed
+Developer, November 27, 2026: a stopgap until ITL-1511. Until then, refuse exactly where the identity is formed
 from the operands as a set. `core/operators/repeated_operands.operand_set` builds that set
 and raises `RepeatedOperandError` (an `InputValidationError`) when two operands have one
 identity (they are equal as the set compares them). `Join.argument_symmetry` (so also
@@ -98,7 +103,7 @@ New file `tests/test_pipeline/test_edge_positions.py`, inputs with two tag and t
   another at 1 and the reverse, give the standalone rows.
 - A source node's observer events are the same for `MergeJoin(A, A)` as for `MergeJoin(A, B)`
   per source (one start and end per run).
-- `Join`, `Rejoin` and a function pod given one stream twice are refused, standalone and
+- `Join`, `Rejoin` and a function pod given one stream twice are refused (for now: ITL-1511), standalone and
   at recording, in both recording orders, sync and async; `Join(a)` has position `None`.
 - The saved file of a job with `MergeJoin(A, A)` has one edge pair and `inputs` `[A, A]`;
   saving a loaded job writes the same bytes.

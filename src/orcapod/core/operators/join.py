@@ -225,7 +225,8 @@ class Join(NonZeroInputOperator):
 
         Raises:
             RepeatedOperandError: If two inputs have one identity (ITL-1419): a set
-                cannot tell ``Join(d)`` from ``Join(d, d)``.
+                cannot tell ``Join(d)`` from ``Join(d, d)``. Not supported yet, a
+                stopgap until ITL-1511.
         """
         from orcapod.core.operators.repeated_operands import (
             RepeatedOperandError,

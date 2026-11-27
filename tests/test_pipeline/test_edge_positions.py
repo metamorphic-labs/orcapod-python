@@ -3,7 +3,8 @@
 An edge is ``(upstream, node, position)``: one upstream given to two inputs of an ordered
 operator is two edges, so ``MergeJoin()(a, a)`` and ``SemiJoin()(a, a)`` run in a job as
 they run standalone. ``Join``, ``Rejoin`` and a function pod given one stream twice are
-refused by the operator (or the pod's join) itself, standalone and in a job.
+refused by the operator (or the pod's join) itself, standalone and in a job, for now (a
+stopgap until ITL-1511).
 
 Inputs have two tag columns (``id``, ``key``) and two data columns (``x``, ``y``), in two
 layouts (tag order and column order swapped).
@@ -337,7 +338,7 @@ REPEATS = {
     "same_object": lambda make: (lambda s: (s, s))(make()),
     "equal_sources": lambda make: (make(), make()),
 }
-REFUSAL = r"same stream.*more than once.*MergeJoin"
+REFUSAL = r"same stream.*more than once.*not supported yet.*ITL-1511.*MergeJoin"
 
 
 def _refusal(pod: str) -> str:

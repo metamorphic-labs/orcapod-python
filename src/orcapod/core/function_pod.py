@@ -879,8 +879,9 @@ class _FunctionPodBase(TraceableBase):
         """The symmetry of the join the pod puts its inputs through.
 
         Raises:
-            RepeatedOperandError: If two inputs have one identity (ITL-1419): the join
-                that formed the set is named, and this function added as context.
+            RepeatedOperandError: If two inputs have one identity (ITL-1419; not
+                supported yet, a stopgap until ITL-1511): the join that formed the set
+                is named, and this function added as context.
         """
         from orcapod.core.operators.repeated_operands import RepeatedOperandError
 
