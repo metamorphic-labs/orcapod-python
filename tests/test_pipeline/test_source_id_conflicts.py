@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 import json
+from collections import Counter
 from pathlib import Path
 import struct
 
@@ -940,11 +941,8 @@ def test_node_run_checks_its_sources_like_job_run(
         assert job.nodes[name].as_table().num_rows == 0
 
 
-def test_each_digest_is_computed_at_most_once_per_source(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from collections import Counter
-
+def _count_digests(monkeypatch: pytest.MonkeyPatch) -> Counter[tuple[str, int]]:
+    """Count each kind of fixed-row digest by the source object that computes it."""
     calls: Counter[tuple[str, int]] = Counter()
     exact = RootSource._digest_fixed_rows  # pyright: ignore[reportPrivateUsage]  # counted
     multiset = RootSource._digest_fixed_row_multiset  # pyright: ignore[reportPrivateUsage]  # counted
@@ -959,14 +957,22 @@ def test_each_digest_is_computed_at_most_once_per_source(
 
     monkeypatch.setattr(RootSource, "_digest_fixed_rows", counted_exact)
     monkeypatch.setattr(RootSource, "_digest_fixed_row_multiset", counted_multiset)
+    return calls
 
+
+def test_each_digest_is_computed_at_most_once_per_source_per_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _count_digests(monkeypatch)
     rows = [{"x": 1}, {"x": 2}]
     first = DictSource(rows, source_id="shared")
     second = DictSource(rows, source_id="shared")
     keyed = DictSource(rows, record_id_columns="x", source_id="shared")
     uses = [("slot 'a'", first), ("slot 'b'", second), ("slot 'c'", keyed)]
     for _ in range(2):
-        # A second check computes nothing: a fixed table's digests are held.
+        # Every check digests again (a held table can share memory with the
+        # caller's data), but each digest at most once per source.
+        calls.clear()
         with pytest.raises(InconsistentSourceError, match="differ only in key"):
             require_consistent_sources(uses)
         # Equal keys need the exact digest, different keys the multiset digest.
@@ -988,3 +994,52 @@ def test_each_digest_is_computed_at_most_once_per_source(
         require_consistent_sources(pair)
     assert sorted(calls.values()) == [1, 1]
     assert {kind for kind, _ in calls} == {"multiset"}
+
+
+def test_a_proxy_and_its_source_are_digested_once_per_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def derived() -> DerivedSource:
+        origin = DictSource(
+            [{"t": "a", "x": 1}, {"t": "b", "x": 2}],
+            tag_columns="t",
+            tag_only_columns=True,
+            source_id="origin",
+        )
+        return DerivedSource(
+            origin, tags_as_data={"t": "tag_value"}, source_id="shared"
+        )
+
+    source, other = derived(), derived()
+    proxy = SourceProxy(
+        source.source_id,
+        source.content_hash().to_string(),
+        source.pipeline_hash().to_string(),
+        *source.output_schema(),
+    )
+    proxy.bind(source)
+    calls = _count_digests(monkeypatch)
+    for uses in itertools.permutations(
+        [("slot 'p'", proxy), ("slot 'd'", source), ("slot 'o'", other)]
+    ):
+        calls.clear()
+        require_consistent_sources(uses)
+        assert calls == {("exact", id(source)): 1, ("exact", id(other)): 1}
+
+
+def test_a_mutated_frame_is_compared_again_at_the_next_bind() -> None:
+    import pandas as pd
+
+    def frame() -> pd.DataFrame:
+        return pd.DataFrame({"x": np.array([1, 2], dtype=np.int64)})
+
+    first_frame, second_frame = frame(), frame()
+    first = DataFrameSource(first_frame, source_id="shared")
+    second = DataFrameSource(second_frame, source_id="shared")
+    job = _job()
+    job.bind(sources={"left": first, "right": second})
+    first_frame.iloc[0, 0] = 100
+    if first.as_table()["x"].to_pylist() == [1, 2]:
+        pytest.skip("this pandas copies the frame; nothing is shared to mutate")
+    with pytest.raises(InconsistentSourceError, match="different rows"):
+        job.bind(sources={"left": first, "right": second})
