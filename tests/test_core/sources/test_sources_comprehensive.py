@@ -486,11 +486,13 @@ class TestArrowTableSourceAdditional:
 
     def test_system_tag_columns_forwarded_to_stream(self):
         """system_tag_columns passed at construction are preserved."""
-        table = pa.table({"x": pa.array([1, 2], type=pa.int64())})
+        table = pa.table({"x": [1, 2], "sys_col": ["a", "b"]})
         src = ArrowTableSource(
             table=table, system_tag_columns=["sys_col"], infer_nullable=True
         )
-        assert "sys_col" in src._system_tag_columns
+        assert src.as_table(columns={"system_tags": True}).column(
+            "_tag_sys_col"
+        ).to_pylist() == ["a", "b"]
 
     def test_as_table_all_info_includes_system_tag_columns(self):
         """as_table(all_info=True) exposes paired _tag_source_id and _tag_record_id columns."""

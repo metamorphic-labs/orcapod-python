@@ -69,7 +69,7 @@ def require_custom_system_tags(
     *,
     schema: pa.Schema | None = None,
 ) -> None:
-    """Validate custom system-tag types, field flags and values before wrapping.
+    """Validate custom system-tag names, types, field flags and values.
 
     Args:
         table: The source's Arrow columns.
@@ -77,12 +77,19 @@ def require_custom_system_tags(
         schema: The declared fields if the reader has yet to apply them.
 
     Raises:
+        ValueError: If a nominated column is missing from the source table.
         InputValidationError: If a nominated column is not non-nullable text.
     """
+    if not names:
+        return
     fields = table.schema if schema is None else schema
+    available = set(fields.names).intersection(table.column_names)
+    if missing := sorted(set(names) - available):
+        raise ValueError(
+            f"system_tag_columns not found in table: {missing}. "
+            f"Available columns: {sorted(available)}"
+        )
     for name in names:
-        if name not in table.column_names or name not in fields.names:
-            continue
         field = fields.field(name)
         has_nulls = table.column(name).null_count > 0
         if (

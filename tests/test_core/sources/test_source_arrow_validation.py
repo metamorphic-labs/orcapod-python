@@ -195,6 +195,22 @@ def test_rejects_invalid_custom_system_tag_columns(
 
 
 @pytest.mark.parametrize("kind", SOURCE_KINDS)
+@pytest.mark.parametrize(
+    "names",
+    [("missing",), ("extra", "missing", "rev"), ("rev", "missing", "extra")],
+)
+def test_refuses_missing_custom_system_tag_columns(
+    kind: str,
+    names: tuple[str, ...],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    table = _table(pa.field("extra", pa.string(), nullable=False), ["a", "b"])
+    with pytest.raises(ValueError, match=r"system_tag_columns not found.*'missing'"):
+        _source(kind, table, tmp_path, monkeypatch, system_tag_columns=names)
+
+
+@pytest.mark.parametrize("kind", SOURCE_KINDS)
 def test_accepts_two_non_nullable_string_system_tags(
     kind: str,
     tmp_path: Path,
