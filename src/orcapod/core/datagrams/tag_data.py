@@ -648,18 +648,21 @@ class Data(Datagram):
         # of a data column the row holds no token column for.
         null = pa.chunked_array([pa.nulls(1, _NULL_TOKEN_TYPE)])
         columns: "list[pa.ChunkedArray[Any]]" = []
-        names: "list[str]" = []
+        column_names: "list[str]" = []
         for name in Datagram.keys(self):
             column_name = f"{constants.SOURCE_PREFIX}{name}"
             column = (
                 typed.column(column_name) if column_name in typed.column_names else null
             )
             columns.append(null if column.null_count == len(column) else column)
-            names.append(column_name)
+            column_names.append(column_name)
         return pa.Table.from_arrays(
             columns,
             schema=pa.schema(
-                [pa.field(name, column.type) for name, column in zip(names, columns)]
+                [
+                    pa.field(name, column.type)
+                    for name, column in zip(column_names, columns)
+                ]
             ),
         )
 

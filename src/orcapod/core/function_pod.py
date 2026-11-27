@@ -1156,7 +1156,7 @@ def _token_rows(rows: "Sequence[pa.Table]") -> pa.Table:
                 [
                     row.column(name)
                     if name in row.column_names
-                    else pa.nulls(row.num_rows, kind)
+                    else pa.nulls(row.num_rows, kind)  # pyright: ignore[reportCallIssue, reportArgumentType]  # pyarrow takes any type; the stubs say an extension type
                     for name, kind in types.items()
                 ],
                 schema=schema,

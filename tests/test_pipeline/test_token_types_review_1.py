@@ -170,7 +170,7 @@ def _async_rows(operator: Any, *streams: Any) -> list[Any]:
 # P1-2: the async Join keeps the declared type of a merged data-tag's token
 # ---------------------------------------------------------------------------
 
-K_TOKENS = {
+K_TOKENS: dict[str, tuple[list[Any], pa.DataType]] = {
     "a": ([["a1", "a2"], ["a3", "a4"]], FIXED),
     "b": ([["b1", "b2"], ["b3", "b4"]], FIXED),
 }
@@ -527,7 +527,7 @@ def test_rows_built_by_hand_and_by_taking_columns_make_one_table(
     """
     from orcapod.core.datagrams import Tag
 
-    tokens = {"y": "from-y", "z": ["z1", "z2"]}
+    tokens: dict[str, Any] = {"y": "from-y", "z": ["z1", "z2"]}
     direct = Data(
         {**{name: 2 for name in order}, "x": 1, "w": 3},
         source_info={name: tokens[name] for name in order},
@@ -562,7 +562,7 @@ def test_rows_built_by_hand_and_by_taking_columns_make_one_table(
 # ---------------------------------------------------------------------------
 
 NESTED = pa.large_list(TOKENS)
-STREAM_TOKENS = {
+STREAM_TOKENS: dict[str, tuple[list[Any], pa.DataType]] = {
     "k": ([["p", "q"], ["r", "s"]], FIXED),
     "g": ([[None, ["a"]], [[]]], NESTED),
 }
@@ -637,7 +637,7 @@ def test_the_python_schema_of_a_token_follows_its_columns_type(tags: str) -> Non
 # P1-1: a Join never stores its pending marker in a merged token
 # ---------------------------------------------------------------------------
 
-NULL_TOKENS = {
+NULL_TOKENS: dict[str, tuple[list[Any], pa.DataType]] = {
     "null_lists": ([None, None], TOKENS),
     "null_nested": ([None, None], NESTED),
     "null_fixed": ([None, None], FIXED_PLAIN),
