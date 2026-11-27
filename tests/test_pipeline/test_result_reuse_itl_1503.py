@@ -53,13 +53,24 @@ def _non_nullable(columns: dict[str, Any]) -> pa.Table:
     return pa.table(columns, schema=schema)
 
 
-def _input(rows: dict[str, int], *, marker: bool = False) -> ArrowTableStream:
+# Two arrangements of one input (ITL-1236): the tag order and the table layout.
+ARRANGEMENTS = pytest.mark.parametrize(
+    "arrangement", ["tags first", "data first, tags reversed"]
+)
+
+
+def _input(
+    rows: dict[str, int], *, marker: bool = False, arrangement: str = "tags first"
+) -> ArrowTableStream:
     """A stream with tags ``key`` and ``group`` and data ``value`` and ``weight``.
 
     Args:
         rows: Tag ``key`` to data ``value``; a key may not repeat (use
             ``_repeated_input`` for rows of one instance).
         marker: Whether to add a user tag named like the old internal marker.
+        arrangement: ``"tags first"`` (tags ``key``, ``group``; table laid out
+            tags then data) or ``"data first, tags reversed"`` (tags ``group``,
+            ``key``; table laid out ``weight``, ``value``, then the tags).
     """
     columns: dict[str, Any] = {
         "key": pa.array(list(rows), pa.large_string()),
@@ -71,6 +82,9 @@ def _input(rows: dict[str, int], *, marker: bool = False) -> ArrowTableStream:
     if marker:
         columns[OLD_MARKER] = pa.array([True] * len(rows), pa.bool_())
         tags.append(OLD_MARKER)
+    if arrangement != "tags first":
+        tags.reverse()
+        columns = {name: columns[name] for name in ["weight", "value", *tags]}
     return ArrowTableStream(_non_nullable(columns), tag_columns=tags)
 
 
@@ -204,12 +218,15 @@ def _delivered(rows: list[Any]) -> dict[str, tuple[bytes, int, float]]:
 # ---------------------------------------------------------------------------
 
 
+@ARRANGEMENTS
 @PATHS
 @pytest.mark.parametrize("marker", [False, True], ids=["plain", "old-marker-tag"])
-def test_persistent_hit_in_ephemeral_mode(use_async: bool, marker: bool) -> None:
+def test_persistent_hit_in_ephemeral_mode(
+    use_async: bool, marker: bool, arrangement: str
+) -> None:
     """The persistent result is used: no call, no write, recorded as persistent."""
     counted = _Counted()
-    source = _input({"a": 1, "b": 2, "c": 3}, marker=marker)
+    source = _input({"a": 1, "b": 2, "c": 3}, marker=marker, arrangement=arrangement)
     persistent, ephemeral = InMemoryArrowDatabase(), InMemoryArrowDatabase()
     stored = _seed(persistent, counted, source, {"a", "b", "c"})
 
@@ -303,11 +320,12 @@ def test_persistent_hit_in_ephemeral_mode_on_reopened_delta_stores(
     ]
 
 
+@ARRANGEMENTS
 @PATHS
-def test_persistent_miss_then_ephemeral_hit(use_async: bool) -> None:
+def test_persistent_miss_then_ephemeral_hit(use_async: bool, arrangement: str) -> None:
     """The ephemeral result is used: no call, no write, recorded as ephemeral."""
     counted = _Counted()
-    source = _input({"a": 1, "b": 2})
+    source = _input({"a": 1, "b": 2}, arrangement=arrangement)
     persistent, ephemeral = InMemoryArrowDatabase(), InMemoryArrowDatabase()
     stored = _seed(ephemeral, counted, source, {"a", "b"})
 
@@ -330,11 +348,14 @@ def test_persistent_miss_then_ephemeral_hit(use_async: bool) -> None:
     }
 
 
+@ARRANGEMENTS
 @PATHS
-def test_double_miss_computes_once_into_the_ephemeral_store(use_async: bool) -> None:
+def test_double_miss_computes_once_into_the_ephemeral_store(
+    use_async: bool, arrangement: str
+) -> None:
     """Neither store holds it: one call, one ephemeral row, no persistent row."""
     counted = _Counted()
-    source = _input({"a": 1, "b": 2})
+    source = _input({"a": 1, "b": 2}, arrangement=arrangement)
     persistent, ephemeral = InMemoryArrowDatabase(), InMemoryArrowDatabase()
     node = _ephemeral_node(
         counted,
@@ -356,11 +377,14 @@ def test_double_miss_computes_once_into_the_ephemeral_store(use_async: bool) -> 
     }
 
 
+@ARRANGEMENTS
 @PATHS
-def test_both_stores_hold_a_result_the_persistent_one_is_used(use_async: bool) -> None:
+def test_both_stores_hold_a_result_the_persistent_one_is_used(
+    use_async: bool, arrangement: str
+) -> None:
     """With a result in each store, the persistent one is returned and recorded."""
     counted = _Counted()
-    source = _input({"a": 1, "b": 2})
+    source = _input({"a": 1, "b": 2}, arrangement=arrangement)
     persistent, ephemeral = InMemoryArrowDatabase(), InMemoryArrowDatabase()
     in_ephemeral = _seed(ephemeral, counted, source, {"a", "b"})
     in_persistent = _seed(persistent, counted, source, {"a", "b"})
@@ -1091,8 +1115,9 @@ def test_repeated_instance_delivery_differs_between_sync_and_async_itl_1521(
     Occurrences of one instance whose tags differ only in a meta column. The sync
     path serves a repeated instance from the row it holds, so every occurrence is
     delivered the first one's row; the async path sends each occurrence on with
-    its own tag. A read of the node gives one row per instance for every
-    occurrence: on sync the first one's, on async the last one's. On both paths
+    its own tag, in no promised order. A read of the node gives one row per
+    instance for every occurrence: on sync the first one's, on async the one
+    delivered last. On both paths
     every occurrence has one result id.
     """
     node, source, rows = _occurrence_node(ephemeral_mode)
@@ -1104,8 +1129,17 @@ def test_repeated_instance_delivery_differs_between_sync_and_async_itl_1521(
 
     node, _, rows = _occurrence_node(ephemeral_mode)
     async_delivered = asyncio.run(_through_async_execute(node, rows))
-    assert _occurrences(async_delivered) == ["first", "second", "third", "second"]
-    assert _occurrences(list(node.iter_data())) == ["second"] * 4
+    # The async path promises no order: the delivered tags as a multiset, and the
+    # held row is the one delivered last, whichever occurrence that was.
+    assert sorted(_occurrences(async_delivered)) == [
+        "first",
+        "second",
+        "second",
+        "third",
+    ]
+    assert (
+        _occurrences(list(node.iter_data())) == [_occurrences(async_delivered)[-1]] * 4
+    )
     assert len(set(_ids(async_delivered))) == 1
     assert _ids(list(node.iter_data())) == _ids(async_delivered)
 
@@ -1187,3 +1221,210 @@ def test_a_write_made_inside_a_commit_of_its_table_is_not_covered(
     stored = _result_ids(database)
     assert set(stored) == returned
     assert len(stored) == len(set(stored))
+
+
+# ---------------------------------------------------------------------------
+# CodeRabbit on eef3e725: the row's start and the lookup, a data-tag input
+# ---------------------------------------------------------------------------
+
+
+def _events_with_lookups(use_async: bool, case: str) -> list[str]:
+    """The observer's row events and the persistent lookups of one row, in order.
+
+    Args:
+        use_async: The async job path (``async_execute``) or the sync path.
+        case: ``"hit"`` (the persistent store holds the result), ``"miss"``,
+            ``"failing lookup"`` (the lookup raises) or ``"failing function"``
+            (a miss, then the function raises).
+    """
+    calls: list[int] = []
+
+    def scale(value: int, weight: float) -> tuple[int, float]:
+        calls.append(value)
+        if case == "failing function":
+            raise ValueError("the function failed")
+        return value * 2, weight * 2
+
+    counted = _Counted()
+    pod = FunctionPod.from_fn(scale, output_keys=["doubled", "heavier"])
+    source = _input({"a": 2})
+    persistent, ephemeral = InMemoryArrowDatabase(), InMemoryArrowDatabase()
+    if case == "hit":
+        _ = _seed(persistent, counted, source, {"a"})
+    node = FunctionJobNode(
+        pod,
+        source,
+        pipeline_database=InMemoryArrowDatabase(),
+        result_database=persistent,
+    )
+    node.node_config = NodeConfig(is_result_ephemeral=True)
+    node.set_ephemeral_database(ephemeral)
+    observer = _RowEvents()
+    lookup = persistent.get_records_with_column_value
+
+    def recorded_lookup(*args: Any, **kwargs: Any) -> Any:
+        observer.events.append(("persistent lookup", "a"))
+        if case == "failing lookup":
+            raise RuntimeError("the lookup failed")
+        return lookup(*args, **kwargs)
+
+    persistent.get_records_with_column_value = recorded_lookup  # pyright: ignore[reportAttributeAccessIssue]  # records the lookups
+
+    async def go() -> None:
+        input_ch: Channel[Any] = Channel(buffer_size=4)
+        output_ch: Channel[Any] = Channel(buffer_size=4)
+        for pair in source.iter_data():
+            await input_ch.writer.send(pair)
+        await input_ch.writer.close()
+        await node.async_execute(
+            input_ch.reader,
+            output_ch.writer,
+            observer=observer,  # pyright: ignore[reportArgumentType]  # a recording observer
+        )
+
+    if use_async:
+        asyncio.run(go())
+    else:
+        _ = node.execute(source, observer=observer)  # pyright: ignore[reportArgumentType]  # a recording observer
+    assert calls == ([] if case in ("hit", "failing lookup") else [2])
+    return [event for event, _ in observer.events]
+
+
+@pytest.mark.parametrize("case", ["hit", "miss", "failing lookup", "failing function"])
+def test_the_row_starts_before_the_persistent_lookup_on_both_paths(case: str) -> None:
+    """In ephemeral mode a row starts for the observer before the persistent
+    store is asked, on the async job path as on the sync path, and its events
+    are the same in the same order: one start, never a second one when a miss
+    goes on to the function, and never none when the function then raises."""
+    expected = {
+        "hit": ["start", "persistent lookup", "end"],
+        "miss": ["start", "persistent lookup", "end"],
+        "failing lookup": ["start", "persistent lookup", "crash"],
+        "failing function": ["start", "persistent lookup", "crash"],
+    }[case]
+    assert _events_with_lookups(False, case) == expected
+    assert _events_with_lookups(True, case) == expected
+
+
+def test_the_row_start_is_reported_once_in_non_ephemeral_mode() -> None:
+    """Non-ephemeral mode makes no such lookup: each row has one start and one
+    end on both paths."""
+    for use_async in (False, True):
+        counted = _Counted()
+        source = _input({"a": 2, "b": 3})
+        node = FunctionJobNode(
+            counted.pod, source, pipeline_database=InMemoryArrowDatabase()
+        )
+        observer = _RowEvents()
+        if use_async:
+
+            async def go() -> None:
+                input_ch: Channel[Any] = Channel(buffer_size=4)
+                output_ch: Channel[Any] = Channel(buffer_size=4)
+                for pair in source.iter_data():
+                    await input_ch.writer.send(pair)
+                await input_ch.writer.close()
+                await node.async_execute(
+                    input_ch.reader,
+                    output_ch.writer,
+                    observer=observer,  # pyright: ignore[reportArgumentType]  # a recording observer
+                )
+
+            asyncio.run(go())
+        else:
+            _ = node.execute(source, observer=observer)  # pyright: ignore[reportArgumentType]  # a recording observer
+        assert sorted(observer.events) == [
+            ("end", "a"),
+            ("end", "b"),
+            ("start", "a"),
+            ("start", "b"),
+        ]
+
+
+def _data_tag_source(units: dict[str, int], session: str) -> Any:
+    """A source whose tags ``unit`` and ``session`` are data-tags (tags that are
+    data columns too), with data ``value`` and ``weight``."""
+    from orcapod.core.sources import DictSource
+
+    return DictSource(
+        [
+            {"unit": unit, "session": session, "value": value, "weight": 1.5}
+            for unit, value in units.items()
+        ],
+        tag_columns=["unit", "session"],
+        source_id=f"recordings_{session}",
+    )
+
+
+@PATHS
+@pytest.mark.parametrize(
+    "fall_through",
+    [["unit", "session"], ["session", "unit"]],
+    ids=["as-is", "reversed"],
+)
+def test_persistent_hit_keeps_the_row_s_own_data_tags(
+    use_async: bool, fall_through: list[str]
+) -> None:
+    """A persistent hit in ephemeral mode, on a pod that lets two data-tags fall
+    through. The stored result was computed for other rows with the same
+    function input (another unit and session). The row delivered has the stored
+    result (its id, values and tokens) and its OWN data-tag columns: the current
+    row's values and source-info tokens, not those of the row the result was
+    computed for."""
+    from orcapod.core.function_pod import FallThroughPod
+
+    counted = _Counted()
+    pod = FallThroughPod(counted.pod, fall_through)
+    persistent, ephemeral = InMemoryArrowDatabase(), InMemoryArrowDatabase()
+    earlier = _data_tag_source({"u8": 1, "u9": 2}, "s0")
+    writer = FunctionJobNode(
+        pod,
+        earlier,
+        pipeline_database=InMemoryArrowDatabase(),
+        result_database=persistent,
+    )
+    stored = {
+        data.as_dict()["value"]: output
+        for tag, data in earlier.iter_data()
+        for output in [writer.execute_data(tag, data)[1]]
+        if output is not None
+    }
+    assert counted.calls == [1, 2]
+    counted.calls.clear()
+
+    source = _data_tag_source({"u1": 1, "u2": 2}, "s1")
+    inputs = {tag.as_dict()["unit"]: data for tag, data in source.iter_data()}
+    node = FunctionJobNode(
+        pod,
+        source,
+        pipeline_database=InMemoryArrowDatabase(),
+        result_database=persistent,
+    )
+    node.node_config = NodeConfig(is_result_ephemeral=True)
+    node.set_ephemeral_database(ephemeral)
+    rows = _run(node, source, use_async)
+
+    assert counted.calls == []
+    assert _result_ids(ephemeral) == []
+    assert len(rows) == 2
+    for tag, data in rows:
+        unit = tag.as_dict()["unit"]
+        value = inputs[unit].as_dict()["value"]
+        result = stored[value]
+        assert data.datagram_uuid == result.datagram_uuid
+        assert data.as_dict() == {
+            "unit": unit,
+            "session": "s1",
+            "doubled": value * 2,
+            "heavier": 3.0,
+        }
+        tokens = data.source_info()
+        for name in ("unit", "session"):
+            assert tokens[name] == inputs[unit].source_info()[name]
+            assert tokens[name] != result.source_info()[name]
+        for name in ("doubled", "heavier"):
+            assert tokens[name] == result.source_info()[name]
+    held = {tag.as_dict()["unit"]: data for tag, data in node.iter_data()}
+    for tag, data in rows:
+        assert held[tag.as_dict()["unit"]].as_dict() == data.as_dict()
+        assert held[tag.as_dict()["unit"]].source_info() == data.source_info()
