@@ -336,12 +336,20 @@ def test_row_order_counts_only_for_positional_ids(keyed: bool) -> None:
         _refused(first, second, Pipeline("conflicts"), both.pod)
 
 
-def test_record_ids_count_at_bind() -> None:
+def test_bind_compares_rows_without_record_ids_when_keys_differ() -> None:
+    # A source id names a dataset; key columns only name its rows. Two readings of
+    # the same rows with other keys bind into distinct named slots; other rows do not.
     job = _job()
     positional = _dict(1)
     keyed = DictSource([{"x": 1}], record_id_columns="x", source_id="shared")
+    job.bind(sources={"left": positional, "right": keyed})
+    assert job.sources["left"] is positional
+    assert job.sources["right"] is keyed
+
+    job = _job()
+    other = DictSource([{"x": 100}], record_id_columns="x", source_id="shared")
     with pytest.raises(InconsistentSourceError, match="different rows"):
-        job.bind(sources={"left": positional, "right": keyed})
+        job.bind(sources={"left": positional, "right": other})
 
 
 def test_nulls_nan_signed_zero_and_nested_values() -> None:
@@ -609,3 +617,190 @@ def test_issue_derived_job_sources_are_dynamic() -> None:
         downstream.pod(first, label="fa")
         downstream.pod(second, label="fb")
     assert "fa" in job.nodes
+
+
+# ITL-1469 review: a source id names a dataset; key columns only name its rows.
+
+_ROWS = [
+    {"t1": "a", "t2": "p", "x": 1, "y": 10},
+    {"t1": "b", "t2": "q", "x": 2, "y": 20},
+    {"t1": "c", "t2": "r", "x": 3, "y": 30},
+]
+
+
+def _keyed(
+    rows: list[dict[str, str | int]],
+    keys: list[str] | None,
+    tags: list[str] | None = None,
+) -> DictSource:
+    return DictSource(
+        rows,
+        tag_columns=tags or ["t1", "t2"],
+        tag_only_columns=True,
+        record_id_columns=keys,
+        source_id="shared",
+    )
+
+
+def _capture(first: RootSource, second: RootSource, pod: _FunctionPodBase) -> str:
+    with pytest.raises(SourceSlotNameCollisionError) as error:
+        with Pipeline("conflicts"):
+            pod(first, label="fa")
+            pod(second, label="fb")
+    return str(error.value)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize(
+    "keys", [(["t1"], ["t2", "x"]), (None, ["t2", "t1"]), (["x", "y"], None)]
+)
+def test_fixed_same_rows_with_different_keys_differ_only_in_key_columns(
+    reverse: bool, keys: tuple[list[str] | None, list[str] | None]
+) -> None:
+    first = _keyed(_ROWS, keys[0])
+    # Another row order and tag order: the same dataset, read with other keys.
+    second = _keyed(list(reversed(_ROWS)), keys[1], tags=["t2", "t1"])
+    if reverse:
+        first, second = second, first
+    assert first.content_hash() != second.content_hash()
+    message = _capture(first, second, both.pod)
+    assert "differ only in key columns" in message
+    assert "ITL-1506" in message
+    assert "source_id=" in message
+
+
+def test_fixed_same_rows_with_signed_zero_and_nan_differ_only_in_key_columns() -> (
+    None
+):
+    @function_pod(output_keys="out")
+    def with_float(x: int, y: float) -> float:
+        return x + y
+
+    def source(ys: list[float], keys: list[str] | None) -> DictSource:
+        return DictSource(
+            [{"t": f"r{i}", "x": i, "y": y} for i, y in enumerate(ys)],
+            tag_columns="t",
+            tag_only_columns=True,
+            record_id_columns=keys,
+            source_id="shared",
+        )
+
+    nan = struct.unpack(">d", bytes.fromhex("7ff8000000000001"))[0]
+    first = source([0.0, float("nan"), 1.5], ["t"])
+    second = source([-0.0, nan, 1.5], None)
+    assert "differ only in key columns" in _capture(first, second, with_float.pod)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_fixed_different_rows_with_different_keys_are_different_rows(
+    reverse: bool,
+) -> None:
+    changed = [*_ROWS[:2], {**_ROWS[2], "y": 300}]
+    first, second = _keyed(_ROWS, ["t1"]), _keyed(changed, ["t2", "x"])
+    if reverse:
+        first, second = second, first
+    _refused(first, second, Pipeline("conflicts"), both.pod)
+
+
+def test_fixed_row_multiset_counts_duplicates_and_ignores_order() -> None:
+    a, b = _ROWS[0], _ROWS[1]
+    assert (
+        _keyed([a, a, b], None).fixed_row_multiset
+        == _keyed([a, b, a], None).fixed_row_multiset
+    )
+    assert (
+        _keyed([a, a, b], None).fixed_row_multiset
+        != _keyed([a, b, b], None).fixed_row_multiset
+    )
+    assert _keyed([a, b], None).fixed_row_multiset != _keyed([a], None).fixed_row_multiset
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_live_sources_with_different_keys_do_not_claim_only_key_columns(
+    tmp_path: Path, reverse: bool
+) -> None:
+    first_path, second_path = tmp_path / "first.csv", tmp_path / "second.csv"
+    first_path.write_text("t1,t2,x,y\na,p,1,2\n")
+    second_path.write_text("t1,t2,x,y\nb,q,3,4\n")
+    sources = [
+        CSVSource(
+            str(path),
+            source_id="shared",
+            tag_columns=["t1", "t2"],
+            tag_only_columns=True,
+            record_id_columns=keys,
+        )
+        for path, keys in ((first_path, ["t1", "x"]), (second_path, ["t2", "y"]))
+    ]
+    first, second = sources[::-1] if reverse else sources
+    message = _capture(first, second, both.pod)
+    assert "differ only" not in message
+    assert "different key columns" in message
+    assert "not compared" in message
+    assert "ITL-1506" in message
+    assert "source_id=" in message
+
+
+def _derived(
+    origin: RootSource, tag: str, keys: list[str] | None
+) -> DerivedSource:
+    return DerivedSource(
+        origin,
+        tags_as_data={tag: "tag_value"},
+        record_id_columns=keys,
+        source_id="shared",
+    )
+
+
+def test_derived_sources_over_live_origins_with_other_mapping_and_keys(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "origin.csv"
+    path.write_text("t1,t2,x\na,p,1\nb,q,2\n")
+    origin = CSVSource(
+        str(path),
+        source_id="origin",
+        tag_columns=["t1", "t2"],
+        tag_only_columns=True,
+    )
+    first, second = _derived(origin, "t1", ["t1"]), _derived(origin, "t2", ["t2"])
+    assert first.arrow_schemas == second.arrow_schemas
+    message = _capture(first, second, with_copy.pod)
+    assert "differ only" not in message
+    assert "not compared" in message
+    assert "ITL-1506" in message
+
+
+def test_derived_sources_over_fixed_origins_compare_rows_without_record_ids() -> None:
+    origin = DictSource(
+        [{"t1": "a", "t2": "p", "x": 1}, {"t1": "b", "t2": "q", "x": 2}],
+        tag_columns=["t1", "t2"],
+        tag_only_columns=True,
+        source_id="origin",
+    )
+    same = _capture(
+        _derived(origin, "t1", ["t1"]), _derived(origin, "t1", ["t2"]), with_copy.pod
+    )
+    assert "differ only in key columns" in same
+    # Another mapping copies other values: the rows differ.
+    _refused(
+        _derived(origin, "t1", ["t1"]),
+        _derived(origin, "t2", ["t2"]),
+        Pipeline("conflicts"),
+        with_copy.pod,
+    )
+
+
+def test_equal_keys_still_compare_record_ids() -> None:
+    # Equal key columns: today's comparison, record ids included, row order counting
+    # for positional ids.
+    _refused(
+        _keyed(_ROWS, None),
+        _keyed(list(reversed(_ROWS)), None),
+        Pipeline("conflicts"),
+        both.pod,
+    )
+    with PipelineJob() as job:
+        both.pod(_keyed(_ROWS, ["t1"]), label="fa")
+        both.pod(_keyed(list(reversed(_ROWS)), ["t1"]), label="fb")
+    assert set(job.function_pods) == {"fa"}
