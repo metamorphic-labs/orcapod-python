@@ -44,6 +44,22 @@ def source_path_text(path: str | bytes | os.PathLike[str] | os.PathLike[bytes]) 
     return text
 
 
+def source_paths(
+    path: str | os.PathLike[str], *, pin: Callable[[str], str] = os.path.abspath
+) -> tuple[str, str]:
+    """Return the supplied text and the path pinned for reads at construction.
+
+    Args:
+        path: The supplied file path or address.
+        pin: The reader's path pinning function.
+
+    Returns:
+        The original text for names and configs, and the pinned access path.
+    """
+    text = source_path_text(path)
+    return text, pin(text)
+
+
 def saved_tag_only_columns(config: dict[str, Any]) -> bool | list[str]:
     """Return the ``tag_only_columns`` of a saved source config (ITL-1019).
 

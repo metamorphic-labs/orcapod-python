@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 from collections.abc import Collection
 from pathlib import Path
@@ -12,7 +13,7 @@ from typing_extensions import override
 from orcapod.core.sources.base import (
     RootSource,
     saved_tag_only_columns,
-    source_path_text,
+    source_paths,
 )
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.source_ids import location_source_name
@@ -32,6 +33,16 @@ else:
     deltalake = LazyModule("deltalake")
 
 
+def _pin_delta_path(path: str) -> str:
+    """Resolve local paths and pass URI addresses through to deltalake."""
+    if (
+        re.match(r"[a-zA-Z][a-zA-Z0-9+.-]*://", path)
+        and not os.path.splitdrive(path)[0]
+    ):
+        return path
+    return str(Path(path).resolve())
+
+
 class DeltaTableSource(RootSource):
     """A source backed by a Delta Lake table.
 
@@ -49,9 +60,6 @@ class DeltaTableSource(RootSource):
     Data-tags (ITL-1023): every declared tag column is a data-tag by default,
     also a data column of the same name. ``tag_only_columns`` (keyword-only) names the
     tags kept plain (tag only, not data, as in v0.3); ``True`` keeps all of them plain.
-
-    The filesystem text of ``delta_table_path`` supplies the default source name.
-    The configuration saves the resolved table path.
     """
 
     SOURCE_KIND: ClassVar[str] = "delta_table"
@@ -72,20 +80,21 @@ class DeltaTableSource(RootSource):
         tag_only_columns: TagOnlyColumns = (),
         **kwargs: Any,
     ) -> None:
-        path_text = source_path_text(delta_table_path)
-        self._delta_table_path: str = str(Path(path_text).resolve())
+        self._delta_table_path, self._access_path = source_paths(
+            delta_table_path, pin=_pin_delta_path
+        )
 
         super().__init__(source_id=source_id, **kwargs)
         if self._source_name is None:
             # The table folder's path or URI as passed: a relative path stays relative.
             # A default name is where the data lives, not a name the user gave: it is
             # not checked for a start shaped like a source id (ITL-1425).
-            self._source_name = location_source_name(path_text)
+            self._source_name = location_source_name(self._delta_table_path)
 
         try:
-            self._delta_table = deltalake.DeltaTable(self._delta_table_path)
+            self._delta_table = deltalake.DeltaTable(self._access_path)
         except deltalake.exceptions.TableNotFoundError:
-            raise ValueError(f"Delta table not found at {self._delta_table_path}")
+            raise ValueError(f"Delta table not found at {self._access_path}")
 
         self._tag_columns: Collection[str] = _normalize_column_list(tag_columns)
         self._system_tag_columns: Collection[str] = system_tag_columns
@@ -154,7 +163,7 @@ class DeltaTableSource(RootSource):
         table = self._read_table()
         if not table.schema.equals(self._table.schema, check_metadata=True):
             raise ValueError(
-                f"Delta table {self._delta_table_path!r} changed its columns at "
+                f"Delta table {self._access_path!r} changed its columns at "
                 f"version {version}: the source was built with {self._table.schema}, "
                 f"the table now has {table.schema}. Build a new DeltaTableSource to "
                 "read it"

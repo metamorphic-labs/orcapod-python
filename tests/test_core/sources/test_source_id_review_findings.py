@@ -517,9 +517,7 @@ def test_a_path_like_source_uses_its_text_once(
     source = _reader(kind, path)
     config = source.to_config()
     _ = json.dumps(config)
-    assert config[path_key] == (
-        str((tmp_path / filename).resolve()) if kind == "delta" else path.text
-    )
+    assert config[path_key] == path.text
     reloaded = type(source).from_config(config)
     assert (
         reloaded.source_id
@@ -528,6 +526,126 @@ def test_a_path_like_source_uses_its_text_once(
     )
     assert reloaded.as_table().num_rows == len(ROWS)
     assert path.calls == 1
+
+
+@pytest.mark.parametrize(
+    "kind,path_key,kind_part",
+    [("csv", "file_path", "csv_v1"), ("delta", "delta_table_path", "delta_table_v1")],
+)
+@pytest.mark.parametrize(
+    "spelling", ["relative", "absolute", "pathlib", "parent", "symlink"]
+)
+def test_file_source_job_saves_given_path_and_pins_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    path_key: str,
+    kind_part: str,
+    spelling: str,
+) -> None:
+    original = tmp_path / "original"
+    (original / "data" / "nested").mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "data" / "nested").mkdir(parents=True)
+    monkeypatch.chdir(original)
+    path = Path("data/units")
+    _write(kind, original / path)
+    if spelling == "symlink":
+        (original / "link").symlink_to(original / "data", target_is_directory=True)
+        (elsewhere / "link").symlink_to(elsewhere / "data", target_is_directory=True)
+    given = {
+        "relative": "./data//units",
+        "absolute": str(original / path),
+        "pathlib": path,
+        "parent": "data/nested/../units",
+        "symlink": "link/units",
+    }[spelling]
+    expected = os.fspath(given)
+    source = _reader(kind, given)
+    assert source.source_id == f"{kind_part}:{expected}"
+    assert source.to_config()[path_key] == expected
+
+    job = PipelineJob(database=DeltaTableDatabase(tmp_path / "db"))
+    with job:
+        _ = ratio.pod(source, label="ratio")
+    saved = tmp_path / "job.json"
+    job.save(saved)
+
+    if kind == "csv":
+        _ = _write_csv(elsewhere / path, ROWS)
+        _ = _write_csv(original / path, OTHER_ROWS)
+    else:
+        _write_delta(elsewhere / path)
+        from deltalake import write_deltalake
+
+        write_deltalake(
+            str(original / path),
+            pa.Table.from_pylist(OTHER_ROWS, schema=SCHEMA),
+            mode="overwrite",
+        )
+
+    monkeypatch.chdir(elsewhere)
+    assert source.check_for_new_data()
+    assert source.as_table().num_rows == len(OTHER_ROWS)
+    loaded = PipelineJob.load(saved)
+    restored = loaded.sources[expected]
+    assert isinstance(restored, (CSVSource, DeltaTableSource))
+    assert restored.source_id == source.source_id
+    assert restored.as_table().num_rows == (
+        len(OTHER_ROWS) if spelling == "absolute" else len(ROWS)
+    )
+    saved_again = tmp_path / "job-again.json"
+    loaded.save(saved_again)
+    assert saved_again.read_bytes() == saved.read_bytes()
+
+
+def test_a_job_with_a_previously_resolved_delta_path_still_loads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "units"
+    _write_delta(path)
+    source = _reader("delta", "units")
+    job = PipelineJob(database=DeltaTableDatabase(tmp_path / "db"))
+    with job:
+        _ = ratio.pod(source, label="ratio")
+    saved = tmp_path / "job.json"
+    job.save(saved)
+    # Older jobs saved the resolved location alongside the original, relative name.
+    payload = json.loads(saved.read_text())
+    config = payload["bindings"]["sources"]["units"]
+    config["delta_table_path"] = str(path.resolve())
+    _ = saved.write_text(json.dumps(payload))
+
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    restored = PipelineJob.load(saved).sources["units"]
+    assert isinstance(restored, DeltaTableSource)
+    assert restored.source_id == "delta_table_v1:units"
+    assert restored.to_config() == config
+    assert restored.as_table().num_rows == len(ROWS)
+
+
+def test_delta_source_passes_remote_uri_to_deltalake(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import deltalake
+
+    path = tmp_path / "units"
+    _write_delta(path)
+    table = deltalake.DeltaTable(str(path))
+    uri = "s3://bucket/units"
+
+    def open_table(location: str) -> deltalake.DeltaTable:
+        assert location == uri
+        return table
+
+    monkeypatch.setattr(deltalake, "DeltaTable", open_table)
+    source = DeltaTableSource(uri)
+    assert source.source_id == f"delta_table_v1:{uri}"
+    assert source.to_config()["delta_table_path"] == uri
+    assert source.as_table().num_rows == len(ROWS)
 
 
 class TestSecondReview1ExplicitNameOverAnUnusableLocation:

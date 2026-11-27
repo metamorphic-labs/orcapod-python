@@ -34,8 +34,12 @@ hashing) and produces the final immutable stream.
 | `DeltaTableSource` | Table directory path | Reads Delta Lake table |
 
 `CSVSource`, `DeltaTableSource`, and `SQLiteTableSource` accept `str` or
-`os.PathLike[str]`, including `pathlib.Path`. Saved job configurations store these paths
-as JSON strings.
+`os.PathLike[str]`, including `pathlib.Path`. They convert the path to text at construction
+and use the supplied spelling in saved job configurations and default source IDs. For
+local files or tables, the source fixes an absolute path at construction, so later reads
+keep using the same location if the working directory changes. When a saved job contains
+a relative path, loading it interprets that path relative to the working directory at load
+time. Delta URIs such as `s3://bucket/table` are saved and passed to deltalake as given.
 
 `orcapod.sources` also provides database-backed sources (`SQLiteTableSource`,
 `PostgreSQLTableSource`, `SpiralDBTableSource`) and `PollingSource` for data that arrives over

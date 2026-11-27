@@ -13,7 +13,7 @@ from typing_extensions import override
 from orcapod.core.sources.base import (
     RootSource,
     saved_tag_only_columns,
-    source_path_text,
+    source_paths,
 )
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.source_ids import location_source_name
@@ -301,16 +301,13 @@ class CSVSource(RootSource):
         tag_only_columns: TagOnlyColumns = (),
         **kwargs: Any,
     ) -> None:
-        self._file_path: str = source_path_text(file_path)
+        self._file_path, self._access_path = source_paths(file_path)
         super().__init__(source_id=source_id, **kwargs)
         if self._source_name is None:
             # A default name is where the data lives, not a name the user gave: it is
             # not checked for a start shaped like a source id (ITL-1425).
             self._source_name = location_source_name(self._file_path)
 
-        # Every later read (a check, ITL-1102) opens the file found now, whatever the
-        # working directory is then.
-        self._access_path = os.path.abspath(self._file_path)
         self._schema = schema
         self._tag_columns: Collection[str] = _normalize_column_list(tag_columns)
         self._system_tag_columns: Collection[str] = system_tag_columns
