@@ -631,3 +631,97 @@ def test_the_python_schema_of_a_token_follows_its_columns_type(tags: str) -> Non
         assert schema["_source_w"] == list[str]
         assert arrow.field("_source_x").type == NESTED
         assert arrow.field("_source_w").type == TOKENS
+
+
+# ---------------------------------------------------------------------------
+# P1-1: a Join never stores its pending marker in a merged token
+# ---------------------------------------------------------------------------
+
+NULL_TOKENS = {
+    "null_lists": ([None, None], TOKENS),
+    "null_nested": ([None, None], NESTED),
+    "null_fixed": ([None, None], FIXED_PLAIN),
+}
+
+
+def _flat(value: Any) -> list[Any]:
+    """Every token inside a (nested) token value."""
+    if isinstance(value, list):
+        return [token for item in value for token in _flat(item)]
+    return [value]
+
+
+def _merged_token_outcome(run: Any) -> Any:
+    """The type and values of ``_source_k`` in ``run()``'s table, or its refusal."""
+    try:
+        table = run()
+    except (InputValidationError, ExceptionGroup) as error:
+        while isinstance(error, ExceptionGroup):
+            (error,) = error.exceptions
+        assert isinstance(error, InputValidationError)
+        return ("refused", "'_source_k'" in str(error))
+    return (
+        str(table.schema.field("_source_k").type),
+        table.sort_by("k").column("_source_k").to_pylist(),
+    )
+
+
+@TAG_ORDER
+@SIDES
+@pytest.mark.parametrize("case", list(NULL_TOKENS))
+def test_a_join_never_stores_its_pending_marker_in_a_merged_token(
+    case: str, swapped: bool, tags: str
+) -> None:
+    """A merged data-tag whose list-typed token is null on both sides.
+
+    The sync ``Join`` wrote its internal pending marker, a string, into the
+    list-typed column, and pyarrow stored the string's characters as the list's
+    items, with no error; the async ``Join`` stored a folded string (review of PR
+    #601, P1-1; the sync fault is on ``main`` too, for a direct ``Join`` over such
+    raw streams). Both routes give one outcome, directly and in a job, and no
+    stored token holds a character of the marker.
+    """
+    order = TAG_ORDERS[tags]
+    values, kind = NULL_TOKENS[case]
+    names = ("b", "a") if swapped else ("a", "b")
+    left, right = (
+        _with_tokens(_source(name, order), order, {"k": (values, kind)})
+        for name in names
+    )
+
+    def table_of(rows: list[Any]) -> pa.Table:
+        # ``k`` is a data-tag, so each row's data table holds it.
+        return pa.concat_tables(
+            [data.as_table(columns={"source": True}) for _, data in rows]
+        )
+
+    outcomes = [
+        _merged_token_outcome(
+            lambda: Join()(left, right).as_table(columns={"source": True})
+        ),
+        _merged_token_outcome(lambda: table_of(_async_rows(Join(), left, right))),
+    ]
+    for orchestrator in ORCHESTRATORS.values():
+        database = InMemoryArrowDatabase()
+        job = PipelineJob(name="null_tokens", database=database)
+        with job:
+            joined = Join()(_source("a", order), _source("b", order), label="joined")
+            add_two.pod(joined, label="f")
+        job.bind(sources=dict(zip(names, (left, right))))
+
+        def run(job: PipelineJob = job, orchestrator: Any = orchestrator) -> pa.Table:
+            _ = job.run(orchestrator=orchestrator())
+            return _stored(job.database, "add_two")  # pyright: ignore[reportArgumentType]  # the job's in-memory database
+
+        outcomes.append(_merged_token_outcome(run))
+    direct_sync, direct_async, job_sync, job_async = outcomes
+    assert direct_sync == direct_async
+    assert job_sync == job_async
+    for outcome in outcomes:
+        if outcome[0] == "refused":
+            assert outcome[1]
+            continue
+        for token in _flat(outcome[1]):
+            assert token is None or (
+                token.startswith("join_v1:") and "\x00" not in token
+            ), token
