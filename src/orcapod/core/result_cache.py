@@ -8,6 +8,7 @@ and ``CachedFunctionPod`` delegate to a ``ResultCache`` instance.
 from __future__ import annotations
 
 import logging
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
@@ -37,6 +38,14 @@ if TYPE_CHECKING:
     from orcapod.protocols.core_protocols.datagrams import DatagramProtocol
 
 logger = logging.getLogger(__name__)
+
+# Held across the lookup and the write of ``ResultCache.store_if_missing`` (ITL-1503),
+# so two threads of one process cannot both find no result for one input and both
+# write. One lock for the process: every cache over one database object, and every
+# view of it, takes the same lock. Only the lookup, the write and its flush run
+# under it: no user function and no await, and nothing there stores a result, so
+# the lock is never taken twice.
+_STORE_IF_MISSING_LOCK = threading.Lock()
 
 
 def pod_timestamp_type() -> pa.DataType:
@@ -334,6 +343,31 @@ class ResultCache:
                 same ID already exists.
             data_context_key: Key of the caller's data context, stored on the row.
         """
+        self._queue(
+            input_data,
+            output_data,
+            variation_datagram,
+            execution_datagram,
+            skip_duplicates,
+            data_context_key=data_context_key,
+        )
+        if self._auto_flush:
+            self._flush()
+
+    def _queue(
+        self,
+        input_data: DataProtocol,
+        output_data: DataProtocol,
+        variation_datagram: "DatagramProtocol",
+        execution_datagram: "DatagramProtocol",
+        skip_duplicates: bool = False,
+        *,
+        data_context_key: str,
+    ) -> None:
+        """Add the result row to the result database, without flushing.
+
+        The arguments are those of ``store``.
+        """
         require_same_data_context(input_data.data_context_key, data_context_key)
         require_same_data_context(output_data.data_context_key, data_context_key)
         self._account_for_stale_tables(data_context_key)
@@ -388,18 +422,20 @@ class ResultCache:
             raise
         except Exception as exc:
             raise OrcapodDatabaseWriteError(self._versioned_record_path) from exc
-        if self._auto_flush:
-            try:
-                self._result_database.flush()
-            except OrcapodDatabaseReadError:
-                # The stored table could not be read: report the read failure itself.
-                raise
-            except Exception as exc:
-                # Views of one database share their pending writes, so the batch that
-                # failed may be an earlier row's or another table's.
-                raise OrcapodDatabaseWriteError(
-                    self._result_database.base_path, flush=True
-                ) from exc
+
+    def _flush(self) -> None:
+        """Flush the result database, reporting a failure as a write error."""
+        try:
+            self._result_database.flush()
+        except OrcapodDatabaseReadError:
+            # The stored table could not be read: report the read failure itself.
+            raise
+        except Exception as exc:
+            # Views of one database share their pending writes, so the batch that
+            # failed may be an earlier row's or another table's.
+            raise OrcapodDatabaseWriteError(
+                self._result_database.base_path, flush=True
+            ) from exc
 
     def store_if_missing(
         self,
@@ -412,17 +448,24 @@ class ResultCache:
     ) -> DataProtocol | None:
         """Store ``output_data`` unless a result for ``input_data`` is stored (ITL-1503).
 
-        A result table holds one result per input data hash. The table is looked up
-        as ``lookup`` does (input data hash and data context; committed and queued
-        rows alike). When a result is there, nothing is written and that result
-        is returned: the caller discards its own and uses the stored one, so two
-        computations of one input that ran at the same moment give one stored
-        result. Otherwise ``output_data`` is stored.
+        The conditional write: the table is looked up as ``lookup`` does (input
+        data hash and data context; committed and queued rows alike). When a
+        result is there, nothing is written and that result is returned: the
+        caller discards its own and uses the stored one, so two computations of
+        one input that ran at the same moment give one stored result. Otherwise
+        ``output_data`` is stored.
 
-        The lookup and the write are synchronous with nothing in between, so
-        within one process, over one database object and its views, no second
-        result is written. A writer on another database handle or in another
-        process is not seen until it is committed and this handle has read it.
+        Scope. This write adds no second result for one input data hash and data
+        context. ``store`` is unconditional and can (a function called with
+        ``skip_cache_lookup=True`` computes again and stores another row). The
+        lookup, the write and its flush run under one process-wide lock, with no
+        await inside, so within one process, conditional writes over one
+        database object and its views add no second result, on one event loop
+        or from several threads. Not covered: a writer on another database
+        handle or in another process (not seen until it is committed and this
+        handle has read it), and a commit of the table made outside this method
+        by another thread at the same moment (a database is not otherwise made
+        safe for threads here).
 
         Args:
             input_data: The input data (its content hash is the key).
@@ -435,19 +478,25 @@ class ResultCache:
             The result already stored, as ``lookup`` returns it, or ``None`` when
             ``output_data`` was stored.
         """
-        stored = self.lookup(input_data, data_context_key=data_context_key)
-        if stored is not None:
-            logger.info(
-                "A result for this input is already stored; not storing another"
+        with _STORE_IF_MISSING_LOCK:
+            stored = self.lookup(input_data, data_context_key=data_context_key)
+            if stored is not None:
+                logger.info(
+                    "A result for this input is already stored; not storing another"
+                )
+                return stored
+            self._queue(
+                input_data,
+                output_data,
+                variation_datagram,
+                execution_datagram,
+                data_context_key=data_context_key,
             )
-            return stored
-        self.store(
-            input_data,
-            output_data,
-            variation_datagram,
-            execution_datagram,
-            data_context_key=data_context_key,
-        )
+            # The flush is under the lock too: while a database commits a table,
+            # its queued rows are in neither its queue nor what it has read of
+            # the table, and a lookup from another thread would miss them.
+            if self._auto_flush:
+                self._flush()
         return None
 
     def get_all_records(

@@ -1398,6 +1398,13 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
     # The same instance ids in the order the run emitted its rows (ITL-1432): the
     # order the rows are held in, so a read gives them as downstream received them.
     _run_entry_order: tuple[bytes, ...] = ()
+    # The rows an asynchronous run emitted, one per instance id of
+    # ``_run_entry_order`` (ITL-1503); ``None`` after a synchronous or load-only run,
+    # whose rows are read from the cache. Two occurrences of one instance in one
+    # async run can be delivered two results (a persistent result published between
+    # them is served to the later one), and the cache keeps one result per instance,
+    # so a read takes each occurrence's own row from here.
+    _run_emitted_pairs: list[tuple[TagProtocol, DataProtocol]] | None = None
     # Whether the last completed run was load-only, and how many of its inputs had no
     # stored result (ITL-1095). Class defaults for nodes rebuilt from a descriptor.
     _run_load_only: bool = False
@@ -1436,6 +1443,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         self._cached_content_hash_column: "pa.Array | None" = None
         self._run_entry_counts = None
         self._run_entry_order = ()
+        self._run_emitted_pairs = None
 
         # DB persistence state (initially None; set via __init__ params or attach_databases)
         self._pipeline_database: ArrowDatabaseProtocol | None = None
@@ -1959,6 +1967,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         self._cached_content_hash_column = None
         self._run_entry_counts = None
         self._run_entry_order = ()
+        self._run_emitted_pairs = None
         self._run_load_only = False
         self._run_not_stored = 0
         self._run_failed = 0
@@ -1985,6 +1994,10 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         """
         if self._run_entry_counts is None:
             return
+        if self._run_emitted_pairs is not None:
+            # An asynchronous run: each occurrence's own row, as it was delivered.
+            yield from self._run_emitted_pairs
+            return
         cache = self._cached_output_datas
         for eid in self._run_entry_order:
             pair = cache.get(eid)
@@ -2003,6 +2016,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         """
         if self._run_entry_counts is None:
             return []
+        if self._run_emitted_pairs is not None:
+            return list(self._run_entry_order)
         cache = self._cached_output_datas
         return [
             eid
@@ -2014,6 +2029,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         self,
         entry_ids: list[bytes],
         *,
+        emitted_pairs: list[tuple[TagProtocol, DataProtocol]] | None = None,
         load_only: bool = False,
         not_stored: int = 0,
         failed: int = 0,
@@ -2023,12 +2039,16 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         Args:
             entry_ids: The instance ids of the run's inputs whose rows the node holds,
                 in the order the run emitted them.
+            emitted_pairs: The rows an asynchronous run emitted, one per id of
+                ``entry_ids`` in the same order; ``None`` for a run whose rows are
+                read from the cache by instance id.
             load_only: Whether the run was load-only (ITL-1095).
             not_stored: How many inputs of a load-only run had no stored result.
             failed: How many rows of the run failed (error policy ``"continue"``).
         """
         self._run_entry_counts = Counter(entry_ids)
         self._run_entry_order = tuple(entry_ids)
+        self._run_emitted_pairs = emitted_pairs
         self._run_load_only = load_only
         self._run_not_stored = not_stored
         self._run_failed = failed
@@ -4290,6 +4310,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         counts = self._run_entry_counts
         if counts is None:
             return 0
+        if self._run_emitted_pairs is not None:
+            return len(self._run_emitted_pairs)
         return sum(
             counts.get(entry_id, 0)
             for entry_id, (_, data) in self._cached_output_datas.items()
@@ -4615,8 +4637,51 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 # Instance ids of this run's inputs that gave a row (a cache hit or a
                 # forwarded computed row), one per input (ITL-1093).
                 run_entry_ids: list[bytes] = []
+                # The rows themselves, one per id above: what a read gives back.
+                emitted_pairs: list[tuple[TagProtocol, DataProtocol]] = []
                 # Rows whose function raised (error policy "continue").
                 failed_rows: list[int] = [0]
+
+                async def emit(
+                    instance_id: bytes, tag: TagProtocol, data: DataProtocol
+                ) -> None:
+                    """Send a row downstream and hold it as this run's row.
+
+                    Recorded once the output took the row, so the held order is the
+                    order downstream received (a parked send can resume after a
+                    later one), and the held row is the one this occurrence was
+                    delivered, whatever the cache holds for its instance later.
+                    """
+                    await output.send((tag, data))
+                    run_entry_ids.append(instance_id)
+                    emitted_pairs.append((tag, data))
+
+                def lookup_crashed(
+                    tag: TagProtocol, data: DataProtocol, exc: Exception
+                ) -> bool:
+                    """Report a row whose stored-result lookup raised, as the sync path does.
+
+                    A database error, or a stored row that cannot be decoded, is
+                    never a row failure: the run stops whatever the policy, after
+                    the row's crash is reported, the database error naming the node
+                    and the row. Any other error is a failed row under the row
+                    failure policy.
+
+                    Returns:
+                        Whether the run goes on to the next row; ``False`` means the
+                        caller re-raises ``exc``.
+                    """
+                    if isinstance(exc, OrcapodDatabaseError):
+                        exc.add_context(node_label=node_label, tag=tag.as_dict())
+                    if isinstance(exc, (OrcapodDatabaseError, TypeIdentityError)):
+                        with keep_database_error(exc, "Observer on_data_crash"):
+                            ctx_obs.on_data_crash(node_label, tag, data, exc)
+                        return False
+                    ctx_obs.on_data_crash(node_label, tag, data, exc)
+                    if error_policy == "fail_fast":
+                        return False
+                    failed_rows[0] += 1
+                    return True
 
                 async def route_inputs() -> None:
                     """Stage 1: send cache hits to output; stamp misses for computation."""
@@ -4639,11 +4704,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                                 ctx_obs.on_data_end(
                                     node_label, tag, data, cached_data, cached=True
                                 )
-                                await output.send((cached_tag, cached_data))
-                                # Recorded once the output took the row, so the held
-                                # order is the order downstream received (a parked
-                                # send can resume after a later one).
-                                run_entry_ids.append(instance_id)
+                                await emit(instance_id, cached_tag, cached_data)
                             elif isinstance(data, EmptyData):
                                 # A placeholder whose instance is not stored: the
                                 # result store answers by its input hash, nothing
@@ -4657,41 +4718,29 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                                     found_tag, found = self._empty_data_cache_hit(
                                         tag, data, instance_id
                                     )
-                                except OrcapodDatabaseError as exc:
-                                    # Never a row failure, whatever the policy:
-                                    # the run stops, after the row's crash is
-                                    # reported, as on the sync path.
-                                    exc.add_context(
-                                        node_label=node_label, tag=tag.as_dict()
-                                    )
-                                    with keep_database_error(
-                                        exc, "Observer on_data_crash"
-                                    ):
-                                        ctx_obs.on_data_crash(
-                                            node_label, tag, data, exc
-                                        )
-                                    raise
-                                except TypeIdentityError as exc:
-                                    with keep_database_error(
-                                        exc, "Observer on_data_crash"
-                                    ):
-                                        ctx_obs.on_data_crash(
-                                            node_label, tag, data, exc
-                                        )
-                                    raise
                                 except Exception as exc:
-                                    ctx_obs.on_data_crash(node_label, tag, data, exc)
-                                    if error_policy == "fail_fast":
+                                    if not lookup_crashed(tag, data, exc):
                                         raise
-                                    failed_rows[0] += 1
                                     continue
                                 ctx_obs.on_data_end(
                                     node_label, tag, data, found, cached=False
                                 )
-                                await output.send((found_tag, found))
-                                run_entry_ids.append(instance_id)
+                                await emit(instance_id, found_tag, found)
                             else:
                                 self._preflight_pipeline_write_schema()
+                                try:
+                                    found = (
+                                        self._persistent_result_in_ephemeral_mode(data)
+                                        if is_ephemeral
+                                        else None
+                                    )
+                                except Exception as exc:
+                                    # The sync path makes this lookup inside the
+                                    # row, after its start: the same events here.
+                                    ctx_obs.on_data_start(node_label, tag, data)
+                                    if not lookup_crashed(tag, data, exc):
+                                        raise
+                                    continue
                                 correlation_key = uuid.uuid4().bytes
                                 input_store[correlation_key] = (
                                     tag,
@@ -4700,11 +4749,6 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                                 )
                                 stamped_tag = tag.with_meta_columns(
                                     **{_TAG_NODE_INPUT_REF: correlation_key}
-                                )
-                                found = (
-                                    self._persistent_result_in_ephemeral_mode(data)
-                                    if is_ephemeral
-                                    else None
                                 )
                                 if found is not None:
                                     # Not computed, stored in neither result store
@@ -4783,9 +4827,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                         # Commits every commit_every_rows rows inside a job (ITL-919);
                         # no await in between, so no other row interleaves.
                         self._row_processed()
-                        await output.send((clean_tag, output_data))
-                        # Recorded once the output took the row (see route_inputs).
-                        run_entry_ids.append(instance_id)
+                        await emit(instance_id, clean_tag, output_data)
 
                 # Capture outer self so _NodeLabelObserver methods can
                 # update FunctionJobNode state without shadowing with 'self'.
@@ -4895,7 +4937,9 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 self._commit_at_node_end()
                 # The node's rows are those of this run's inputs, as the sync path's:
                 # the cache also holds every stored result loaded above.
-                self._set_run_rows(run_entry_ids, failed=failed_rows[0])
+                self._set_run_rows(
+                    run_entry_ids, emitted_pairs=emitted_pairs, failed=failed_rows[0]
+                )
             else:
                 # No-DB path: delegate dispatch entirely to the pod. The pod closes
                 # the writer it is given; that close waits for the finally below, so
