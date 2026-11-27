@@ -866,9 +866,11 @@ def token_layers_fit(token_type: "pa.DataType", data_type: "pa.DataType") -> boo
     logical type is read as its storage, so the logical list built for a list of
     a logical element counts as one large-list layer per list level.
 
-    Only lists are layers today: a token type with a nested layer of another
-    kind (a struct, a map, a union, a list view) is refused whatever the data.
-    A layer's item field (its name, nullability and metadata) is not compared.
+    Only lists are layers today, and under its layers a token is a string: a
+    token type with a layer of another kind (a struct, a map, a union, a list
+    view) or with another leaf (an integer, a binary) is refused whatever the
+    data. A layer's item field (its name, nullability and metadata) is not
+    compared.
 
     Args:
         token_type: The Arrow type of the ``_source_<name>`` column.
@@ -881,7 +883,13 @@ def token_layers_fit(token_type: "pa.DataType", data_type: "pa.DataType") -> boo
     while True:
         layer = _list_layer(token)
         if layer is None:
-            return not pa.types.is_nested(token)
+            # The leaf: a string. A stream's token columns are large-normalized;
+            # the other spellings are the same token.
+            return (
+                pa.types.is_large_string(token)
+                or pa.types.is_string(token)
+                or pa.types.is_string_view(token)
+            )
         while isinstance(data, pa.ExtensionType):
             data = data.storage_type
         if _list_layer(data) != layer:
@@ -890,55 +898,57 @@ def token_layers_fit(token_type: "pa.DataType", data_type: "pa.DataType") -> boo
 
 
 TOKEN_SHAPE_RULE = (
-    "A source-info token column must have the shape of its data column: each list "
-    "layer of the token's type needs the same list layer in the data's type (a large "
-    "list, or a fixed-size list of the same size), and a token that has a list layer "
-    "is never null, though an element inside it may be"
+    "A source-info token column must have the shape of its data column: its type is "
+    "list layers over a string (large_string), each list layer needs the same list "
+    "layer in the data's type (a large list, or a fixed-size list of the same size), "
+    "and a token that has a list layer is never null, though an element inside it "
+    "may be"
 )
 """The token-shape rule, as the refusal of a stream that breaks it begins."""
 
 
 def token_shape_violations(
     data: "pa.Table", tokens: "pa.Table", data_columns: Collection[str]
-) -> "list[tuple[str, str, pa.DataType, pa.DataType, int]]":
-    """Return the source-info columns of a stream that break the token-shape rule.
+) -> "list[tuple[str, str, pa.DataType, pa.DataType, bool]]":
+    """Return the source-info columns of a table that break the token-shape rule.
 
     The shape is read from the columns' types and the nulls from their validity;
-    no value is read. A token column with no list layer is never looked at, and
-    a data column with no token column is skipped.
+    no value is read. A plain string token column is never looked at further,
+    and a data column with no token column is skipped.
 
     Args:
-        data: The stream's table of tag and data columns.
-        tokens: The stream's table of ``_source_<name>`` columns.
-        data_columns: The stream's data columns (data-tags included).
+        data: The table of tag and data columns.
+        tokens: The table of ``_source_<name>`` columns (it may be ``data``).
+        data_columns: The data columns (data-tags included).
 
     Returns:
         One entry per violating column, in the order of ``data_columns``: the
-        token column, the data column, both types, and the number of null tokens
-        (``-1`` when the token's layers do not fit the data's, which is reported
-        before any null).
+        token column, the data column, both types, and whether the token's type
+        fits the data's (then a token with a list layer is null).
     """
     from orcapod.system_constants import constants
 
-    found: "list[tuple[str, str, pa.DataType, pa.DataType, int]]" = []
+    found: "list[tuple[str, str, pa.DataType, pa.DataType, bool]]" = []
     token_names = set(tokens.column_names)
     for name in data_columns:
         token_name = f"{constants.SOURCE_PREFIX}{name}"
         if token_name not in token_names:
             continue
         token_type = tokens.schema.field(token_name).type
-        if _list_layer(token_type) is None and not pa.types.is_nested(token_type):
+        if pa.types.is_large_string(token_type):
             continue
         data_type = data.schema.field(name).type
         if not token_layers_fit(token_type, data_type):
-            found.append((token_name, name, token_type, data_type, -1))
-        elif nulls := tokens.column(token_name).null_count:
-            found.append((token_name, name, token_type, data_type, nulls))
+            found.append((token_name, name, token_type, data_type, False))
+        elif _list_layer(token_type) is not None and (
+            tokens.column(token_name).null_count
+        ):
+            found.append((token_name, name, token_type, data_type, True))
     return found
 
 
 def token_shape_error(
-    found: "Sequence[tuple[str, str, pa.DataType, pa.DataType, int]]",
+    found: "Sequence[tuple[str, str, pa.DataType, pa.DataType, bool]]",
 ) -> InputValidationError:
     """Return the error refusing the source-info columns ``found``.
 
@@ -953,17 +963,44 @@ def token_shape_error(
         f"  - token column {token_name!r} has type {token_type} and its data column "
         f"{name!r} has type {data_type}: "
         + (
-            "the token's list layers are not the data's outer list layers"
-            if nulls < 0
-            else f"{nulls} of its tokens are null"
+            "it holds a null token"
+            if fits
+            else "the token's type is not list layers over a string that are the "
+            "data's outer list layers"
         )
-        for token_name, name, token_type, data_type, nulls in found
+        for token_name, name, token_type, data_type, fits in found
     ]
     return InputValidationError(
         f"{TOKEN_SHAPE_RULE}:\n"
         + "\n".join(lines)
         + "\nA plain string token (large_string) fits any data and may be null."
     )
+
+
+def require_token_shapes_of_rows(
+    rows: "Iterable[pa.Table]", data_columns: "Callable[[int], Collection[str]]"
+) -> None:
+    """Refuse rows that break the token-shape rule, as the stream of them would be.
+
+    For rows that are handed on without being built into a stream (the held rows
+    of the async orchestrator). Each row's own one-row table is read for its
+    columns' types and its token columns' null counts; no table is built from
+    the rows and no value is read. Every violating column of any row is reported
+    once, in the order of the first row that holds it.
+
+    Args:
+        rows: Each row's one-row table of data and ``_source_*`` columns.
+        data_columns: Gives the data columns of the row at a position.
+
+    Raises:
+        InputValidationError: As ``token_shape_error`` words it.
+    """
+    found: "dict[str, tuple[str, str, pa.DataType, pa.DataType, bool]]" = {}
+    for position, row in enumerate(rows):
+        for violation in token_shape_violations(row, row, data_columns(position)):
+            _ = found.setdefault(violation[0], violation)
+    if found:
+        raise token_shape_error(list(found.values()))
 
 
 def dictionary_columns_error(

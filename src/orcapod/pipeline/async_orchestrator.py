@@ -667,12 +667,42 @@ async def _send_held(
     rows: list[tuple[TagProtocol, DataProtocol]],
     writer: WritableChannel[tuple[TagProtocol, DataProtocol]],
 ) -> None:
-    """Send the rows of a node the run holds rather than runs, then close."""
+    """Send the rows of a node the run holds rather than runs, then close.
+
+    The rows are a stream's rows that are not built into a stream here, so they are
+    held to the token-shape rule first, as the sync orchestrator's stream of them is
+    when a successor reads it (ITL-1491): one pass over the rows, each row's own
+    column types and token null counts, before any row is sent.
+
+    Raises:
+        InputValidationError: If a row's source-info token does not have the shape
+            of its data (``schema_utils.require_token_shapes_of_rows``).
+    """
     try:
+        _require_token_shapes(rows)
         for row in rows:
             await writer.send(row)
     finally:
         await writer.close()
+
+
+def _require_token_shapes(rows: list[tuple[TagProtocol, DataProtocol]]) -> None:
+    """Refuse held rows whose tokens do not have the shape of their data.
+
+    A placeholder of a result that is gone holds no data column and is skipped.
+
+    Raises:
+        InputValidationError: Naming each token column, its data column and both
+            types.
+    """
+    from orcapod.core.datagrams.tag_data import EmptyData
+    from orcapod.utils import schema_utils
+
+    held = [data for _, data in rows if not isinstance(data, EmptyData)]
+    schema_utils.require_token_shapes_of_rows(
+        (data.as_table(columns={"source": True}) for data in held),
+        lambda position: held[position].keys(),
+    )
 
 
 def _start_node(

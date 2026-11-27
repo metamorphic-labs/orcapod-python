@@ -471,6 +471,7 @@ def test_tokens_of_two_list_kinds_need_two_data_types_which_are_refused(
         lambda: _with_tokens(scalar, order, {"x": ([["p", "q"]] * 2, FIXED_PLAIN)})
     )
     assert "'_source_x'" in message and "'x'" in message
+    assert str(FIXED_PLAIN) in message and str(pa.int64()) in message
 
 
 # ---------------------------------------------------------------------------
@@ -760,7 +761,7 @@ def test_a_stream_whose_merged_data_tag_has_a_null_list_token_is_refused(
     message = _refusal(lambda: _with_tokens(source, order, {"k": (values, kind)}))
     assert "'_source_k'" in message and "'k'" in message
     assert str(kind) in message and str(data_type) in message
-    assert ("tokens are null" in message) == shaped
+    assert ("holds a null token" in message) == shaped
 
 
 def test_the_join_never_writes_a_token_that_does_not_fit_its_column() -> None:
@@ -790,6 +791,9 @@ def test_the_join_never_writes_a_token_that_does_not_fit_its_column() -> None:
             "_merged_k": pa.array([None, None], TOKENS),
         }
     )
-    with pytest.raises(RuntimeError, match="_source_k") as refused:
+    # A null where a list of tokens is declared is refused before the guard: the
+    # callers word it as an ``InputValidationError`` naming the operator and column.
+    from orcapod.core.operators.join import NullTokenListError
+
+    with pytest.raises(NullTokenListError):
         _ = Join._merge_source_columns(table, "_source_k", "_merged_k")  # pyright: ignore[reportPrivateUsage]  # the sync merge
-    assert "\x00" not in str(refused.value)
