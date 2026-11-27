@@ -87,30 +87,6 @@ def _comparison_schema(source: RootSource) -> tuple[ContentHash, ContentHash]:
     return arrow_schema_identity(*schemas, source.data_context)
 
 
-def _same_fixed_rows(first: RootSource, other: RootSource) -> bool:
-    """Tell whether two fixed readings of one source id hold the same rows.
-
-    A source id names a dataset; key columns only name its rows and belong to the
-    reading. With equal (or unknown) key columns, compare tags, data and record ids
-    (``fixed_content``), so positional row order counts as it always has. With
-    different key columns the record ids necessarily differ, so compare the rows as a
-    multiset of tags and data (``fixed_row_multiset``): every occurrence counts, order
-    does not, and floats compare by the Arrow value rule (``-0.0`` equals ``0.0``, NaN
-    equals NaN).
-
-    Args:
-        first: A source whose ``fixed_content`` is not ``None``.
-        other: Another such source with the same source id and schema.
-
-    Returns:
-        ``True`` when the two readings hold the same rows.
-    """
-    first_keys, other_keys = first.key_columns, other.key_columns
-    if first_keys is None or other_keys is None or first_keys == other_keys:
-        return first.fixed_content == other.fixed_content
-    return first.fixed_row_multiset == other.fixed_row_multiset
-
-
 def _key_columns_conflict(
     source_id: str, group: list[tuple[str, RootSource]]
 ) -> str | None:
@@ -119,26 +95,27 @@ def _key_columns_conflict(
     Such sources are distinct readings of one dataset. They are refused everywhere for
     now (capture, bind, load, run), whatever slots they would take: allowing them in
     distinct named slots is ITL-1506, after the multi-slot binding work (ITL-1442).
-    Call only after the schemas and fixed rows of ``group`` were found to agree. A
-    source whose key columns are unknown (an unbound proxy) is not compared.
+    Call only after the schemas and fixed rows of ``group`` were found to agree. Only
+    the sources whose key columns are known are compared: one whose key columns are
+    unknown (an unbound proxy) neither causes nor suppresses a refusal.
 
     Args:
         source_id: The shared source id.
         group: Every distinct source with that id, with where it is used.
 
     Returns:
-        The error message, or ``None`` when the key columns agree.
+        The error message, or ``None`` when the known key columns agree.
     """
-    keys = {source.key_columns for _, source in group}
-    if None in keys or len(keys) < 2:
+    known = [(where, s) for where, s in group if s.key_columns is not None]
+    if len({source.key_columns for _, source in known}) < 2:
         return None
-    where = ", ".join(location for location, _ in group)
+    where = ", ".join(location for location, _ in known)
     remedy = (
         "A later version will allow distinct readings of one dataset in distinct "
         "named slots (ITL-1506). For now, give each source its own name with "
         "source_id=... when it is built."
     )
-    if all(source.fixed_content is not None for _, source in group):
+    if all(source.fixed_content is not None for _, source in known):
         return (
             f"Sources with source id {source_id!r} in {where} share one schema and "
             "the same rows, and differ only in key columns (record_id_columns), so "
@@ -151,6 +128,51 @@ def _key_columns_conflict(
     )
 
 
+def _differing_fixed_rows(
+    group: list[tuple[str, RootSource]],
+) -> tuple[str, str] | None:
+    """Find two fixed sources of one id and schema that hold different rows.
+
+    A source id names a dataset; key columns only name its rows and belong to the
+    reading. Every pair of fixed sources is compared by the rule for that pair, so the
+    answer never depends on the order of ``group``:
+
+    - equal key columns (or unknown ones): tags, data and record ids
+      (``fixed_content``), so positional row order counts as it always has;
+    - different key columns: the record ids necessarily differ, so the rows are
+      compared as a multiset of tags and data (``fixed_row_multiset``): every
+      occurrence counts, order does not, and floats compare by the Arrow value rule
+      (``-0.0`` equals ``0.0``, NaN equals NaN).
+
+    Each digest is computed at most once per source.
+
+    Args:
+        group: Every distinct source with that id, with where it is used.
+
+    Returns:
+        The locations of the first such pair, or ``None`` when all fixed rows agree.
+    """
+    contents = [(where, s, s.fixed_content) for where, s in group]
+    fixed = [(where, s, c) for where, s, c in contents if c is not None]
+    multisets: dict[int, bytes | None] = {}
+
+    def multiset(source: RootSource) -> bytes | None:
+        if id(source) not in multisets:
+            multisets[id(source)] = source.fixed_row_multiset
+        return multisets[id(source)]
+
+    for index, (first_location, first, first_content) in enumerate(fixed):
+        for location, source, content in fixed[index + 1 :]:
+            first_keys, keys = first.key_columns, source.key_columns
+            if first_keys is None or keys is None or first_keys == keys:
+                same = first_content == content
+            else:
+                same = multiset(first) == multiset(source)
+            if not same:
+                return first_location, location
+    return None
+
+
 def require_consistent_sources(
     uses: Iterable[SourceUse],
     rebinding: Rebinding = (),
@@ -159,8 +181,9 @@ def require_consistent_sources(
 
     Compare distinct objects only. A live source has no fixed rows to compare,
     but does not prevent comparing two fixed sources that share its address.
-    Fixed sources are compared by ``_same_fixed_rows``: record ids count only when
-    their key columns are equal. Sources whose schemas and fixed rows agree but whose
+    Every pair of fixed sources is compared by ``_differing_fixed_rows`` (record ids
+    count only when their key columns are equal), so different rows are reported whatever
+    the order of the uses. Sources whose schemas and fixed rows agree but whose known
     key columns differ are then refused too (``_key_columns_conflict``, ITL-1506).
     For a bind, use the prospective sources alongside every unchanged binding.
 
@@ -183,18 +206,12 @@ def require_consistent_sources(
                     f"and {location}. Give the sources different source_id values."
                 )
 
-        fixed: RootSource | None = None
-        fixed_location = first_location
-        for location, source in group:
-            if source.fixed_content is None:
-                continue
-            if fixed is None:
-                fixed, fixed_location = source, location
-            elif not _same_fixed_rows(fixed, source):
-                raise InconsistentSourceError(
-                    f"Source {source_id!r} has different rows in {fixed_location} "
-                    f"and {location}. Give the sources different source_id values."
-                )
+        differing = _differing_fixed_rows(group)
+        if differing is not None:
+            raise InconsistentSourceError(
+                f"Source {source_id!r} has different rows in {differing[0]} "
+                f"and {differing[1]}. Give the sources different source_id values."
+            )
 
         message = _key_columns_conflict(source_id, group)
         if message is not None:

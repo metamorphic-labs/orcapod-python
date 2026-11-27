@@ -497,7 +497,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         Raises:
             InconsistentSourceError: If two sources sharing a source ID have
-                different schemas, or both hold fixed rows and those rows differ.
+                different schemas, both hold fixed rows and those rows differ, or
+                they have different key columns (refused in any slots for now,
+                ITL-1506); the job is left as it was.
             SourceSpecMismatchError: If any source's columns differ from its slot's
                 declared names, roles or types.
             ValueError: If a source key has no matching ``SourceJobNode`` slot, or an
@@ -1802,7 +1804,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         Raises:
             InconsistentSourceError: If reconstructed sources sharing a source ID
-                have different schemas.
+                have different schemas, fixed rows that differ, or different key
+                columns (ITL-1506).
             ValueError: If the file's format version is not the one this Orcapod
                 writes (an earlier format is refused, never migrated), or if it was
                 saved before the database key was renamed (``bindings.store``

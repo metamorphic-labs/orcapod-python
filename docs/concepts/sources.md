@@ -1015,7 +1015,7 @@ deliveries.
 
 Sources that share a `source_id` and schema but have different key columns are two
 readings of one dataset, and are refused for now everywhere: at capture, `bind` (into any
-slots) and load, with `InconsistentSourceError`. When both hold their rows in memory, the
+slots), load and run (`job.run()` and a node's `run()`), with `InconsistentSourceError`. When both hold their rows in memory, the
 rows are compared first (as a multiset, above): different rows are reported as such, and
 equal rows as differing only in key columns. The rows of a source read later (a file, a
 database) are not compared, and the error says so. ITL-1506 will allow distinct readings

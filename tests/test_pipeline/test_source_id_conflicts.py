@@ -863,9 +863,9 @@ def test_unknown_key_columns_never_hide_a_conflict_between_known_ones() -> None:
 
 def _three_slot_job() -> PipelineJob:
     with PipelineJob(database=InMemoryArrowDatabase()) as job:
-        increment.pod(_dict(2, "a"), label="fa")
-        increment.pod(_dict(3, "b"), label="fb")
-        increment.pod(_dict(4, "c"), label="fc")
+        _ = increment.pod(_dict(2, "a"), label="fa")
+        _ = increment.pod(_dict(3, "b"), label="fb")
+        _ = increment.pod(_dict(4, "c"), label="fc")
     return job
 
 
@@ -902,7 +902,7 @@ def _semi_join_job() -> PipelineJob:
 
     with PipelineJob(database=InMemoryArrowDatabase()) as job:
         matched = SemiJoin()(source("left"), source("right"), label="matched")
-        increment_matched.pod(matched, label="fm")
+        _ = increment_matched.pod(matched, label="fm")
     return job
 
 
@@ -933,8 +933,8 @@ def test_node_run_checks_its_sources_like_job_run(
     job = _semi_join_job()
     _rebind_outside_bind(job, right_keys, x)
     with pytest.raises(InconsistentSourceError, match=message):
-        job.run()
+        _ = job.run()
     with pytest.raises(InconsistentSourceError, match=message):
-        job.nodes[node].run()
-    assert not job.matched.as_table().num_rows
-    assert not job.fm.as_table().num_rows
+        _ = job.nodes[node].run()
+    for name in ("matched", "fm"):
+        assert job.nodes[name].as_table().num_rows == 0
