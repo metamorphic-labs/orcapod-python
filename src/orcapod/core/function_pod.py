@@ -5,14 +5,7 @@ import itertools
 import dataclasses
 import logging
 from abc import abstractmethod
-from collections.abc import (
-    Awaitable,
-    Callable,
-    Collection,
-    Iterable,
-    Iterator,
-    Sequence,
-)
+from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
 from functools import update_wrapper, wraps
 from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
@@ -93,19 +86,6 @@ def _executor_supports_concurrent(
     """Return True if the data function's executor supports concurrent execution."""
     executor = data_function.executor
     return executor is not None and executor.supports_concurrent_execution
-
-
-class _AsyncInvocation(Protocol):
-    """Per-row invocation used by the async dispatcher."""
-
-    def __call__(
-        self,
-        tag: TagProtocol,
-        data: DataProtocol,
-        *,
-        logger: DataExecutionLoggerProtocol | None,
-        run_id: str | None,
-    ) -> Awaitable[tuple[TagProtocol, DataProtocol | None]]: ...
 
 
 class _FunctionPodBase(TraceableBase):
@@ -678,7 +658,6 @@ class _FunctionPodBase(TraceableBase):
         observer: ExecutionObserverProtocol | None = None,
         error_policy: Literal["continue", "fail_fast"] = "continue",
         run_id: str | None = None,
-        _invoke: _AsyncInvocation | None = None,
     ) -> None:
         """Streaming async execution with per-data concurrency control.
 
@@ -698,7 +677,6 @@ class _FunctionPodBase(TraceableBase):
                 concurrently, so the row raised is the first to fail, which is the
                 first in input order only with one row at a time.
             run_id: Pipeline run identifier forwarded to per-row processing.
-            _invoke: Internal per-row invocation override for a job node.
 
         Raises:
             Exception: Under ``"fail_fast"``, the exception of the first row whose
@@ -712,7 +690,6 @@ class _FunctionPodBase(TraceableBase):
             max_concurrency = resolve_concurrency(self.pod_config, pipeline_config)
             obs = observer if observer is not None else NoOpObserver()
             pod_label = self.label
-            invoke = self._async_invoke_with_hooks if _invoke is None else _invoke
 
             sem = (
                 asyncio.Semaphore(max_concurrency)
@@ -724,7 +701,7 @@ class _FunctionPodBase(TraceableBase):
                 obs.on_data_start(pod_label, tag, data)
                 pkt_logger = obs.create_data_logger(tag, data)
                 try:
-                    out_tag, result_data = await invoke(
+                    out_tag, result_data = await self._async_invoke_with_hooks(
                         tag, data, logger=pkt_logger, run_id=run_id
                     )
                 except OrcapodDatabaseError as exc:

@@ -1395,11 +1395,9 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
     # its number of inputs; None when no run completed (ITL-1093). A class default so
     # nodes rebuilt from a saved descriptor start without a run.
     _run_entry_counts: Counter[bytes] | None = None
-    # Instance ids in held-row order, aligned with the rows returned by reads.
+    # The same instance ids in the order the run emitted its rows (ITL-1432): the
+    # order the rows are held in, so a read gives them as downstream received them.
     _run_entry_order: tuple[bytes, ...] = ()
-    # On the async path, two completions can share an instance id. Keep the
-    # emitted pairs so each occurrence reads back as sent, even after a cache update.
-    _run_emitted_pairs: list[tuple[TagProtocol, DataProtocol]] | None = None
     # Whether the last completed run was load-only, and how many of its inputs had no
     # stored result (ITL-1095). Class defaults for nodes rebuilt from a descriptor.
     _run_load_only: bool = False
@@ -1961,7 +1959,6 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         self._cached_content_hash_column = None
         self._run_entry_counts = None
         self._run_entry_order = ()
-        self._run_emitted_pairs = None
         self._run_load_only = False
         self._run_not_stored = 0
         self._run_failed = 0
@@ -1976,17 +1973,16 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         cache may hold more (results of other inputs, read from the database), which stay
         cached for reuse but are not rows of this run (ITL-1093). Without a completed
         run in this process there are no rows, whatever the cache or the database holds
-        (ITL-1095). Every read (``iter_data``, ``as_table``, ``head``, the data frames,
-        a downstream node's own ``run()``) gives the same rows as downstream received
+        (ITL-1095). Rows come in the order the run passed them downstream, a stored
+        result and a computed one alike, one row per input (a repeated input's row at
+        each of its places), so every read (``iter_data``, ``as_table``, ``head``, the
+        data frames, a downstream node's own ``run()``) gives what downstream received
         (ITL-1441). A synchronous run passes them in input order, also over a partly
         stored history, load-only (the stored inputs) and after ``clear_cache()``. An
-        asynchronous run with a database holds the same multiset of rows it
-        delivered, in an unspecified order (ITL-1437). An input without output
-        (an inactive function) is not a row.
+        asynchronous run promises no order (ITL-1437): its rows are held in the order
+        that run emitted them. An input without output (an inactive function) is not a
+        row.
         """
-        if self._run_emitted_pairs is not None:
-            yield from self._run_emitted_pairs
-            return
         if self._run_entry_counts is None:
             return
         cache = self._cached_output_datas
@@ -2005,8 +2001,6 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         Returns:
             The labelled digests, or ``[]`` when the node holds no run.
         """
-        if self._run_emitted_pairs is not None:
-            return list(self._run_entry_order)
         if self._run_entry_counts is None:
             return []
         cache = self._cached_output_datas
@@ -2020,7 +2014,6 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         self,
         entry_ids: list[bytes],
         *,
-        emitted_pairs: list[tuple[TagProtocol, DataProtocol]] | None = None,
         load_only: bool = False,
         not_stored: int = 0,
         failed: int = 0,
@@ -2030,15 +2023,12 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         Args:
             entry_ids: The instance ids of the run's inputs whose rows the node holds,
                 in the order the run emitted them.
-            emitted_pairs: When supplied by the async run, the emitted rows aligned
-                with their instance ids.
             load_only: Whether the run was load-only (ITL-1095).
             not_stored: How many inputs of a load-only run had no stored result.
             failed: How many rows of the run failed (error policy ``"continue"``).
         """
         self._run_entry_counts = Counter(entry_ids)
         self._run_entry_order = tuple(entry_ids)
-        self._run_emitted_pairs = emitted_pairs
         self._run_load_only = load_only
         self._run_not_stored = not_stored
         self._run_failed = failed
@@ -2246,7 +2236,6 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             self._ephemeral_cached_pod = CachedFunctionPod(
                 result_pod(self._function_pod),
                 result_database=database,
-                fallback_lookup=self._lookup_persistent_result,
             )
         else:
             self._ephemeral_cached_pod = None
@@ -2782,11 +2771,36 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
 
         return self._output_stream(output)
 
-    def _lookup_persistent_result(self, data: DataProtocol) -> DataProtocol | None:
-        """Probe the currently attached persistent pod cache by input data hash."""
-        if self._cached_function_pod is None:
+    def _persistent_result_in_ephemeral_mode(
+        self, data: DataProtocol
+    ) -> DataProtocol | None:
+        """Return the persistent store's result for ``data``, for a node in ephemeral mode.
+
+        STOPGAP (ITL-1503), replaced by the design of layered result-cache
+        wrappers (ITL-1516). In ephemeral mode the order is: the persistent result
+        store, then the ephemeral one, then the function; a fresh result is saved
+        to the ephemeral store only. The ephemeral wrapper knows its own store
+        alone, so the node makes the first step itself, with a read-only lookup
+        by input data hash. A hit is recorded as a persistent result that was not
+        computed, and nothing is written to either result store.
+
+        A persistent result that this node's own pipeline record points to was
+        served in ephemeral mode before, through the lookup by instance id. What
+        this adds is the row with no pipeline record whose input data hash the
+        persistent store holds a result for: it is served, where the function
+        ran again before.
+
+        Args:
+            data: The node's input row (its fall-through columns still on it).
+
+        Returns:
+            The stored result, or ``None`` on a miss or when the node has no
+            persistent result store it can compute over.
+        """
+        pod = self._cached_function_pod
+        if not isinstance(pod, CachedFunctionPod):
             return None
-        return self._cached_function_pod.lookup_cached_data(data)
+        return pod.lookup_cached_data(function_input(self._function_pod, data))
 
     def _empty_data_cache_hit(
         self, tag: TagProtocol, data: EmptyData, instance_id: bytes
@@ -2841,12 +2855,13 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                     "Recompute the upstream node."
                 ),
             )
-        cached = self._lookup_persistent_result(data)
-        if cached is not None:
-            self._cached_output_datas[instance_id] = (tag, cached)
-            self._cached_output_table = None
-            self._cached_content_hash_column = None
-            return tag, cached
+        if self._cached_function_pod is not None:
+            cached = self._cached_function_pod.lookup_cached_data(data)
+            if cached is not None:
+                self._cached_output_datas[instance_id] = (tag, cached)
+                self._cached_output_table = None
+                self._cached_content_hash_column = None
+                return tag, cached
         raise EphemeralResultMissingError(
             tag=tag,
             cached_content_hash=data.cached_content_hash,
@@ -2883,8 +2898,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 already has it; computed here otherwise.
 
         When ``node_config.is_result_ephemeral=True``:
-        - Uses the ephemeral cache first, falls back to the persistent cache on
-          a miss, and stores fresh results in the ephemeral database.
+        - Uses ``_ephemeral_cached_pod`` for both compute and storage.
         - Raises ``RuntimeError`` if no ephemeral database has been set.
 
         When ``node_config.is_result_ephemeral=False`` (default):
@@ -2916,14 +2930,18 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                     "ephemeral database has been assigned. Call set_ephemeral_database() with "
                     "an ArrowDatabaseProtocol before executing this node."
                 )
-            fallback_hits: list[TagProtocol] = []
-            tag_out, output_data = self._ephemeral_cached_pod.process_data(
-                tag,
-                function_input(self._function_pod, data),
-                logger=logger,
-                run_id=run_id,
-                on_fallback=fallback_hits.append,
-            )
+            # Stopgap (ITL-1503, until ITL-1516): the persistent store is asked first.
+            output_data = self._persistent_result_in_ephemeral_mode(data)
+            from_persistent = output_data is not None
+            if from_persistent:
+                tag_out = tag
+            else:
+                tag_out, output_data = self._ephemeral_cached_pod.process_data(
+                    tag,
+                    function_input(self._function_pod, data),
+                    logger=logger,
+                    run_id=run_id,
+                )
             if output_data is not None:
                 result_computed = bool(
                     output_data.get_meta_value(
@@ -2937,7 +2955,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                         instance_id,
                         data_record_id=output_data.datagram_uuid,
                         computed=result_computed,
-                        is_ephemeral=not fallback_hits,
+                        is_ephemeral=not from_persistent,
                         output_data_hash=output_data.content_hash(),
                         run_id=run_id,
                     )
@@ -3057,13 +3075,18 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                     "ephemeral database has been assigned. Call set_ephemeral_database() with "
                     "an ArrowDatabaseProtocol before executing this node."
                 )
-            fallback_hits: list[TagProtocol] = []
-            tag_out, output_data = await self._ephemeral_cached_pod.async_process_data(
-                tag,
-                function_input(self._function_pod, data),
-                logger=logger,
-                on_fallback=fallback_hits.append,
-            )
+            # Stopgap (ITL-1503, until ITL-1516): the persistent store is asked first.
+            output_data = self._persistent_result_in_ephemeral_mode(data)
+            from_persistent = output_data is not None
+            if from_persistent:
+                tag_out = tag
+            else:
+                (
+                    tag_out,
+                    output_data,
+                ) = await self._ephemeral_cached_pod.async_process_data(
+                    tag, function_input(self._function_pod, data), logger=logger
+                )
             if output_data is not None:
                 result_computed = bool(
                     output_data.get_meta_value(
@@ -3077,7 +3100,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                         instance_id,
                         data_record_id=output_data.datagram_uuid,
                         computed=result_computed,
-                        is_ephemeral=not fallback_hits,
+                        is_ephemeral=not from_persistent,
                         output_data_hash=output_data.content_hash(),
                     )
         elif self._cached_function_pod is not None:
@@ -4264,8 +4287,6 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             RuntimeError: If ``load_status`` is UNAVAILABLE.
         """
         self._prepare_held_read()
-        if self._run_emitted_pairs is not None:
-            return len(self._run_emitted_pairs)
         counts = self._run_entry_counts
         if counts is None:
             return 0
@@ -4588,29 +4609,14 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
 
                 # Local dict: correlation_key → (original_tag, original_input_data)
                 input_store: dict[bytes, tuple[TagProtocol, DataProtocol, bytes]] = {}
-                fallback_hits: set[bytes] = set()
-
-                def note_fallback(tag: TagProtocol) -> None:
-                    """Record the storage location for this in-flight invocation."""
-                    fallback_hits.add(
-                        cast(bytes, tag.get_meta_value(_TAG_NODE_INPUT_REF))
-                    )
-
+                # Rows answered by the persistent store in ephemeral mode (the
+                # ITL-1503 stopgap, until ITL-1516).
+                persistent_hits: set[bytes] = set()
                 # Instance ids of this run's inputs that gave a row (a cache hit or a
                 # forwarded computed row), one per input (ITL-1093).
                 run_entry_ids: list[bytes] = []
-                emitted_pairs: list[tuple[TagProtocol, DataProtocol]] = []
                 # Rows whose function raised (error policy "continue").
                 failed_rows: list[int] = [0]
-
-                async def emit(
-                    instance_id: bytes, tag: TagProtocol, data: DataProtocol
-                ) -> None:
-                    """Hold the exact occurrence after the channel accepts it."""
-                    pair = (tag, data)
-                    await output.send(pair)
-                    run_entry_ids.append(instance_id)
-                    emitted_pairs.append(pair)
 
                 async def route_inputs() -> None:
                     """Stage 1: send cache hits to output; stamp misses for computation."""
@@ -4633,7 +4639,11 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                                 ctx_obs.on_data_end(
                                     node_label, tag, data, cached_data, cached=True
                                 )
-                                await emit(instance_id, cached_tag, cached_data)
+                                await output.send((cached_tag, cached_data))
+                                # Recorded once the output took the row, so the held
+                                # order is the order downstream received (a parked
+                                # send can resume after a later one).
+                                run_entry_ids.append(instance_id)
                             elif isinstance(data, EmptyData):
                                 # A placeholder whose instance is not stored: the
                                 # result store answers by its input hash, nothing
@@ -4678,7 +4688,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                                 ctx_obs.on_data_end(
                                     node_label, tag, data, found, cached=False
                                 )
-                                await emit(instance_id, found_tag, found)
+                                await output.send((found_tag, found))
+                                run_entry_ids.append(instance_id)
                             else:
                                 self._preflight_pipeline_write_schema()
                                 correlation_key = uuid.uuid4().bytes
@@ -4690,6 +4701,23 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                                 stamped_tag = tag.with_meta_columns(
                                     **{_TAG_NODE_INPUT_REF: correlation_key}
                                 )
+                                found = (
+                                    self._persistent_result_in_ephemeral_mode(data)
+                                    if is_ephemeral
+                                    else None
+                                )
+                                if found is not None:
+                                    # Not computed, stored in neither result store
+                                    # again: straight to the record stage.
+                                    ctx_obs.on_data_start(node_label, tag, data)
+                                    ctx_obs.on_data_end(
+                                        node_label, tag, data, found, cached=False
+                                    )
+                                    persistent_hits.add(correlation_key)
+                                    await result_channel.writer.send(
+                                        (stamped_tag, found)
+                                    )
+                                    continue
                                 # The function takes the row without its
                                 # fall-through columns (ITL-1023).
                                 await compute_channel.writer.send(
@@ -4704,14 +4732,10 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 async def record_and_forward() -> None:
                     """Stage 3: record pipeline entry, strip key, emit to output."""
                     async for output_tag, output_data in result_channel.reader:
-                        correlation_key = cast(
-                            bytes, output_tag.get_meta_value(_TAG_NODE_INPUT_REF)
-                        )
+                        correlation_key = output_tag.get_meta_value(_TAG_NODE_INPUT_REF)
                         original_tag, input_data, instance_id = input_store.pop(
-                            correlation_key
+                            cast(bytes, correlation_key)
                         )
-                        from_fallback = correlation_key in fallback_hits
-                        fallback_hits.discard(correlation_key)
                         result_computed = bool(
                             output_data.get_meta_value(
                                 execution_pod.RESULT_COMPUTED_FLAG, False
@@ -4724,7 +4748,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                                 instance_id,
                                 data_record_id=output_data.datagram_uuid,
                                 computed=result_computed,
-                                is_ephemeral=is_ephemeral and not from_fallback,
+                                is_ephemeral=is_ephemeral
+                                and correlation_key not in persistent_hits,
                                 output_data_hash=output_data.content_hash(),
                                 run_id=run_id,
                             )
@@ -4735,6 +4760,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                                 node_label=node_label, tag=original_tag.as_dict()
                             )
                             raise
+                        persistent_hits.discard(cast(bytes, correlation_key))
                         # The row's data-tag columns fall through onto the stored
                         # result, as on the sync path (ITL-1023).
                         # Not None: the result channel carries only results.
@@ -4744,7 +4770,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                                 self._function_pod, input_data, output_data
                             ),
                         )
-                        # Keep the latest result for reuse independently of the rows held.
+                        # Update in-memory cache so iter_data() sees the result.
                         clean_tag = output_tag.drop_meta_columns(
                             _TAG_NODE_INPUT_REF, ignore_missing=True
                         )
@@ -4757,7 +4783,9 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                         # Commits every commit_every_rows rows inside a job (ITL-919);
                         # no await in between, so no other row interleaves.
                         self._row_processed()
-                        await emit(instance_id, clean_tag, output_data)
+                        await output.send((clean_tag, output_data))
+                        # Recorded once the output took the row (see route_inputs).
+                        run_entry_ids.append(instance_id)
 
                 # Capture outer self so _NodeLabelObserver methods can
                 # update FunctionJobNode state without shadowing with 'self'.
@@ -4842,7 +4870,6 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                         correlation_key = tag.get_meta_value(_TAG_NODE_INPUT_REF, None)
                         if correlation_key is not None:
                             input_store.pop(correlation_key, None)
-                            fallback_hits.discard(correlation_key)
 
                     def create_data_logger(self, tag: Any, data: Any) -> Any:
                         # Strip the correlation key before creating the logger
@@ -4861,14 +4888,6 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                             observer=_NodeLabelObserver(),
                             error_policy=error_policy,
                             run_id=run_id,
-                            _invoke=(
-                                partial(
-                                    execution_pod._async_invoke_with_hooks,
-                                    on_fallback=note_fallback,
-                                )
-                                if is_ephemeral
-                                else None
-                            ),
                         )
                     )
                     tg.create_task(record_and_forward())
@@ -4876,9 +4895,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 self._commit_at_node_end()
                 # The node's rows are those of this run's inputs, as the sync path's:
                 # the cache also holds every stored result loaded above.
-                self._set_run_rows(
-                    run_entry_ids, emitted_pairs=emitted_pairs, failed=failed_rows[0]
-                )
+                self._set_run_rows(run_entry_ids, failed=failed_rows[0])
             else:
                 # No-DB path: delegate dispatch entirely to the pod. The pod closes
                 # the writer it is given; that close waits for the finally below, so

@@ -1,0 +1,583 @@
+"""Result reuse of a function job node (ITL-1503).
+
+Two rules:
+
+- **Ephemeral mode asks the persistent store first.** With both result stores set,
+  a row's result comes from the persistent store, else from the ephemeral store,
+  else from the function; a fresh result is saved to the ephemeral store only, and
+  nothing is ever saved to the persistent store. (A stopgap in the node, until the
+  cache wrappers are redesigned: ITL-1516.)
+- **Write if missing.** A result table holds one result per input data hash. A
+  computation that finds a result stored for its input when it is about to store
+  its own discards its own and uses the stored one, reported as a cache hit.
+
+Every case runs on the synchronous and the asynchronous path.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from typing import Any
+
+import pyarrow as pa
+import pytest
+
+from orcapod.channels import Channel
+from orcapod.core.cached_function_pod import CachedFunctionPod
+from orcapod.core.function_pod import FunctionPod
+from orcapod.core.nodes.function_node import FunctionJobNode
+from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
+from orcapod.system_constants import constants
+from orcapod.types import NodeConfig, PodConfig
+
+# The name the first version of this fix put on a tag as an internal marker.
+OLD_MARKER = "_orcapod_result_from_fallback"
+
+PATHS = pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+
+
+def _non_nullable(columns: dict[str, Any]) -> pa.Table:
+    schema = pa.schema(
+        [pa.field(name, array.type, nullable=False) for name, array in columns.items()]
+    )
+    return pa.table(columns, schema=schema)
+
+
+def _input(rows: dict[str, int], *, marker: bool = False) -> ArrowTableStream:
+    """A stream with tags ``key`` and ``group`` and data ``value`` and ``weight``.
+
+    Args:
+        rows: Tag ``key`` to data ``value``; a key may not repeat (use
+            ``_repeated_input`` for rows of one instance).
+        marker: Whether to add a user tag named like the old internal marker.
+    """
+    columns: dict[str, Any] = {
+        "key": pa.array(list(rows), pa.large_string()),
+        "group": pa.array(["g"] * len(rows), pa.large_string()),
+        "value": pa.array(list(rows.values()), pa.int64()),
+        "weight": pa.array([1.5] * len(rows), pa.float64()),
+    }
+    tags = ["key", "group"]
+    if marker:
+        columns[OLD_MARKER] = pa.array([True] * len(rows), pa.bool_())
+        tags.append(OLD_MARKER)
+    return ArrowTableStream(_non_nullable(columns), tag_columns=tags)
+
+
+def _repeated_input(keys: list[str], value: int) -> ArrowTableStream:
+    """Rows that all hold ``value``; rows with one key are one instance."""
+    return ArrowTableStream(
+        _non_nullable(
+            {
+                "key": pa.array(keys, pa.large_string()),
+                "group": pa.array(["g"] * len(keys), pa.large_string()),
+                "value": pa.array([value] * len(keys), pa.int64()),
+                "weight": pa.array([1.5] * len(keys), pa.float64()),
+            }
+        ),
+        tag_columns=["key", "group"],
+    )
+
+
+class _Counted:
+    """A pod over a function that records the values it was called with."""
+
+    def __init__(self) -> None:
+        self.calls: list[int] = []
+
+        def scale(value: int, weight: float) -> tuple[int, float]:
+            self.calls.append(value)
+            return value * 2, weight * 2
+
+        self.pod = FunctionPod.from_fn(scale, output_keys=["doubled", "heavier"])
+
+
+async def _run_async(node: FunctionJobNode, source: ArrowTableStream) -> list[Any]:
+    input_ch: Channel[Any] = Channel(buffer_size=32)
+    output_ch: Channel[Any] = Channel(buffer_size=32)
+
+    async def feed() -> None:
+        for pair in source.iter_data():
+            await input_ch.writer.send(pair)
+        await input_ch.writer.close()
+
+    await asyncio.gather(feed(), node.async_execute(input_ch.reader, output_ch.writer))
+    return await output_ch.reader.collect()
+
+
+def _run(node: FunctionJobNode, source: ArrowTableStream, use_async: bool) -> list[Any]:
+    """Run ``node`` over ``source`` and return the rows it passed downstream."""
+    if use_async:
+        return asyncio.run(_run_async(node, source))
+    return list(node.execute(source, error_policy="fail_fast").iter_data())
+
+
+def _result_ids(database: Any) -> list[bytes]:
+    """The ids of every result stored in ``database``, in any of its tables."""
+    ids: list[bytes] = []
+    for path in database.list_table_paths():
+        table = database.get_all_records(path, record_id_column="rid")
+        if table is not None:
+            ids.extend(table["rid"].to_pylist())
+    return ids
+
+
+def _seed(
+    database: Any, counted: _Counted, source: ArrowTableStream, keys: set[str]
+) -> dict[str, bytes]:
+    """Store the results of the rows named ``keys`` in ``database``.
+
+    Returns:
+        Key to the id of the result stored for it.
+    """
+    writer = FunctionJobNode(
+        counted.pod,
+        source,
+        pipeline_database=InMemoryArrowDatabase(),
+        result_database=database,
+    )
+    stored: dict[str, bytes] = {}
+    for tag, data in source.iter_data():
+        key = str(tag.as_dict()["key"])
+        if key in keys:
+            _, output = writer.execute_data(tag, data)
+            assert output is not None
+            stored[key] = output.datagram_uuid.bytes
+    database.flush()
+    counted.calls.clear()
+    return stored
+
+
+def _ephemeral_node(
+    counted: _Counted,
+    source: ArrowTableStream,
+    *,
+    pipeline: Any,
+    persistent: Any,
+    ephemeral: Any,
+) -> FunctionJobNode:
+    node = FunctionJobNode(
+        counted.pod, source, pipeline_database=pipeline, result_database=persistent
+    )
+    node.node_config = NodeConfig(is_result_ephemeral=True)
+    node.set_ephemeral_database(ephemeral)
+    return node
+
+
+def _records(node: FunctionJobNode) -> dict[str, dict[str, Any]]:
+    """The node's stored pipeline records by key: result id, origin, computed."""
+    table = node.get_all_records(all_info=True)
+    assert table is not None
+    return {
+        row["key"]: {
+            "result_id": row[constants.DATA_RECORD_ID],
+            "is_ephemeral": row[constants.IS_EPHEMERAL_COL],
+            "computed": row["__computed"],
+        }
+        for row in table.to_pylist()
+    }
+
+
+def _delivered(rows: list[Any]) -> dict[str, tuple[bytes, int, float]]:
+    return {
+        tag.as_dict()["key"]: (
+            data.datagram_uuid.bytes,
+            data.as_dict()["doubled"],
+            data.as_dict()["heavier"],
+        )
+        for tag, data in rows
+    }
+
+
+# ---------------------------------------------------------------------------
+# Ephemeral mode: persistent store, then ephemeral store, then the function
+# ---------------------------------------------------------------------------
+
+
+@PATHS
+@pytest.mark.parametrize("marker", [False, True], ids=["plain", "old-marker-tag"])
+def test_persistent_hit_in_ephemeral_mode(use_async: bool, marker: bool) -> None:
+    """The persistent result is used: no call, no write, recorded as persistent."""
+    counted = _Counted()
+    source = _input({"a": 1, "b": 2, "c": 3}, marker=marker)
+    persistent, ephemeral = InMemoryArrowDatabase(), InMemoryArrowDatabase()
+    stored = _seed(persistent, counted, source, {"a", "b", "c"})
+
+    node = _ephemeral_node(
+        counted,
+        source,
+        pipeline=InMemoryArrowDatabase(),
+        persistent=persistent,
+        ephemeral=ephemeral,
+    )
+    rows = _run(node, source, use_async)
+
+    assert counted.calls == []
+    assert _delivered(rows) == {
+        "a": (stored["a"], 2, 3.0),
+        "b": (stored["b"], 4, 3.0),
+        "c": (stored["c"], 6, 3.0),
+    }
+    assert _result_ids(ephemeral) == []
+    assert sorted(_result_ids(persistent)) == sorted(stored.values())
+    assert _records(node) == {
+        key: {"result_id": stored[key], "is_ephemeral": False, "computed": False}
+        for key in "abc"
+    }
+    if marker:
+        # A user tag with the old marker's name is an ordinary tag.
+        assert all(tag.as_dict()[OLD_MARKER] is True for tag, _ in rows)
+        assert set(node.keys()[0]) == {"key", "group", OLD_MARKER}
+
+
+@PATHS
+@pytest.mark.parametrize(
+    "has_pipeline_record", [True, False], ids=["with-record", "result-only"]
+)
+def test_persistent_hit_in_ephemeral_mode_on_reopened_delta_stores(
+    use_async: bool, has_pipeline_record: bool, tmp_path: Path
+) -> None:
+    """The same over Delta stores opened again, mixed with a row to compute."""
+    counted = _Counted()
+    source = _input({"stored": 1, "new": 2})
+    pipeline_path = tmp_path / "pipeline"
+    current_path = pipeline_path if has_pipeline_record else tmp_path / "other"
+    first_pipeline = DeltaTableDatabase(base_path=pipeline_path)
+    first = FunctionJobNode(
+        counted.pod,
+        source,
+        pipeline_database=first_pipeline,
+        result_database=DeltaTableDatabase(base_path=tmp_path / "results"),
+    )
+    for tag, data in source.iter_data():
+        if tag.as_dict()["key"] == "stored":
+            _ = first.execute_data(tag, data)
+    first_pipeline.flush()
+    assert counted.calls == [1]
+    counted.calls.clear()
+
+    opened: list[DeltaTableDatabase] = []
+
+    def open_node() -> FunctionJobNode:
+        opened[:] = [
+            DeltaTableDatabase(base_path=current_path),
+            DeltaTableDatabase(base_path=tmp_path / "results"),
+            DeltaTableDatabase(base_path=tmp_path / "ephemeral"),
+        ]
+        return _ephemeral_node(
+            counted,
+            source,
+            pipeline=opened[0],
+            persistent=opened[1],
+            ephemeral=opened[2],
+        )
+
+    rows = _run(open_node(), source, use_async)
+    for database in reversed(opened):
+        database.flush()
+    assert counted.calls == [2]
+    assert {k: v[1:] for k, v in _delivered(rows).items()} == {
+        "stored": (2, 3.0),
+        "new": (4, 3.0),
+    }
+
+    records = _records(open_node())
+    assert {k: r["is_ephemeral"] for k, r in records.items()} == {
+        "stored": False,
+        "new": True,
+    }
+    assert records["new"]["computed"] is True
+    assert len(_result_ids(DeltaTableDatabase(base_path=tmp_path / "results"))) == 1
+    assert _result_ids(DeltaTableDatabase(base_path=tmp_path / "ephemeral")) == [
+        records["new"]["result_id"]
+    ]
+
+
+@PATHS
+def test_persistent_miss_then_ephemeral_hit(use_async: bool) -> None:
+    """The ephemeral result is used: no call, no write, recorded as ephemeral."""
+    counted = _Counted()
+    source = _input({"a": 1, "b": 2})
+    persistent, ephemeral = InMemoryArrowDatabase(), InMemoryArrowDatabase()
+    stored = _seed(ephemeral, counted, source, {"a", "b"})
+
+    node = _ephemeral_node(
+        counted,
+        source,
+        pipeline=InMemoryArrowDatabase(),
+        persistent=persistent,
+        ephemeral=ephemeral,
+    )
+    rows = _run(node, source, use_async)
+
+    assert counted.calls == []
+    assert _delivered(rows) == {"a": (stored["a"], 2, 3.0), "b": (stored["b"], 4, 3.0)}
+    assert _result_ids(persistent) == []
+    assert sorted(_result_ids(ephemeral)) == sorted(stored.values())
+    assert _records(node) == {
+        key: {"result_id": stored[key], "is_ephemeral": True, "computed": False}
+        for key in "ab"
+    }
+
+
+@PATHS
+def test_double_miss_computes_once_into_the_ephemeral_store(use_async: bool) -> None:
+    """Neither store holds it: one call, one ephemeral row, no persistent row."""
+    counted = _Counted()
+    source = _input({"a": 1, "b": 2})
+    persistent, ephemeral = InMemoryArrowDatabase(), InMemoryArrowDatabase()
+    node = _ephemeral_node(
+        counted,
+        source,
+        pipeline=InMemoryArrowDatabase(),
+        persistent=persistent,
+        ephemeral=ephemeral,
+    )
+    rows = _run(node, source, use_async)
+
+    assert sorted(counted.calls) == [1, 2]
+    delivered = _delivered(rows)
+    assert {k: v[1:] for k, v in delivered.items()} == {"a": (2, 3.0), "b": (4, 3.0)}
+    assert _result_ids(persistent) == []
+    assert sorted(_result_ids(ephemeral)) == sorted(v[0] for v in delivered.values())
+    assert _records(node) == {
+        key: {"result_id": delivered[key][0], "is_ephemeral": True, "computed": True}
+        for key in "ab"
+    }
+
+
+@PATHS
+def test_both_stores_hold_a_result_the_persistent_one_is_used(use_async: bool) -> None:
+    """With a result in each store, the persistent one is returned and recorded."""
+    counted = _Counted()
+    source = _input({"a": 1, "b": 2})
+    persistent, ephemeral = InMemoryArrowDatabase(), InMemoryArrowDatabase()
+    in_ephemeral = _seed(ephemeral, counted, source, {"a", "b"})
+    in_persistent = _seed(persistent, counted, source, {"a", "b"})
+    assert set(in_ephemeral.values()).isdisjoint(in_persistent.values())
+
+    node = _ephemeral_node(
+        counted,
+        source,
+        pipeline=InMemoryArrowDatabase(),
+        persistent=persistent,
+        ephemeral=ephemeral,
+    )
+    rows = _run(node, source, use_async)
+
+    assert counted.calls == []
+    assert {k: v[0] for k, v in _delivered(rows).items()} == in_persistent
+    assert _records(node) == {
+        key: {"result_id": in_persistent[key], "is_ephemeral": False, "computed": False}
+        for key in "ab"
+    }
+    assert sorted(_result_ids(ephemeral)) == sorted(in_ephemeral.values())
+    assert sorted(_result_ids(persistent)) == sorted(in_persistent.values())
+
+
+def test_ephemeral_store_only_is_unchanged() -> None:
+    """Without a persistent store the ephemeral store is asked, then the function."""
+    counted = _Counted()
+    source = _input({"a": 1, "b": 2})
+    ephemeral = InMemoryArrowDatabase()
+
+    def run_once() -> dict[str, tuple[bytes, int, float]]:
+        node = FunctionJobNode(counted.pod, source, ephemeral_database=ephemeral)
+        node.node_config = NodeConfig(is_result_ephemeral=True)
+        return _delivered([node.execute_data(*pair) for pair in source.iter_data()])
+
+    first = run_once()
+    assert counted.calls == [1, 2]
+    assert sorted(_result_ids(ephemeral)) == sorted(v[0] for v in first.values())
+    assert run_once() == first
+    assert counted.calls == [1, 2]
+    assert len(_result_ids(ephemeral)) == 2
+
+
+# ---------------------------------------------------------------------------
+# Write if missing: equal inputs computed at the same moment
+# ---------------------------------------------------------------------------
+
+
+class _Gated:
+    """An async function whose calls all start before any of them returns."""
+
+    def __init__(self, expected: int, release_order: list[int]) -> None:
+        self.calls = 0
+        self._expected = expected
+        self._order = release_order
+        self._all_started = asyncio.Event()
+        self._returned = [asyncio.Event() for _ in range(expected)]
+
+        async def scale(value: int, weight: float) -> tuple[int, float]:
+            self.calls += 1
+            call = self.calls
+            if call == self._expected:
+                self._all_started.set()
+            _ = await asyncio.wait_for(self._all_started.wait(), timeout=5)
+            position = self._order.index(call)
+            if position:
+                previous = self._returned[self._order[position - 1] - 1]
+                _ = await asyncio.wait_for(previous.wait(), timeout=5)
+            self._returned[call - 1].set()
+            # Each call gives its own value, so a result tells which call made it.
+            return value + call, weight
+
+        self.pod = FunctionPod.from_fn(
+            scale,
+            output_keys=["doubled", "heavier"],
+            pod_config=PodConfig(max_concurrency=expected),
+        )
+
+
+@pytest.mark.parametrize("release_order", [[1, 2, 3], [3, 1, 2], [2, 3, 1]])
+@pytest.mark.parametrize("ephemeral_mode", [False, True], ids=["persistent", "eph"])
+def test_equal_inputs_computed_together_store_one_result(
+    release_order: list[int], ephemeral_mode: bool
+) -> None:
+    """Three rows of one input (two of one instance, one of another) in flight
+    together: every call runs, ONE result is stored, every row delivers it, the
+    pipeline records name it, and a read gives what was delivered."""
+    gated = _Gated(3, release_order)
+    source = _repeated_input(["a", "a", "b"], 10)
+    pipeline, persistent, ephemeral = (InMemoryArrowDatabase() for _ in range(3))
+    node = FunctionJobNode(
+        gated.pod, source, pipeline_database=pipeline, result_database=persistent
+    )
+    if ephemeral_mode:
+        node.node_config = NodeConfig(is_result_ephemeral=True)
+        node.set_ephemeral_database(ephemeral)
+    assert len({node.compute_instance_id(*pair) for pair in source.iter_data()}) == 2
+
+    rows = asyncio.run(_run_async(node, source))
+
+    assert gated.calls == 3
+    written, untouched = (
+        (ephemeral, persistent) if ephemeral_mode else (persistent, ephemeral)
+    )
+    stored_ids = _result_ids(written)
+    assert len(stored_ids) == 1
+    assert _result_ids(untouched) == []
+    # The first call to return made the stored result.
+    expected = (stored_ids[0], 10 + release_order[0], 1.5)
+
+    def as_delivered(pairs: list[Any]) -> list[tuple[Any, ...]]:
+        return [
+            (
+                tag.as_dict()["key"],
+                data.datagram_uuid.bytes,
+                data.as_dict()["doubled"],
+                data.as_dict()["heavier"],
+            )
+            for tag, data in pairs
+        ]
+
+    delivered = as_delivered(rows)
+    assert sorted(delivered) == sorted(
+        [("a", *expected), ("a", *expected), ("b", *expected)]
+    )
+    # Readback is what was delivered, row for row, in the emitted order.
+    assert as_delivered(list(node.iter_data())) == delivered
+    assert node.held_row_count() == 3
+    records = _records(node)
+    assert set(records) == {"a", "b"}
+    assert {r["result_id"] for r in records.values()} == {stored_ids[0]}
+    assert {r["is_ephemeral"] for r in records.values()} == {ephemeral_mode}
+    stored = node.get_all_records()
+    assert stored is not None
+    assert sorted(map(str, stored["key"].to_pylist())) == ["a", "b"]
+    assert set(stored["doubled"].to_pylist()) == {expected[1]}
+
+
+@pytest.mark.parametrize("release_order", [[1, 2], [2, 1]])
+def test_two_nodes_sharing_a_result_table_store_one_result(
+    release_order: list[int],
+) -> None:
+    """Two nodes of one function over equal inputs, run together on one result
+    database: one stored result, and both nodes' rows and records name it."""
+    gated = _Gated(2, release_order)
+    sources = [_input({"left": 7}), _input({"right": 7})]
+    pipeline, results = InMemoryArrowDatabase(), InMemoryArrowDatabase()
+    nodes = [
+        FunctionJobNode(
+            gated.pod, source, pipeline_database=pipeline, result_database=results
+        )
+        for source in sources
+    ]
+
+    async def run_both() -> list[list[Any]]:
+        return list(await asyncio.gather(*map(_run_async, nodes, sources)))
+
+    delivered = asyncio.run(run_both())
+
+    assert gated.calls == 2
+    stored_ids = _result_ids(results)
+    assert len(stored_ids) == 1
+    for node, rows, key in zip(nodes, delivered, ["left", "right"], strict=True):
+        expected = {key: (stored_ids[0], 7 + release_order[0], 1.5)}
+        assert _delivered(rows) == expected
+        assert _delivered(list(node.iter_data())) == expected
+        assert _records(node)[key]["result_id"] == stored_ids[0]
+
+
+def _stores(tmp_path: Path) -> dict[str, Any]:
+    return {
+        "memory": InMemoryArrowDatabase(),
+        "delta": DeltaTableDatabase(base_path=tmp_path / "delta"),
+    }
+
+
+@PATHS
+@pytest.mark.parametrize("store", ["memory", "delta"])
+@pytest.mark.parametrize("auto_flush", [True, False], ids=["committed", "queued"])
+def test_a_second_computation_uses_the_stored_result_in_every_store(
+    use_async: bool, store: str, auto_flush: bool, tmp_path: Path
+) -> None:
+    """A result stored for the input after the lookup, committed or still queued,
+    is found when the computation stores: nothing is added, and the stored result
+    is returned as a cache hit."""
+    database = _stores(tmp_path)[store]
+    source = _input({"a": 5})
+    tag, data = next(iter(source.iter_data()))
+
+    def scale(value: int, weight: float) -> tuple[int, float]:
+        return value * 2, weight * 2
+
+    plain = FunctionPod.from_fn(scale, output_keys=["doubled", "heavier"])
+
+    class _StoresMeanwhile(FunctionPod):
+        """Computes, and has an equal input's result stored before it returns."""
+
+        def process_data(self, tag: Any, data: Any, **kwargs: Any) -> Any:
+            result = super().process_data(tag, data, **kwargs)
+            first.append(other.process_data(tag, data)[1])
+            return result
+
+        async def async_process_data(self, tag: Any, data: Any, **kwargs: Any) -> Any:
+            result = await super().async_process_data(tag, data, **kwargs)
+            first.append((await other.async_process_data(tag, data))[1])
+            return result
+
+    first: list[Any] = []
+    other = CachedFunctionPod(plain, result_database=database)
+    other.set_auto_flush(auto_flush)
+    cached_pod = CachedFunctionPod(
+        _StoresMeanwhile(plain.data_function), result_database=database
+    )
+    cached_pod.set_auto_flush(auto_flush)
+
+    if use_async:
+        _, output = asyncio.run(cached_pod.async_process_data(tag, data))
+    else:
+        _, output = cached_pod.process_data(tag, data)
+
+    assert output is not None and len(first) == 1
+    assert first[0].get_meta_value(CachedFunctionPod.RESULT_COMPUTED_FLAG) is True
+    assert output.datagram_uuid == first[0].datagram_uuid
+    assert output.get_meta_value(CachedFunctionPod.RESULT_COMPUTED_FLAG) is False
+    assert output.as_dict() == {"doubled": 10, "heavier": 3.0}
+    assert output.source_info() == first[0].source_info()
+    database.flush()
+    assert _result_ids(database) == [first[0].datagram_uuid.bytes]

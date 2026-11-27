@@ -439,11 +439,7 @@ class TestBulkResolution:
 
         # A result of the same input in the ephemeral store, with its own id.
         tag_obj, data_obj = next(iter(stream.iter_data()))
-        ephemeral_writer = FunctionJobNode(
-            pod, stream, ephemeral_database=ephemeral_store
-        )
-        ephemeral_writer.node_config = NodeConfig(is_result_ephemeral=True)
-        _, eph_output = ephemeral_writer.execute_data(tag_obj, data_obj)
+        _, eph_output = node._ephemeral_cached_pod.process_data(tag_obj, data_obj)
         assert eph_output is not None
         ephemeral_result_id = eph_output.datagram_uuid
         assert ephemeral_result_id != persistent_result_id

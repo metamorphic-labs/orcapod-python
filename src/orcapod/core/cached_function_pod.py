@@ -5,8 +5,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 from datetime import datetime, timezone
-from collections.abc import Callable, Iterator
-from functools import partial
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 from orcapod.core.data_function import CachedDataFunction
@@ -53,9 +52,6 @@ class CachedFunctionPod(WrappedFunctionPod):
 
     Uses a shared ``ResultCache`` for lookup/store/conflict-resolution
     logic (same mechanism as ``CachedDataFunction``).
-
-    A caller may supply a read-only fallback lookup and observe its hits
-    separately from the returned tag and data.
     """
 
     # Expose RESULT_COMPUTED_FLAG from the shared ResultCache
@@ -66,12 +62,9 @@ class CachedFunctionPod(WrappedFunctionPod):
         function_pod: FunctionPodProtocol,
         result_database: ArrowDatabaseProtocol,
         auto_flush: bool = True,
-        *,
-        fallback_lookup: Callable[[DataProtocol], DataProtocol | None] | None = None,
         **kwargs,
     ) -> None:
         super().__init__(function_pod, **kwargs)
-        self._fallback_lookup = fallback_lookup
         self._cache = ResultCache(
             result_database=result_database,
             record_path=self.uri,  # no prefix; db is pre-scoped
@@ -200,23 +193,6 @@ class CachedFunctionPod(WrappedFunctionPod):
             return None
         return cached.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: False})
 
-    def _lookup_result(
-        self,
-        tag: TagProtocol,
-        data: DataProtocol,
-        on_fallback: Callable[[TagProtocol], None] | None,
-    ) -> DataProtocol | None:
-        """Read the primary cache first and report hits from the fallback."""
-        cached = self.lookup_cached_data(data)
-        if cached is not None:
-            module_logger.info("Pod-level cache hit")
-            return cached
-        if self._fallback_lookup is not None:
-            cached = self._fallback_lookup(data)
-            if cached is not None and on_fallback is not None:
-                on_fallback(tag)
-        return cached
-
     def process_data(
         self,
         tag: TagProtocol,
@@ -224,7 +200,6 @@ class CachedFunctionPod(WrappedFunctionPod):
         *,
         logger: DataExecutionLoggerProtocol | None = None,
         run_id: str | None = None,
-        on_fallback: Callable[[TagProtocol], None] | None = None,
     ) -> tuple[TagProtocol, DataProtocol | None]:
         """Process a data with pod-level caching.
 
@@ -240,14 +215,15 @@ class CachedFunctionPod(WrappedFunctionPod):
             run_id: Pipeline run identifier forwarded to the inner pod's
                 ``process_data``. Used to populate ``InvocationContext.pipeline_run_id``
                 for ctx-aware pods.
-            on_fallback: Called with the input tag on a fallback cache hit.
 
         Returns:
             A ``(tag, output_data)`` tuple; output_data is ``None``
             if the inner function filters the data out.
         """
-        cached = self._lookup_result(tag, data, on_fallback)
+        cached = self._cache.lookup(data, data_context_key=self.data_context_key)
         if cached is not None:
+            module_logger.info("Pod-level cache hit")
+            cached = cached.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: False})
             return tag, cached
 
         tag, output = self._function_pod.process_data(
@@ -265,10 +241,16 @@ class CachedFunctionPod(WrappedFunctionPod):
                 python_schema=pf.get_execution_data_schema(),
                 data_context=pf.data_context,
             )
-            self._cache.store(
+            # Write if missing (ITL-1503): a result stored for this input since the
+            # lookup above (an equal input computed at the same moment) is used and
+            # this one discarded, reported as a cache hit.
+            stored = self._cache.store_if_missing(
                 data, output, var_dg, exec_dg, data_context_key=self.data_context_key
             )
-            output = output.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: True})
+            if stored is not None:
+                output = stored.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: False})
+            else:
+                output = output.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: True})
         return tag, output
 
     async def async_process_data(
@@ -278,7 +260,6 @@ class CachedFunctionPod(WrappedFunctionPod):
         *,
         logger: DataExecutionLoggerProtocol | None = None,
         run_id: str | None = None,
-        on_fallback: Callable[[TagProtocol], None] | None = None,
     ) -> tuple[TagProtocol, DataProtocol | None]:
         """Async counterpart of ``process_data``.
 
@@ -293,14 +274,15 @@ class CachedFunctionPod(WrappedFunctionPod):
             run_id: Pipeline run identifier forwarded to the inner pod's
                 ``async_process_data``. Used to populate ``InvocationContext.pipeline_run_id``
                 for ctx-aware pods.
-            on_fallback: Called with the input tag on a fallback cache hit.
 
         Returns:
             A ``(tag, output_data)`` tuple; output_data is ``None``
             if the inner function filters the data out.
         """
-        cached = self._lookup_result(tag, data, on_fallback)
+        cached = self._cache.lookup(data, data_context_key=self.data_context_key)
         if cached is not None:
+            module_logger.info("Pod-level cache hit")
+            cached = cached.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: False})
             return tag, cached
 
         tag, output = await self._function_pod.async_process_data(
@@ -318,10 +300,16 @@ class CachedFunctionPod(WrappedFunctionPod):
                 python_schema=pf.get_execution_data_schema(),
                 data_context=pf.data_context,
             )
-            self._cache.store(
+            # Write if missing (ITL-1503): a result stored for this input since the
+            # lookup above (an equal input computed at the same moment) is used and
+            # this one discarded, reported as a cache hit.
+            stored = self._cache.store_if_missing(
                 data, output, var_dg, exec_dg, data_context_key=self.data_context_key
             )
-            output = output.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: True})
+            if stored is not None:
+                output = stored.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: False})
+            else:
+                output = output.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: True})
         return tag, output
 
     def _invoke_with_hooks(
@@ -408,7 +396,6 @@ class CachedFunctionPod(WrappedFunctionPod):
         *,
         logger: DataExecutionLoggerProtocol | None = None,
         run_id: str | None = None,
-        on_fallback: Callable[[TagProtocol], None] | None = None,
     ) -> tuple[TagProtocol, DataProtocol | None]:
         """Async counterpart of ``_invoke_with_hooks`` for ``CachedFunctionPod``.
 
@@ -421,23 +408,21 @@ class CachedFunctionPod(WrappedFunctionPod):
             logger: Optional data execution logger.
             run_id: Pipeline run identifier forwarded to
                 ``PostRunPayload.invocation_context``.
-            on_fallback: Called with the input tag on a fallback cache hit.
 
         Returns:
             A ``(tag, output_data)`` tuple.
         """
-        process = self.async_process_data
-        if on_fallback is not None:
-            process = partial(process, on_fallback=on_fallback)
         if not self._post_run_hooks:
-            return await process(tag, data, logger=logger, run_id=run_id)
+            return await self.async_process_data(
+                tag, data, logger=logger, run_id=run_id
+            )
 
         started_at = datetime.now(timezone.utc)
         out_tag = tag
         output_data: DataProtocol | None = None
 
         try:
-            out_tag, output_data = await process(
+            out_tag, output_data = await self.async_process_data(
                 tag, data, logger=logger, run_id=run_id
             )
             if output_data is not None:

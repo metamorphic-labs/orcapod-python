@@ -401,6 +401,55 @@ class ResultCache:
                     self._result_database.base_path, flush=True
                 ) from exc
 
+    def store_if_missing(
+        self,
+        input_data: DataProtocol,
+        output_data: DataProtocol,
+        variation_datagram: "DatagramProtocol",
+        execution_datagram: "DatagramProtocol",
+        *,
+        data_context_key: str,
+    ) -> DataProtocol | None:
+        """Store ``output_data`` unless a result for ``input_data`` is stored (ITL-1503).
+
+        A result table holds one result per input data hash. The table is looked up
+        as ``lookup`` does (input data hash and data context; committed and queued
+        rows alike). When a result is there, nothing is written and that result
+        is returned: the caller discards its own and uses the stored one, so two
+        computations of one input that ran at the same moment give one stored
+        result. Otherwise ``output_data`` is stored.
+
+        The lookup and the write are synchronous with nothing in between, so
+        within one process, over one database object and its views, no second
+        result is written. A writer on another database handle or in another
+        process is not seen until it is committed and this handle has read it.
+
+        Args:
+            input_data: The input data (its content hash is the key).
+            output_data: The computed output data.
+            variation_datagram: Function variation metadata as a Datagram.
+            execution_datagram: Execution environment metadata as a Datagram.
+            data_context_key: Key of the caller's data context.
+
+        Returns:
+            The result already stored, as ``lookup`` returns it, or ``None`` when
+            ``output_data`` was stored.
+        """
+        stored = self.lookup(input_data, data_context_key=data_context_key)
+        if stored is not None:
+            logger.info(
+                "A result for this input is already stored; not storing another"
+            )
+            return stored
+        self.store(
+            input_data,
+            output_data,
+            variation_datagram,
+            execution_datagram,
+            data_context_key=data_context_key,
+        )
+        return None
+
     def get_all_records(
         self, data_context_key: str, include_system_columns: bool = False
     ) -> "pa.Table | None":

@@ -1,4 +1,5 @@
-"""A function job node holds the rows its run passed downstream (ITL-1441).
+"""A function job node's held rows follow the order its run passed them downstream
+(ITL-1441, fixed in PR 530).
 
 On the synchronous path a run passes its rows downstream in input order, whether a
 row's result was computed or read from the store; every read of the node afterwards
@@ -9,13 +10,13 @@ node run on its own gives exactly what the whole job gave. Before the fix the no
 held stored rows first, and a ``Batch`` run on its own grouped other members (other
 sums, folded record ids and stored entries) than the whole job.
 
-The asynchronous path holds the same multiset of rows it delivered downstream
-(ITL-1437).
+The asynchronous path promises no order (ITL-1437): a read follows the order that
+run emitted, and a downstream node run on its own still gives what the whole job
+gave.
 """
 
 from __future__ import annotations
 
-from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -303,8 +304,12 @@ def test_tied_group_members_follow_the_held_order(mode: str) -> None:
         assert len(members) == 1 and sorted(members[0]) == sorted(versions_rows)
 
 
-def test_async_held_rows_match_all_deliveries_under_backpressure() -> None:
-    """Hold both rows when a stored row's send is parked behind a computed row."""
+def test_async_held_order_is_the_order_the_output_took_the_rows() -> None:
+    """Under backpressure a parked send can complete after a later one. The node
+    records a row once its output took it, so the held order is the order downstream
+    received. Here the inputs arrive k=1 (computed) then k=0 (stored): the stored
+    row's send is parked until the computed row's send has completed, so downstream
+    receives k=1 first, and the node holds k=1 first."""
     import asyncio
 
     from orcapod.channels import Channel
@@ -346,4 +351,4 @@ def test_async_held_rows_match_all_deliveries_under_backpressure() -> None:
 
     received = asyncio.run(run())
     assert received == [1, 0]
-    assert Counter(t.as_dict()["k"] for t, _ in node.iter_data()) == Counter(received)
+    assert [t.as_dict()["k"] for t, _ in node.iter_data()] == received

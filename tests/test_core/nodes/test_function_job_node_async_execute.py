@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections import Counter
-from pathlib import Path
-from typing import cast
 
 import pyarrow as pa
 import pytest
@@ -15,11 +12,8 @@ from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.sources import ArrowTableSource
-from orcapod.core.streams.arrow_table_stream import ArrowTableStream
-from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
-from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
-from orcapod.system_constants import constants
-from orcapod.types import NodeConfig, PodConfig
+from orcapod.databases import InMemoryArrowDatabase
+from orcapod.types import PodConfig
 
 
 # ---------------------------------------------------------------------------
@@ -69,195 +63,6 @@ async def _run_node(node: FunctionJobNode) -> list[tuple]:
         node.async_execute(input_ch.reader, output_ch.writer),
     )
     return await output_ch.reader.collect()
-
-
-def _plain_input(keys: list[str], values: list[int]) -> ArrowTableStream:
-    """Make a stream whose repeated rows can have the same instance id."""
-    schema = pa.schema(
-        [pa.field("key", pa.string()), pa.field("value", pa.int64(), nullable=False)]
-    )
-    return ArrowTableStream(
-        pa.table({"key": keys, "value": values}, schema=schema), tag_columns=["key"]
-    )
-
-
-@pytest.mark.parametrize("reverse", [False, True])
-@pytest.mark.parametrize("colliding_tag", [False, True])
-@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize(
-    "has_pipeline_record", [True, False], ids=["with-record", "result-only"]
-)
-def test_ephemeral_node_reuses_persistent_result(
-    use_async: bool,
-    has_pipeline_record: bool,
-    reverse: bool,
-    colliding_tag: bool,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A persistent pod result is reusable even without a pipeline record."""
-    calls: list[int] = []
-
-    def count_calls(value: int) -> int:
-        calls.append(value)
-        return value * 2
-
-    keys, values = ["stored", "new"], [0, 1]
-    if reverse:
-        keys.reverse()
-        values.reverse()
-    source = _plain_input(keys, values)
-    if colliding_tag:
-        original_iter_data = source.iter_data
-
-        def iter_tagged_data():
-            for tag, data in original_iter_data():
-                if tag.as_dict()["key"] == "new":
-                    tag = tag.with_meta_columns(_orcapod_result_from_fallback=True)
-                yield tag, data
-
-        monkeypatch.setattr(source, "iter_data", iter_tagged_data)
-    pod = FunctionPod.from_fn(count_calls, output_keys="result")
-    pipeline_path = tmp_path / "original-pipeline"
-    current_path = pipeline_path if has_pipeline_record else tmp_path / "pipeline"
-    result_path = tmp_path / "results"
-    ephemeral_path = tmp_path / "ephemeral"
-    pipeline_db = DeltaTableDatabase(base_path=pipeline_path)
-    result_db = DeltaTableDatabase(base_path=result_path)
-    original = FunctionJobNode(
-        pod, source, pipeline_database=pipeline_db, result_database=result_db
-    )
-    for tag, data in source.iter_data():
-        if tag.as_dict()["key"] == "stored":
-            _ = original.execute_data(tag, data)
-    assert calls == [0]
-    result_db.flush()
-    pipeline_db.flush()
-
-    ephemeral_db = DeltaTableDatabase(base_path=ephemeral_path)
-    current_pipeline_db = DeltaTableDatabase(base_path=current_path)
-    result_db = DeltaTableDatabase(base_path=result_path)
-    node = FunctionJobNode(
-        pod,
-        source,
-        pipeline_database=current_pipeline_db,
-        result_database=result_db,
-    )
-    node.node_config = NodeConfig(is_result_ephemeral=True)
-    node.set_ephemeral_database(ephemeral_db)
-
-    rows = (
-        cast(list[tuple[TagProtocol, DataProtocol]], asyncio.run(_run_node(node)))
-        if use_async
-        else list(node.execute(source, error_policy="fail_fast").iter_data())
-    )
-    assert {tag.as_dict()["key"]: data.as_dict()["result"] for tag, data in rows} == {
-        "stored": 0,
-        "new": 2,
-    }
-    assert calls == [0, 1]
-    ephemeral_db.flush()
-    result_db.flush()
-    current_pipeline_db.flush()
-
-    reader = FunctionJobNode(
-        pod,
-        source,
-        pipeline_database=DeltaTableDatabase(base_path=current_path),
-        result_database=DeltaTableDatabase(base_path=result_path),
-        ephemeral_database=DeltaTableDatabase(base_path=ephemeral_path),
-    )
-    joined = reader.get_all_records(all_info=True)
-    assert joined is not None
-    assert dict(
-        zip(
-            joined["key"].to_pylist(),
-            joined[constants.IS_EPHEMERAL_COL].to_pylist(),
-            strict=True,
-        )
-    ) == {
-        "stored": False,
-        "new": True,
-    }
-    assert dict(
-        zip(joined["key"].to_pylist(), joined["__computed"].to_pylist(), strict=True)
-    ) == {"stored": has_pipeline_record, "new": True}
-
-
-@pytest.mark.parametrize("values", [[0, 10, 0], [10, 0, 0]])
-@pytest.mark.parametrize("first_completion", [1, 2])
-def test_async_node_holds_each_completion_of_a_repeated_input(
-    values: list[int], first_completion: int, tmp_path: Path
-) -> None:
-    """The held rows agree with the channel when both copies compute a result."""
-    calls = 0
-    wait_for_both = False
-    both_started = asyncio.Event()
-    first_returned = asyncio.Event()
-
-    async def count_calls(value: int) -> int:
-        nonlocal calls
-        if value == 10:
-            return value
-        calls += 1
-        invocation = calls
-        if wait_for_both:
-            if invocation == 2:
-                both_started.set()
-            if invocation == first_completion:
-                _ = await asyncio.wait_for(both_started.wait(), timeout=5)
-                first_returned.set()
-            else:
-                _ = await asyncio.wait_for(first_returned.wait(), timeout=5)
-        return value + invocation
-
-    source = _plain_input(["a"] * len(values), values)
-    pod = FunctionPod.from_fn(
-        count_calls,
-        output_keys="result",
-        pod_config=PodConfig(max_concurrency=2),
-    )
-    sync_node = FunctionJobNode(pod, source, pipeline_database=InMemoryArrowDatabase())
-    sync_rows = list(sync_node.execute(source, error_policy="fail_fast").iter_data())
-    assert calls == 1
-    sync_values = [1 if value == 0 else value for value in values]
-    assert [data.as_dict()["result"] for _, data in sync_rows] == sync_values
-    assert [
-        data.as_dict()["result"] for _, data in sync_node.iter_data()
-    ] == sync_values
-
-    calls = 0
-    wait_for_both = True
-    async_path = tmp_path / "async"
-    async_db = DeltaTableDatabase(base_path=async_path)
-    async_node = FunctionJobNode(pod, source, pipeline_database=async_db)
-    entry_ids = {
-        async_node.compute_instance_id(tag, data) for tag, data in source.iter_data()
-    }
-    assert len(entry_ids) == 2
-    sent = cast(
-        list[tuple[TagProtocol, DataProtocol]], asyncio.run(_run_node(async_node))
-    )
-    sent_values = [cast(int, data.as_dict()["result"]) for _, data in sent]
-    assert calls == 2
-    assert Counter(sent_values) == Counter([1, 2, 10])
-    assert [value for value in sent_values if value != 10] == [
-        first_completion,
-        3 - first_completion,
-    ]
-    held = Counter(
-        cast(int, data.as_dict()["result"]) for _, data in async_node.iter_data()
-    )
-    assert held == Counter(sent_values)
-    assert async_node.held_row_count() == len(sent)
-    assert len(async_node.held_instance_ids()) == len(sent)
-    async_db.flush()
-    reader = FunctionJobNode(
-        pod, source, pipeline_database=DeltaTableDatabase(base_path=async_path)
-    )
-    stored = reader.get_all_records()
-    assert stored is not None
-    assert Counter(stored["result"].to_pylist()) == held
 
 
 # ---------------------------------------------------------------------------
