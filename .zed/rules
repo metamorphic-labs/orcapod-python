@@ -1161,9 +1161,23 @@ these preimages anywhere else.
   rows, typed zero-row input and the sync orchestrator's held-rows stream), from the
   columns' types and the token column's null count only: no value is read and nothing is
   computed. Rows that are handed on without being built into a stream are held to it too:
-  the async orchestrator's held rows, once per held node before any is sent
-  (`schema_utils.require_token_shapes_of_rows`: each row's own column types and token null
-  counts), so both orchestrators refuse alike. The type rule is the pure function
+  the async orchestrator's held rows, once per held node before any is sent, and only
+  when a node that runs reads them (rows of a held node that is terminal, or whose
+  successors are all held, are not checked: the sync orchestrator never builds them
+  either). That check (`schema_utils.require_token_shapes_of_rows`) reads each row's
+  `token_layout()`: the token columns that are not plain strings, with the types the row
+  holds, empty for a row with plain string tokens; the rows read from one table share one
+  layout object (`Data.rows_of`). The type rule is applied once per distinct layout, never
+  per row, and only a list-typed token column is asked per row whether its token is null
+  (`token_is_null`, the token the row already holds). It builds no table and reads no data
+  value; a row built from Python values gets no Arrow (its data types come from its
+  schema, a list token's type from the list, and its `None` token is a plain string). A
+  table's columns and a row's are read by the rule through ONE normalization,
+  `schema_utils.token_types_as_read` (large variants; a `null` leaf of a token type is
+  `large_string`, as a stream holds it): never give `token_layers_fit` a held type
+  directly, and never write a second normalization. `with_source_info` holds an Arrow
+  scalar's token in that same form. Both orchestrators refuse alike, and the error lists
+  the columns in name order (`token_shape_error` sorts them). The type rule is the pure function
   `schema_utils.token_layers_fit`; `token_shape_violations` lists the violating columns and
   `token_shape_error` words the `InputValidationError`, which names the token column, the
   data column and both types. Never loosen it. NOT covered: a record batch sent into an
@@ -1174,7 +1188,8 @@ these preimages anywhere else.
   hand-built input refuses instead, with `InputValidationError` naming the column, on both
   paths: `Index` on a null inner list of a list-of-lists token, and `Join` / `MergeJoin`
   merging the tokens of a shared data-tag where one holds a null inner list
-  (`join.NullTokenListError`, worded by `join.null_token_list_error`). Whether a null
+  (`join.NullTokenListError`, worded by `join.null_token_list_error`; the streaming-join
+  kernels word it the same way). Whether a null
   inner list is a valid token at all is open (the developer's rule names the token and its
   elements, not an inner list); until decided, never add a construction-time check for it.
 - Two inputs that declare one token column with two types are refused, on the sync and the

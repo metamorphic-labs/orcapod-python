@@ -1327,9 +1327,23 @@ ITL-1491):
   operator result and every table built from rows), from the columns' types and the token
   column's null count only: no value is read. A stream that breaks it is refused with
   `InputValidationError` naming the token column, the data column and both types
-  (`schema_utils.token_layers_fit` is the rule). Rows that a run hands on without building
-  a stream of them (the rows of a node the async orchestrator holds instead of running) are
-  checked the same way, row by row, before any is sent, so both orchestrators refuse alike.
+  (`schema_utils.token_layers_fit` is the rule). The error lists the violating columns
+  in name order.
+- Rows that a run hands on without building a stream of them (the rows of a node the async
+  orchestrator holds instead of running) are held to the same rule before any is sent, so
+  both orchestrators refuse alike. What that check reads: each row's token layout, which is
+  the token columns that are not plain strings with the types the row holds (empty for a
+  row with plain string tokens, and shared by the rows read from one table). The type rule
+  is applied once per distinct layout, not once per row, and only a list-typed token column
+  is asked, per row, whether its token is null. No table is built and no data value is
+  read. A row built from Python values gets no Arrow table: its data types come from its
+  schema and a list token's type from the list it is. Rows that no running node reads (a
+  held node that is terminal, or whose successors are all held) are not checked on either
+  route.
+- A table's columns and a row's are read through one normalization before the rule: both
+  types in their large variants, and a `null` leaf of a token type as `large_string`
+  (a token typed `null` is a null string token, and `large_list<null>` is
+  `large_list<large_string>`).
 - No source, operator or function builds such a stream: the lists `Batch`, `GroupBy` and
   `MergeJoin` build are parallel by origin row, data and tokens alike. Only a table built by
   hand can break the rule.
@@ -1341,7 +1355,8 @@ What the check does not cover:
   the row with `InputValidationError` naming the column, on the sync and on the async path:
   `Index` when it takes that element (the element's token would be a null list), and `Join`
   and `MergeJoin` when they merge the tokens of a data-tag both inputs hold (the tokens are
-  merged position by position, and a null list has no position).
+  merged position by position, and a null list has no position). The record-batch join
+  kernels refuse it with the same error.
 - A record batch sent into a record-batch channel. The channels are not wired into nodes
   yet; the stream built from a channel's batches is checked.
 - A `Data` row built by hand outside a stream.

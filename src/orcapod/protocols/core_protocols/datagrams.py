@@ -14,7 +14,14 @@ from orcapod.protocols.hashing_protocols import (
     ContentIdentifiableProtocol,
     DataContextAwareProtocol,
 )
-from orcapod.types import ColumnConfig, DataType, DataValue, Schema, SourceInfoValue
+from orcapod.types import (
+    ColumnConfig,
+    DataType,
+    DataValue,
+    Schema,
+    SourceInfoValue,
+    TokenLayout,
+)
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -690,6 +697,34 @@ class DataProtocol(DatagramProtocol, Protocol):
 
         Returns:
             The one-row table of source-info columns.
+        """
+        ...
+
+    def token_layout(self) -> "TokenLayout":
+        """
+        Return the token columns of this row that are not plain strings.
+
+        What the token-shape rule reads of a row that is not built into a stream
+        (ITL-1491). Building it builds no table and reads no data value.
+
+        Returns:
+            One entry per token column whose type is not ``large_string``, in the
+            order of the data columns: the token column, the data column, the
+            token type and the data type, as the row holds them. Empty when every
+            token is a plain string, and for the placeholder of a result that is
+            gone.
+        """
+        ...
+
+    def token_is_null(self, name: str) -> bool:
+        """
+        Whether the token of a data column of ``token_layout()`` is null in this row.
+
+        Args:
+            name: The data column.
+
+        Returns:
+            Whether the token is null.
         """
         ...
 

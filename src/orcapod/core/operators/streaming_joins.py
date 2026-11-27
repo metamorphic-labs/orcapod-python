@@ -92,8 +92,10 @@ from orcapod.core.operators.join import (
     _COMMON_JOIN_KEY,  # pyright: ignore[reportPrivateUsage]  # Join's one rule
     _MERGED_SOURCE_PREFIX,  # pyright: ignore[reportPrivateUsage]  # Join's one rule
     Join,
+    NullTokenListError,
     _matched_pairs,  # pyright: ignore[reportPrivateUsage]  # Join's one rule
     _with_common_key,  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+    null_token_list_error,
 )
 from orcapod.core.operators.base import require_shared_arrow_type
 from orcapod.core.operators.key_nullability import key_nullable
@@ -734,7 +736,12 @@ class StreamingJoin(StreamingJoinKernel):
                 table, left_schema, right_schema, keys
             )
             for left_name, right_name in rename.items():
-                table = Join._merge_source_columns(table, left_name, right_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+                try:
+                    table = Join._merge_source_columns(table, left_name, right_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+                except NullTokenListError as error:
+                    raise null_token_list_error(
+                        "Join", left_name, table.schema.field(left_name).type
+                    ) from error
             if not final:
                 return table
             for name in sorted(self._merged_source):
@@ -945,7 +952,12 @@ class StreamingMergeJoin(StreamingJoinKernel):
         left_names = set(left_schema.names)
         suffixed = (set(right_schema.names) & left_names) - self._shared_tags
         for left_name, right_name in self._rename.items():
-            joined = Join._merge_source_columns(joined, left_name, right_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+            try:
+                joined = Join._merge_source_columns(joined, left_name, right_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
+            except NullTokenListError as error:
+                raise null_token_list_error(
+                    "MergeJoin", left_name, joined.schema.field(left_name).type
+                ) from error
             joined = Join._fold_source_column(joined, left_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
         for name in sorted(self._colliding):
             source_name = f"{constants.SOURCE_PREFIX}{name}"

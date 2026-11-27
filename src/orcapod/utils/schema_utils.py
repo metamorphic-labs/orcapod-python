@@ -5,12 +5,12 @@ import logging
 import sys
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from types import UnionType
-from typing import Any, Union, get_args, get_origin, get_type_hints
+from typing import Any, Protocol, Union, get_args, get_origin, get_type_hints
 
 import pyarrow as pa
 
 from orcapod.errors import InputValidationError
-from orcapod.types import ContentHash, Schema, SchemaLike
+from orcapod.types import ContentHash, Schema, SchemaLike, TokenLayout
 
 logger = logging.getLogger(__name__)
 
@@ -897,6 +897,50 @@ def token_layers_fit(token_type: "pa.DataType", data_type: "pa.DataType") -> boo
         token, data = token.value_type, data.value_type  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]  # a list type has a value type
 
 
+def token_types_as_read(
+    token_type: "pa.DataType", data_type: "pa.DataType"
+) -> "tuple[pa.DataType, pa.DataType]":
+    """Return a token column's type and its data column's type as the rule reads them.
+
+    The one normalization before the token-shape rule, for a table's columns and
+    for a row's alike: both types in their large variants, as every stream holds
+    them, and a ``null`` leaf of the token type read as ``large_string``, which is
+    what a stream makes of a source-info column typed ``null`` (a null token is a
+    string token). A row that is handed on without being built into a stream
+    holds the types it was given, so they are read through this first.
+
+    Args:
+        token_type: The Arrow type of the ``_source_<name>`` column.
+        data_type: The Arrow type of the data column ``<name>``.
+
+    Returns:
+        The two types, normalized.
+    """
+    from orcapod.utils import arrow_utils
+
+    return (
+        arrow_utils.normalize_to_large_types(token_type),
+        arrow_utils.normalize_to_large_types(data_type, keep_null=True),
+    )
+
+
+def token_shape_fault(
+    token_type: "pa.DataType", data_type: "pa.DataType"
+) -> "tuple[pa.DataType, pa.DataType] | None":
+    """Return the types of a token column that does not fit its data column.
+
+    Args:
+        token_type: The Arrow type of the ``_source_<name>`` column, as held.
+        data_type: The Arrow type of the data column ``<name>``, as held.
+
+    Returns:
+        ``None`` when the token type fits (``token_layers_fit`` of the types as
+        ``token_types_as_read`` gives them); otherwise those two types.
+    """
+    token, data = token_types_as_read(token_type, data_type)
+    return None if token_layers_fit(token, data) else (token, data)
+
+
 TOKEN_SHAPE_RULE = (
     "A source-info token column must have the shape of its data column: its type is "
     "list layers over a string (large_string), each list layer needs the same list "
@@ -938,12 +982,14 @@ def token_shape_violations(
         if pa.types.is_large_string(token_type):
             continue
         data_type = data.schema.field(name).type
-        if not token_layers_fit(token_type, data_type):
-            found.append((token_name, name, token_type, data_type, False))
+        if fault := token_shape_fault(token_type, data_type):
+            found.append((token_name, name, *fault, False))
         elif _list_layer(token_type) is not None and (
             tokens.column(token_name).null_count
         ):
-            found.append((token_name, name, token_type, data_type, True))
+            found.append(
+                (token_name, name, *token_types_as_read(token_type, data_type), True)
+            )
     return found
 
 
@@ -957,7 +1003,8 @@ def token_shape_error(
 
     Returns:
         An ``InputValidationError`` naming each token column, its data column and
-        both types, and what is wrong with it.
+        both types, and what is wrong with it, in the order of the token columns'
+        names (a set of names is held sorted).
     """
     lines = [
         f"  - token column {token_name!r} has type {token_type} and its data column "
@@ -968,7 +1015,9 @@ def token_shape_error(
             else "the token's type is not list layers over a string that are the "
             "data's outer list layers"
         )
-        for token_name, name, token_type, data_type, fits in found
+        for token_name, name, token_type, data_type, fits in sorted(
+            found, key=lambda entry: entry[0]
+        )
     ]
     return InputValidationError(
         f"{TOKEN_SHAPE_RULE}:\n"
@@ -977,28 +1026,60 @@ def token_shape_error(
     )
 
 
-def require_token_shapes_of_rows(
-    rows: "Iterable[pa.Table]", data_columns: "Callable[[int], Collection[str]]"
-) -> None:
+class HoldsTokenLayout(Protocol):
+    """What the token-shape rule reads of a row (``DataProtocol`` has both)."""
+
+    def token_layout(self) -> "TokenLayout": ...
+
+    def token_is_null(self, name: str) -> bool: ...
+
+
+def require_token_shapes_of_rows(rows: "Iterable[HoldsTokenLayout]") -> None:
     """Refuse rows that break the token-shape rule, as the stream of them would be.
 
     For rows that are handed on without being built into a stream (the held rows
-    of the async orchestrator). Each row's own one-row table is read for its
-    columns' types and its token columns' null counts; no table is built from
-    the rows and no value is read. Every violating column of any row is reported
-    once, in the order of the first row that holds it.
+    of the async orchestrator). What is read of each row is its token layout
+    (``token_layout()``): the token columns that are not plain strings, with the
+    types the row holds. Rows with plain string tokens have an empty layout and
+    are not looked at further. The type rule is applied once per distinct layout,
+    not once per row; a list-typed token column that fits is then asked, per row,
+    whether its token is null (``token_is_null``: the token the row already
+    holds). No table is built and no data value is read.
 
     Args:
-        rows: Each row's one-row table of data and ``_source_*`` columns.
-        data_columns: Gives the data columns of the row at a position.
+        rows: The rows' data.
 
     Raises:
-        InputValidationError: As ``token_shape_error`` words it.
+        InputValidationError: As ``token_shape_error`` words it: every violating
+            column of any row, once.
     """
     found: "dict[str, tuple[str, str, pa.DataType, pa.DataType, bool]]" = {}
-    for position, row in enumerate(rows):
-        for violation in token_shape_violations(row, row, data_columns(position)):
-            _ = found.setdefault(violation[0], violation)
+    judged: "dict[TokenLayout, tuple[list[tuple[str, str, pa.DataType, pa.DataType, bool]], list[tuple[str, str, pa.DataType, pa.DataType, bool]]]]" = {}
+    last: "TokenLayout | None" = None
+    faults: "list[tuple[str, str, pa.DataType, pa.DataType, bool]]" = []
+    nullable: "list[tuple[str, str, pa.DataType, pa.DataType, bool]]" = []
+    for row in rows:
+        layout = row.token_layout()
+        if not layout:
+            continue
+        if layout is not last:
+            last = layout
+            verdict = judged.get(layout)
+            if verdict is None:
+                verdict = ([], [])
+                for token_name, name, token_type, data_type in layout:
+                    if fault := token_shape_fault(token_type, data_type):
+                        verdict[0].append((token_name, name, *fault, False))
+                    elif _list_layer(token_type) is not None:
+                        read = token_types_as_read(token_type, data_type)
+                        verdict[1].append((token_name, name, *read, True))
+                judged[layout] = verdict
+            faults, nullable = verdict
+        for fault in faults:
+            _ = found.setdefault(fault[0], fault)
+        for entry in nullable:
+            if row.token_is_null(entry[1]) and entry[0] not in found:
+                found[entry[0]] = entry
     if found:
         raise token_shape_error(list(found.values()))
 

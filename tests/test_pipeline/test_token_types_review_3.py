@@ -8,11 +8,12 @@ reads them) and about the record-batch join kernels.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pytest
 
+from orcapod.channels import Channel
 from orcapod.core.datagrams import Data, Tag
 from orcapod.core.operators import Join, MergeJoin
 from orcapod.core.operators.static_output_pod import rows_on_read
@@ -45,17 +46,15 @@ TOKENS = pa.large_list(STR)
 ROUTES = pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
 
 
-class _Sink:
-    """A writable channel that keeps what it is sent."""
+def _sent_on(rows: list[Any], *, read: bool = True) -> list[Any]:
+    """Send held rows as the async orchestrator does; return what was sent."""
 
-    def __init__(self) -> None:
-        self.rows: list[Any] = []
+    async def run() -> list[Any]:
+        channel: Channel[Any] = Channel(buffer_size=len(rows) + 1)
+        await _send_held(rows, channel.writer, read=read)
+        return await channel.reader.collect()
 
-    async def send(self, row: Any) -> None:
-        self.rows.append(row)
-
-    async def close(self) -> None:
-        pass
+    return asyncio.run(run())
 
 
 def _unwrapped(error: BaseException) -> BaseException:
@@ -166,9 +165,7 @@ def test_the_held_row_check_builds_no_table(monkeypatch: pytest.MonkeyPatch) -> 
 
     rows = _list_rows(5)
     monkeypatch.setattr(arrow_utils, "hstack_tables", counted)
-    sink = _Sink()
-    asyncio.run(_send_held(rows, sink))
-    assert len(sink.rows) == 5
+    assert len(_sent_on(rows)) == 5
     assert stacked == []
 
 
@@ -177,15 +174,13 @@ def test_the_held_row_check_makes_no_arrow_of_a_row_built_from_values() -> None:
     none: its data types come from its schema, a list token's type from the list
     it is (a ``None`` there is a plain string token, which fits any data)."""
     data = Data({"x": [1], "y": 2}, source_info={"x": ["t"], "y": None})
-    sink = _Sink()
-    asyncio.run(_send_held([(Tag({"k": 1}), data)], sink))
-    assert len(sink.rows) == 1
+    assert len(_sent_on([(Tag({"k": 1}), data)])) == 1
     assert data._data_table is None  # pyright: ignore[reportPrivateUsage]  # no Arrow was made
     assert data._source_info_table is None  # pyright: ignore[reportPrivateUsage]
     # The same rule still refuses such a row: a list token over a scalar.
     bad = Data({"x": 1, "y": 2}, source_info={"x": ["t"], "y": "s"})
     with pytest.raises(InputValidationError, match="'_source_x'"):
-        asyncio.run(_send_held([(Tag({"k": 1}), bad)], _Sink()))
+        _sent_on([(Tag({"k": 1}), bad)])
     assert bad._data_table is None  # pyright: ignore[reportPrivateUsage]
 
 
@@ -203,7 +198,7 @@ def test_the_held_row_check_judges_each_layout_once(
 
     rows = _list_rows(40)
     monkeypatch.setattr(schema_utils, "token_layers_fit", counted)
-    asyncio.run(_send_held(rows, _Sink()))
+    assert len(_sent_on(rows)) == 40
     assert len(judged) == 2
 
 
@@ -289,7 +284,7 @@ def test_a_kernel_refuses_a_null_inner_list_as_its_operator_does(
 # ---------------------------------------------------------------------------
 
 
-def _row_with_tokens(position: int, x: Any, y: Any) -> tuple[Tag, Data]:
+def _row_with_tokens(position: int, x: Any, y: Any) -> Any:
     table = pa.table(
         {
             "x": pa.array([[1]], pa.large_list(pa.int64())),
@@ -315,9 +310,9 @@ def test_both_routes_name_the_violating_columns_in_name_order(
         pa.table({"k": [0], "y": [[2]], "x": [[1]]}), tag_columns=["k"]
     )
     with pytest.raises(InputValidationError) as on_async:
-        asyncio.run(_send_held(rows, _Sink()))
+        _sent_on(rows)
     with pytest.raises(InputValidationError) as on_sync:
-        rows_on_read(rows, seed).built()
+        cast("Any", rows_on_read(rows, seed)).built()
     assert str(on_async.value) == str(on_sync.value)
     message = str(on_async.value)
     assert message.index("'_source_x'") < message.index("'_source_y'")
