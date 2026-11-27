@@ -445,7 +445,7 @@ def test_tokens_of_two_list_kinds_need_two_data_types_which_are_refused(
 
     The reviewer's case for P2-3. Under the token-shape rule each token needs data
     of its own list kind, so the colliding column ``x`` has two data types, and
-    ``MergeJoin`` refuses the inputs on ``x`` itself, on both routes. (With ``x``
+    ``MergeJoin`` refuses the inputs, on both routes. (With ``x``
     an integer in both, as in the review, neither stream can be built.)
     """
     order = TAG_ORDERS[tags]
@@ -458,12 +458,14 @@ def test_tokens_of_two_list_kinds_need_two_data_types_which_are_refused(
         )
         for name, extra, kind in (("a", "w", kinds[0]), ("b", "v", kinds[1]))
     )
+    # ``x`` has two Arrow types; the refusal names ``x`` or, where the two inputs'
+    # Python types of ``x`` read alike, its token column.
     sync = _refusal(lambda: MergeJoin()(left, right).as_table())
-    assert "MergeJoin" in sync and "data column 'x'" in sync
+    assert "MergeJoin" in sync and ("'x'" in sync or "'_source_x'" in sync)
     # The async route has no validation step: it refuses the same column when the
     # rows meet, naming both Arrow types.
     late = _refusal(lambda: _async_rows(MergeJoin(), left, right))
-    assert "MergeJoin" in late and "column 'x'" in late
+    assert "MergeJoin" in late and ("'x'" in late or "'_source_x'" in late)
     scalar = _source("a", order, data=("x", "w"))
     message = _refusal(
         lambda: _with_tokens(scalar, order, {"x": ([["p", "q"]] * 2, FIXED_PLAIN)})
