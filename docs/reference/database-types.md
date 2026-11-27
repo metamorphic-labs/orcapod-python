@@ -50,7 +50,9 @@ The library value types (NumPy, pandas, Polars, torch) are
 
 The databases: `InMemoryArrowDatabase` (in-memory), `DeltaTableDatabase` (Delta), and
 `ConnectorArrowDatabase` over `SQLiteConnector` and `PostgreSQLConnector`. Orcapod reads
-SpiralDB but does not write it for now (`SpiralDBWriteNotSupportedError`). See [The database](../concepts/pipeline-job.md#the-database) for how a
+SpiralDB but does not write it for now (`SpiralDBWriteNotSupportedError`). Status and logging
+observers reject stores backed by the SpiralDB connector at setup (ITL-1540).
+See [The database](../concepts/pipeline-job.md#the-database) for how a
 job uses one.
 
 Some refusals depend on the values or names as well as the type:

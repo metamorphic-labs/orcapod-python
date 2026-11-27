@@ -605,6 +605,10 @@ class SpiralDBWriteNotSupportedError(NotImplementedError):
     """
 
 
+class SpiralDBObserverNotSupportedError(SpiralDBWriteNotSupportedError):
+    """A status or logging observer was given a SpiralDB store at setup (ITL-1540)."""
+
+
 class SpiralDBSignInError(RuntimeError):
     """SpiralDB cannot be reached without a person signing in; the message says how.
 
