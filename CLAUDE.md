@@ -1169,42 +1169,70 @@ are defined in one module, `core/row_ids.py`; never build one of these preimages
   column's type is some list layers on top of `large_string`. Those layers must match
   EXACTLY the outer list layers of its data column's type, kind for kind: a `large_list`
   layer needs a `large_list` layer, a fixed-size list a fixed-size list of the same size
-  (compared after large normalization, so a plain `list` is a large list). The data may be
-  deeper than its token (`large_list<large_list<int64>>` under a `large_list<large_string>`
-  token), and a plain `large_string` token has no layer, so it fits any data. A data column
-  of a logical list type (the extension type built for a list of a logical element, such as
-  a list of `Path`) is read as its storage: one large-list layer per list level, which is
-  what `Batch`, `GroupBy` and `MergeJoin` build over a logical element. A token with a
-  layer is never null (an element inside it may be: `["a::row_0::x", null]`); a plain
-  string token may be null. Valid: `large_list<large_string>` over `large_list<int64>`;
+  (compared after large normalization, so a plain `list` is a large list). Under its layers
+  a token is a string: any other leaf (an integer, a binary, also as a plain scalar token
+  column) is refused. The data may be deeper than its token
+  (`large_list<large_list<int64>>` under a `large_list<large_string>` token), and a plain
+  `large_string` token has no layer, so it fits any data. A data column of a logical list
+  type (the extension type built for a list of a logical element, such as a list of `Path`)
+  is read as its storage: one large-list layer per list level, which is what `Batch`,
+  `GroupBy` and `MergeJoin` build over a logical element. A token with a layer is never
+  null (an element inside it may be: `["a::row_0::x", null]`); a plain string token may be
+  null. Valid: `large_list<large_string>` over `large_list<int64>`;
   `fixed_size_list<large_string>[2]` over `fixed_size_list<int64>[2]`; `large_string` over
   anything. Invalid: `large_list<large_string>` over `int64`; a large list over a
-  fixed-size list or the reverse; two list levels over one; a null list token. Only lists
-  are layers today: a token type with a nested layer of another kind (a struct, a map) is
-  refused, and no code is written for layers that do not exist yet. A layer's item field
-  (name, nullability, metadata) is NOT compared between a token and its data (a separate
-  design issue decides a consistent treatment); never add a refusal for it. The rule is
-  checked once, where a stream is built from a table (`ArrowTableStream.__init__`, so every
-  source, operator result, table built from rows, typed zero-row input and held-rows
-  stream), from the columns' types and the token column's null count only: no value is
-  read and nothing is computed. The type rule is the pure function
+  fixed-size list or the reverse; two list levels over one; a null list token;
+  `large_list<int64>` as a token. Only lists are layers today: a token type with a nested
+  layer of another kind (a struct, a map) is refused, and no code is written for layers
+  that do not exist yet. A layer's item field (name, nullability, metadata) is NOT compared
+  between a token and its data, nor between two inputs' declarations of one token column
+  beyond what `require_shared_arrow_type` compares (ITL-1519 decides a consistent
+  treatment); never add a refusal for it. The rule is checked where a stream is built from
+  a table (`ArrowTableStream.__init__`, so every source, operator result, table built from
+  rows, typed zero-row input and the sync orchestrator's held-rows stream), from the
+  columns' types and the token column's null count only: no value is read and nothing is
+  computed. Rows that are handed on without being built into a stream are held to it too:
+  the async orchestrator's held rows, once per held node before any is sent
+  (`schema_utils.require_token_shapes_of_rows`: each row's own column types and token null
+  counts), so both orchestrators refuse alike. The type rule is the pure function
   `schema_utils.token_layers_fit`; `token_shape_violations` lists the violating columns and
   `token_shape_error` words the `InputValidationError`, which names the token column, the
-  data column and both types. Never check it elsewhere, and never loosen it. No source,
-  operator or function builds a violating stream; an operator that would give one from a
-  valid hand-built input refuses instead (`Index` on a null inner list of a list-of-lists
-  token raises `InputValidationError` naming the column, on both paths).
+  data column and both types. Never loosen it. NOT covered: a record batch sent into an
+  `OutputChannel` (the channels are not wired into nodes; the stream `result()` builds is
+  checked), a `Data` built by hand outside a stream, and what is INSIDE a token list (a
+  null inner list of a list-of-lists token is accepted in a stream). No source, operator
+  or function builds a violating stream; an operator that would need one from a valid
+  hand-built input refuses instead, with `InputValidationError` naming the column, on both
+  paths: `Index` on a null inner list of a list-of-lists token, and `Join` / `MergeJoin`
+  merging the tokens of a shared data-tag where one holds a null inner list
+  (`join.NullTokenListError`, worded by `join.null_token_list_error`). Whether a null
+  inner list is a valid token at all is open (the developer's rule names the token and its
+  elements, not an inner list); until decided, never add a construction-time check for it.
 - Two inputs that declare one token column with two types are refused, on the sync and the
   async path, with `require_shared_arrow_type`'s error naming the column and both types
   (developer, November 27, 2026): a column that collides under `MergeJoin`, and the token
-  column of a data-tag both inputs of a `Join` hold. Under the token-shape rule this is
-  reached by a list token in one input and a plain string token in the other, or by item
-  fields that differ in nullability. Record batches of one stream declare one token type,
-  compared strictly (`settle_token_types`: list kind, depth, and each item field's name,
-  nullability and metadata), so the order of the batches never decides a type; a batch
-  that declares another is refused, and a streaming-join kernel holds every batch to its
-  input stream's token type. A token column may carry metadata on a list's item field, as
-  its stream declares it.
+  column of a data-tag both inputs of a `Join` or a `MergeJoin` hold (compared before
+  `MergeJoin` renames the second input's column, so the outcome never depends on whether a
+  row matches). ORDINARY sources reach this: `Batch(1)` over a source of scalars gives list
+  data with LIST tokens, a source that already holds such lists has STRING tokens, and
+  joining the two on that data-tag (or merging that column) is refused; the remedy is to
+  bring both inputs to one form before the join (it is a known limitation in the
+  changelog, and the developer is deciding it). The decision comes from the declared
+  types: the sync path reads its inputs' tables; the async `Join` takes each input's first
+  row as its declaration and compares it with every other input's as it arrives, whether
+  or not any row matches. An input that sends NO row over a bare row channel
+  (`Join().async_execute` called directly) declares nothing there, as for the shared-key
+  type check; in a job the node knows its inputs' types and both orchestrators refuse.
+  `MergeJoin` reports its first disagreement in name order (`_output_types` iterates
+  sorted names, never a set). The async `Join` folds only the tokens of columns it merged
+  (`merged_so_far`, one set per join, shared by the steps of a staggered chain): a
+  column's own token that happens to start like the join's internal pending marker is the
+  user's and is kept, as on the sync path. Record batches of one stream declare one token
+  type, compared strictly (`settle_token_types`: list kind, depth, and each item field's
+  name, nullability and metadata), so the order of the batches never decides a type; a
+  batch that declares another is refused, and a streaming-join kernel holds every batch to
+  its input stream's token type. A token column may carry metadata on a list's item field,
+  as its stream declares it.
 - The instance id reads a row's tokens through `DataProtocol.source_info_table()`: the typed
   columns the row carries, every field nullable; a null token is a `large_string` null, for
   the id and for the stored column (developer decision of November 26, 2026). A stream's

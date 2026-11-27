@@ -153,8 +153,14 @@ Orcapod's sources, operators and functions always keep these rules. They matter 
 build a table with `_source_*` columns by hand and hand it to `ArrowTableStream`: a list
 token over a value that is not a list, a list of another kind (a fixed-size list of tokens
 needs a fixed-size list of values of the same size), more list levels in the token than in
-the value, or a missing list token is refused with `InputValidationError`, which names the
-token column, its data column and both types. The Arrow types, with a table of what is
+the value, a token that is not text, or a missing list token is refused with
+`InputValidationError`, which names the token column, its data column and both types.
+
+One case reaches ordinary pipelines. A `Batch` of single values and a source that already
+holds lists of them have the same values but different tokens: a list of tokens (one per
+member) in the first, one plain token per list in the second. A `Join` on such a column as
+a data-tag, or a `MergeJoin` of it, refuses the two inputs and names the token column and
+both types. Bring both inputs to one form before the join: batch both, or neither. The Arrow types, with a table of what is
 accepted and refused, are in
 [the hashing reference](../reference/hashing.md#the-shape-of-a-source-info-token-column).
 

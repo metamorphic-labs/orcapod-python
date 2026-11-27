@@ -1315,6 +1315,7 @@ ITL-1491):
 | `fixed_size_list<large_string>[2]` | `fixed_size_list<int64>[3]` | refused: the sizes differ |
 | `large_list<large_list<large_string>>` | `large_list<int64>` | refused: two layers over one |
 | a struct, a map | any type | refused: only lists are layers today |
+| `large_list<int64>`, `int64`, `large_binary` | any type | refused: under its layers a token is a string |
 
 - Both types are compared in their large variants, so a plain `list` counts as a large list.
 - A token that has a layer is never null. An element inside it may be: a `Batch` over three
@@ -1322,30 +1323,64 @@ ITL-1491):
   A plain string token may be null.
 - A layer's item field (its name, nullability and metadata) is not compared between a token
   and its data.
-- The rule is checked once, where a stream is built from a table (so for every source,
-  every operator result and every table built from rows), from the columns' types and the
-  token column's null count only: no value is read. A stream that breaks it is refused with
+- The rule is checked where a stream is built from a table (so for every source, every
+  operator result and every table built from rows), from the columns' types and the token
+  column's null count only: no value is read. A stream that breaks it is refused with
   `InputValidationError` naming the token column, the data column and both types
-  (`schema_utils.token_layers_fit` is the rule).
+  (`schema_utils.token_layers_fit` is the rule). Rows that a run hands on without building
+  a stream of them (the rows of a node the async orchestrator holds instead of running) are
+  checked the same way, row by row, before any is sent, so both orchestrators refuse alike.
 - No source, operator or function builds such a stream: the lists `Batch`, `GroupBy` and
   `MergeJoin` build are parallel by origin row, data and tokens alike. Only a table built by
   hand can break the rule.
 
+What the check does not cover:
+
+- What is inside a token list. A list-of-lists token whose inner list is null
+  (`[null, ["a"]]`) is accepted in a stream. An operator that needs that inner list refuses
+  the row with `InputValidationError` naming the column, on the sync and on the async path:
+  `Index` when it takes that element (the element's token would be a null list), and `Join`
+  and `MergeJoin` when they merge the tokens of a data-tag both inputs hold (the tokens are
+  merged position by position, and a null list has no position).
+- A record batch sent into a record-batch channel. The channels are not wired into nodes
+  yet; the stream built from a channel's batches is checked.
+- A `Data` row built by hand outside a stream.
+
 Where a null token is stored or hashed (the inputs of site 8, above) it is a `large_string`
 null; by the rule a stream's rows have a null token only in a `large_string` column. A
 pipeline table that already holds a token column with another type refuses the row, naming
-the column and both types; in a pipeline built through sources this cannot happen.
+the column and both types.
 
 #### Two declarations of one token column
 
 Two inputs that declare one token column with two types are refused, on the sync and on the
 async path, with the error that names the column and both types: a column that collides
-under `MergeJoin`, and the token column of a data-tag that both inputs of a `Join` hold,
-which the join merges into one token of that declared type. With streams that satisfy the
-shape rule this is a list of tokens in one input against a plain string token in the other,
-or list items that differ in nullability. Record batches of one stream declare one token
-type, compared strictly (list kind, depth, and each item field's name, nullability and
-metadata), so the order of the batches never decides a type.
+under `MergeJoin`, and the token column of a data-tag that both inputs of a `Join` or a
+`MergeJoin` hold, which the operator merges into one token of that declared type. With
+streams that satisfy the shape rule this is a list of tokens in one input against a plain
+string token in the other, or list items that differ in nullability.
+
+Ordinary sources can reach this refusal. `Batch(1)` over a source of single values gives
+lists with a list of tokens (one token per member). A source that already holds such lists
+has one plain token per value. The two have the same data type and two token types, so a
+`Join` on that data-tag, or a `MergeJoin` on that column, refuses them. Bring both inputs
+to one form before the join: batch both, or neither.
+
+The decision comes from the declared types, not from which rows match. The sync path reads
+its inputs' tables. The async `Join` takes each input's first row as its declaration and
+compares it with every other input's as it arrives. An input that sends no row over a bare
+row channel (`Join().async_execute(...)` called directly, outside a job) declares nothing
+there; in a job the node knows its inputs' types, and both orchestrators refuse.
+
+Item fields that differ only in name or metadata between two inputs' declarations are not
+refused: both paths give the first input's type (in the join's canonical input order).
+
+The async `Join` folds only the tokens of the columns it merged. A column's own token is
+the user's, whatever it looks like.
+
+Record batches of one stream declare one token type, compared strictly (list kind, depth,
+and each item field's name, nullability and metadata), so the order of the batches never
+decides a type.
 
 The placeholder of an ephemeral result that is gone (`EmptyData`) carries tokens too: for each
 output of the function, a real output's token with the sentinel `EPHEMERAL_RESULT_GONE`

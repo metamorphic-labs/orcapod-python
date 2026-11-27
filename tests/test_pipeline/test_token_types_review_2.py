@@ -534,3 +534,33 @@ def test_a_batch_of_scalars_against_a_source_of_lists_is_refused_on_both_routes(
         assert "large_string in" in message or "and large_string" in message
     if operator is MergeJoin:
         assert outcomes[0][1] == outcomes[1][1]
+
+
+@function_pod(output_keys="n")
+def count_lists(x: list[int], y: list[int]) -> int:
+    """Return how many values the two lists hold."""
+    return len(x) + len(y)
+
+
+@TAG_ORDER
+@pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
+def test_a_job_joining_a_batch_of_scalars_with_a_source_of_lists_is_refused(
+    orchestrator: str, tags: str
+) -> None:
+    """The same case in a job, on each orchestrator: refused, nothing computed.
+
+    Before ITL-1491 this job failed too, with ``ValueError: cannot merge the source
+    info of a list with that of a scalar`` when a key matched.
+    """
+    order = TAG_ORDERS[tags]
+    _, _, scalars, lists = _ordinary_inputs(Join, order)
+    job = PipelineJob(name="ordinary", database=InMemoryArrowDatabase())
+    with job:
+        joined = Join()(Batch(batch_size=1)(scalars), lists, label="joined")
+        count_lists.pod(joined, label="f")
+    kind, message = _outcome(
+        lambda: job.run(orchestrator=ORCHESTRATORS[orchestrator]()) and []
+    )
+    assert kind == "InputValidationError", (kind, message)
+    assert message.startswith("Join") and "_source_" in message
+    assert "large_list<item: large_string>" in message
