@@ -16,7 +16,6 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, cast
 
 import pyarrow as pa
-import pyarrow.compute as pc
 
 from orcapod.protocols.core_protocols.streams import (
     RecordBatchInput,
@@ -1342,65 +1341,6 @@ def settle_token_types(
         if not accepted_type.equals(field.type, check_metadata=True):
             raise SourceInfoTypesDisagree(field.name)
     return settled
-
-
-def tokens_as(column: pa.Array[Any], kind: pa.DataType) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny]  # any column
-    """``column``'s source-info tokens as an array of ``kind``, every value kept.
-
-    The same array when it has that type. A level that holds only nulls (or no
-    value) says nothing a type could tell apart, so it takes ``kind`` as it is;
-    converting keeps every token, and a token that ``kind`` cannot hold is refused,
-    never changed. No type is taken from a token's value (ITL-1491).
-
-    Args:
-        column: Source-info tokens.
-        kind: A token type (``large_string``, or ``large_list`` of a token type).
-
-    Returns:
-        The tokens as ``kind``.
-
-    Raises:
-        RowBuiltFormUnavailable: If a token cannot be represented as ``kind``.
-    """
-    return _tokens_into(column, kind)
-
-
-def _tokens_into(column: pa.Array[Any], kind: pa.DataType) -> pa.Array[Any]:  # pyright: ignore[reportExplicitAny]  # any column
-    """``tokens_as``, level by level, never reading a value as another shape.
-
-    A level whose values are all null (or that has none) takes ``kind`` as it is; two
-    list levels convert their values; any other difference is refused. A value is
-    never re-read in another type (pyarrow reads a string as a list of characters).
-
-    Raises:
-        RowBuiltFormUnavailable: If a token cannot be represented as ``kind``.
-    """
-    if column.type == kind:
-        return column
-    if column.null_count == len(column):
-        return pa.nulls(len(column), kind)  # pyright: ignore[reportCallIssue, reportArgumentType]  # pyarrow takes any type; the stubs say an extension type
-    lists = (pa.ListType, pa.LargeListType)
-    if isinstance(column.type, lists) and isinstance(kind, lists):
-        # The slice's own lists: its values, and offsets from its lists' lengths (a
-        # null list holds none), so a sliced array converts as its rows say.
-        values = _tokens_into(pc.list_flatten(column), kind.value_type)  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-        lengths = pc.fill_null(pc.list_value_length(column), 0)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportArgumentType]  # pyarrow takes a Python fill value
-        offset_type = pa.int64() if isinstance(kind, pa.LargeListType) else pa.int32()
-        offsets = pa.concat_arrays(
-            [
-                pa.array([0], offset_type),
-                pc.cumulative_sum(lengths).cast(offset_type),  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-            ]
-        )
-        build = (
-            pa.LargeListArray.from_arrays
-            if isinstance(kind, pa.LargeListType)
-            else pa.ListArray.from_arrays
-        )
-        return build(offsets, values, type=kind, mask=column.is_null())  # pyright: ignore[reportUnknownVariableType, reportCallIssue, reportArgumentType]  # the offsets' width follows ``kind``
-    raise RowBuiltFormUnavailable(
-        f"a token of type {column.type} cannot be represented as {kind}"
-    )
 
 
 def concatenate_batches(batches: Sequence[pa.RecordBatch]) -> pa.Table | None:

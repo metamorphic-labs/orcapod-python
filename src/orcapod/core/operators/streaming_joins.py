@@ -111,10 +111,8 @@ from orcapod.core.operators.semijoin import (
     _has_whole_key,  # pyright: ignore[reportPrivateUsage]  # SemiJoin's one rule
 )
 from orcapod.core.operators.static_output_pod import (
-    RowBuiltFormUnavailable,
     StaticOutputOperatorPod,
     settle_token_types,
-    tokens_as,
 )
 from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS, row_built_columns
 from orcapod.protocols.core_protocols import StreamProtocol
@@ -606,17 +604,9 @@ class StreamingJoinKernel(ABC):
                 continue
             if not table.num_rows and pa.types.is_null(actual.type):
                 continue
-            if table.num_rows and field.name.startswith(constants.SOURCE_PREFIX):
-                # A batch's token type follows its own tokens and can be shallower
-                # than the layout's (a null or an empty list fixes fewer list
-                # levels): the tokens are converted, every value kept.
-                try:
-                    columns[index] = pa.chunked_array(
-                        [tokens_as(table.column(index).combine_chunks(), field.type)]
-                    )
-                    continue
-                except RowBuiltFormUnavailable:
-                    pass
+            # A source-info column is held to its stream's type like any other
+            # column: the pipeline determines it, and a batch never brings its own
+            # (ITL-1491).
             raise ValueError(
                 f"{type(self).__name__}: column {field.name!r} of input "
                 + f"{input_index} is {actual.type} in a batch, but "
