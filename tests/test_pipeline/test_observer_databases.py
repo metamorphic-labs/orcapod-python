@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, cast, final
 from unittest.mock import Mock, patch
 
 import pytest
+from typing_extensions import override
 
 from orcapod import databases
 from orcapod.databases import (
@@ -41,6 +42,32 @@ class _DerivedExtensionWrapper(ExtensionAwareDatabase):
 
 class _DerivedSpiralConnector(SpiralDBConnector):
     """A SpiralDB connector subclass still uses the same store."""
+
+
+@final
+class _DelegatingConnectorDatabase(ConnectorArrowDatabase):
+    """Implement the database interface through a delegate without a connector."""
+
+    # Deliberately exercise a subclass without the base class's stored connector.
+    def __init__(self) -> None:  # pyright: ignore[reportMissingSuperCall]
+        self._delegate = InMemoryArrowDatabase()
+
+    @override
+    def __getattribute__(self, name: str) -> object:
+        if not name.startswith("_"):
+            return cast(object, getattr(self._delegate, name))
+        return cast(object, super().__getattribute__(name))
+
+
+@final
+class _DatabaseWithCustomAttributeLookup(InMemoryArrowDatabase):
+    """Expose the database interface without allowing dynamic class lookup."""
+
+    @override
+    def __getattribute__(self, name: str) -> object:
+        if name == "__class__":
+            raise AssertionError("The setup check must use the actual class.")
+        return cast(object, super().__getattribute__(name))
 
 
 @pytest.fixture
@@ -91,7 +118,10 @@ def store_view(
 
 
 _OBSERVERS = [StatusObserver, LoggingObserver]
-_REFUSAL = r"Observers cannot record to a SpiralDB store in this version.*another database.*Delta.*ITL-1540"
+_REFUSAL = (
+    r"^Observers cannot record to a SpiralDB store in this version\. "
+    + r"Give the observer another database, for example Delta\.$"
+)
 
 
 @pytest.mark.parametrize("observer_class", _OBSERVERS)
@@ -132,6 +162,74 @@ def test_spiral_store_subclasses_are_refused(
         )
         with pytest.raises(SpiralDBObserverNotSupportedError, match=_REFUSAL):
             _ = observer_class(db)
+
+    capture_install.assert_not_called()
+
+
+@pytest.mark.parametrize("observer_class", _OBSERVERS)
+def test_unclassifiable_connector_database_is_accepted(
+    observer_class: type[StatusObserver] | type[LoggingObserver],
+    capture_install: Mock,
+) -> None:
+    observer = observer_class(_DelegatingConnectorDatabase())
+    _ = observer.contextualize("node")
+    assert capture_install.call_count == int(observer_class is LoggingObserver)
+
+
+@pytest.mark.parametrize("observer_class", _OBSERVERS)
+def test_other_database_attribute_hooks_are_not_called(
+    observer_class: type[StatusObserver] | type[LoggingObserver],
+    capture_install: Mock,
+) -> None:
+    _ = observer_class(_DatabaseWithCustomAttributeLookup())
+    assert capture_install.call_count == int(observer_class is LoggingObserver)
+
+
+@pytest.mark.parametrize("observer_class", _OBSERVERS)
+def test_wrapper_without_stored_database_is_accepted(
+    observer_class: type[StatusObserver] | type[LoggingObserver],
+    capture_install: Mock,
+) -> None:
+    _ = observer_class(ExtensionAwareDatabase.__new__(ExtensionAwareDatabase))
+    assert capture_install.call_count == int(observer_class is LoggingObserver)
+
+
+@pytest.mark.parametrize("logging_first", [True, False])
+@pytest.mark.parametrize("nested", [True, False])
+def test_composite_refusal_does_not_install_capture(
+    logging_first: bool,
+    nested: bool,
+    spiral_connector: SpiralDBConnector,
+    monkeypatch: pytest.MonkeyPatch,
+    capture_install: Mock,
+) -> None:
+    spiral = _wrap(ConnectorArrowDatabase(spiral_connector).at("observer"))
+    stores = {"memory": InMemoryArrowDatabase(), "spiral": spiral}
+
+    def resolve(
+        config: dict[str, str], db_registry: object = None
+    ) -> ArrowDatabaseProtocol:
+        assert db_registry is None
+        return stores[config["type"]]
+
+    monkeypatch.setattr(serialization, "resolve_database_from_config", resolve)
+    logging_config: dict[str, object] = {
+        "type": "logging",
+        "database": {"type": "memory"},
+    }
+    status_config: dict[str, object] = {
+        "type": "status",
+        "database": {"type": "spiral"},
+    }
+    if nested:
+        logging_config = {"type": "composite", "observers": [logging_config]}
+        status_config = {"type": "composite", "observers": [status_config]}
+    children = [logging_config, status_config]
+    if not logging_first:
+        children.reverse()
+
+    with pytest.raises(SpiralDBObserverNotSupportedError, match=r"SpiralDB store"):
+        _ = CompositeObserver.from_config({"observers": children})
 
     capture_install.assert_not_called()
 
@@ -181,8 +279,8 @@ def test_other_stores_are_accepted(
     assert capture_install.call_count == int(observer_class is LoggingObserver)
 
 
-def test_exported_database_classes_have_been_considered() -> None:
-    """Keep new public database types visible to the stopgap's maintainers."""
+def test_every_database_class_exported_from_orcapod_databases_is_classified() -> None:
+    """Require an explicit classification for names exported through ``__all__``."""
     assert set(databases.__all__) == {
         # Roots kept as-is by the observer check.
         "InMemoryArrowDatabase",

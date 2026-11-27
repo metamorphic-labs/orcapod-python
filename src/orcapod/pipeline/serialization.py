@@ -6,9 +6,10 @@ import hashlib
 import json as _json
 import logging
 import re
-from collections.abc import Collection, Iterable
+from collections.abc import Callable, Collection, Iterable
 from enum import Enum
-from typing import TYPE_CHECKING, Any, cast
+from functools import partial
+from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
 from orcapod.types import Schema
 from orcapod.logical_types.canonical_form import (
@@ -26,7 +27,13 @@ from orcapod.logical_types.identifier import (
 if TYPE_CHECKING:
     import pyarrow as pa
 
-    from orcapod.protocols.database_protocols import DatabaseRegistryProtocol
+    from orcapod.pipeline.composite_observer import CompositeObserver
+    from orcapod.pipeline.logging_observer import LoggingObserver
+    from orcapod.pipeline.status_observer import StatusObserver
+    from orcapod.protocols.database_protocols import (
+        ArrowDatabaseProtocol,
+        DatabaseRegistryProtocol,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -349,10 +356,11 @@ OPERATOR_REGISTRY: dict[str, type] = _build_operator_registry()
 DATA_FUNCTION_REGISTRY: dict[str, type] = _build_data_function_registry()
 
 
-_observer_registry: dict[str, Any] | None = None
+_Observer: TypeAlias = "StatusObserver | LoggingObserver | CompositeObserver"
+_observer_registry: dict[str, type[_Observer]] | None = None
 
 
-def _get_observer_registry() -> dict[str, Any]:
+def _get_observer_registry() -> dict[str, type[_Observer]]:
     global _observer_registry
     if _observer_registry is None:
         from orcapod.pipeline.status_observer import StatusObserver
@@ -360,9 +368,9 @@ def _get_observer_registry() -> dict[str, Any]:
         from orcapod.pipeline.composite_observer import CompositeObserver
 
         _observer_registry = {
-            "status": lambda cfg, reg: StatusObserver.from_config(cfg, reg),
-            "logging": lambda cfg, reg: LoggingObserver.from_config(cfg, reg),
-            "composite": lambda cfg, reg: CompositeObserver.from_config(cfg, reg),
+            "status": StatusObserver,
+            "logging": LoggingObserver,
+            "composite": CompositeObserver,
         }
     return _observer_registry
 
@@ -381,14 +389,46 @@ def resolve_observer_from_config(config: dict, db_registry: dict | None = None) 
     Raises:
         ValueError: If observer type is unknown.
     """
+    return _prepare_observer_from_config(
+        cast("dict[str, object]", config),
+        cast("dict[str, object] | None", db_registry),
+    )()
+
+
+def _prepare_observer_from_config(
+    config: dict[str, object], db_registry: dict[str, object] | None
+) -> Callable[[], _Observer]:
+    """Resolve and check a config before constructing any observers."""
+    from orcapod.pipeline._observer_database import require_observer_database
+    from orcapod.pipeline.composite_observer import CompositeObserver
+
     registry = _get_observer_registry()
-    obs_type = config.get("type")
+    obs_type = cast(str, config.get("type"))
     if obs_type not in registry:
         raise ValueError(
             f"Unknown observer type: {obs_type!r}. "
             f"Known types: {sorted(registry.keys())}"
         )
-    return registry[obs_type](config, db_registry)
+    observer_class = registry[obs_type]
+    if issubclass(observer_class, CompositeObserver):
+        children = prepare_composite_observers(config, db_registry)
+        return lambda: observer_class(*(build() for build in children))
+
+    db_config = cast("dict[str, object]", config["database"])
+    database = cast(
+        "ArrowDatabaseProtocol",
+        resolve_database_from_config(db_config, db_registry=db_registry),
+    )
+    require_observer_database(database)
+    return partial(observer_class, database)
+
+
+def prepare_composite_observers(
+    config: dict[str, object], db_registry: dict[str, object] | None
+) -> list[Callable[[], _Observer]]:
+    """Resolve every child before any logging observer installs capture."""
+    children = cast("list[dict[str, object]]", config["observers"])
+    return [_prepare_observer_from_config(child, db_registry) for child in children]
 
 
 def _ensure_registries() -> None:

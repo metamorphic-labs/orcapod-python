@@ -130,7 +130,7 @@ class CompositeObserver:
 
     @classmethod
     def from_config(
-        cls, config: dict, db_registry: dict | None = None
+        cls, config: dict[str, object], db_registry: dict[str, object] | None = None
     ) -> "CompositeObserver":
         """Reconstruct a ``CompositeObserver`` from a config dict.
 
@@ -143,9 +143,7 @@ class CompositeObserver:
         Returns:
             A new ``CompositeObserver`` instance.
         """
-        from orcapod.pipeline.serialization import resolve_observer_from_config
+        from orcapod.pipeline.serialization import prepare_composite_observers
 
-        children = [
-            resolve_observer_from_config(c, db_registry) for c in config["observers"]
-        ]
-        return cls(*children)
+        children = prepare_composite_observers(config, db_registry)
+        return cls(*(build() for build in children))

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from inspect import getattr_static
+from typing import TYPE_CHECKING, cast
 
 from orcapod.databases import (
     ConnectorArrowDatabase,
@@ -27,14 +28,20 @@ def require_observer_database(database: ArrowDatabaseProtocol) -> None:
     # Stopgap (ITL-1540): update this check by hand for a new standalone SpiralDB
     # database or a new wrapper. ITL-1539 will decide the protocol property that
     # every database should declare and wrappers should forward. Use the known
-    # classes' stored references directly until then.
-    while isinstance(database, ExtensionAwareDatabase):
-        database = database._db  # pyright: ignore[reportPrivateUsage]
-    if isinstance(database, ConnectorArrowDatabase) and isinstance(
-        database._connector,  # pyright: ignore[reportPrivateUsage]
-        SpiralDBConnector,
-    ):
+    # classes' stored references without invoking subclass attribute hooks.
+    backend: object = database
+    seen: set[int] = set()
+    while issubclass(type(backend), ExtensionAwareDatabase):
+        if id(backend) in seen:
+            return
+        seen.add(id(backend))
+        backend = cast(object, getattr_static(backend, "_db", None))
+    if not issubclass(type(backend), ConnectorArrowDatabase):
+        return
+
+    connector = cast(object, getattr_static(backend, "_connector", None))
+    if issubclass(type(connector), SpiralDBConnector):
         raise SpiralDBObserverNotSupportedError(
             "Observers cannot record to a SpiralDB store in this version. "
-            + "Give the observer another database, for example Delta (ITL-1540)."
+            + "Give the observer another database, for example Delta."
         )
