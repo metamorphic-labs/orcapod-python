@@ -5,6 +5,7 @@ from typing import Any, ClassVar, TYPE_CHECKING, TypeAlias
 import polars as pl
 import pyarrow as pa
 
+from orcapod.core.unique_keys import UniqueKeys
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.streams import ArrowTableStream
@@ -48,6 +49,10 @@ class PolarsFilter(UnaryOperator):
 
     # Its identity is not frozen with data context v1 (ITL-1266, ITL-1247).
     PROVISIONAL = True
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys (``core/unique_keys``): rows are only left out."""
+        return stream.unique_keys
 
     def __init__(
         self,

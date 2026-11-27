@@ -7,6 +7,7 @@ from typing import Any, ClassVar
 
 from typing_extensions import override
 
+from orcapod.core.unique_keys import UniqueKeys
 from orcapod.core.operators.base import UnaryOperator
 from orcapod.core.data_tags import require_taggable_type, stream_data_tags
 from orcapod.core.streams import ArrowTableStream
@@ -78,6 +79,10 @@ class TagBy(UnaryOperator):
 
     # Data-tags (ITL-1023): handled; this operator makes them.
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys (``core/unique_keys``): tags are only added."""
+        return stream.unique_keys
 
     def __init__(self, columns: str | Iterable[str], **kwargs: Any) -> None:
         names = _tag_by_names(columns)

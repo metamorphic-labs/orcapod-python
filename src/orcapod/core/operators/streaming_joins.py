@@ -2,7 +2,8 @@
 
 The async path of ``Join``, ``MergeJoin``, ``SemiJoin`` and ``Rejoin`` (ITL-1347, stage
 5) is to read its inputs as Arrow record batches, in whatever order they arrive; these
-kernels are that computation, not yet wired into ``async_execute``. A kernel gives the
+kernels are that computation (``run_kernel``, for the operators'
+``async_execute_batches``; no job node calls that form yet). A kernel gives the
 rows of the operator's sync ``static_process`` over the same inputs as a multiset (row
 order is not a result on the async path; developer, November 22, 2026), within the
 limits each kernel's docstring states (``StreamingRejoin``: repeated origins with three
@@ -49,8 +50,8 @@ How a kernel stays equal to the sync path:
   no rows that shares a tag with the others empties the result (an inner join), so no
   row was emitted before it can refuse. ``SemiJoin`` with no shared tag passes every
   left row whatever its right input holds, and has no shared column to refuse.
-- **Matching is the sync join's.** Each input keeps the rows it needs as Arrow tables and
-  a Polars frame of their prepared keys and row numbers (``arrow_keys.polars_key_frame``),
+- **Matching is the sync join's.** Each input keeps the rows it needs in a row spool
+  (memory, then local disk; ``core/row_spool``) and a Polars frame of their prepared keys and row numbers (``arrow_keys.polars_key_frame``),
   with the constant key every join adds (``join._with_common_key``). An arriving batch's
   key frame is joined with the other side's accumulated key frame by the sync path's own
   rule (``join._matched_pairs``), in one vectorized join, never per row: a top-level
@@ -67,7 +68,8 @@ How a kernel stays equal to the sync path:
   the last step of F), so a kernel declares every such field nullable and the stream made
   from its batches settles them.
 
-A kernel holds only what can still match: a side's rows are dropped when the other side
+A kernel holds only what can still match: a row is let go once it has matched when the
+other side is certified unique on the keys (``core/unique_keys``); a side's rows are dropped when the other side
 closes (nothing can arrive to match them), and an arriving row is not kept once the
 other side has closed. A row whose key holds a top-level null is never kept (it matches
 nothing). A step of a ``Join`` chain that can never emit again (a side closed holding no
@@ -77,11 +79,13 @@ except those the sync path still merges before it (``StreamingJoin._close``).
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from typing import Any, ClassVar
 
 import numpy as np
+import numpy.typing as npt
 import polars as pl
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -113,11 +117,17 @@ from orcapod.core.operators.semijoin import (
 from orcapod.core.operators.static_output_pod import (
     RowBuiltFormUnavailable,
     StaticOutputOperatorPod,
+    close_inputs,
+    concatenate_batches,
+    finish_operator,
     settle_token_types,
     tokens_as,
 )
+from orcapod.core.row_spool import RowSpool
 from orcapod.core.streams.base import ZERO_ROW_INPUT_COLUMNS, row_built_columns
 from orcapod.protocols.core_protocols import StreamProtocol
+from orcapod.protocols.core_protocols.streams import RecordBatchInput, RecordBatchOutput
+from orcapod.core.unique_keys import joined_keys, unique_on
 from orcapod.system_constants import constants
 from orcapod.utils import arrow_utils
 
@@ -128,6 +138,19 @@ TRANSPORT_COLUMNS: dict[str, bool] = {"source": True, "system_tags": True}
 # The row-number columns of the key frames, one per side of a binary join; never a key
 # (keys are tag columns, and a tag never starts with the meta prefix ``__``).
 _ROW = ("__streaming_left_row", "__streaming_right_row")
+
+# How many rows an output batch holds at most: a row with its source-info tokens is
+# several KiB, so a batch is some tens of MiB.
+PAIRS_PER_BATCH = 8_192
+
+# The pair-count column of a many-to-many match, and how many removed rows a side's key
+# frame holds before it is compacted.
+_COUNT = "__streaming_count"
+_COMPACT_ROWS = 1_024
+
+# How many rows of one input are read ahead and pushed at once. A push joins its rows with
+# every key held, so rows that have arrived already are pushed together.
+PUSH_ROWS = 65_536
 
 
 def _settled_by_values(schema: pa.Schema) -> pa.Schema:
@@ -191,112 +214,204 @@ def _key_frame(table: pa.Table, keys: Sequence[str], row: str) -> pl.DataFrame:
     )
 
 
-def _match(
-    arriving: pl.DataFrame, held: pl.DataFrame, keys: Sequence[str]
-) -> pl.DataFrame:
-    """Join two key frames by the sync join's rule (``join._matched_pairs``).
+def _bounded_pairs(
+    arriving: pl.DataFrame,
+    held: pl.DataFrame,
+    keys: Sequence[str],
+    *,
+    at_most_one: bool,
+    row: str,
+) -> Iterator[pl.DataFrame]:
+    """Join two key frames by the sync join's rule, in pieces of a bounded size.
 
-    Both frames hold the constant join key, so inputs that share no tag give every pair
-    and a top-level null key matches nothing, as on the sync path.
+    The rule is ``join._matched_pairs``. Both frames hold the constant join key, so
+    inputs that share no tag give every pair and a top-level null key matches nothing,
+    as on the sync path. A piece holds at most ``PAIRS_PER_BATCH`` pairs, or the pairs of
+    one arriving row when it has more: those are at most the rows held.
 
     Args:
         arriving: The arriving batch's key frame.
         held: The other side's accumulated key frame.
         keys: The shared tag columns.
+        at_most_one: Whether an arriving row matches at most one held row (the held
+            side is unique on the keys), so the pairs need not be counted first.
+        row: The arriving frame's row-number column.
 
-    Returns:
-        One row per matched pair, holding both row-number columns.
+    Yields:
+        One row per matched pair, holding both row-number columns; never empty.
     """
-    return _matched_pairs(arriving, held, [*keys, _COMMON_JOIN_KEY])
+    on = [*keys, _COMMON_JOIN_KEY]
+    if at_most_one:
+        pieces = [arriving]
+    else:
+        # Only the held rows that match, then how many each arriving row has.
+        held = held.join(arriving, on=on, how="semi")
+        if not held.height:
+            return
+        counts = held.group_by(on).len(name=_COUNT)
+        counted = arriving.join(counts, on=on, how="inner").sort(row)
+        pieces = [arriving]
+        if int(counted.get_column(_COUNT).sum()) > PAIRS_PER_BATCH:
+            pieces = _pieces(counted)
+    for piece in pieces:
+        pairs = _matched_pairs(piece, held, on)
+        for start in range(0, pairs.height, PAIRS_PER_BATCH):
+            yield pairs.slice(start, PAIRS_PER_BATCH)
 
 
-def _joined_by_rows(
-    left: pa.Table,
-    right: pa.Table,
-    keys: Sequence[str],
-    left_rows: pa.Array[Any],
-    right_rows: pa.Array[Any],
-) -> pa.Table:
-    """Take matched pairs from two tables, in the layout of ``join._inner_join``.
+def _pieces(counted: pl.DataFrame) -> Iterator[pl.DataFrame]:
+    """Cut arriving rows into runs whose pair counts add up to ``PAIRS_PER_BATCH``.
+
+    Args:
+        counted: The arriving rows that match, each with its number of pairs.
+
+    Yields:
+        The runs, without the counts; a row with more pairs is a run of its own.
+    """
+    ends = np.cumsum(counted.get_column(_COUNT).to_numpy().astype(np.int64))
+    rows = counted.drop(_COUNT)
+    start = 0
+    while start < rows.height:
+        before = int(ends[start - 1]) if start else 0
+        end = int(np.searchsorted(ends, before + PAIRS_PER_BATCH, side="right"))
+        end = max(end, start + 1)
+        yield rows.slice(start, end - start)
+        start = end
+
+
+def _side_by_side(left: pa.Table, right: pa.Table, keys: Sequence[str]) -> pa.Table:
+    """Put matched rows of two tables side by side, in the layout of ``join._inner_join``.
 
     The left columns (one of each key, the left row's value), then the right columns that
     are not keys, a name the left table also has taking the suffix ``_right``.
 
     Args:
-        left: The left table.
-        right: The right table.
+        left: The left row of each pair.
+        right: The right row of each pair.
         keys: The key columns.
-        left_rows: The left row of each pair.
-        right_rows: The right row of each pair.
 
     Returns:
         The joined table, fields without the inputs' flags (as ``_inner_join``).
     """
-    names: list[str] = []
-    arrays: list[Any] = []
-    for name in left.column_names:
-        names.append(name)
-        arrays.append(left.column(name).take(left_rows))
+    names: list[str] = list(left.column_names)
+    arrays: list[Any] = list(left.columns)
     for name in right.column_names:
         if name in keys:
             continue
         names.append(f"{name}_right" if name in left.column_names else name)
-        arrays.append(right.column(name).take(right_rows))
+        arrays.append(right.column(name))
     return pa.Table.from_arrays(arrays, names=names)
 
 
 class _Side:
-    """One side of a binary symmetric hash join: the rows it holds and their key frame.
+    """One side of a symmetric join: its rows' key frame, the rows themselves spooled.
 
     Args:
         keys: The key columns.
         row: This side's row-number column.
+        constant_key: Whether the key frame holds the constant join key.
     """
 
-    def __init__(self, keys: Sequence[str], row: str) -> None:
+    def __init__(
+        self, keys: Sequence[str], row: str, *, constant_key: bool = True
+    ) -> None:
         self.keys: list[str] = list(keys)
         self.row: str = row
         self.closed: bool = False
         self.schema: pa.Schema | None = None
-        self._tables: list[pa.Table] = []
-        self._frames: list[pl.DataFrame] = []
-        self._table: pa.Table | None = None
-        self._frame: pl.DataFrame | None = None
         self.rows: int = 0
+        self._constant_key: bool = constant_key
+        self._frames: list[pl.DataFrame] = []
+        self._spool: RowSpool = RowSpool()
+        # Beside the key frame's rows, their numbers (ascending) and whether each is still
+        # held: as long as the frame, whatever the numbers are.
+        self._numbers: npt.NDArray[np.int64] = np.empty(0, dtype=np.int64)
+        self._alive: npt.NDArray[np.bool_] = np.empty(0, dtype=np.bool_)
+        self._count: int = 0
+        self._removed_count: int = 0
 
     def key_frame(self, table: pa.Table) -> pl.DataFrame:
         """The key frame of ``table``, its rows numbered from 0."""
-        return _key_frame(table, self.keys, self.row)
+        if self._constant_key:
+            return _key_frame(table, self.keys, self.row)
+        return polars_key_frame(table, self.keys, self.row)
 
     def append(self, table: pa.Table, frame: pl.DataFrame) -> None:
         """Hold ``table``'s rows, with ``frame`` from ``key_frame``."""
-        self._tables.append(table)
-        # Numbered after the rows already held, as ``table()`` holds them.
-        self._frames.append(
-            frame.with_columns(pl.col(self.row) + self.rows) if self.rows else frame
-        )
-        self._table = None
-        self._frame = None
+        if not table.num_rows:
+            return
+        # Numbered after the rows already held, as the spool numbers them.
+        first = self._spool.size
+        self._frames.append(frame.with_columns(pl.col(self.row) + first))
+        self._spool.append(table)
         self.rows += table.num_rows
+        count = self._count + table.num_rows
+        if count > len(self._numbers):
+            for name in ("_numbers", "_alive"):
+                old = getattr(self, name)
+                grown = np.empty(2 * count, dtype=old.dtype)
+                grown[: self._count] = old[: self._count]
+                setattr(self, name, grown)
+        self._numbers[self._count : count] = np.arange(first, self._spool.size)
+        self._alive[self._count : count] = True
+        self._count = count
 
-    def table(self) -> pa.Table:
-        """Every row held, numbered as in ``frame``."""
-        if self._table is None:
-            self._table = pa.concat_tables(self._tables)
-        return self._table
+    def held(self, rows: npt.NDArray[np.int64]) -> npt.NDArray[np.int64]:
+        """Those of ``rows``, numbers in the key frame, that were not removed."""
+        return rows[self._alive[self._positions(rows)]]
+
+    def _positions(self, rows: npt.NDArray[np.int64]) -> npt.NDArray[np.int64]:
+        """Where the rows with these numbers are in the key frame."""
+        return np.searchsorted(self._numbers[: self._count], rows)
+
+    def take(self, rows: npt.NDArray[np.int64]) -> pa.Table:
+        """The held rows with these numbers, in this order."""
+        return self._spool.take(rows)
 
     def frame(self) -> pl.DataFrame:
-        """The key frame of every row held."""
-        if self._frame is None:
-            self._frame = pl.concat(self._frames, rechunk=False)
-            self._frames = [self._frame]
-        return self._frame
+        """The key frame of the rows held and, until compacted, of removed ones.
+
+        A caller whose removed rows can match again asks ``held`` which are held.
+        """
+        if len(self._frames) != 1:
+            self._frames = [pl.concat(self._frames, rechunk=False)]
+        return self._frames[0]
+
+    def held_frame(self) -> pl.DataFrame:
+        """The key frame of the rows held, without the removed ones."""
+        frame = self.frame()
+        if not self._removed_count:
+            return frame
+        return frame.filter(pl.Series(self._alive[: self._count]))
+
+    def remove(self, rows: npt.NDArray[np.int64]) -> None:
+        """Let rows go that can never match again: each is held, each given once."""
+        if not len(rows):
+            return
+        self._spool.discard(rows)
+        self.rows -= len(rows)
+        self._alive[self._positions(rows)] = False
+        self._removed_count += len(rows)
+        if not self.rows or self._removed_count >= max(self.rows, _COMPACT_ROWS):
+            self._compact()
+
+    def _compact(self) -> None:
+        """Drop the removed rows from the key frame."""
+        if self.rows:
+            self._frames = [self.held_frame()]
+            self._numbers = self._numbers[: self._count][self._alive[: self._count]]
+        else:
+            self._frames, self._numbers = [], np.empty(0, dtype=np.int64)
+        self._count = len(self._numbers)
+        self._alive = np.ones(self._count, dtype=np.bool_)
+        self._removed_count = 0
 
     def clear(self) -> None:
-        """Drop every row held."""
-        self._tables, self._frames = [], []
-        self._table, self._frame = None, None
+        """Drop every row held, and their files."""
         self.rows = 0
+        self._compact()
+        self._spool.close()
+        self._spool = RowSpool()
 
 
 class _BinaryLink:
@@ -306,13 +421,18 @@ class _BinaryLink:
         keys: The key columns.
         finish: Turns the pairs' joined table (``_joined_by_rows`` layout) into the
             link's output rows; given the two sides' schemas.
+        unique: Whether each side is certified unique on the keys: no two of its rows
+            match one row of the other side. A row is let go once it has matched if, and
+            only if, the other side is unique: it can match nothing else.
     """
 
     def __init__(
         self,
         keys: Sequence[str],
         finish: Callable[[pa.Table, pa.Schema, pa.Schema], pa.Table],
+        unique: tuple[bool, bool] = (False, False),
     ) -> None:
+        self.unique: tuple[bool, bool] = unique
         self.keys: list[str] = list(keys)
         self.sides: tuple[_Side, _Side] = (_Side(keys, _ROW[0]), _Side(keys, _ROW[1]))
         self._finish: Callable[[pa.Table, pa.Schema, pa.Schema], pa.Table] = finish
@@ -340,48 +460,63 @@ class _BinaryLink:
             side.closed = True
             side.clear()
 
-    def push(self, side: int, table: pa.Table) -> pa.Table | None:
+    def push(self, side: int, table: pa.Table) -> Iterator[pa.Table]:
         """Match ``table``'s rows with the other side's, then hold them if still needed.
+
+        The rows are held, and the matched ones let go, once the iterator is read to its
+        end.
 
         Args:
             side: 0 for the left side, 1 for the right.
             table: The arriving rows; every table of one side has one schema.
 
-        Returns:
-            The output rows of the new pairs, or ``None`` when there is none.
+        Yields:
+            The output rows of the new pairs, in pieces of at most ``PAIRS_PER_BATCH``.
         """
         this, other = self.sides[side], self.sides[1 - side]
         if this.schema is None:
             this.schema = table.schema
         if other.closed and not other.rows:
             # Nothing can pair with these rows, and none is held: no key to prepare.
-            return None
+            return
         if self.keys:
             # A row whose key holds a top-level null matches nothing: never held, so a
             # closed side holding only such rows is exhausted.
             table = table.filter(_has_whole_key(table, self.keys))
             if not table.num_rows:
-                return None
+                return
         frame = this.key_frame(table)
-        result = None
+        this_unique, other_unique = self.unique[side], self.unique[1 - side]
+        matched = np.zeros(table.num_rows, dtype=np.bool_)
+        gone: list[npt.NDArray[np.int64]] = []
         if other.rows:
-            pairs = _match(frame, other.frame(), self.keys)
-            if pairs.height:
-                rows = (
-                    pairs.get_column(_ROW[0]).to_arrow(),
-                    pairs.get_column(_ROW[1]).to_arrow(),
-                )
-                tables = (table, other.table()) if side == 0 else (other.table(), table)
-                joined = _joined_by_rows(*tables, self.keys, *rows)
+            for pairs in _bounded_pairs(
+                frame, other.frame(), self.keys, at_most_one=other_unique, row=this.row
+            ):
+                mine = pairs.get_column(this.row).to_numpy().astype(np.int64)
+                theirs = pairs.get_column(other.row).to_numpy().astype(np.int64)
+                if other_unique:
+                    matched[mine] = True
+                if this_unique:
+                    gone.append(theirs)
+                taken = (table.take(pa.array(mine, pa.int64())), other.take(theirs))
+                left, right = taken if side == 0 else (taken[1], taken[0])
                 assert self.sides[0].schema is not None
                 assert self.sides[1].schema is not None
-                result = self._finish(
-                    joined, self.sides[0].schema, self.sides[1].schema
+                yield self._finish(
+                    _side_by_side(left, right, self.keys),
+                    self.sides[0].schema,
+                    self.sides[1].schema,
                 )
+        if gone:
+            other.remove(np.concatenate(gone))
         # A row is held only for rows still to arrive on the other side.
         if not other.closed:
+            if matched.any():
+                unmatched = ~matched
+                table = table.filter(pa.array(unmatched))
+                frame = this.key_frame(table)
             this.append(table, frame)
-        return result
 
     def close(self, side: int) -> None:
         """Note that ``side`` ends: the other side's rows can never match again."""
@@ -454,11 +589,24 @@ class StreamingJoinKernel(ABC):
     def push(self, input_index: int, batch: pa.RecordBatch) -> list[pa.RecordBatch]:
         """Take one record batch of an input; return the output rows it decides.
 
+        ``iter_push`` with its batches collected: for an output known to be small.
+        """
+        return list(self.iter_push(input_index, batch))
+
+    def iter_push(
+        self, input_index: int, batch: pa.RecordBatch
+    ) -> Iterator[pa.RecordBatch]:
+        """Take one record batch of an input; yield the output rows it decides.
+
+        The iterator must be read to its end before the kernel is used again: the
+        batch's own rows are held only then. Reading it piece by piece keeps the output
+        of a many-to-many match out of memory.
+
         Args:
             input_index: The input, in call order.
             batch: The batch, holding the input's transport columns.
 
-        Returns:
+        Yields:
             The output record batches, possibly none.
 
         Raises:
@@ -470,9 +618,9 @@ class StreamingJoinKernel(ABC):
         self._require_open(input_index)
         table = self._as_input_table(input_index, batch)
         if not table.num_rows:
-            return []
+            return
         self._received[input_index] = True
-        return self._emitted(self._push(input_index, table))
+        yield from self._emitted(self._push(input_index, table))
 
     def close(self, input_index: int) -> list[pa.RecordBatch]:
         """Note that an input has ended; return the output rows that decides.
@@ -491,7 +639,7 @@ class StreamingJoinKernel(ABC):
         """
         self._require_open(input_index)
         self._closed[input_index] = True
-        emitted = self._emitted(self._close(input_index))
+        emitted = list(self._emitted(self._close(input_index)))
         if all(self._closed):
             self._check_settled_against_empty_inputs()
             result = self._check_empty_inputs()
@@ -539,8 +687,8 @@ class StreamingJoinKernel(ABC):
         )
 
     @abstractmethod
-    def _push(self, input_index: int, table: pa.Table) -> list[pa.Table]:
-        """Take an input's rows; return the output tables they decide.
+    def _push(self, input_index: int, table: pa.Table) -> Iterable[pa.Table]:
+        """Take an input's rows; give the output tables they decide.
 
         Args:
             input_index: The input, in call order.
@@ -643,13 +791,12 @@ class StreamingJoinKernel(ABC):
         """
         del input_index, token_types
 
-    def _emitted(self, tables: list[pa.Table]) -> list[pa.RecordBatch]:
+    def _emitted(self, tables: Iterable[pa.Table]) -> Iterator[pa.RecordBatch]:
         """The record batches of the output tables, holding ``output_columns``.
 
         Every system-tag and source-info field is declared nullable: the complete
         table's values decide those flags (``StaticOutputOperatorPod._flag_by_values``).
         """
-        batches: list[pa.RecordBatch] = []
         for table in tables:
             if table.num_rows:
                 self._emitted_any = True
@@ -657,8 +804,10 @@ class StreamingJoinKernel(ABC):
                 table = pa.Table.from_arrays(
                     table.columns, schema=_settled_by_values(table.schema)
                 )
-                batches.extend(table.to_batches())
-        return batches
+                yield from table.to_batches()
+
+    def release(self) -> None:
+        """Let every row held go, with its files: the run has ended or failed."""
 
     def _suffix(self, input_index: int, position: int) -> str:
         """What an input's system-tag column names gain: ``{pipeline hash}:{position}``."""
@@ -701,6 +850,8 @@ class StreamingJoin(StreamingJoinKernel):
         if len(inputs) == 1:
             return
         first = inputs[order[0]]
+        # The unique keys of the rows joined so far (``core/unique_keys``).
+        unique_keys = first.unique_keys
         tag_keys = set(first.keys()[0])
         data_tags = set(stream_data_tags(first))
         for position, index in enumerate(order[1:], start=1):
@@ -719,8 +870,13 @@ class StreamingJoin(StreamingJoinKernel):
             keys = sorted(tag_keys & next_tags)
             last = position == len(inputs) - 1
             self._links.append(
-                _BinaryLink(keys, self._link_finish(keys, rename, final=last))
+                _BinaryLink(
+                    keys,
+                    self._link_finish(keys, rename, final=last),
+                    (unique_on(unique_keys, keys), unique_on(stream.unique_keys, keys)),
+                )
             )
+            unique_keys = joined_keys(unique_keys, stream.unique_keys, keys)
             self._merges.append(bool(rename))
             tag_keys |= next_tags
             data_tags |= next_data_tags
@@ -753,7 +909,7 @@ class StreamingJoin(StreamingJoinKernel):
 
         return finish
 
-    def _push(self, input_index: int, table: pa.Table) -> list[pa.Table]:
+    def _push(self, input_index: int, table: pa.Table) -> Iterable[pa.Table]:
         """Feed an input's rows into its step and forward what each step emits.
 
         The input at canonical position 0 is the first step's left side, the input at
@@ -776,13 +932,19 @@ class StreamingJoin(StreamingJoinKernel):
         if rename := self._renames.get(input_index):
             table = table.rename_columns([rename.get(c, c) for c in table.column_names])
         step, side = (0, 0) if position == 0 else (position - 1, 1)
-        result = self._links[step].push(side, table)
-        while result is not None and step < len(self._links) - 1:
-            if step in self._sinks:
-                return []
-            step += 1
-            result = self._links[step].push(0, result)
-        return [] if result is None else [result]
+        return self._through(step, side, table)
+
+    def _through(self, step: int, side: int, table: pa.Table) -> Iterator[pa.Table]:
+        """Push rows into a step, and what it emits through the steps after it."""
+        for result in self._links[step].push(side, table):
+            if step == len(self._links) - 1:
+                yield result
+            elif step not in self._sinks:
+                yield from self._through(step + 1, 0, result)
+
+    def release(self) -> None:
+        for link in self._links:
+            link.release()
 
     def _close(self, input_index: int) -> list[pa.Table]:
         """End an input's side of its step, and every side that can no longer receive.
@@ -865,7 +1027,14 @@ class StreamingMergeJoin(StreamingJoinKernel):
         self._type_converter = StaticOutputOperatorPod._upstream_context(  # pyright: ignore[reportPrivateUsage]  # the operators' one rule
             left
         ).type_converter
-        self._link = _BinaryLink(sorted(self._shared_tags), self._finish)
+        self._link = _BinaryLink(
+            sorted(self._shared_tags),
+            self._finish,
+            (
+                unique_on(left.unique_keys, self._shared_tags),
+                unique_on(right.unique_keys, self._shared_tags),
+            ),
+        )
 
     def _check_settled_against_empty_inputs(self) -> None:
         """Refuse, when every input has closed, a run whose input with rows settled a
@@ -1001,7 +1170,7 @@ class StreamingMergeJoin(StreamingJoinKernel):
             schema=schema,
         )
 
-    def _push(self, input_index: int, table: pa.Table) -> list[pa.Table]:
+    def _push(self, input_index: int, table: pa.Table) -> Iterable[pa.Table]:
         table = arrow_utils.append_to_system_tags(
             table, self._suffix(input_index, input_index)
         )
@@ -1009,8 +1178,10 @@ class StreamingMergeJoin(StreamingJoinKernel):
             table = table.rename_columns(
                 [self._rename.get(c, c) for c in table.column_names]
             )
-        result = self._link.push(input_index, table)
-        return [] if result is None else [result]
+        return self._link.push(input_index, table)
+
+    def release(self) -> None:
+        self._link.release()
 
     def _close(self, input_index: int) -> list[pa.Table]:
         self._link.close(input_index)
@@ -1037,80 +1208,94 @@ class StreamingSemiJoin(StreamingJoinKernel):
         super().__init__(operator, inputs)
         left, right = inputs
         self._keys = list(SemiJoin._match_keys(left.keys()[0], right.keys()[0]))  # pyright: ignore[reportPrivateUsage]  # SemiJoin's one rule
-        # The left rows not decided yet, and the right rows' keys.
-        self._waiting: pa.Table | None = None
+        # The left rows not decided yet (keys, the rows spooled), and the distinct keys of
+        # the right rows.
+        self._waiting = _Side(self._keys, _ROW[0], constant_key=False)
         self._right_frames: list[pl.DataFrame] = []
-        self._right_frame: pl.DataFrame | None = None
+        # Whether Polars tells key values apart as its joins do (no nested key).
+        self._distinct: bool = not any(
+            pa.types.is_nested(self._layouts[1].field(name).type) for name in self._keys
+        )
 
     @property
     def held_rows(self) -> int:
-        waiting = self._waiting.num_rows if self._waiting is not None else 0
-        return waiting + sum(frame.height for frame in self._right_frames)
+        return self._waiting.rows + sum(frame.height for frame in self._right_frames)
+
+    def release(self) -> None:
+        self._waiting.clear()
+        self._right_frames = []
 
     def _right_keys(self) -> pl.DataFrame | None:
-        """The key frame of every right row held, or ``None`` with none."""
+        """The key frame of the right rows held, or ``None`` with none."""
         if not self._right_frames:
             return None
-        if self._right_frame is None:
-            self._right_frame = pl.concat(self._right_frames, rechunk=False)
-            self._right_frames = [self._right_frame]
-        return self._right_frame
+        if len(self._right_frames) > 1:
+            self._right_frames = [pl.concat(self._right_frames, rechunk=False)]
+        return self._right_frames[0]
 
-    def _kept(self, left: pa.Table, right_keys: pl.DataFrame) -> pa.Array[Any]:
-        """Whether each left row's key is among ``right_keys``, as a boolean mask."""
-        kept = polars_key_frame(left, self._keys, _ROW[0]).join(
-            right_keys, on=self._keys, how="semi"
-        )
-        mask = np.zeros(left.num_rows, dtype=np.bool_)
-        mask[kept.get_column(_ROW[0]).to_numpy()] = True
-        return pa.array(mask)
+    def _matched(
+        self, left: pl.DataFrame, right_keys: pl.DataFrame
+    ) -> npt.NDArray[np.int64]:
+        """The left rows whose key is among ``right_keys``, by number."""
+        kept = left.join(right_keys, on=self._keys, how="semi")
+        return kept.get_column(_ROW[0]).to_numpy().astype(np.int64)
 
-    def _push(self, input_index: int, table: pa.Table) -> list[pa.Table]:
+    def _push(self, input_index: int, table: pa.Table) -> Iterable[pa.Table]:
         if not self._keys:
             return [table] if input_index == 0 else []
         if input_index == 0:
-            right_keys = self._right_keys()
-            if right_keys is None:
-                kept = pa.array(np.zeros(table.num_rows, dtype=np.bool_))
-            else:
-                kept = self._kept(table, right_keys)
-            if not self._closed[1]:
-                # A left row whose key holds a top-level null never matches.
-                undecided = table.filter(
-                    pc.and_(pc.invert(kept), _has_whole_key(table, self._keys))
-                )
-                if undecided.num_rows:
-                    self._waiting = (
-                        undecided
-                        if self._waiting is None
-                        else pa.concat_tables([self._waiting, undecided])
-                    )
-            return [table.filter(kept)]
-        # A right batch: only its keys, and only rows whose keys hold no top-level null
-        # (the sync path drops those: such a key never matches).
+            return self._push_left(table)
+        return self._push_right(table)
+
+    def _push_left(self, table: pa.Table) -> Iterator[pa.Table]:
+        """Emit the left rows a right row matched already; hold the undecided ones."""
+        frame = self._waiting.key_frame(table)
+        kept = np.zeros(table.num_rows, dtype=np.bool_)
+        if (right_keys := self._right_keys()) is not None:
+            kept[self._matched(frame, right_keys)] = True
+        mask = pa.array(kept)
+        if not self._closed[1]:
+            # A left row whose key holds a top-level null never matches.
+            undecided = table.filter(
+                pc.and_(pc.invert(mask), _has_whole_key(table, self._keys))
+            )
+            self._waiting.append(undecided, self._waiting.key_frame(undecided))
+        yield table.filter(mask)
+
+    def _push_right(self, table: pa.Table) -> Iterator[pa.Table]:
+        """Hold the right rows' keys; emit the waiting left rows they decide."""
+        # Only rows whose keys hold no top-level null (the sync path drops those: such a
+        # key never matches).
         keys = table.select(self._keys)
         keys = keys.filter(_has_whole_key(keys, self._keys))
         if not keys.num_rows:
-            return []
+            return
         frame = polars_key_frame(keys, self._keys)
+        if self._distinct:
+            frame = frame.unique()
         if not self._closed[0]:
-            self._right_frames.append(frame)
-            self._right_frame = None
-        if self._waiting is None:
-            return []
-        kept = self._kept(self._waiting, frame)
-        decided = self._waiting.filter(kept)
-        remaining = self._waiting.filter(pc.invert(kept))
-        self._waiting = remaining if remaining.num_rows else None
-        return [decided]
+            held = self._right_keys()
+            if held is not None and self._distinct:
+                new = frame.join(held, on=self._keys, how="anti")
+            else:
+                new = frame
+            if new.height:
+                self._right_frames.append(new)
+        if not self._waiting.rows:
+            return
+        decided = self._waiting.held(self._matched(self._waiting.frame(), frame))
+        for start in range(0, len(decided), PAIRS_PER_BATCH):
+            rows = decided[start : start + PAIRS_PER_BATCH]
+            yield self._waiting.take(rows)
+            self._waiting.remove(rows)
 
     def _close(self, input_index: int) -> list[pa.Table]:
         if input_index == 0:
             # No left row will arrive: the right keys can match nothing new.
-            self._right_frames, self._right_frame = [], None
+            self._right_frames = []
         else:
             # No right row will arrive: the undecided left rows never match.
-            self._waiting = None
+            self._waiting.clear()
         return []
 
 
@@ -1624,3 +1809,124 @@ class StreamingRejoin(StreamingJoinKernel):
                     )
                 )
         return []
+
+
+async def run_kernel(
+    make_kernel: Callable[[Sequence[StreamProtocol]], StreamingJoinKernel],
+    inputs: Sequence[RecordBatchInput],
+    output: RecordBatchOutput,
+) -> None:
+    """Run a join kernel over an operator's channels (``async_execute_batches``).
+
+    Every input is read at once and to its end, whatever the others do: the inputs may
+    be two readers of one upstream, which a wait would block, and an input's read error
+    must be met. Each input reads ahead until it holds ``PUSH_ROWS`` rows
+    (its producer's last batch whole, whatever its size) and waits, and the
+    output's batches are sent one at a time, so a slow reader of the output holds the
+    join back.
+
+    The kernel's rows and files are let go at a normal end, a failure and a
+    cancellation. Channels end as in ``StaticOutputOperatorPod.async_execute_batches``.
+
+    Args:
+        make_kernel: Makes the kernel from the input streams (the descriptions).
+        inputs: The operator's input channels, in order.
+        output: The channel the result's record batches are sent into.
+    """
+    readers: list[asyncio.Task[None]] = []
+    kernel: StreamingJoinKernel | None = None
+    try:
+        # An input read already cannot be given whole: refused before anything is read.
+        claims = [channel.reserve() for channel in inputs]
+        kernel = make_kernel([channel.stream for channel in inputs])
+        changed = asyncio.Event()
+        ahead = [_ReadAhead(changed) for _ in inputs]
+        readers = [
+            asyncio.create_task(buffer.fill(channel, claim))
+            for buffer, channel, claim in zip(ahead, inputs, claims)
+        ]
+        open_inputs = set(range(len(inputs)))
+        while open_inputs:
+            changed.clear()
+            progressed = False
+            for index in sorted(open_inputs):
+                batches, ended = ahead[index].drain()
+                for batch in _push_sizes(batches):
+                    progressed = True
+                    for result in kernel.iter_push(index, batch):
+                        await output.send(result)
+                    # The readers get a turn also when nothing was sent.
+                    await asyncio.sleep(0)
+                if ended:
+                    progressed = True
+                    await readers[index]  # raises what ended it, if anything did
+                    open_inputs.discard(index)
+                    for result in kernel.close(index):
+                        await output.send(result)
+            if not progressed:
+                _ = await changed.wait()
+    except BaseException as error:
+        output.fail(error)
+        for reader in readers:
+            _ = reader.cancel()
+        _ = await asyncio.gather(*readers, return_exceptions=True)
+        await close_inputs(inputs, error)
+        raise
+    finally:
+        if kernel is not None:
+            kernel.release()
+    await finish_operator(inputs, output)
+
+
+class _ReadAhead:
+    """The record batches one input delivered and the join has not pushed yet.
+
+    Args:
+        changed: Set when a batch arrives or the input ends.
+    """
+
+    def __init__(self, changed: asyncio.Event) -> None:
+        self._changed: asyncio.Event = changed
+        self._room: asyncio.Event = asyncio.Event()
+        self._batches: list[pa.RecordBatch] = []
+        self._rows: int = 0
+        self._ended: bool = False
+
+    async def fill(self, channel: RecordBatchInput, claim: object) -> None:
+        """Read ``channel`` to its end, waiting while ``PUSH_ROWS`` rows or more are unread."""
+        try:
+            _ = channel.reserve(claim)
+            async for batch in channel:
+                if not batch.num_rows:
+                    continue
+                self._batches.append(batch)
+                self._rows += batch.num_rows
+                self._changed.set()
+                while self._rows >= PUSH_ROWS:
+                    self._room.clear()
+                    _ = await self._room.wait()
+        finally:
+            self._ended = True
+            self._changed.set()
+
+    def drain(self) -> tuple[list[pa.RecordBatch], bool]:
+        """Take the batches read, and whether the input has ended after them."""
+        batches, self._batches, self._rows = self._batches, [], 0
+        self._room.set()
+        return batches, self._ended
+
+
+def _push_sizes(batches: Sequence[pa.RecordBatch]) -> Iterator[pa.RecordBatch]:
+    """``batches`` put under one another and cut to at most ``PUSH_ROWS`` rows.
+
+    Args:
+        batches: Record batches of one input, in the order they arrived.
+    """
+    if len(batches) == 1:
+        # As delivered: a batch of its own is what the kernel checks.
+        table = pa.Table.from_batches(batches)
+    else:
+        table = concatenate_batches(batches)
+    if table is not None:
+        for start in range(0, table.num_rows, PUSH_ROWS):
+            yield from table.slice(start, PUSH_ROWS).combine_chunks().to_batches()

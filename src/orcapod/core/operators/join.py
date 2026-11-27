@@ -8,6 +8,9 @@ from typing import Any, ClassVar
 import polars as pl
 import pyarrow as pa
 
+from orcapod.protocols.core_protocols.streams import RecordBatchInput, RecordBatchOutput
+from orcapod.core.exact_class import reads_as_its_class
+from orcapod.core.unique_keys import UniqueKeys, joined_keys
 from orcapod.types.explanation import plain_repr
 from orcapod.core.operators.meta_columns import (
     WithoutMetaWriter,
@@ -191,6 +194,16 @@ def _fold_pending(value: Any) -> Any:
 class Join(NonZeroInputOperator):
     # Data-tags (ITL-1023): handled.
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
+
+    def derive_unique_keys(self, *streams: StreamProtocol) -> UniqueKeys:
+        """The inputs' unique keys, joined input by input (``joined_keys``)."""
+        keys = streams[0].unique_keys
+        tags = set(streams[0].keys()[0])
+        for stream in streams[1:]:
+            names = set(stream.keys()[0])
+            keys = joined_keys(keys, stream.unique_keys, tags & names)
+            tags |= names
+        return keys
 
     @property
     def kernel_id(self) -> tuple[str, ...]:
@@ -694,6 +707,28 @@ class Join(NonZeroInputOperator):
             truncated = input_pipeline_hashes[orig_idx].to_hex(n_char)
             suffixes.append(f"{truncated}:{canon_position[orig_idx]}")
         return suffixes
+
+    async def async_execute_batches(
+        self, inputs: Sequence[RecordBatchInput], output: RecordBatchOutput
+    ) -> None:
+        """Run over input channels of Arrow record batches, holding keys only.
+
+        ``streaming_joins.StreamingJoin`` gives the rows of the sync path as a set, in memory
+        bounded by its inputs' join keys (``docs/dev/specs/itl-1464-joins.md``).
+
+        Args:
+            inputs: One input channel per input stream, in the operator's order.
+            output: The channel the result's record batches are sent into.
+        """
+        if not reads_as_its_class(self, Join):
+            # A subclass, or an instance with a member replaced, may compute other rows:
+            # its own sync call over all of its inputs.
+            await super().async_execute_batches(inputs, output)
+            return
+        # The kernels are built on this module's join rules.
+        from orcapod.core.operators.streaming_joins import StreamingJoin, run_kernel
+
+        await run_kernel(lambda streams: StreamingJoin(self, streams), inputs, output)
 
     async def async_execute(
         self,
