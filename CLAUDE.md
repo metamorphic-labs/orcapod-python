@@ -1132,31 +1132,24 @@ are defined in one module, `core/row_ids.py`; never build one of these preimages
   result in the result store by the input hash, calls nothing and writes no pipeline row
   (developer, November 26, 2026; `FunctionJobNode._empty_data_cache_hit` is the one place
   that holds that choice, to be reconsidered in ITL-1475).
-- The instance id reads a row's tokens through `DataProtocol.source_info_table()`. A token
-  column has one canonical type, a function of the token's value alone (developer decision
-  of November 26, 2026): a null token is a `large_string` null whatever type its column
-  declares; a non-null token of a row read from an Arrow table (a stream's row) keeps the
-  type that table gives it, with a nullable field, never typed again from the value (a
-  nested token column would not survive it); a change of the row keeps the typed column of every
-  token it keeps (a selection, a drop, a rename, added columns); a token given as a Python value is typed
-  from its value. STOPGAP, not the proper solution (developer, November 27, 2026; ITL-1491
-  removes it): the token of a column taken from another row (`with_columns_of`, a data-tag
-  that falls through a function pod) and a token at the sync edge between two nodes (the
-  row-built form) are typed again from their values. The rule: a data-tag that falls through
-  a function pod keeps its source-info token with its type unchanged; a column a function
-  returns is never a pass-through, even with an input's name and value (its token points to
-  the function); and the type of every source-info token column is determined by the
-  pipeline, like every other column type, never taken from values (sources build plain
-  `large_string` tokens; joins and single-stream operators keep the shape; `Batch`, `GroupBy`
-  and `MergeJoin` add one list level each). The stopgap exists because the sync route
-  normalizes a stream's token columns to large types between two nodes and the async route
-  passes rows on without it, so a hand-built token of another type (a fixed-size list) had
-  two instance ids. Never build on the re-typing, and never write "a function passes a
-  column through". A rename moves a column's token with it; a token held for the destination name
-  before is dropped. There is one column
-  per data column: a data column with no token has a null token, so a row built from values
-  and the same row read from a table have one instance id. Ids are a function of the row
-  alone, never of the order sessions ran in. A pipeline table keeps one type per token
+- The instance id reads a row's tokens through `DataProtocol.source_info_table()`: one column
+  per data column, a data column with no token having a null token. THE INTENDED RULE
+  (developer, November 27, 2026): the type of every source-info token column is fixed by the
+  pipeline, like every other column type, and is not meant to be taken from values: each
+  source and operator determines its output token columns' types from its inputs' types, by
+  its own rule, in its own module. A data-tag that falls through a function pod is meant to
+  keep its source-info token with its type unchanged; a column a function returns is never a
+  pass-through, even with an input's name and value (its token points to the function).
+  TODAY (ITL-1471), in `source_info_table()`: a null token is a `large_string` null whatever
+  type its column declares; a non-null token of a row read from an Arrow table (a stream's
+  row) keeps the type that table declares, with a nullable field; a token given as a Python
+  value is typed from its value (`arrow_utils.source_info_arrow_type`). STOPGAP, not the
+  proper solution: today a token's declared type is, in some places, inferred again from its
+  value (`Data.as_table(columns={"source": True})` and so `_rows_to_table`, the row-built
+  form, and `with_columns_of`). It can narrow a declared type (example: `[None]` in a token
+  column a `Batch` declares with two list levels infers one). ITL-1491 removes it. Never
+  build on the re-typing, and never write "a function passes a column through". A rename
+  moves a column's token with it; a token held for the destination name before is dropped. A pipeline table keeps one type per token
   column: a row whose token column has another type than the rows recorded (a list token
   beside a string or null token) is refused, naming the column and both types
   (`_require_one_type_per_token_column`), and the write fails as a database write error. A lookup must never fail on a row its stream holds as valid Arrow. The
@@ -1856,11 +1849,13 @@ data. The rules:
   (`arrow_keys.polars_key_frame`, `arrow_keys.sort_key`) and the rows are taken from the
   table, so no value passes through Polars. A tag type with no rule (a map, an interval, a
   union, a list view) raises `TypeError` naming the column.
-- `Data` source-info values may be `str`, `None`, or `list[...]`, nested to any depth; the
-  Arrow and Python types are derived from the value, with `None` mapping to `large_string`.
-  That rule has one definition, `arrow_utils.source_info_arrow_type`, and applies only to
-  tokens supplied as Python values: `ArrowTableStream.iter_data` hands each row's source info
-  to `Data` as Arrow columns, so a type the stream already has is never re-inferred. A
+- `Data` source-info values may be `str`, `None`, or `list[...]`, nested to any depth; for a
+  token supplied as a Python value the Arrow and Python types are derived from the value, with
+  `None` mapping to `large_string`. That rule has one definition,
+  `arrow_utils.source_info_arrow_type`. `ArrowTableStream.iter_data` hands each row's source
+  info to `Data` as Arrow columns, and `source_info_table()` keeps the type the stream
+  declares for a non-null token. Today a declared type is, in some places, inferred again
+  from the value, a stopgap ITL-1491 removes (above, "Row ids"). A
   many→one operator must emit a list for **every** row of a list-valued column — mixing a bare
   `None` into some rows makes per-row `as_table()` schemas diverge and `pa.concat_tables` fail
   on the barrier path.

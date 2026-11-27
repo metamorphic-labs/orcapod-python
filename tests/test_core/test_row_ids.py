@@ -572,12 +572,10 @@ class TestTokensOfBuiltAndChangedRows:
     ) -> None:
         """``with_columns_of`` (a data-tag falling through a function) types from values.
 
-        The taken columns' tokens are typed from their values, as the edge between
-        two nodes types them on the sync route and as a stored result gives them
-        (decision of November 26, 2026): one type, so one instance id, on every
-        route. A fixed-size list token becomes a large list; a nested token that
-        cannot be typed from its value fails here. Keeping the typed column from
-        end to end is ITL-1491.
+        The copied columns' tokens are typed again from their values: a stopgap,
+        not the proper solution (developer, November 27, 2026). A fixed-size list
+        token becomes a large list; a nested token that cannot be typed from its
+        value fails here. ITL-1491 removes the re-typing.
         """
         fixed = pa.list_(pa.large_string(), 2)
         table = pa.Table.from_arrays(

@@ -577,22 +577,23 @@ class Data(Datagram):
         """Return the source-info tokens as a one-row table.
 
         One ``_source_<column>`` per data column, in their order, every field
-        nullable; a data column with no token has a null token. Each column has
-        one canonical type, a function of the token's value alone (ITL-1471): a
-        null token is a ``large_string`` null whatever type its column declares
-        (a null says nothing a type could tell apart), and a non-null token of a
-        row read from an Arrow table (a stream's row) keeps the type that table
-        gives it: its type is never worked out again from its value, which a
-        nested token column would not survive. A change of the row keeps the
-        typed column of every token it keeps (a selection, a drop, a rename,
-        added columns); a token given as a Python value (a row built from
-        values, ``with_source_info``) is typed from its value. So a row built
-        from values and the same row read from a table give the same columns.
+        nullable; a data column with no token has a null token. What each
+        column's type is today (ITL-1471):
 
-        Stopgap (developer, November 27, 2026; removed by ITL-1491): the token of
-        a column taken from another row (``with_columns_of``, a data-tag that
-        falls through a function pod) is typed again from its value too. The
-        rule is that it keeps its type unchanged; see ``with_columns_of``.
+        - a null token is a ``large_string`` null whatever type its column
+          declares (a null says nothing a type could tell apart);
+        - a non-null token of a row read from an Arrow table (a stream's row)
+          keeps the type that table declares for it: it is not worked out again
+          from its value, which a nested token column would not survive. A
+          change of the row keeps the typed column of every token it keeps (a
+          selection, a drop, a rename, added columns);
+        - a token given as a Python value (a row built from values,
+          ``with_source_info``) is typed from its value
+          (``arrow_utils.source_info_arrow_type``), and so is a token copied
+          from another row by ``with_columns_of`` (a stopgap, see there).
+
+        A token column's type is not meant to be taken from values: it is
+        fixed by the pipeline (ITL-1491).
 
         ``as_table(columns={"source": True})`` differs in two ways: it types
         every token from its value, and it has no column for a data column whose
@@ -858,24 +859,19 @@ class Data(Datagram):
         values a function returned, are not converted again. Used for the columns of
         data-tags that fall through a function pod.
 
-        The rule (developer, November 27, 2026): a data-tag that falls through a
-        function pod keeps its source-info token with its type unchanged. A column
-        a function returns is never a pass-through, even with an input's name and
-        value: its token points to the function. The type of every source-info
-        token column is determined by the pipeline, like every other column type,
-        never taken from values: sources build plain ``large_string`` tokens,
-        joins and single-stream operators keep the shape, and ``Batch``,
-        ``GroupBy`` and ``MergeJoin`` add one list level each.
+        The intended rule (developer, November 27, 2026): a data-tag that falls
+        through a function pod keeps its source-info token with its type
+        unchanged. A column a function returns is never a pass-through, even with
+        an input's name and value: its token points to the function. The type of
+        every source-info token column is fixed by the pipeline and is not meant
+        to be taken from values: each source and operator determines its output
+        token columns' types from its inputs' types, by its own rule, in its own
+        module.
 
-        Stopgap, not the proper solution: today the taken columns' tokens are
-        typed again from their values, so the token's value is kept but its type
-        may not be (a ``fixed_size_list`` token becomes a ``large_list``). The
-        reason is a difference between the two routes: the sync route normalizes
-        a stream's token columns to large types between two nodes, and the async
-        route passes rows on without it, so a hand-built token of another type (a
-        fixed-size list) had two instance ids. Typing the token from its value
-        here gives it one type, so one instance id, on both routes. ITL-1491
-        fixes the route difference and removes this re-typing.
+        Stopgap, not the proper solution: today this method types the copied
+        tokens again from their values (``arrow_utils.source_info_arrow_type``),
+        so a copied token's declared type may not be kept (a ``fixed_size_list``
+        token becomes a ``large_list``). ITL-1491 removes it.
 
         Args:
             other: The data to take the columns from.
@@ -917,15 +913,12 @@ class Data(Datagram):
             **{k: v for k, v in self._source_info.items() if k not in names},
         }
         new_p._source_info_table = None
-        # STOPGAP (developer, November 27, 2026; ITL-1491 removes it): the added
-        # columns' typed token columns are not kept, so their tokens are typed
-        # again from their values. The rule is that a data-tag that falls through
-        # a function pod keeps its token with its type unchanged, the type being
-        # determined by the pipeline and never taken from values. Until the sync
-        # and the async route agree on a token column's type between two nodes
-        # (the sync route normalizes it to large types, the async route does
-        # not), keeping the type here would give one row two instance ids. This
-        # row's own typed columns, when it has them, are kept.
+        # STOPGAP, not the proper solution (developer, November 27, 2026;
+        # ITL-1491 removes it): the copied columns' typed token columns are not
+        # kept, so the copied tokens are typed again from their values. A
+        # data-tag that falls through a function pod is meant to keep its token
+        # with its type unchanged. This row's own typed columns, when it has
+        # them, are kept.
         self._keep_typed_tokens(
             new_p, {k: k for k in Datagram.keys(self) if k not in names}
         )
