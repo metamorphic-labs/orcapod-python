@@ -97,6 +97,7 @@ from orcapod.utils import arrow_utils
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from types import FrameType
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
 
 
@@ -1882,6 +1883,18 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
             ValueError: If this node or one it depends on caches (``LOG`` or
                 ``REPLAY``) over a restricted source (ITL-1218); nothing has run.
         """
+        from orcapod.core.sources.cached_source import stored_source_caches
+
+        with stored_source_caches(load_only):
+            return self._run_in_source_context(
+                load_only=load_only,
+                caller=sys._getframe(1),  # pyright: ignore[reportPrivateUsage]  # warning belongs at the caller's line
+            )
+
+    def _run_in_source_context(
+        self, *, load_only: bool, caller: FrameType
+    ) -> StreamView:
+        """Run with the source cache policy chosen by ``run()``."""
         from orcapod.pipeline.node_run import (
             check_sources,
             depends_on_job_nodes,
@@ -1907,7 +1920,7 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
             )
             self._last_run = summary
             if not summary.ok:
-                warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
+                warn_row_failures(summary, caller)
             return self._run_view(computed=False)
         if self._loaded:
             raise self._cannot_compute_error()

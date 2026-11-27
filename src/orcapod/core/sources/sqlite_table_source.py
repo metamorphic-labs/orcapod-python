@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 from collections.abc import Collection, Iterator
 from contextlib import contextmanager
+from pathlib import PurePath
 from typing import Any, ClassVar, TYPE_CHECKING
 
 from orcapod.core.data_tags import TagOnlyColumns
@@ -44,15 +45,21 @@ if TYPE_CHECKING:
     from orcapod.config import OrcapodConfig
 
 
-def _access_path(db_path: str | os.PathLike[str]) -> str | os.PathLike[str]:
+def _access_path(db_path: str) -> str:
     """The path a later read opens: a file path made absolute, a special name as given.
 
-    ``":memory:"`` and ``file:`` URIs are not file system paths.
+    SQLite's empty and in-memory database names are kept as given.
     """
-    text = os.fspath(db_path)
-    if text == ":memory:" or text.startswith("file:"):
+    if db_path in {"", ":memory:"} or PurePath(db_path).is_absolute():
         return db_path
-    return os.path.abspath(text)
+    # Pin the directory without normalizing the filename. The filesystem must
+    # still follow a symlink before processing a following '..'.
+    pinned = os.path.join(os.getcwd(), db_path)
+    if PurePath(pinned).is_absolute():
+        return pinned
+    # A relative Windows filename on another drive uses that drive's current
+    # directory. Resolve only the bare drive before appending the original name.
+    return os.path.join(os.path.abspath(PurePath(db_path).drive), db_path)
 
 
 class SQLiteTableSource(DBTableSource):
@@ -75,8 +82,9 @@ class SQLiteTableSource(DBTableSource):
        connection is released immediately to avoid holding file locks.
 
     Args:
-        db_path: Path to the SQLite database file, or ``":memory:"`` for an
-            in-process in-memory database.
+        db_path: String or path-like object for the SQLite database file, or
+            ``":memory:"`` for an in-process in-memory database. The original path
+            text supplies the default source name and is saved in the configuration.
         table_name: Name of the table to expose as a source.
         tag_columns: Columns to use as tag columns. A bare string is
             accepted as a single column name. If ``None`` (default),
@@ -108,7 +116,7 @@ class SQLiteTableSource(DBTableSource):
 
     def __init__(
         self,
-        db_path: str | os.PathLike,
+        db_path: str | os.PathLike[str],
         table_name: str,
         tag_columns: str | Collection[str] | None = None,
         system_tag_columns: Collection[str] = (),
@@ -119,12 +127,13 @@ class SQLiteTableSource(DBTableSource):
         config: "OrcapodConfig | None" = None,
         *,
         tag_only_columns: TagOnlyColumns = (),
+        _read_only: bool = False,
     ) -> None:
-        self._db_path = db_path
-        # A check (ITL-1102) reopens the database found now, whatever the working
-        # directory is then; an in-memory database or a URI is kept as given.
-        self._access_path: str | os.PathLike[str] = _access_path(db_path)
-        connector = SQLiteConnector(db_path)
+        self._db_path = os.fspath(db_path)
+        # Keep the original name for configuration and identity, and pin where reads go.
+        self._access_path = _access_path(self._db_path)
+        self._read_only = _read_only
+        connector = SQLiteConnector(self._access_path, _read_only=_read_only)
 
         try:
             # A missing table is reported as missing, not as a table without a key.
@@ -201,7 +210,7 @@ class SQLiteTableSource(DBTableSource):
         # The path is read up to the last ``:main.``, so only the table name must not
         # hold a ``:``; the path is kept as passed, colons included (``C:\\data``).
         table = joined_location(":", f"main.{table_name}")
-        return f"{os.fspath(self._db_path)}:{table}"
+        return f"{self._db_path}:{table}"
 
     @contextmanager
     @override
@@ -210,7 +219,7 @@ class SQLiteTableSource(DBTableSource):
 
         The connector the source was built with was closed once the table was read.
         """
-        connector = SQLiteConnector(self._access_path)
+        connector = SQLiteConnector(self._access_path, _read_only=self._read_only)
         try:
             yield connector
         finally:
@@ -220,7 +229,7 @@ class SQLiteTableSource(DBTableSource):
         """Serialize source configuration to a JSON-compatible dict."""
         base = super().to_config()
         base.pop("connector", None)
-        return {**base, "source_type": self.SOURCE_KIND, "db_path": str(self._db_path)}
+        return {**base, "source_type": self.SOURCE_KIND, "db_path": self._db_path}
 
     @classmethod
     def from_config(
@@ -234,9 +243,12 @@ class SQLiteTableSource(DBTableSource):
         Returns:
             A new ``SQLiteTableSource`` instance.
 
-        Note:
-            ``:memory:`` sources cannot be reconstructed — the new in-memory
-            database will be empty and ``ValueError`` will be raised.
+        The database file must already exist. SQLite opens it read-only and may
+        create its own WAL working files while reading an existing WAL database.
+
+        Raises:
+            ValueError: If the saved source was in memory.
+            sqlite3.OperationalError: If the database file cannot be opened.
         """
         return cls._from_saved_name(
             config,
@@ -250,5 +262,6 @@ class SQLiteTableSource(DBTableSource):
                 source_id=name,
                 label=config.get("label"),
                 data_context=config.get("data_context"),
+                _read_only=True,
             ),
         )

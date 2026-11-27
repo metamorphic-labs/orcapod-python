@@ -15,6 +15,7 @@ from orcapod.core.data_tags import (
 from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
+from orcapod.core.sources.cached_source import CachedSource, stored_source_streams
 from orcapod.core.sources.provisional import warn_provisional_source
 from orcapod.core.sources.reload import same_rows
 from orcapod.core.sources.source_ids import hash_source_name
@@ -291,6 +292,9 @@ class DerivedSource(RootSource):
             source_id = hash_source_name(origin.content_hash())
         super().__init__(source_id=source_id, **kwargs)
         self._origin = origin
+        self._uses_source_cache = isinstance(origin, CachedSource) or (
+            isinstance(origin, DerivedSource) and origin._uses_source_cache
+        )
         self._record_id_columns = key_columns
         self._key_columns = key_columns or ()
         self._cached_table: pa.Table | None = None
@@ -618,6 +622,14 @@ class DerivedSource(RootSource):
         # Every read of rows notes the provisional use, also of rows kept from an
         # earlier read (ITL-1331), as a provisional operator's stream does.
         self._note_provisional_identity_use()
+        snapshots = stored_source_streams.get()
+        if self._uses_source_cache and snapshots is not None:
+            if id(self) not in snapshots:
+                records = self._origin_records()
+                snapshots[id(self)] = self._stream_over(
+                    records if records is not None else self._empty_origin_table()
+                )
+            return snapshots[id(self)]
         if self._tags_as_data is not None:
             if self._cached_stream is not None:
                 return self._cached_stream
@@ -668,7 +680,9 @@ class DerivedSource(RootSource):
             none and its origin changed.
         """
         if isinstance(self._origin, RootSource):
-            _ = self._origin.check_for_new_data()
+            changed = self._origin.check_for_new_data()
+            if self._uses_source_cache and stored_source_streams.get() is not None:
+                return changed
         seen = self._origin.last_modified
         if seen == self._origin_seen:
             return False
@@ -698,6 +712,14 @@ class DerivedSource(RootSource):
             self._cached_table = read
         self._update_modified_time()
         return True
+
+    @property
+    @override
+    def last_modified(self) -> datetime | None:
+        """Use the cache snapshot's time only while reading its load-only view."""
+        if self._uses_source_cache and stored_source_streams.get() is not None:
+            return self._origin.last_modified
+        return super().last_modified
 
     def _schema_requires_io(self, config: ColumnConfig) -> bool:
         """Whether reading the schema with ``config`` would poll: as for the origin."""

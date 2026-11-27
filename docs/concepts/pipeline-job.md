@@ -359,9 +359,10 @@ tag_schema=Schema({...}), data_schema=Schema({...}))`) means one Arrow type per 
 zones, declare the slot with Arrow schemas (`tag_schema=pa.schema([...])`). Binding a source
 never changes a node's schema or where its results are stored.
 
-A job made without sources has **unbound** slots. It can still be run: nodes that depend on
-an unbound source are skipped, and `job.unbound_sources` lists what is missing. Bind later
-with `job.bind(...)`:
+A job made without sources has **unbound** slots. It can still run the parts of the
+pipeline with bound inputs. `job.unbound_sources` lists the missing slots, and
+`summary.skipped_unbound_sources` maps each skipped node to the slots blocking it.
+Bind a source later with `job.bind(...)`:
 
 ```python
 job_c = PipelineJob.from_pipeline(pipeline, database=database)
@@ -478,11 +479,40 @@ the **Nodes** table below the picture for each node's columns and status.
 ## Saving and loading
 
 `job.save(path)` writes the job to a JSON file: the graph, the database's location (and the
-result database's, when one was given) and how each source was configured. `PipelineJob.load(path)` reads it back, for example in a later
-Python session. An `InMemoryArrowDatabase` has no location to record, so here the database
-is passed again; `PipelineJob.load(path, database=...)` is also how you point a loaded job
-at a database that has moved, and `PipelineJob.load(path, result_database=...)` at a result
-database. The file records each node's own Arrow types, so saving types
+result database's, when one was given) and how each source was configured.
+`PipelineJob.load(path)` reads it back, for example in a later Python session. Pass the
+original `InMemoryArrowDatabase` again to read its rows in the same process. For a
+local Delta store, loading requires existing directories for the saved root and
+any saved scope under it.
+If the path is missing or is a file, loading warns and leaves the database unbound.
+This also applies to a source's Delta cache, in which case the source slot stays
+unbound. Open a moved store by passing `database=...` or `result_database=...` to
+`PipelineJob.load()`. Bind a cached source with `job.bind(sources=...)` after giving
+it the cache's new location. An existing directory opens even if it holds no Delta
+tables. A remote Delta store's location is checked when it is accessed.
+
+Saving a loaded job keeps the recorded locations of databases and source caches
+that could not be opened, so a later load can find them when they return.
+
+Loading a job creates no files or directories, with one exception. If an existing
+SQLite database uses write-ahead logging (WAL), you may see `-wal` and `-shm`
+files appear next to it. SQLite can create these working files as part of opening
+the database in read-only mode. This is expected and harmless. Orcapod writes
+nothing to the database. A missing SQLite database file stays absent and its
+source slot stays unbound.
+
+SQLite saves the supplied path text and uses it in the default source ID. A
+relative path stays relative in the saved job, so loading the job in a different
+working directory reads relative to that directory. Each live or restored source
+pins its absolute filename when built and keeps using it after a working-directory
+change. SQLite treats a `file:` prefix as part of the filename and follows symlinks
+as it opens the file, including when a symlink is followed by `..`.
+
+The `create_base_path` option on `DeltaTableDatabase.from_config()` is
+**provisional**. Passing `False` requires the saved local root and scope directories
+to exist. Job loading uses this setting.
+
+The file records each node's own Arrow types, so saving types
 every node from its inputs' types, as previewing an empty job does, and costs what that
 preview costs: a pipeline whose joins keep many system-tag columns saves as slowly as it
 previews.
@@ -504,9 +534,9 @@ not their code, so a loaded job cannot compute:
   `as_source()` read what the database holds for the node: here the three rows of cohort A
   and the one of cohort B, because both cohorts were read through a source named `"mice"`.
 - `loaded.run()` raises `RuntimeError`. To compute, run the code that defines the pipeline.
-- `loaded.run(load_only=True)` fills the nodes with the stored results for the sources'
-  current rows, computing nothing. An in-memory source such as `DictSource` is not saved
-  with the job, so bind it first:
+- `loaded.run(load_only=True)` fills the nodes with stored results for the bound
+  sources' current rows. It computes nothing. The data in a `DictSource` is kept in
+  memory, so the summary names the skipped nodes and their blocking slot until you bind it.
 
 ```python
 try:
@@ -514,6 +544,11 @@ try:
 except RuntimeError:
     print("a loaded job cannot compute")
 # a loaded job cannot compute
+
+print(loaded.run(load_only=True))
+# Load-only run of job 'bmi': no nodes ran.
+#   'bmi': skipped (unbound sources: 'mice')
+#   'mice': skipped (unbound sources: 'mice')
 
 loaded.bind(sources={"mice": mice(cohort_a)})
 summary = loaded.run(load_only=True)

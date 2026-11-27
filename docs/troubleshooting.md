@@ -294,7 +294,8 @@ and what the pipeline imports must be there.
 - The job was read with `PipelineJob.load()`. A loaded job's nodes read empty until
   `loaded.run(load_only=True)`.
 - A source of the job is not bound. `job.unbound_sources` lists such sources; the nodes
-  below them do not run.
+  below them do not run. The run summary's `skipped_unbound_sources` field names the
+  skipped nodes and which slots to bind.
 
 **Fix.** Call `job.run()`, then read `job.nodes[label]`. To see everything the database
 holds for a node, whatever run it came from, use `job.nodes[label].as_source()`.

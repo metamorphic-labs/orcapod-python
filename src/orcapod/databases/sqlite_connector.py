@@ -19,6 +19,7 @@ import os
 import sqlite3
 import threading
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
@@ -238,10 +239,26 @@ class SQLiteConnector:
             in-process in-memory database. Defaults to ":memory:".
     """
 
-    def __init__(self, db_path: str | os.PathLike = ":memory:") -> None:
+    def __init__(
+        self,
+        db_path: str | os.PathLike[str] = ":memory:",
+        *,
+        _read_only: bool = False,
+    ) -> None:
         self._db_path = db_path
+        location = str(db_path)
+        if _read_only:
+            if location in {"", ":memory:"}:
+                raise ValueError(
+                    "A saved SQLite source requires an existing database file"
+                )
+            # The source has pinned the absolute filename without normalising it.
+            location = f"{Path(location).as_uri()}?mode=ro"
         self._conn: sqlite3.Connection | None = sqlite3.connect(
-            str(db_path), check_same_thread=False, isolation_level=None
+            location,
+            uri=_read_only,
+            check_same_thread=False,
+            isolation_level=None,
         )
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.RLock()
