@@ -344,8 +344,8 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                 read one source under two restrictions (ITL-1218), whatever streams
                 lead there. Nothing is recorded then.
             InputValidationError: If the pod is commutative and two of its inputs have
-                one identity: forming the invocation's identity refuses it
-                (``repeated_operands.operand_set``, ITL-1419). Nothing is recorded then.
+                one identity. Forming the invocation's identity raises
+                ``RepeatedOperandError`` as a stopgap until ITL-1511.
         """
         from orcapod.pipeline.restrictions import require_one_restriction
 

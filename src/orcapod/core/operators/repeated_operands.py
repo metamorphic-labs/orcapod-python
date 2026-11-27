@@ -26,13 +26,13 @@ from orcapod.protocols.core_protocols import StreamProtocol
 
 
 class RepeatedOperandError(InputValidationError):
-    """Two operands of a commutative pod have one identity, which is not supported yet.
+    """The operand set for a pod's identity contains two inputs with one identity.
 
-    A stopgap: ITL-1511 is to allow a commutative operator to take one stream more than
-    once. The message names the pod that got the repeated operand, set once by the pod whose
-    own operands repeat (``named``) and never replaced. A pod further down, or a function
-    pod whose join got the operands, can only add context (``add_context``): what the
-    repeated operand is part of.
+    The developer approved this stopgap on 2026-11-27 until ITL-1511 adds a unique/repeat
+    toggle. A job forms the identity and raises this error, while a standalone row read
+    can skip identity formation. The message names the pod whose own operands repeat
+    (``named``). A downstream pod or a function pod whose join got the repeated inputs
+    can attach context with ``add_context``.
 
     Args:
         reason: What is repeated and what to do instead.

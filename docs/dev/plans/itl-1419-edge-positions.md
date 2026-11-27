@@ -32,29 +32,30 @@ missed two separate sources of one identity (standalone hashes still collided, a
 recorded over them compiled in one order and failed in the other), and that the check
 added its own error for an operand that cannot be hashed.
 
-Developer, November 27, 2026: a stopgap until ITL-1511. Until then, refuse exactly where the identity is formed
-from the operands as a set. `core/operators/repeated_operands.operand_set` builds that set
+On 2026-11-27 the developer approved refusing repeated operands as a stopgap until
+ITL-1511. The refusal occurs when the pod forms its identity from its operands as a set.
+`core/operators/repeated_operands.operand_set` builds that set
 and raises `RepeatedOperandError` (an `InputValidationError`) when two operands have one
-identity (they are equal as the set compares them). `Join.argument_symmetry` (so also
+identity (they are equal as the set compares them). This includes two separately built
+sources with the same source ID and schema. `Join.argument_symmetry` (so also
 `Rejoin`), the commutative branch of `BinaryOperator.argument_symmetry` and the function
 pod's `argument_symmetry` call it. The error names the operator whose own operands repeat
 (`RepeatedOperandError.named`, set once); a pod downstream, and a function pod whose join
 got the operands, add context (`add_context`) and never replace that name (verification
-of the third head). Whatever forms the identity meets the refusal: hashing, recording,
-compiling; a function pod never forms it on the row path. No separate check remains. An operand whose identity cannot be
-computed raises what hashing it raises. Rows computed without forming the identity
-(standalone `as_table()`) are computed as before.
-
-A commutative operator's inputs have no position also when it has one input (`Join()(a)`):
-only a function or side-effect pod gets position 0 for its one input.
+of the third head). Hashing, recording and compiling form the identity. An operand whose
+identity cannot be computed raises its existing hashing error. Standalone row reads such as
+`Join()(d, d).as_table()` or a function pod's row read over several inputs can proceed
+when they skip identity formation. A job refuses the same invocation. The developer
+accepted this discrepancy as part of the stopgap, and ITL-1511 will remove it.
 
 ## Change
 
 1. **One rule for positions** (new `src/orcapod/pipeline/edges.py`): `input_positions(pod,
    inputs)` gives each input of an operator its argument index when the operator's
    `argument_symmetry` is a tuple (`MergeJoin`, `SemiJoin`: 0 and 1) and `None` when it is a
-   `frozenset` (`Join`, `Rejoin`, with any number of inputs); a function or side-effect pod's
-   one input is at 0. Used by
+   `frozenset` (`Join`, `Rejoin`, even with one input). A function or side-effect pod's
+   one input is at 0. Positions exist in memory. When ITL-1511 allows repeats, each
+   identical edge will get an occurrence number so it can be identified individually. Used by
    `_record_invocation`, `compile`, the `PipelineJob` rebuild of a blueprint and the loader.
 2. **Hash-level edges are triples.** `_graph_edges` becomes a sorted list of
    `(upstream key, node key, position)`. `_hash_graph` (networkx, used for topological order and
@@ -76,13 +77,12 @@ only a function or side-effect pod gets position 0 for its one input.
    events are unchanged.
 6. **Held rows** (`node.run()`, the state rule) feed every position alike: the sync orchestrator
    reads `outputs[upstream]` per edge, the async one sends the held rows to every edge reader.
-7. **Diagram: left to stage 2.** The diagram keys its edges by node pair and role
-   (`(start, end, constrains)`) and routes them in the layout code, so two lines for
-   `MergeJoin(A, A)` need parallel-edge routing there, not a change in the edge listing
-   (coordinator, 2026-11-26: leave it to stage 2 if it reaches layout code).
+7. **Diagram.** `diagram()` draws one line for both inputs of `MergeJoin(A, A)` because
+   the diagram keys its edges by node pair and role (`(start, end, constrains)`).
+   ITL-1530 tracks routing parallel edges in the layout.
    `SemiJoin(A, A)` already draws two lines (plain and constraining, ITL-1455).
 
-Not in this stage: any public name (`job.edges`), any restriction, any change to a refusal, and
+Not in this stage: any public name (`job.edges`), any restriction, and
 nothing in the id code of `core/nodes/function_node.py` / `operator_node.py` (ITL-1466).
 
 ## Hashes
@@ -103,8 +103,9 @@ New file `tests/test_pipeline/test_edge_positions.py`, inputs with two tag and t
   another at 1 and the reverse, give the standalone rows.
 - A source node's observer events are the same for `MergeJoin(A, A)` as for `MergeJoin(A, B)`
   per source (one start and end per run).
-- `Join`, `Rejoin` and a function pod given one stream twice are refused (for now: ITL-1511), standalone and
-  at recording, in both recording orders, sync and async; `Join(a)` has position `None`.
+- Exercise `RepeatedOperandError` when hashing and recording `Join`, `Rejoin` and function
+  pods with repeated operands (ITL-1511), including both recording orders and sync and
+  async jobs.
 - The saved file of a job with `MergeJoin(A, A)` has one edge pair and `inputs` `[A, A]`;
   saving a loaded job writes the same bytes.
 - `test_one_stream_given_twice_fails_to_run_in_a_job` becomes the test that it runs.

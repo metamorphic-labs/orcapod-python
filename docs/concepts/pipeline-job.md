@@ -380,6 +380,15 @@ Every job also carries its blueprint as `job.pipeline`.
 
 ## Seeing the graph
 
+In memory, a job keeps one edge per input. Ordered operators use argument indices, so
+`MergeJoin()(a, a)` runs with two edges, at positions 0 and 1. Commutative operators use
+`None` for the position, even with one input. ITL-1511 will give identical edges occurrence
+numbers when repeated operands are allowed, so each edge can be identified individually.
+Saved pipelines reconstruct positions from the saved input lists.
+
+`diagram()` currently draws one line for the two inputs of `MergeJoin()(a, a)`. ITL-1530
+tracks drawing both lines.
+
 !!! caution "In development"
     `Pipeline.diagram()`, `PipelineJob.diagram()`, `PipelineDiagram` and its methods and
     arguments, the look of the picture and the notebook display may change in any release
