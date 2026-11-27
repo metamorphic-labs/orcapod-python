@@ -9,6 +9,9 @@ code. See site/README.md.
 Database backends store pipeline results. The SQLite and PostgreSQL connectors support
 reads and writes through `ConnectorArrowDatabase`. The SpiralDB connector is read-only.
 
+**Provisional.** `ExtensionAwareDatabase` is expected to be integrated more closely with
+the underlying database classes (ITL-1539), so its public form may change.
+
 ::: orcapod.databases.DeltaTableDatabase
 
 ::: orcapod.databases.InMemoryArrowDatabase
