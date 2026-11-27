@@ -671,7 +671,11 @@ but it does compute the results that are missing. `job.run(load_only=True)` fill
 with what is already stored for this run's inputs and never computes: sources are read,
 operators run on the rows that reach them, each function node takes the stored results of
 its inputs and skips the inputs that have none, no side effect is delivered and nothing is
-written to the database. The summary counts what each node loaded and skipped:
+written to the database. A cached source checks its store on each run and reads only the
+rows already there. If it has no stored rows, it warns and supplies an empty input.
+These cache snapshots, including those read through a derived source, leave the source's
+full-run rows and modification time intact.
+The summary counts what each node loaded and skipped:
 
 ```python
 more_mice = mice + [{"subject_id": "mouse_04", "weight": 30.0, "height": 0.12}]
@@ -698,6 +702,10 @@ inputs. A function node passes on only the rows it loaded, so the rows below it 
 incomplete: a group formed after it may lack members, and the result stored for a smaller
 group by an earlier run may then be loaded for it. `run_async(load_only=True)` does the same
 on the asynchronous orchestrator.
+
+A run skips unbound source slots and every node that depends on them. The summary lists those
+nodes and the slots blocking each one in `summary.skipped_unbound_sources`. Bind the missing
+sources with `job.bind(sources=...)` to include those nodes on the next run.
 
 A load-only run reads only job nodes, sources and streams that neither compute nor deliver.
 A pod's stream built outside the job (a function pod's, which computes when it is read, or a
@@ -1023,6 +1031,19 @@ file saved by an earlier release (format `0.1.0` to `0.3.0`) is refused, with a 
 saying so. Rebuild the pipeline from code and save it again; taking older files to the
 current format is the work of a separate migration tool, not of `load`.
 
+For a saved local Delta database, `load()` requires directories for its saved root
+and any saved scope. A directory can hold zero Delta tables. If either path is
+missing or is a file, loading warns and
+leaves the database unbound. Use
+`PipelineJob.load(path, database=...)` to give the job a moved store, or
+`PipelineJob.load(path, result_database=...)` for a moved separate result store.
+If a cached source's Delta cache cannot be opened, its source slot stays unbound.
+For a remote Delta database, the connection is deferred until the store is accessed.
+Saving the loaded job retains unavailable store and source cache locations.
+
+See [Saving and loading](pipeline-job.md#saving-and-loading) for how loading handles
+SQLite source paths and write-ahead log files.
+
 For example:
 
 ```python
@@ -1057,7 +1078,7 @@ loaded job cannot compute: function pods are not saved with it, so `loaded.run()
 `loaded.run(load_only=True)` fills its nodes from the database instead, as for any job (see
 *Loading without computing* above): the sources are read (an in-memory source must be bound
 first, since its data is not saved), the rebuilt operators run, and each function node takes
-the results stored for those inputs. Nodes below a source that is not available stay empty.
+the results stored for those inputs. The run summary lists the nodes skipped for unbound sources.
 `node.run(load_only=True)` does the same for one node and what it depends on.
 
 ```python

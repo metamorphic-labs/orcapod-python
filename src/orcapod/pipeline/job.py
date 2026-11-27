@@ -15,6 +15,7 @@ from orcapod.core.nodes import JobNode
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.nodes.operator_node import OperatorJobNode
 from orcapod.core.nodes.source_node import SourceJobNode
+from orcapod.core.sources.cached_source import stored_source_caches
 from orcapod.core.sources.derived_source import DerivedSource
 from orcapod.core.streams.base import StreamBase
 from orcapod.side_effects import SideEffectJobNode, SideEffectNode
@@ -50,6 +51,7 @@ from orcapod.types import NodeConfig
 from orcapod.utils.database_errors import database_write_path, flush_best_effort
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
     from pathlib import Path
 
     from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
@@ -92,6 +94,7 @@ class _PreparedRun:
         plan: What the run runs and holds (``plan_run``, ITL-1095).
         unchecked_sources: The sources the start-of-run check could not check
             (``check_sources``, ITL-1102).
+        skipped_unbound_sources: Excluded node labels and the source slots blocking them.
     """
 
     exec_dag: OrcaDAG[Any]
@@ -101,6 +104,7 @@ class _PreparedRun:
     result_db: "ArrowDatabaseProtocol"
     plan: "RunPlan"
     unchecked_sources: tuple[str, ...]
+    skipped_unbound_sources: Mapping[str, set[str]]
 
 
 def _with_counter(
@@ -176,6 +180,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
     ) -> None:
         super().__init__(name=name, tracker_manager=tracker_manager)
         self._database = database
+        self._unresolved_database: dict[str, Any] | None = None
         self._result_database: "ArrowDatabaseProtocol | None" = result_database
         # For a loaded job whose file names a separate result database that is not
         # available (it could not be rebuilt, or it was in memory) and none was given:
@@ -187,6 +192,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         self._auto_compile = auto_compile
         # name → bound concrete source (user-facing API: job.sources).
         self._sources: dict[str, cp.StreamProtocol] = {}
+        self._unresolved_sources: dict[str, dict[str, Any]] = {}
         # hash → bound concrete source, keyed by the same hash as
         # _persistent_node_map.  Used by bind() for O(1) lookup by content
         # hash; avoids name collisions when multiple concrete sources share
@@ -535,6 +541,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # the job as it was, its database included (ITL-1112).
         self._database = new_database
         self._result_database = new_result_database
+        if database is not None:
+            self._unresolved_database = None
         if result_database_given:
             self._unresolved_result_database = None
 
@@ -548,6 +556,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     schema_hash = job_node.as_node().content_hash().to_string()
                     self._sources_by_hash[schema_hash] = sources[job_node.name]
             self._sources.update(sources)
+            for source_name in sources:
+                self._unresolved_sources.pop(source_name, None)
             # Every node predicts its schema again (ITL-1111). Since ITL-1112 a bind
             # should never change a prediction: ``validate`` refuses a source of other
             # column names or types, and the slot gives the declared schema, so this
@@ -980,9 +990,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         """Execute the resolvable subgraph of this job in place.
 
         Nodes whose upstream includes an unbound source (and all their
-        dependents) are excluded from execution. Partial execution is a
-        first-class outcome — ``unbound_sources`` reports which source
-        slots were excluded.
+        dependents) are excluded from execution. The summary's
+        ``skipped_unbound_sources`` names those nodes and the slots that block them.
 
         After a successful run, ``job.nodes`` returns the execution-ready
         nodes with populated database caches.
@@ -1074,43 +1083,46 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         """
         from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
 
-        prepared = self._prepare_run(commit_every_rows, load_only=load_only)
-        # The state rule (ITL-1095): a node that holds a current run is not run again.
-        plan = prepared.plan
-        counter = RunCountingObserver()
-        effective_orchestrator = orchestrator or SyncPipelineOrchestrator()
-        is_sync = isinstance(effective_orchestrator, SyncPipelineOrchestrator)
-        with self._executing(prepared, plan, commit_every_rows, load_only=load_only):
-            if is_sync:
-                # Held nodes give their output streams on the sync path (ITL-1347).
-                _ = effective_orchestrator.run(
-                    plan.dag,
-                    observer=_with_counter(observer, counter),
-                    run_id=prepared.run_id,
-                    pipeline_uri=prepared.pipeline_uri,
-                    materialize_results=materialize_results,
-                    load_only=load_only,
-                    held=plan.held,
-                )
-            else:
-                # The async path sends the rows the plan took (until stage 5).
-                _ = effective_orchestrator.run(
-                    plan.dag,
-                    observer=_with_counter(observer, counter),
-                    run_id=prepared.run_id,
-                    pipeline_uri=prepared.pipeline_uri,
-                    materialize_results=materialize_results,
-                    load_only=load_only,
-                    held_rows=plan.held_rows,
-                )
-        summary = self._finish_run(
-            prepared,
-            counter,
-            plan,
-            load_only=load_only,
-            unchecked_sources=prepared.unchecked_sources,
-            asynchronous=not is_sync,
-        )
+        with stored_source_caches(load_only):
+            prepared = self._prepare_run(commit_every_rows, load_only=load_only)
+            # The state rule (ITL-1095): a node that holds a current run is not run again.
+            plan = prepared.plan
+            counter = RunCountingObserver()
+            effective_orchestrator = orchestrator or SyncPipelineOrchestrator()
+            is_sync = isinstance(effective_orchestrator, SyncPipelineOrchestrator)
+            with self._executing(
+                prepared, plan, commit_every_rows, load_only=load_only
+            ):
+                if is_sync:
+                    # Held nodes give their output streams on the sync path (ITL-1347).
+                    _ = effective_orchestrator.run(
+                        plan.dag,
+                        observer=_with_counter(observer, counter),
+                        run_id=prepared.run_id,
+                        pipeline_uri=prepared.pipeline_uri,
+                        materialize_results=materialize_results,
+                        load_only=load_only,
+                        held=plan.held,
+                    )
+                else:
+                    # The async path sends the rows the plan took (until stage 5).
+                    _ = effective_orchestrator.run(
+                        plan.dag,
+                        observer=_with_counter(observer, counter),
+                        run_id=prepared.run_id,
+                        pipeline_uri=prepared.pipeline_uri,
+                        materialize_results=materialize_results,
+                        load_only=load_only,
+                        held_rows=plan.held_rows,
+                    )
+            summary = self._finish_run(
+                prepared,
+                counter,
+                plan,
+                load_only=load_only,
+                unchecked_sources=prepared.unchecked_sources,
+                asynchronous=not is_sync,
+            )
         if not summary.ok:
             warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
         return summary
@@ -1161,28 +1173,31 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 f"{type(orchestrator).__name__}. Use job.run(orchestrator=...) to run "
                 "it."
             )
-        prepared = self._prepare_run(commit_every_rows, load_only=load_only)
-        # The state rule (ITL-1095): a node that holds a current run is not run again.
-        plan = prepared.plan
-        counter = RunCountingObserver()
-        with self._executing(prepared, plan, commit_every_rows, load_only=load_only):
-            _ = await orchestrator.run_async(
-                plan.dag,
-                observer=_with_counter(observer, counter),
-                run_id=prepared.run_id,
-                pipeline_uri=prepared.pipeline_uri,
-                materialize_results=materialize_results,
+        with stored_source_caches(load_only):
+            prepared = self._prepare_run(commit_every_rows, load_only=load_only)
+            # The state rule (ITL-1095): a node that holds a current run is not run again.
+            plan = prepared.plan
+            counter = RunCountingObserver()
+            with self._executing(
+                prepared, plan, commit_every_rows, load_only=load_only
+            ):
+                _ = await orchestrator.run_async(
+                    plan.dag,
+                    observer=_with_counter(observer, counter),
+                    run_id=prepared.run_id,
+                    pipeline_uri=prepared.pipeline_uri,
+                    materialize_results=materialize_results,
+                    load_only=load_only,
+                    held_rows=plan.held_rows,
+                )
+            summary = self._finish_run(
+                prepared,
+                counter,
+                plan,
                 load_only=load_only,
-                held_rows=plan.held_rows,
+                unchecked_sources=prepared.unchecked_sources,
+                asynchronous=True,
             )
-        summary = self._finish_run(
-            prepared,
-            counter,
-            plan,
-            load_only=load_only,
-            unchecked_sources=prepared.unchecked_sources,
-            asynchronous=True,
-        )
         if not summary.ok:
             warn_row_failures(summary, sys._getframe(1))  # pyright: ignore[reportPrivateUsage]  # the caller's line is where the warning is shown
         return summary
@@ -1304,28 +1319,31 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             if node_hash not in hash_dag:
                 hash_dag.add_node(node_hash)
 
-        # Walk topologically; exclude unbound sources and all their dependents.
-        excluded_hashes: set[str] = set()
+        # Keep the causes of exclusion through every saved node, even one the
+        # loader did not restore, so the nodes below it also report their blockers.
+        blocked_by: dict[str, set[str]] = {}
+        skipped_unbound_sources: dict[str, set[str]] = {}
         for node_hash in hash_dag.topological_sort():
-            if node_hash not in self._persistent_node_map:
-                # A node a loaded job did not restore (a kind PipelineJob.load does
-                # not know): below an unbound source it is left out too, so the nodes
-                # below it are as well.
-                if any(p in excluded_hashes for p in hash_dag.predecessors(node_hash)):
-                    excluded_hashes.add(node_hash)
-                continue
-            node = self._persistent_node_map[node_hash]
+            node = self._persistent_node_map.get(node_hash)
+            slots = {
+                slot
+                for parent_hash in hash_dag.predecessors(node_hash)
+                for slot in blocked_by.get(parent_hash, ())
+            }
             if isinstance(node, SourceJobNode) and node.bound_source is None:
-                excluded_hashes.add(node_hash)
-            elif any(p in excluded_hashes for p in hash_dag.predecessors(node_hash)):
-                excluded_hashes.add(node_hash)
+                slots.add(node.name)
+            if not slots:
+                continue
+            blocked_by[node_hash] = slots
+            if node is not None:
+                skipped_unbound_sources[node.label] = slots
 
         # A loaded job whose graph lost a node (the file records a node of a kind
         # PipelineJob.load does not restore) cannot feed the nodes below it: every
         # saved input of a node must be a restored node.
         if self._loaded:
             for node_hash, node in self._persistent_node_map.items():
-                if node_hash in excluded_hashes:
+                if node_hash in blocked_by:
                     continue  # below an unbound source: not part of this run
                 if not isinstance(node, (FunctionJobNode, OperatorJobNode)):
                     continue
@@ -1348,12 +1366,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # --- Build execution OrcaDAG from existing node objects (no cloning) ---
         exec_dag: OrcaDAG = OrcaDAG()
         for node_hash, node in self._persistent_node_map.items():
-            if node_hash not in excluded_hashes:
+            if node_hash not in blocked_by:
                 exec_dag.add_node(node)
         for u_hash, v_hash in self._graph_edges:
             if (
-                u_hash not in excluded_hashes
-                and v_hash not in excluded_hashes
+                u_hash not in blocked_by
+                and v_hash not in blocked_by
                 and u_hash in self._persistent_node_map
                 and v_hash in self._persistent_node_map
             ):
@@ -1425,6 +1443,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             result_db=result_db,
             plan=plan,
             unchecked_sources=unchecked,
+            skipped_unbound_sources=skipped_unbound_sources,
         )
 
     @contextlib.contextmanager
@@ -1562,6 +1581,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             ran_nothing=not plan.to_run,
             restricted_sources=restrictions_in_force(prepared.exec_dag.nodes()),
             asynchronous=asynchronous,
+            skipped_unbound_sources=prepared.skipped_unbound_sources,
         )
         return self._last_run
 
@@ -1584,6 +1604,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         Saves topology (via the embedded Pipeline) plus bindings metadata and
         run state. The format covers both "template" (pre-run) and
         "completed" (post-run) states — distinguished by ``run.status``.
+        Recorded configurations for unavailable bindings are saved until replaced.
 
         Args:
             path: File path to write JSON output to.
@@ -1621,9 +1642,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         finally:
             os.unlink(tmp_path)
 
-        # Serialize source configs (best-effort — skip non-reconstructable sources)
-        sources_block: dict[str, Any] = {}
-        for spec_name, source in sorted(self._sources.items()):
+        # Unavailable sources keep their saved config until replaced by a binding.
+        sources_block: dict[str, Any] = dict(self._unresolved_sources)
+        for spec_name, source in self._sources.items():
             if hasattr(source, "to_config"):
                 try:
                     # ``hasattr`` checked it: every source declares it.
@@ -1640,7 +1661,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 sources_block[spec_name] = {"source_type": "unknown"}
 
         # Database config (best-effort)
-        database_block = None
+        database_block = self._unresolved_database
         if self._database is not None and hasattr(self._database, "to_config"):
             database_block = self._database.to_config()
         # A separate result database (ITL-1408), saved by the same rule; ``None`` when
@@ -1703,7 +1724,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             },
             "pipeline": pipeline_data,
             "bindings": {
-                "sources": sources_block,
+                "sources": dict(sorted(sources_block.items())),
                 "database": database_block,
                 "result_database": result_database_block,
             },
@@ -1738,6 +1759,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         cannot be rebuilt for another reason (a moved file) is logged as a
         warning. Neither affects reading the other nodes.
 
+        A saved local Delta store must already have directories for its root and
+        any saved scope. If either path is missing or is a file, loading warns
+        and leaves the corresponding database or cached source unbound. Remote
+        Delta stores are opened on access. SQLite inputs open existing files
+        read-only. SQLite may create its own WAL working files while reading.
+
         Args:
             path: Path to the JSON file produced by ``save()``.
             database: Optional database override. When provided, takes precedence
@@ -1764,8 +1791,6 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 such a file then loads.
         """
         import json as _json
-        import os
-        import tempfile
         from pathlib import Path as _Path
 
         from orcapod.core.nodes.source_node import SourceNodeBase
@@ -1792,20 +1817,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             exc.add_note(f"Loading the job file {path}")
             raise
 
-        # Reconstruct pipeline from embedded blueprint data
-        with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as tmp:
-            tmp_path = tmp.name
-            _json.dump(data["pipeline"], tmp)
-        try:
-            pipeline = Pipeline.load(tmp_path)
-        except ValueError as exc:
-            # The embedded pipeline was read from a temporary file: name the job file.
-            message = str(exc)
-            if tmp_path in message:
-                exc.args = (message.replace(tmp_path, str(path)),)
-            raise
-        finally:
-            os.unlink(tmp_path)
+        pipeline = Pipeline._from_saved_data(data["pipeline"], path)  # pyright: ignore[reportPrivateUsage]  # the job embeds a pipeline blueprint
 
         # Reconstruct sources (best-effort)
         slots = {
@@ -1814,9 +1826,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             if isinstance(node, SourceNodeBase)
         }
         sources: dict[str, cp.StreamProtocol] = {}
-        for spec_name, src_config in (
-            data.get("bindings", {}).get("sources", {}).items()
-        ):
+        bindings = data.get("bindings", {})
+        saved_sources: dict[str, dict[str, Any]] = bindings.get("sources", {})
+        for spec_name, src_config in saved_sources.items():
             source_type = src_config.get("source_type")
             # Every source states its plain tags (ITL-1019): a refusal is the file's
             # error, not a source that could not be rebuilt.
@@ -1878,8 +1890,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         # Reconstruct database
         effective_database = database
+        unresolved_database: dict[str, Any] | None = None
         if effective_database is None:
-            bindings = data.get("bindings", {})
             if bindings.get("store") and "database" not in bindings:
                 # A file saved before ITL-1082 renamed the key. It is not read under
                 # the old name: the job would load without its database, silently.
@@ -1897,8 +1909,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                         resolve_database_from_config,
                     )
 
-                    effective_database = resolve_database_from_config(store_config)
+                    effective_database = resolve_database_from_config(
+                        store_config, create_base_path=False
+                    )
                 except Exception as exc:
+                    unresolved_database = store_config
                     logger.warning(
                         "Could not reconstruct the database from its saved config: %s. "
                         "Node results cannot be read until a database is given: "
@@ -1915,7 +1930,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         effective_result_database = result_database
         unresolved_result_database: dict[str, Any] | None = None
         if effective_result_database is None:
-            result_config = data.get("bindings", {}).get("result_database")
+            result_config = bindings.get("result_database")
             if result_config and result_config.get("type") == "in_memory":
                 # An in-memory database holds nothing once its process ended: a new
                 # one would be empty, so it is not available, as a connector is not.
@@ -1934,7 +1949,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     )
 
                     effective_result_database = resolve_database_from_config(
-                        result_config
+                        result_config, create_base_path=False
                     )
                 except Exception as exc:
                     unresolved_result_database = result_config
@@ -1953,6 +1968,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             result_database=effective_result_database,
         )
         job._unresolved_result_database = unresolved_result_database
+        job._unresolved_database = unresolved_database
+        job._unresolved_sources = {
+            name: config
+            for name, config in saved_sources.items()
+            if name not in sources
+        }
         job._loaded = True
         job._compiled_pipeline = pipeline
         # Mark compiled so save() / compiled_pipeline can be accessed.

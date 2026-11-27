@@ -376,6 +376,7 @@ def run_job_node(
             sources the check could not check; returns its ``RunSummary`` or ``None``.
         caller: The frame of the ``run()`` caller.
     """
+    from orcapod.core.sources.cached_source import stored_source_caches
     from orcapod.pipeline.node_run import (
         check_sources,
         depends_on_job_nodes,
@@ -385,27 +386,28 @@ def run_job_node(
     from orcapod.pipeline.restrictions import refuse_restriction_conflicts
     from orcapod.pipeline.run_summary import warn_row_failures
 
-    # A source read under two restrictions, or a caching operator over a restricted
-    # source, is refused before any source is checked and before anything is
-    # computed or written (ITL-1218).
-    refuse_restriction_conflicts([node])
-    # Every source feeding the run first takes in any new data (ITL-1102).
-    unchecked = check_sources([node])
-    if node.holds_current_run(load_only=load_only):
-        return
-    if depends_on_job_nodes(node):
-        summary = run_with_dependencies(
-            node, load_only=load_only, unchecked_sources=unchecked
-        )
-    else:
-        if load_only:
-            refuse_unloadable_inputs(node)
-        summary = run_alone(unchecked)
-    if summary is None:
-        return
-    node._last_run = summary
-    if not summary.ok:
-        warn_row_failures(summary, caller)
+    with stored_source_caches(load_only):
+        # A source read under two restrictions, or a caching operator over a restricted
+        # source, is refused before any source is checked and before anything is
+        # computed or written (ITL-1218).
+        refuse_restriction_conflicts([node])
+        # Every source feeding the run first takes in any new data (ITL-1102).
+        unchecked = check_sources([node])
+        if node.holds_current_run(load_only=load_only):
+            return
+        if depends_on_job_nodes(node):
+            summary = run_with_dependencies(
+                node, load_only=load_only, unchecked_sources=unchecked
+            )
+        else:
+            if load_only:
+                refuse_unloadable_inputs(node)
+            summary = run_alone(unchecked)
+        if summary is None:
+            return
+        node._last_run = summary
+        if not summary.ok:
+            warn_row_failures(summary, caller)
 
 
 class FunctionNodeBase(StreamBase):

@@ -1760,6 +1760,7 @@ class DeltaTableDatabase:
         self._path_prefix = _path_prefix
         self._root = _root
         self._scoped_path = _scoped_path
+        self._create_base_path = create_base_path
         self.batch_size = batch_size
         self.max_hierarchy_depth = max_hierarchy_depth
         self.allow_schema_evolution = allow_schema_evolution
@@ -1770,9 +1771,10 @@ class DeltaTableDatabase:
             self._local_root = Path(self._root_uri)
             if create_base_path:
                 self._local_root.mkdir(parents=True, exist_ok=True)
-            elif not self._local_root.exists():
+            elif not self._local_root.is_dir():
                 raise ValueError(
-                    f"Base path {self._local_root} does not exist and create_base_path=False"
+                    f"Base path {self._local_root} is not an existing directory "
+                    "and create_base_path=False"
                 )
         # For cloud paths: create_base_path is silently ignored (no directory needed).
 
@@ -3407,12 +3409,20 @@ class DeltaTableDatabase:
         return config
 
     @classmethod
-    def from_config(cls, config: dict[str, Any]) -> "DeltaTableDatabase":
+    def from_config(
+        cls, config: dict[str, Any], *, create_base_path: bool = True
+    ) -> "DeltaTableDatabase":
         """Reconstruct a DeltaTableDatabase from a config dict.
 
         Supports both the current format (``"root_uri"`` for the storage root,
         ``"base_path"`` as a list for the scoping prefix) and the legacy format
         produced before ENG-341 (``"base_path"`` as a URI string, no prefix).
+
+        Args:
+            config: The saved database configuration.
+            create_base_path: PROVISIONAL. Create a missing local root when true. When false,
+                require existing directories for the root and the saved scope.
+                Remote stores are opened lazily.
         """
         if "root_uri" in config:
             # Current format (post-ENG-341)
@@ -3425,15 +3435,26 @@ class DeltaTableDatabase:
             # Legacy format (pre-ENG-341): "base_path" was the root URI string
             root_uri = config["base_path"]
             _path_prefix = ()
-        return cls(
+        database = cls(
             base_path=root_uri,
             storage_options=config.get("storage_options"),
-            create_base_path=True,
+            create_base_path=create_base_path,
             batch_size=config.get("batch_size", 1000),
             max_hierarchy_depth=config.get("max_hierarchy_depth", 10),
             allow_schema_evolution=config.get("allow_schema_evolution", True),
             _path_prefix=_path_prefix,
         )
+        if not create_base_path:
+            database._require_existing_scope()
+        return database
+
+    def _require_existing_scope(self) -> None:
+        """Validate a saved local scope without creating it."""
+        if self._is_cloud or not self._path_prefix:
+            return
+        scope = Path(self._get_table_uri(()))
+        if not scope.is_dir():
+            raise ValueError(f"Delta store scope {scope} is not an existing directory")
 
     @property
     def keeps_field_metadata(self) -> bool:
@@ -4281,6 +4302,7 @@ class DeltaTableDatabase:
         return DeltaTableDatabase(
             base_path=self._root_uri,
             storage_options=self._storage_options,
+            create_base_path=self._create_base_path,
             batch_size=self.batch_size,
             max_hierarchy_depth=self.max_hierarchy_depth,
             allow_schema_evolution=self.allow_schema_evolution,
