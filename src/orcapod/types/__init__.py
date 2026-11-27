@@ -74,11 +74,6 @@ SourceInfoValue: TypeAlias = str | None | list["SourceInfoValue"]
 unknown, or -- for many-to-one operators such as ``GroupBy`` and
 ``MergeJoin`` -- a list of tokens, one per aggregated member."""
 
-TokenLayout: TypeAlias = tuple[tuple[str, str, pa.DataType, pa.DataType], ...]
-"""The token columns of a row that are not plain strings, in the order of its data
-columns: the token column, its data column, and the Arrow type the row holds for
-each. Empty for a row whose tokens are all plain strings (``large_string``)."""
-
 PathSet: TypeAlias = PathLike | Collection[PathLike | None]
 """A single path or an arbitrarily nested collection of paths (with optional
 ``None`` entries). Used when operations need to address multiple files at

@@ -56,10 +56,6 @@ def _assert_same_datagram(built: Datagram, expected: Datagram) -> None:
             assert _same_table(held[name], value), name
         elif name == "_data_context":
             assert held[name] is value
-        elif name == "_token_layout":
-            # What ``token_layout()`` answered: the rows of one table are given
-            # the answer once; the constructor's row reads it when asked (below).
-            assert value is None
         else:
             assert held[name] == value, name
     # What it reports, through every view.
@@ -82,7 +78,6 @@ def _assert_same_datagram(built: Datagram, expected: Datagram) -> None:
     if isinstance(expected, Data):
         assert isinstance(built, Data)
         assert built.source_info() == expected.source_info()
-        assert built.token_layout() == expected.token_layout()
 
 
 def _assert_rows_match_the_constructor(

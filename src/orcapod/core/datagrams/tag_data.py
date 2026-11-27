@@ -35,7 +35,6 @@ from orcapod.types import (
     Schema,
     SchemaLike,
     SourceInfoValue,
-    TokenLayout,
 )
 from orcapod.utils import arrow_utils
 
@@ -423,8 +422,6 @@ class Data(Datagram):
         # them, when it was read from one (here, or ``rows_of``); ``None``
         # otherwise, and after any change of the columns or tokens.
         self._typed_source_info: "pa.Table | None" = typed
-        # What ``token_layout`` answered; a copy starts without one.
-        self._token_layout: "TokenLayout | None" = None
 
     @staticmethod
     def _data_and_source_info_tables(
@@ -491,17 +488,11 @@ class Data(Datagram):
         if data_table.num_columns == 0:
             raise ValueError("Data table must contain at least one data column.")
         rows = cls._rows_of_table(data_table, data_context, beside=si_table)
-        # The rows of one table hold one layout of token and data types: the first
-        # row reads it and the others are given the same object (ITL-1491).
-        layout: "TokenLayout | None" = None
         for data, _, source_info_row in rows:
             assert source_info_row is not None
             data._source_info = cls._source_info_of_row(source_info_row)
             data._source_info_table = None
             data._typed_source_info = source_info_row
-            data._token_layout = layout
-            if layout is None:
-                layout = data.token_layout()
             yield data
 
     # ------------------------------------------------------------------
@@ -675,87 +666,6 @@ class Data(Datagram):
             ),
         )
 
-    def token_layout(self) -> "TokenLayout":
-        """Return the token columns of this row that are not plain strings.
-
-        What the token-shape rule reads of a row that is handed on without being
-        built into a stream (``schema_utils.require_token_shapes_of_rows``). No
-        table is built and no data value is read: a row read from an Arrow table
-        gives the types of the token columns it holds and of its data columns; a
-        row built from Python values has no Arrow type for a token, so a token
-        that is a list is typed from that list
-        (``arrow_utils.source_info_arrow_type``, as ``as_table`` types it), a
-        string or ``None`` token is a plain string, and the data types come from
-        the row's schema. The rows read from one table share one layout object.
-
-        Returns:
-            One entry per token column whose type is not ``large_string``, in the
-            order of the data columns: the token column, the data column, the
-            token type and the data type, as the row holds them. Empty when every
-            token is a plain string.
-        """
-        layout = self._token_layout
-        if layout is None:
-            layout = self._token_layout = self._read_token_layout()
-        return layout
-
-    def _read_token_layout(self) -> "TokenLayout":
-        typed = self._typed_source_info
-        token_types: "dict[str, pa.DataType]" = {}
-        if typed is not None:
-            token_types = {
-                field.name.removeprefix(constants.SOURCE_PREFIX): field.type
-                for field in typed.schema
-                if not pa.types.is_large_string(field.type)
-            }
-        else:
-            # Built from values: only a list is not a plain string token.
-            token_types = {
-                name: arrow_utils.source_info_arrow_type(token)
-                for name, token in self._source_info.items()
-                if token is not None and not isinstance(token, str)
-            }
-        if not token_types:
-            return ()
-        # The schema of the table the row holds, or of its Python schema; no
-        # table is built for it.
-        table = self._data_table
-        data_schema = table.schema if table is not None else self._ensure_arrow_schema()
-        return tuple(
-            (
-                f"{constants.SOURCE_PREFIX}{name}",
-                name,
-                token_types[name],
-                data_schema.field(name).type,
-            )
-            for name in Datagram.keys(self)
-            if name in token_types
-        )
-
-    def token_null_level(self, name: str, layers: int) -> int | None:
-        """Return the list level at which the token of ``name`` holds a null list.
-
-        Read from the token the row already holds (a null of a row's token column
-        is held as ``None``); no Arrow is read or built. Asked only of a column of
-        ``token_layout()``: there a row built from Python values never holds a
-        ``None`` token, which is a plain string token.
-
-        Args:
-            name: A data column of ``token_layout()``.
-            layers: The number of list layers of its token's type.
-
-        Returns:
-            The outermost level of a null list (0 is the token itself), or
-            ``None`` when no list of the token is null
-            (``arrow_utils.null_token_list_level``).
-        """
-        token = self._source_info.get(name)
-        if token is None:
-            return 0
-        if layers == 1:
-            return None
-        return arrow_utils.null_token_list_level(token, layers)
-
     def _token_columns(
         self, kept: "Mapping[str, pa.ChunkedArray[Any]]", *, every_column: bool = False
     ) -> "pa.Table":
@@ -821,9 +731,7 @@ class Data(Datagram):
         A token given as a Python value is typed from that value: no Arrow type
         exists for it. A token whose column type is known (an operator that
         derives a token from its input's, as ``Index`` does) is given as an
-        Arrow scalar of that type, and keeps it (ITL-1491), in its large variant
-        and with a ``null`` leaf read as ``large_string``, as a token column read
-        from a table is held.
+        Arrow scalar of that type, and keeps it (ITL-1491).
 
         Args:
             **source_info: The token of each named data column: a Python value,
@@ -838,16 +746,8 @@ class Data(Datagram):
             if key.startswith(constants.SOURCE_PREFIX):
                 key = key.removeprefix(constants.SOURCE_PREFIX)
             if isinstance(value, pa.Scalar):
-                # In the large types of a datagram, as a token column read from a
-                # table is: a ``null`` leaf is a string's (a stream reads it so,
-                # and the instance id cannot hash a ``null`` type).
                 typed_given[key] = pa.chunked_array(
-                    [
-                        pa.array(
-                            [value.as_py()],
-                            type=arrow_utils.normalize_to_large_types(value.type),
-                        )
-                    ]
+                    [pa.array([value.as_py()], type=value.type)]
                 )
                 value = cast("SourceInfoValue", value.as_py())
             current[key] = value
@@ -1126,8 +1026,6 @@ class Data(Datagram):
         # Not a cache: it is what the row was read with, and stays true for a copy
         # (every method that changes the columns or the tokens clears it).
         new_p._typed_source_info = self._typed_source_info
-        # Read again when asked: the methods that copy go on to change the copy.
-        new_p._token_layout = None
         return new_p
 
 
@@ -1315,10 +1213,6 @@ class EmptyData(Data):
     def cached_content_hash(self) -> ContentHash | None:
         """The stored content hash, or ``None`` if absent (old-format row)."""
         return self._cached_content_hash
-
-    def token_layout(self) -> "TokenLayout":
-        """Return no entry: a placeholder holds no data column for a token to fit."""
-        return ()
 
     def source_info(self) -> "dict[str, SourceInfoValue]":
         """Return the tokens the placeholder carries, by data column name."""

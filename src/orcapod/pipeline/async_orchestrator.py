@@ -11,7 +11,6 @@ import asyncio
 import contextlib
 import contextvars
 import logging
-import operator
 import threading
 import uuid
 import warnings
@@ -283,16 +282,7 @@ class AsyncPipelineOrchestrator:
                             failed_nodes,
                             node,
                             # The rows the plan took (ITL-1347, stage 5 changes it).
-                            _send_held(
-                                held_rows[node],
-                                writer,
-                                # Only a successor that runs reads them; a held
-                                # one discards its inputs.
-                                read=any(
-                                    successor not in held_rows
-                                    for successor in out_edges.get(node, [])
-                                ),
-                            ),
+                            _send_held(held_rows[node], writer),
                         )
                     elif is_source_node(node):
                         _start_node(
@@ -673,41 +663,12 @@ async def _drain(reader: Any) -> None:
         pass
 
 
-_DATA_OF_ROW = operator.itemgetter(1)
-
-
 async def _send_held(
     rows: list[tuple[TagProtocol, DataProtocol]],
     writer: WritableChannel[tuple[TagProtocol, DataProtocol]],
-    *,
-    read: bool = True,
 ) -> None:
-    """Send the rows of a node the run holds rather than runs, then close.
-
-    The rows are a stream's rows that are not built into a stream here, so they are
-    held to the token-shape rule first, as the sync orchestrator's stream of them is
-    when a successor reads it (ITL-1491), before any row is sent. The check reads
-    each row's token layout, which is empty for rows with plain string tokens; the
-    type rule is applied once per distinct layout, and only a list-typed token
-    column is asked, per row, whether its token is null
-    (``schema_utils.require_token_shapes_of_rows``). No table is built and no data
-    value is read.
-
-    Args:
-        rows: The held rows.
-        writer: Where they go.
-        read: Whether a node that runs reads these rows. Rows nobody reads are not
-            checked: the sync orchestrator never builds them either.
-
-    Raises:
-        InputValidationError: If a row's source-info token does not have the shape
-            of its data.
-    """
-    from orcapod.utils import schema_utils
-
+    """Send the rows of a node the run holds rather than runs, then close."""
     try:
-        if read:
-            schema_utils.require_token_shapes_of_rows(map(_DATA_OF_ROW, rows))
         for row in rows:
             await writer.send(row)
     finally:

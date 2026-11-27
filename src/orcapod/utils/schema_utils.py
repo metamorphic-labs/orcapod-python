@@ -5,12 +5,12 @@ import logging
 import sys
 from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from types import UnionType
-from typing import Any, Protocol, Union, get_args, get_origin, get_type_hints
+from typing import Any, Union, get_args, get_origin, get_type_hints
 
 import pyarrow as pa
 
 from orcapod.errors import InputValidationError
-from orcapod.types import ContentHash, Schema, SchemaLike, TokenLayout
+from orcapod.types import ContentHash, Schema, SchemaLike
 
 logger = logging.getLogger(__name__)
 
@@ -902,50 +902,6 @@ def token_layers_fit(token_type: "pa.DataType", data_type: "pa.DataType") -> boo
         token, data = token.value_type, data.value_type  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]  # a list type has a value type
 
 
-def token_types_as_read(
-    token_type: "pa.DataType", data_type: "pa.DataType"
-) -> "tuple[pa.DataType, pa.DataType]":
-    """Return a token column's type and its data column's type as the rule reads them.
-
-    The one normalization before the token-shape rule, for a table's columns and
-    for a row's alike: both types in their large variants, as every stream holds
-    them, and a ``null`` leaf of the token type read as ``large_string``, which is
-    what a stream makes of a source-info column typed ``null`` (a null token is a
-    string token). A row that is handed on without being built into a stream
-    holds the types it was given, so they are read through this first.
-
-    Args:
-        token_type: The Arrow type of the ``_source_<name>`` column.
-        data_type: The Arrow type of the data column ``<name>``.
-
-    Returns:
-        The two types, normalized.
-    """
-    from orcapod.utils import arrow_utils
-
-    return (
-        arrow_utils.normalize_to_large_types(token_type),
-        arrow_utils.normalize_to_large_types(data_type, keep_null=True),
-    )
-
-
-def token_shape_fault(
-    token_type: "pa.DataType", data_type: "pa.DataType"
-) -> "tuple[pa.DataType, pa.DataType] | None":
-    """Return the types of a token column that does not fit its data column.
-
-    Args:
-        token_type: The Arrow type of the ``_source_<name>`` column, as held.
-        data_type: The Arrow type of the data column ``<name>``, as held.
-
-    Returns:
-        ``None`` when the token type fits (``token_layers_fit`` of the types as
-        ``token_types_as_read`` gives them); otherwise those two types.
-    """
-    token, data = token_types_as_read(token_type, data_type)
-    return None if token_layers_fit(token, data) else (token, data)
-
-
 TOKEN_SHAPE_RULE = (
     "A source-info token column must have the shape of its data column: its type is "
     "list layers over a string (large_string), each list layer needs the same list "
@@ -983,15 +939,6 @@ def null_list_level(column: "pa.ChunkedArray[Any] | pa.Array[Any]") -> int | Non
     return None
 
 
-def token_list_layers(token_type: "pa.DataType") -> int:
-    """Return the number of list layers of a token type."""
-    layers = 0
-    while _list_layer(token_type) is not None:
-        token_type = token_type.value_type  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]  # a list type has a value type
-        layers += 1
-    return layers
-
-
 def token_shape_violations(
     data: "pa.Table", tokens: "pa.Table", data_columns: Collection[str]
 ) -> "list[TokenShapeViolation]":
@@ -1023,12 +970,10 @@ def token_shape_violations(
         if pa.types.is_large_string(token_type):
             continue
         data_type = data.schema.field(name).type
-        if fault := token_shape_fault(token_type, data_type):
-            found.append((token_name, name, *fault, None))
+        if not token_layers_fit(token_type, data_type):
+            found.append((token_name, name, token_type, data_type, None))
         elif (level := null_list_level(tokens.column(token_name))) is not None:
-            found.append(
-                (token_name, name, *token_types_as_read(token_type, data_type), level)
-            )
+            found.append((token_name, name, token_type, data_type, level))
     return found
 
 
@@ -1066,73 +1011,6 @@ def token_shape_error(
         + "\n".join(lines)
         + "\nA plain string token (large_string) fits any data and may be null."
     )
-
-
-class HoldsTokenLayout(Protocol):
-    """What the token-shape rule reads of a row (``DataProtocol`` has both)."""
-
-    def token_layout(self) -> "TokenLayout": ...
-
-    def token_null_level(self, name: str, layers: int) -> int | None: ...
-
-
-def require_token_shapes_of_rows(rows: "Iterable[HoldsTokenLayout]") -> None:
-    """Refuse rows that break the token-shape rule, as the stream of them would be.
-
-    For rows that are handed on without being built into a stream (the held rows
-    of the async orchestrator). What is read of each row is its token layout
-    (``token_layout()``): the token columns that are not plain strings, with the
-    types the row holds. Rows with plain string tokens have an empty layout and
-    are not looked at further. The type rule is applied once per distinct layout,
-    not once per row; a list-typed token column that fits is then asked, per row,
-    for the level of a null list in its token (``token_null_level``: the token
-    the row already holds). No table is built and no data value is read.
-
-    Args:
-        rows: The rows' data.
-
-    Raises:
-        InputValidationError: As ``token_shape_error`` words it: every violating
-            column of any row, once.
-    """
-    found: "dict[str, TokenShapeViolation]" = {}
-    judged: "dict[TokenLayout, tuple[list[TokenShapeViolation], list[TokenShapeViolation]]]" = {}
-    last: "TokenLayout | None" = None
-    faults: "list[TokenShapeViolation]" = []
-    nullable: "list[TokenShapeViolation]" = []
-    for row in rows:
-        layout = row.token_layout()
-        if not layout:
-            continue
-        if layout is not last:
-            last = layout
-            verdict = judged.get(layout)
-            if verdict is None:
-                verdict = ([], [])
-                for token_name, name, token_type, data_type in layout:
-                    if fault := token_shape_fault(token_type, data_type):
-                        verdict[0].append((token_name, name, *fault, None))
-                    elif _list_layer(token_type) is not None:
-                        read = token_types_as_read(token_type, data_type)
-                        # In the last place: the token type's list layers.
-                        verdict[1].append(
-                            (token_name, name, *read, token_list_layers(read[0]))
-                        )
-                judged[layout] = verdict
-            faults, nullable = verdict
-        for fault in faults:
-            _ = found.setdefault(fault[0], fault)
-        for token_name, name, token_type, data_type, layers in nullable:
-            assert layers is not None
-            level = row.token_null_level(name, layers)
-            if level is None:
-                continue
-            # The outermost level of any row, as the column of them all gives.
-            known = found.get(token_name)
-            if known is None or (known[4] is not None and level < known[4]):
-                found[token_name] = (token_name, name, token_type, data_type, level)
-    if found:
-        raise token_shape_error(list(found.values()))
 
 
 def dictionary_columns_error(

@@ -163,7 +163,8 @@ One case reaches ordinary pipelines. A `Batch` of single values and a source tha
 holds lists of them have the same values but different tokens: a list of tokens (one per
 member) in the first, one plain token per list in the second. A `Join` on such a column as
 a data-tag, or a `MergeJoin` of it, refuses the two inputs and names the token column and
-both types. Bring both inputs to one form before the join: batch both, or neither. The Arrow types, with a table of what is
+both types. Bring both inputs to one form before the join: batch both, or neither.
+Whether the two forms should join is an open question (ITL-1522). The Arrow types, with a table of what is
 accepted and refused, are in
 [the hashing reference](../reference/hashing.md#the-shape-of-a-source-info-token-column).
 

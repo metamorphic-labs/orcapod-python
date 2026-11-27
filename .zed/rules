@@ -1161,32 +1161,26 @@ these preimages anywhere else.
   a table (`ArrowTableStream.__init__`, so every source, operator result, table built from
   rows, typed zero-row input and the sync orchestrator's held-rows stream), from the
   columns' types and the token column's null count only: no value is read and nothing is
-  computed. Rows that are handed on without being built into a stream are held to it too:
-  the async orchestrator's held rows, once per held node before any is sent, and only
-  when a node that runs reads them (rows of a held node that is terminal, or whose
-  successors are all held, are not checked: the sync orchestrator never builds them
-  either). That check (`schema_utils.require_token_shapes_of_rows`) reads each row's
-  `token_layout()`: the token columns that are not plain strings, with the types the row
-  holds, empty for a row with plain string tokens; the rows read from one table share one
-  layout object (`Data.rows_of`). The type rule is applied once per distinct layout, never
-  per row, and only a list-typed token column is asked per row whether its token is null
-  (`token_is_null`, the token the row already holds). It builds no table and reads no data
-  value; a row built from Python values gets no Arrow (its data types come from its
-  schema, a list token's type from the list, and its `None` token is a plain string). A
-  table's columns and a row's are read by the rule through ONE normalization,
-  `schema_utils.token_types_as_read` (large variants; a `null` leaf of a token type is
-  `large_string`, as a stream holds it): never give `token_layers_fit` a held type
-  directly, and never write a second normalization. `with_source_info` holds an Arrow
-  scalar's token in that same form. Both orchestrators refuse alike, and the error lists
-  the columns in name order (`token_shape_error` sorts them). The type rule is the pure function
+  computed. The error lists the violating columns in name order (`token_shape_error`
+  sorts them). KNOWN LIMIT (ITL-1534): the rule is checked where a stream is built, and
+  the async orchestrator hands a held node's rows on without building one, so a
+  hand-built held row with an invalid token shape is refused on sync and accepted on
+  async (pinned by `test_rows_on_read.py::test_held_rows_that_break_the_token_shape_rule_differ_by_route_itl_1534`).
+  A check of held rows on the async route was tried in this PR and taken out (developer,
+  November 27, 2026): never add one back here, ITL-1534 decides it. Whatever is done
+  there, NEVER hash an Arrow type object or use one as a dict or set key: an extension
+  type need not be hashable (Orcapod's own `list[Path]` type is not), which made a held
+  batch of such lists fail on replay
+  (`test_token_types_review_4.py::test_a_replay_over_logical_lists_reuses_its_rows`).
+  The type rule is the pure function
   `schema_utils.token_layers_fit`; `token_shape_violations` lists the violating columns and
   `token_shape_error` words the `InputValidationError`, which names the token column, the
-  data column and both types. Never loosen it. NOT covered: a record batch sent into an
+  data column and both types. Never loosen it. NOT covered: held rows on the async route
+  (above, ITL-1534), a record batch sent into an
   `OutputChannel` (the channels are not wired into nodes; the stream `result()` builds is
   checked; the follow-up is ITL-1526), and a `Data` built by hand outside a stream. The null check reads the
   validity of EVERY list level of a list-typed token column (`schema_utils.null_list_level`:
-  the null count of each level's arrays, no value; for a held row the token it already
-  holds, `arrow_utils.null_token_list_level`), and the error says at which level (0 is the
+  the null count of each level's arrays, no value), and the error says at which level (0 is the
   token itself). A typed zero-row table and a plain string token are unaffected. No
   source, operator or function builds a violating stream. The operators that need an
   inner list keep a guard for input no stream can hold any more (rows built by hand and

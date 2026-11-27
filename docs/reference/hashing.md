@@ -1333,22 +1333,6 @@ ITL-1491):
   `InputValidationError` naming the token column, the data column and both types
   (`schema_utils.token_layers_fit` is the rule). The error lists the violating columns
   in name order.
-- Rows that a run hands on without building a stream of them (the rows of a node the async
-  orchestrator holds instead of running) are held to the same rule before any is sent, so
-  both orchestrators refuse alike. What that check reads: each row's token layout, which is
-  the token columns that are not plain strings with the types the row holds (empty for a
-  row with plain string tokens, and shared by the rows read from one table). The type rule
-  is applied once per distinct layout, not once per row, and only a list-typed token column
-  is asked, per row, whether a list of its token is null at any level (read from the token
-  the row already holds). No table is built and no data value is
-  read. A row built from Python values gets no Arrow table: its data types come from its
-  schema and a list token's type from the list it is. Rows that no running node reads (a
-  held node that is terminal, or whose successors are all held) are not checked on either
-  route.
-- A table's columns and a row's are read through one normalization before the rule: both
-  types in their large variants, and a `null` leaf of a token type as `large_string`
-  (a token typed `null` is a null string token, and `large_list<null>` is
-  `large_list<large_string>`).
 - No source, operator or function builds such a stream: the lists `Batch`, `GroupBy` and
   `MergeJoin` build are parallel by origin row, data and tokens alike. Only a table built by
   hand can break the rule.
@@ -1360,6 +1344,13 @@ and it raises `InputValidationError` naming the column.
 
 What the check does not cover:
 
+- The rows of a node an async run holds instead of running. The rule is checked where a
+  stream is built; the sync orchestrator builds a held node's rows into a stream where a
+  successor reads them, and the async orchestrator hands them on without building one. So
+  a held row built by hand with an invalid token shape is refused on the sync route and
+  accepted on the async route. Rows a run holds come from a stream that was checked when
+  it was built, so this concerns hand-built rows only. Making the two routes agree is
+  ITL-1534.
 - A record batch sent into a record-batch channel. The channels are not wired into nodes
   yet; the stream built from a channel's batches is checked. Checking a batch where it is sent is ITL-1526.
 - A `Data` row built by hand outside a stream.
