@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Collection, Sequence
 from typing import Any, ClassVar
 
+from orcapod.core.unique_keys import UniqueKeys
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
@@ -57,10 +58,16 @@ class SelectTagColumns(UnaryOperator):
     Operator that selects specified columns from a stream.
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     # Data-tags (ITL-1023): handled.
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys (``core/unique_keys``): those whose tags all stay."""
+        return stream.unique_keys
 
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
         self.columns = _canonical_columns(columns)
@@ -90,13 +97,14 @@ class SelectTagColumns(UnaryOperator):
             logger.info("All tag columns are selected. Returning stream unaltered.")
             return stream
 
-        table = stream.as_table(
+        table = self._input_table(
+            stream,
             columns={
                 "source": True,
                 "system_tags": True,
                 "context": True,
                 "sort_by_tags": False,
-            }
+            },
         )
 
         # A dropped data-tag leaves its column as plain data (specification
@@ -196,10 +204,16 @@ class SelectDataColumns(UnaryOperator):
     Operator that selects specified columns from a stream.
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     # Data-tags (ITL-1023): handled.
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys (``core/unique_keys``): tags are unchanged."""
+        return stream.unique_keys
 
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
         self.columns = _canonical_columns(columns)
@@ -229,7 +243,8 @@ class SelectDataColumns(UnaryOperator):
             logger.info("All data columns are selected. Returning stream unaltered.")
             return stream
 
-        table = stream.as_table(
+        table = self._input_table(
+            stream,
             columns={
                 "source": True,
                 "system_tags": True,
@@ -352,10 +367,16 @@ class DropTagColumns(UnaryOperator):
     Operator that drops specified columns from a stream.
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     # Data-tags (ITL-1023): handled.
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys (``core/unique_keys``): those whose tags all stay."""
+        return stream.unique_keys
 
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
         self.columns = _canonical_columns(columns)
@@ -388,13 +409,14 @@ class DropTagColumns(UnaryOperator):
             logger.info("No tag columns to drop. Returning stream unaltered.")
             return stream
 
-        table = stream.as_table(
+        table = self._input_table(
+            stream,
             columns={
                 "source": True,
                 "system_tags": True,
                 "context": True,
                 "sort_by_tags": False,
-            }
+            },
         )
 
         # A dropped data-tag leaves its column as plain data (specification
@@ -496,10 +518,16 @@ class DropDataColumns(UnaryOperator):
     Operator that drops specified columns from a stream.
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     # Data-tags (ITL-1023): handled.
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys (``core/unique_keys``): tags are unchanged."""
+        return stream.unique_keys
 
     def __init__(self, columns: str | Collection[str], strict: bool = True, **kwargs):
         self.columns = _canonical_columns(columns)
@@ -534,13 +562,14 @@ class DropDataColumns(UnaryOperator):
         associated_source_columns = [
             f"{constants.SOURCE_PREFIX}{c}" for c in columns_to_drop
         ]
-        table = stream.as_table(
+        table = self._input_table(
+            stream,
             columns={
                 "source": True,
                 "system_tags": True,
                 "context": True,
                 "sort_by_tags": False,
-            }
+            },
         )
         # A data-tag whose data column is removed keeps its column as a plain
         # tag with the same values (specification section 7.2).
@@ -774,13 +803,14 @@ class _TagAndDataColumnsOperator(UnaryOperator, ABC):
     def unary_static_process(self, stream: StreamProtocol) -> StreamProtocol:
         tag_columns, data_columns = self._user_columns(stream)
         tags_removed, data_removed = self._removals(tag_columns, data_columns)
-        table = stream.as_table(
+        table = self._input_table(
+            stream,
             columns={
                 "source": True,
                 "system_tags": True,
                 "context": True,
                 "sort_by_tags": False,
-            }
+            },
         )
         removed = {
             *tags_removed,
@@ -881,7 +911,13 @@ class DropColumns(_TagAndDataColumnsOperator):
             be dropped: a stream needs at least one data column.
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     _verb: ClassVar[str] = "drop"
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys (``core/unique_keys``): those whose tags all stay."""
+        return stream.unique_keys
 
     def _removed(self, columns: Collection[str]) -> list[str]:
         return [c for c in columns if c in self.columns]
@@ -905,7 +941,13 @@ class SelectColumns(_TagAndDataColumnsOperator):
             named: a stream needs at least one data column.
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     _verb: ClassVar[str] = "select"
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys (``core/unique_keys``): those whose tags all stay."""
+        return stream.unique_keys
 
     def _removed(self, columns: Collection[str]) -> list[str]:
         return [c for c in columns if c not in self.columns]

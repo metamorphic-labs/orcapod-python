@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import pyarrow as pa
 
+from orcapod.core.unique_keys import UniqueKeys
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.datagrams import Tag
@@ -116,6 +117,8 @@ class AddTags(UnaryOperator):
             ``::`` separator).
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     # Provisional: its identity is not frozen with data context v1 (ITL-1279).
     PROVISIONAL: ClassVar[bool] = True
 
@@ -123,6 +126,10 @@ class AddTags(UnaryOperator):
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys (``core/unique_keys``): tags are only added."""
+        return stream.unique_keys
 
     def __init__(self, tags: Mapping[str, TagConstant], **kwargs: Any):
         if not tags:
@@ -322,13 +329,14 @@ class AddTags(UnaryOperator):
         """
         tag_keys, _ = stream.keys()
         data_context = stream.data_context  # pyright: ignore[reportAttributeAccessIssue]  # StreamProtocol omits data_context, which every concrete stream provides (ITL-844)
-        table = stream.as_table(
+        table = self._input_table(
+            stream,
             columns={
                 "source": True,
                 "system_tags": True,
                 "context": True,
                 "sort_by_tags": False,
-            }
+            },
         )
         return ArrowTableStream(
             self._with_constants(table, tag_keys, data_context.type_converter),

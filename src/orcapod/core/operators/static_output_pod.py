@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, Any, ClassVar, NoReturn, cast
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from orcapod.core.exact_class import reads_as_its_class
+from orcapod.core.unique_keys import UniqueKeys, derived_keys
 from orcapod.protocols.core_protocols.streams import (
     RecordBatchInput,
     RecordBatchOutput,
@@ -40,13 +42,14 @@ from orcapod.core.operators.provisional import (
     provisional_operator_name,
     warn_provisional_operator,
 )
+from orcapod.utils import source_tokens
 from orcapod.utils.provisional import note_provisional_use, provisional_class_name
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+from orcapod.core.streams.carried import carried_batches, carried_table
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
     StreamBase,
     check_head_size,
-    reads_as_its_class,
     short_stream_repr,
     typed_zero_row_input,
     typed_zero_row_table,
@@ -115,6 +118,14 @@ class StaticOutputOperatorPod(TraceableBase):
     ``AddTags``, ``DropNulls``, ``Index``, ``Pick``). Such an operator can be applied
     to each Arrow record batch of its input as it arrives
     (``async_execute_batches``); every other operator needs all of an input first.
+    """
+
+    CARRIES_TOKENS: ClassVar[bool] = False
+    """Whether the operator passes derived token columns on (ITL-1464).
+
+    Declared by a library operator that never reads the values of a source-info column
+    it passes on, or builds their text itself. It holds for exactly the class that
+    declares it, never for a subclass (``_input_table``).
     """
 
     OUTPUT_SCHEMA_IS_INPUT_SCHEMA: ClassVar[bool] = False
@@ -219,6 +230,24 @@ class StaticOutputOperatorPod(TraceableBase):
             return
         if any(stream_data_tags(stream) for stream in streams):
             raise not_supported_yet(type(self).__name__, self.DATA_TAGS_ISSUE)
+
+    def _input_table(
+        self, stream: StreamProtocol, columns: dict[str, Any]
+    ) -> "pa.Table":
+        """The table of ``stream`` as this operator reads it.
+
+        Derived token columns as they are (``carried_table``) for an operator whose class
+        declares ``CARRIES_TOKENS`` itself and is used as that class; text for any other,
+        so a user's operator, also one that subclasses a library operator, reads text.
+
+        Args:
+            stream: An input stream.
+            columns: The column groups, as for ``as_table``.
+        """
+        kind = type(self)
+        if vars(kind).get("CARRIES_TOKENS") is True and reads_as_its_class(self, kind):
+            return carried_table(stream, columns)
+        return stream.as_table(columns=columns)
 
     def pipeline_identity_structure(self) -> Any:
         """Return the pipeline identity, which defaults to content identity for operators."""
@@ -578,6 +607,9 @@ class StaticOutputOperatorPod(TraceableBase):
             if not field.name.startswith(constants.SOURCE_PREFIX):
                 continue
             if pa.types.is_large_string(field.type):
+                continue
+            if source_tokens.derived_recipe(field.type) is not None:
+                # Every token of a derived column is one string.
                 continue
             values = table.column(index).to_pylist()
             kinds = {arrow_utils.source_info_arrow_type(value) for value in values}
@@ -1137,7 +1169,7 @@ class StaticOutputOperatorPod(TraceableBase):
                 # cannot make one table with the earlier ones is refused, as the sync
                 # path refuses the whole input, never processed alone.
                 settled: dict[str, pa.DataType] = {}
-                async for batch in channel:
+                async for batch in carried_batches(channel):
                     settled = settle_token_types(batch, settled)
                     await self._send_processed([batch], channel.stream, output)
             else:
@@ -1178,7 +1210,7 @@ class StaticOutputOperatorPod(TraceableBase):
             output: The channel to send into; a result with no rows sends nothing.
         """
         table = row_built_columns(
-            result.as_table(columns=ZERO_ROW_INPUT_COLUMNS), result.keys()
+            carried_table(result, ZERO_ROW_INPUT_COLUMNS), result.keys()
         )
         for batch in table.to_batches():
             if batch.num_rows:
@@ -1396,7 +1428,9 @@ def settle_token_types(
         if not field.name.startswith(constants.SOURCE_PREFIX):
             continue
         kinds: set[pa.DataType]
-        if pa.types.is_large_string(field.type):
+        # A derived column settles as the text its recipe gives (ITL-1464).
+        derived = source_tokens.derived_recipe(field.type) is not None
+        if derived or pa.types.is_large_string(field.type):
             kinds = {pa.large_string()}
         else:
             kinds = {
@@ -1408,7 +1442,8 @@ def settle_token_types(
         if len(kinds) > 1:
             raise SourceInfoTypesDisagree(field.name)
         (kind,) = kinds
-        _ = _named_tokens_as(column, kind, field.name)  # representable, or refused
+        if not derived:
+            _ = _named_tokens_as(column, kind, field.name)  # representable, or refused
         settled[field.name] = kind
     return settled
 
@@ -1488,6 +1523,31 @@ def _named_tokens_as(
         raise RowBuiltFormUnavailable(f"{name}: {error}") from error
 
 
+def _with_one_token_form(batches: Sequence[pa.RecordBatch]) -> list[pa.RecordBatch]:
+    """``batches`` with each source-info column in one form in all of them.
+
+    A column every batch derives by one recipe stays derived; one that some batches hold
+    as text, or derive otherwise, is text in all of them (ITL-1464).
+
+    Args:
+        batches: Record batches of one stream's rows.
+    """
+    kinds: dict[str, set[pa.DataType]] = {}
+    for batch in batches:
+        for field in batch.schema:
+            if field.name.startswith(constants.SOURCE_PREFIX):
+                kinds.setdefault(field.name, set()).add(field.type)
+    mixed = {name for name, types in kinds.items() if len(types) > 1}
+    formed: list[pa.RecordBatch] = []
+    for batch in batches:
+        if mixed & set(source_tokens.derived_columns(batch.schema)):
+            table = source_tokens.materialize(pa.Table.from_batches([batch]), mixed)
+            formed.extend(table.combine_chunks().to_batches())
+        else:
+            formed.append(batch)
+    return formed
+
+
 def concatenate_batches(batches: Sequence[pa.RecordBatch]) -> pa.Table | None:
     """Put a stream's record batches under one another, or ``None`` with no row.
 
@@ -1518,11 +1578,14 @@ def concatenate_batches(batches: Sequence[pa.RecordBatch]) -> pa.Table | None:
         settled = settle_token_types(batch, settled)
     prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
     opened: list[pa.RecordBatch] = []
-    for batch in rows:
+    for batch in _with_one_token_form(rows):
         columns: list[Any] = []  # pyright: ignore[reportExplicitAny]  # any column
         fields: list[pa.Field[Any]] = []  # pyright: ignore[reportExplicitAny]  # any field
         for field, column in zip(batch.schema, batch.columns, strict=True):
-            if field.name in settled:
+            if (
+                field.name in settled
+                and source_tokens.derived_recipe(field.type) is None
+            ):
                 column = _named_tokens_as(column, settled[field.name], field.name)
                 field = pa.field(field.name, settled[field.name])
             if field.name.startswith(prefixes):
@@ -1633,6 +1696,10 @@ class RowsOnRead:
     # The members that tell what the output is without reading it: the node's, which
     # the built stream takes too (``_as_upstream_stream``), or the built stream's once
     # it is built. A protocol check (``isinstance``) reads them and builds nothing.
+    @property
+    def unique_keys(self) -> UniqueKeys:
+        return self._node.unique_keys
+
     @property
     def producer(self) -> Any:
         return self._node.producer
@@ -1747,6 +1814,8 @@ class _RowsOfStream(ArrowTableStream):
         data_context: The rows' data context; ``None`` for the default.
     """
 
+    _carried_table = ArrowTableStream._carried_table  # pyright: ignore[reportPrivateUsage]  # read as its base is
+
     def __init__(
         self,
         table: pa.Table,
@@ -1811,6 +1880,8 @@ def produced_stream(stream: StreamProtocol) -> StreamProtocol:
 class DynamicPodStream(StreamBase):
     """Recomputable stream wrapping a ``StaticOutputOperatorPod`` invocation."""
 
+    DERIVES_UNIQUE_KEYS: ClassVar[bool] = True
+
     def __init__(
         self,
         pod: StaticOutputOperatorPod,
@@ -1873,6 +1944,11 @@ class DynamicPodStream(StreamBase):
         if self._upstreams:
             structure += (self._pod.argument_symmetry(self._upstreams),)
         return structure
+
+    @property
+    def unique_keys(self) -> UniqueKeys:
+        """The tag sets no two rows agree on, derived from the inputs' (``core/unique_keys``)."""
+        return derived_keys(self.producer, self.upstreams, self)
 
     @property
     def producer(self) -> PodProtocol:
@@ -2044,6 +2120,14 @@ class DynamicPodStream(StreamBase):
             "StreamProtocol has not been updated or is empty."
         )
         return self._cached_stream.as_table(columns=columns, all_info=all_info)
+
+    def _carried_table(self, config: ColumnConfig) -> "pa.Table":
+        """The operator's result, derived token columns as they are (ITL-1464)."""
+        self._refresh()
+        assert self._cached_stream is not None, (
+            "StreamProtocol has not been updated or is empty."
+        )
+        return carried_table(self._cached_stream, config)
 
     def iter_data(
         self,

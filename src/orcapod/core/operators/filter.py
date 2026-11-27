@@ -12,6 +12,7 @@ from typing import Any, ClassVar
 
 import pyarrow as pa
 
+from orcapod.core.unique_keys import UniqueKeys
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.operators.base import UnaryOperator
@@ -74,6 +75,8 @@ class Filter(UnaryOperator):
         TypeError: If ``condition`` is neither a condition nor a mapping.
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     # Data-tags (ITL-1023): a data-tag is one column, named alike as tag or data.
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
@@ -85,6 +88,10 @@ class Filter(UnaryOperator):
 
     # Its identity is not frozen with data context v1 (ITL-1374).
     PROVISIONAL: ClassVar[bool] = True
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys (``core/unique_keys``): rows are only left out."""
+        return stream.unique_keys
 
     def __init__(
         self, condition: Condition | Mapping[str, object], **kwargs: Any
@@ -243,13 +250,14 @@ class Filter(UnaryOperator):
         """
         # Every system column passes through: source info, system tags and each row's
         # data context (a raw stream may hold several).
-        table = stream.as_table(
+        table = self._input_table(
+            stream,
             columns={
                 "source": True,
                 "system_tags": True,
                 "context": True,
                 "sort_by_tags": False,
-            }
+            },
         )
         tag_columns, data_columns = stream.keys()
         self._check_arrow(table.schema, _user_columns(tag_columns, data_columns))

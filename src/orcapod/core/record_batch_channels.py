@@ -29,7 +29,7 @@ from orcapod.core.streams.base import row_built_names
 from orcapod.core.streams.record_batch_input import InputChannel
 from orcapod.errors import UpstreamFailedError
 from orcapod.system_constants import constants
-from orcapod.utils import arrow_utils
+from orcapod.utils import arrow_utils, source_tokens
 
 if TYPE_CHECKING:
     from orcapod.protocols.core_protocols import StreamProtocol
@@ -429,6 +429,10 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
         expected = declared.field(column.name)
         carried = arrow_utils.normalize_to_large_types(expected.type)
         if column.name.startswith(constants.SOURCE_PREFIX):
+            if source_tokens.derived_recipe(column.type) is not None:
+                if column.metadata:
+                    return f"column {column.name!r} carries field metadata"
+                continue
             if not _is_token_type(column.type):
                 return f"column {column.name!r} is {column.type}, not a token type"
             if column.metadata or not column.type.equals(

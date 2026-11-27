@@ -1,6 +1,7 @@
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any, ClassVar
 
+from orcapod.core.unique_keys import UniqueKeys, renamed_keys
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.core.operators.base import UnaryOperator
@@ -91,10 +92,16 @@ class MapData(UnaryOperator):
             ``SelectTagColumns`` and the other column operators.
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     # Data-tags (ITL-1023): handled.
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys (``core/unique_keys``): no tag is renamed."""
+        return stream.unique_keys
 
     def __init__(
         self,
@@ -179,13 +186,14 @@ class MapData(UnaryOperator):
             # nothing to rename in the data, return stream as is
             return stream
 
-        table = stream.as_table(
+        table = self._input_table(
+            stream,
             columns={
                 "source": True,
                 "system_tags": True,
                 "context": True,
                 "sort_by_tags": False,
-            }
+            },
         )
 
         # A data-tag column keeps its tag under its own name, now plain; the
@@ -365,6 +373,8 @@ class MapTags(UnaryOperator):
         tag_only: Rename data-tags in the tag role only.
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     # Provisional: its identity is not frozen with data context v1 (ITL-1279).
     PROVISIONAL: ClassVar[bool] = True
 
@@ -372,6 +382,13 @@ class MapTags(UnaryOperator):
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys, renamed, without those that lose a tag."""
+        dropped = set(stream.keys()[0]) - set(self.name_map)
+        return renamed_keys(
+            stream.unique_keys, self.name_map, dropped if self.drop_unmapped else ()
+        )
 
     def __init__(
         self,
@@ -457,13 +474,14 @@ class MapTags(UnaryOperator):
             # nothing to rename or drop in the tags, return stream as is
             return stream
 
-        table = stream.as_table(
+        table = self._input_table(
+            stream,
             columns={
                 "source": True,
                 "system_tags": True,
                 "context": True,
                 "sort_by_tags": False,
-            }
+            },
         )
 
         name_map = {
@@ -664,10 +682,17 @@ class MapColumns(UnaryOperator):
             or (with ``drop_unmapped``) no data column would remain.
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     # Provisional: its identity is not frozen with data context v1 (ITL-1279).
     # Each output row comes from one input row (ITL-1347).
     ROW_BY_ROW: ClassVar[bool] = True
     PROVISIONAL: ClassVar[bool] = True
+
+    def derive_unique_keys(self, stream: StreamProtocol) -> UniqueKeys:
+        """The input's unique keys, renamed, without those that lose a tag."""
+        tag_renames, _, dropped, _ = self._plan(*self._user_columns(stream))
+        return renamed_keys(stream.unique_keys, tag_renames, dropped)
 
     def __init__(
         self,
@@ -799,13 +824,14 @@ class MapColumns(UnaryOperator):
         tag_renames, data_renames, tags_dropped, data_dropped = self._plan(
             tag_columns, data_columns
         )
-        table = stream.as_table(
+        table = self._input_table(
+            stream,
             columns={
                 "source": True,
                 "system_tags": True,
                 "context": True,
                 "sort_by_tags": False,
-            }
+            },
         )
         dropped = {
             *tags_dropped,

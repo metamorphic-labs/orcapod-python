@@ -8,6 +8,9 @@ from typing import Any, ClassVar, final
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from orcapod.protocols.core_protocols.streams import RecordBatchInput, RecordBatchOutput
+from orcapod.core.exact_class import reads_as_its_class
+from orcapod.core.unique_keys import UniqueKeys
 from orcapod.types.explanation import plain_repr
 from orcapod.channels import ChannelClosed, ReadableChannel, WritableChannel
 from orcapod.core.operators.meta_columns import WithoutMetaWriter
@@ -76,8 +79,17 @@ class SemiJoin(BinaryOperator):
     (a null key matches nothing) and keeps the left input's type (ITL-829).
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     CONSTRAINING_INPUTS: ClassVar[tuple[int, ...]] = (1,)
     CONSTRAINT_MATCHES_SHARED_TAGS: ClassVar[bool] = True
+
+    def derive_unique_keys(
+        self, left: StreamProtocol, right: StreamProtocol
+    ) -> UniqueKeys:
+        """The left input's unique keys: left rows are only left out."""
+        del right
+        return left.unique_keys
 
     @staticmethod
     def _match_keys(
@@ -224,8 +236,8 @@ class SemiJoin(BinaryOperator):
         if not common_keys:
             return left_stream
 
-        left_table = left_stream.as_table(
-            columns={"source": True, "system_tags": True, "context": True}
+        left_table = self._input_table(
+            left_stream, columns={"source": True, "system_tags": True, "context": True}
         )
         # Only the right side's keys are read, never its data columns.
         right_table = right_stream.as_table().select(list(common_keys))
@@ -322,6 +334,30 @@ class SemiJoin(BinaryOperator):
         (shouldn't happen in normal pipeline execution).
         """
         return getattr(self, "_validated_common_keys", ())
+
+    async def async_execute_batches(
+        self, inputs: Sequence[RecordBatchInput], output: RecordBatchOutput
+    ) -> None:
+        """Run over input channels of Arrow record batches, holding keys only.
+
+        ``streaming_joins.StreamingSemiJoin`` gives the rows of the sync path as a set, in memory
+        bounded by its inputs' join keys (``docs/dev/specs/itl-1464-joins.md``).
+
+        Args:
+            inputs: One input channel per input stream, in the operator's order.
+            output: The channel the result's record batches are sent into.
+        """
+        if not reads_as_its_class(self, SemiJoin):
+            # A subclass, or an instance with a member replaced, may compute other rows:
+            # its own sync call over all of its inputs.
+            await super().async_execute_batches(inputs, output)
+            return
+        # The kernels are built on this module's join rules.
+        from orcapod.core.operators.streaming_joins import StreamingSemiJoin, run_kernel
+
+        await run_kernel(
+            lambda streams: StreamingSemiJoin(self, streams), inputs, output
+        )
 
     async def async_execute(
         self,
