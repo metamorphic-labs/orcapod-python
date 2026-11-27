@@ -1215,17 +1215,27 @@ class Join(NonZeroInputOperator):
             raise InputValidationError(
                 f"Join: inputs share data columns {sorted(overlap - merged)}."
             )
-        source_info = {**left.source_info(), **right.source_info()}
-        if merged:
-            left_info, right_info = left.source_info(), right.source_info()
-            for name in merged:
-                source_info[name] = _merge_pending(
-                    left_info.get(name), right_info.get(name)
-                )
+        # Each column's token goes on as the typed column its row carries: the
+        # pipeline determines a token column's type, and it is never taken from a
+        # value (ITL-1491). Only a token the join makes is given as a value: the
+        # token of a merged data-tag, from both sides' tokens, and, when the row
+        # is emitted, the fold of the members an earlier step of the chain left
+        # pending.
+        left_info, right_info = left.source_info(), right.source_info()
+        source_info: dict[str, Any] = {
+            name: _merge_pending(left_info.get(name), right_info.get(name))
+            for name in merged
+        }
         if final:
+            carried = {**left_info, **right_info, **source_info}
+            folded = {name: _fold_pending(value) for name, value in carried.items()}
             source_info = {
-                name: _fold_pending(value) for name, value in source_info.items()
+                name: value
+                for name, value in folded.items()
+                if name in merged or value != carried[name]
             }
+        made = set(source_info)
+        tokens = Join._token_columns(left, made) + Join._token_columns(right, made)
         # Column order as ``static_process`` lays it out: the data-tag columns
         # first, in the merged tag order, then each side's other data columns.
         tag_order = [*left_tag.keys()]
@@ -1237,7 +1247,7 @@ class Join(NonZeroInputOperator):
         ]
         if not with_data_tags:
             return Data(
-                arrow_utils.hstack_tables(left_table, right_table),
+                arrow_utils.hstack_tables(left_table, right_table, *tokens),
                 source_info=source_info,
                 data_context=left.data_context_key,
             )
@@ -1269,10 +1279,31 @@ class Join(NonZeroInputOperator):
             schema=pa.schema(fields),
         )
         return Data(
-            arrow_utils.hstack_tables(data_tags, left_rest, right_rest),
+            arrow_utils.hstack_tables(data_tags, left_rest, right_rest, *tokens),
             source_info=source_info,
             data_context=left.data_context_key,
         )
+
+    @staticmethod
+    def _token_columns(data: DataProtocol, merged: Collection[str]) -> list[pa.Table]:
+        """Return ``data``'s source-info columns, without those of ``merged`` columns.
+
+        Args:
+            data: One side's row.
+            merged: The columns whose token the join makes, given as a value.
+
+        Returns:
+            A list holding the one-row table of the kept ``_source_*`` columns, with
+            the types the row carries; an empty list when no column is kept.
+        """
+        table = data.as_table(columns={"source": True})
+        kept = [
+            name
+            for name in table.column_names
+            if name.startswith(constants.SOURCE_PREFIX)
+            and name.removeprefix(constants.SOURCE_PREFIX) not in merged
+        ]
+        return [table.select(kept)] if kept else []
 
     @staticmethod
     def _merge_pair_rename(

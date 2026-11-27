@@ -150,8 +150,8 @@ class OutputChannel:
         # batch's when the stream cannot say its Arrow types without rows.
         self._schema: pa.Schema | None = None
         self._schema_known = False
-        # Each source-info column's token type as the batches accepted so far settle it
-        # (``settle_token_types``): a later batch must settle with it.
+        # Each source-info column's token type as the batches accepted so far declare
+        # it (``settle_token_types``): a later batch must declare the same.
         self._token_types: dict[str, pa.DataType] = {}
         # The column order of the channel's batches: the first batch with rows'.
         self._order: list[str] | None = None
@@ -405,6 +405,19 @@ def _named(stream: Any) -> str:  # pyright: ignore[reportExplicitAny]  # any str
     return repr(label) if label else repr(stream)
 
 
+def _is_token_type(kind: pa.DataType) -> bool:
+    """Whether ``kind`` is a source-info token type: ``large_string``, or a list of one.
+
+    The list may be a large list (what ``Batch``, ``GroupBy`` and ``MergeJoin``
+    build) or a fixed-size list (a hand-built stream's, kept as declared: ITL-1491).
+    """
+    if pa.types.is_large_string(kind):
+        return True
+    if isinstance(kind, (pa.LargeListType, pa.FixedSizeListType)):
+        return _is_token_type(kind.value_type)  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
+    return False
+
+
 def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
     """Say how a record batch's columns differ from a channel's, or ``None``.
 
@@ -417,9 +430,10 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
     ``large_string``, as a row's datagram stores it, and only null values are taken
     there. Whether a system-tag or source-info field is nullable is not compared: it
     follows the values of the complete table (``_flag_by_values``). Nor is a
-    source-info column's type, which follows its tokens over the complete table
-    (``_type_source_info_by_values``): it must only be a token type (``large_string``,
-    or ``large_list`` of a token type).
+    source-info column's type compared with the description's: it is the one the
+    batch declares (a stream bound to a slot may declare another token type than
+    the slot's description), which every batch of the channel must then declare
+    (``settle_token_types``); it must only be a token type (``_is_token_type``).
     """
     sent = batch.schema
     if sorted(declared.names) != sorted(sent.names):
@@ -560,18 +574,6 @@ def _map_entries(array: pa.MapArray) -> tuple[pa.Array[Any], pa.Array[Any]]:  # 
     ]
     taken = pa.array(indices, pa.int64())
     return array.keys.take(taken), array.items.take(taken)  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-
-
-def _is_token_type(kind: pa.DataType) -> bool:
-    """Whether ``kind`` is a source-info token type: ``large_string``, or a list of one.
-
-    The types ``arrow_utils.source_info_arrow_type`` gives a token.
-    """
-    if pa.types.is_large_string(kind):
-        return True
-    if isinstance(kind, pa.LargeListType):
-        return _is_token_type(kind.value_type)  # pyright: ignore[reportUnknownArgumentType, reportUnknownMemberType]
-    return False
 
 
 def _without_metadata(kind: pa.DataType) -> pa.DataType:

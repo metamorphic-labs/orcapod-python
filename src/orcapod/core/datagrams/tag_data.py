@@ -376,8 +376,10 @@ class Data(Datagram):
             self._source_info: dict[str, SourceInfoValue] = self._source_info_of_row(
                 si_table
             )
-            # The table's own source-info columns, when the tokens are all its own.
-            typed = si_table if not source_info and si_table.num_rows == 1 else None
+            # The row's source-info columns: the table's own, with their types; a
+            # token given as a value (``source_info``) is made here, so its column
+            # is typed from that value (ITL-1491).
+            typed = si_table if si_table.num_rows == 1 else None
         else:
             typed = None
             # Dict path: extract source-info keys before calling super()

@@ -1132,27 +1132,41 @@ are defined in one module, `core/row_ids.py`; never build one of these preimages
   result in the result store by the input hash, calls nothing and writes no pipeline row
   (developer, November 26, 2026; `FunctionJobNode._empty_data_cache_hit` is the one place
   that holds that choice, to be reconsidered in ITL-1475).
-- The instance id reads a row's tokens through `DataProtocol.source_info_table()`. A token
-  column has one canonical type, a function of the token's value alone (developer decision
-  of November 26, 2026): a null token is a `large_string` null whatever type its column
-  declares; a non-null token of a row read from an Arrow table (a stream's row) keeps the
-  type that table gives it, with a nullable field, never typed again from the value (a
-  nested token column would not survive it); a change of the row keeps the typed column of every
-  token it keeps (a selection, a drop, a rename, added columns); a token given as a Python value is typed
-  from its value. STOPGAP, not the proper solution (developer, November 27, 2026; ITL-1491
-  removes it): the token of a column taken from another row (`with_columns_of`, a data-tag
-  that falls through a function pod) and a token at the sync edge between two nodes (the
-  row-built form) are typed again from their values. The rule: a data-tag that falls through
-  a function pod keeps its source-info token with its type unchanged; a column a function
-  returns is never a pass-through, even with an input's name and value (its token points to
-  the function); and the type of every source-info token column is determined by the
-  pipeline, like every other column type, never taken from values (sources build plain
-  `large_string` tokens; joins and single-stream operators keep the shape; `Batch`, `GroupBy`
-  and `MergeJoin` add one list level each). The stopgap exists because the sync route
-  normalizes a stream's token columns to large types between two nodes and the async route
-  passes rows on without it, so a hand-built token of another type (a fixed-size list) had
-  two instance ids. Never build on the re-typing, and never write "a function passes a
-  column through". A rename moves a column's token with it; a token held for the destination name
+- The Arrow type of every source-info token column is determined by the pipeline, like
+  every other column type; it is never taken from values (developer, November 27, 2026,
+  ITL-1491). A source builds plain `large_string` tokens, and each operator determines its
+  output's token column types from its inputs' types, as it does for every column: the
+  types are those of its result over its inputs' zero-row tables (`typed_zero_row_table`),
+  defined where the operator builds its output (a list of tokens by
+  `arrow_utils.aggregated_list_type`, as for a data list). Never summarize this as a rule
+  per operator family: the operators differ (one keeps a column's token type, one adds a
+  list level to some columns and folds others into one token, one makes a new string
+  token). A row read
+  from an Arrow table carries its typed token columns, and every route keeps them, sync and
+  async alike: `Data.as_table(columns={"source": True})` (so the row-built table at the edge
+  between two nodes, `_rows_to_table`), the row-built form of a whole table (which only
+  normalizes a token column to large types, like any column, and sets its field flag), every
+  change of a row (a selection, a drop, a rename, added columns), record batches
+  (`settle_token_types`: the declared type; two batches of one stream that declare two types
+  are refused), an operator's own async form (`Join` merges two rows by their typed token
+  columns, and gives as a value only a token it makes: a merged data-tag's) and a function
+  node, which takes the token types from its input's rows. A
+  data-tag that falls through a function pod keeps its token with its type unchanged
+  (`Data.with_columns_of`); a column a function returns is never a pass-through, even with
+  an input's name and value: its token points to the function. Never write "a function
+  passes a column through", and never type a token from its value. The one exception: a
+  token is typed from its value (`arrow_utils.source_info_arrow_type`) only where it is
+  first created and no Arrow type exists: a `Data` built by hand from Python values or
+  given one by `with_source_info`, and the string tokens Orcapod itself creates (a source's,
+  a function output's, `Pick`'s and `Index`'s, a merged data-tag's, a placeholder's). A hand-built raw stream's
+  token type is kept as it declares it (a fixed-size list stays one; a list's item field
+  keeps its name and nullability).
+- The instance id reads a row's tokens through `DataProtocol.source_info_table()`: the typed
+  columns the row carries, every field nullable, with one difference from the columns in
+  transit (developer decision of November 26, 2026): a null token is a `large_string` null
+  whatever type its column declares, for the id and for the stored column. In transit
+  (`as_table`, the edge, operators) a null token keeps its column's declared type, so the
+  rows of one stream always make one table. A rename moves a column's token with it; a token held for the destination name
   before is dropped. There is one column
   per data column: a data column with no token has a null token, so a row built from values
   and the same row read from a table have one instance id. Ids are a function of the row

@@ -336,8 +336,8 @@ class Batch(UnaryOperator):
                 full = rows - rows % self.batch_size
                 if not full:
                     continue
-                # Arrived batches may differ in their provenance fields: put them
-                # under one another as a complete table settles them.
+                # Arrived batches may differ in their provenance fields' flags: put
+                # them under one another, under one schema.
                 arrived = concatenate_batches(waiting)
                 assert arrived is not None  # they hold rows
                 await self._send_processed(

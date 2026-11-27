@@ -1261,11 +1261,49 @@ preimage = tag.as_table(columns={"system_tags": True})
 
 | Field | Value |
 |---|---|
-| **Inputs** | `__pipeline_entry_id` (the entry id's labelled digest, `pa.large_binary()`), then the `_source_*` columns of the input data in name order (`data.source_info_table()`): one per data column, a data column with no token having a null token, each with one canonical type that is a function of the token's value alone: a null token is a `large_string` null whatever type its column declares; a non-null token of a row read from an Arrow table keeps the type that table gives it (nullable field), never typed again from the value, also after a change of the row that keeps the token (a selection, a drop, a rename, added columns); a token given as a Python value has the type of its value, and so has the token of a data-tag that falls through a function (the edge between two nodes and a stored result type it from its value, so it has one type on every route). A row built from values and the same row read from a table give the same columns. So the id is a function of the row alone, never of the order sessions ran in. The pipeline row stores this same table (`FunctionJobNode._add_pipeline_record`), so a stored row gives its instance id again from its own columns |
+| **Inputs** | `__pipeline_entry_id` (the entry id's labelled digest, `pa.large_binary()`), then the `_source_*` columns of the input data in name order (`data.source_info_table()`): one per data column, a data column with no token having a null token, each with the type the pipeline determines for it (below, "The type of a source-info token column"), except that a null token is a `large_string` null whatever type its column declares. A row built from values and the same row read from a table give the same columns. So the id is a function of the row alone, never of the order sessions ran in. The pipeline row stores this same table (`FunctionJobNode._add_pipeline_record`), so a stored row gives its instance id again from its own columns |
 | **Algorithm** | `StarfixArrowHasher.hash_table(preimage)` |
 | **Output format** | `ContentHash`; stored in `__pipeline_instance_id` as `b"{method}:{digest}"` |
 | **Uniqueness guarantee** | Unique per `(entry, source-info tokens)`; the in-memory cache key and the lookup column of the pipeline table |
 | **Known exclusions** | The result id: every result recorded for one instance has this id. |
+
+#### The type of a source-info token column
+
+The Arrow type of every source-info token column is determined by the pipeline, like every
+other column type. It is never taken from values (developer, November 27, 2026, ITL-1491).
+
+A source builds `large_string` tokens. Each operator determines the token column types of
+its output from the types of its inputs, as it determines every other column type: they are
+the types of its result over its inputs' zero-row tables, and they are defined where the
+operator builds its output (a list of tokens is typed like a list of data values, by
+`arrow_utils.aggregated_list_type`). The operators differ, so there is no rule per family
+of operators: one keeps a column's token type, another puts the tokens of the rows it
+gathers into a list, and another makes one new string token from several. At a function
+pod, a column the function returns has a `large_string` token that points to the function,
+and a data-tag that falls through keeps its token with its type unchanged.
+
+A row read from a stream carries its typed token columns, and every route keeps them: the
+table built from rows at the edge between two nodes (sync), the rows sent on as they are
+(async), the whole-table form of a node's output, record batches, and every change of a row
+that keeps a token (a selection, a drop, a rename, added columns). So a function node reads
+the same token types from its input on the sync and on the async path, and a row has one
+instance id whichever path recorded it first. A token column is normalized to the large
+variants like any other column, and nothing else: a hand-built raw stream whose token column
+is a fixed-size list, or a list whose item field has another name or is non-nullable, keeps
+that type on every route.
+
+Two points where a token's value matters:
+
+- A null token in transit keeps its column's declared type, so that the rows of one stream
+  always make one table. For the instance id, and in the stored pipeline row, it is a
+  `large_string` null (the inputs of site 8, above). A pipeline table that already holds a column with
+  another type refuses the row, naming the column and both types; in a pipeline built through
+  sources this cannot happen.
+- A token is typed from its value only where it is first created and no Arrow type exists:
+  a row built by hand from Python values (`Data(..., source_info=...)`,
+  `with_source_info`), and the string tokens Orcapod itself creates (a source's, a function
+  output's, `Pick`'s and `Index`'s, a merged data-tag's, a placeholder's), which are
+  `large_string`.
 
 The placeholder of an ephemeral result that is gone (`EmptyData`) carries tokens too: for each
 output of the function, a real output's token with the sentinel `EPHEMERAL_RESULT_GONE`

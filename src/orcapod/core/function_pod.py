@@ -1567,8 +1567,10 @@ class FunctionPodStream(StreamBase):
         # The data columns have declared types: convert each value as its column's
         # type, never as the type the value happens to have. A subclass instance
         # returned for a base-class column is then refused instead of being stored
-        # as the base without its own fields (ITL-972). Only the remaining columns
-        # (meta, source info) are typed from their values.
+        # as the base without its own fields (ITL-972). The remaining columns
+        # (meta, source info) take the Arrow types of the first row's schema
+        # (``data_schema``); a source-info column's is the one the row carries
+        # (ITL-1491).
         python_schema = dict(infer_python_schema_from_pylist_data(all_data))
         python_schema.update(self.output_schema()[1])
         struct_data = converter.python_dicts_to_struct_dicts(

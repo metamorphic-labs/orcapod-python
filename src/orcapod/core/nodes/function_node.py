@@ -3284,11 +3284,14 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
     def _require_one_type_per_token_column(self, tokens: "pa.Table") -> None:
         """Refuse a row whose token column has another type than the rows recorded.
 
-        A pipeline table has one Arrow type per column. A token's type is a
-        function of its value (``Data.source_info_table``: a null is a
-        ``large_string`` null, a list a list), so rows whose tokens of one column
-        differ in kind (a list token and a string or null token) cannot share a
-        table. The types are those of the stored table (read once, by
+        A pipeline table has one Arrow type per column. A token column's type is
+        determined by the pipeline (ITL-1491), so in a pipeline built through
+        sources every row of one table gives a column the same type; this is the
+        safety net for a hand-built raw stream given straight to a node, and for
+        an implementation bug. A null token is recorded as a ``large_string`` null
+        whatever its column declares (``Data.source_info_table``), so a column
+        that mixes null and list tokens is refused here too. The types are those
+        of the stored table (read once, by
         ``_preflight_pipeline_write_schema``) and of the rows this node recorded
         since.
 
