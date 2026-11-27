@@ -1404,6 +1404,68 @@ def test_held_rows_with_nested_tokens_are_stored_alike_on_both_routes() -> None:
     assert len(set(left.column("__pipeline_instance_id").to_pylist())) == 2
 
 
+@pytest.mark.parametrize("fault", ["null_list_token", "list_token_over_scalar"])
+def test_held_rows_that_break_the_token_shape_rule_are_refused_on_both_routes(
+    fault: str,
+) -> None:
+    """Held rows are rows of a stream: both routes hold them to the token-shape rule.
+
+    The rows are built by hand from one-row tables, outside any stream: a null
+    token in a list-typed token column, or a list token over a scalar value. The
+    sync orchestrator builds the held rows into a stream at the successor's edge,
+    which refuses them. The async orchestrator sent them on as they were, and the
+    function node recorded them (second review of PR #601, finding 2). Both now
+    refuse, with the same error, and nothing is stored.
+    """
+    from orcapod.core.datagrams import Data
+    from orcapod.core.operators.static_output_pod import rows_on_read
+    from orcapod.errors import InputValidationError
+    from orcapod.pipeline import AsyncPipelineOrchestrator
+
+    strings = pa.large_list(pa.large_string())
+
+    def bad_rows() -> list[Any]:
+        rows = []
+        for tag, data in _unconvertible().iter_data():
+            table = data.as_table()
+            if fault == "null_list_token":
+                table = table.append_column(
+                    "_source_x", pa.array([None], _UNCONVERTIBLE)
+                )
+            else:
+                table = table.set_column(
+                    0,
+                    pa.field("x", pa.int64(), nullable=False),
+                    pa.array([1], pa.int64()),
+                ).append_column("_source_x", pa.array([["a"]], strings))
+            rows.append((tag, Data(table)))
+        return rows
+
+    messages = []
+    for asynchronous in (False, True):
+        held, after, _ = _held_job()
+        dag: OrcaDAG[Any] = OrcaDAG()
+        dag.add_edge(held, after)
+        rows = bad_rows()
+        with pytest.raises((InputValidationError, ExceptionGroup)) as refused:
+            if asynchronous:
+                AsyncPipelineOrchestrator().run(dag, held_rows={held: rows})
+            else:
+                SyncPipelineOrchestrator().run(
+                    dag, held={held: rows_on_read(rows, held)}
+                )
+        error: BaseException = refused.value
+        while isinstance(error, ExceptionGroup):
+            (error,) = error.exceptions
+        assert isinstance(error, InputValidationError), repr(error)
+        assert "'_source_x'" in str(error) and "'x'" in str(error)
+        messages.append(str(error))
+        database = after._pipeline_database  # pyright: ignore[reportPrivateUsage]  # nothing is stored
+        database.flush()
+        assert [p for p in database.list_table_paths() if p[-1] == "pdb_v2"] == []
+    assert messages[0] == messages[1]
+
+
 def test_held_rows_run_independent_nodes_first() -> None:
     """Sync: a held node's rows are built where its successor reads them, after an
     independent node has run (the order ``main`` gave)."""

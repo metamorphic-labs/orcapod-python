@@ -254,6 +254,29 @@ WRONG_SHAPE: dict[str, tuple[pa.DataType, list[Any], pa.DataType, list[Any]]] = 
         large(fixed(INT, 3)),
         [[[1, 2, 3]], [[4, 5, 6]]],
     ),
+    # Under its layers a token is a string: any other leaf is refused, also where
+    # the layers fit (second review of PR #601, finding 1).
+    "integer_token": (INT, [1, 2], INT, [1, 2]),
+    "binary_token": (pa.large_binary(), [b"t", b"u"], INT, [1, 2]),
+    "list_of_integers_token": (large(INT), [[1], [2]], large(INT), [[3], [4]]),
+    "list_of_binary_token": (
+        large(pa.large_binary()),
+        [[b"t"], [b"u"]],
+        large(INT),
+        [[3], [4]],
+    ),
+    "nested_integers_token": (
+        large(large(INT)),
+        [[[1]], [[2]]],
+        large(large(INT)),
+        [[[3]], [[4]]],
+    ),
+    "fixed_of_integers_token": (
+        fixed(INT),
+        [[1, 2], [3, 4]],
+        fixed(INT),
+        [[5, 6], [7, 8]],
+    ),
     # A token layer of a kind other than a list is refused, whatever the data.
     "struct_token": (
         pa.struct([("t", STR)]),
