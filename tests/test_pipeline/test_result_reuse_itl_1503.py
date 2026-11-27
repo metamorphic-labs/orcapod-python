@@ -1008,3 +1008,60 @@ def test_async_execute_without_a_persistent_store_runs_the_plain_pod() -> None:
         stored[path] = len(_result_ids(ephemeral))
     assert fired == {"sync row": [], "async_execute": ["COMPUTED"]}
     assert stored == {"sync row": 1, "async_execute": 0}
+
+
+@pytest.mark.parametrize("ephemeral_mode", [False, True], ids=["persistent", "eph"])
+def test_many_repeats_of_one_instance_hold_few_rows_in_memory(
+    ephemeral_mode: bool,
+) -> None:
+    """An async run over 2,000 occurrences of one instance, all delivered one
+    result, holds 2,000 rows for a read but not 2,000 separate tag and data
+    objects: occurrences delivered the same row share one held pair (here two,
+    the computed row and the stored one the later occurrences were served)."""
+    repeats = 2000
+    counted = _Counted()
+    source = _input({"a": 2})
+    (row,) = source.iter_data()
+    node = FunctionJobNode(
+        counted.pod,
+        source,
+        pipeline_database=InMemoryArrowDatabase(),
+        result_database=InMemoryArrowDatabase(),
+    )
+    if ephemeral_mode:
+        node.node_config = NodeConfig(is_result_ephemeral=True)
+        node.set_ephemeral_database(InMemoryArrowDatabase())
+
+    async def go() -> list[bytes]:
+        input_ch: Channel[Any] = Channel(buffer_size=16)
+        output_ch: Channel[Any] = Channel(buffer_size=16)
+
+        async def send() -> None:
+            for _ in range(repeats):
+                await input_ch.writer.send(row)
+            await input_ch.writer.close()
+
+        async def drain() -> list[bytes]:
+            return [data.datagram_uuid.bytes async for _, data in output_ch.reader]
+
+        _, delivered, _ = await asyncio.gather(
+            send(), drain(), node.async_execute(input_ch.reader, output_ch.writer)
+        )
+        return delivered
+
+    delivered = asyncio.run(go())
+    # The occurrences in flight together each call the function; one result is kept.
+    assert set(counted.calls) == {2} and len(counted.calls) < 100
+    assert len(delivered) == repeats and len(set(delivered)) == 1
+
+    held = list(node.iter_data())
+    assert _ids(held) == delivered
+    assert node.held_row_count() == repeats
+    assert len(node.held_instance_ids()) == repeats
+    assert len({id(data) for _, data in held}) <= 2
+    assert len({id(tag) for tag, _ in held}) <= 2
+    # One occurrence stored its computed result, the others were served it.
+    computed = [
+        data.get_meta_value(CachedFunctionPod.RESULT_COMPUTED_FLAG) for _, data in held
+    ]
+    assert computed.count(True) == 1 and computed.count(False) == repeats - 1
