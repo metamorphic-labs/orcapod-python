@@ -279,6 +279,33 @@ def test_same_name_across_kinds_still_collides_at_capture_but_can_bind_separate_
     assert job.sources["right"] is table
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_same_source_id_with_different_key_columns_is_refused_at_build(
+    tmp_path: Path, reverse: bool
+) -> None:
+    path = tmp_path / "shared.csv"
+    path.write_text("t1,t2,x,y\na,b,1,2\nc,d,3,4\n")
+    sources = [
+        CSVSource(
+            str(path),
+            source_id="shared",
+            tag_columns=["t1", "t2"],
+            tag_only_columns=True,
+            record_id_columns=keys,
+        )
+        for keys in (["t1", "x"], ["t2", "y"])
+    ]
+    first, second = sources[::-1] if reverse else sources
+    assert first.source_id == second.source_id
+    assert first.arrow_schemas == second.arrow_schemas
+    assert first.content_hash() != second.content_hash()
+
+    with pytest.raises(SourceSlotNameCollisionError, match="ITL-1506"):
+        with Pipeline("conflicts"):
+            both.pod(first, label="fa")
+            both.pod(second, label="fb")
+
+
 @pytest.mark.parametrize("keyed", [False, True])
 def test_row_order_counts_only_for_positional_ids(keyed: bool) -> None:
     rows = [{"k": "a", "t": 10, "x": 1, "y": 3}, {"k": "b", "t": 20, "x": 2, "y": 4}]
