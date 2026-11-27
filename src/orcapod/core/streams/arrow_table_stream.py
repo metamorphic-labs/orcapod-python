@@ -20,9 +20,12 @@ from orcapod.protocols.core_protocols import PodProtocol, StreamProtocol, TagPro
 from orcapod.protocols.hashing_protocols import PipelineElementProtocol
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema, SourceInfoValue
-from orcapod.utils import arrow_utils, schema_utils
+from orcapod.utils import arrow_utils, schema_utils, source_tokens
 
 logger = logging.getLogger(__name__)
+
+ROWS_PER_PART = 8192
+"""The rows whose source-info text ``iter_data`` builds at once (ITL-1464)."""
 
 
 class ArrowTableStream(StreamBase):
@@ -351,6 +354,10 @@ class ArrowTableStream(StreamBase):
         columns_config = ColumnConfig.handle_config(columns, all_info=all_info)
         return self._assemble_table(columns_config, limit=None)
 
+    def _carried_table(self, config: ColumnConfig) -> "pa.Table":
+        """The table with its derived token columns as they are (``carried_table``)."""
+        return self._assemble_table(config, limit=None, carried=config.system_tags)
+
     def head(
         self,
         n: int = 10,
@@ -384,13 +391,19 @@ class ArrowTableStream(StreamBase):
         return self._assemble_table(ZERO_ROW_INPUT_COLUMNS, limit=0)
 
     def _assemble_table(
-        self, columns_config: ColumnConfig, limit: int | None
+        self,
+        columns_config: ColumnConfig,
+        limit: int | None,
+        *,
+        carried: bool = False,
     ) -> "pa.Table":
         """Return the stream's rows with the column groups of ``columns_config``.
 
         Args:
             columns_config: The column groups to include, and whether to sort by tags.
             limit: Assemble only the first ``limit`` rows; ``None`` for all of them.
+            carried: Leave a derived token column derived (``carried_table``), which
+                needs the system tags in the table; ``False`` gives its text.
         """
         output_table = self._table
         data_context_table = self._data_context_table
@@ -408,8 +421,8 @@ class ArrowTableStream(StreamBase):
                 [str(data.content_hash()) for _, data in rows], type=pa.large_string()
             )
 
-        def shape(carried: "pa.Table") -> "pa.Table":
-            table_stack = (carried,)
+        def shape(rows: "pa.Table") -> "pa.Table":
+            table_stack = (rows,)
             if columns_config.context:
                 table_stack += (data_context_table,)
             if columns_config.source:
@@ -423,6 +436,8 @@ class ArrowTableStream(StreamBase):
                 # the system tags are asked for. The system tags stay in the table
                 # through the sort: they break ties between equal tags.
                 table = arrow_utils.sort_by_tag_columns(table, tuple(self._tag_columns))
+            if not carried:
+                table = source_tokens.materialize(table)
             if not columns_config.system_tags:
                 table = table.drop_columns(list(self._system_tag_columns))
             return table
@@ -471,21 +486,30 @@ class ArrowTableStream(StreamBase):
                     self._source_info_table.schema.field(name),
                     self._source_info_table.column(name),
                 )
-            # The table is prepared once for all of its rows (ITL-1348): building
-            # ``Tag(row)`` and ``Data(row)`` from one-row slices normalized every row
-            # three times and split its columns again.
-            tags = (
-                Tag.rows_of(rows.select(tag_columns), self.data_context)
-                if tag_columns
-                else None
+            # Derived tokens become text a part of the rows at a time (ITL-1464); a
+            # table with none is one part.
+            size = (
+                ROWS_PER_PART
+                if source_tokens.derived_columns(rows.schema)
+                else max(rows.num_rows, 1)
             )
-            for data in Data.rows_of(rows.select(data_columns), self.data_context):
-                # A fresh empty tag per row, so rows never share one object.
-                tag = next(tags) if tags is not None else Tag({})
+            for start in range(0, rows.num_rows, size):
+                part = source_tokens.materialize(rows.slice(start, size))
+                # The part is prepared once for all of its rows (ITL-1348): building
+                # ``Tag(row)`` and ``Data(row)`` from one-row slices normalized every
+                # row three times and split its columns again.
+                tags = (
+                    Tag.rows_of(part.select(tag_columns), self.data_context)
+                    if tag_columns
+                    else None
+                )
+                for data in Data.rows_of(part.select(data_columns), self.data_context):
+                    # A fresh empty tag per row, so rows never share one object.
+                    tag = next(tags) if tags is not None else Tag({})
 
-                yield tag, data
+                    yield tag, data
 
-                cached_elements.append((tag, data))
+                    cached_elements.append((tag, data))
             self._cached_elements = cached_elements
         else:
             yield from self._cached_elements

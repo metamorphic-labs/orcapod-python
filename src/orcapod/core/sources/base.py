@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
+from orcapod.core.streams.carried import carried_table
 from orcapod.core.streams.base import (
     StreamBase,
     reads_as_its_class,
@@ -536,6 +537,15 @@ class RootSource(StreamBase):
     ) -> "pa.Table":
         """Delegate to the underlying stream's as_table."""
         return self._stream.as_table(columns=columns, all_info=all_info)
+
+    def _carried_from_stream(self, config: ColumnConfig) -> "pa.Table":
+        """``as_table`` above, derived token columns as they are (ITL-1464).
+
+        What a source kind that reads through ``_stream`` declares as its
+        ``_carried_table`` (``core/streams/carried.py``).
+        """
+        stream: StreamBase = getattr(self, "_stream")  # noqa: B009  # set by each subclass
+        return carried_table(stream, config)
 
     # -------------------------------------------------------------------------
     # The start-of-run check (ITL-1102)

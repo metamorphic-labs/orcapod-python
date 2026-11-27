@@ -74,6 +74,8 @@ class Filter(UnaryOperator):
         TypeError: If ``condition`` is neither a condition nor a mapping.
     """
 
+    CARRIES_TOKENS: ClassVar[bool] = True
+
     # Data-tags (ITL-1023): a data-tag is one column, named alike as tag or data.
     DATA_TAGS_ISSUE: ClassVar[str | None] = None
 
@@ -243,13 +245,14 @@ class Filter(UnaryOperator):
         """
         # Every system column passes through: source info, system tags and each row's
         # data context (a raw stream may hold several).
-        table = stream.as_table(
+        table = self._input_table(
+            stream,
             columns={
                 "source": True,
                 "system_tags": True,
                 "context": True,
                 "sort_by_tags": False,
-            }
+            },
         )
         tag_columns, data_columns = stream.keys()
         self._check_arrow(table.schema, _user_columns(tag_columns, data_columns))

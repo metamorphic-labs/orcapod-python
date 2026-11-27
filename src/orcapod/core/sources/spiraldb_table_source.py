@@ -62,7 +62,8 @@ from orcapod.core.sources.stream_builder import (
     row_identifiers,
 )
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
-from orcapod.core.streams.base import check_head_size
+from orcapod.core.streams.carried import carried_table
+from orcapod.core.streams.base import StreamBase, check_head_size
 from orcapod.core.streams.view import ViewStatus, StreamView
 from orcapod.databases.spiraldb_connector import (
     SpiralDBConnector,
@@ -962,31 +963,28 @@ class SpiralDBTableSource(RootSource):
         all_info: bool = False,
     ) -> "pa.Table":
         """Scan the table and return its rows as one PyArrow table (all held in memory)."""
-        return self._whole_table(
-            self._batch_streams(), columns=columns, all_info=all_info
+        return self._whole_stream(self._batch_streams()).as_table(
+            columns=columns, all_info=all_info
         )
 
-    def _whole_table(
-        self,
-        streams: Iterator["ArrowTableStream"],
-        *,
-        columns: ColumnConfig | dict[str, Any] | None,
-        all_info: bool,
-    ) -> "pa.Table":
-        """Return the rows of ``streams`` (batches of one read) as one table."""
+    def _carried_table(self, config: ColumnConfig) -> "pa.Table":
+        """Scan the table as ``as_table`` does, building no source-info text (ITL-1464)."""
+        return carried_table(self._whole_stream(self._batch_streams()), config)
+
+    def _whole_stream(self, streams: Iterator["ArrowTableStream"]) -> StreamBase:
+        """Return the rows of ``streams`` (batches of one read) as one stream."""
         # One stream over all the rows, so that a whole-table option (sorting by
         # tags) applies across batches.
         enriched = {"source": True, "system_tags": True}
-        tables = [stream.as_table(columns=enriched) for stream in streams]
+        tables = [carried_table(stream, enriched) for stream in streams]
         if not tables:
-            return self._stream.as_table(columns=columns, all_info=all_info)
-        whole = ArrowTableStream(
+            return self._stream
+        return ArrowTableStream(
             table=pa.concat_tables(tables),
             tag_columns=self._tag_columns,
             system_tag_columns=self._system_tag_columns,
             data_tags=self._data_tags,
         )
-        return whole.as_table(columns=columns, all_info=all_info)
 
     def _head(
         self,
@@ -1016,11 +1014,9 @@ class SpiralDBTableSource(RootSource):
         head_limit = n if limit is None else min(n, limit)
         asof = self._asof
         table = self._lookup_table()
-        rows = self._whole_table(
-            self._read_batches(table, asof=asof, limit=head_limit, max_rows=None),
-            columns=columns,
-            all_info=all_info,
-        )
+        rows = self._whole_stream(
+            self._read_batches(table, asof=asof, limit=head_limit, max_rows=None)
+        ).as_table(columns=columns, all_info=all_info)
         if rows.num_rows < head_limit or head_limit == limit:
             return _Head(rows, True, rows.num_rows, False)
         bound, total = self._bounded_count(n, table)
