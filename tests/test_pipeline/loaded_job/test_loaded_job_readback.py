@@ -377,31 +377,23 @@ def _append_recomputed_record(
     reader.result_database.add_records(
         reader.record_path, result, record_id_column=record_id_col, flush=True
     )
-    # The recomputed record: its record id is made from the instance and the new
-    # result id, and its key is the node's content hash with it (ITL-1471).
+    # The recomputed record: its record id is made from the node's content hash,
+    # the instance and the new result id, and is its key (ITL-1471).
     from orcapod.core import row_ids
     from orcapod.types import ContentHash
 
     new_record = row_ids.record_id(
         node.data_context.arrow_hasher,
         ContentHash.from_prefixed_digest(
+            record.column("__node_content_hash")[0].as_py()
+        ),
+        ContentHash.from_prefixed_digest(
             record.column("__pipeline_instance_id")[0].as_py()
         ),
         uuid.UUID(bytes=new_record_id),
     )
     record = replaced(record, "__pipeline_record_id", [new_record.to_prefixed_digest()])
-    record = replaced(
-        record,
-        entry_id_col,
-        [
-            row_ids.pipeline_row_key(
-                ContentHash.from_prefixed_digest(
-                    record.column("__node_content_hash")[0].as_py()
-                ),
-                new_record,
-            )
-        ],
-    )
+    record = replaced(record, entry_id_col, [new_record.to_prefixed_digest()])
     record = replaced(
         record, time_col, [recorded_at + datetime.timedelta(minutes=minutes_later)]
     )
@@ -551,7 +543,7 @@ def test_newer_unavailable_result_does_not_expose_old_persistent_result(
     assert records is not None
     # Public database writes reproduce historical recomputations without executing a pod:
     # each is a valid record of its instance, with a new result id, the record id made
-    # from the two and the row key made from the node and the record id.
+    # from the node's content hash and the two, which is also the row's key.
     from orcapod.contexts import get_default_context
     from orcapod.core import row_ids
     from orcapod.types import ContentHash
@@ -559,23 +551,23 @@ def test_newer_unavailable_result_does_not_expose_old_persistent_result(
     hasher = get_default_context().arrow_hasher
     result_ids = [uuid.uuid4() for _ in range(records.num_rows)]
     record_ids = [
-        row_ids.record_id(hasher, ContentHash.from_prefixed_digest(instance), result)
-        for instance, result in zip(
+        row_ids.record_id(
+            hasher,
+            ContentHash.from_prefixed_digest(node),
+            ContentHash.from_prefixed_digest(instance),
+            result,
+        )
+        for node, instance, result in zip(
+            cast(
+                "list[bytes]",
+                records.column(constants.NODE_CONTENT_HASH_COL).to_pylist(),
+            ),
             cast("list[bytes]", records.column("__pipeline_instance_id").to_pylist()),
             result_ids,
         )
     ]
     for column, values in {
-        "__rid": [
-            row_ids.pipeline_row_key(ContentHash.from_prefixed_digest(node), record)
-            for node, record in zip(
-                cast(
-                    "list[bytes]",
-                    records.column(constants.NODE_CONTENT_HASH_COL).to_pylist(),
-                ),
-                record_ids,
-            )
-        ],
+        "__rid": [r.to_prefixed_digest() for r in record_ids],
         "__pipeline_record_id": [r.to_prefixed_digest() for r in record_ids],
         constants.DATA_RECORD_ID: [r.bytes for r in result_ids],
         constants.IS_EPHEMERAL_COL: [True] * records.num_rows,

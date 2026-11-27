@@ -33,7 +33,7 @@ no node or pod module), so `function_pod.py`, `side_effects.py`, `function_node.
 | `ENTRY_ID_COL`, `INSTANCE_ID_COL`, `RECORD_ID_COL` | the three column names |
 | `entry_id_preimage(tag, data)`, `entry_id(hasher, tag, data)` | user tags and system tags (`tag.as_table(columns={"system_tags": True})`), then `__input_data_hash` (`large_binary`, the labelled digest of `data.content_hash()`). Today's `_build_record_id_preimage`, moved; no index column |
 | `instance_id_preimage(entry, data)`, `instance_id(hasher, tag, data)` | `__pipeline_entry_id` (`large_binary`, the entry id's labelled digest), then the input's `_source_*` columns in name order |
-| `record_id_preimage(instance, result_id)`, `record_id(hasher, instance, result_id)` | `__pipeline_instance_id` (`large_binary`), then `__data_id` (`large_binary`, the result UUID's bytes) |
+| `record_id_preimage(node_content_hash, instance, result_id)`, `record_id(hasher, node_content_hash, instance, result_id)` | `__node_content_hash` (`large_binary`, the labelled digest of the recording node's content hash), then `__pipeline_instance_id` (`large_binary`), then `__data_id` (`large_binary`, the result UUID's bytes). The node's content hash is in the record id by the developer's decision of November 26, 2026: the record id alone is the table's key, and two nodes sharing a table each keep their rows |
 
 Each id is a `ContentHash` of the data context's Arrow hasher (`arrow_v1`); it is fed onward as
 `to_prefixed_digest()` and stored the same way. No new hash label.

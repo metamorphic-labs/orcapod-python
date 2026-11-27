@@ -1,8 +1,8 @@
 """Regression tests for the second review of the row ids (ITL-1471, PR #583).
 
 1. Two nodes that share one pipeline table (the default pipeline-hash scope) and
-   meet one instance with one stored result each keep their own row: the table's
-   key is the node's content hash with the record id.
+   meet one instance with one stored result each keep their own row: the record
+   id, the table's key, covers the node's content hash.
 2. A trace of a function that reads its source directly finds the record of the
    row's own instance after a rerun whose tokens changed.
 3. On the async route a placeholder whose result is not stored is a failed row
@@ -133,9 +133,10 @@ def test_two_nodes_sharing_a_table_each_keep_their_row_of_a_shared_instance(
     """Both nodes store all of their rows, also the instances they share.
 
     The second node meets two instances the first already recorded, with the same
-    stored results, so the same record ids. Keyed by the record id alone its two
-    rows were skipped as duplicates, and its stored view lost them (review of PR
-    #583; ``main`` kept both). The table's key is (node content hash, record id).
+    stored results. With a record id made of the instance and the result alone its
+    two rows were skipped as duplicates, and its stored view lost them (review of
+    PR #583; ``main`` kept both). The record id covers the node's content hash, so
+    the two nodes' records of one instance differ, and the record id is the key.
     """
     database = InMemoryArrowDatabase()
     pod = combine.pod
@@ -164,9 +165,13 @@ def test_two_nodes_sharing_a_table_each_keep_their_row_of_a_shared_instance(
     assert table.num_rows == 6
     assert len(set(_values(table, KEY))) == 6
     by_node: dict[bytes, list[bytes]] = {}
+    instances: dict[bytes, set[bytes]] = {}
     for row in table.to_pylist():
         by_node.setdefault(row["__node_content_hash"], []).append(
             row[row_ids.RECORD_ID_COL]
+        )
+        instances.setdefault(row["__node_content_hash"], set()).add(
+            row["__pipeline_instance_id"]
         )
     assert set(by_node) == {
         first.content_hash().to_prefixed_digest(),
@@ -174,20 +179,31 @@ def test_two_nodes_sharing_a_table_each_keep_their_row_of_a_shared_instance(
     }
     records = [set(ids) for ids in by_node.values()]
     assert [len(ids) for ids in records] == [3, 3]
-    # The two shared instances have one record id in both nodes' rows.
-    assert len(records[0] & records[1]) == 2
-    # Every stored row gives its record id again, and its key is the node's
-    # content hash with it.
+    # The two nodes share two instances, each with one stored result, and no
+    # record id: a record id covers the node that recorded the row.
+    shared = set.intersection(*instances.values())
+    assert len(shared) == 2
+    assert not records[0] & records[1]
+    for instance in shared:
+        of_instance = [
+            row
+            for row in table.to_pylist()
+            if row["__pipeline_instance_id"] == instance
+        ]
+        assert len(of_instance) == 2
+        assert len({row["__data_id"] for row in of_instance}) == 1
+        assert len({row[row_ids.RECORD_ID_COL] for row in of_instance}) == 2
+    # Every stored row gives its record id again from its own columns (the node's
+    # content hash, the instance id, the result id), and the record id is its key.
     for row in table.to_pylist():
         record = row_ids.record_id(
             HASHER,
+            ContentHash.from_prefixed_digest(row["__node_content_hash"]),
             ContentHash.from_prefixed_digest(row["__pipeline_instance_id"]),
             uuid.UUID(bytes=row["__data_id"]),
         )
         assert record.to_prefixed_digest() == row[row_ids.RECORD_ID_COL]
-        assert row[KEY] == row_ids.pipeline_row_key(
-            ContentHash.from_prefixed_digest(row["__node_content_hash"]), record
-        )
+        assert row[KEY] == row[row_ids.RECORD_ID_COL]
 
     # A new node over the first session's stream is that node again: every row is a
     # hit, nothing is computed and nothing is written.

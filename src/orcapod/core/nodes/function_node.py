@@ -142,10 +142,10 @@ def _pipeline_meta_schema() -> pa.Schema:
 
     The record holds the tags, system tags and input source-info columns, then
     these. The instance id is the plain column a run looks a row up by, and the
-    record id names the row (``core/row_ids.py``, ITL-1471). The table's key is
-    the node's content hash with the record id (``row_ids.pipeline_row_key``): one
-    table holds the rows of every node with one pipeline hash, and two of them can
-    record one instance with one result. One definition for the writer (``add_pipeline_record``) and for the
+    record id names the row and is the table's key (``core/row_ids.py``,
+    ITL-1471). The record id covers the node's content hash: one table holds the
+    rows of every node with one pipeline hash, and two of them can record one
+    instance with one result, each under its own record id. One definition for the writer (``add_pipeline_record``) and for the
     check of the pipeline database when it is attached (ITL-1162).
     """
     return pa.schema(
@@ -2470,7 +2470,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         """Queue a readable record with a dependency on its result's commit.
 
         Args:
-            row_key: The row's key in the table (``row_ids.pipeline_row_key``).
+            row_key: The row's key in the table: its record id, with its label.
             record: The row.
             result_id: The id of the result the row points at.
             is_ephemeral: Whether the result is in the ephemeral database.
@@ -3152,13 +3152,13 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
     ) -> None:
         """Add a pipeline record for a row that produced output.
 
-        The row is named by its record id, the hash of its instance id and the id
-        of its result (``row_ids.record_id``), and kept under this node's content
-        hash with it (``row_ids.pipeline_row_key``); nothing is read before the
-        write. The database skips a row whose key is already stored, so the same
+        The row is named by its record id, the hash of this node's content hash,
+        the row's instance id and the id of its result (``row_ids.record_id``),
+        and kept under it; nothing is read before the write. The database skips a row whose key is already stored, so the same
         instance recorded again by this node with the same result is one row,
         with its first recording time. Another node that shares the table (the
-        same pipeline hash) keeps its own row of the same record. A recompute has a new result id, so it is a new row. An
+        same pipeline hash) has another record id for the same instance and
+        result, so it keeps its own row. A recompute has a new result id, so it is a new row. An
         input whose tokens changed is a new instance: its row is new, and its
         result normally comes from the result store, so nothing is computed
         (ITL-1471).
@@ -3233,15 +3233,16 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         self._account_for_stale_tables()
         self._preflight_pipeline_write_schema()
 
+        # The table is shared by the nodes of one pipeline hash: the record id
+        # covers this node's content hash, so another node's record of the same
+        # instance and result is another row. The record id is the row's key.
         record = row_ids.record_id(
             self.data_context.arrow_hasher,
+            self.content_hash(),
             ContentHash.from_prefixed_digest(instance_id),
             data_record_id,
         )
-        # The table is shared by the nodes of one pipeline hash: the row's key is
-        # this node's content hash with the record id, so another node's record
-        # of the same instance and result is another row.
-        row_key = row_ids.pipeline_row_key(self.content_hash(), record)
+        row_key = record.to_prefixed_digest()
 
         # The input's source-info columns, exactly as the instance id read them
         # (``row_ids.instance_id_preimage`` takes the same table): a stored row
@@ -3268,7 +3269,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 f"{constants.META_PREFIX}computed": [computed],
                 constants.IS_EPHEMERAL_COL: [is_ephemeral],
                 INSTANCE_ID_COL: [instance_id],
-                RECORD_ID_COL: [record.to_prefixed_digest()],
+                RECORD_ID_COL: [row_key],
                 PIPELINE_RUN_ID_COL: [run_id],
                 PIPELINE_RECORDED_AT_COL: [datetime.now(timezone.utc)],
             },

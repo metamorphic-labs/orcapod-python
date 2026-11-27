@@ -1067,19 +1067,20 @@ these preimages anywhere else.
   entry id    — hash of user tags, system tags, the labelled input data hash (__pipeline_entry_id)
   instance id — hash of the entry id (labelled) and the input's source-info tokens in name
                 order (__pipeline_instance_id)
-  record id   — hash of the instance id (labelled) and the result id, __data_id
-                (__pipeline_record_id)
+  record id   — hash of the node's content hash (labelled), the instance id (labelled) and
+                the result id, __data_id (__pipeline_record_id)
 
 - A function node identifies a row by its instance id (tokens included): it is the plain lookup
   column of the pipeline table and the key of the node's in-memory cache. A new instance of a
   known entry (same values, other tokens) writes a new row; its result normally comes from the
   result store (same input hash), so nothing is computed.
-- A pipeline row stores its record id (__pipeline_record_id). The table's key is the node's
-  content hash with the record id (row_ids.pipeline_row_key; not a hash, never read apart):
+- A pipeline row stores its record id (__pipeline_record_id). It is the table's key, and it
+  covers the content hash of the node that records the row (developer, November 26, 2026):
   with the default pipeline-hash scope one table holds the rows of several nodes, told apart by
-  __node_content_hash, and two of them can record one instance with one cached result. Never
-  key the table by the record id alone: the second node's row would be dropped as a duplicate.
-  A write skips only a row this node already stored under that record id; a recompute has a new
+  __node_content_hash, and two of them can record one instance with one cached result, each
+  under its own record id. Never take the node's content hash out of the record id: the second
+  node's row would be dropped as a duplicate. The row stores __node_content_hash, so it gives
+  its record id again from its own columns. A write skips only a row this node already stored under that record id; a recompute has a new
   result id, so it writes a new row. There is no recomputation index: among the rows of one
   instance, __recorded_at says which is the latest.
 - Only side effects and functions that take the invocation context are keyed by the entry id:
@@ -1107,10 +1108,20 @@ these preimages anywhere else.
   gives it, with a nullable field, never typed again from the value (a nested token column
   would not survive it); a change of the row keeps the typed column of every
   token it keeps (a selection, a drop, a rename, added columns); a token given as a Python value is typed
-  from its value, and so is the token of a column taken from another row (`with_columns_of`,
-  a data-tag falling through a function: the edge between two nodes and a stored result type
-  it from its value too, so it has one type on every route; typed tokens from end to end are
-  ITL-1491). A rename moves a column's token with it; a token held for the destination name
+  from its value. STOPGAP, not the proper solution (developer, November 27, 2026; ITL-1491
+  removes it): the token of a column taken from another row (`with_columns_of`, a data-tag
+  that falls through a function pod) and a token at the sync edge between two nodes (the
+  row-built form) are typed again from their values. The rule: a data-tag that falls through
+  a function pod keeps its source-info token with its type unchanged; a column a function
+  returns is never a pass-through, even with an input's name and value (its token points to
+  the function); and the type of every source-info token column is determined by the
+  pipeline, like every other column type, never taken from values (sources build plain
+  `large_string` tokens; joins and single-stream operators keep the shape; `Batch`, `GroupBy`
+  and `MergeJoin` add one list level each). The stopgap exists because the sync route
+  normalizes a stream's token columns to large types between two nodes and the async route
+  passes rows on without it, so a hand-built token of another type (a fixed-size list) had
+  two instance ids. Never build on the re-typing, and never write "a function passes a
+  column through". A rename moves a column's token with it; a token held for the destination name
   before is dropped. There is one column
   per data column: a data column with no token has a null token, so a row built from values
   and the same row read from a table have one instance id. Ids are a function of the row alone, never of the order
