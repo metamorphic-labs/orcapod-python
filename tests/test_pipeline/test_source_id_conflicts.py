@@ -675,10 +675,13 @@ def _keyed(
 
 
 def _capture(first: RootSource, second: RootSource, pod: _FunctionPodBase) -> str:
-    with pytest.raises(InconsistentSourceError) as error:
-        with Pipeline("conflicts"):
-            pod(first, label="fa")
-            pod(second, label="fb")
+    """Refused when the second step is captured, not later at compile."""
+    graph = Pipeline("conflicts")
+    with graph:
+        _ = pod(first, label="fa")
+        with pytest.raises(InconsistentSourceError) as error:
+            _ = pod(second, label="fb")
+    assert "fb" not in graph.nodes
     return str(error.value)
 
 
@@ -773,52 +776,72 @@ def test_live_sources_with_different_keys_do_not_claim_only_key_columns(
     assert "source_id=" in message
 
 
-def _derived(origin: RootSource, tag: str, keys: list[str] | None) -> DerivedSource:
+@function_pod(output_keys="out")
+def with_copies(x: int, y: int, c1: str, c2: str) -> int:
+    return x + y + len(c1) + len(c2)
+
+
+def _derived(
+    origin: RootSource, mapping: dict[str, str], keys: list[str] | None
+) -> DerivedSource:
     return DerivedSource(
-        origin,
-        tags_as_data={tag: "tag_value"},
-        record_id_columns=keys,
-        source_id="shared",
+        origin, tags_as_data=mapping, record_id_columns=keys, source_id="shared"
     )
+
+
+# Two copies, given in both orders; the conflict changes only the second copy (c2
+# copies t3 instead of t2: same type, other values).
+_COPIES = {"t1": "c1", "t2": "c2"}
+_COPIES_REVERSED = {"t2": "c2", "t1": "c1"}
+_SECOND_COPY_CHANGED = {"t1": "c1", "t3": "c2"}
+_ORIGIN_TEXT = "t1,t2,t3,x,y\na,p,u,1,10\nb,q,v,2,20\n"
 
 
 def test_derived_sources_over_live_origins_with_other_mapping_and_keys(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "origin.csv"
-    path.write_text("t1,t2,x\na,p,1\nb,q,2\n")
+    path.write_text(_ORIGIN_TEXT)
     origin = CSVSource(
         str(path),
         source_id="origin",
-        tag_columns=["t1", "t2"],
+        tag_columns=["t1", "t2", "t3"],
         tag_only_columns=True,
     )
-    first, second = _derived(origin, "t1", ["t1"]), _derived(origin, "t2", ["t2"])
-    assert first.arrow_schemas == second.arrow_schemas
-    message = _capture(first, second, with_copy.pod)
-    assert "differ only" not in message
-    assert "not compared" in message
-    assert "ITL-1506" in message
+    for mapping in (_COPIES_REVERSED, _SECOND_COPY_CHANGED):
+        first = _derived(origin, _COPIES, ["t1", "t2"])
+        second = _derived(origin, mapping, ["t3", "t1"])
+        assert first.arrow_schemas == second.arrow_schemas
+        message = _capture(first, second, with_copies.pod)
+        assert "differ only" not in message
+        assert "not compared" in message
+        assert "ITL-1506" in message
 
 
-def test_derived_sources_over_fixed_origins_compare_rows_without_record_ids() -> None:
+@pytest.mark.parametrize("reverse", [False, True])
+def test_derived_sources_over_fixed_origins_compare_rows_without_record_ids(
+    reverse: bool,
+) -> None:
     origin = DictSource(
-        [{"t1": "a", "t2": "p", "x": 1}, {"t1": "b", "t2": "q", "x": 2}],
-        tag_columns=["t1", "t2"],
+        [
+            {"t1": "a", "t2": "p", "t3": "u", "x": 1, "y": 10},
+            {"t1": "b", "t2": "q", "t3": "v", "x": 2, "y": 20},
+        ],
+        tag_columns=["t1", "t2", "t3"],
         tag_only_columns=True,
         source_id="origin",
     )
-    same = _capture(
-        _derived(origin, "t1", ["t1"]), _derived(origin, "t1", ["t2"]), with_copy.pod
-    )
+
+    def pair(mapping: dict[str, str]) -> tuple[DerivedSource, DerivedSource]:
+        first = _derived(origin, _COPIES, ["t1", "t2"])
+        second = _derived(origin, mapping, ["t3", "t1"])
+        return (second, first) if reverse else (first, second)
+
+    # The mapping given in the other order copies the same values.
+    same = _capture(*pair(_COPIES_REVERSED), with_copies.pod)
     assert "differ only in key columns" in same
-    # Another mapping copies other values: the rows differ.
-    _refused(
-        _derived(origin, "t1", ["t1"]),
-        _derived(origin, "t2", ["t2"]),
-        Pipeline("conflicts"),
-        with_copy.pod,
-    )
+    # Only the second copy changed: the rows differ.
+    _refused(*pair(_SECOND_COPY_CHANGED), Pipeline("conflicts"), with_copies.pod)
 
 
 def test_equal_keys_still_compare_record_ids() -> None:
@@ -856,7 +879,11 @@ def test_unknown_key_columns_never_hide_a_conflict_between_known_ones() -> None:
     ):
         with pytest.raises(InconsistentSourceError) as error:
             require_consistent_sources(uses)
-        assert "differ only in key columns" in str(error.value)
+        # The proxy's rows were not compared, so the rows are not claimed equal.
+        message = str(error.value)
+        assert "different key columns" in message
+        assert "differ only" not in message
+        assert "not compared" in message
     # Alone with either known source, the proxy causes nothing.
     require_consistent_sources([("slot 'p'", proxy), ("slot 'a'", positional)])
     require_consistent_sources([("slot 'p'", proxy), ("slot 'b'", keyed)])
@@ -1043,3 +1070,71 @@ def test_a_mutated_frame_is_compared_again_at_the_next_bind() -> None:
         pytest.skip("this pandas copies the frame; nothing is shared to mutate")
     with pytest.raises(InconsistentSourceError, match="different rows"):
         job.bind(sources={"left": first, "right": second})
+
+
+def _arranged(
+    arrangement: Arrangement,
+    source_id: str,
+    keys: list[str] | None,
+    changed: bool = False,
+) -> ArrowTableSource:
+    """``P`` (two tags, two data columns) in ``arrangement``; ``changed`` alters p2."""
+    table = make_table(P, arrangement)
+    if changed:
+        index = table.schema.get_field_index("p2")
+        values = table["p2"].to_pylist()
+        values[-1] = "changed"
+        table = table.set_column(
+            index, table.schema.field(index), pa.array(values, pa.large_string())
+        )
+    role = arrangement.roles
+    return ArrowTableSource(
+        table,
+        tag_columns=list(arrangement.tag_order),
+        tag_only_columns=True
+        if role == PLAIN
+        else [P.mixed_plain]
+        if role == MIXED
+        else [],
+        record_id_columns=keys,
+        source_id=source_id,
+    )
+
+
+@pytest.mark.parametrize("role", ROLES)
+@pytest.mark.parametrize(
+    ("left_keys", "right_keys", "changed", "message"),
+    [
+        (["t1", "t2"], ["t2", "t1"], False, "differ only in key columns"),
+        (None, ["t2", "t1"], False, "differ only in key columns"),
+        (["t1", "t2"], ["t2", "t1"], True, "different rows"),
+        (None, None, True, "different rows"),
+    ],
+)
+@pytest.mark.parametrize(
+    "orchestrator", [SyncPipelineOrchestrator, AsyncPipelineOrchestrator]
+)
+def test_node_run_checks_its_sources_on_several_columns(
+    role: str,
+    left_keys: list[str] | None,
+    right_keys: list[str] | None,
+    changed: bool,
+    message: str,
+    orchestrator: type,
+) -> None:
+    left = Arrangement(P.tags, TAGS_FIRST, role)
+    right = Arrangement(tuple(reversed(P.tags)), DATA_FIRST_REVERSED, role)
+    with PipelineJob(database=InMemoryArrowDatabase()) as job:
+        matched = SemiJoin()(
+            _arranged(left, "left", None), _arranged(right, "right", None), label="m"
+        )
+        _ = with_pair.pod(matched, label="fm")
+    # Rebound outside bind, so only the run-time checks can refuse.
+    job.nodes["left"].bound_source = _arranged(left, "shared", left_keys)
+    job.nodes["right"].bound_source = _arranged(right, "shared", right_keys, changed)
+    with pytest.raises(InconsistentSourceError, match=message):
+        _ = job.run(orchestrator=orchestrator())
+    for node in ("m", "fm"):
+        with pytest.raises(InconsistentSourceError, match=message):
+            _ = job.nodes[node].run()
+        assert job.nodes[node].as_table().num_rows == 0
