@@ -434,6 +434,73 @@ class _VersionedContentHash(ContentHash):
         return b"v2:" + super().to_prefixed_digest()
 
 
+class _CustomEncodingLabel(str):
+    @override
+    def encode(self, encoding: str = "utf-8", errors: str = "strict") -> bytes:
+        return b"custom"
+
+
+class _ChangingAlgorithmKey(FileHashKey):
+    _algorithm_reads: int = 0
+
+    @override
+    def __getattribute__(self, name: str) -> object:
+        if name == "algorithm":
+            reads = self._algorithm_reads
+            object.__setattr__(self, "_algorithm_reads", reads + 1)
+            return "sha256" if reads < 2 else "sha3_256"
+        return super().__getattribute__(name)
+
+
+@pytest.mark.parametrize("match_mtime", [True, False])
+def test_sqlite_rejects_a_conflict_from_another_label(
+    tmp_path: Path,
+    match_mtime: bool,
+    caplog: pytest.LogCaptureFixture,
+):
+    db_path = tmp_path / "cache.db"
+    original = _hash_of("sha256")
+    blob = original.to_prefixed_digest()
+    with SqliteHashCacher(db_path, match_mtime=match_mtime) as cache:
+        _insert_raw(db_path, blob)
+        adapter_key = (str, sqlite3.PrepareProtocol)
+        previous_adapter = sqlite3.adapters.get(adapter_key)
+        sqlite3.register_adapter(str, str.lower)
+        try:
+            with pytest.raises(ValueError, match="matched a row with algorithm label"):
+                cache.put(_key("SHA256"), ContentHash("SHA256", b"\x02" * 32))
+        finally:
+            if previous_adapter is None:
+                del sqlite3.adapters[adapter_key]
+            else:
+                sqlite3.register_adapter(str, previous_adapter)
+        assert cache.get(_key("sha256")) == original
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "SELECT algorithm, hash, cached_at FROM file_hash_cache_v2"
+        ).fetchall() == [("sha256", blob, 1)]
+    assert not caplog.records
+
+
+@pytest.mark.parametrize("match_mtime", [True, False])
+@pytest.mark.parametrize(
+    ("key_type", "label"),
+    [
+        pytest.param(FileHashKey, _CustomEncodingLabel("sha256"), id="custom-encoding"),
+        pytest.param(_ChangingAlgorithmKey, "sha256", id="changing-algorithm"),
+    ],
+)
+def test_sqlite_reads_with_a_canonical_algorithm_snapshot(
+    tmp_path: Path, match_mtime: bool, key_type: type[FileHashKey], label: str
+):
+    key = _key("sha256")
+    lookup_key = key_type(key.path, key.mtime_ns, key.size, label)
+    with SqliteHashCacher(tmp_path / "cache.db", match_mtime=match_mtime) as cache:
+        original = _hash_of("sha256")
+        cache.put(key, original)
+        assert cache.get(lookup_key) == original
+
+
 @pytest.mark.parametrize("match_mtime", [True, False])
 @pytest.mark.parametrize("same_digest", [True, False])
 def test_sqlite_preserves_valid_rows_with_custom_serialization(

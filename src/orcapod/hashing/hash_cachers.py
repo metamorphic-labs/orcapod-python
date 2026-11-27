@@ -270,7 +270,8 @@ class SqliteHashCacher:
         Returns:
             Cached ``ContentHash``, or ``None`` if not found.
         """
-        hash_format = stored_hash_format(key.algorithm)
+        algorithm = str.__str__(key.algorithm)
+        hash_format = stored_hash_format(algorithm)
         if hash_format is None:
             return None
         conn = self._connection()
@@ -278,17 +279,17 @@ class SqliteHashCacher:
             row = conn.execute(
                 "SELECT CASE WHEN typeof(hash)='blob' THEN hash END FROM file_hash_cache_v2 "
                 "WHERE path=? AND mtime_ns=? AND size=? AND algorithm=?",
-                (str(key.path), key.mtime_ns, key.size, key.algorithm),
+                (str(key.path), key.mtime_ns, key.size, algorithm),
             ).fetchone()
         else:
             row = conn.execute(
                 "SELECT CASE WHEN typeof(hash)='blob' THEN hash END FROM file_hash_cache_v2 "
                 "WHERE path=? AND size=? AND algorithm=? ORDER BY mtime_ns DESC LIMIT 1",
-                (str(key.path), key.size, key.algorithm),
+                (str(key.path), key.size, algorithm),
             ).fetchone()
         if row is None or not isinstance(row[0], bytes):
             return None
-        return parse_stored_file_hash(row[0], key.algorithm, *hash_format)
+        return parse_stored_file_hash(row[0], algorithm, *hash_format)
 
     def put(self, key: FileHashKey, value: ContentHash) -> None:
         """Store ``value`` under ``key``.
@@ -303,8 +304,9 @@ class SqliteHashCacher:
 
         Raises:
             ValueError: If the hash label or digest length is invalid for the key
-                (checked before the write guards), or if a write finds a different
-                well-formed hash under the same key.
+                (checked before the write guards), if the store matches a row
+                with another label, or if a different well-formed hash exists
+                under the same key.
         """
         algorithm = str.__str__(key.algorithm)
         prefix, digest_size, stored_value = serialize_storable_file_hash(
@@ -334,20 +336,27 @@ class SqliteHashCacher:
             if inserted.rowcount == 1:
                 return
             existing = cast(
-                "tuple[object, ...] | None",
+                "tuple[object, object] | None",
                 conn.execute(
                     """
-                    SELECT CASE WHEN typeof(hash)='blob' THEN hash END FROM file_hash_cache_v2
+                    SELECT algorithm, CASE WHEN typeof(hash)='blob' THEN hash END
+                    FROM file_hash_cache_v2
                     WHERE path=? AND mtime_ns=? AND size=? AND algorithm=?
                     """,
                     fields,
                 ).fetchone(),
             )
-            if existing == (stored_value,):
+            if existing is None:
+                raise ValueError(f"Different hash already cached for {key!r}")
+            stored_algorithm, blob = existing
+            if str.__eq__(algorithm, stored_algorithm) is not True:
+                raise ValueError(
+                    f"Cache matched a row with algorithm label {stored_algorithm!r} "
+                    f"for key label {algorithm!r}"
+                )
+            if blob == stored_value:
                 return
-            if existing is None or matches_stored_file_hash(
-                existing[0], prefix, digest_size
-            ):
+            if matches_stored_file_hash(blob, prefix, digest_size):
                 raise ValueError(f"Different hash already cached for {key!r}")
             _ = conn.execute(
                 """
@@ -357,7 +366,7 @@ class SqliteHashCacher:
                 (stored_value, *fields),
             )
         logger.warning(
-            "Replaced a malformed cached hash for %s (%s)", key.path, key.algorithm
+            "Replaced a malformed cached hash for %s (%s)", key.path, algorithm
         )
 
     def clear(self) -> None:

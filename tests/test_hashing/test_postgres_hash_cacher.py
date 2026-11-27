@@ -59,6 +59,24 @@ class _VersionedContentHash(ContentHash):
         return b"v2:" + super().to_prefixed_digest()
 
 
+class _CustomEncodingLabel(str):
+    @override
+    def encode(self, encoding: str = "utf-8", errors: str = "strict") -> bytes:
+        return b"custom"
+
+
+class _ChangingAlgorithmKey(FileHashKey):
+    _algorithm_reads: int = 0
+
+    @override
+    def __getattribute__(self, name: str) -> object:
+        if name == "algorithm":
+            reads = self._algorithm_reads
+            object.__setattr__(self, "_algorithm_reads", reads + 1)
+            return "sha256" if reads < 2 else "sha3_256"
+        return super().__getattribute__(name)
+
+
 def _insert_raw(pg_conninfo: str, key: FileHashKey, blob: bytes) -> None:
     with psycopg.connect(pg_conninfo) as conn:
         conn.execute(
@@ -835,6 +853,58 @@ _CRAFTED_BLOBS = [
 
 @pytest.mark.postgres
 class TestPostgresHashCacherStrictStore:
+    @pytest.mark.parametrize("match_mtime", [True, False])
+    def test_rejects_a_conflict_from_another_label(
+        self, pg_conninfo: str, match_mtime: bool, caplog: pytest.LogCaptureFixture
+    ):
+        with connect(pg_conninfo) as conn:
+            conn.execute(
+                "CREATE COLLATION algorithm_ci "
+                "(provider=icu, locale='und-u-ks-level2', deterministic=false)"
+            )
+            conn.execute(
+                "ALTER TABLE file_hash_cache_v2 "
+                "ALTER COLUMN algorithm TYPE TEXT COLLATE algorithm_ci"
+            )
+        key = make_key()
+        original = make_hash()
+        blob = original.to_prefixed_digest()
+        _insert_raw(pg_conninfo, key, blob)
+        with PostgresHashCacher(pg_conninfo, match_mtime=match_mtime) as cache:
+            other_key = FileHashKey(key.path, key.mtime_ns, key.size, "SHA256")
+            with pytest.raises(ValueError, match="matched a row with algorithm label"):
+                cache.put(other_key, ContentHash("SHA256", b"\x02" * 32))
+            assert cache.get(key) == original
+        with connect(pg_conninfo) as conn:
+            assert conn.execute(
+                "SELECT algorithm, hash, cached_at FROM file_hash_cache_v2"
+            ).fetchall() == [("sha256", blob, 1)]
+        assert not caplog.records
+
+    @pytest.mark.parametrize("match_mtime", [True, False])
+    @pytest.mark.parametrize(
+        ("key_type", "label"),
+        [
+            pytest.param(
+                FileHashKey, _CustomEncodingLabel("sha256"), id="custom-encoding"
+            ),
+            pytest.param(_ChangingAlgorithmKey, "sha256", id="changing-algorithm"),
+        ],
+    )
+    def test_reads_with_a_canonical_algorithm_snapshot(
+        self,
+        pg_conninfo: str,
+        match_mtime: bool,
+        key_type: type[FileHashKey],
+        label: str,
+    ):
+        key = make_key()
+        lookup_key = key_type(key.path, key.mtime_ns, key.size, label)
+        with PostgresHashCacher(pg_conninfo, match_mtime=match_mtime) as cache:
+            original = make_hash()
+            cache.put(key, original)
+            assert cache.get(lookup_key) == original
+
     @pytest.mark.parametrize("match_mtime", [True, False])
     @pytest.mark.parametrize("same_digest", [True, False])
     def test_preserves_valid_rows_with_custom_serialization(
