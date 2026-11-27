@@ -113,6 +113,10 @@ The developer approved this stopgap on 2026-11-27. A standalone row read such as
 it skips identity formation. The same invocation is refused in a job. ITL-1511 will allow
 repeated operands with a unique/repeat toggle and remove this discrepancy.
 
+**Known limit.** The refusal covers flat unordered declarations, including every
+commutative operator Orcapod ships. Mixed or nested unordered groups are unchecked.
+ITL-1548 tracks how operators declare argument symmetry alongside ITL-1511.
+
 ```python
 from orcapod.sources import DictSource
 from orcapod.operators import Join

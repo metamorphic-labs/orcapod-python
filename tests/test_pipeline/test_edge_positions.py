@@ -13,10 +13,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import pickle
 from collections.abc import Collection
 from importlib.util import find_spec
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pyarrow as pa
 import pytest
@@ -24,12 +25,14 @@ from typing_extensions import override
 
 from orcapod import Pipeline, PipelineJob, function_pod, sources
 from orcapod.core.operators import Join, MergeJoin, Rejoin, SemiJoin
+from orcapod.core.operators.base import BinaryOperator
 from orcapod.core.operators.repeated_operands import RepeatedOperandError
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.errors import InconsistentSourceError, InputValidationError
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.protocols.core_protocols import ArgumentGroup, StreamProtocol
+from orcapod.types import ColumnConfig, Schema
 
 
 LAYOUTS = ["tags_id_key", "tags_key_id"]
@@ -739,6 +742,113 @@ def test_custom_commutative_operator_cannot_collapse_a_repeated_identity() -> No
     with job, pytest.raises(RepeatedOperandError, match=rf"OwnJoin: the {REFUSAL}"):
         _ = OwnJoin()(d, d, label="step")
     assert "step" not in job.nodes
+
+
+class LeftOnly(BinaryOperator):
+    """An ordered binary operator whose right operand has no effect."""
+
+    DATA_TAGS_ISSUE: ClassVar[str | None] = None
+
+    @override
+    def identity_structure(self) -> tuple[str, ...]:
+        return ("LeftOnly",)
+
+    @override
+    def is_commutative(self) -> bool:
+        return False
+
+    @override
+    def argument_symmetry(self, streams: Collection[StreamProtocol]) -> ArgumentGroup:
+        left, _ = streams
+        return (left,)
+
+    @override
+    def validate_binary_inputs(
+        self, left_stream: StreamProtocol, right_stream: StreamProtocol
+    ) -> None:
+        pass
+
+    @override
+    def binary_output_schema(
+        self,
+        left_stream: StreamProtocol,
+        right_stream: StreamProtocol,
+        *,
+        columns: ColumnConfig | dict[str, Any] | None = None,
+        all_info: bool = False,
+    ) -> tuple[Schema, Schema]:
+        return left_stream.output_schema(columns=columns, all_info=all_info)
+
+    @override
+    def binary_static_process(
+        self, left_stream: StreamProtocol, right_stream: StreamProtocol
+    ) -> StreamProtocol:
+        return left_stream
+
+
+@pytest.mark.parametrize("repeat", [False, True])
+def test_ordered_operator_can_omit_an_operand_from_its_identity(repeat: bool) -> None:
+    left = _a(LAYOUTS[0])
+    right = left if repeat else _b(LAYOUTS[0])
+    output = LeftOnly()(left, right)
+    _ = output.content_hash()
+    _ = output.pipeline_hash()
+    job = PipelineJob(database=InMemoryArrowDatabase())
+    with job:
+        _ = LeftOnly()(left, right, label="step")
+    _ = job.run()
+    expected = _rows(left.as_table())
+    assert _rows(output.as_table()) == expected
+    assert _rows(job.step.as_table()) == expected
+
+
+class NestedMergeJoin(MergeJoin):
+    """A single unordered member containing both ordered inputs."""
+
+    @override
+    def argument_symmetry(self, streams: Collection[StreamProtocol]) -> ArgumentGroup:
+        return frozenset((tuple(streams),))
+
+
+def test_repeat_in_nested_ordered_group_keeps_both_positions() -> None:
+    stream = _data_tags_only()
+    expected = _rows(NestedMergeJoin()(stream, stream).as_table())
+    job = PipelineJob(database=InMemoryArrowDatabase())
+    with job:
+        _ = NestedMergeJoin()(stream, stream, label="joined")
+    _ = job.run()
+    assert [position for _, _, position in _edges_by_label(job)] == [0, 1]
+    assert _rows(job.joined.as_table()) == expected
+
+
+class MixedJoin(Join):
+    """A join with an unordered pair and a separate, ordered third input."""
+
+    @override
+    def argument_symmetry(self, streams: Collection[StreamProtocol]) -> ArgumentGroup:
+        first, second, third = streams
+        return (frozenset((first, second)), third)
+
+
+def test_mixed_group_collapse_is_outside_the_stopgap() -> None:
+    """The raw set discards the membership history needed to check the pair."""
+    first = _data_tags_only("first")
+    third = _data_tags_only("third")
+    output = MixedJoin()(first, first, third)
+    _ = output.content_hash()
+    _ = output.pipeline_hash()
+
+
+def test_repeated_operand_error_preserves_its_pod_and_message_when_pickled() -> None:
+    first, second = _data_tags_only(), _data_tags_only()
+    with pytest.raises(RepeatedOperandError) as caught:
+        _ = _identity.pod(first, second).content_hash()
+    original = caught.value
+    restored: object = pickle.loads(pickle.dumps(original))
+    assert isinstance(restored, RepeatedOperandError)
+    assert restored.pod == original.pod == "Join"
+    assert str(restored) == str(original)
+    assert restored.context == original.context
 
 
 def test_hashing_error_has_precedence_over_repeat_in_both_orders() -> None:

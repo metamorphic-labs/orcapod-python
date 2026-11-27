@@ -34,9 +34,8 @@ added its own error for an operand that cannot be hashed.
 
 On 2026-11-27 the developer approved refusing repeated operands as a stopgap until
 ITL-1511. `core/operators/repeated_operands.read_argument_symmetry` reads the operator's
-grouping and raises `RepeatedOperandError` (an `InputValidationError`) if an unordered
-group has collapsed repeated operands. The check applies to built-in and custom
-operators because it reads their result. The error names the operator whose own
+grouping and raises `RepeatedOperandError` (an `InputValidationError`) if a flat
+unordered group has collapsed repeated operands. The error names the operator whose own
 operands repeat. A downstream pod or the function pod whose join received the operands
 can add context with `add_context`. Hashing, recording and compiling form the identity.
 Set formation completes before checking for collapsed operands, so the existing hashing

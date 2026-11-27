@@ -11,6 +11,8 @@ from __future__ import annotations
 from collections.abc import Collection
 from typing import Protocol
 
+from typing_extensions import override
+
 from orcapod.errors import InputValidationError
 from orcapod.protocols.core_protocols import ArgumentGroup, StreamProtocol
 
@@ -53,17 +55,16 @@ class RepeatedOperandError(InputValidationError):
         self.context.append(context)
         self.args = (self._message(),)
 
-
-def _operand_count(group: ArgumentGroup) -> int:
-    if isinstance(group, (tuple, frozenset)):
-        return sum(_operand_count(member) for member in group)
-    return 1
+    @override
+    def __reduce__(self) -> tuple[object, ...]:
+        """Rebuild from the constructor fields and keep the contextual message."""
+        return (type(self), (self.reason, self.pod), {**vars(self), "args": self.args})
 
 
 def read_argument_symmetry(
     pod: SymmetryDeclaring, streams: Collection[StreamProtocol]
 ) -> ArgumentGroup:
-    """Read a pod's operand group and check that it retains every operand.
+    """Read a pod's operand group and check for collapse in a flat unordered group.
 
     Args:
         pod: The pod declaring the operand group.
@@ -73,10 +74,14 @@ def read_argument_symmetry(
         The operand group as declared by the pod.
 
     Raises:
-        RepeatedOperandError: If set formation loses an operand (ITL-1511).
+        RepeatedOperandError: If the flat set of inputs loses an operand (ITL-1511).
     """
     group = pod.argument_symmetry(streams)
-    if _operand_count(group) >= len(streams):
+    if not isinstance(group, frozenset) or len(group) >= len(streams):
+        return group
+    # A flat set takes all inputs. A nested set does not tell us which inputs went
+    # into each group before set formation (ITL-1548).
+    if any(isinstance(member, (tuple, frozenset)) for member in group):
         return group
 
     seen: dict[StreamProtocol, StreamProtocol] = {}
