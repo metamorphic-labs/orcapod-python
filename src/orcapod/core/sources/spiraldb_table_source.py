@@ -56,6 +56,8 @@ from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.source_ids import joined_location, location_source_name
 from orcapod.core.sources.derived_source import validate_tags_as_data
 from orcapod.core.sources.stream_builder import (
+    require_custom_system_tags,
+    require_supported_nullable_types,
     SourceStreamBuilder,
     key_column_type_allowed,
     normalize_record_id_columns,
@@ -383,6 +385,7 @@ class SpiralDBTableSource(RootSource):
                 )
             self._table_id = table.table_id
             schema = table.arrow_schema()
+            require_supported_nullable_types(schema)
             # One version for every read of this source object. A given version is
             # used as it is; a table that was never written has no version to pin.
             self._asof = asof if asof is not None else (table.version() or None)
@@ -892,9 +895,10 @@ class SpiralDBTableSource(RootSource):
             asof=asof,
         ):
             for start in range(0, batch.num_rows, self._batch_rows):
-                rows = arrow_utils.drop_system_columns(
-                    pa.Table.from_batches([batch.slice(start, self._batch_rows)])
-                )
+                raw = pa.Table.from_batches([batch.slice(start, self._batch_rows)])
+                require_supported_nullable_types(raw.schema)
+                rows = arrow_utils.drop_system_columns(raw)
+                require_custom_system_tags(rows, self._system_tag_columns)
                 # Metadata too: field metadata is how a column's logical type is
                 # recorded, and the schema hash was computed at construction.
                 if not rows.schema.equals(self._table_schema, check_metadata=True):

@@ -64,8 +64,9 @@ How a kernel stays equal to the sync path:
   batch of pairs gives the sync rows.
 - **Field flags.** A batch's flags are the sync result's, except the system-tag and
   source-info fields: a complete table decides those by its values (``StaticOutputOperatorPod._flag_by_values``,
-  the last step of F), so a kernel declares every such field nullable and the stream made
-  from its batches settles them.
+  the last step of F). The input layout declares these fields nullable and the stream
+  made from the batches settles them. Join's sorted system-tag fields are already
+  declared non-nullable when the kernel emits them.
 
 A kernel holds only what can still match: a side's rows are dropped when the other side
 closes (nothing can arrive to match them), and an arriving row is not kept once the
@@ -130,13 +131,15 @@ TRANSPORT_COLUMNS: dict[str, bool] = {"source": True, "system_tags": True}
 _ROW = ("__streaming_left_row", "__streaming_right_row")
 
 
-def _settled_by_values(schema: pa.Schema) -> pa.Schema:
-    """``schema`` with every system-tag and source-info field nullable.
+def _settled_by_values(schema: pa.Schema, *, system_tags: bool = True) -> pa.Schema:
+    """``schema`` with source-info and, optionally, system-tag fields nullable.
 
     What a kernel declares for the fields a complete table decides by its values
     (``StaticOutputOperatorPod._flag_by_values``): one record batch of many cannot.
     """
-    prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
+    prefixes = (constants.SOURCE_PREFIX,)
+    if system_tags:
+        prefixes = (*prefixes, constants.SYSTEM_TAG_PREFIX)
     return pa.schema(
         [
             field.with_nullable(True) if field.name.startswith(prefixes) else field
@@ -646,8 +649,9 @@ class StreamingJoinKernel(ABC):
     def _emitted(self, tables: list[pa.Table]) -> list[pa.RecordBatch]:
         """The record batches of the output tables, holding ``output_columns``.
 
-        Every system-tag and source-info field is declared nullable: the complete
-        table's values decide those flags (``StaticOutputOperatorPod._flag_by_values``).
+        A source-info field is nullable until the complete table settles its flag
+        (``StaticOutputOperatorPod._flag_by_values``). System tags keep the field
+        from the kernel so Join's sorted tags retain their non-nullable declaration.
         """
         batches: list[pa.RecordBatch] = []
         for table in tables:
@@ -655,7 +659,8 @@ class StreamingJoinKernel(ABC):
                 self._emitted_any = True
                 table = table.select(list(self.output_columns)).combine_chunks()
                 table = pa.Table.from_arrays(
-                    table.columns, schema=_settled_by_values(table.schema)
+                    table.columns,
+                    schema=_settled_by_values(table.schema, system_tags=False),
                 )
                 batches.extend(table.to_batches())
         return batches

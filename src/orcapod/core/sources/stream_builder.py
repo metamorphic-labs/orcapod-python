@@ -23,7 +23,7 @@ from orcapod.core.sources.source_ids import (
     require_source_name,
 )
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
-from orcapod.errors import RowIdentifierError
+from orcapod.errors import InputValidationError, RowIdentifierError
 from orcapod.logical_types.identifier import LogicalTypeIdentifierError
 from orcapod.system_constants import constants
 from orcapod.types import ContentHash
@@ -34,6 +34,73 @@ if TYPE_CHECKING:
     from orcapod.config import OrcapodConfig
     from orcapod.contexts import DataContext
     from orcapod.protocols.hashing_protocols import ArrowHasherProtocol
+
+
+def _contains_null_type(arrow_type: pa.DataType) -> bool:
+    """Return whether an Arrow type contains the Null type at any depth."""
+    if isinstance(arrow_type, pa.BaseExtensionType):
+        return _contains_null_type(arrow_type.storage_type)
+    if pa.types.is_dictionary(arrow_type):
+        return _contains_null_type(arrow_type.value_type)
+    return pa.types.is_null(arrow_type) or any(
+        _contains_null_type(arrow_type.field(i).type)
+        for i in range(arrow_type.num_fields)
+    )
+
+
+def require_supported_nullable_types(schema: pa.Schema) -> None:
+    """Refuse source columns containing the Arrow Null type, even with zero rows."""
+    columns = sorted(
+        (field.name, str(field.type))
+        for field in schema
+        if _contains_null_type(field.type)
+    )
+    if columns:
+        names = ", ".join(f"{name!r} ({arrow_type})" for name, arrow_type in columns)
+        raise InputValidationError(
+            f"Source column(s) {names} contain Arrow type null. "
+            "Please declare a supported nullable type."
+        )
+
+
+def require_custom_system_tags(
+    table: pa.Table,
+    names: Collection[str],
+    *,
+    schema: pa.Schema | None = None,
+) -> None:
+    """Validate custom system-tag types, field flags and values before wrapping.
+
+    Args:
+        table: The source's Arrow columns.
+        names: The columns nominated as system tags.
+        schema: The declared fields if the reader has yet to apply them.
+
+    Raises:
+        InputValidationError: If a nominated column is not non-nullable text.
+    """
+    fields = table.schema if schema is None else schema
+    for name in names:
+        if name not in table.column_names or name not in fields.names:
+            continue
+        field = fields.field(name)
+        has_nulls = table.column(name).null_count > 0
+        if (
+            field.nullable
+            or has_nulls
+            or not (
+                pa.types.is_string(field.type)
+                or pa.types.is_large_string(field.type)
+                or pa.types.is_string_view(field.type)
+            )
+        ):
+            raise InputValidationError(
+                f"Custom system-tag column {name!r} has type {field.type} "
+                f"({'nullable' if field.nullable else 'non-nullable'}"
+                f"{', contains null values' if has_nulls else ''}). "
+                "Declare a non-nullable string column with no null values "
+                "and convert its values to text first."
+            )
 
 
 def normalize_record_id_columns(
@@ -455,6 +522,7 @@ class SourceStreamBuilder:
         )
         tag_columns_tuple = tuple(tag_columns)
         system_tag_columns_tuple = tuple(system_tag_columns)
+        require_supported_nullable_types(table.schema)
         data_tags_tuple = tuple(c for c in tag_columns_tuple if c in data_tags)
         if unknown := set(data_tags) - set(tag_columns_tuple):
             raise ValueError(
@@ -487,6 +555,7 @@ class SourceStreamBuilder:
 
         # 1. Drop system columns from raw input.
         table = arrow_utils.drop_system_columns(table)
+        require_custom_system_tags(table, system_tag_columns_tuple)
 
         # 2. Validate tag_columns. A table with no columns at all (e.g. a
         # DictSource built from no rows and no schema) gets its own error, since

@@ -1390,8 +1390,11 @@ data. The rules:
 - Every output column takes the large-normalized form of its input type
   (`arrow_utils.normalize_to_large_types`: `string` to `large_string`, `binary` to `large_binary`, `list`
   to `large_list`, recursively). Width, nullability and logical (extension) types are never
-  changed; `int8` stays `int8`, and `null` stays `null` (operators and the type converter pass
-  `keep_null=True`; only `Data` maps `null` to `large_string`, the function's default).
+  changed, so `int8` stays `int8`. Sources refuse Arrow type `null` at any depth, including
+  in reserved raw columns. Declare a supported nullable type for missing values.
+  Custom system-tag columns on a source must be non-nullable text and contain no null values.
+  A raw `ArrowTableStream` still preserves `null` in its table in ITL-1543 part A.
+  A row built by `Data` still gives an untyped null the `large_string` type.
   `PolarsFilter` is the one operator that still round-trips its columns through Polars; it
   casts them back to the normalized input types (`arrow_utils.restore_column_types` and
   `restore_schema_nullability`). Every other operator takes its values from the input's Arrow

@@ -1755,24 +1755,18 @@ def sort_system_tag_values(table: "pa.Table") -> "pa.Table":
 
         # Replace columns with sorted values
         for pos_idx, (sid_col, rid_col) in enumerate(paired_cols):
-            if sid_col:
-                orig_type = table.column(sid_col).type
-                tbl_idx = table.column_names.index(sid_col)
-                table = table.drop(sid_col)
-                table = table.add_column(
-                    tbl_idx,
-                    sid_col,
-                    pa.array(sorted_sid[pos_idx], type=orig_type),
-                )
-            if rid_col:
-                orig_type = table.column(rid_col).type
-                tbl_idx = table.column_names.index(rid_col)
-                table = table.drop(rid_col)
-                table = table.add_column(
-                    tbl_idx,
-                    rid_col,
-                    pa.array(sorted_rid[pos_idx], type=orig_type),
-                )
+            for name, values in (
+                (sid_col, sorted_sid[pos_idx]),
+                (rid_col, sorted_rid[pos_idx]),
+            ):
+                if name is not None:
+                    index = table.schema.get_field_index(name)
+                    field = pa.field(
+                        name, table.schema.field(index).type, nullable=False
+                    )
+                    table = table.set_column(
+                        index, field, pa.array(values, type=field.type)
+                    )
 
     return table
 
