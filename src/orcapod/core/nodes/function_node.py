@@ -2786,9 +2786,9 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
 
         A persistent result that this node's own pipeline record points to was
         served in ephemeral mode before, through the lookup by instance id. What
-        this adds is the row with no pipeline record whose input data hash the
-        persistent store holds a result for: it is served, where the function
-        ran again before.
+        this adds is reuse by input data hash when no pipeline record supplies
+        a result. A persistent hit takes precedence over an ephemeral hit and
+        avoids calling the function when the ephemeral store would miss too.
 
         Args:
             data: The node's input row (its fall-through columns still on it).
@@ -4716,7 +4716,21 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                                             # The sync path makes this lookup
                                             # inside the row, after its start:
                                             # the same events here.
-                                            ctx_obs.on_data_start(node_label, tag, data)
+                                            with keep_database_error(
+                                                exc
+                                                if isinstance(
+                                                    exc,
+                                                    (
+                                                        OrcapodDatabaseError,
+                                                        TypeIdentityError,
+                                                    ),
+                                                )
+                                                else None,
+                                                "Observer on_data_start",
+                                            ):
+                                                ctx_obs.on_data_start(
+                                                    node_label, tag, data
+                                                )
                                             if not lookup_crashed(tag, data, exc):
                                                 raise
                                             continue

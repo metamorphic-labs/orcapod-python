@@ -37,6 +37,7 @@ from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
+from orcapod.errors import OrcapodDatabaseReadError, TypeIdentityError
 from orcapod.system_constants import constants
 from orcapod.types import NodeConfig, PodConfig
 
@@ -189,27 +190,32 @@ def _ephemeral_node(
 
 
 def _records(node: FunctionJobNode) -> dict[str, dict[str, Any]]:
-    """The node's stored pipeline records by key: result id, origin, computed."""
+    """The node's stored pipeline records, with exactly one record per key."""
     table = node.get_all_records(all_info=True)
     assert table is not None
+    rows = table.to_pylist()
+    assert len({row["key"] for row in rows}) == len(rows), "duplicate record keys"
     return {
         row["key"]: {
             "result_id": row[constants.DATA_RECORD_ID],
             "is_ephemeral": row[constants.IS_EPHEMERAL_COL],
             "computed": row["__computed"],
         }
-        for row in table.to_pylist()
+        for row in rows
     }
 
 
 def _delivered(rows: list[Any]) -> dict[str, tuple[bytes, int, float]]:
+    """The results from a run that delivers exactly one row per key."""
+    keyed_rows = [(tag.as_dict()["key"], data) for tag, data in rows]
+    assert len({key for key, _ in keyed_rows}) == len(rows), "duplicate delivery keys"
     return {
-        tag.as_dict()["key"]: (
+        key: (
             data.datagram_uuid.bytes,
             data.as_dict()["doubled"],
             data.as_dict()["heavier"],
         )
-        for tag, data in rows
+        for key, data in keyed_rows
     }
 
 
@@ -920,11 +926,12 @@ def _leaf(error: BaseException) -> BaseException:
 
 
 def _failing_lookup_outcome(
-    use_async: bool, database_error: bool, error_policy: Any
+    use_async: bool,
+    lookup_error: Exception,
+    error_policy: Any,
+    observer: _RowEvents | None = None,
 ) -> dict[str, Any]:
     """What a run reports when the persistent store's lookup by input hash raises."""
-    from orcapod.errors import OrcapodDatabaseReadError
-
     counted = _Counted()
     source = _input({"a": 2, "b": 3})
     persistent, ephemeral = InMemoryArrowDatabase(), InMemoryArrowDatabase()
@@ -938,12 +945,11 @@ def _failing_lookup_outcome(
     node.label = "scaled"
 
     def broken(*args: Any, **kwargs: Any) -> Any:
-        if database_error:
-            raise OrcapodDatabaseReadError("fault", ("fault",))
-        raise RuntimeError("fault")
+        raise lookup_error
 
     persistent.get_records_with_column_value = broken  # pyright: ignore[reportAttributeAccessIssue]  # the injected fault
-    observer = _RowEvents()
+    if observer is None:
+        observer = _RowEvents()
 
     async def go() -> None:
         input_ch: Channel[Any] = Channel(buffer_size=8)
@@ -973,6 +979,8 @@ def _failing_lookup_outcome(
     return {
         "events": observer.events,
         "error": None if raised is None else type(raised).__name__,
+        "original error": raised is lookup_error,
+        "notes": getattr(raised, "__notes__", []),
         "node_label": getattr(raised, "node_label", None),
         "tag": getattr(raised, "tag", None),
         "calls": counted.calls,
@@ -990,16 +998,74 @@ def test_a_failing_persistent_lookup_is_reported_alike_on_both_paths(
     what it gives the sync path: the row's start and crash events, the node and
     tag on a database error, and the same end under each error policy (a database
     error stops the run whatever the policy; another error is a failed row)."""
-    sync = _failing_lookup_outcome(False, database_error, error_policy)
-    assert sync["events"][:2] == [("start", "a"), ("crash", "a")]
-    assert sync["calls"] == []
-    if database_error:
-        assert (sync["error"], sync["node_label"]) == (
-            "OrcapodDatabaseReadError",
-            "scaled",
+
+    def outcome(use_async: bool) -> dict[str, Any]:
+        error = (
+            OrcapodDatabaseReadError("fault", ("fault",))
+            if database_error
+            else RuntimeError("fault")
         )
+        return _failing_lookup_outcome(use_async, error, error_policy)
+
+    sync = outcome(False)
+    assert sync["calls"] == []
+    first_row_events = [("start", "a"), ("crash", "a")]
+    if database_error:
+        assert sync["error"] == "OrcapodDatabaseReadError"
+        assert sync["original error"]
+        assert sync["node_label"] == "scaled"
         assert sync["tag"] == {"key": "a", "group": "g"}
-    assert _failing_lookup_outcome(True, database_error, error_policy) == sync
+        assert sync["events"] == first_row_events
+    elif error_policy == "fail_fast":
+        assert sync["error"] == "RuntimeError"
+        assert sync["original error"]
+        assert sync["events"] == first_row_events
+    else:
+        assert sync["error"] is None
+        assert sync["events"] == first_row_events + [("start", "b"), ("crash", "b")]
+    assert outcome(True) == sync
+
+
+class _FailingStartObserver(_RowEvents):
+    """Record the row start, then raise from the callback."""
+
+    def on_data_start(self, label: str, tag: Any, data: Any) -> None:
+        super().on_data_start(label, tag, data)
+        raise LookupError("observer failed")
+
+
+@pytest.mark.parametrize("error_policy", ["continue", "fail_fast"])
+@pytest.mark.parametrize(
+    "error_type", [OrcapodDatabaseReadError, TypeIdentityError, RuntimeError]
+)
+def test_async_lookup_error_when_observer_start_raises(
+    error_type: type[Exception], error_policy: str
+) -> None:
+    """A start observer cannot replace an async fatal lookup error."""
+    if error_type is OrcapodDatabaseReadError:
+        lookup_error = OrcapodDatabaseReadError("fault", ("fault",))
+    else:
+        lookup_error = error_type("fault")
+    outcome = _failing_lookup_outcome(
+        True, lookup_error, error_policy, _FailingStartObserver()
+    )
+
+    assert outcome["calls"] == []
+    if error_type is RuntimeError:
+        assert outcome["error"] == "LookupError"
+        assert outcome["events"] == [("start", "a")]
+        return
+
+    assert outcome["error"] == error_type.__name__
+    assert outcome["original error"]
+    assert outcome["events"] == [("start", "a"), ("crash", "a")]
+    assert any(
+        "Observer on_data_start" in note and "LookupError: observer failed" in note
+        for note in outcome["notes"]
+    )
+    if error_type is OrcapodDatabaseReadError:
+        assert outcome["node_label"] == "scaled"
+        assert outcome["tag"] == {"key": "a", "group": "g"}
 
 
 def test_a_result_this_pipeline_recorded_is_served_before_the_persistent_store() -> (
