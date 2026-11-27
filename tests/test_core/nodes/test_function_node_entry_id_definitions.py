@@ -1,10 +1,9 @@
 """A function node's entry ids and input data hashes have one definition (ITL-1361).
 
-``FunctionJobNode._input_entries`` takes each input row's base entry id from slices of
-the input stream's Arrow table (``_base_entry_id_of_slices``) where the slices are
-provably the rows' own tables, and from the rows (``compute_base_entry_id``) otherwise.
-Both go through the same definitions: the preimage's last column is
-``_with_input_data_hash``, and the input data hash is ``data_table_content_hash``, the
+``FunctionJobNode._input_entries`` takes each input row's instance id from slices of
+the input stream's Arrow table (``_instance_id_of_slices``) where the slices are
+provably the rows' own tables, and from the rows (``compute_instance_id``) otherwise.
+Both use the preimages in ``row_ids``. The input data hash is ``data_table_content_hash``, the
 content hash a data datagram has. These tests check, byte for byte, that the slice-built
 ids and input data hashes equal the row-built ones over the several-items family (tag
 order, table layout, tag roles), nullable columns, logical and numpy values, list-valued
@@ -81,7 +80,7 @@ def _assert_one_definition(stream: Any) -> None:
     )
     by_rows = _outcome(
         lambda: [
-            node.compute_base_entry_id(tag, data) for tag, data in stream.iter_data()
+            node.compute_instance_id(tag, data) for tag, data in stream.iter_data()
         ]
     )
     assert isinstance(sliced, list) and sliced, sliced
@@ -302,7 +301,7 @@ def _run(database: InMemoryArrowDatabase, *, slices: bool, monkeypatch: Any) -> 
     node: Any = job.nodes["doubled"]
     joined = node._fetch_joined_records()  # pyright: ignore[reportPrivateUsage]  # the stored entry ids
     assert joined is not None
-    entry_ids = joined.table["__pipeline_base_entry_id"].to_pylist()
+    entry_ids = joined.table["__pipeline_instance_id"].to_pylist()
     return sorted(entry_ids), node.as_table()
 
 
@@ -617,7 +616,7 @@ def test_a_content_hashed_value_is_hashed_once_per_row(
         data.content_hash().to_prefixed_digest() for _, data in source.iter_data()
     ]
     entry_ids = sorted(
-        _node_for(pod, source).compute_base_entry_id(tag, data)
+        _node_for(pod, source).compute_instance_id(tag, data)
         for tag, data in source.iter_data()
     )
     database = InMemoryArrowDatabase()
@@ -633,7 +632,7 @@ def test_a_content_hashed_value_is_hashed_once_per_row(
     )
     stored = joined.table.sort_by(record_id)  # row_0, row_1: the source's order
     assert stored["__input_data_hash"].to_pylist() == expected
-    assert sorted(stored["__pipeline_base_entry_id"].to_pylist()) == entry_ids
+    assert sorted(stored["__pipeline_instance_id"].to_pylist()) == entry_ids
 
 
 def _node_for(pod: Any, source: Any) -> FunctionJobNode:

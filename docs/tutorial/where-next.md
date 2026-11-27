@@ -1,8 +1,7 @@
-# Part 10: Where next
+# Where next
 
-Optional. You now know the core of Orcapod: sources, function pods, operators, jobs, and how
-results are stored and reused. This part is a short tour of features the tutorial did not
-need. Each section is independent; read the ones that match what you want to do next.
+This page is optional. It is a short tour of features the tutorials did not need. The sections
+are independent.
 
 ```python
 from workshop_data import make_dataset
@@ -19,19 +18,18 @@ sessions = CSVSource(
 durations = sessions.select_data_columns(["duration_s"])
 ```
 
-## Steps that act instead of compute
+## Side effects
 
-A function pod returns a value. Some steps exist for their effect: send a notification,
-upload a file, write a row to a lab database. These are **side-effect pods**. The most
-useful kind is the **sink**, made with `@sink_pod`: it runs once for each row and remembers
-which rows it has already handled, so a re-run does not repeat the effect for them. A row
-counts as handled once its function has returned and that has been recorded; if the process
-stops in between, the next run calls the function for that row again. A row is identified by
-its source's name and its position, unless the source names key columns that are unique per
-row (`record_id_columns`). Reordering the rows of a source without them can make the sink
-handle them again, and so can a source whose name changes: an in-memory source without a
-`source_id` is named after its content, so adding a row renames it. For a sink, give the
-source both a `source_id` and key columns.
+**Side-effect pods** are steps that exist for their effect: send a notification, upload a
+file, write a row to another database. One kind is the **sink**, made with `@sink_pod`: it
+runs once for each row and remembers which rows it has already handled, so a re-run does not
+repeat the effect for them. A row counts as handled once its function has returned and that
+has been recorded; if the process stops in between, the next run calls the function for that
+row again. A row is identified by its source's name and its position, unless the source names
+key columns that are unique per row (`record_id_columns`). Reordering the rows of a source
+without them can make the sink handle them again, and so can a source whose name changes: an
+in-memory source without a `source_id` is named after its content, so adding a row renames it.
+For a sink, give the source both a `source_id` and key columns.
 
 ```python
 from orcapod import InvocationContext, sink_pod
@@ -62,9 +60,9 @@ print(len(delivered))
 # 8
 ```
 
-Eight sessions, eight deliveries, and none on the second run.
+The second run delivered nothing.
 
-Three differences from a function pod. A sink is applied by calling it directly
+A sink differs from a function pod in three ways. It is applied by calling it directly
 (`announce(stream)`, no `.pod`). Its function **must** take a parameter named `ctx`, which
 receives an `InvocationContext` describing the call; without it the run fails with
 `TypeError: ... got an unexpected keyword argument 'ctx'`. And it does not drop data columns
@@ -124,8 +122,8 @@ print(loaded.nodes["minutes"].as_table().num_rows)
 # 8
 ```
 
-A loaded job is for **looking at results**. It does not contain your functions, only their
-names, so it cannot compute anything: `loaded.run()` raises `RuntimeError`.
+A loaded job is for **looking at results**. It holds the names of your functions without their
+code, so it cannot compute anything: `loaded.run()` raises `RuntimeError`.
 `loaded.run(load_only=True)` fills its nodes with the results already in the database and
 computes nothing. To compute, run the script that defines the pipeline. More in
 [Pipelines and jobs](../concepts/pipeline-job.md).
@@ -203,8 +201,7 @@ the job a new name, and run it twice. How many deliveries are there after each r
     # 4
     ```
 
-    Four after the first run, still four after the second. The sink saw only the four long
-    sessions, and the second time it ran for none of them.
+    Four after the first run, and none more after the second.
 
 **2.** Wrap Python's built-in `round` with `FunctionPod.from_fn`? Try it, and explain what
 happens.
@@ -231,6 +228,5 @@ happens.
     # Schema({'duration_rounded': int})
     ```
 
-That is the end of the tutorial. The [Concepts](../concepts/sources.md) pages go deeper on
-each topic, and [Troubleshooting](../troubleshooting.md) is the page to keep open while you
-write your first pipeline.
+The [Concepts](../concepts/sources.md) pages cover each topic in more detail, and
+[Troubleshooting](../troubleshooting.md) lists common errors and their fixes.

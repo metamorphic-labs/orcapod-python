@@ -1,14 +1,13 @@
 # Part 1: Your first stream
 
-An analysis usually starts with tables: a list of animals, a list of sessions, a table of
-measurements. Before Orcapod can compute anything, it needs to know two things about each
-table: which columns say *what a row is about*, and which columns hold *the values*. This part
-shows how to load a table and tell Orcapod that.
+An analysis usually starts with tables. Orcapod needs to know two things about each table:
+which columns identify a row, and which columns hold the values. This part shows how to load
+a table and tell Orcapod both.
 
 You will:
 
 - load a CSV file and a list of Python dictionaries as **sources**
-- choose **tag columns** and see what is left as **data columns**
+- choose **tag columns** and **data columns**
 - look at a **stream** four ways: its schema, its column names, row by row, and as a DataFrame
 
 ```python
@@ -17,7 +16,7 @@ from workshop_data import make_dataset
 data_dir = make_dataset()
 ```
 
-## A source is a table with named keys
+## Loading a table
 
 A **source** is where data enters Orcapod. `CSVSource` reads a CSV file:
 
@@ -37,31 +36,24 @@ print(subjects.as_pandas_df())
 # 3   mouse_04   M         13  knockout
 ```
 
-Three arguments:
 
-- The file path, **as a string**. `CSVSource` takes a string, not a `pathlib.Path`, hence
-  the `str(...)`.
-- `tag_columns`: the columns that identify a row. More on this below.
-- `source_id`: a name for this source. Orcapod uses it when it records where a value came
-  from. Give every source a short, stable name.
+
+- The file path is a string, so a `pathlib.Path` needs `str(...)`.
+- `tag_columns` names the columns that identify a row.
+- `tag_only_columns=True` makes those columns tags only, as the next section explains.
+- `source_id` names the source. Orcapod uses it when it records where a value came from.
+  Give every source a short, stable name.
 
 ## Tags and data
 
-Every column of a source is either a tag column or a data column.
+- **Tag columns** identify a row, like a primary key in a database. Orcapod uses them to
+  match rows when it combines tables.
+- **Data columns** hold the values.
 
-- **Tag columns** say what a row is about. They are the keys: the mouse, the session, the
-  probe. If you have used a relational database, they play the part of a primary key. Orcapod
-  uses tags to match rows when it combines tables.
-- **Data columns** are everything else: the values that were measured or recorded.
-
-By default a declared tag column is also a data column: `CSVSource`, like every source built
-from a table, makes its tags **data-tags**, one column seen both as a tag and as the data
-column of the same name (see [Data-tags](../concepts/data-tags.md)). This
-tutorial keeps its tags plain with `tag_only_columns=True`: a plain tag is a tag only, never
-also a data column, so the data columns below are exactly the columns that are not tags.
-
-You choose the tag columns; all remaining columns become data columns. `output_schema()`
-returns both groups, with their types:
+Here a column is either a tag or data. `tag_only_columns=True` sets that; see
+[Data-tags](../concepts/data-tags.md) for columns with both roles. You name the tag columns,
+and all remaining columns are data columns. `output_schema()` returns both groups, with their
+types:
 
 ```python
 tag_schema, data_schema = subjects.output_schema()
@@ -71,7 +63,7 @@ print(data_schema)
 # Schema({'sex': str, 'age_weeks': int, 'genotype': str})
 ```
 
-A **schema** is the list of column names and their types. Orcapod worked the types out from
+A **schema** is the list of column names and their types. `CSVSource` infers the types from
 the file: `age_weeks` is an `int` because every value in that column is a whole number.
 
 `keys()` gives only the names:
@@ -84,8 +76,8 @@ print(data_keys)
 # ('sex', 'age_weeks', 'genotype')
 ```
 
-A table can need more than one tag column. A session is identified by the mouse *and* the
-session name:
+A table can need more than one tag column. Every mouse has a session called `s1`, so a
+session is identified by the mouse and the session name together:
 
 ```python
 sessions = CSVSource(
@@ -97,14 +89,14 @@ print(sessions.output_schema())
 # (Schema({'subject_id': str, 'session': str}), Schema({'date': date, 'duration_s': float}))
 ```
 
-## A source is a stream
+## Looking at a stream
 
-What a source gives you is a **stream**: an ordered, read-only sequence of rows, each one a
-pair of (tag, data). Every step you add later takes streams in and gives a stream back, so
-the four ways of looking at a stream shown in this part work at every stage of a pipeline.
+A **stream** is a read-only sequence of rows, each one a pair of (tag, data). Every step in
+Orcapod takes streams and returns a stream. A source is the stream that brings data in.
+`output_schema()` and `keys()`, and everything below, work on every stream.
 
-You have seen `output_schema()` and `keys()`. To walk through the rows, loop over the stream
-(the same as calling its `iter_data()` method). Each row comes as two objects; call `.as_dict()` on either to get a plain dictionary:
+Loop over a stream to get its rows. Call `.as_dict()` on a tag or a data object to get a
+plain dictionary:
 
 ```python
 for tag, data in sessions:
@@ -132,13 +124,12 @@ print(sessions.as_table().num_rows)
 # 8
 ```
 
-A stream cannot be changed. There is no method to edit a row or add a column in place. To
-get different data you build a new stream from this one, which is what Parts 2 to 4 are
-about.
+A stream cannot be changed in place. To get different data, you build a new stream from it,
+as Parts 2 to 4 show.
 
 ## Sources from Python data
 
-Not everything starts as a file. `DictSource` takes a list of dictionaries, one per row:
+`DictSource` takes a list of dictionaries, one per row:
 
 ```python
 from orcapod.sources import DictSource
@@ -157,28 +148,29 @@ print(probes.as_pandas_df())
 # 1  imec1    CA1         384
 ```
 
-It behaves exactly like the CSV sources above. Orcapod has more source types (pandas and
-Polars DataFrames, Delta tables, SQL tables); they differ only in where the rows come from.
+Orcapod has more source types, for pandas and Polars DataFrames, Delta tables and SQL tables.
 See [Sources](../concepts/sources.md).
 
-## What to remember
+## Key points
 
-- A **source** brings a table into Orcapod. A source is a **stream** of (tag, data) rows.
+- Every step takes **streams** of (tag, data) rows and returns a stream. A **source** is the
+  stream that brings data in.
 - **Tag columns** identify a row; **data columns** hold the values. You choose the tags.
-- Look at any stream with `output_schema()`, `keys()`, `iter_data()` and `as_pandas_df()`.
+- Look at any stream with `output_schema()`, `keys()`, a `for` loop and
+  `as_pandas_df()`.
 - Streams are read-only.
 
 ## Exercises
 
 **1.** `workshop_data/units.csv` has one row per sorted unit, with columns `subject_id`,
-`session`, `probe`, `unit`, `region`, `depth_um` and `n_spikes`. Load it as a source called
-`units`. Which columns must be tags so that each row is identified? How many rows does it
-have?
+`session`, `probe`, `unit`, `region`, `depth_um` and `n_spikes`. Unit numbers restart at 0 on
+every probe, probe names repeat in every session, and session names repeat for every mouse.
+`region`, `depth_um` and `n_spikes` describe the unit. Load the file as a source called
+`units`, with the tags that identify a row. How many rows does it have?
 
 ??? success "Solution"
-    Unit numbers restart at 0 on every probe, and probe names repeat in every session, so
-    all four of `subject_id`, `session`, `probe` and `unit` are needed. `region`, `depth_um`
-    and `n_spikes` describe the unit; they are data.
+    All four of `subject_id`, `session`, `probe` and `unit` are needed. The other columns
+    are data.
 
     ```python
     units = CSVSource(
@@ -192,9 +184,8 @@ have?
     # 64
     ```
 
-    You could argue that `region` belongs with the tags, because it says what the row is
-    about. That is a real choice, and it has consequences: tags are what rows are matched on
-    in Part 3. Here `region` is fully determined by `probe`, so it adds nothing as a key.
+    `region` could also be a tag. It depends only on `probe` here, so it is not needed to
+    identify a row. Part 3 shows how tags decide which rows are combined.
 
 **2.** Two mistakes are common when a source is created. Make each one on purpose and read
 the message: (a) name a tag column that does not exist in `subjects.csv`; (b) make every
@@ -220,22 +211,20 @@ column of `subjects.csv` a tag.
     # No data columns found in the table. At least one data column is required.
     ```
 
-    The first message lists the columns that do exist, which is usually enough to spot a
-    typo. The second states a rule: a stream needs at least one data column.
+    The first message lists the columns that exist. The second states a rule: a stream needs
+    at least one data column.
 
-**3.** Print the first three rows of `units` using `iter_data()`.
+**3.** Print the first three rows of `units` with a loop.
 
 ??? success "Solution"
-    `iter_data()` is an ordinary Python iterator, so `itertools.islice` works on it.
+    A stream is an ordinary Python iterable, so `itertools.islice` works on it.
 
     ```python
     from itertools import islice
 
-    for tag, data in islice(units.iter_data(), 3):
+    for tag, data in islice(units, 3):
         print(tag.as_dict(), "->", data.as_dict())
     # {'subject_id': 'mouse_01', 'session': 's1', 'probe': 'imec0', 'unit': 0} -> {'region': 'V1', 'depth_um': 1580, 'n_spikes': 149}
     # {'subject_id': 'mouse_01', 'session': 's1', 'probe': 'imec0', 'unit': 1} -> {'region': 'V1', 'depth_um': 2560, 'n_spikes': 326}
     # {'subject_id': 'mouse_01', 'session': 's1', 'probe': 'imec0', 'unit': 2} -> {'region': 'V1', 'depth_um': 600, 'n_spikes': 662}
     ```
-
-Next: [Part 2: Computing with function pods](02-function-pods.md).

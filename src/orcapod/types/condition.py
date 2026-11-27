@@ -28,7 +28,7 @@ import re
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from datetime import date, datetime, timedelta, timezone
 from types import MappingProxyType
-from typing import Literal, NamedTuple, TypeAlias, TypeVar
+from typing import Literal, NamedTuple, Never, TypeAlias, TypeVar
 
 import pyarrow as pa
 from typing_extensions import override
@@ -684,6 +684,13 @@ def check_equality_conditions(
 # -----------------------------------------------------------------------------
 
 
+_TRUTH_VALUE_GUIDANCE = (
+    "Pass separate arguments to filter() or where() (equality keywords in where()), "
+    "or combine conditions with & (and), | (or), and ~ (not), with each comparison "
+    "in parentheses. For a range, use .between(a, b) (both ends included)."
+)
+
+
 class ColumnRef:
     """A column, or a field of a struct column, to build conditions on: ``col(name)``.
 
@@ -694,11 +701,9 @@ class ColumnRef:
     ``bytes``, ``datetime.datetime`` or ``datetime.date``, never ``None``); whether it
     fits its column is checked when the condition meets a stream.
 
-    ``==`` and ``!=`` build conditions, so a ``ColumnRef`` is not hashable and has no
-    truth value (``col("t") and col("u")`` raises ``TypeError``). Combine conditions
-    with ``&``, ``|`` and ``~``, never ``and``, ``or`` and ``not``: a ``Condition`` that
-    requires something is true, so ``(col("t") > 1) and (col("t") < 2)`` silently
-    evaluates to ``col("t") < 2`` alone. Write ``(col("t") > 1) & (col("t") < 2)``.
+    A ``ColumnRef`` is unhashable because ``==`` and ``!=`` build conditions. Both
+    ``ColumnRef`` and ``Condition`` raise ``TypeError`` in Python truth tests. To
+    require both comparisons, write ``(col("t") > 1) & (col("t") < 2)``.
     """
 
     __slots__: tuple[str, ...] = ("_path",)
@@ -871,16 +876,13 @@ class ColumnRef:
 
     __hash__ = None  # pyright: ignore[reportAssignmentType]  # == builds a condition, so no hash
 
-    def __bool__(self) -> bool:
-        """Refuse a truth value: ``and``/``or`` are not conditions; use ``&`` and ``|``.
+    def __bool__(self) -> Never:
+        """Refuse a Python truth test.
 
         Raises:
             TypeError: Always.
         """
-        raise TypeError(
-            f"{self!r} has no truth value: combine conditions with & (and), | (or) "
-            "and ~ (not), never with and, or, not"
-        )
+        raise TypeError(f"{self!r} has no truth value. {_TRUTH_VALUE_GUIDANCE}")
 
     @override
     def __setattr__(self, name: str, value: object) -> None:
@@ -895,6 +897,13 @@ class ColumnRef:
 
 def col(name: str) -> ColumnRef:
     """Return a reference to the column ``name``, to build conditions on.
+
+    A comparison builds a ``Condition`` with no Python truth value. A chained
+    comparison such as ``1 <= col("t") <= 5`` and the operators ``and``, ``or`` and
+    ``not`` raise ``TypeError``. Pass separate conditions to ``filter()`` (or
+    separate equality keywords to ``where()``), or combine conditions with ``&``,
+    ``|`` and ``~``, putting each comparison in parentheses. For a range, use
+    ``col("t").between(1, 5)``, which includes both ends.
 
     Example::
 
@@ -971,8 +980,8 @@ class Condition:
     consistently with that equality; the hash is Python's own and in-process only,
     never an Orcapod hash.
 
-    The truth value of a condition is whether it requires anything (``Condition()``
-    is false), so ``a and b`` is not a combination: use ``a & b``.
+    A condition has no Python truth value. Use ``is_empty`` to check whether it
+    requires anything, and ``&``, ``|`` and ``~`` to combine conditions.
 
     Example::
 
@@ -1087,7 +1096,7 @@ class Condition:
             for part in built:
                 condition = condition.combined(part)
             condition = condition.combined(cls._equal_to(merged))
-        if not condition:
+        if condition.is_empty:
             raise ValueError(
                 "a condition needs at least one column: column=value, a mapping "
                 "{column: value, ...}, or a condition built with col(...)"
@@ -1118,6 +1127,11 @@ class Condition:
         ``canonical_form`` never follow it).
         """
         return self._root
+
+    @property
+    def is_empty(self) -> bool:
+        """Whether the condition requires nothing."""
+        return not self._root.children
 
     @property
     def only_equalities(self) -> bool:
@@ -1210,7 +1224,7 @@ class Condition:
         true is true)."""
         if not isinstance(other, Condition):
             return NotImplemented
-        if not self or not other:
+        if self.is_empty or other.is_empty:
             raise ValueError(
                 "an empty condition holds for every row, so 'or' with it holds for "
                 "every row; leave it out"
@@ -1227,7 +1241,7 @@ class Condition:
     def __invert__(self) -> Condition:
         """Return the condition that this one does not hold (unknown stays unknown, so
         a row with a null the condition reads is kept by neither)."""
-        if not self:
+        if self.is_empty:
             raise ValueError(
                 "an empty condition holds for every row; 'not' of it holds for none"
             )
@@ -1265,7 +1279,7 @@ class Condition:
         ``unit in [3, 7]``, ``rate is null``; ``|`` and ``~`` read ``(a or b)`` and
         ``not (a)``. In the order given; display only.
         """
-        if not self._root.children:
+        if self.is_empty:
             return "no condition"
         return ", ".join(_node_text(child) for child in self._root.children)
 
@@ -1278,7 +1292,7 @@ class Condition:
         must not follow how the condition was written (``explain()``); ``text()``
         keeps the order given.
         """
-        if not self._root.children:
+        if self.is_empty:
             return "no condition"
         return ", ".join(
             _node_text(child, canonical=True)
@@ -1340,9 +1354,13 @@ class Condition:
             }
         )
 
-    def __bool__(self) -> bool:
-        """Return whether the condition requires anything."""
-        return bool(self._root.children)
+    def __bool__(self) -> Never:
+        """Refuse a Python truth test.
+
+        Raises:
+            TypeError: Always, including for an empty condition.
+        """
+        raise TypeError(f"Condition has no truth value. {_TRUTH_VALUE_GUIDANCE}")
 
     @override
     def __eq__(self, other: object) -> bool:
@@ -1369,7 +1387,7 @@ class Condition:
 
     @override
     def __repr__(self) -> str:
-        if not self:
+        if self.is_empty:
             return "Condition()"
         if self.only_equalities:
             return f"Condition.of({dict(self.equalities)!r})"

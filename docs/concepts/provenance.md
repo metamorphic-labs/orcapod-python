@@ -42,7 +42,8 @@ def average(accuracy: list[float]) -> float:
     return sum(accuracy) / len(accuracy)
 
 
-job = PipelineJob(name="behaviour", database=InMemoryArrowDatabase())
+database = InMemoryArrowDatabase()
+job = PipelineJob(name="behaviour", database=database)
 with job:
     scores = score.pod(trials, label="scores")
     average.pod(
@@ -66,6 +67,9 @@ print(trace)
 #       dict_v1:trials {"animal":"a2","trial":2} hits = 3
 #       dict_v1:trials {"animal":"a2","trial":2} misses = 7
 ```
+
+(The grouping prints a `ProvisionalHashWarning`: see
+[Provisional operators](operators.md#provisional-operators).)
 
 ## What a trace reads
 
@@ -188,7 +192,7 @@ The result is an `Absence`. Its fields hold:
 - `removed_by`: the step that removed it, a `Step`;
 - `because`: the reason, in words.
 
-Tutorial [Part 8](../tutorial/08-inspecting-and-tracing.md) shows a row removed by a filter
+The tutorial [Tracing a value](../tutorial/tracing-a-value.md#missing-rows) shows a row removed by a filter
 and one removed by a join.
 
 ## On the diagram
@@ -218,8 +222,32 @@ print(job.diagram(highlight=trace.highlight()))
 # >* per_animal (function pod · average) [computed] [traced from here] <- SelectDataColumns
 ```
 
+**Marks are history, not the last run.** `computed here` in a trace and `[computed]` or
+`[reused]` on the diagram describe the stored entry, in the run that recorded it. What a run
+just computed or reused is in its run summary. The same job built again over the same
+database computes nothing, and its trace and marks are unchanged:
+
+```python
+again = PipelineJob(name="behaviour", database=database)
+with again:
+    scores = score.pod(trials, label="scores")
+    average.pod(
+        scores.group_by(["animal"]).select_data_columns(["accuracy"]),
+        label="per_animal",
+    )
+print(again.run())
+# Run of job 'behaviour': all rows succeeded.
+#   scores: 4 rows: 0 computed, 4 from store, 0 failed
+#   per_animal: 2 rows: 0 computed, 2 from store, 0 failed
+warm = again.nodes["per_animal"].trace({"animal": "a2"}, "mean_accuracy")
+print([run.computed_here for _, run in warm.function_runs()])
+# [True, False, True]
+print(warm.highlight().marks == trace.highlight().marks)
+# True
+```
+
 In a notebook the diagram is drawn as a picture, the mark as a bold line on its node. Here
-is the job of tutorial [Part 8](../tutorial/08-inspecting-and-tracing.md), first plain,
+is the job of the tutorial [Tracing a value](../tutorial/tracing-a-value.md), first plain,
 then with the trace of one firing rate highlighted. Its path stops at `rates`: the grouping
 after it is dimmed. That rate reused the result an equal input had computed, so `rates` is
 marked `reused`:

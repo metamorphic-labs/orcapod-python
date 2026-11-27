@@ -1,4 +1,4 @@
-"""Cross-version check of a function node's entry ids (ITL-1361).
+"""Cross-version check of a function node's instance ids (ITL-1361).
 
 Run once per Orcapod version, each with its own environment, over the same inputs:
 
@@ -9,7 +9,7 @@ Run once per Orcapod version, each with its own environment, over the same input
 
 ``write`` runs a function job node over each input and stores its results in a Delta
 store; ``load`` runs the same node load-only over the same store. A store written by one
-version must be hit, row for row, by the other: same stored base entry ids, every row
+version must be hit, row for row, by the other: same stored instance ids, every row
 from the store, no call of the function. The inputs cover the several-items family
 (tag order, layout, tag roles), list-valued columns after ``Batch`` and ``GroupBy``,
 nested source info, nullable and logical values, and raw streams whose rows type their
@@ -228,12 +228,12 @@ def main() -> None:
                 records = database.get_all_records(path)
                 if (
                     records is None
-                    or "__pipeline_base_entry_id" not in records.column_names
+                    or "__pipeline_instance_id" not in records.column_names
                 ):
                     continue
                 ids += [
                     value.hex()
-                    for value in records["__pipeline_base_entry_id"].to_pylist()
+                    for value in records["__pipeline_instance_id"].to_pylist()
                     if isinstance(value, bytes)
                 ]
             ids.sort()

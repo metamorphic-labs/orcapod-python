@@ -31,7 +31,6 @@ from orcapod.databases import (
     DeltaTableDatabase,
     ExtensionAwareDatabase,
     InMemoryArrowDatabase,
-    SpiralDBConnector,
     SQLiteConnector,
 )
 from orcapod.databases.utils import in_held_column_order
@@ -58,8 +57,8 @@ SECOND_ORDERS = {
     "id c a b": [ID, "c", "a", "b"],
     "b id a c": ["b", ID, "a", "c"],
 }
-DATABASES = ("in-memory", "Delta", "SQLite", "SpiralDB")
-DURABLE = ("Delta", "SQLite", "SpiralDB")
+DATABASES = ("in-memory", "Delta", "SQLite")
+DURABLE = ("Delta", "SQLite")
 
 
 def _row(n: int) -> dict[str, Any]:
@@ -77,13 +76,8 @@ def _rows(order: list[str], ns: list[int]) -> pa.Table:
 def _given_order(database: str, first: list[str], stored: bool = True) -> list[str]:
     """The order a database gives a table first written in ``first``.
 
-    The first write's order, except in SpiralDB once rows are stored: SpiralDB
-    stores and reads a table's columns in its own order, the key columns, then the
-    value columns sorted by name, whatever the order written (observed live,
-    ITL-1367; its fake does the same). Rows still pending keep the first write's.
+    The first write's order.
     """
-    if database == "SpiralDB" and stored:
-        return [ID, *sorted(n for n in first if n != ID)]
     return first
 
 
@@ -151,7 +145,7 @@ def test_a_new_table_keeps_the_order_the_database_gave_its_first_write(
     tmp_path: Path, database: str
 ) -> None:
     """The first write's order is kept, whichever order it is; nothing is sorted by
-    Orcapod (SpiralDB orders a table's columns its own way)."""
+    Orcapod."""
     with open_database(database, tmp_path) as db:
         for n, order in enumerate([["c", "b", "a", ID], [ID, "a", "b", "c"]]):
             path = (f"t{n}",)
@@ -172,8 +166,6 @@ RETYPE_VERDICTS: dict[tuple[str, str], tuple[str, type[BaseException]]] = {
     ("Delta", "same pending batch"): ("add", ValueError),
     ("SQLite", "after a flush"): ("add", UnstorableColumnError),
     ("SQLite", "same pending batch"): ("add", UnstorableColumnError),
-    ("SpiralDB", "after a flush"): ("flush", ValueError),
-    ("SpiralDB", "same pending batch"): ("add", pa.ArrowInvalid),
 }
 
 
@@ -247,22 +239,6 @@ def test_rows_queued_before_a_table_is_created_again_are_read_with_it_by_name(
             other_db.get_all_records(PATH, record_id_column=ID),
             ["b", ID, "c", "a"],
             [2, 3],
-        )
-
-
-def test_a_spiraldb_table_deleted_and_created_again_in_another_order(
-    tmp_path: Path,
-) -> None:
-    with open_database("SpiralDB", tmp_path) as db:
-        _add(db, _rows([ID, "a", "c", "b"], [1]), flush=True)
-        db._connector.delete_table("t")  # the connector's own drop
-        other_db = ConnectorArrowDatabase(SpiralDBConnector("p"))
-        _add(other_db, _rows(["b", ID, "c", "a"], [3]), flush=True)
-        _add(db, _rows([ID, "a", "c", "b"], [4]), flush=True)
-        _check(
-            db.get_all_records(PATH, record_id_column=ID),
-            _given_order("SpiralDB", ["b", ID, "c", "a"]),
-            [3, 4],
         )
 
 
@@ -735,7 +711,7 @@ def test_a_queued_row_is_read_from_memory(tmp_path: Path) -> None:
     """A point lookup of a queued row answers from memory, in the order the row is
     queued, with no lookup of the stored table (as main): the stored table is not
     even listed. Presentation order is a reader's business (ITL-1370)."""
-    with open_database("SpiralDB", tmp_path) as db:
+    with open_database("SQLite", tmp_path) as db:
         rows = pa.table(
             {
                 "rid": pa.array([bytes([1])], pa.large_binary()),
@@ -797,7 +773,7 @@ def test_a_refused_reordered_append_leaves_the_next_batch_committed(
             db.add_records(PATH, _abc(2), flush=True, **kwargs)
     else:
         db.add_records(PATH, _abc(2), flush=True, **kwargs)
-    assert DeltaTable(tmp_path / "t").history()[0]["operation"] == "MERGE"
+    assert list(DeltaTable(tmp_path / "t").history())[0]["operation"] == "MERGE"
     table = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="rid")
     assert table is not None
     expected = [1, 2, 3] if race else [1, 2]

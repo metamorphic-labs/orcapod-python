@@ -1,12 +1,12 @@
 # Part 5: Keeping results
 
-Everything in Parts 1 to 4 was computed in memory. Close Python and the results are gone;
-run the script again and every function runs again. That is fine for 64 rows. It is not fine
-when one function call takes a minute and you have ten thousand of them.
+The results of Parts 1 to 4 were held in memory. They are gone when Python exits, and running
+the script again runs every function again. With long computations or many rows, you want to
+keep the results.
 
-A **`PipelineJob`** runs the same steps against a database. Each result is stored together
-with a record of the inputs it was computed from. The next time the pipeline runs, results
-that are already stored are read back instead of being computed again.
+A **`PipelineJob`** stores each result in a database, with a record of the inputs it was
+computed from. The next time the pipeline runs, results that are already stored are read back
+instead of being computed again.
 
 You will:
 
@@ -47,12 +47,13 @@ def mean_rate(rate_hz: list[float]) -> float:
     return sum(rate_hz) / len(rate_hz)
 ```
 
-These are the two functions from Part 4. The `calls` list is only there for teaching: it
-lets us count how often each function was really called.
+These are the two functions from Part 4. The `calls` list counts how often each function was
+called.
 
-## Record, then run
+## Run a recorded job
 
-A job needs a **database** to put its results in. Start with one that lives in memory. Then write the pipeline exactly as before, inside a `with` block:
+A job needs a **database** for its results. Start with one in memory, and write the pipeline
+inside a `with` block:
 
 ```python
 from orcapod.databases import InMemoryArrowDatabase
@@ -75,9 +76,8 @@ print(len(calls))
 # 0
 ```
 
-Nothing has been computed. Inside the `with` block the job only **records** which operators
-and pods are applied to which streams. The one new thing in the code is `label=`: a name for
-the step, which you will use to find its results.
+No function was called in this block. The job only **records** which operators and pods are
+applied to which streams. `label=` names a step, so that you can find its results.
 
 `run()` executes what was recorded and writes every result to the database:
 
@@ -90,12 +90,12 @@ print(calls.count("firing_rate"), calls.count("mean_rate"))
 # 63 8
 ```
 
-`mean_rate` ran 8 times, once per session. `firing_rate` ran 63 times for 64 units. That is
-not a mistake: two units happen to have the same spike count and the same session duration.
-Orcapod stores a result under the function and the *values* of its inputs, so the second of
-those two units found its answer already stored.
+`mean_rate` ran 8 times, once per session. `firing_rate` ran 63 times for 64 units, because two
+units have the same spike count and the same session duration. Orcapod stores a result under
+the function and the *values* of its inputs, so the second of those two units found its result
+already stored.
 
-## Nodes: where the results are
+## Nodes
 
 Each recorded step is a **node** of the job. `job.nodes` lists them by name:
 
@@ -104,8 +104,7 @@ print(sorted(job.nodes))
 # ['GroupBy', 'Join', 'SelectDataColumns_1', 'SelectDataColumns_2', 'SelectDataColumns_3', 'rates', 'session_means', 'sessions', 'units']
 ```
 
-(`sorted` is only there to make this page reproducible: `list(job.nodes)` gives the same
-names, in an order that can differ from one Python session to the next.)
+
 
 - A source is listed under its `source_id`.
 - A function pod is listed under the `label` you gave it. Without a label it gets the
@@ -124,10 +123,8 @@ has a picture of this job's diagram and what each display in a notebook shows.
     `warnings.filterwarnings("ignore", category=InDevelopmentWarning)` after importing
     it from `orcapod.errors`.
 
-Drag it to move it, zoom with the `+` and `−` buttons, and click a node to see its schema
-(its tag and data columns) and how many rows the last run computed or read. Outside a notebook,
-`print(job.diagram())` gives the same graph as text, one node per line with the nodes it
-reads from:
+Outside a notebook, `print(job.diagram())` gives the same graph as text, one node per line
+with the nodes it reads from:
 
 ```python
 print(job.diagram())
@@ -143,11 +140,10 @@ print(job.diagram())
 #   session_means (function pod · mean_rate · current) <- SelectDataColumns_3
 ```
 
-The `Join` is there because `firing_rate` was given two streams: the pod joins them for you.
-`current` means the node holds the rows of the run you just did; before `job.run()` every
-node but the sources says `not run`. `job.diagram(collapse=True)` hides the steps that only
-choose or join columns, leaving the sources, the function pods and the `GroupBy` (in the
-notebook, the `collapse` checkbox above the diagram does the same):
+The `Join` is there because the pod joins the two streams given to `firing_rate`. `current`
+means the node holds the rows of the latest run. Before `job.run()`, every node but the
+sources says `not run`. `job.diagram(collapse=True)` hides the steps that only choose or join
+columns. The sources, the function pods and the `GroupBy` remain:
 
 ```python
 print(job.diagram(collapse=True))
@@ -159,7 +155,8 @@ print(job.diagram(collapse=True))
 #   session_means (function pod · mean_rate · current) <- GroupBy
 ```
 
-A node is a stream. Everything from Part 1 works on it:
+Read the node of a function pod or an operator like any other stream. The node of a source has
+`as_table()`, `keys()` and `output_schema()`, but no `for` loop and no DataFrame methods:
 
 ```python
 means = job.nodes["session_means"]
@@ -181,12 +178,12 @@ print(job.nodes["rates"].as_table().num_rows)
 
 !!! warning "Read nodes after `run()`"
     A node shows the rows of the job's run in this Python session. Before `run()`, every node
-    except the sources gives you an empty table without complaint; only `head()` and the
-    notebook preview say "not run". If a node looks empty, check that you ran the job.
+    except the sources gives an empty table and raises no error. Only `head()` and the notebook
+    preview say "not run". If a node looks empty, check that you ran the job.
 
 ## Run it again
 
-Record the same pipeline in a new job over the same database. A small function saves retyping:
+Record the same pipeline in a new job over the same database:
 
 ```python
 def build_job(database):
@@ -213,13 +210,11 @@ print(job.nodes["session_means"].as_table().num_rows)
 # 8
 ```
 
-Still 71. The second run called no function at all. Every result was found in the database,
-and the node holds the same 8 rows.
+Still 71: the second run called no function. Every result was found in the database.
 
 ## Keep results on disk
 
-`InMemoryArrowDatabase` disappears with the Python process. `DeltaTableDatabase` writes to a
-directory and is what you use for real work:
+`InMemoryArrowDatabase` is gone when Python exits. `DeltaTableDatabase` writes to a directory:
 
 ```python
 import shutil
@@ -233,10 +228,10 @@ print(len(calls))
 # 142
 ```
 
-This is a different, empty database, so everything was computed once more: 71 further calls.
+This database was empty, so everything was computed: 71 further calls.
 
-Now do what a new Python session would do: make a new database object for the same directory,
-build the job, run it.
+Now make a new database object for the same directory, as a new Python session would, and
+build and run the job:
 
 ```python
 job = build_job(DeltaTableDatabase("workshop_db"))
@@ -251,9 +246,7 @@ print(means.sort_values(["subject_id", "session"], ignore_index=True).head(2))
 # 1   mouse_01      s2      6.793750
 ```
 
-No calls. The results came from the files in `workshop_db/`. Rows read back from a database
-are not guaranteed to come in the order they were first computed in, which is why the sample
-sorts them before printing. Sort whenever the order matters to you.
+No calls. The results came from the files in `workshop_db/`:
 
 ```python
 from pathlib import Path
@@ -265,12 +258,14 @@ print(sorted(p.name for p in Path("workshop_db/workshop").iterdir()))
 ```
 
 The first level is the job's `name`. Below it, `_result` holds each function's results, and
-the directory named after each function records which inputs the job gave it. Two jobs with
-different names over the same directory do not share results. You never need to read
-these files yourself, and deleting the whole directory is safe: it only means the next run
-computes everything again.
+the directory named after each function records which inputs the job gave it. By default, two
+jobs with different names over the same directory do not share results. If you delete the
+directory, the next run computes everything again.
 
-## What to remember
+Rows read back from a database are not guaranteed to come in the order they were computed in.
+Sort them whenever the order matters, as the samples here do.
+
+## Key points
 
 - `PipelineJob(name=..., database=...)`, a `with` block to record, `job.run()` to execute.
 - Give pods a `label`; read results from `job.nodes[label]` after `run()`.
@@ -278,9 +273,6 @@ computes everything again.
   database computes only what is missing.
 - `InMemoryArrowDatabase` for trying things out; `DeltaTableDatabase("directory")` to keep
   results between sessions.
-
-The concept page [Pipelines and jobs](../concepts/pipeline-job.md) covers what this part left
-out: reusable pipeline blueprints, binding sources later, and saving a job to a file.
 
 ## Exercises
 
@@ -321,16 +313,15 @@ print("function calls in this run:", n_calls)
 ```
 
 ??? success "Solution"
-    The first run prints `rows: 64` and `function calls in this run: 54`. Fifty-four, not
-    64, because some units share a depth and identical inputs are computed once.
+    The first run prints `rows: 64` and `function calls in this run: 54`. It is below
+    64 because some units share a depth, and identical inputs are computed once.
 
-    The second run prints `rows: 64` and `function calls in this run: 0`. It is a new Python
-    process, with a new job object and a new database object. The only thing it shares with
-    the first run is the `exercise_db` directory, and that is enough.
+    The second run prints `rows: 64` and `function calls in this run: 0`. It shares only the
+    `exercise_db` directory with the first run.
 
     Delete `exercise_db/` and run the script once more: 54 calls again.
 
-**2.** In the main example, what would `list(job.nodes)` show if you removed both `label=`
+**2.** In the main example, which names would `job.nodes` hold if you removed both `label=`
 arguments? Predict, then try it with a new job over an `InMemoryArrowDatabase`.
 
 ??? success "Solution"
@@ -350,7 +341,7 @@ arguments? Predict, then try it with a new job over an `InMemoryArrowDatabase`.
     # ['GroupBy', 'Join', 'SelectDataColumns_1', 'SelectDataColumns_2', 'SelectDataColumns_3', 'firing_rate', 'mean_rate', 'sessions', 'units']
     ```
 
-    Labels become useful when the same function is applied in two places of one pipeline.
+    Labels tell the nodes apart when one function is applied in two places of a pipeline.
 
 **3.** Create a job without a database, record one step, and call `run()`. Read the error and do
 what it suggests.
@@ -376,5 +367,3 @@ what it suggests.
     print(no_database.nodes["rates"].as_table().num_rows)
     # 64
     ```
-
-Next: [Part 6: Re-runs and caching](06-reruns-and-caching.md).

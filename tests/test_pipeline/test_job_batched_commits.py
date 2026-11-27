@@ -9,12 +9,13 @@ tests check, on a ``DeltaTableDatabase`` whose table history counts commits:
 - that a node or cached pod used on its own still commits after every row,
 - a failed commit: ``OrcapodDatabaseWriteError`` naming the node and no row, earlier batches kept,
 - that a failing node commits its ephemeral results before the run's error propagates,
-- that each row's base entry id is computed once,
+- that each row's instance id is computed once,
 - that a node's records read right after the run are all there (ITL-930).
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -96,7 +97,7 @@ def table_dirs(root: Path) -> dict[str, Path]:
 
 def operations(table: Path) -> list[str]:
     """The table's commit operations, oldest first."""
-    history = deltalake.DeltaTable(str(table)).history()
+    history = list(deltalake.DeltaTable(str(table)).history())
     return [str(entry["operation"]) for entry in reversed(history)]
 
 
@@ -444,28 +445,30 @@ def test_a_node_failing_on_a_store_write_commits_its_ephemeral_results(
 
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
-def test_base_entry_id_is_computed_once_per_row(
+def test_instance_id_is_computed_once_per_row(
     orchestrator: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Each row's base entry id is computed once, not once per use."""
+    """Each row's instance id is computed once, not once per use."""
     # Counts calls of a public node method through a class-level spy; the test is
     # about how often the node computes the id.
-    # A row's id is made from its datagrams (``compute_base_entry_id``) or, for an
+    # A row's id is made from its datagrams (``compute_instance_id``) or, for an
     # input over an Arrow table, from its table slices (ITL-1361): both are counted.
     calls = {"n": 0}
-    original = FunctionJobNode.compute_base_entry_id
-    original_of_slices = FunctionJobNode._base_entry_id_of_slices  # pyright: ignore[reportPrivateUsage]  # the table path's id
+    original = FunctionJobNode.compute_instance_id
+    original_of_slices = FunctionJobNode._instance_id_of_slices  # pyright: ignore[reportPrivateUsage]  # the table path's id
 
     def counting(self: FunctionJobNode, tag: Any, input_data: Any) -> bytes:
         calls["n"] += 1
         return original(self, tag, input_data)
 
-    def counting_slices(self: FunctionJobNode, tag_row: Any, data_hash: Any) -> bytes:
+    def counting_slices(
+        self: FunctionJobNode, tag_row: Any, data_hash: Any, source_row: Any
+    ) -> bytes:
         calls["n"] += 1
-        return original_of_slices(self, tag_row, data_hash)
+        return original_of_slices(self, tag_row, data_hash, source_row)
 
-    monkeypatch.setattr(FunctionJobNode, "compute_base_entry_id", counting)
-    monkeypatch.setattr(FunctionJobNode, "_base_entry_id_of_slices", counting_slices)
+    monkeypatch.setattr(FunctionJobNode, "compute_instance_id", counting)
+    monkeypatch.setattr(FunctionJobNode, "_instance_id_of_slices", counting_slices)
     job = build_job(InMemoryArrowDatabase(), 20)
     job.run(orchestrator=ORCHESTRATORS[orchestrator]())
     assert calls["n"] == 20
@@ -500,7 +503,8 @@ def test_rerun_of_an_ephemeral_node_recomputes_and_records_every_row(
     """A rerun with a fresh ephemeral database recomputes each row (ITL-923).
 
     The first run's results are gone, so each row is computed again and gets a
-    second pipeline record (recomputation index 1); the node reads 5 rows.
+    second pipeline record, under the same instance id (ITL-1471); the node reads
+    5 rows.
     """
 
     def make_store() -> Any:
@@ -534,8 +538,8 @@ def test_rerun_of_an_ephemeral_node_recomputes_and_records_every_row(
     assert records is not None and records.num_rows == 5
     if store == "delta":
         (table,) = {log.parent for log in (tmp_path / "store").rglob("_delta_log")}
-        index = read_column(table, "__pipeline_recomputation_index")
-        assert sorted(index) == [0] * 5 + [1] * 5
+        instances = Counter(read_column(table, "__pipeline_instance_id"))
+        assert sorted(instances.values()) == [2] * 5
 
 
 @pytest.mark.parametrize(
@@ -585,8 +589,8 @@ def test_results_are_committed_before_their_records_just_below_batch_size(
         orchestrator=ORCHESTRATORS[orchestrator](), commit_every_rows=49
     )
     tables = table_dirs(tmp_path)
-    pipeline_history = deltalake.DeltaTable(str(tables["pipeline"])).history()
-    result_history = deltalake.DeltaTable(str(tables["result"])).history()
+    pipeline_history = list(deltalake.DeltaTable(str(tables["pipeline"])).history())
+    result_history = list(deltalake.DeltaTable(str(tables["result"])).history())
     # 120 rows at 49 per commit: 3 pipeline-record commits, none by the database alone.
     assert len(pipeline_history) == 3
     for entry in pipeline_history:
@@ -617,7 +621,7 @@ def test_results_are_committed_before_their_records_just_below_batch_size(
 def _assert_records_point_at_committed_results(root: Path) -> None:
     """Every committed pipeline-record version references only committed results."""
     tables = table_dirs(root)
-    result_history = deltalake.DeltaTable(str(tables["result"])).history()
+    result_history = list(deltalake.DeltaTable(str(tables["result"])).history())
     for entry in deltalake.DeltaTable(str(tables["pipeline"])).history():
         records = deltalake.DeltaTable(
             str(tables["pipeline"]), version=entry["version"]
@@ -677,7 +681,7 @@ def test_writes_pending_before_the_run_are_committed_first(tmp_path: Path) -> No
     leftover = pa.table({"v": pa.array([1], pa.int64())})
     store.add_record(("leftover",), b"left-1", leftover)  # pending, never flushed
     build_job(store, 30).run()
-    leftover_commit = deltalake.DeltaTable(str(tmp_path / "leftover")).history()
+    leftover_commit = list(deltalake.DeltaTable(str(tmp_path / "leftover")).history())
     first_job_commit = min(
         entry["timestamp"]
         for table in table_dirs_except(tmp_path, "leftover")

@@ -135,6 +135,20 @@ class StaticOutputOperatorPod(TraceableBase):
     and its input's head is never asked for.
     """
 
+    CONSTRAINING_INPUTS: ClassVar[tuple[int, ...]] = ()
+    """The input positions whose rows only decide which rows of the other inputs pass.
+
+    No row of such an input flows on (``SemiJoin``'s right input). Display only: the
+    pipeline diagram draws these inputs apart (ITL-1455); it enters no identity. Only a
+    plain tuple of plain integers within the inputs counts; anything else is none.
+    """
+
+    CONSTRAINT_MATCHES_SHARED_TAGS: ClassVar[bool] = False
+    """Whether the constraining inputs match on the tag columns every input has.
+
+    Display only: the diagram then names those tags.
+    """
+
     PROVISIONAL: ClassVar[bool] = False
     """Whether the operator is provisional: its identity is not frozen (ITL-1266).
 
@@ -542,6 +556,13 @@ class StaticOutputOperatorPod(TraceableBase):
         every row to give a column one type. This step gives each column that type,
         built from the same values. A ``large_string`` column is every row's type
         already and is left as it is.
+
+        Stopgap, not the proper solution (developer, November 27, 2026): this
+        step infers a token column's declared type again from its values. A
+        token column's type is fixed by the pipeline and is not meant to be
+        taken from values. The inference can narrow a declared type (example:
+        ``[None]`` in a token column a ``Batch`` declares with two list levels
+        infers one). ITL-1491 removes it.
 
         Args:
             table: A table of user tags, system tags, data and source info, after the

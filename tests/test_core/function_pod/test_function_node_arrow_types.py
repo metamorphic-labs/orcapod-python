@@ -437,7 +437,7 @@ def _stored_tags(root: pathlib.Path, node: str) -> list[int]:
     (log,) = [
         log
         for log in root.rglob("_delta_log")
-        if log.parent.name == "pdb_v1" and node in log.parent.parts
+        if log.parent.name == "pdb_v2" and node in log.parent.parts
     ]
     values = deltalake.DeltaTable(str(log.parent)).to_pyarrow_table()["k"].to_pylist()
     return sorted(int(value) for value in values if value is not None)

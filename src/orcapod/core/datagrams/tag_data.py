@@ -49,11 +49,41 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+# The Arrow type of a null source-info token, whatever type its column declares
+# (``arrow_utils.source_info_arrow_type(None)``).
+_NULL_TOKEN_TYPE = pa.large_string()
+
+
 def _source_info_field(name: str, token: SourceInfoValue) -> pa.Field[Any]:
     """The field of source-info column ``name`` holding ``token``, as a row's table has it."""
     import pyarrow as _pa
 
     return _pa.field(name, arrow_utils.source_info_arrow_type(token))
+
+
+def source_info_row_as_datagram_gives(typed: pa.Table) -> pa.Table:
+    """Return the source-info table of a row read from an Arrow table.
+
+    Args:
+        typed: One row of the stream's prepared source-info columns.
+
+    Returns:
+        The row's nullable token fields, with each null token typed as text.
+    """
+    # This is the row representation on main today. ITL-1543 owns matching the
+    # row's schema with the stream's. Non-null tokens keep the stream's Arrow type.
+    columns = [
+        pa.chunked_array([pa.nulls(1, _NULL_TOKEN_TYPE)])
+        if column.null_count == len(column)
+        else column
+        for column in typed.columns
+    ]
+    return pa.Table.from_arrays(
+        columns,
+        schema=pa.schema(
+            [pa.field(f.name, c.type) for f, c in zip(typed.schema, columns)]
+        ),
+    )
 
 
 class Tag(Datagram):
@@ -371,7 +401,10 @@ class Data(Datagram):
             self._source_info: dict[str, SourceInfoValue] = self._source_info_of_row(
                 si_table
             )
+            # The table's own source-info columns, when the tokens are all its own.
+            typed = si_table if not source_info and si_table.num_rows == 1 else None
         else:
+            typed = None
             # Dict path: extract source-info keys before calling super()
             data_only = {
                 k: v
@@ -394,6 +427,10 @@ class Data(Datagram):
             self._source_info = {**contained_source_info, **(source_info or {})}
 
         self._source_info_table: "pa.Table | None" = None
+        # The row's source-info columns as the Arrow table it was read from gave
+        # them, when it was read from one (here, or ``rows_of``); ``None``
+        # otherwise, and after any change of the columns or tokens.
+        self._typed_source_info: "pa.Table | None" = typed
 
     @staticmethod
     def _data_and_source_info_tables(
@@ -464,6 +501,7 @@ class Data(Datagram):
             assert source_info_row is not None
             data._source_info = cls._source_info_of_row(source_info_row)
             data._source_info_table = None
+            data._typed_source_info = source_info_row
             yield data
 
     # ------------------------------------------------------------------
@@ -560,6 +598,90 @@ class Data(Datagram):
         """Return source info for all data-column keys (None for unknown)."""
         return {k: self._source_info.get(k) for k in self.keys()}
 
+    def source_info_table(self) -> "pa.Table":
+        """Return the source-info tokens as a one-row table.
+
+        One ``_source_<column>`` per data column, in their order, every field
+        nullable; a data column with no token has a null token. What each
+        column's type is today (ITL-1471):
+
+        - a null token is a ``large_string`` null whatever type its column
+          declares (a null says nothing a type could tell apart);
+        - a non-null token of a row read from an Arrow table (a stream's row)
+          keeps the type that table declares for it: it is not worked out again
+          from its value, which a nested token column would not survive. A
+          change of the row keeps the typed column of every token it keeps (a
+          selection, a drop, a rename, added columns);
+        - a token given as a Python value (a row built from values,
+          ``with_source_info``) is typed from its value
+          (``arrow_utils.source_info_arrow_type``), and so is a token copied
+          from another row by ``with_columns_of`` (a stopgap, see there).
+
+        A token column's type is not meant to be taken from values: it is
+        fixed by the pipeline (ITL-1491).
+
+        ``as_table(columns={"source": True})`` differs in two ways: it types
+        every token from its value, and it has no column for a data column whose
+        token was never given.
+
+        Returns:
+            The one-row table; a table with no column when there is no data
+            column (a placeholder that carries no token).
+        """
+        typed = self._typed_source_info
+        if typed is None:
+            names = Datagram.keys(self)
+            if all(name in self._source_info for name in names):
+                return self._ensure_source_info_table()
+            return self._token_columns({})
+        return source_info_row_as_datagram_gives(typed)
+
+    def _token_columns(self, kept: "Mapping[str, pa.ChunkedArray[Any]]") -> "pa.Table":
+        """Return one token column per data column this row holds, in their order.
+
+        Args:
+            kept: The typed column of each token that is kept as it was read,
+                by the name of the data column it now belongs to.
+
+        Returns:
+            A one-row table: for a data column in ``kept`` that column, for any
+            other the row's token typed from its value (null when it has none).
+        """
+        arrays: "list[pa.ChunkedArray[Any]]" = []
+        fields: "list[pa.Field[Any]]" = []
+        for name in Datagram.keys(self):
+            column_name = f"{constants.SOURCE_PREFIX}{name}"
+            array = kept.get(name)
+            if array is None:
+                token = self._source_info.get(name)
+                token_type = _source_info_field(column_name, token).type
+                array = pa.chunked_array([pa.array([token], type=token_type)])
+            arrays.append(array)
+            fields.append(pa.field(column_name, array.type))
+        return pa.Table.from_arrays(arrays, schema=pa.schema(fields))
+
+    def _keep_typed_tokens(self, changed: Self, origin: "Mapping[str, str]") -> None:
+        """Give ``changed`` the typed columns of the tokens it keeps from this row.
+
+        Does nothing when this row holds no typed columns (it was built from
+        Python values): its tokens are then typed from their values anyway.
+
+        Args:
+            changed: The row made from this one; its columns and tokens are set.
+            origin: For each data column of ``changed`` whose token is this
+                row's, unchanged: the name the column has in this row.
+        """
+        typed = self._typed_source_info
+        if typed is None:
+            changed._typed_source_info = None
+            return
+        kept = {
+            new: typed.column(f"{constants.SOURCE_PREFIX}{old}")
+            for new, old in origin.items()
+            if f"{constants.SOURCE_PREFIX}{old}" in typed.column_names
+        }
+        changed._typed_source_info = changed._token_columns(kept)
+
     def with_source_info(self, **source_info: "SourceInfoValue") -> Self:
         """Create a copy with updated source-information entries."""
         current = dict(self._source_info)
@@ -569,6 +691,10 @@ class Data(Datagram):
             current[key] = value
         new_p = self.copy(include_cache=False)
         new_p._source_info = current
+        replaced = {key.removeprefix(constants.SOURCE_PREFIX) for key in source_info}
+        self._keep_typed_tokens(
+            new_p, {k: k for k in Datagram.keys(new_p) if k not in replaced}
+        )
         return new_p
 
     # ------------------------------------------------------------------
@@ -656,6 +782,7 @@ class Data(Datagram):
             if k in self._source_info
         }
         new_p._source_info_table = None
+        self._keep_typed_tokens(new_p, {k: k for k in Datagram.keys(new_p)})
         return new_p
 
     def drop(self, *column_names: str, ignore_missing: bool = False) -> Self:
@@ -665,15 +792,34 @@ class Data(Datagram):
             k: v for k, v in self._source_info.items() if k not in column_names
         }
         new_p._source_info_table = None
+        self._keep_typed_tokens(new_p, {k: k for k in Datagram.keys(new_p)})
         return new_p
 
     def rename(self, column_mapping: "Mapping[str, str]") -> Self:
+        """Return a copy with data columns renamed, each token moving with its column.
+
+        Only the tokens of the columns this row holds are carried over: a token
+        held for a name the row had no column of (given earlier through
+        ``with_source_info``) is dropped, so it never stands in for the token of
+        the column renamed to that name. An empty mapping changes nothing and
+        returns this row itself.
+        """
+        if not column_mapping:
+            return self
         new_p = super().rename(column_mapping)
+        held = self._names_with_tokens()
         new_p._source_info = {
-            column_mapping.get(k, k): v for k, v in self._source_info.items()
+            column_mapping.get(k, k): self._source_info[k]
+            for k in held
+            if k in self._source_info
         }
         new_p._source_info_table = None
+        self._keep_typed_tokens(new_p, {column_mapping.get(k, k): k for k in held})
         return new_p
+
+    def _names_with_tokens(self) -> tuple[str, ...]:
+        """The names whose tokens are this row's own: its data columns, in order."""
+        return Datagram.keys(self)
 
     def with_columns(
         self,
@@ -698,6 +844,9 @@ class Data(Datagram):
             new_source_info[col] = None  # new columns get empty source info
         new_p._source_info = new_source_info
         new_p._source_info_table = None
+        self._keep_typed_tokens(
+            new_p, {k: k for k in Datagram.keys(new_p) if k not in updates}
+        )
         return new_p
 
     def as_datagram(
@@ -719,6 +868,20 @@ class Data(Datagram):
         data's own columns are kept as they are: their Arrow fields, and the Python
         values a function returned, are not converted again. Used for the columns of
         data-tags that fall through a function pod.
+
+        The intended rule (developer, November 27, 2026): a data-tag that falls
+        through a function pod keeps its source-info token with its type
+        unchanged. A column a function returns is never a pass-through, even with
+        an input's name and value: its token points to the function. The type of
+        every source-info token column is fixed by the pipeline and is not meant
+        to be taken from values: each source and operator determines its output
+        token columns' types from its inputs' types, by its own rule, in its own
+        module.
+
+        Stopgap, not the proper solution: today this method types the copied
+        tokens again from their values (``arrow_utils.source_info_arrow_type``),
+        so a copied token's declared type may not be kept (a ``fixed_size_list``
+        token becomes a ``large_list``). ITL-1491 removes it.
 
         Args:
             other: The data to take the columns from.
@@ -760,12 +923,24 @@ class Data(Datagram):
             **{k: v for k, v in self._source_info.items() if k not in names},
         }
         new_p._source_info_table = None
+        # STOPGAP, not the proper solution (developer, November 27, 2026;
+        # ITL-1491 removes it): the copied columns' typed token columns are not
+        # kept, so the copied tokens are typed again from their values. A
+        # data-tag that falls through a function pod is meant to keep its token
+        # with its type unchanged. This row's own typed columns, when it has
+        # them, are kept.
+        self._keep_typed_tokens(
+            new_p, {k: k for k in Datagram.keys(self) if k not in names}
+        )
         return new_p
 
     def copy(self, include_cache: bool = True, preserve_id: bool = True) -> Self:
         new_p = super().copy(include_cache=include_cache, preserve_id=preserve_id)
         new_p._source_info = dict(self._source_info)
         new_p._source_info_table = self._source_info_table if include_cache else None
+        # Not a cache: it is what the row was read with, and stays true for a copy
+        # (every method that changes the columns or the tokens clears it).
+        new_p._typed_source_info = self._typed_source_info
         return new_p
 
 
@@ -792,18 +967,20 @@ class EmptyData(Data):
     pipeline DB row lacking the stored hash column), ``content_hash()`` raises
     ``EmptyDataHashMissingError`` loudly.
 
-    ``empty_source_info`` is an optional provenance field for the future
-    tag-row reconstruction follow-up. This release defines the field; the write
-    logic is deferred.
+    A placeholder carries source-info tokens (ITL-1471): one for each data column
+    of the result that is gone, built as that result's would be, with the sentinel
+    ``EPHEMERAL_RESULT_GONE`` (``core/row_ids.py``) where the result id would
+    stand. A node that receives the placeholder computes the row's instance id
+    from them. ``source_info()`` and ``source_info_table()`` return them; they
+    are the only part of the placeholder that reads like a row.
 
     Args:
         cached_content_hash: The content hash of the missing data payload this
             token represents — typically the upstream node's output hash, which
             equals the downstream node's input hash. ``None`` for old-format
             rows lacking the stored hash column.
-        empty_source_info: Optional provenance dict for tag-row reconstruction
-            (follow-up). Keys match tag-row source columns; ``record_id`` may
-            be ``None``.
+        source_info: The source-info tokens of the missing result, by data column
+            name. ``None`` or empty when none is known.
         python_schema: Optional schema hint (passed to parent).
         data_context: Data context key or instance (passed to parent).
         record_uuid: Optional explicit UUID for this token.
@@ -812,7 +989,7 @@ class EmptyData(Data):
     def __init__(
         self,
         cached_content_hash: ContentHash | None = None,
-        empty_source_info: dict[str, str | None] | None = None,
+        source_info: "Mapping[str, SourceInfoValue] | None" = None,
         python_schema: SchemaLike | None = None,
         data_context: str | contexts.DataContext | None = None,
         record_uuid: uuid.UUID | None = None,
@@ -825,7 +1002,7 @@ class EmptyData(Data):
             record_uuid=record_uuid,
         )
         self._cached_content_hash: ContentHash | None = cached_content_hash
-        self._empty_source_info: dict[str, str | None] | None = empty_source_info
+        self._source_info = dict(source_info or {})
 
     # ------------------------------------------------------------------
     # Content identity
@@ -916,6 +1093,10 @@ class EmptyData(Data):
 
         raise EmptyDataAccessError(self, "arrow_schema")
 
+    def _names_with_tokens(self) -> tuple[str, ...]:
+        """The names of the tokens: a placeholder holds no column, only tokens."""
+        return tuple(self._source_info)
+
     # ------------------------------------------------------------------
     # Copy — preserves EmptyData-specific fields
     # ------------------------------------------------------------------
@@ -923,10 +1104,10 @@ class EmptyData(Data):
     def copy(self, include_cache: bool = True, preserve_id: bool = True) -> Self:
         """Return a shallow copy of this token, preserving EmptyData-specific fields.
 
-        Overrides ``Datagram.copy()`` so that ``_cached_content_hash`` and
-        ``_empty_source_info`` are carried across (the base implementation uses
-        ``object.__new__`` and only copies ``Datagram`` fields, which would
-        silently drop our extra attributes).
+        Overrides ``Datagram.copy()`` so that ``_cached_content_hash`` is carried
+        across (the base implementation uses ``object.__new__`` and only copies
+        ``Datagram`` fields, which would silently drop the extra attribute). The
+        tokens are copied by ``Data.copy``.
 
         Args:
             include_cache: Forwarded to ``super().copy()``.
@@ -937,7 +1118,6 @@ class EmptyData(Data):
         """
         new_p = super().copy(include_cache=include_cache, preserve_id=preserve_id)
         new_p._cached_content_hash = self._cached_content_hash
-        new_p._empty_source_info = self._empty_source_info
         return new_p
 
     # ------------------------------------------------------------------
@@ -949,7 +1129,26 @@ class EmptyData(Data):
         """The stored content hash, or ``None`` if absent (old-format row)."""
         return self._cached_content_hash
 
-    @property
-    def empty_source_info(self) -> dict[str, str | None] | None:
-        """Optional provenance dict for future tag-row reconstruction."""
-        return self._empty_source_info
+    def source_info(self) -> "dict[str, SourceInfoValue]":
+        """Return the tokens the placeholder carries, by data column name."""
+        return dict(self._source_info)
+
+    def source_info_table(self) -> pa.Table:
+        """Return the tokens as a one-row table of source-info columns.
+
+        The columns are typed as a row's own source-info columns are
+        (``_source_info_field``), in the order the tokens were given.
+
+        Returns:
+            The one-row table, or a table with no column when the placeholder
+            carries no token.
+        """
+        if not self._source_info:
+            return pa.table({})
+        prefixed = {
+            f"{constants.SOURCE_PREFIX}{k}": v for k, v in self._source_info.items()
+        }
+        return pa.Table.from_pylist(
+            [prefixed],
+            schema=pa.schema([_source_info_field(k, v) for k, v in prefixed.items()]),
+        )

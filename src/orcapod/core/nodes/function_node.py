@@ -79,7 +79,15 @@ from orcapod.core.datagrams.datagram import (
     _one_row_tables,  # pyright: ignore[reportPrivateUsage]  # the datagrams' own row reader
     data_table_content_hash,
 )
-from orcapod.core.datagrams.tag_data import Data, EmptyData, Tag
+import orcapod.core.row_ids as row_ids
+from orcapod.core.data_function import output_source_info
+from orcapod.core.datagrams.tag_data import (
+    Data,
+    EmptyData,
+    Tag,
+    source_info_row_as_datagram_gives,
+)
+from orcapod.core.row_ids import INSTANCE_ID_COL, RECORD_ID_COL
 from orcapod.errors import (
     EphemeralResultMissingError,
     InputValidationError,
@@ -136,19 +144,6 @@ from orcapod.utils import arrow_utils, schema_utils
 
 logger = logging.getLogger(__name__)
 
-# Pipeline entry ID column name used when fetching records from the pipeline
-# database. Always present in the table returned by _fetch_joined_records.
-_PIPELINE_ENTRY_ID_COL = "__pipeline_entry_id"
-
-# Column name for the stable base entry ID (no recomputation index).
-# Stores the per-logical-input identity; later tasks wire this into the
-# Phase 1 filter and the in-memory cache key.
-_PIPELINE_BASE_ENTRY_ID_COL = "__pipeline_base_entry_id"
-
-# Column storing the recomputation chain index (pa.int32).
-# 0 for the first computation, N+1 for each miss-triggered recompute.
-_PIPELINE_RECOMPUTATION_INDEX_COL = "__pipeline_recomputation_index"
-
 PIPELINE_RUN_ID_COL = "__pipeline_run_id"
 PIPELINE_RECORDED_AT_COL = "__recorded_at"
 
@@ -159,10 +154,14 @@ _PIPELINE_RECORDING_FIELDS = (
 
 
 def _pipeline_meta_schema() -> pa.Schema:
-    """The bookkeeping columns of a function node's pipeline record (``pdb_v1``).
+    """The bookkeeping columns of a function node's pipeline record (``pdb_v2``).
 
     The record holds the tags, system tags and input source-info columns, then
-    these. One definition for the writer (``add_pipeline_record``) and for the
+    these. The instance id is the plain column a run looks a row up by, and the
+    record id names the row and is the table's key (``core/row_ids.py``,
+    ITL-1471). The record id covers the node's content hash: one table holds the
+    rows of every node with one pipeline hash, and two of them can record one
+    instance with one result, each under its own record id. One definition for the writer (``add_pipeline_record``) and for the
     check of the pipeline database when it is attached (ITL-1162).
     """
     return pa.schema(
@@ -174,61 +173,10 @@ def _pipeline_meta_schema() -> pa.Schema:
             pa.field(constants.DATA_CONTEXT_COL, pa.large_string()),
             pa.field(f"{constants.META_PREFIX}computed", pa.bool_()),
             pa.field(constants.IS_EPHEMERAL_COL, pa.bool_()),
-            pa.field(_PIPELINE_BASE_ENTRY_ID_COL, pa.large_binary()),
-            pa.field(_PIPELINE_RECOMPUTATION_INDEX_COL, pa.int32()),
+            pa.field(INSTANCE_ID_COL, pa.large_binary()),
+            pa.field(RECORD_ID_COL, pa.large_binary()),
             *_PIPELINE_RECORDING_FIELDS,
         ]
-    )
-
-
-def _build_record_id_preimage(
-    tag: "TagProtocol",
-    input_data: "DataProtocol",
-) -> "pa.Table":
-    """Build the Arrow preimage table for record_id / base_entry_id computation.
-
-    Combines the tag's system-tag columns with the binary input data hash into a
-    single-row Arrow table.  ``NODE_CONTENT_HASH_COL`` is intentionally excluded —
-    it is redundant (fully determined by the table path + system tags).
-
-    The input data hash enters with its label, ``b"<label>:" + digest``, the form
-    the stored ``INPUT_DATA_HASH_COL`` column of the pipeline and result tables
-    keeps: a hash fed into another hash carries the name of the algorithm that
-    produced it (ITL-1154).
-
-    Args:
-        tag: The tag datagram for the input row.
-        input_data: The data datagram for the input row.
-
-    Returns:
-        A single-row ``pa.Table`` with system-tag columns and
-        ``INPUT_DATA_HASH_COL`` (``large_binary``, the prefixed digest).
-    """
-    return _with_input_data_hash(
-        tag.as_table(columns={"system_tags": True}), input_data
-    )
-
-
-def _with_input_data_hash(
-    tag_table: "pa.Table", input_data: "DataProtocol | ContentHash"
-) -> "pa.Table":
-    """Return a row's tag table (with system tags) with its input data hash appended.
-
-    The one statement of the entry-id preimage's last column (``_build_record_id_preimage``).
-
-    Args:
-        tag_table: The row's one-row tag table, system tags included.
-        input_data: The row's data datagram, or its content hash.
-
-    Returns:
-        The preimage: ``tag_table`` and ``INPUT_DATA_HASH_COL`` (``large_binary``).
-    """
-    data_hash = (
-        input_data if isinstance(input_data, ContentHash) else input_data.content_hash()
-    )
-    return tag_table.append_column(
-        constants.INPUT_DATA_HASH_COL,
-        pa.array([data_hash.to_prefixed_digest()], type=pa.large_binary()),
     )
 
 
@@ -273,6 +221,13 @@ def _slices_are_rows(table: "pa.Table") -> bool:
             table.schema
         )
     )
+
+
+def _source_info_type_matches_rows(token_type: pa.DataType) -> bool:
+    """Whether a prepared token column is text or a large list of such tokens."""
+    while isinstance(token_type, pa.LargeListType):
+        token_type = token_type.value_type
+    return token_type == pa.large_string()
 
 
 def _large_layout(table: "pa.Table") -> "pa.Table":
@@ -356,9 +311,8 @@ def _with_datagram_id(data: Data, datagram_id: uuid.UUID) -> Data:
     """Return ``data`` with ``datagram_id`` as its datagram id.
 
     A stored row read back is built by a stream, which gives every row a fresh id.
-    The copy shares the row's columns, types, source info and data context
-    (``Datagram.with_datagram_uuid``), instead of building the datagram again from its
-    table (ITL-1361).
+    Share the row's data and source info when rebuilding it would give the same
+    token fields (ITL-1361).
 
     Args:
         data: The datagram a stream built from a stored row.
@@ -367,7 +321,26 @@ def _with_datagram_id(data: Data, datagram_id: uuid.UUID) -> Data:
     Returns:
         A datagram equal to ``data`` whose ``datagram_uuid`` is ``datagram_id``.
     """
-    return data.with_datagram_uuid(datagram_id)
+    rebuilt_token_schema = pa.schema(
+        [
+            pa.field(
+                f"{constants.SOURCE_PREFIX}{name}",
+                arrow_utils.source_info_arrow_type(token),
+            )
+            for name, token in data.source_info().items()
+        ]
+    )
+    if data.source_info_table().schema.equals(
+        rebuilt_token_schema, check_metadata=True
+    ):
+        return data.with_datagram_uuid(datagram_id)
+    # Main infers the token type here (for example, fixed-size list becomes
+    # large list). Revisit this gate after PR 601 removes that stopgap (ITL-1491).
+    return Data(
+        data.as_table(columns={"source": True}),
+        record_uuid=datagram_id,
+        data_context=data.data_context_key,
+    )
 
 
 def passed_rows_output_stream(
@@ -1592,18 +1565,18 @@ class _JoinedRecords(NamedTuple):
 
     Attributes:
         table: The joined ``pa.Table`` for rows that matched in the result DB.
-            Always includes a ``_PIPELINE_BASE_ENTRY_ID_COL`` column.
+            Always includes a ``INSTANCE_ID_COL`` column.
         taginfo_columns: Column names from the pipeline database fetch,
             captured before the join. Used by ``_load_cached_entries`` to
             derive tag keys in the CACHE_ONLY fallback path.
-        empty_data_tokens: Mapping from ``base_entry_id`` bytes to an
+        empty_data_tokens: Mapping from ``instance_id`` bytes to an
             ``EmptyData`` token for each ephemeral tag row whose result
             was not found in either database (cross-session miss). Empty dict
             when no ephemeral misses occurred.
-        empty_taginfo_rows: Mapping from ``base_entry_id`` bytes to the raw
+        empty_taginfo_rows: Mapping from ``instance_id`` bytes to the raw
             taginfo row dict for each entry in ``empty_data_tokens``: its
-            bookkeeping columns (the recomputation index) are read from it.
-        empty_taginfo_tables: Mapping from ``base_entry_id`` bytes to the same
+            bookkeeping columns (the recording time) are read from it.
+        empty_taginfo_tables: Mapping from ``instance_id`` bytes to the same
             taginfo row as a one-row Arrow table, with its stored Arrow types.
             ``_load_cached_entries`` builds the tag of each token from it, never
             from Python values (ITL-1298).
@@ -1634,8 +1607,7 @@ _TAGINFO_MATCH_COLUMNS = (
     constants.NODE_CONTENT_HASH_COL,
     constants.IS_EPHEMERAL_COL,
     constants.DATA_RECORD_ID,
-    _PIPELINE_BASE_ENTRY_ID_COL,
-    _PIPELINE_RECOMPUTATION_INDEX_COL,
+    INSTANCE_ID_COL,
 )
 
 
@@ -1736,13 +1708,16 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
     _current_tables_checked: bool = False
     # Preflight the first miss before invoking user code. Each commit checks again.
     _pipeline_preflight_checked: bool = False
+    # The Arrow type of each source-info column this node's pipeline table holds
+    # (stored, or recorded by this node since); ``None`` until first needed.
+    _token_column_types: "dict[str, pa.DataType] | None" = None
     # Set once a database that cannot list its tables was reported.
     _unlisted_store_reported: bool = False
-    # Base entry ids of the inputs of the last completed run in this process, each with
+    # Instance ids of the inputs of the last completed run in this process, each with
     # its number of inputs; None when no run completed (ITL-1093). A class default so
     # nodes rebuilt from a saved descriptor start without a run.
     _run_entry_counts: Counter[bytes] | None = None
-    # The same base entry ids in the order the run emitted its rows (ITL-1432): the
+    # The same instance ids in the order the run emitted its rows (ITL-1432): the
     # order the rows are held in, so a read gives them as downstream received them.
     _run_entry_order: tuple[bytes, ...] = ()
     # Whether the last completed run was load-only, and how many of its inputs had no
@@ -1883,6 +1858,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 completions it cannot match exist; nothing has been delivered then.
         """
         self._pipeline_preflight_checked = False
+        self._token_column_types = None
         self._refresh_stored_tables()
         if self._delivers_side_effects:
             self._stale_tables_checked = False
@@ -1926,8 +1902,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         since the last run are found before anything is delivered (ITL-1408). Other
         nodes read their current tables the first time only.
 
-        A pipeline table written by an earlier version of Orcapod (``pdb_v1``) holds
-        no ``__data_context`` column: its rows are not read as results and are left
+        A pipeline table at another layout than this version's (``pdb_v2``) was written
+        by another version of Orcapod: its rows are not read as results and are left
         unchanged, and their number is reported (ITL-944). Such tables are looked for
         at this node's own path and, because the hashes in a path can differ between
         versions, anywhere under the function's name in the database (ITL-954). A node
@@ -2068,6 +2044,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         self._stale_tables_checked = False
         self._current_tables_checked = False
         self._pipeline_preflight_checked = False
+        self._token_column_types = None
         self._unlisted_store_reported = False
         self._skipped_rows_reported = False
         # ... and its own rows to compare with the job file's expected count.
@@ -2353,6 +2330,25 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             if pair is not None and pair[1] is not None:
                 yield pair[0], pair[1]
 
+    def held_instance_ids(self) -> list[bytes]:
+        """The instance id of each row this node holds, in the order it holds them.
+
+        One id per row of ``iter_data`` / ``as_table``: the id the row was looked
+        up and recorded under (``compute_instance_id`` of its input). A trace reads
+        it to find the stored record of a held row (``pipeline/provenance.py``).
+
+        Returns:
+            The labelled digests, or ``[]`` when the node holds no run.
+        """
+        if self._run_entry_counts is None:
+            return []
+        cache = self._cached_output_datas
+        return [
+            eid
+            for eid in self._run_entry_order
+            if (pair := cache.get(eid)) is not None and pair[1] is not None
+        ]
+
     def _set_run_rows(
         self,
         entry_ids: list[bytes],
@@ -2361,10 +2357,10 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         not_stored: int = 0,
         failed: int = 0,
     ) -> None:
-        """Make the inputs of a completed run, by base entry id, the rows this node holds.
+        """Make the inputs of a completed run, by instance id, the rows this node holds.
 
         Args:
-            entry_ids: The base entry ids of the run's inputs whose rows the node holds,
+            entry_ids: The instance ids of the run's inputs whose rows the node holds,
                 in the order the run emitted them.
             load_only: Whether the run was load-only (ITL-1095).
             not_stored: How many inputs of a load-only run had no stored result.
@@ -2515,10 +2511,10 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             )[0]
             ctx_obs.on_node_start(node_label, node_hash, tag_schema=tag_schema)
             inputs = [
-                (tag, data, self.compute_base_entry_id(tag, data))
+                (tag, data, self.compute_instance_id(tag, data))
                 async for tag, data in input_channel
             ]
-            _ = self.get_cached_results(base_entry_ids=[eid for _, _, eid in inputs])
+            _ = self.get_cached_results(instance_ids=[eid for _, _, eid in inputs])
             loaded_ids: list[bytes] = []
             not_stored = 0
             for tag, data, entry_id in inputs:
@@ -2794,12 +2790,19 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
 
     def _write_pipeline_record(
         self,
-        record_id: bytes,
+        row_key: bytes,
         record: pa.Table,
         result_id: bytes,
         is_ephemeral: bool,
     ) -> None:
-        """Queue a readable record with a dependency on its result's commit."""
+        """Queue a readable record with a dependency on its result's commit.
+
+        Args:
+            row_key: The row's key in the table: its record id, with its label.
+            record: The row.
+            result_id: The id of the result the row points at.
+            is_ephemeral: Whether the result is in the ephemeral database.
+        """
         database = self._require_pipeline_database()
         path = self._versioned_pipeline_path
         pod = self._ephemeral_cached_pod if is_ephemeral else self._cached_function_pod
@@ -2821,10 +2824,10 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         result_guard = (
             contextlib.nullcontext()
             if dependency is None
-            else database.guard_record(path, record_id, dependency)
+            else database.guard_record(path, row_key, dependency)
         )
         with database.guard_table_schema(path, check), result_guard:
-            database.add_record(path, record_id, record, skip_duplicates=True)
+            database.add_record(path, row_key, record, skip_duplicates=True)
 
     def _row_processed(self) -> None:
         """Count a processed row; commit once a batch is full (only inside a job run)."""
@@ -3094,12 +3097,11 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
 
         output: list[tuple[TagProtocol, DataProtocol]] = []
         try:
-            # Collect upstream entries and resolve base_entry_ids (stable across
-            # recomputation)
+            # Collect upstream entries and resolve their instance ids.
             upstream_entries = self._input_entries(
                 input_stream, row_views=_reads_no_rows(ctx_obs)
             )
-            base_entry_ids = [eid for _, _, eid in upstream_entries]
+            instance_ids = [eid for _, _, eid in upstream_entries]
 
             # Hot-load any already-computed results from DB into _cached_output_datas.
             # get_cached_results() is called for its side effect (populating the
@@ -3108,21 +3110,21 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             # directly — which includes None-output entries (function returned None)
             # and prevents spurious recomputation of already-processed data.
             self._forget_stored_hit_tables()
-            self._cached_results(base_entry_ids, keep_tables=True)
+            self._cached_results(instance_ids, keep_tables=True)
 
-            # Base entry ids of the inputs that gave a row (a cache hit or a
+            # Instance ids of the inputs that gave a row (a cache hit or a
             # successful computation), one per input: the node's rows afterwards.
             emitted_entry_ids: list[bytes] = []
             failed_rows = 0
-            for tag, data, base_entry_id in upstream_entries:
+            for tag, data, instance_id in upstream_entries:
                 ctx_obs.on_data_start(node_label, tag, data)
 
-                if base_entry_id in self._cached_output_datas and not isinstance(
-                    self._cached_output_datas[base_entry_id][1], EmptyData
+                if instance_id in self._cached_output_datas and not isinstance(
+                    self._cached_output_datas[instance_id][1], EmptyData
                 ):
-                    tag_out, result = self._cached_output_datas[base_entry_id]
+                    tag_out, result = self._cached_output_datas[instance_id]
                     ctx_obs.on_data_end(node_label, tag, data, result, cached=True)
-                    emitted_entry_ids.append(base_entry_id)
+                    emitted_entry_ids.append(instance_id)
                     if result is not None:
                         output.append((tag_out, result))
                     continue
@@ -3134,7 +3136,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                         _datagram(data),
                         logger=pkt_logger,
                         run_id=run_id,
-                        base_entry_id=base_entry_id,
+                        instance_id=instance_id,
                     )
                 except OrcapodDatabaseError as exc:
                     # A failed database read or write fails the run whatever the error
@@ -3171,7 +3173,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                     continue
 
                 ctx_obs.on_data_end(node_label, tag, data, result, cached=False)
-                emitted_entry_ids.append(base_entry_id)
+                emitted_entry_ids.append(instance_id)
                 if result is not None:
                     output.append((tag_out, result))
                 self._commit_or_end_node(
@@ -3200,7 +3202,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         return self._output_stream(output)
 
     def _empty_data_cache_hit(
-        self, tag: TagProtocol, data: EmptyData, base_entry_id: bytes
+        self, tag: TagProtocol, data: EmptyData, instance_id: bytes
     ) -> tuple[TagProtocol, DataProtocol]:
         """Return the stored result for an ``EmptyData`` input, or raise.
 
@@ -3212,10 +3214,25 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         plain output would give a row without the data columns the node declares
         (CodeRabbit on PR #342); the refusal is the same error as a miss.
 
+        What looks up what (ITL-1471). The placeholder carries the tokens of the
+        result that is gone, with a sentinel where its result id stood, so its
+        instance id is not the one stored when the real result flowed through
+        this node: the lookup by instance id (``get_cached_results``) misses, and
+        the row arrives here. The result store is then asked by the input's
+        content hash, which the placeholder keeps (``lookup_cached_data``). The
+        function is not called.
+
+        This node writes no pipeline row for a placeholder input (developer,
+        November 26, 2026, ITL-1471: "no pipeline row for a placeholder input, for
+        now"). Recording the instance (a row whose source-info columns hold the
+        sentinel tokens) is the other choice, to be reconsidered in ITL-1475; it
+        needs no layout change. This method is the one place that holds the
+        choice.
+
         Args:
             tag: The input row's tag.
             data: The ``EmptyData`` input.
-            base_entry_id: The row's base entry id.
+            instance_id: The row's instance id.
 
         Returns:
             The tag and the stored result.
@@ -3240,7 +3257,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         if self._cached_function_pod is not None:
             cached = self._cached_function_pod.lookup_cached_data(data)
             if cached is not None:
-                self._cached_output_datas[base_entry_id] = (tag, cached)
+                self._cached_output_datas[instance_id] = (tag, cached)
                 self._cached_output_table = None
                 self._cached_content_hash_column = None
                 return tag, cached
@@ -3262,12 +3279,12 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         *,
         logger: DataExecutionLoggerProtocol | None = None,
         run_id: str | None = None,
-        base_entry_id: bytes | None = None,
+        instance_id: bytes | None = None,
     ) -> tuple[TagProtocol, DataProtocol | None]:
         """Core compute + persist + cache.
 
         Used by ``execute_data`` and ``execute``.
-        Stores result in ``_cached_output_datas`` keyed by base_entry_id.
+        Stores result in ``_cached_output_datas`` keyed by instance_id.
         Exceptions propagate to the caller — no error handling here.
 
         Args:
@@ -3276,7 +3293,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             logger: Optional data execution logger.
             run_id: Optional pipeline run identifier threaded through to
                 ``InvocationContext.pipeline_run_id``.
-            base_entry_id: The row's ``compute_base_entry_id``, when the caller
+            instance_id: The row's ``compute_instance_id``, when the caller
                 already has it; computed here otherwise.
 
         When ``node_config.is_result_ephemeral=True``:
@@ -3287,7 +3304,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         - Uses ``_cached_function_pod`` (persistent DB) or raw function pod.
 
         When a pipeline database is attached, a result produced here is recorded
-        at the next recomputation index, using ``skip_duplicates=True``.
+        under its record id; a row with that record id already stored is skipped.
 
         Returns:
             A ``(tag, output_data)`` 2-tuple.
@@ -3295,17 +3312,12 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         # A node that delivers side effects must not run on completions it cannot match.
         self._account_for_stale_tables()
         require_same_data_context(data.data_context_key, self._stored_data_context_key)
-        # Guard: EmptyData inputs skip all computation and go straight to cache lookup.
-        # EmptyData.content_hash() returns the cached_content_hash, so
-        # result_cache.lookup(data) works transparently — it finds the downstream
-        # cached result keyed by the same input hash as the original upstream execution.
-        # add_pipeline_record is intentionally skipped for EmptyData inputs because
-        # EmptyData.as_table() raises EmptyDataAccessError (no payload to read source
-        # columns from). Pipeline DB write for this path is deferred.
-        if base_entry_id is None:
-            base_entry_id = self.compute_base_entry_id(tag, data)
+        # A placeholder input computes nothing and records nothing: see
+        # ``_empty_data_cache_hit``.
+        if instance_id is None:
+            instance_id = self.compute_instance_id(tag, data)
         if isinstance(data, EmptyData):
-            return self._empty_data_cache_hit(tag, data, base_entry_id)
+            return self._empty_data_cache_hit(tag, data, instance_id)
 
         self._preflight_pipeline_write_schema()
         ephemeral_result = bool(self._node_config.is_result_ephemeral)
@@ -3333,7 +3345,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                     self._add_pipeline_record(
                         tag,
                         data,
-                        base_entry_id,
+                        instance_id,
                         data_record_id=output_data.datagram_uuid,
                         computed=result_computed,
                         is_ephemeral=True,
@@ -3356,7 +3368,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 self._add_pipeline_record(
                     tag,
                     data,
-                    base_entry_id,
+                    instance_id,
                     data_record_id=output_data.datagram_uuid,
                     computed=result_computed,
                     output_data_hash=output_data.content_hash(),
@@ -3372,17 +3384,17 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             # through onto it, as the pod does (ITL-1023).
             output_data = with_fall_through(self._function_pod, data, output_data)
 
-        # Store by base_entry_id (stable across recomputation cycles) and invalidate caches
-        self._cached_output_datas[base_entry_id] = (tag_out, output_data)
+        # Store by instance id (the same for every result of one instance) and invalidate caches
+        self._cached_output_datas[instance_id] = (tag_out, output_data)
         self._cached_output_table = None
         self._cached_content_hash_column = None
 
         return tag_out, output_data
 
     def get_cached_results(
-        self, base_entry_ids: list[bytes]
+        self, instance_ids: list[bytes]
     ) -> dict[bytes, tuple[TagProtocol, DataProtocol]]:
-        """Public cache façade: return already-computed results for the given base entry IDs.
+        """Public cache façade: return already-computed results for the given instance ids.
 
         Serves hits directly from the in-memory cache (``_cached_output_datas``).
         For IDs not yet cached, delegates to ``_load_cached_entries`` which calls
@@ -3394,18 +3406,18 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         for that.
 
         Args:
-            base_entry_ids: Stable base entry IDs (from ``compute_base_entry_id``)
+            instance_ids: Stable instance ids (from ``compute_instance_id``)
                 to look up.
 
         Returns:
-            Mapping from base_entry_id to ``(tag, output_data)`` for found entries.
-            Empty dict if no DB is attached, ``base_entry_ids`` is empty, or no
+            Mapping from instance_id to ``(tag, output_data)`` for found entries.
+            Empty dict if no DB is attached, ``instance_ids`` is empty, or no
             matches are found.
         """
-        return self._cached_results(base_entry_ids)
+        return self._cached_results(instance_ids)
 
     def _cached_results(
-        self, base_entry_ids: list[bytes], *, keep_tables: bool = False
+        self, instance_ids: list[bytes], *, keep_tables: bool = False
     ) -> dict[bytes, tuple[TagProtocol, DataProtocol]]:
         """``get_cached_results``; with ``keep_tables``, also keep the stored tables.
 
@@ -3413,12 +3425,10 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         output takes their rows from it (``_output_from_stored_tables``, ITL-1361); no
         other caller keeps them (the async path is as before).
         """
-        if self._cached_function_pod is None or not base_entry_ids:
+        if self._cached_function_pod is None or not instance_ids:
             return {}
 
-        missing = [
-            eid for eid in base_entry_ids if eid not in self._cached_output_datas
-        ]
+        missing = [eid for eid in instance_ids if eid not in self._cached_output_datas]
         if missing:
             loaded = self._load_cached_entries(missing, keep_tables=keep_tables)
             self._cached_output_datas.update(loaded)
@@ -3428,7 +3438,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
 
         return {
             eid: self._cached_output_datas[eid]
-            for eid in base_entry_ids
+            for eid in instance_ids
             if eid in self._cached_output_datas
             and self._cached_output_datas[eid][1] is not None
         }
@@ -3439,13 +3449,13 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         data: DataProtocol,
         *,
         logger: DataExecutionLoggerProtocol | None = None,
-        base_entry_id: bytes | None = None,
+        instance_id: bytes | None = None,
     ) -> tuple[TagProtocol, DataProtocol | None]:
         """Async counterpart of ``_process_data_internal``.
 
         Mirrors the sync ephemeral/persistent branch logic using async variants
         of ``process_data``. See ``_process_data_internal`` for full behaviour
-        documentation, including ``base_entry_id``.
+        documentation, including ``instance_id``.
 
         Returns:
             A ``(tag, output_data)`` 2-tuple.
@@ -3454,10 +3464,10 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         self._account_for_stale_tables()
         require_same_data_context(data.data_context_key, self._stored_data_context_key)
         # Guard: same logic as sync _process_data_internal — see inline comment there.
-        if base_entry_id is None:
-            base_entry_id = self.compute_base_entry_id(tag, data)
+        if instance_id is None:
+            instance_id = self.compute_instance_id(tag, data)
         if isinstance(data, EmptyData):
-            return self._empty_data_cache_hit(tag, data, base_entry_id)
+            return self._empty_data_cache_hit(tag, data, instance_id)
 
         self._preflight_pipeline_write_schema()
         ephemeral_result = bool(self._node_config.is_result_ephemeral)
@@ -3482,7 +3492,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                     self._add_pipeline_record(
                         tag,
                         data,
-                        base_entry_id,
+                        instance_id,
                         data_record_id=output_data.datagram_uuid,
                         computed=result_computed,
                         is_ephemeral=True,
@@ -3501,7 +3511,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 self._add_pipeline_record(
                     tag,
                     data,
-                    base_entry_id,
+                    instance_id,
                     data_record_id=output_data.datagram_uuid,
                     computed=result_computed,
                     output_data_hash=output_data.content_hash(),
@@ -3516,48 +3526,25 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             # through onto it, as the pod does (ITL-1023).
             output_data = with_fall_through(self._function_pod, data, output_data)
 
-        # Store by base_entry_id (stable across recomputation cycles) and invalidate caches
-        self._cached_output_datas[base_entry_id] = (tag_out, output_data)
+        # Store by instance id (the same for every result of one instance) and invalidate caches
+        self._cached_output_datas[instance_id] = (tag_out, output_data)
         self._cached_output_table = None
         self._cached_content_hash_column = None
 
         return tag_out, output_data
 
-    def _build_entry_id_preimage(
-        self,
-        tag: TagProtocol,
-        input_data: DataProtocol,
-    ) -> "pa.Table":
-        """Builds the shared Arrow preimage used by both entry-ID methods.
-
-        Delegates to the module-level ``_build_record_id_preimage()`` helper.
-        The preimage contains system-tag columns and ``INPUT_DATA_HASH_COL``
-        (``large_binary``).  ``NODE_CONTENT_HASH_COL`` is excluded — it is
-        redundant and fully determined by the table path and system tags.
-
-        Args:
-            tag: The tag datagram for the input row.
-            input_data: The data datagram for the input row.
-
-        Returns:
-            A single-row ``pa.Table`` with system-tag columns and
-            ``INPUT_DATA_HASH_COL``.
-        """
-        return _build_record_id_preimage(tag, input_data)
-
-    def compute_base_entry_id(
+    def compute_instance_id(
         self,
         tag: TagProtocol,
         input_data: DataProtocol,
     ) -> bytes:
-        """Computes the stable (recomputation-index-free) entry ID for a (tag, data) pair.
+        """Compute the instance id of a (tag, data) pair, the id a row is looked up by.
 
-        Hashes the tag's system-tag columns plus ``INPUT_DATA_HASH_COL`` (binary).
-        Because it excludes the recomputation index it is stable across all
-        recomputation attempts for the same logical input.
-
-        The base entry ID is stored in ``_PIPELINE_BASE_ENTRY_ID_COL`` and will be
-        used as the in-memory cache key and Phase 1 filter in subsequent tasks.
+        The instance id is the hash of the row's entry id (its tags, system tags
+        and input data hash) and the source-info tokens of its data
+        (``row_ids.instance_id``). It is stored in ``INSTANCE_ID_COL`` and is the
+        key of the in-memory cache. Every result recorded for one instance (a
+        recompute after its result was lost) has this id.
 
         Args:
             tag: The tag datagram for the input row.
@@ -3566,23 +3553,24 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         Returns:
             A bytes value in ``b"{method}:{digest}"`` format.
         """
-        return self.data_context.arrow_hasher.hash_table(
-            self._build_entry_id_preimage(tag, input_data)
+        return row_ids.instance_id(
+            self.data_context.arrow_hasher, tag, input_data
         ).to_prefixed_digest()
 
     def _input_entries(
         self, input_stream: StreamProtocol, *, row_views: bool = False
     ) -> list[tuple[TagProtocol, DataProtocol, bytes]]:
-        """Return ``input_stream``'s rows, each with its base entry id.
+        """Return ``input_stream``'s rows, each with its instance id.
 
-        The id is ``compute_base_entry_id`` of the row. Where the stream's slices are
+        The id is ``compute_instance_id`` of the row. Where the stream's slices are
         provably the rows' own tables (``_reads_as_a_table_stream`` and
         ``_slices_are_rows``: exactly a stream over its table, in this node's data
         context, with system tags a row would not retype and no column a datagram
         would retype), each row's id is taken from one-row slices of the stream's
-        table by the same definitions (``_base_entry_id_of_slices``), without
-        building each row's tables (ITL-1361); any other input computes each id from
-        its row, as before. The rows are then views made only when one is read
+        tags, data and source info by the same definitions
+        (``_instance_id_of_slices``), without building each row's datagrams
+        (ITL-1361). Other inputs compute each id from its row as on main.
+        The rows are then views made only when one is read
         (``_TagView``, ``_DataView``) when ``row_views`` (the node's observers read no
         input row, ``_reads_no_rows``), and otherwise the rows themselves.
 
@@ -3591,7 +3579,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             row_views: Whether the rows may be handed on as views.
 
         Returns:
-            ``(tag, data, base entry id)`` for each row, in the stream's order.
+            ``(tag, data, instance id)`` for each row, in the stream's order.
         """
         from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 
@@ -3601,15 +3589,27 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             and input_stream.data_context_key == self.data_context_key
             else None
         )
-        if table is None or not _slices_are_rows(table):
+        tag_keys, data_keys = input_stream.keys() if table is not None else ((), ())
+        source_side = None
+        if table is not None and _slices_are_rows(table):
+            with_source = input_stream.as_table(
+                columns={"system_tags": True, "source": True}
+            )
+            source_names = [f"{constants.SOURCE_PREFIX}{name}" for name in data_keys]
+            if all(
+                (index := with_source.schema.get_field_index(name)) >= 0
+                and _source_info_type_matches_rows(with_source.schema.field(index).type)
+                for name in source_names
+            ):
+                source_side = with_source.select(source_names)
+        if table is None or source_side is None:
             # Not provably the rows' own tables (another stream kind, a replaced
             # reader, another data context, system tags or columns a row would type
             # otherwise): each row's id from the row, as on main.
             return [
-                (tag, data, self.compute_base_entry_id(tag, data))
+                (tag, data, self.compute_instance_id(tag, data))
                 for tag, data in input_stream.iter_data()
             ]
-        tag_keys, data_keys = input_stream.keys()
         system_tags = [
             name
             for name in table.column_names
@@ -3627,10 +3627,12 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         # not grow with the number of chunks, as ``Table.slice(i, 1)``'s does.
         data_hashes: list[ContentHash] = []
         ids: list[bytes] = []
-        for tag_row, data_row in _one_row_tables(tag_side, data_side):
+        for tag_row, data_row, source_row in _one_row_tables(
+            tag_side, data_side, source_side
+        ):
             data_hash = data_table_content_hash(data_row, rows_context)
             data_hashes.append(data_hash)
-            ids.append(self._base_entry_id_of_slices(tag_row, data_hash))
+            ids.append(self._instance_id_of_slices(tag_row, data_hash, source_row))
         # The rows themselves are made only when one is read (``_RowView``); each
         # row's data keeps the digest computed above.
         lazy = _LazyRows(
@@ -3639,76 +3641,43 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         if not row_views:
             # An observer that may read the rows receives the rows themselves.
             return [
-                (tag, data, entry_id)
-                for (tag, data), entry_id in zip(lazy.get(), ids, strict=True)
+                (tag, data, instance_id)
+                for (tag, data), instance_id in zip(lazy.get(), ids, strict=True)
             ]
         return [
             (
                 cast(TagProtocol, cast(object, _TagView(lazy, index))),
                 cast(DataProtocol, cast(object, _DataView(lazy, index))),
-                entry_id,
+                instance_id,
             )
-            for index, entry_id in enumerate(ids)
+            for index, instance_id in enumerate(ids)
         ]
 
-    def _base_entry_id_of_slices(
-        self, tag_row: pa.Table, data_hash: ContentHash
+    def _instance_id_of_slices(
+        self, tag_row: pa.Table, data_hash: ContentHash, source_row: pa.Table
     ) -> bytes:
-        """One row's base entry id from its one-row tag slice and its data hash.
+        """Build an instance id from the row's Arrow slices and data hash.
 
-        ``compute_base_entry_id`` of the row, from its table (``_input_entries``), by
-        the same definitions: the preimage is the tag side with its system tags and
-        the input data hash (``_with_input_data_hash``), and the input data hash is
-        the content hash a datagram of the row's data columns has
-        (``data_table_content_hash``, computed by the caller once per row).
+        Uses the same preimages as ``compute_instance_id`` and the same token
+        table as ``Data.source_info_table``.
 
         Args:
             tag_row: The row's user tags and system tags, flags as a row has them.
             data_hash: The row's input data hash.
+            source_row: The row's prepared source-info columns.
 
         Returns:
-            The base entry id.
+            The labelled instance digest.
         """
-        return self.data_context.arrow_hasher.hash_table(
-            _with_input_data_hash(tag_row, data_hash)
-        ).to_prefixed_digest()
-
-    def compute_pipeline_entry_id(
-        self,
-        tag: TagProtocol,
-        input_data: DataProtocol,
-        recomputation_index: int = 0,
-    ) -> bytes:
-        """Compute a versioned pipeline entry ID from tag + system tags + input data hash + index.
-
-        Extends the base preimage (see ``_build_entry_id_preimage``) with a
-        ``_PIPELINE_RECOMPUTATION_INDEX_COL`` column (value: ``recomputation_index``,
-        type ``pa.int32()``) so that each recomputation attempt receives a distinct
-        DB primary key.
-
-        At ``recomputation_index=0`` this produces a hash that differs from the
-        pre-ITL-508 implementation (the index column is now part of the preimage).
-        Existing pipeline DB records are implicitly invalidated — acceptable
-        because the project is pre-v0.1.0.
-
-        The preimage is ``system_tags + INPUT_DATA_HASH_COL + recomputation_index``.
-
-        Args:
-            tag: The tag datagram for the input row.
-            input_data: The data datagram for the input row.
-            recomputation_index: Position in the recomputation chain. ``0`` for
-                the first computation, ``N+1`` for each miss-triggered recompute.
-
-        Returns:
-            Method-prefixed raw bytes (``b"{method}:{digest}"``) uniquely
-            identifying this (tag, input_data, node run, recomputation attempt).
-            Suitable for storage in a ``pa.large_binary()`` column.
-        """
-        preimage = self._build_entry_id_preimage(tag, input_data).append_column(
-            _PIPELINE_RECOMPUTATION_INDEX_COL,
-            pa.array([recomputation_index], type=pa.int32()),
+        hasher = self.data_context.arrow_hasher
+        entry = hasher.hash_table(
+            row_ids.entry_id_preimage_from_parts(tag_row, data_hash)
         )
-        return self.data_context.arrow_hasher.hash_table(preimage).to_prefixed_digest()
+        return hasher.hash_table(
+            row_ids.instance_id_preimage_from_tokens(
+                entry, source_info_row_as_datagram_gives(source_row)
+            )
+        ).to_prefixed_digest()
 
     def add_pipeline_record(
         self,
@@ -3723,21 +3692,23 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
     ) -> None:
         """Add a pipeline record for a row that produced output.
 
-        Computes the next recomputation index by querying existing rows in the
-        pipeline DB that share the same ``base_entry_id``, then writes at
-        ``max_index + 1``. The database skips duplicate versioned entry IDs.
-        Sync execution ordinarily reuses the first recorded result for an
-        identical input in the same run. Async execution can schedule both
-        copies of an identical input without system tags before either entry is
-        available, and can write separate entries with successive indices.
+        The row is named by its record id, the hash of this node's content hash,
+        the row's instance id and the id of its result (``row_ids.record_id``),
+        and kept under it; nothing is read before the write. The database skips a row whose key is already stored, so the same
+        instance recorded again by this node with the same result is one row,
+        with its first recording time. Another node that shares the table (the
+        same pipeline hash) has another record id for the same instance and
+        result, so it keeps its own row. A recompute has a new result id, so it is a new row. An
+        input whose tokens changed is a new instance: its row is new, and its
+        result normally comes from the result store, so nothing is computed
+        (ITL-1471).
 
         The pipeline record stores:
 
         - Tag columns (including system tags)
         - All source columns of the input data (provenance, not data values)
         - Output data record ID (for joining with result records)
-        - Base entry ID (``_PIPELINE_BASE_ENTRY_ID_COL``)
-        - Recomputation index (``_PIPELINE_RECOMPUTATION_INDEX_COL``)
+        - Instance id (``INSTANCE_ID_COL``)
         - Whether the result is stored in the ephemeral database
         - Input data context key
         - Whether the result was freshly computed or cached
@@ -3761,7 +3732,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         self._add_pipeline_record(
             tag,
             input_data,
-            self.compute_base_entry_id(tag, input_data),
+            self.compute_instance_id(tag, input_data),
             data_record_id=data_record_id,
             computed=computed,
             is_ephemeral=is_ephemeral,
@@ -3773,7 +3744,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         self,
         tag: TagProtocol,
         input_data: DataProtocol,
-        base_entry_id: bytes,
+        instance_id: bytes,
         data_record_id: uuid.UUID,
         computed: bool,
         is_ephemeral: bool = False,
@@ -3781,19 +3752,19 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         *,
         run_id: str | None = None,
     ) -> None:
-        """``add_pipeline_record`` with the row's base entry id already computed.
+        """``add_pipeline_record`` with the row's instance id already computed.
 
         Args:
             tag: The tag associated with the input data.
             input_data: The input data that was processed.
-            base_entry_id: ``compute_base_entry_id(tag, input_data)``.
+            instance_id: ``compute_instance_id(tag, input_data)``.
             data_record_id: UUID of the result record in the result database.
             computed: Whether the result was freshly computed.
             is_ephemeral: Whether the result is stored in the ephemeral database.
             output_data_hash: Content hash of the output, if any.
             run_id: ID of the run recording the entry, if any.
         """
-        pipeline_database = self._require_pipeline_database()
+        self._require_pipeline_database()
         # The row key combines the input's hash with this node's hasher: an input
         # of another data context would be stored under a mixed key.
         require_same_data_context(
@@ -3802,32 +3773,22 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         self._account_for_stale_tables()
         self._preflight_pipeline_write_schema()
 
-        # Determine the next recomputation index by querying all existing rows
-        # for this base_entry_id. No await is used here, so within a single-threaded
-        # asyncio event loop this read-then-write sequence is uninterrupted.
-        existing = pipeline_database.get_records_with_column_value(
-            self._versioned_pipeline_path,
-            {
-                _PIPELINE_BASE_ENTRY_ID_COL: base_entry_id,
-                constants.DATA_CONTEXT_COL: self._stored_data_context_key,
-            },
+        # The table is shared by the nodes of one pipeline hash: the record id
+        # covers this node's content hash, so another node's record of the same
+        # instance and result is another row. The record id is the row's key.
+        record = row_ids.record_id(
+            self.data_context.arrow_hasher,
+            self.content_hash(),
+            ContentHash.from_prefixed_digest(instance_id),
+            data_record_id,
         )
-        if existing is None or existing.num_rows == 0:
-            new_index = 0
-        else:
-            indices = existing.column(_PIPELINE_RECOMPUTATION_INDEX_COL).to_pylist()
-            new_index = max(indices) + 1
+        row_key = record.to_prefixed_digest()
 
-        versioned_entry_id = self.compute_pipeline_entry_id(tag, input_data, new_index)
-
-        # Extract source columns only (no data columns) from the input data
-        input_table_with_source = input_data.as_table(columns={"source": True})
-        source_col_names = [
-            c
-            for c in input_table_with_source.column_names
-            if c.startswith(constants.SOURCE_PREFIX)
-        ]
-        input_source_table = input_table_with_source.select(source_col_names)
+        # The input's source-info columns, exactly as the instance id read them
+        # (``row_ids.instance_id_preimage`` takes the same table): a stored row
+        # gives its instance id again from its own columns, whatever their types
+        # (ITL-1471). Never typed again from the token values.
+        input_source_table = input_data.source_info_table()
 
         # Build the meta columns table.
         meta_table = pa.Table.from_pydict(
@@ -3847,8 +3808,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 constants.DATA_CONTEXT_COL: [self._stored_data_context_key],
                 f"{constants.META_PREFIX}computed": [computed],
                 constants.IS_EPHEMERAL_COL: [is_ephemeral],
-                _PIPELINE_BASE_ENTRY_ID_COL: [base_entry_id],
-                _PIPELINE_RECOMPUTATION_INDEX_COL: [new_index],
+                INSTANCE_ID_COL: [instance_id],
+                RECORD_ID_COL: [row_key],
                 PIPELINE_RUN_ID_COL: [run_id],
                 PIPELINE_RECORDED_AT_COL: [datetime.now(timezone.utc)],
             },
@@ -3861,15 +3822,17 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         combined_record = mark_data_tags(
             arrow_utils.hstack_tables(
                 tag.as_table(columns={"system_tags": True}),
-                input_source_table,
+                # A row with no token has no source-info column to store.
+                *((input_source_table,) if input_source_table.num_columns else ()),
                 meta_table,
             ),
             fall_through_tags(self._function_pod),
         )
 
         try:
+            self._require_one_type_per_token_column(input_source_table)
             self._write_pipeline_record(
-                versioned_entry_id, combined_record, data_record_id.bytes, is_ephemeral
+                row_key, combined_record, data_record_id.bytes, is_ephemeral
             )
         except OrcapodDatabaseError:
             # The stored table could not be read: report the read failure itself.
@@ -3881,6 +3844,45 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 tag=tag.as_dict(),
             ) from exc
 
+    def _require_one_type_per_token_column(self, tokens: "pa.Table") -> None:
+        """Refuse a row whose token column has another type than the rows recorded.
+
+        A pipeline table has one Arrow type per column. A token's type is a
+        function of its value (``Data.source_info_table``: a null is a
+        ``large_string`` null, a list a list), so rows whose tokens of one column
+        differ in kind (a list token and a string or null token) cannot share a
+        table. The types are those of the stored table (read once, by
+        ``_preflight_pipeline_write_schema``) and of the rows this node recorded
+        since.
+
+        Args:
+            tokens: The row's source-info columns, as it is about to be recorded.
+
+        Raises:
+            InputValidationError: Naming the column and both types.
+        """
+        # The stored table's types were read by the preflight, with its one read of
+        # the table's schema.
+        self._preflight_pipeline_write_schema()
+        known = self._token_column_types
+        if known is None:
+            known = self._token_column_types = {}
+        for field in tokens.schema:
+            row_type = arrow_utils.normalize_to_large_types(field.type, keep_null=True)
+            recorded = known.setdefault(field.name, row_type)
+            if recorded != row_type:
+                raise InputValidationError(
+                    f"Function node {self.label!r}: the source-info column "
+                    f"{field.name!r} of this row has Arrow type "
+                    f"{arrow_utils.describe_arrow_type(row_type)}, and the rows "
+                    "already recorded in its pipeline table have "
+                    f"{arrow_utils.describe_arrow_type(recorded)}. A pipeline "
+                    "table keeps one type per column, and a token's type follows "
+                    "its value: a null token is a large_string null, a list of "
+                    "tokens a list. Give every row of this column tokens of one "
+                    "kind (for example an empty list in place of a null)."
+                )
+
     def _preflight_pipeline_write_schema(self) -> None:
         """Refuse an incompatible table before the first computation in this run."""
         database = self._pipeline_database
@@ -3890,6 +3892,13 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         existing = database.get_table_schema(path)
         if existing is not None:
             self._check_pipeline_write_schema(database, path, existing)
+        # The type of each token column the table holds, for
+        # ``_require_one_type_per_token_column``.
+        self._token_column_types = {
+            field.name: arrow_utils.normalize_to_large_types(field.type, keep_null=True)
+            for field in existing or ()
+            if field.name.startswith(constants.SOURCE_PREFIX)
+        }
         self._pipeline_preflight_checked = True
 
     def _check_pipeline_write_schema(
@@ -3943,8 +3952,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
 
         Calls ``_fetch_joined_records`` to obtain the raw joined table, then
         applies ``ColumnConfig``-driven column dropping to produce a
-        user-facing result. ``NODE_CONTENT_HASH_COL``, ``_PIPELINE_ENTRY_ID_COL``,
-        ``_PIPELINE_BASE_ENTRY_ID_COL``, and ``_PIPELINE_RECOMPUTATION_INDEX_COL``
+        user-facing result. ``NODE_CONTENT_HASH_COL``, ``RECORD_ID_COL``,
+        and ``INSTANCE_ID_COL``
         are always dropped — they are internal discriminator columns, not
         user-facing data. These columns are listed explicitly to ensure they are
         dropped even when ``all_info=True`` (which skips the meta-prefix sweep).
@@ -3988,9 +3997,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         # which skips the meta-prefix sweep.
         drop_columns = [
             constants.NODE_CONTENT_HASH_COL,
-            _PIPELINE_ENTRY_ID_COL,
-            _PIPELINE_BASE_ENTRY_ID_COL,
-            _PIPELINE_RECOMPUTATION_INDEX_COL,
+            RECORD_ID_COL,
+            INSTANCE_ID_COL,
         ]
         if not column_config.meta and not column_config.all_info:
             drop_columns.extend(
@@ -4008,7 +4016,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             )
         if drop_columns:
             # pa.Table.drop() requires no duplicate names in its input list.
-            # Guard against duplicates that arise when _PIPELINE_ENTRY_ID_COL (which
+            # Guard against duplicates that arise when RECORD_ID_COL (which
             # starts with META_PREFIX) ends up in both the always-drop seed and the
             # meta-prefix sweep extension.
             unique_drop = list(
@@ -4072,8 +4080,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
 
         The provenance reader (ITL-1432). Unlike ``get_all_records``, nothing is joined
         and nothing is dropped: the pipeline entries keep their key
-        (``__pipeline_entry_id``), ``__pipeline_base_entry_id``, the recomputation
-        index, ``__node_content_hash`` and ``__computed``; the results keep their key
+        (``__pipeline_record_id``), ``__pipeline_instance_id``,
+        ``__node_content_hash`` and ``__computed``; the results keep their key
         as ``__data_id``, the column the pipeline entries name it by. Only this node's
         entries are kept (``__node_content_hash``, when the table is shared by the
         nodes of one pipeline hash), and only rows of the current data context, of
@@ -4096,10 +4104,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         # table this read fetches and of no other (entries only: no result table).
         self._pipeline_database.refresh_table(self._versioned_pipeline_path)
         context_key = self._stored_data_context_key
-        entries = self._pipeline_database.get_all_records(
-            self._versioned_pipeline_path,
-            record_id_column=_PIPELINE_ENTRY_ID_COL,
-        )
+        entries = self._pipeline_database.get_all_records(self._versioned_pipeline_path)
         if entries is not None:
             entries = keep_rows_of_data_context(entries, context_key)
             if self._table_scope == "pipeline_hash":
@@ -4154,7 +4159,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
 
     def _fetch_joined_records(
         self,
-        base_entry_ids: list[bytes] | None = None,
+        instance_ids: list[bytes] | None = None,
     ) -> _JoinedRecords | None:
         """Internal primitive: fetch both DBs and inner-join, supporting two databases.
 
@@ -4167,17 +4172,17 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         WARNING-level log. Ephemeral miss rows (cross-session miss) are silently
         dropped.
 
-        If ``base_entry_ids`` is provided, the result is filtered to matching
-        ``_PIPELINE_BASE_ENTRY_ID_COL`` values before conversion to Arrow.
+        If ``instance_ids`` is provided, the result is filtered to matching
+        ``INSTANCE_ID_COL`` values before conversion to Arrow.
 
         Args:
-            base_entry_ids: If given, return only rows whose
-                ``_PIPELINE_BASE_ENTRY_ID_COL`` value is in this list.
+            instance_ids: If given, return only rows whose
+                ``INSTANCE_ID_COL`` value is in this list.
                 If ``None``, return all rows.
 
         Returns:
             A ``_JoinedRecords`` whose ``table`` always includes a
-            ``_PIPELINE_BASE_ENTRY_ID_COL`` column, or ``None`` when either
+            ``INSTANCE_ID_COL`` column, or ``None`` when either
             the pipeline database or cached function pod is absent. A 0-row
             table (not ``None``) is returned when both fetches succeed but
             no matching rows exist — callers check ``num_rows`` themselves.
@@ -4186,10 +4191,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             return None
 
         self._account_for_stale_tables()
-        taginfo = self._pipeline_database.get_all_records(
-            self._versioned_pipeline_path,
-            record_id_column=_PIPELINE_ENTRY_ID_COL,
-        )
+        taginfo = self._pipeline_database.get_all_records(self._versioned_pipeline_path)
 
         if taginfo is None:
             return None
@@ -4328,12 +4330,14 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 unmatched_df.get_column(_TAGINFO_ROW).to_arrow()
             )
             for index, row in enumerate(unmatched_table.to_pylist()):
-                base_eid = row[_PIPELINE_BASE_ENTRY_ID_COL]
-                previous = empty_taginfo_rows.get(base_eid)
+                instance = row[INSTANCE_ID_COL]
+                previous = empty_taginfo_rows.get(instance)
+                # Several rows of one instance whose results are gone: the one
+                # recorded last stands for the instance.
                 if (
                     previous is not None
-                    and previous[_PIPELINE_RECOMPUTATION_INDEX_COL]
-                    > row[_PIPELINE_RECOMPUTATION_INDEX_COL]
+                    and previous[PIPELINE_RECORDED_AT_COL]
+                    > row[PIPELINE_RECORDED_AT_COL]
                 ):
                     continue
                 # Use OUTPUT_DATA_HASH_COL so that the downstream result cache
@@ -4348,23 +4352,24 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                     logger.warning(
                         "Pipeline DB row missing %r column — EmptyData will have "
                         "no cached hash; flow-through unavailable for this row. "
-                        "base_entry_id: %r",
+                        "instance_id: %r",
                         constants.OUTPUT_DATA_HASH_COL,
-                        base_eid,
+                        instance,
                     )
                     cached_hash = None
                 else:
                     cached_hash = ContentHash.from_prefixed_digest(raw_hash)
-                empty_data_tokens[base_eid] = EmptyData(
+                empty_data_tokens[instance] = EmptyData(
                     cached_content_hash=cached_hash,
+                    source_info=self._placeholder_source_info(row, data_tags),
                     data_context=self.data_context,
                 )
-                empty_taginfo_rows[base_eid] = row
-                empty_taginfo_tables[base_eid] = unmatched_table.slice(index, 1)
+                empty_taginfo_rows[instance] = row
+                empty_taginfo_tables[instance] = unmatched_table.slice(index, 1)
 
         # ------------------------------------------------------------------
-        # Keep both databases' rows until latest-recomputation selection. Persistent
-        # rows come last so they retain priority when recomputation indices tie.
+        # Keep both databases' rows until the latest row of each instance is chosen.
+        # Persistent rows come last so they retain priority when recording times tie.
         # ------------------------------------------------------------------
         if ephemeral_df.height > 0 and persistent_df.height > 0:
             merged_df = pl.concat([ephemeral_df, persistent_df], how="diagonal")
@@ -4384,11 +4389,9 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 data_tags=data_tags,
             )
 
-        # Apply base_entry_id filter if requested
-        if base_entry_ids is not None:
-            merged_df = merged_df.filter(
-                pl.col(_PIPELINE_BASE_ENTRY_ID_COL).is_in(base_entry_ids)
-            )
+        # Apply instance_id filter if requested
+        if instance_ids is not None:
+            merged_df = merged_df.filter(pl.col(INSTANCE_ID_COL).is_in(instance_ids))
 
         # Every column comes from the stored tables, by the rows Polars matched; the
         # ephemeral rows come first, as concatenated above.
@@ -4422,6 +4425,38 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             empty_taginfo_tables=empty_taginfo_tables,
             data_tags=data_tags,
         )
+
+    def _placeholder_source_info(
+        self, row: "Mapping[str, Any]", data_tags: Sequence[str]
+    ) -> dict[str, Any]:
+        """Build the source-info tokens of the placeholder of a result that is gone.
+
+        The tokens are those the result's own row would carry (ITL-1471): for each
+        output of the function, the token of a real output with the sentinel
+        ``row_ids.EPHEMERAL_RESULT_GONE`` where the result id would stand, built
+        by ``output_source_info`` as a real output's is; for a data-tag that falls
+        through, the input's token of that column, which the stored row keeps. The
+        sentinel names no row of the result table.
+
+        Args:
+            row: The stored pipeline row of the result that is gone.
+            data_tags: The data-tags the pipeline table marks.
+
+        Returns:
+            The tokens by data column name, in the order of the node's data columns.
+        """
+        data_keys = self.keys()[1]
+        gone = output_source_info(
+            self.node_uri,
+            row_ids.EPHEMERAL_RESULT_GONE,
+            [key for key in data_keys if key not in data_tags],
+        )
+        return {
+            key: gone[key]
+            if key in gone
+            else row.get(f"{constants.SOURCE_PREFIX}{key}")
+            for key in data_keys
+        }
 
     def _stored_data_tags(self, taginfo_schema: "pa.Schema") -> tuple[str, ...]:
         """Return the data-tags the pipeline table marks, checked against the pod.
@@ -4476,7 +4511,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             if not c.startswith(constants.META_PREFIX)
             and not c.startswith(constants.SOURCE_PREFIX)
             and not c.startswith(constants.SYSTEM_TAG_PREFIX)
-            and c != _PIPELINE_ENTRY_ID_COL
+            and c != RECORD_ID_COL
             and c != constants.NODE_CONTENT_HASH_COL
         )
 
@@ -4487,46 +4522,40 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
 
         The stream is built over the stored Arrow records with the internal
         columns dropped, so every column keeps the type it was stored with. A
-        base entry with several records contributes only the one with the
-        greatest recomputation index.
+        instance with several records (it was recomputed) contributes only the one
+        recorded last (``__recorded_at``).
 
         Returns:
-            The base entry ID of each row, in stream order, the stream, and the
+            The instance id of each row, in stream order, the stream, and the
             stored ``__data_id`` of each row (the id of the result record, in
             stream order); or ``None`` when no persistent row is stored.
         """
         joined = fetched.table
         if joined.num_rows == 0:
             return None
-        all_base_entry_ids = cast(
-            list[bytes], joined.column(_PIPELINE_BASE_ENTRY_ID_COL).to_pylist()
-        )
-        # One row per base entry ID: when a base entry has several records (it
-        # was recomputed), the one with the greatest recomputation index -- the
-        # latest result -- wins, in the position where the base entry first
+        all_instance_ids = cast(list[bytes], joined.column(INSTANCE_ID_COL).to_pylist())
+        # One row per instance id: when a instance has several records (it
+        # was recomputed), the one recorded last -- the latest result -- wins, in the position where the instance first
         # appears. Ties keep the later row.
-        recomputation_indices = cast(
-            list[int], joined.column(_PIPELINE_RECOMPUTATION_INDEX_COL).to_pylist()
+        recorded_at = cast(
+            "list[datetime]", joined.column(PIPELINE_RECORDED_AT_COL).to_pylist()
         )
         chosen_row: dict[bytes, int] = {}
-        for row, base_entry_id in enumerate(all_base_entry_ids):
-            current = chosen_row.get(base_entry_id)
-            if (
-                current is None
-                or recomputation_indices[row] >= recomputation_indices[current]
-            ):
-                chosen_row[base_entry_id] = row
+        for row, instance_id in enumerate(all_instance_ids):
+            current = chosen_row.get(instance_id)
+            if current is None or recorded_at[row] >= recorded_at[current]:
+                chosen_row[instance_id] = row
         chosen_row = {
-            base_eid: row
-            for base_eid, row in chosen_row.items()
-            if base_eid not in fetched.empty_taginfo_rows
-            or recomputation_indices[row]
-            >= fetched.empty_taginfo_rows[base_eid][_PIPELINE_RECOMPUTATION_INDEX_COL]
+            instance: row
+            for instance, row in chosen_row.items()
+            if instance not in fetched.empty_taginfo_rows
+            or recorded_at[row]
+            >= fetched.empty_taginfo_rows[instance][PIPELINE_RECORDED_AT_COL]
         }
         if not chosen_row:
             return None
-        base_entry_ids = list(chosen_row)
-        if len(base_entry_ids) < joined.num_rows:
+        instance_ids = list(chosen_row)
+        if len(instance_ids) < joined.num_rows:
             joined = joined.take(pa.array(list(chosen_row.values()), type=pa.int64()))
         drop_cols = [
             c
@@ -4546,20 +4575,20 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             tag_columns=self._stored_tag_keys(fetched),
             data_tags=fetched.data_tags,
         )
-        return base_entry_ids, stream, data_ids
+        return instance_ids, stream, data_ids
 
     def _load_cached_entries(
         self,
-        base_entry_ids: list[bytes] | None = None,
+        instance_ids: list[bytes] | None = None,
         *,
         keep_tables: bool = False,
     ) -> "dict[bytes, tuple[TagProtocol, DataProtocol]]":
         """DB loader: fetch ``(tag, data)`` pairs from the pipeline and result databases.
 
         Calls ``_fetch_joined_records`` to obtain the raw joined table, then
-        converts each row into a ``(tag, data)`` tuple keyed by base entry ID.
+        converts each row into a ``(tag, data)`` tuple keyed by instance id.
 
-        If ``base_entry_ids`` is given, only those entries are fetched from DB.
+        If ``instance_ids`` is given, only those entries are fetched from DB.
         If ``None``, all records for this node are loaded.
 
         Does NOT read from or write to the in-memory cache
@@ -4570,17 +4599,17 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         for that.
 
         Args:
-            base_entry_ids: If provided, load only these specific base entry IDs.
+            instance_ids: If provided, load only these specific instance ids.
                 If ``None``, load all records for this node.
             keep_tables: Keep the stored rows' table and each result's place in it
                 (``_stored_hit_tables``), for the sync run's output (ITL-1361).
 
         Returns:
-            dict mapping base_entry_id → ``(tag, data)``. Empty dict when either
+            dict mapping instance_id → ``(tag, data)``. Empty dict when either
             database is absent, either DB fetch returns ``None``, or no rows
             match after joining.
         """
-        fetched = self._fetch_joined_records(base_entry_ids=base_entry_ids)
+        fetched = self._fetch_joined_records(instance_ids=instance_ids)
         if fetched is None:
             return {}
         if fetched.table.num_rows == 0 and not fetched.empty_data_tokens:
@@ -4592,7 +4621,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         # --- Process normal (fully matched) rows ---
         stored = self._stored_rows_stream(fetched)
         if stored is not None:
-            base_entry_ids_col, stream, data_ids = stored
+            instance_ids_col, stream, data_ids = stored
             # The stored rows' table, so a sync run's output of these results is taken
             # from it instead of being built again from their datagrams (ITL-1361).
             table_index = len(self._stored_hit_tables)
@@ -4602,13 +4631,13 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                         stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS), stream.keys()
                     )
                 )
-            for row, (base_eid, data_id, (tag, data)) in enumerate(
-                zip(base_entry_ids_col, data_ids, stream.iter_data(), strict=True)
+            for row, (instance, data_id, (tag, data)) in enumerate(
+                zip(instance_ids_col, data_ids, stream.iter_data(), strict=True)
             ):
                 # A stored result is the datagram its own provenance names: it
                 # carries the stored ``__data_id`` as its datagram id (ITL-1060).
                 stored_data = _with_datagram_id(data, data_id)
-                loaded[base_eid] = (tag, stored_data)
+                loaded[instance] = (tag, stored_data)
                 if keep_tables:
                     self._stored_hit_positions[id(stored_data)] = (
                         stored_data,
@@ -4617,8 +4646,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                     )
 
         # --- Process EmptyData tokens (ephemeral misses) ---
-        for base_eid, empty_data in fetched.empty_data_tokens.items():
-            if base_eid in loaded:
+        for instance, empty_data in fetched.empty_data_tokens.items():
+            if instance in loaded:
                 # A matched result at least as recent as the missing one wins.
                 continue
             # The stored row with its stored Arrow types, never Python values: a
@@ -4626,7 +4655,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             # and a struct tag could not be read at all (ITL-1298). The columns
             # keep the stored row's order, tags and system tags. The storage-only
             # data-tag mark is dropped, as for a stored row read into a stream.
-            row_table = without_tag_kind_marks(fetched.empty_taginfo_tables[base_eid])
+            row_table = without_tag_kind_marks(fetched.empty_taginfo_tables[instance])
             tag = Tag(
                 row_table.select(
                     [
@@ -4638,7 +4667,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 ),
                 data_context=self.data_context,
             )
-            loaded[base_eid] = (tag, empty_data)
+            loaded[instance] = (tag, empty_data)
 
         return loaded
 
@@ -5098,15 +5127,15 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 else:
                     execution_pod = self._cached_function_pod
 
-                # Load pipeline DB → in-memory cache keyed by base_entry_id.
+                # Load pipeline DB → in-memory cache keyed by instance_id.
                 loaded = self._load_cached_entries()
                 self._cached_output_datas.update(loaded)
                 if loaded:
                     self._cached_output_table = None
                     self._cached_content_hash_column = None
-                cached_by_base_entry_id: dict[
-                    bytes, tuple[TagProtocol, DataProtocol]
-                ] = dict(loaded)
+                cached_by_instance_id: dict[bytes, tuple[TagProtocol, DataProtocol]] = (
+                    dict(loaded)
+                )
 
                 # Intermediate channels (bounded for backpressure).
                 compute_channel: Channel[tuple[TagProtocol, DataProtocol]] = Channel(
@@ -5118,7 +5147,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
 
                 # Local dict: correlation_key → (original_tag, original_input_data)
                 input_store: dict[bytes, tuple[TagProtocol, DataProtocol, bytes]] = {}
-                # Base entry ids of this run's inputs that gave a row (a cache hit or a
+                # Instance ids of this run's inputs that gave a row (a cache hit or a
                 # forwarded computed row), one per input (ITL-1093).
                 run_entry_ids: list[bytes] = []
                 # Rows whose function raised (error policy "continue").
@@ -5128,18 +5157,18 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                     """Stage 1: send cache hits to output; stamp misses for computation."""
                     try:
                         async for tag, data in input_channel:
-                            base_entry_id = self.compute_base_entry_id(tag, data)
+                            instance_id = self.compute_instance_id(tag, data)
                             # A cached EmptyData is a result that is gone (an
                             # ephemeral result from an earlier run): compute the row
                             # again, as the sync path does (ITL-923).
-                            if base_entry_id in cached_by_base_entry_id and not (
+                            if instance_id in cached_by_instance_id and not (
                                 isinstance(
-                                    cached_by_base_entry_id[base_entry_id][1],
+                                    cached_by_instance_id[instance_id][1],
                                     EmptyData,
                                 )
                             ):
-                                cached_tag, cached_data = cached_by_base_entry_id[
-                                    base_entry_id
+                                cached_tag, cached_data = cached_by_instance_id[
+                                    instance_id
                                 ]
                                 ctx_obs.on_data_start(node_label, tag, data)
                                 ctx_obs.on_data_end(
@@ -5149,14 +5178,60 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                                 # Recorded once the output took the row, so the held
                                 # order is the order downstream received (a parked
                                 # send can resume after a later one).
-                                run_entry_ids.append(base_entry_id)
+                                run_entry_ids.append(instance_id)
+                            elif isinstance(data, EmptyData):
+                                # A placeholder whose instance is not stored: the
+                                # result store answers by its input hash, nothing
+                                # is computed and no pipeline row is written
+                                # (``_empty_data_cache_hit``). A placeholder with
+                                # no stored result is a failed row under the row
+                                # failure policy, with the events of the sync path:
+                                # the row starts before the lookup.
+                                ctx_obs.on_data_start(node_label, tag, data)
+                                try:
+                                    found_tag, found = self._empty_data_cache_hit(
+                                        tag, data, instance_id
+                                    )
+                                except OrcapodDatabaseError as exc:
+                                    # Never a row failure, whatever the policy:
+                                    # the run stops, after the row's crash is
+                                    # reported, as on the sync path.
+                                    exc.add_context(
+                                        node_label=node_label, tag=tag.as_dict()
+                                    )
+                                    with keep_database_error(
+                                        exc, "Observer on_data_crash"
+                                    ):
+                                        ctx_obs.on_data_crash(
+                                            node_label, tag, data, exc
+                                        )
+                                    raise
+                                except TypeIdentityError as exc:
+                                    with keep_database_error(
+                                        exc, "Observer on_data_crash"
+                                    ):
+                                        ctx_obs.on_data_crash(
+                                            node_label, tag, data, exc
+                                        )
+                                    raise
+                                except Exception as exc:
+                                    ctx_obs.on_data_crash(node_label, tag, data, exc)
+                                    if error_policy == "fail_fast":
+                                        raise
+                                    failed_rows[0] += 1
+                                    continue
+                                ctx_obs.on_data_end(
+                                    node_label, tag, data, found, cached=False
+                                )
+                                await output.send((found_tag, found))
+                                run_entry_ids.append(instance_id)
                             else:
                                 self._preflight_pipeline_write_schema()
                                 correlation_key = uuid.uuid4().bytes
                                 input_store[correlation_key] = (
                                     tag,
                                     data,
-                                    base_entry_id,
+                                    instance_id,
                                 )
                                 stamped_tag = tag.with_meta_columns(
                                     **{_TAG_NODE_INPUT_REF: correlation_key}
@@ -5176,7 +5251,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                     """Stage 3: record pipeline entry, strip key, emit to output."""
                     async for output_tag, output_data in result_channel.reader:
                         correlation_key = output_tag.get_meta_value(_TAG_NODE_INPUT_REF)
-                        original_tag, input_data, base_entry_id = input_store.pop(
+                        original_tag, input_data, instance_id = input_store.pop(
                             cast(bytes, correlation_key)
                         )
                         result_computed = bool(
@@ -5188,7 +5263,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                             self._add_pipeline_record(
                                 original_tag,
                                 input_data,
-                                base_entry_id,
+                                instance_id,
                                 data_record_id=output_data.datagram_uuid,
                                 computed=result_computed,
                                 is_ephemeral=is_ephemeral,
@@ -5215,7 +5290,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                         clean_tag = output_tag.drop_meta_columns(
                             _TAG_NODE_INPUT_REF, ignore_missing=True
                         )
-                        self._cached_output_datas[base_entry_id] = (
+                        self._cached_output_datas[instance_id] = (
                             clean_tag,
                             output_data,
                         )
@@ -5226,7 +5301,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                         self._row_processed()
                         await output.send((clean_tag, output_data))
                         # Recorded once the output took the row (see route_inputs).
-                        run_entry_ids.append(base_entry_id)
+                        run_entry_ids.append(instance_id)
 
                 # Capture outer self so _NodeLabelObserver methods can
                 # update FunctionJobNode state without shadowing with 'self'.
@@ -5275,7 +5350,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                             # result — restoring the old _async_process_data_internal
                             # behaviour of always writing (tag, None) to
                             # _cached_output_datas.
-                            # Note: route_inputs() checks cached_by_base_entry_id
+                            # Note: route_inputs() checks cached_by_instance_id
                             # (pipeline DB) and filtered items are never written
                             # to the pipeline DB, so subsequent async_execute()
                             # calls still re-send filtered inputs to the pod.
@@ -5285,8 +5360,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                             if correlation_key is not None:
                                 original = input_store.pop(correlation_key, None)
                                 if original is not None:
-                                    _, _, base_entry_id = original
-                                    fn_node._cached_output_datas[base_entry_id] = (
+                                    _, _, instance_id = original
+                                    fn_node._cached_output_datas[instance_id] = (
                                         clean,
                                         None,
                                     )

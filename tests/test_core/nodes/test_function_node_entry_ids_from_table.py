@@ -1,9 +1,9 @@
 """A function node's entry ids taken from its input table equal the rows' (ITL-1361, L3).
 
-``FunctionJobNode._input_entries`` computes each input row's base entry id from slices of
+``FunctionJobNode._input_entries`` computes each input row's instance id from slices of
 the input stream's Arrow table (the tag side with its system tags, and the hash of the
 data columns) instead of from tables built from each row's datagrams
-(``compute_base_entry_id``). The ids decide which stored results a run finds, so they must
+(``compute_instance_id``). The ids decide which stored results a run finds, so they must
 be equal for every input a job can hand a node: every operator, column role and
 arrangement of the async-sync matrix, behind an operator and behind a function pod, in
 the form a job hands it on (``_materialize_upstream``).
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pyarrow as pa
 import pytest
 
 from orcapod.core.data_tags import stream_data_tags
@@ -54,7 +55,7 @@ def _all_cases() -> list[Any]:
 @pytest.mark.parametrize("handed_on", [True, False], ids=["handed_on", "raw"])
 @pytest.mark.parametrize("case", _all_cases())
 def test_entry_ids_from_the_table_equal_the_rows(case: Case, handed_on: bool) -> None:
-    """Every row's id from table slices equals ``compute_base_entry_id`` of its row.
+    """Every row's id from table slices equals ``compute_instance_id`` of its row.
 
     For the stream a job hands a node (``handed_on``), and for a raw stream over the
     operator result's own table, whose system-tag fields may be declared nullable (a
@@ -75,9 +76,7 @@ def test_entry_ids_from_the_table_equal_the_rows(case: Case, handed_on: bool) ->
     )
     node = _node()
     entries = node._input_entries(stream)  # pyright: ignore[reportPrivateUsage]  # under test
-    expected = [
-        node.compute_base_entry_id(tag, data) for tag, data in stream.iter_data()
-    ]
+    expected = [node.compute_instance_id(tag, data) for tag, data in stream.iter_data()]
     assert [entry_id for _, _, entry_id in entries] == expected
 
 
@@ -87,7 +86,45 @@ def test_entry_ids_of_a_stream_that_is_not_a_table_stream_take_the_row_path() ->
     assert not isinstance(stream, ArrowTableStream)
     node = _node()
     entries = node._input_entries(stream)  # pyright: ignore[reportPrivateUsage]  # under test
-    expected = [
-        node.compute_base_entry_id(tag, data) for tag, data in stream.iter_data()
-    ]
+    expected = [node.compute_instance_id(tag, data) for tag, data in stream.iter_data()]
     assert [entry_id for _, _, entry_id in entries] == expected
+
+
+def _source_info_stream() -> ArrowTableStream:
+    """Three arrivals of the same entry, with tokens split across chunk boundaries."""
+    token_type = pa.large_list(pa.large_list(pa.large_string()))
+    return ArrowTableStream(
+        pa.Table.from_arrays(
+            [
+                pa.chunked_array([[1, 1], [1]], type=pa.int64()),
+                pa.chunked_array([[7], [7, 7]], type=pa.int64()),
+                pa.chunked_array(
+                    [
+                        pa.array([None, [[None]]], type=token_type),
+                        pa.array([[["from-another-source"]]], type=token_type),
+                    ]
+                ),
+            ],
+            names=["k", "i8", "_source_i8"],
+        ),
+        tag_columns=["k"],
+    )
+
+
+def test_instance_ids_distinguish_source_info_across_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The slice path reads main's typed tokens, including its untyped null token."""
+    node = _node()
+    stream = _source_info_stream()
+    expected = [node.compute_instance_id(tag, data) for tag, data in stream.iter_data()]
+    assert len(set(expected)) == 3
+
+    def row_path(*_args: Any) -> bytes:
+        pytest.fail(
+            "the stream's compatible source-info columns must take the slice path"
+        )
+
+    monkeypatch.setattr(FunctionJobNode, "compute_instance_id", row_path)
+    entries = node._input_entries(stream, row_views=True)  # pyright: ignore[reportPrivateUsage]  # under test
+    assert [instance_id for _, _, instance_id in entries] == expected

@@ -2337,6 +2337,14 @@ def pipeline_job() -> dict[str, Any]:
             out[f"table[{name}].input_data_hashes"] = sorted(
                 _jsonable(v) for v in records.column("__input_data_hash").to_pylist()
             )
+        elif "__pipeline_instance_id" in records.column_names:
+            # A pipeline table's record id holds the result id, a UUIDv7 that is new
+            # in every store, so it cannot be pinned: its lookup column, the instance
+            # id, is pinned instead (ITL-1471).
+            out[f"table[{name}].instance_ids"] = sorted(
+                _jsonable(v)
+                for v in records.column("__pipeline_instance_id").to_pylist()
+            )
         else:
             out[f"table[{name}].record_ids"] = sorted(
                 _jsonable(v) for v in records.column("__golden_record_id").to_pylist()
@@ -2614,6 +2622,14 @@ def pipeline_polars_filter_expr_job() -> dict[str, Any]:
             out[f"table[{name}].input_data_hashes"] = sorted(
                 _jsonable(v) for v in records.column("__input_data_hash").to_pylist()
             )
+        elif "__pipeline_instance_id" in records.column_names:
+            # A pipeline table's record id holds the result id, a UUIDv7 that is new
+            # in every store, so it cannot be pinned: its lookup column, the instance
+            # id, is pinned instead (ITL-1471).
+            out[f"table[{name}].instance_ids"] = sorted(
+                _jsonable(v)
+                for v in records.column("__pipeline_instance_id").to_pylist()
+            )
         else:
             out[f"table[{name}].record_ids"] = sorted(
                 _jsonable(v) for v in records.column("__golden_record_id").to_pylist()
@@ -2719,6 +2735,14 @@ def pipeline_filter_job() -> dict[str, Any]:
             # Result-table record ids are UUIDv7 (volatile); pin the lookup key instead.
             out[f"table[{name}].input_data_hashes"] = sorted(
                 _jsonable(v) for v in records.column("__input_data_hash").to_pylist()
+            )
+        elif "__pipeline_instance_id" in records.column_names:
+            # A pipeline table's record id holds the result id, a UUIDv7 that is new
+            # in every store, so it cannot be pinned: its lookup column, the instance
+            # id, is pinned instead (ITL-1471).
+            out[f"table[{name}].instance_ids"] = sorted(
+                _jsonable(v)
+                for v in records.column("__pipeline_instance_id").to_pylist()
             )
         else:
             out[f"table[{name}].record_ids"] = sorted(
@@ -2859,6 +2883,14 @@ def _rejoin_job(run_async: bool) -> dict[str, Any]:
             # Result-table record ids are UUIDv7 (volatile); pin the lookup key instead.
             out[f"table[{name}].input_data_hashes"] = sorted(
                 _jsonable(v) for v in records.column("__input_data_hash").to_pylist()
+            )
+        elif "__pipeline_instance_id" in records.column_names:
+            # A pipeline table's record id holds the result id, a UUIDv7 that is new
+            # in every store, so it cannot be pinned: its lookup column, the instance
+            # id, is pinned instead (ITL-1471).
+            out[f"table[{name}].instance_ids"] = sorted(
+                _jsonable(v)
+                for v in records.column("__pipeline_instance_id").to_pylist()
             )
         else:
             out[f"table[{name}].record_ids"] = sorted(
@@ -3151,6 +3183,14 @@ def pipeline_drop_nulls_job() -> dict[str, Any]:
             # Result-table record ids are UUIDv7 (volatile); pin the lookup key instead.
             out[f"table[{name}].input_data_hashes"] = sorted(
                 _jsonable(v) for v in records.column("__input_data_hash").to_pylist()
+            )
+        elif "__pipeline_instance_id" in records.column_names:
+            # A pipeline table's record id holds the result id, a UUIDv7 that is new
+            # in every store, so it cannot be pinned: its lookup column, the instance
+            # id, is pinned instead (ITL-1471).
+            out[f"table[{name}].instance_ids"] = sorted(
+                _jsonable(v)
+                for v in records.column("__pipeline_instance_id").to_pylist()
             )
         else:
             out[f"table[{name}].record_ids"] = sorted(

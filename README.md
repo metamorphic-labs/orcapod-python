@@ -12,22 +12,21 @@ provenance token.
 ## Installation
 
 Orcapod supports Python 3.11, 3.12 and 3.13 and is published on PyPI as `orcapod`.
-No release after 0.1.4 is available there yet: 0.2.0 was never published, and 0.3.0 was
-withdrawn on 2026-11-17. Until 0.4.0 is released, install the development version from the
-repository.
+0.1.4 is the latest stable release there (0.3.0 was withdrawn); a plain `uv add orcapod`
+installs it. The workshop uses the latest 0.4.0 release
+candidate, which the commands below install.
 
 The recommended way to install it is [uv](https://docs.astral.sh/uv/): `uv add` adds
 Orcapod to a uv project (start one with `uv init` in a new directory), and `uv run` runs
 your code in that project's environment:
 
 ```bash
-uv add git+https://github.com/metamorphic-labs/orcapod-python
+uv add "orcapod>=0.4.0rc7"
 ```
 
-In an environment not managed by uv, use
-`pip install git+https://github.com/metamorphic-labs/orcapod-python` instead. Once 0.4.0 is
-out, `uv add orcapod` (or `pip install orcapod`) installs the latest stable release; to try a
-release candidate, name it, for example `uv add "orcapod==0.4.0rc1"`.
+In an environment not managed by uv, use `pip install "orcapod>=0.4.0rc7"` instead. For the
+development version, install from the repository:
+`uv add git+https://github.com/metamorphic-labs/orcapod-python`.
 
 Tables written by 0.2.0 or earlier are not read by this version: see
 [Upgrading from 0.2.0](https://github.com/metamorphic-labs/orcapod-python/blob/main/CHANGELOG.md#upgrading-from-020)
@@ -40,7 +39,7 @@ Optional features are installed as extras, for example `uv add "orcapod[spiraldb
 | `orcapod[ray]` | Distributed execution with `RayExecutor` (Ray 2.60 or later, which has no wheel for Intel macOS) |
 | `orcapod[redis]` | `RedisCacher`, a Redis-backed hash cache |
 | `orcapod[postgresql]` | The PostgreSQL connector, table source and file hash cache (psycopg 3.1.17 or later) |
-| `orcapod[spiraldb]` | The SpiralDB connector and table source |
+| `orcapod[spiraldb]` | The SpiralDB connector and table source, read only (spiral-sdk) |
 | `orcapod[torch]` | PyTorch, for `torch.Tensor` values (any installed `torch` works) |
 | `orcapod[all]` | All of the above |
 
@@ -100,9 +99,10 @@ session.
 
 - [Getting Started](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/getting-started.md):
   sources, streams and function pods, step by step.
-- [Tutorial](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/tutorial/index.md):
-  a self-paced course in eleven short parts, from a first stream to a stored, re-runnable
-  pipeline over files, with exercises.
+- [Tutorials](https://github.com/metamorphic-labs/orcapod-python/blob/main/docs/tutorial/index.md):
+  a self-paced core course in seven parts, from a first stream to a stored, re-runnable
+  pipeline, and short tutorials on files, inspecting results, tracing a value, chaining
+  pipelines and handling errors, with exercises.
 - [Concepts](https://github.com/metamorphic-labs/orcapod-python/tree/main/docs/concepts): sources,
   streams, function pods, operators, pipelines and jobs, identity and hashing, file types,
   arrays and your own data types.

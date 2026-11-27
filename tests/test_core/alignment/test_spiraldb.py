@@ -20,7 +20,7 @@ import pyarrow as pa
 import pytest
 
 from orcapod.sources import SpiralDBTableSource
-from tests.test_databases import fake_pyspiral
+from tests.test_databases import fake_spiral_sdk
 
 from .checker import (
     Layout,
@@ -66,9 +66,9 @@ def key_tokens(table: pa.Table) -> list[str]:
 @pytest.fixture()
 def source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     """A source over the fake table, scanned two rows per batch, and its oracle."""
-    monkeypatch.setattr(fake_pyspiral, "scan_batch_rows", 2)
-    with fake_pyspiral.install(tmp_path / "spiral"):
-        project = fake_pyspiral.FakeSpiral().project(PROJECT)
+    monkeypatch.setattr(fake_spiral_sdk, "scan_batch_rows", 2)
+    with fake_spiral_sdk.install(tmp_path / "spiral"):
+        project = fake_spiral_sdk.ExternalProject(PROJECT)
         project.create_table("default.event", key_schema=KEYS).write(written_table())
         yield SpiralDBTableSource(
             PROJECT,

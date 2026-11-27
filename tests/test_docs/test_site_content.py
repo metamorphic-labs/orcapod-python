@@ -171,7 +171,7 @@ def test_the_home_page_gets_the_hero(tmp_path: Path):
             "icon": "right-arrow",
         },
         {
-            "text": "Tutorial",
+            "text": "Tutorials",
             "link": "/orcapod-python/tutorial/",
             "variant": "secondary",
         },
@@ -577,3 +577,17 @@ def test_an_invalid_address_is_refused(env: dict[str, str]):
     assert proc.stdout == ""
     (variable,) = env
     assert variable in proc.stderr
+
+
+def test_the_site_shows_code_comments_as_written():
+    """A printed value that looks like a file name (`# 1.58`) stays in its code block.
+
+    Expressive Code would otherwise take it out of the code as the block's title. The site
+    build itself also fails on any titled code block.
+    """
+    config = (REPO_ROOT / "site" / "astro.config.mjs").read_text(encoding="utf-8")
+    assert "frames: { extractFileNameFromCode: false }" in config
+    page = REPO_ROOT / "docs" / "tutorial" / "02-function-pods.md"
+    assert "print(to_mm(depth_um=1580))\n# 1.58\n```" in page.read_text(
+        encoding="utf-8"
+    )
