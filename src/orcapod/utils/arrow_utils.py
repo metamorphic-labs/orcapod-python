@@ -1291,7 +1291,7 @@ def restore_schema_nullability(
 
     Fields that are **not** found in any reference schema are left exactly as
     Polars produced them (``nullable=True``), which is safe for internally
-    generated sentinel columns (e.g. ``_exists``, ``__pipeline_entry_id``).
+    generated sentinel columns (e.g. ``_exists``, ``__pipeline_record_id``).
 
     When the same field name appears in multiple reference schemas the
     **last-supplied** schema wins, so callers can pass ``(left_schema,

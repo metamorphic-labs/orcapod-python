@@ -9,12 +9,13 @@ tests check, on a ``DeltaTableDatabase`` whose table history counts commits:
 - that a node or cached pod used on its own still commits after every row,
 - a failed commit: ``OrcapodDatabaseWriteError`` naming the node and no row, earlier batches kept,
 - that a failing node commits its ephemeral results before the run's error propagates,
-- that each row's base entry id is computed once,
+- that each row's instance id is computed once,
 - that a node's records read right after the run are all there (ITL-930).
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -444,20 +445,20 @@ def test_a_node_failing_on_a_store_write_commits_its_ephemeral_results(
 
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
-def test_base_entry_id_is_computed_once_per_row(
+def test_instance_id_is_computed_once_per_row(
     orchestrator: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Each row's base entry id is computed once, not once per use."""
+    """Each row's instance id is computed once, not once per use."""
     # Counts calls of a public node method through a class-level spy; the test is
     # about how often the node computes the id.
     calls = {"n": 0}
-    original = FunctionJobNode.compute_base_entry_id
+    original = FunctionJobNode.compute_instance_id
 
     def counting(self: FunctionJobNode, tag: Any, input_data: Any) -> bytes:
         calls["n"] += 1
         return original(self, tag, input_data)
 
-    monkeypatch.setattr(FunctionJobNode, "compute_base_entry_id", counting)
+    monkeypatch.setattr(FunctionJobNode, "compute_instance_id", counting)
     job = build_job(InMemoryArrowDatabase(), 20)
     job.run(orchestrator=ORCHESTRATORS[orchestrator]())
     assert calls["n"] == 20
@@ -492,7 +493,8 @@ def test_rerun_of_an_ephemeral_node_recomputes_and_records_every_row(
     """A rerun with a fresh ephemeral database recomputes each row (ITL-923).
 
     The first run's results are gone, so each row is computed again and gets a
-    second pipeline record (recomputation index 1); the node reads 5 rows.
+    second pipeline record, under the same instance id (ITL-1471); the node reads
+    5 rows.
     """
 
     def make_store() -> Any:
@@ -526,8 +528,8 @@ def test_rerun_of_an_ephemeral_node_recomputes_and_records_every_row(
     assert records is not None and records.num_rows == 5
     if store == "delta":
         (table,) = {log.parent for log in (tmp_path / "store").rglob("_delta_log")}
-        index = read_column(table, "__pipeline_recomputation_index")
-        assert sorted(index) == [0] * 5 + [1] * 5
+        instances = Counter(read_column(table, "__pipeline_instance_id"))
+        assert sorted(instances.values()) == [2] * 5
 
 
 @pytest.mark.parametrize(

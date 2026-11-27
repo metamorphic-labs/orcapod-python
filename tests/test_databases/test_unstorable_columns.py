@@ -76,6 +76,23 @@ def _sqlite_database(tmp_path: pathlib.Path) -> ConnectorArrowDatabase:
     return ConnectorArrowDatabase(SQLiteConnector(str(tmp_path / "store.db")))
 
 
+class _TimestampKeepingConnector(SQLiteConnector):
+    """A SQLite connector that states it stores timestamps; every other rule is SQLite's.
+
+    The tests that use it are refused before a row is written, so it never has to
+    store one.
+    """
+
+    def unstorable_column_reason(
+        self, name: str, arrow_type: pa.DataType, *, primary_key: bool
+    ) -> str | None:
+        if pa.types.is_timestamp(arrow_type):
+            return None
+        return super().unstorable_column_reason(
+            name, arrow_type, primary_key=primary_key
+        )
+
+
 # ---------------------------------------------------------------------------
 # A job refuses a node up front
 # ---------------------------------------------------------------------------
@@ -228,27 +245,50 @@ class TestWriteRefuses:
         assert stored.schema.field("v").type == normalize_to_large_types(arrow_type)
         assert stored["v"].to_pylist() == values * 2
 
-    def test_operator_cache_with_storable_columns_runs_on_sqlite(
+    def test_operator_cache_is_refused_on_sqlite_when_it_is_attached(
         self, tmp_path: pathlib.Path
     ):
-        """Operator caches hold only the operator's columns plus binary/text ones."""
+        """An operator cache stores an insertion time, which SQLite cannot hold.
+
+        Every row of an operator cache is stored with ``__recorded_at``
+        (``timestamp[us, tz=UTC]``, ITL-1471), a type a SQLite database has no
+        column for, as for a function node's pipeline table. The database is
+        refused when it is attached, naming the node and the column, before
+        anything runs. (Before the insertion time, a cache of storable columns
+        ran on SQLite.)
+        """
         database = _sqlite_database(tmp_path)
         job = PipelineJob(name="p", database=database)
         with job:
             _ = SelectDataColumns(["x"])(_source(), label="sel")
+        with pytest.raises(UnstorableColumnError) as exc_info:
+            job.nodes["sel"].attach_databases(
+                pipeline_database=database.at("p"), cache_mode=CacheMode.LOG
+            )
+        assert exc_info.value.node_label == "sel"
+        assert exc_info.value.column == "__recorded_at"
+        assert exc_info.value.arrow_type == pa.timestamp("us", tz="UTC")
+        assert database.list_table_paths() == []
+        # Without caching nothing is stored, so the database is accepted.
         job.nodes["sel"].attach_databases(
-            pipeline_database=database.at("p"), cache_mode=CacheMode.LOG
+            pipeline_database=database.at("p"), cache_mode=CacheMode.OFF
         )
         _ = job.run()
-        job.nodes["sel"].clear_cache()
-        _ = job.run()  # the second write meets the stored table's read-back types
         assert sorted(job.nodes["sel"].as_table()["x"].to_pylist()) == [1, 2]
 
     def test_operator_cache_with_unstorable_column_refused_at_write(
         self, tmp_path: pathlib.Path
     ):
-        """An operator cache holding an int32 column is refused when it is written."""
-        database = _sqlite_database(tmp_path)
+        """An operator cache holding an int32 column is refused when it is written.
+
+        The cache's own columns are checked when the database is attached; the
+        operator's output columns only when they are written. SQLite is refused
+        at attach (the insertion time, above), so the write is reached through a
+        connector that takes a timestamp and, like SQLite, no ``int32``.
+        """
+        database = ConnectorArrowDatabase(
+            _TimestampKeepingConnector(str(tmp_path / "store.db"))
+        )
         source = ArrowTableSource(
             pa.table(
                 {
@@ -376,8 +416,8 @@ class TestEveryTableChecked:
             )
 
         assert exc_info.value.node_label == "dbl"
-        assert exc_info.value.column == "__pipeline_recomputation_index"
-        assert exc_info.value.arrow_type == pa.int32()
+        assert exc_info.value.column == "__recorded_at"
+        assert exc_info.value.arrow_type == pa.timestamp("us", tz="UTC")
 
     def test_extension_aware_wrapper_checked_before_delivery(
         self, tmp_path: pathlib.Path

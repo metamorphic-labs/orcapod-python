@@ -72,12 +72,16 @@ from orcapod.core.nodes.function_node import (
     PIPELINE_RECORDED_AT_COL,
     PIPELINE_RUN_ID_COL,
 )
+from orcapod.core.nodes.operator_node import OPERATOR_RECORDED_AT_COL
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import RestrictedAggregationWarning
 from orcapod.protocols.core_protocols import StreamProtocol
-from orcapod.system_constants import PIPELINE_DB_SCHEMA_VERSION
+from orcapod.system_constants import (
+    OPERATOR_DB_SCHEMA_VERSION,
+    PIPELINE_DB_SCHEMA_VERSION,
+)
 from orcapod.types import Condition
 from orcapod.operators import (
     AddTags,
@@ -1132,7 +1136,15 @@ def _job(
             continue
         volatile = _VOLATILE
         if path[-1] == PIPELINE_DB_SCHEMA_VERSION:
-            volatile = volatile | {PIPELINE_RUN_ID_COL, PIPELINE_RECORDED_AT_COL}
+            # The record id holds the result id, which is random (ITL-1471).
+            volatile = volatile | {
+                PIPELINE_RUN_ID_COL,
+                PIPELINE_RECORDED_AT_COL,
+                "__pipeline_record_id",
+            }
+        elif path[-1] == OPERATOR_DB_SCHEMA_VERSION:
+            # An operator cache row is stored with its insertion time (ITL-1471).
+            volatile = volatile | {OPERATOR_RECORDED_AT_COL}
         keep = [c for c in stored.column_names if c not in volatile]
         out[f"stored[{'/'.join(path)}]"] = sorted(
             _masked(sorted(row.items())) for row in stored.select(keep).to_pylist()

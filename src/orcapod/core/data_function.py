@@ -734,6 +734,30 @@ def declaration_for(type_id: str) -> DataFunctionTypeDeclaration:
         ) from None
 
 
+def output_source_info(
+    uri: tuple[str, ...], result_id: str, columns: Iterable[str]
+) -> dict[str, str]:
+    """Build the source-info token of each output column of one result.
+
+    A token is ``<function uri>::<result id>::<column>``, the uri's parts joined
+    by ``:``. This is the one place an output's tokens are built: a computed
+    result gives its id as hex text, and the placeholder of an ephemeral result
+    that is gone gives the sentinel ``row_ids.EPHEMERAL_RESULT_GONE`` in its
+    place (ITL-1471).
+
+    Args:
+        uri: The data function's uri.
+        result_id: The text that names the result: the hex of its id, or the
+            sentinel.
+        columns: The output columns.
+
+    Returns:
+        The token of each column, by column name, in the order given.
+    """
+    source = ":".join(uri)
+    return {column: f"{source}::{result_id}::{column}" for column in columns}
+
+
 class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
     @property
     def data_function_type_id(self) -> str:
@@ -1008,14 +1032,8 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
                     "unchanged. Return value.detach().cpu() to avoid this warning.",
                 )
 
-        def combine(*components: tuple[str, ...]) -> str:
-            inner_parsed = [":".join(component) for component in components]
-            return "::".join(inner_parsed)
-
         new_record_uuid = uuid.UUID(bytes=uuid7().bytes)
-        source_info = {
-            k: combine(self.uri, (new_record_uuid.hex,), (k,)) for k in output_data
-        }
+        source_info = output_source_info(self.uri, new_record_uuid.hex, output_data)
 
         if not output_data:
             return Data(

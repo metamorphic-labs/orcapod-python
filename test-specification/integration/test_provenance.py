@@ -183,7 +183,7 @@ class TestNameExtending:
 class TestReducing:
     """Per design: a many->one op list-wraps user columns but NOT system tags.
 
-    System tag columns must stay scalar, because ``_build_record_id_preimage``
+    System tag columns must stay scalar, because ``entry_id_preimage``
     hashes them directly to derive record identity. They fold to a
     deterministic digest and their column name gains ``::{pipeline_hash}``.
     """

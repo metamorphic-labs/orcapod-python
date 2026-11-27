@@ -63,43 +63,43 @@ class TestGetCachedResults:
         node = function_node_with_db
         all_pairs = list(node._input_stream.iter_data())
 
-        base_entry_ids = []
+        instance_ids = []
         for tag, data in all_pairs:
             node.execute_data(tag, data)
-            base_entry_ids.append(node.compute_base_entry_id(tag, data))
+            instance_ids.append(node.compute_instance_id(tag, data))
 
-        cached = node.get_cached_results(base_entry_ids)
+        cached = node.get_cached_results(instance_ids)
         assert len(cached) == 2
-        assert all(eid in cached for eid in base_entry_ids)
+        assert all(eid in cached for eid in instance_ids)
 
     def test_filters_to_requested_entry_ids_only(self, function_node_with_db):
         node = function_node_with_db
         all_pairs = list(node._input_stream.iter_data())
 
-        base_entry_ids = []
+        instance_ids = []
         for tag, data in all_pairs:
             node.execute_data(tag, data)
-            base_entry_ids.append(node.compute_base_entry_id(tag, data))
+            instance_ids.append(node.compute_instance_id(tag, data))
 
-        cached = node.get_cached_results([base_entry_ids[0]])
+        cached = node.get_cached_results([instance_ids[0]])
         assert len(cached) == 1
-        assert base_entry_ids[0] in cached
-        assert base_entry_ids[1] not in cached
+        assert instance_ids[0] in cached
+        assert instance_ids[1] not in cached
 
     def test_get_cached_results_populates_internal_cache(self, function_node_with_db):
-        """get_cached_results should populate _cached_output_datas keyed by base_entry_id."""
+        """get_cached_results should populate _cached_output_datas keyed by instance_id."""
         node = function_node_with_db
         all_pairs = list(node._input_stream.iter_data())
 
-        base_entry_ids = []
+        instance_ids = []
         for tag, data in all_pairs:
             node.execute_data(tag, data)
-            base_entry_ids.append(node.compute_base_entry_id(tag, data))
+            instance_ids.append(node.compute_instance_id(tag, data))
 
         # Clear internal cache
         node._cached_output_datas.clear()
         assert len(node._cached_output_datas) == 0
 
         # get_cached_results should repopulate
-        node.get_cached_results(base_entry_ids)
+        node.get_cached_results(instance_ids)
         assert len(node._cached_output_datas) == 2
