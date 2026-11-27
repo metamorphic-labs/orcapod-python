@@ -420,10 +420,13 @@ class RootSource(StreamBase):
 
     @property
     def holds_fixed_rows(self) -> bool:
-        """Whether this source holds rows that never change, so they can be compared.
+        """Whether this source holds its table, so its rows can be compared.
 
-        Answered without reading or digesting any row. Sources that hold immutable
-        rows opt in; a wrapper can opt in if what it wraps holds fixed rows.
+        A source that holds its table gives its rows without a read or a poll. Its
+        values are not assumed constant: the table can share memory with a caller's
+        frame or array whose values change, so they are compared again at each check.
+        Answered without reading or digesting any row. A wrapper opts in if what it
+        wraps holds its table.
         """
         return False
 
