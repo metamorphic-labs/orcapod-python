@@ -1881,9 +1881,8 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
                 ``load_only`` is false.
             ValueError: If this node or one it depends on caches (``LOG`` or
                 ``REPLAY``) over a restricted source (ITL-1218); nothing has run.
-            InconsistentSourceError: If sources it reads share a source ID and
-                disagree (schema, fixed rows or key columns), as ``job.run()``
-                refuses; nothing has run.
+            InconsistentSourceError: If distinct source objects share a content
+                hash, or sources with one ID differ in schema or key columns.
         """
         from orcapod.pipeline.node_run import (
             check_sources,
@@ -1897,17 +1896,13 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
 
         if self._loaded and not load_only:
             raise self._cannot_compute_error()
+        require_consistent_sources([(f"node {self.label!r}", self)])
         # A source read under two restrictions, or a caching operator over a restricted
         # source, is refused before any source is checked and before anything is
         # computed or written (ITL-1218).
         refuse_restriction_conflicts([self])
-        # Sources sharing a source id must agree, as job.run() requires (ITL-1469);
-        # checked again after the check for new data, which can replace held rows.
-        uses = [(f"node {self.label!r}", self)]
-        require_consistent_sources(uses)
         # Every source feeding the run first takes in any new data (ITL-1102).
         unchecked = check_sources([self])
-        require_consistent_sources(uses)
         if self.holds_current_run(load_only=load_only):
             return self._run_view(computed=False)
         if depends_on_job_nodes(self):

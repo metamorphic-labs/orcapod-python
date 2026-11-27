@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 import polars as pl
 import pyarrow as pa
 
-from orcapod.core.sources.base import FixedTableSource
+from orcapod.core.sources.base import RootSource
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.core.sources.stream_builder import (
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class DataFrameSource(FixedTableSource):
+class DataFrameSource(RootSource):
     """A source backed by a Polars DataFrame (or any Polars-compatible data).
 
     The DataFrame is converted to an Arrow table and enriched by

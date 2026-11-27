@@ -496,10 +496,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 the job's own database again, at ``<name>/_result`` (ITL-1408).
 
         Raises:
-            InconsistentSourceError: If two sources sharing a source ID have
-                different schemas, both hold fixed rows and those rows differ, or
-                they have different key columns (refused in any slots for now,
-                ITL-1506); the job is left as it was.
+            InconsistentSourceError: If distinct source objects share a content
+                hash, or sources with one ID differ in schema or key columns
+                (ITL-1506). The job is left as it was.
             SourceSpecMismatchError: If any source's columns differ from its slot's
                 declared names, roles or types.
             ValueError: If a source key has no matching ``SourceJobNode`` slot, or an
@@ -1337,11 +1336,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         # --- Build hash-keyed OrcaDAG for topological ordering + exclusion ---
         # A caller can change a slot or proxy directly after binding the job.
-        source_uses = [
+        require_consistent_sources(
             (f"node {node.label!r}", node)
             for node in self._persistent_node_map.values()
-        ]
-        require_consistent_sources(source_uses)
+        )
         hash_dag: OrcaDAG[str] = OrcaDAG()
         for u, v in self._graph_edges:
             hash_dag.add_edge(u, v)
@@ -1431,8 +1429,6 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # Every source first takes in any new data, moving its modified time, before
         # the state rule judges any node (ITL-1102).
         unchecked = check_sources(exec_dag.nodes())
-        # Refresh can replace cached derived rows after their initial comparison.
-        require_consistent_sources(source_uses)
         # A restricted source under an aggregation is allowed, and said (ITL-1218).
         warn_restricted_aggregation(exec_dag)
         # The state rule (ITL-1095): a node that holds a current run is not run again.
@@ -1803,9 +1799,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             results.
 
         Raises:
-            InconsistentSourceError: If reconstructed sources sharing a source ID
-                have different schemas, fixed rows that differ, or different key
-                columns (ITL-1506).
+            InconsistentSourceError: If distinct reconstructed source objects
+                share a content hash, or sources with one ID differ in schema
+                or key columns (ITL-1506).
             ValueError: If the file's format version is not the one this Orcapod
                 writes (an earlier format is refused, never migrated), or if it was
                 saved before the database key was renamed (``bindings.store``
@@ -1864,6 +1860,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             if isinstance(node, SourceNodeBase)
         }
         sources: dict[str, cp.StreamProtocol] = {}
+        sources_by_config: dict[str, cp.StreamProtocol | None] = {}
         for spec_name, src_config in (
             data.get("bindings", {}).get("sources", {}).items()
         ):
@@ -1888,7 +1885,13 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             except ValueError as exc:
                 raise ValueError(f"{path}: source {spec_name!r}: {exc}") from exc
             try:
-                source = resolve_source_from_config(src_config)
+                # Slots written with the same complete config share one rebuild.
+                config_key = _json.dumps(src_config, sort_keys=True)
+                if config_key not in sources_by_config:
+                    sources_by_config[config_key] = resolve_source_from_config(
+                        src_config
+                    )
+                source = sources_by_config[config_key]
                 if source is not None:
                     # A rebuilt source its slot refuses (a file whose column types
                     # changed) is one that could not be rebuilt (ITL-1112).

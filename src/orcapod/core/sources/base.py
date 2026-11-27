@@ -4,8 +4,6 @@ import warnings
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
-from typing_extensions import override
-
 from orcapod import contexts
 from orcapod.config import OrcapodConfig
 from orcapod.core.streams.base import (
@@ -419,29 +417,6 @@ class RootSource(StreamBase):
         return arrow_schema_identity(*self.arrow_schemas, self.data_context)
 
     @property
-    def _holds_fixed_rows(self) -> bool:
-        """Whether this source holds its table, so its rows can be compared.
-
-        A source that holds its table gives its rows without a read or a poll. Its
-        values are not assumed constant: the table can share memory with a caller's
-        frame or array whose values change, so they are compared again at each check.
-        Answered without reading or digesting any row. A wrapper opts in if what it
-        wraps holds its table.
-        """
-        return False
-
-    @property
-    def _fixed_content(self) -> bytes | None:
-        """Digest of held rows for collision checks, or None for a live read.
-
-        Tags, data and record ids (``_digest_fixed_rows``), computed on each read.
-        The digest is separate from source identity.
-        """
-        if not self._holds_fixed_rows:
-            return None
-        return self._digest_fixed_rows()
-
-    @property
     def _resolved_key_columns(self) -> tuple[str, ...] | None:
         """The resolved key columns that name this source's rows, in key order.
 
@@ -451,55 +426,6 @@ class RootSource(StreamBase):
         when that is unknown (an unbound proxy).
         """
         return self._key_columns
-
-    @property
-    def _fixed_row_multiset(self) -> bytes | None:
-        """Digest of the held rows as a multiset of tags and data, or None for a live read.
-
-        Used to compare two fixed readings of one dataset whose key columns differ
-        (ITL-1506): record ids, which follow the key columns, are left out, and so is
-        row order. Every row counts as often as it occurs. Rows are put in the
-        canonical row order of an identity table
-        (``arrow_utils.canonical_identity_row_order``) and digested under the Arrow
-        float rule, so ``-0.0`` equals ``0.0`` and every NaN equals every other. It is
-        ``None`` exactly when ``_holds_fixed_rows`` is false; computed on each read.
-        """
-        if not self._holds_fixed_rows:
-            return None
-        return self._digest_fixed_row_multiset()
-
-    def _digest_fixed_row_multiset(self) -> bytes:
-        """Digest the rows as a multiset of tags and data (``_fixed_row_multiset``)."""
-        from orcapod.hashing.starfix_digest import digest_orcapod_table
-        from orcapod.utils.arrow_utils import canonical_identity_row_order
-
-        table = canonical_identity_row_order(
-            self.as_table(), tuple(self.keys()[0]), self.data_context.arrow_hasher
-        )
-        return digest_orcapod_table(
-            table,
-            include_metadata=False,
-            ordered_columns=False,
-            ordered_struct_fields=False,
-        )
-
-    def _digest_fixed_rows(self) -> bytes:
-        """Compare tags, data and record IDs under the normal Arrow float rule."""
-        from orcapod.hashing.starfix_digest import digest_orcapod_table
-        from orcapod.utils.arrow_utils import key_row_order
-
-        table = self.as_table(columns={"system_tags": True})
-        if self._key_columns and table.num_rows > 1:
-            table = key_row_order(table, self._key_columns)
-        # The schemas are checked separately, including logical type identifiers.
-        # Compare encoded values directly without converting nested or extension
-        # columns to Python objects. Starfix reads their Arrow storage.
-        return digest_orcapod_table(
-            table,
-            include_metadata=False,
-            ordered_columns=False,
-            ordered_struct_fields=False,
-        )
 
     def identity_structure(self) -> Any:
         """Identity from the ``source_id``, the Arrow schema and the key columns.
@@ -722,18 +648,3 @@ class RootSource(StreamBase):
             cache_path_prefix=cache_path_prefix,
             **kwargs,
         )
-
-
-class FixedTableSource(RootSource):
-    """A root that holds an Arrow table for its entire lifetime.
-
-    Its digests are never held: the table can share memory with the caller's data (a
-    pandas frame, a NumPy array), which the caller can still change. A consistency
-    check digests it at most once per check.
-    """
-
-    @property
-    @override
-    def _holds_fixed_rows(self) -> bool:
-        """Always: the table is held for the source's lifetime."""
-        return True

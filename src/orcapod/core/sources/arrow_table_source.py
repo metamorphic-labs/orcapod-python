@@ -4,7 +4,7 @@ import logging
 from collections.abc import Collection
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from orcapod.core.sources.base import FixedTableSource
+from orcapod.core.sources.base import RootSource
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.core.sources.stream_builder import (
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class ArrowTableSource(FixedTableSource):
+class ArrowTableSource(RootSource):
     """A source backed by an in-memory PyArrow Table.
 
     Uses ``SourceStreamBuilder`` to strip system columns, add per-row

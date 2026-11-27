@@ -5,7 +5,7 @@ from typing import Any, ClassVar
 
 import pyarrow as pa
 
-from orcapod.core.sources.base import FixedTableSource
+from orcapod.core.sources.base import RootSource
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.core.sources.stream_builder import (
@@ -17,7 +17,7 @@ from orcapod.utils.schema_utils import _normalize_column_list
 from orcapod.utils.tensor_conversions import warn_source_tensor_conversions
 
 
-class DictSource(FixedTableSource):
+class DictSource(RootSource):
     """A source backed by a collection of Python dictionaries.
 
     Each dict becomes one (tag, data) pair in the stream. The dicts are

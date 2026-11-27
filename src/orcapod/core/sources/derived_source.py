@@ -305,15 +305,6 @@ class DerivedSource(RootSource):
     # Identity
     # -------------------------------------------------------------------------
 
-    @property
-    @override
-    def _holds_fixed_rows(self) -> bool:
-        """Rows are fixed only when the origin itself holds fixed rows.
-
-        The digests are not held: a check for new data can refresh the rows.
-        """
-        return isinstance(self._origin, RootSource) and self._origin._holds_fixed_rows
-
     def identity_structure(self) -> Any:
         """Return what the content hash is built from.
 

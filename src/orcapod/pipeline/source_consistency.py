@@ -1,4 +1,4 @@
-"""Validation of sources sharing a canonical source ID within one graph."""
+"""Validate source object registrations within one graph."""
 
 from __future__ import annotations
 
@@ -67,11 +67,13 @@ def root_source_uses(
         else:
             # Loaded nodes can have inputs that could not be reconstructed.
             upstreams = cast("tuple[StreamProtocol | None, ...]", stream.upstreams)
-            pending.extend(
-                (location, upstream, recorded)
-                for upstream in reversed(upstreams)
-                if upstream is not None
-            )
+            for index in reversed(range(len(upstreams))):
+                upstream = upstreams[index]
+                if upstream is not None:
+                    upstream_location = location
+                    if len(upstreams) > 1:
+                        upstream_location += f", {stream.label!r} input {index + 1}"
+                    pending.append((upstream_location, upstream, recorded))
 
 
 def _comparison_schema(source: RootSource) -> tuple[ContentHash, ContentHash]:
@@ -87,147 +89,33 @@ def _comparison_schema(source: RootSource) -> tuple[ContentHash, ContentHash]:
     return arrow_schema_identity(*schemas, source.data_context)
 
 
-def _key_columns_conflict(
-    source_id: str, group: list[tuple[str, RootSource]]
-) -> str | None:
-    """Describe sources of one id and schema whose key columns differ, if any.
-
-    Such sources are distinct readings of one dataset. They are refused everywhere for
-    now (capture, bind, load, run), whatever slots they would take. ITL-1506 tracks
-    the design for different key columns under one source id.
-    Call only after the schemas and fixed rows of ``group`` were found to agree. Only
-    the sources whose key columns are known are compared: one whose key columns are
-    unknown (an unbound proxy) neither causes nor suppresses a refusal. The message
-    says they differ only in key columns when every source of the group holds fixed
-    rows (all compared and equal); any other source, read later or unbound, means
-    its rows were not compared, and the message says so.
-
-    Args:
-        source_id: The shared source id.
-        group: Every distinct source with that id, with where it is used.
-
-    Returns:
-        The error message, or ``None`` when the known key columns agree.
-    """
-    known = [
-        (where, s)
-        for where, s in group
-        if s._resolved_key_columns is not None  # pyright: ignore[reportPrivateUsage]  # source consistency
-    ]
-    if len({source._resolved_key_columns for _, source in known}) < 2:  # pyright: ignore[reportPrivateUsage]  # source consistency
-        return None
-    where = ", ".join(location for location, _ in known)
-    remedy = (
-        "A later version will allow distinct readings of one dataset in distinct "
-        "named slots (ITL-1506). For now, give each source its own name with "
-        "source_id=... when it is built."
-    )
-    # "Only" claims the rows are equal: true only when every source of the group,
-    # known key columns or not, holds rows that ``_differing_fixed_rows`` compared.
-    if all(source._holds_fixed_rows for _, source in group):  # pyright: ignore[reportPrivateUsage]  # source consistency
-        return (
-            f"Sources with source id {source_id!r} in {where} share one schema and "
-            "the same rows, and differ only in key columns (record_id_columns), so "
-            f"this is refused for now. {remedy}"
-        )
-    return (
-        f"Sources with source id {source_id!r} in {where} share one schema and have "
-        "different key columns (record_id_columns). The rows of a source read later "
-        f"are not compared. This is refused for now. {remedy}"
-    )
-
-
-def _underlying(source: RootSource) -> RootSource:
-    """The source whose rows ``source`` presents: a bound proxy's delegate, unwrapped.
-
-    Args:
-        source: A source in a consistency check.
-
-    Returns:
-        The innermost bound root source behind any proxies, or ``source`` itself.
-    """
-    from orcapod.core.sources.base import RootSource
-    from orcapod.core.sources.source_proxy import SourceProxy
-
-    while isinstance(source, SourceProxy) and isinstance(source.delegate, RootSource):
-        source = source.delegate
-    return source
-
-
-def _differing_fixed_rows(
-    group: list[tuple[str, RootSource]],
-) -> tuple[str, str] | None:
-    """Find two fixed sources of one id and schema that hold different rows.
-
-    A source id names a dataset; key columns only name its rows and belong to the
-    reading. Every pair of fixed sources is compared by the rule for that pair, so the
-    answer never depends on the order of ``group``:
-
-    - equal key columns (or unknown ones): tags, data and record ids
-      (``_fixed_content``), so positional row order counts as it always has;
-    - different key columns: the record ids necessarily differ, so the rows are
-      compared as a multiset of tags and data (``_fixed_row_multiset``): every
-      occurrence counts, order does not, and floats compare by the Arrow value rule
-      (``-0.0`` equals ``0.0``, NaN equals NaN).
-
-    Only the digests a pair needs are computed, each at most once per check for each
-    underlying source: a bound proxy is digested as the source it stands in for
-    (``_underlying``). Nothing is held across checks: an in-memory table can share
-    memory with the caller's data, which the caller can change between checks.
-
-    Args:
-        group: Every distinct source with that id, with where it is used.
-
-    Returns:
-        The locations of the first such pair, or ``None`` when all fixed rows agree.
-    """
-    fixed = [
-        (where, s)
-        for where, s in group
-        if s._holds_fixed_rows  # pyright: ignore[reportPrivateUsage]  # source consistency
-    ]
-    exact: dict[int, bytes | None] = {}
-    multisets: dict[int, bytes | None] = {}
-
-    def digest(source: RootSource, *, record_ids: bool) -> bytes | None:
-        source = _underlying(source)
-        held = exact if record_ids else multisets
-        if id(source) not in held:
-            held[id(source)] = (
-                source._fixed_content if record_ids else source._fixed_row_multiset  # pyright: ignore[reportPrivateUsage]  # source consistency
-            )
-        return held[id(source)]
-
-    for index, (first_location, first) in enumerate(fixed):
-        for location, source in fixed[index + 1 :]:
-            first_keys, keys = first._resolved_key_columns, source._resolved_key_columns  # pyright: ignore[reportPrivateUsage]  # source consistency
-            record_ids = first_keys is None or keys is None or first_keys == keys
-            if digest(first, record_ids=record_ids) != digest(
-                source, record_ids=record_ids
-            ):
-                return first_location, location
-    return None
-
-
 def require_consistent_sources(
     uses: Iterable[SourceUse],
     rebinding: Rebinding = (),
 ) -> None:
-    """Refuse schema differences and conflicting fixed rows at a shared address.
+    """Require one object per content hash and one schema and key per source ID.
 
-    Compare distinct objects only. A live source has no fixed rows to compare,
-    but does not prevent comparing two fixed sources that share its address.
-    Every pair of fixed sources is compared by ``_differing_fixed_rows`` (record ids
-    count only when their key columns are equal), so different rows are reported whatever
-    the order of the uses. Sources whose schemas and fixed rows agree but whose known
-    key columns differ are then refused too (``_key_columns_conflict``, ITL-1506).
-    For a bind, use the prospective sources alongside every unchanged binding.
+    Args:
+        uses: The graph's streams and where they are used.
+        rebinding: Prospective slot replacements to check before changing a binding.
 
     Raises:
-        InconsistentSourceError: Naming the sources and remedy for a conflict.
+        InconsistentSourceError: Naming both locations and how to resolve the conflict.
     """
+    by_hash: dict[str, tuple[str, RootSource]] = {}
     by_id: dict[str, list[tuple[str, RootSource]]] = {}
     for location, source in root_source_uses(uses, rebinding):
+        content_hash = source.content_hash().to_string()
+        first_location, first = by_hash.setdefault(content_hash, (location, source))
+        if first is not source:
+            reuse = "Build the source once and reuse the object"
+            if first.condition.equalities or source.condition.equalities:
+                reuse = "Call where() once and reuse the resulting source object"
+            raise InconsistentSourceError(
+                f"Source {source.source_id!r} has distinct source objects with one "
+                f"content hash in {first_location} and {location}. {reuse}, "
+                "or give each source its own source_id."
+            )
         by_id.setdefault(source.source_id, []).append((location, source))
 
     for source_id, group in by_id.items():
@@ -242,13 +130,18 @@ def require_consistent_sources(
                     f"and {location}. Give the sources different source_id values."
                 )
 
-        differing = _differing_fixed_rows(group)
-        if differing is not None:
-            raise InconsistentSourceError(
-                f"Source {source_id!r} has different rows in {differing[0]} "
-                f"and {differing[1]}. Give the sources different source_id values."
-            )
-
-        message = _key_columns_conflict(source_id, group)
-        if message is not None:
-            raise InconsistentSourceError(message)
+        known_keys = [
+            (location, keys)
+            for location, source in group
+            if (keys := source._resolved_key_columns) is not None  # pyright: ignore[reportPrivateUsage]  # source consistency
+        ]
+        if known_keys:
+            first_location, first_keys = known_keys[0]
+            for location, keys in known_keys[1:]:
+                if keys != first_keys:
+                    raise InconsistentSourceError(
+                        f"Source {source_id!r} has different key columns "
+                        f"(record_id_columns) in {first_location} and {location}. "
+                        "Give the sources different source_id values. ITL-1506 "
+                        "tracks distinct readings in distinct named slots."
+                    )

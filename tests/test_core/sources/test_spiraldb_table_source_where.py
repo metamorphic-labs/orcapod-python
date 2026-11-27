@@ -23,7 +23,7 @@ import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.databases import DeltaTableDatabase
-from orcapod.errors import RestrictedAggregationWarning
+from orcapod.errors import InconsistentSourceError, RestrictedAggregationWarning
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.restrictions import restrictions_in_force
 from orcapod.core.sources.spiraldb_table_source import _checked_conditions
@@ -1098,7 +1098,7 @@ class TestRunsAndSavedJobs:
 
         events = _source(source_id="events", tag_only_columns=True)
         job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
-        with pytest.raises(ValueError, match="different rows in one pipeline"):
+        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
             with job:
                 first.pod(events.where(subject_id="m1"), label="first")
                 second.pod(events.where(subject_id="m2"), label="second")
@@ -1120,7 +1120,7 @@ class TestRunsAndSavedJobs:
         m1 = events.where(subject_id="m1").select_data_columns(["amplitude"])
         m2 = events.where(subject_id="m2").select_data_columns(["amplitude"])
         job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
-        with pytest.raises(ValueError, match="different rows in one pipeline"):
+        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
             with job:
                 first.pod(m1, label="first")
                 second.pod(m2, label="second")
@@ -1152,7 +1152,7 @@ class TestRunsAndSavedJobs:
         events = _source(source_id="events", tag_only_columns=True)
         outside = events.where(**prebuilt).select_data_columns(["amplitude"])
         job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
-        with pytest.raises(ValueError, match="different rows in one pipeline"):
+        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
             with job:
                 if prebuilt_first:
                     first.pod(outside, label="first")
@@ -1166,22 +1166,22 @@ class TestRunsAndSavedJobs:
     def test_a_stream_with_the_hash_of_an_equal_captured_output_is_accepted(
         self, project, tmp_path, prebuilt_first
     ):
-        """The same restriction, its conditions in another order, is one stream."""
+        """Prebuilt and captured projections can reuse one restricted source."""
 
         @function_pod(output_keys="a")
         def first(amplitude: float | None) -> float | None:
             """Return ``amplitude``."""
             return amplitude
 
-        events = _source(source_id="events", tag_only_columns=True)
-        outside = events.where(flag=True, subject_id="m1").select_data_columns(
-            ["amplitude"]
+        events = _source(source_id="events", tag_only_columns=True).where(
+            flag=True, subject_id="m1"
         )
+        outside = events.select_data_columns(["amplitude"])
         job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
         with job:
             if prebuilt_first:
                 first.pod(outside, label="first")
-            events.where(subject_id="m1", flag=True).select_data_columns(["amplitude"])
+            events.select_data_columns(["amplitude"])
             if not prebuilt_first:
                 first.pod(outside, label="first")
 
@@ -1222,7 +1222,7 @@ class TestRunsAndSavedJobs:
         """One operator over two differently restricted sources of one table."""
         events = _source(source_id="events", tag_only_columns=True)
         job = PipelineJob(name="two")
-        with pytest.raises(ValueError, match="different rows in one pipeline"):
+        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
             with job:
                 events.where(subject_id="m1").semi_join(
                     events.where(subject_id="m2"), label="both"
@@ -1232,7 +1232,7 @@ class TestRunsAndSavedJobs:
     def test_one_restriction_twice_in_one_job_is_accepted(
         self, project, tmp_path, restrict
     ):
-        """Two source objects with the same restriction (or none) are one source."""
+        """Two branches can reuse one source with or without a restriction."""
 
         @function_pod(output_keys="a")
         def first(amplitude: float | None) -> float | None:
@@ -1244,16 +1244,13 @@ class TestRunsAndSavedJobs:
             """Return ``channel``."""
             return channel
 
-        def events(*conditions: tuple[str, object]) -> SpiralDBTableSource:
-            """Return the events source, with ``conditions`` in the order given."""
-            source = _source(source_id="events", tag_only_columns=True)
-            return source.where(dict(conditions)) if restrict else source
-
+        events = _source(source_id="events", tag_only_columns=True)
+        if restrict:
+            events = events.where(subject_id="m1", flag=True)
         job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
         with job:
-            # The same conditions given in another order are the same restriction.
-            first.pod(events(("subject_id", "m1"), ("flag", True)), label="first")
-            second.pod(events(("flag", True), ("subject_id", "m1")), label="second")
+            first.pod(events, label="first")
+            second.pod(events, label="second")
 
         job.run()
         expected = [3] if restrict else [1, 2, 3, 4, 5]
@@ -1293,7 +1290,7 @@ class TestRunsAndSavedJobs:
             return channel
 
         job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
-        with pytest.raises(ValueError, match="different rows in one pipeline"):
+        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
             with job:
                 first.pod(_source(source_id="events", limit=1), label="first")
                 second.pod(_source(source_id="events", limit=2), label="second")
@@ -1489,11 +1486,10 @@ class TestConditionInstances:
         [(0.0, -0.0), (-0.0, 0.0), (math.nan, math.nan)],
         ids=["0.0 then -0.0", "-0.0 then 0.0", "NaN twice"],
     )
-    def test_equal_float_conditions_are_one_restriction_in_a_pipeline(
+    def test_equal_float_conditions_still_require_one_source_object(
         self, project, tmp_path, values
     ):
-        """``0.0`` and ``-0.0``, or NaN twice, are one restriction (as Polars matches
-        them), so one table read with both in one pipeline is accepted."""
+        """Equal conditions can belong to distinct source objects."""
 
         @function_pod(output_keys="a")
         def first(amplitude: float | None) -> float | None:
@@ -1506,10 +1502,16 @@ class TestConditionInstances:
             return channel
 
         events = _source(source_id="events", tag_only_columns=True)
+        first_read = events.where(amplitude=values[0])
+        second_read = events.where(amplitude=values[1])
+        assert first_read.condition == second_read.condition
+        assert first_read.content_hash() == second_read.content_hash()
         job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
         with job:
-            first.pod(events.where(amplitude=values[0]), label="first")
-            second.pod(events.where(amplitude=values[1]), label="second")
+            first.pod(first_read, label="first")
+            with pytest.raises(InconsistentSourceError, match=r"Call where\(\) once"):
+                second.pod(second_read, label="second")
+            second.pod(first_read, label="second")
 
         summary = job.run()
 
@@ -2048,7 +2050,7 @@ class TestRestrictionThroughWrappers:
         other = _events().where(subject_id="m2")
         first, second = (proxy, other) if order == "proxy first" else (other, proxy)
         job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
-        with pytest.raises(ValueError, match="different rows in one pipeline"):
+        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
             with job:
                 first.select_data_columns(["amplitude"], label="a")
                 second.select_data_columns(["channel"], label="b")
@@ -2197,7 +2199,7 @@ class TestOneRestrictionPerSource:
             return amplitude
 
         job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
-        with pytest.raises(ValueError, match="different rows in one pipeline"):
+        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
             with job:
                 chains[first_chain](_events().where(subject_id="m1"))
                 chains[second_chain](second())
@@ -2222,7 +2224,7 @@ class TestOneRestrictionPerSource:
         m2 = built[chains[1]](_events().where(subject_id="m2"))
         first, second = (m1, m2) if order == "m1 first" else (m2, m1)
         job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
-        with pytest.raises(ValueError, match="different rows in one pipeline"):
+        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
             with job:
                 first.semi_join(second, label="both")
 
@@ -2233,9 +2235,10 @@ class TestOneRestrictionPerSource:
         chains = self._chains()
         names = ["select", "drop"] if order == "select first" else ["drop", "select"]
         job = PipelineJob(name="one", database=DeltaTableDatabase(tmp_path / "s"))
+        events = _events().where(flag=True, subject_id="m1")
         with job:
             for name in names:
-                chains[name](_events().where(flag=True, subject_id="m1"))
+                chains[name](events)
         summary = job.run()
         assert summary.conditions == {
             "events": Condition.of(subject_id="m1", flag=True)
@@ -2269,7 +2272,7 @@ class TestRestrictionsCheckedLive:
             "drop": lambda s: s.drop_data_columns(["note"]),
         }[step]
         job = PipelineJob(name="live", database=DeltaTableDatabase(tmp_path / "s"))
-        with pytest.raises(ValueError, match="different rows in one pipeline"):
+        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
             with job:
                 MapData({"channel": "lane"})(slot)
                 slot.bound_source = _events().where(subject_id="m2")
@@ -2281,7 +2284,7 @@ class TestRestrictionsCheckedLive:
         m1 = _events().where(subject_id="m1")
         slot = self._slot(m1)
         job = PipelineJob(name="live", database=DeltaTableDatabase(tmp_path / "s"))
-        with pytest.raises(ValueError, match="different rows in one pipeline"):
+        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
             with job:
                 MapData({"channel": "lane"})(slot)
                 m1.select_data_columns(["amplitude"])
@@ -2295,8 +2298,9 @@ class TestRestrictionsCheckedLive:
         job = PipelineJob(name="live", database=DeltaTableDatabase(tmp_path / "s"))
         with job:
             MapData({"channel": "lane"})(slot)
-            slot.bound_source = _events().where(subject_id="m1")
-            m1.select_data_columns(["amplitude"])
+            replacement = _events().where(subject_id="m1")
+            slot.bound_source = replacement
+            replacement.select_data_columns(["amplitude"])
         assert job.run().conditions == {"events": Condition.of(subject_id="m1")}
 
 
@@ -2356,7 +2360,9 @@ class TestASlotOverTwoTables:
         other_db = DeltaTableDatabase(tmp_path / "other")
 
         for _ in range(2):
-            with pytest.raises(ValueError, match="different rows in one pipeline"):
+            with pytest.raises(
+                InconsistentSourceError, match="distinct source objects"
+            ):
                 job.bind(sources={"events": stream}, database=other_db)
             assert job.database is before[0]
             assert slot.bound_source is before[1]
@@ -2371,7 +2377,7 @@ class TestASlotOverTwoTables:
         )
         scans = len(fake_spiral_sdk.scan_log)
 
-        with pytest.raises(ValueError, match="different rows in one pipeline"):
+        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
             if run == "job.run":
                 job.run()
             elif run == "job.run_async":
@@ -2386,9 +2392,9 @@ class TestASlotOverTwoTables:
     ):
         """Two sources, one restriction each: no conflict; the run reads only the
         rows both restrictions keep."""
-        job = self._job(tmp_path, self._others().where(subject_id="m2"))
-        events = _events().where(subject_id="m2")
         others = self._others().where(subject_id="m2")
+        job = self._job(tmp_path, others)
+        events = _events().where(subject_id="m2")
         stream = (
             events.semi_join(others)
             if order == "events first"
@@ -2449,12 +2455,12 @@ class TestBindingTwoSlotsOverOneSource:
         return job.nodes["events"].bound_source, job.nodes["pick"].bound_source
 
     @pytest.mark.parametrize("order", ["events first", "pick first"])
-    def test_equivalent_restrictions_for_both_slots_are_accepted(
+    def test_one_restricted_object_for_both_slots_is_accepted(
         self, project, tmp_path, order
     ):
         job = self._job(tmp_path)
         events = _events().where(subject_id="m2", flag=True)
-        pick = self._pick(_events().where(flag=True).where(subject_id="m2"))
+        pick = self._pick(events)
         sources: dict[str, Any] = {"events": events, "pick": pick}
         if order == "pick first":
             sources = dict(reversed(sources.items()))
@@ -2495,7 +2501,9 @@ class TestBindingTwoSlotsOverOneSource:
         other = DeltaTableDatabase(tmp_path / "other")
 
         for _ in range(2):
-            with pytest.raises(ValueError, match="different rows in one pipeline"):
+            with pytest.raises(
+                InconsistentSourceError, match="distinct source objects"
+            ):
                 job.bind(sources=sources, database=other)
             after = (job.database, *self._bound(job))
             assert all(a is b for a, b in zip(after, before, strict=True))
@@ -2509,17 +2517,17 @@ class TestBindingTwoSlotsOverOneSource:
         m2 = _events().where(subject_id="m2")
         new = m2 if slot == "events" else self._pick(m2)
 
-        with pytest.raises(ValueError, match="different rows in one pipeline"):
+        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
             job.bind(sources={slot: new})
         after = self._bound(job)
         assert after[0] is before[0] and after[1] is before[1]
 
     @pytest.mark.parametrize("slot", ["events", "pick"])
-    def test_one_slot_changed_to_an_equal_restriction_is_accepted(
+    def test_one_slot_rebound_to_the_same_restricted_source_is_accepted(
         self, project, tmp_path, slot
     ):
         job = self._job(tmp_path)
-        m1 = _events().where(subject_id="m1")
+        m1, _ = self._bound(job)
         new = m1 if slot == "events" else self._pick(m1)
 
         job.bind(sources={slot: new})

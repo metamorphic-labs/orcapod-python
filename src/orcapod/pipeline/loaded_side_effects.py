@@ -336,9 +336,8 @@ class LoadedSideEffectJobNode(SideEffectJobNode):
 
         Raises:
             RuntimeError: If ``load_only`` is false; nothing runs then.
-            InconsistentSourceError: If sources it reads share a source ID and
-                disagree (schema, fixed rows or key columns), as ``job.run()``
-                refuses; nothing has run.
+            InconsistentSourceError: If distinct source objects share a content
+                hash, or sources with one ID differ in schema or key columns.
         """
         import sys
 

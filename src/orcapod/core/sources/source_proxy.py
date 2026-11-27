@@ -97,30 +97,6 @@ class SourceProxy(RootSource):
 
     @property
     @override
-    def _holds_fixed_rows(self) -> bool:
-        """Whether the bound source holds fixed rows."""
-        return (
-            isinstance(self._delegate, RootSource) and self._delegate._holds_fixed_rows
-        )
-
-    @property
-    @override
-    def _fixed_content(self) -> bytes | None:
-        """The bound source's fixed rows, if it holds them."""
-        if isinstance(self._delegate, RootSource):
-            return self._delegate._fixed_content
-        return None
-
-    @property
-    @override
-    def _fixed_row_multiset(self) -> bytes | None:
-        """The bound source's multiset digest, if it holds fixed rows."""
-        if isinstance(self._delegate, RootSource):
-            return self._delegate._fixed_row_multiset
-        return None
-
-    @property
-    @override
     def _resolved_key_columns(self) -> tuple[str, ...] | None:
         """The bound source's key columns, or ``None`` while unbound."""
         if isinstance(self._delegate, RootSource):

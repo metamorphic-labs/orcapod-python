@@ -360,8 +360,8 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         # streams lead to it: every source this invocation reads is checked with
         # every source the pipeline's streams read now (nothing is remembered: a
         # slot rebound since the last invocation changes what they read).
-        require_one_restriction([*self._held_streams(), *inputs])
         require_consistent_sources(self._source_uses(invocation))
+        require_one_restriction([*self._held_streams(), *inputs])
         self._remember_invocation(key, invocation)
         self._hash_graph.add_node(key)
         for upstream, upstream_hash in upstreams:
@@ -537,8 +537,8 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         # Checked again here, from what the streams read now: a slot rebound after
         # the last invocation would otherwise connect a branch recorded over one
         # restriction to another (ITL-1218).
-        require_one_restriction(self._held_streams())
         require_consistent_sources(self._source_uses())
+        require_one_restriction(self._held_streams())
 
         source_node_cls = self.source_node_class
 

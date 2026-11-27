@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Collection
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from orcapod.core.sources.base import FixedTableSource
+from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
     normalize_record_id_columns,
@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     pass
 
 
-class ListSource(FixedTableSource):
+class ListSource(RootSource):
     """A source backed by a Python list.
 
     Each element in the list becomes one (tag, data) pair. The element is
