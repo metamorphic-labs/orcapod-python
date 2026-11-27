@@ -489,7 +489,9 @@ def test_loading_relative_sqlite_from_another_directory_only_creates_wal_files(
     original.mkdir()
     write_sqlite_input(original / filename, 1)
     monkeypatch.chdir(original)
-    source = SQLiteTableSource(filename, "samples", source_id="file")
+    source = SQLiteTableSource(
+        filename, "samples", source_id="file", tag_only_columns=True
+    )
     job = PipelineJob("sqlite_paths", database=DeltaTableDatabase(original / "store"))
     with job:
         _ = total.pod(source)
@@ -594,7 +596,7 @@ def test_sqlite_job_round_trip_keeps_path_text_and_default_id(
     # This is the default ID format on main, including the unmodified filename.
     expected_id = f"sqlite_table_v1:{expected_path}:main.samples"
     monkeypatch.chdir(original)
-    source = SQLiteTableSource(paths[kind], "samples")
+    source = SQLiteTableSource(paths[kind], "samples", tag_only_columns=True)
     job = PipelineJob("sqlite_paths", database=DeltaTableDatabase(original / "store"))
     with job:
         _ = total.pod(source)
@@ -664,7 +666,7 @@ def test_relative_sqlite_source_pins_its_file_at_construction_and_load(
     write_sqlite_input(first / "input.sqlite", 2)
     write_sqlite_input(second / "input.sqlite", 99)
     monkeypatch.chdir(first)
-    source = SQLiteTableSource("input.sqlite", "samples")
+    source = SQLiteTableSource("input.sqlite", "samples", tag_only_columns=True)
     assert source.source_id == "sqlite_table_v1:input.sqlite:main.samples"
     named = SQLiteTableSource(
         "input.sqlite",
