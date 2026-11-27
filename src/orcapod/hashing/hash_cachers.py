@@ -5,12 +5,14 @@ Provides ``InMemoryHashCacher`` (testing/ephemeral use) and
 ``CacherProtocol[FileHashKey, ContentHash]``.
 """
 
+import logging
 import os
 import sqlite3
 import threading
 import time
 from contextlib import closing
 from pathlib import Path
+from typing import cast
 
 from orcapod.hashing.file_hashers import (
     FILE_HASH_CACHE_SCHEMA_VERSION,
@@ -21,6 +23,7 @@ from orcapod.hashing.file_hashers import (
 )
 from orcapod.types import ContentHash
 
+logger = logging.getLogger(__name__)
 
 _SQLITE_BUSY_TIMEOUT_SECONDS = 5.0
 
@@ -238,6 +241,7 @@ class SqliteHashCacher:
                 """
             )
 
+            # user_version tracks the layout of the current table.
             version = conn.execute("PRAGMA user_version").fetchone()[0]
             if version < FILE_HASH_CACHE_SCHEMA_VERSION:
                 conn.execute(f"PRAGMA user_version = {FILE_HASH_CACHE_SCHEMA_VERSION}")
@@ -288,6 +292,7 @@ class SqliteHashCacher:
 
         No-ops silently when ``read_only=True`` or when ``key.size`` is below
         ``min_cache_size_bytes``. Putting the existing hash is also a no-op.
+        Replacing a malformed stored value refreshes its timestamp and logs a warning.
 
         Args:
             key: File hash cache key.
@@ -296,7 +301,7 @@ class SqliteHashCacher:
         Raises:
             ValueError: If the hash label or digest length is invalid for the key
                 (checked before the write guards), or if a write finds a different
-                hash under the same key.
+                well-formed hash under the same key.
         """
         require_storable(key, value)
         if self._read_only:
@@ -321,14 +326,35 @@ class SqliteHashCacher:
                 """,
                 (*fields, stored_value),
             )
-            if inserted.rowcount == 0:
-                existing = conn.execute(
-                    "SELECT hash FROM file_hash_cache_v2 "
-                    "WHERE path=? AND mtime_ns=? AND size=? AND algorithm=?",
+            if inserted.rowcount == 1:
+                return
+            existing = cast(
+                "tuple[object, ...] | None",
+                conn.execute(
+                    """
+                    SELECT hash FROM file_hash_cache_v2
+                    WHERE path=? AND mtime_ns=? AND size=? AND algorithm=?
+                    """,
                     fields,
-                ).fetchone()
-                if existing != (stored_value,):
-                    raise ValueError(f"Different hash already cached for {key!r}")
+                ).fetchone(),
+            )
+            if existing == (stored_value,):
+                return
+            if (
+                existing is None
+                or parse_stored_file_hash(existing[0], key.algorithm) is not None
+            ):
+                raise ValueError(f"Different hash already cached for {key!r}")
+            _ = conn.execute(
+                """
+                UPDATE file_hash_cache_v2 SET hash=?, cached_at=strftime('%s', 'now')
+                WHERE path=? AND mtime_ns=? AND size=? AND algorithm=?
+                """,
+                (stored_value, *fields),
+            )
+        logger.warning(
+            "Replaced a malformed cached hash for %s (%s)", key.path, key.algorithm
+        )
 
     def clear(self) -> None:
         """Delete all rows from the cache table."""

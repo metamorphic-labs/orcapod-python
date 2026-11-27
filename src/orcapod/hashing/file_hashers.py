@@ -91,7 +91,7 @@ def require_storable(key: FileHashKey, value: ContentHash) -> None:
         )
 
 
-def parse_stored_file_hash(blob: bytes, label: str) -> ContentHash | None:
+def parse_stored_file_hash(blob: object, label: str) -> ContentHash | None:
     """Read a stored ``<label>:<digest>`` value strictly, for one algorithm.
 
     A persistent cacher stores ``ContentHash.to_prefixed_digest()``. The value is
@@ -100,13 +100,19 @@ def parse_stored_file_hash(blob: bytes, label: str) -> ContentHash | None:
     happen to begin with ``<label>:``, a digest of another length) is a miss.
 
     Args:
-        blob: The stored bytes.
+        blob: The stored value, expected to contain binary data.
         label: The label of the key that was looked up.
 
     Returns:
         The stored hash, or ``None`` when the value is not a well-formed hash of
         ``label``.
     """
+    if isinstance(blob, memoryview):
+        blob = blob.tobytes()
+    elif isinstance(blob, bytearray):
+        blob = bytes(blob)
+    if not isinstance(blob, bytes):
+        return None
     prefix = stored_hash_prefix(label)
     if prefix is None or not blob.startswith(prefix):
         return None

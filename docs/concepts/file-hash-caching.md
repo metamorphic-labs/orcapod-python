@@ -36,21 +36,25 @@ For example, `orcapod warm-cache --algorithm md5` fills MD5 entries. A later
 SHA-256 lookup can fill its own entries alongside them.
 
 A cache write raises `ValueError` if the hash label or digest length is invalid
-for the key, or if the key already holds a different hash. Writing an identical
-hash leaves the existing entry and its timestamp unchanged. Reads accept values
-in the exact format `<label>:<digest>`, with the key's label and that
-algorithm's digest length. An incompatible hash returned by a custom cache is
-also a miss.
+for the key, or if the key already holds a different well-formed hash. Writing
+an identical hash leaves the existing entry and its timestamp unchanged. Reads
+accept values in the exact format `<label>:<digest>`, with the key's label and
+that algorithm's digest length. The persistent caches treat malformed values
+as misses. The next valid write for the same key replaces the malformed value,
+refreshes its timestamp, and logs a warning naming the file and hash algorithm.
+An incompatible hash returned by a custom cache is also a miss.
 
 `orcapod warm-cache --force` skips the lookup and reads each eligible file
-again. If a new hash differs from the stored hash for the same key, the cache
-retains the original entry and the command reports a file error. If an actual
-rehash and write conflict occurs while a pipeline hashes a file column, it can
+again. If a new hash differs from a well-formed hash stored for the same key,
+the cache retains the original entry and the command reports a file error. If
+a rehash and write conflict occurs while a pipeline hashes a file column, it can
 surface as `RuntimeError: Failed to process column 'recording'`, with a
 `ValueError` cause beginning `Different hash already cached for FileHashKey`
-and naming the file and algorithm. Clear the [current cache](#cache-storage)
-and rerun the pipeline or warmer to rebuild the entries. Let file rewrites
-advance the modification time to avoid stale hits in the default mode.
+and naming the file and algorithm. To replace a stale valid hash, clear the
+[current cache](#cache-storage) and rerun the pipeline or warmer to rebuild the
+entries. An explicit operation to replace a valid hash is tracked separately
+(ITL-1547). Let file rewrites advance the modification time to avoid stale hits
+in the default mode.
 
 The label must name an algorithm whose digest length is fixed: a `hashlib`
 algorithm such as `sha256` or `md5`, or `hash_path`, `xxh64` or `crc32`. Every algorithm
@@ -233,12 +237,13 @@ You can override this path in two ways:
 - Set the `ORCAPOD_HASH_CACHE_DB` environment variable to the desired path.
 - Pass the `db_path` argument to `enable_file_hash_caching()`.
 
-SQLite and PostgreSQL use the new `file_hash_cache_v2` table. The versioned
-name lets the new primary key coexist with the old `file_hash_cache` table,
-which the cacher leaves untouched. SQLite records version 2 in
-`PRAGMA user_version`, and PostgreSQL records it in `file_hash_cache_v2_meta`.
-Until migration support is available (ITL-1535), let your next pipeline run or
-`orcapod warm-cache` hash the files once more to fill the new table.
+SQLite and PostgreSQL use the new `file_hash_cache_v2` table. The old
+`file_hash_cache` table remains untouched and the cacher reads only the new
+table. SQLite uses `PRAGMA user_version` to record the layout of the new table.
+PostgreSQL records version 2 in `file_hash_cache_v2_meta`. ITL-1535 tracks
+migration of old caches, including both SQLite layouts (with and without
+`cached_at`). Let your next pipeline run or `orcapod warm-cache` hash the files
+once more to fill the new table.
 
 To inspect cached entries using the SQLite command-line tool:
 

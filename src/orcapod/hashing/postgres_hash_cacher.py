@@ -7,6 +7,7 @@ the optional ``psycopg`` driver (``pip install 'orcapod[postgresql]'``).
 
 from __future__ import annotations
 
+import logging
 import re
 import threading
 
@@ -18,6 +19,8 @@ from orcapod.hashing.file_hashers import (
     stored_hash_prefix,
 )
 from orcapod.types import ContentHash
+
+logger = logging.getLogger(__name__)
 
 try:
     import psycopg
@@ -188,18 +191,14 @@ class PostgresHashCacher:
                 "ORDER BY mtime_ns DESC LIMIT 1",
                 (str(key.path), key.size, key.algorithm),
             ).fetchone()
-        if row is None:
-            return None
-        stored = row[0]
-        if not isinstance(stored, (bytes, bytearray, memoryview)):
-            return None
-        return parse_stored_file_hash(bytes(stored), key.algorithm)
+        return None if row is None else parse_stored_file_hash(row[0], key.algorithm)
 
     def put(self, key: FileHashKey, value: ContentHash) -> None:
         """Store ``value`` under ``key``.
 
         No-ops silently when ``read_only=True`` or when ``key.size`` is below
         ``min_cache_size_bytes``. Putting the existing hash is also a no-op.
+        Replacing a malformed stored value refreshes its timestamp and logs a warning.
 
         Args:
             key: File hash cache key.
@@ -208,7 +207,7 @@ class PostgresHashCacher:
         Raises:
             ValueError: If the hash label or digest length is invalid for the key
                 (checked before the write guards), or if a write finds a different
-                hash under the same key.
+                well-formed hash under the same key.
         """
         require_storable(key, value)
         if self._read_only:
@@ -235,18 +234,34 @@ class PostgresHashCacher:
                 if inserted.rowcount == 1:
                     return
                 # A separate statement sees a competing insert after it commits.
-                # Lock the existing row through the comparison. If clear()
+                # Lock the existing row through comparison and repair. If clear()
                 # deleted it in the meantime, retry against the current table.
                 existing = conn.execute(
-                    "SELECT hash FROM file_hash_cache_v2 "
-                    "WHERE path=%s AND mtime_ns=%s AND size=%s AND algorithm=%s FOR SHARE",
+                    """
+                    SELECT hash FROM file_hash_cache_v2
+                    WHERE path=%s AND mtime_ns=%s AND size=%s AND algorithm=%s
+                    FOR NO KEY UPDATE
+                    """,
                     fields,
                 ).fetchone()
                 if existing is None:
                     continue
-                if existing != (stored_value,):
+                if existing == (stored_value,):
+                    return
+                if parse_stored_file_hash(existing[0], key.algorithm) is not None:
                     raise ValueError(f"Different hash already cached for {key!r}")
-                return
+                _ = conn.execute(
+                    """
+                    UPDATE file_hash_cache_v2
+                    SET hash=%s, cached_at=EXTRACT(EPOCH FROM statement_timestamp())::BIGINT
+                    WHERE path=%s AND mtime_ns=%s AND size=%s AND algorithm=%s
+                    """,
+                    (stored_value, *fields),
+                )
+                break
+        logger.warning(
+            "Replaced a malformed cached hash for %s (%s)", key.path, key.algorithm
+        )
 
     def clear(self) -> None:
         """Delete all rows from the cache table."""

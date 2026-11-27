@@ -9,6 +9,7 @@ change what the default ``sha256`` hasher returns.
 from __future__ import annotations
 
 import sqlite3
+import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -291,11 +292,20 @@ def test_conflicting_hash_is_refused_and_identical_hash_is_a_noop(cacher: Cacher
 
 
 @pytest.mark.parametrize("same_hash", [True, False])
-def test_sqlite_concurrent_puts(tmp_path: Path, same_hash: bool):
+@pytest.mark.parametrize("malformed_existing", [False, True])
+def test_sqlite_concurrent_puts(
+    tmp_path: Path,
+    same_hash: bool,
+    malformed_existing: bool,
+    caplog: pytest.LogCaptureFixture,
+):
     key = _key("sha256")
     values = (_hash_of("sha256", 1), _hash_of("sha256", 1 if same_hash else 2))
     barrier = Barrier(2)
-    with SqliteHashCacher(tmp_path / "cache.db") as cacher:
+    db = tmp_path / "cache.db"
+    with SqliteHashCacher(db) as cacher:
+        if malformed_existing:
+            _insert_raw(db, b"corrupt")
 
         def put(value: ContentHash) -> bool:
             try:
@@ -314,6 +324,11 @@ def test_sqlite_concurrent_puts(tmp_path: Path, same_hash: bool):
         assert cacher.get(key) == next(
             value for value, success in zip(values, accepted, strict=True) if success
         )
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM file_hash_cache_v2").fetchone() == (
+            1,
+        )
+    assert len(caplog.records) == int(malformed_existing)
 
 
 # ---------------------------------------------------------------------------
@@ -405,8 +420,8 @@ def test_every_supported_algorithm_round_trips(
 def _insert_raw(db_path: Path, blob: bytes | str, algorithm: str = "sha256") -> None:
     with sqlite3.connect(db_path) as conn:
         conn.execute(
-            "INSERT INTO file_hash_cache_v2 (path, mtime_ns, size, algorithm, hash) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO file_hash_cache_v2 (path, mtime_ns, size, algorithm, hash, cached_at) "
+            "VALUES (?, ?, ?, ?, ?, 1)",
             ("/a/b.txt", 1000, 100, algorithm, blob),
         )
 
@@ -424,13 +439,31 @@ CRAFTED_BLOBS = [
 
 @pytest.mark.parametrize("match_mtime", [True, False])
 @pytest.mark.parametrize("blob", CRAFTED_BLOBS)
-def test_sqlite_reads_a_malformed_stored_hash_as_a_miss(
-    tmp_path: Path, match_mtime: bool, blob: bytes | str
+def test_sqlite_repairs_a_malformed_stored_hash(
+    tmp_path: Path,
+    match_mtime: bool,
+    blob: bytes | str,
+    caplog: pytest.LogCaptureFixture,
 ):
     db_path = tmp_path / "c.db"
     with SqliteHashCacher(db_path, match_mtime=match_mtime) as c:
         _insert_raw(db_path, blob)
-        assert c.get(_key("sha256")) is None
+        key = _key("sha256")
+        assert c.get(key) is None
+        value = _hash_of("sha256")
+        before = int(time.time())
+        c.put(key, value)
+        assert c.get(key) == value
+        with pytest.raises(ValueError, match="Different hash"):
+            c.put(key, _hash_of("sha256", fill=2))
+        assert c.get(key) == value
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute("SELECT cached_at FROM file_hash_cache_v2").fetchone()
+    assert row is not None and before <= row[0] <= int(time.time())
+    (warning,) = caplog.records
+    assert warning.levelname == "WARNING"
+    assert str(key.path) in warning.getMessage()
+    assert key.algorithm in warning.getMessage()
 
 
 def test_sqlite_reads_a_well_formed_stored_hash(tmp_path: Path):
