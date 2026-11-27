@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
-from typing import TYPE_CHECKING, Any, Self
+from typing import cast, TYPE_CHECKING, Any, Self
 
 import pyarrow as pa
 
@@ -723,12 +723,33 @@ class Data(Datagram):
         }
         changed._typed_source_info = changed._token_columns(kept)
 
-    def with_source_info(self, **source_info: "SourceInfoValue") -> Self:
-        """Create a copy with updated source-information entries."""
+    def with_source_info(
+        self, **source_info: "SourceInfoValue | pa.Scalar[Any]"
+    ) -> Self:
+        """Create a copy with updated source-information entries.
+
+        A token given as a Python value is typed from that value: no Arrow type
+        exists for it. A token whose column type is known (an operator that
+        derives a token from its input's, as ``Index`` does) is given as an
+        Arrow scalar of that type, and keeps it (ITL-1491).
+
+        Args:
+            **source_info: The token of each named data column: a Python value,
+                or an Arrow scalar that carries the token column's type.
+
+        Returns:
+            The copy.
+        """
         current = dict(self._source_info)
+        typed_given: "dict[str, pa.ChunkedArray[Any]]" = {}
         for key, value in source_info.items():
             if key.startswith(constants.SOURCE_PREFIX):
                 key = key.removeprefix(constants.SOURCE_PREFIX)
+            if isinstance(value, pa.Scalar):
+                typed_given[key] = pa.chunked_array(
+                    [pa.array([value.as_py()], type=value.type)]
+                )
+                value = cast("SourceInfoValue", value.as_py())
             current[key] = value
         new_p = self.copy(include_cache=False)
         new_p._source_info = current
@@ -736,6 +757,16 @@ class Data(Datagram):
         self._keep_typed_tokens(
             new_p, {k: k for k in Datagram.keys(new_p) if k not in replaced}
         )
+        if typed_given:
+            kept = dict(typed_given)
+            carried = new_p._typed_source_info
+            if carried is not None:
+                kept |= {
+                    name.removeprefix(constants.SOURCE_PREFIX): carried.column(name)
+                    for name in carried.column_names
+                    if name.removeprefix(constants.SOURCE_PREFIX) not in typed_given
+                }
+            new_p._typed_source_info = new_p._token_columns(kept)
         return new_p
 
     # ------------------------------------------------------------------
