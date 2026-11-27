@@ -26,7 +26,6 @@ from __future__ import annotations
 import os
 from collections.abc import Collection, Iterator
 from contextlib import contextmanager
-from pathlib import PurePath
 from typing import Any, ClassVar, TYPE_CHECKING
 
 from orcapod.core.data_tags import TagOnlyColumns
@@ -35,7 +34,7 @@ from typing_extensions import override
 from orcapod.core.sources.db_table_source import DBTableSource
 from orcapod.core.sources.source_ids import joined_location
 from orcapod.core.sources.stream_builder import normalize_record_id_columns
-from orcapod.core.sources.base import saved_tag_only_columns, source_path_text
+from orcapod.core.sources.base import saved_tag_only_columns, source_paths
 from orcapod.databases.sqlite_connector import SQLiteConnector
 from orcapod.protocols.db_connector_protocol import DBConnectorProtocol
 from orcapod.utils.schema_utils import _normalize_column_list
@@ -43,23 +42,6 @@ from orcapod.utils.schema_utils import _normalize_column_list
 if TYPE_CHECKING:
     from orcapod import contexts
     from orcapod.config import OrcapodConfig
-
-
-def _access_path(db_path: str) -> str:
-    """The path a later read opens: a file path made absolute, a special name as given.
-
-    SQLite's empty and in-memory database names are kept as given.
-    """
-    if db_path in {"", ":memory:"} or PurePath(db_path).is_absolute():
-        return db_path
-    # Pin the directory without normalizing the filename. The filesystem must
-    # still follow a symlink before processing a following '..'.
-    pinned = os.path.join(os.getcwd(), db_path)
-    if PurePath(pinned).is_absolute():
-        return pinned
-    # A relative Windows filename on another drive uses that drive's current
-    # directory. Resolve only the bare drive before appending the original name.
-    return os.path.join(os.path.abspath(PurePath(db_path).drive), db_path)
 
 
 class SQLiteTableSource(DBTableSource):
@@ -129,9 +111,9 @@ class SQLiteTableSource(DBTableSource):
         tag_only_columns: TagOnlyColumns = (),
         _read_only: bool = False,
     ) -> None:
-        self._db_path = source_path_text(db_path)
-        # Keep the original name for configuration and identity, and pin where reads go.
-        self._access_path = _access_path(self._db_path)
+        self._db_path, self._access_path = source_paths(
+            db_path, passthrough=lambda path: path in {"", ":memory:"}
+        )
         self._read_only = _read_only
         connector = SQLiteConnector(self._access_path, _read_only=_read_only)
 

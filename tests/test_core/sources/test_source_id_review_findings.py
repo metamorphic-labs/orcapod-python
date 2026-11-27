@@ -23,6 +23,7 @@ import sqlite3
 import warnings
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+from typing import cast
 
 import pyarrow as pa
 import pytest
@@ -71,6 +72,11 @@ OTHER_ROWS = [
 ]
 TAG_ORDERS = [["subject", "session"], ["session", "subject"]]
 ORCHESTRATORS = [None, AsyncPipelineOrchestrator()]
+
+
+def _sorted_weights(table: pa.Table) -> list[float]:
+    """Return the fixture's non-null weights in a stable order."""
+    return sorted(cast("list[float]", table.column("weight").to_pylist()))
 
 
 def _write_csv(path: Path, rows: Sequence[Mapping[str, object]]) -> Path:
@@ -625,6 +631,172 @@ def test_a_job_with_a_previously_resolved_delta_path_still_loads(
     assert restored.source_id == "delta_table_v1:units"
     assert restored.to_config() == config
     assert restored.as_table().num_rows == len(ROWS)
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "alias/../units.sqlite",
+        pytest.param(
+            "file:units.sqlite",
+            marks=pytest.mark.skipif(
+                os.name == "nt", reason="Colon in a literal filename"
+            ),
+        ),
+    ],
+)
+def test_sqlite_refresh_opens_the_same_literal_filename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, filename: str
+) -> None:
+    original = tmp_path / "original"
+    elsewhere = tmp_path / "elsewhere"
+    (original / "physical" / "child").mkdir(parents=True)
+    elsewhere.mkdir()
+    if filename.startswith("alias"):
+        (original / "alias").symlink_to("physical/child", target_is_directory=True)
+        original_file = original / "physical" / "units.sqlite"
+        other_file = original / "units.sqlite"
+    else:
+        original_file = original / filename
+        other_file = elsewhere / filename
+    for path in (original_file, other_file):
+        _write_sqlite(path)
+    monkeypatch.chdir(original)
+    source = _reader("sqlite", filename)
+    assert _sorted_weights(source.as_table()) == [22.0, 25.5, 27.25]
+    for path, offset in ((original_file, 100), (other_file, 200)):
+        with sqlite3.connect(path) as connection:
+            _ = connection.execute("UPDATE records SET weight = weight + ?", (offset,))
+    monkeypatch.chdir(elsewhere)
+    assert source.check_for_new_data()
+    assert _sorted_weights(source.as_table()) == [122.0, 125.5, 127.25]
+
+
+def test_sqlite_source_rejects_bytes_paths() -> None:
+    with pytest.raises(
+        TypeError, match=r"Source paths must be str or os.PathLike\[str\]"
+    ):
+        _ = SQLiteTableSource(b"units.sqlite", "records")  # pyright: ignore[reportArgumentType]  # exercise runtime rejection
+
+
+def test_resaving_a_job_keeps_the_unavailable_relative_delta_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = tmp_path / "original"
+    elsewhere = tmp_path / "elsewhere"
+    original.mkdir()
+    elsewhere.mkdir()
+    _write_delta(original / "units")
+    monkeypatch.chdir(original)
+    job = PipelineJob(database=DeltaTableDatabase(tmp_path / "db"))
+    with job:
+        _ = ratio.pod(_reader("delta", "./units"), label="ratio")
+    saved = tmp_path / "job.json"
+    job.save(saved)
+
+    monkeypatch.chdir(elsewhere)
+    loaded = PipelineJob.load(saved)
+    assert loaded.unbound_sources == ["./units"]
+    saved_again = tmp_path / "job-again.json"
+    loaded.save(saved_again)
+    config = json.loads(saved.read_text())["bindings"]["sources"]
+    assert config["./units"]["delta_table_path"] == "./units"
+    assert json.loads(saved_again.read_text())["bindings"]["sources"] == config
+
+
+@pytest.mark.parametrize("kind", ["csv", "delta"])
+def test_parent_after_symlink_follows_the_filesystem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    from deltalake import write_deltalake
+
+    (tmp_path / "physical" / "child").mkdir(parents=True)
+    (tmp_path / "alias").symlink_to("physical/child", target_is_directory=True)
+    _write(kind, tmp_path / "units")
+    physical = tmp_path / "physical" / "units"
+    if kind == "csv":
+        _ = _write_csv(physical, OTHER_ROWS)
+    else:
+        write_deltalake(str(physical), pa.Table.from_pylist(OTHER_ROWS, schema=SCHEMA))
+    monkeypatch.chdir(tmp_path)
+    source = _reader(kind, "alias/../units")
+    assert _sorted_weights(source.as_table()) == [9.0, 40.0]
+    if kind == "csv":
+        _ = _write_csv(physical, ROWS)
+    else:
+        write_deltalake(
+            str(physical), pa.Table.from_pylist(ROWS, schema=SCHEMA), mode="overwrite"
+        )
+    monkeypatch.chdir(tmp_path / "physical")
+    assert source.check_for_new_data()
+    assert _sorted_weights(source.as_table()) == [22.0, 25.5, 27.25]
+
+
+@pytest.mark.parametrize("kind", ["csv", "delta"])
+def test_file_source_refresh_schema_error_names_the_supplied_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    from deltalake import write_deltalake
+
+    monkeypatch.chdir(tmp_path)
+    path = tmp_path / "units"
+    source: CSVSource | DeltaTableSource
+    if kind == "csv":
+        _ = path.write_text("weight\n25\n")
+        source = CSVSource("./units")
+        _ = path.write_text("other\n250\n")
+    else:
+        write_deltalake(str(path), pa.table({"weight": [25]}))
+        source = DeltaTableSource("./units")
+        write_deltalake(
+            str(path),
+            pa.table({"other": [250]}),
+            mode="overwrite",
+            schema_mode="overwrite",
+        )
+    with pytest.raises(ValueError, match=r" '\./units' changed its columns"):
+        source.check_for_new_data()
+
+
+@pytest.mark.parametrize("kind", ["csv", "delta"])
+def test_relative_source_cache_rebinding_pending_developer_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    from deltalake import write_deltalake
+
+    original = tmp_path / "original"
+    elsewhere = tmp_path / "elsewhere"
+    original.mkdir()
+    elsewhere.mkdir()
+    _write(kind, original / "units")
+    if kind == "csv":
+        _ = _write_csv(elsewhere / "units", OTHER_ROWS)
+    else:
+        write_deltalake(
+            str(elsewhere / "units"), pa.Table.from_pylist(OTHER_ROWS, schema=SCHEMA)
+        )
+    monkeypatch.chdir(original)
+    cache = CachedSource(
+        _reader(kind, "units"), cache_database=DeltaTableDatabase(tmp_path / "cache")
+    )
+    assert cache.as_table().num_rows == len(ROWS)
+    job = PipelineJob(database=DeltaTableDatabase(tmp_path / "db"))
+    with job:
+        _ = ratio.pod(cache, label="ratio")
+    saved = tmp_path / "job.json"
+    job.save(saved)
+
+    def restored_weights() -> list[float]:
+        restored = PipelineJob.load(saved).sources["units"]
+        assert isinstance(restored, CachedSource)
+        assert restored.cache_path == cache.cache_path
+        return _sorted_weights(restored.as_table())
+
+    # Record current behavior pending a decision about relative source paths in caches.
+    monkeypatch.chdir(elsewhere)
+    assert restored_weights() == [9.0, 22.0, 25.5, 27.25, 40.0]
+    monkeypatch.chdir(original)
+    assert restored_weights() == [9.0, 22.0, 25.5, 27.25, 40.0]
 
 
 def test_delta_source_passes_remote_uri_to_deltalake(

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import warnings
 from collections.abc import Callable
+from pathlib import PurePath
 from typing import TYPE_CHECKING, Any, ClassVar, TypeVar
 
 from orcapod import contexts
@@ -45,19 +46,31 @@ def source_path_text(path: str | bytes | os.PathLike[str] | os.PathLike[bytes]) 
 
 
 def source_paths(
-    path: str | os.PathLike[str], *, pin: Callable[[str], str] = os.path.abspath
+    path: str | os.PathLike[str],
+    *,
+    passthrough: Callable[[str], bool] | None = None,
 ) -> tuple[str, str]:
     """Return the supplied text and the path pinned for reads at construction.
 
     Args:
         path: The supplied file path or address.
-        pin: The reader's path pinning function.
+        passthrough: Identifies addresses or special names passed directly to the reader.
 
     Returns:
         The original text for names and configs, and the pinned access path.
     """
     text = source_path_text(path)
-    return text, pin(text)
+    if passthrough is not None and passthrough(text):
+        return text, text
+    local_path = PurePath(text)
+    if local_path.is_absolute():
+        return text, text
+    # Keep every component so the reader can follow a symlink before a following '..'.
+    pinned = os.path.join(os.getcwd(), text)
+    if PurePath(pinned).is_absolute():
+        return text, pinned
+    # On Windows, a drive-relative path can use another drive's working directory.
+    return text, os.path.join(os.path.abspath(local_path.drive), text)
 
 
 def saved_tag_only_columns(config: dict[str, Any]) -> bool | list[str]:

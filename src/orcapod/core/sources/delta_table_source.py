@@ -4,7 +4,6 @@ import os
 import re
 
 from collections.abc import Collection
-from pathlib import Path
 from typing import Any, ClassVar, TYPE_CHECKING
 
 import pyarrow as pa
@@ -33,14 +32,12 @@ else:
     deltalake = LazyModule("deltalake")
 
 
-def _pin_delta_path(path: str) -> str:
-    """Resolve local paths and pass URI addresses through to deltalake."""
-    if (
-        re.match(r"[a-zA-Z][a-zA-Z0-9+.-]*://", path)
+def _is_delta_uri(path: str) -> bool:
+    """Identify a URI address, excluding Windows drive paths."""
+    return (
+        re.match(r"[a-zA-Z][a-zA-Z0-9+.-]*://", path) is not None
         and not os.path.splitdrive(path)[0]
-    ):
-        return path
-    return str(Path(path).resolve())
+    )
 
 
 class DeltaTableSource(RootSource):
@@ -80,8 +77,8 @@ class DeltaTableSource(RootSource):
         tag_only_columns: TagOnlyColumns = (),
         **kwargs: Any,
     ) -> None:
-        self._delta_table_path, self._access_path = source_paths(
-            delta_table_path, pin=_pin_delta_path
+        self._delta_table_path, access_path = source_paths(
+            delta_table_path, passthrough=_is_delta_uri
         )
 
         super().__init__(source_id=source_id, **kwargs)
@@ -92,9 +89,9 @@ class DeltaTableSource(RootSource):
             self._source_name = location_source_name(self._delta_table_path)
 
         try:
-            self._delta_table = deltalake.DeltaTable(self._access_path)
+            self._delta_table = deltalake.DeltaTable(access_path)
         except deltalake.exceptions.TableNotFoundError:
-            raise ValueError(f"Delta table not found at {self._access_path}")
+            raise ValueError(f"Delta table not found at {access_path}")
 
         self._tag_columns: Collection[str] = _normalize_column_list(tag_columns)
         self._system_tag_columns: Collection[str] = system_tag_columns
@@ -163,7 +160,7 @@ class DeltaTableSource(RootSource):
         table = self._read_table()
         if not table.schema.equals(self._table.schema, check_metadata=True):
             raise ValueError(
-                f"Delta table {self._access_path!r} changed its columns at "
+                f"Delta table {self._delta_table_path!r} changed its columns at "
                 f"version {version}: the source was built with {self._table.schema}, "
                 f"the table now has {table.schema}. Build a new DeltaTableSource to "
                 "read it"

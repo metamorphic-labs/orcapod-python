@@ -17,7 +17,7 @@ import pytest
 from orcapod import PipelineJob, function_pod
 from orcapod.core.nodes import FunctionJobNode, OperatorJobNode
 from orcapod.core.operators import Join, SelectDataColumns
-from orcapod.core.sources import sqlite_table_source
+from orcapod.core.sources import base as source_base
 from orcapod.databases import (
     DeltaTableDatabase,
     InMemoryArrowDatabase,
@@ -645,21 +645,22 @@ def test_sqlite_source_keeps_dot_dot_after_a_symlink(
     assert loaded.nodes["file"].as_table().column("x").to_pylist() == [2] * 3
 
 
-def test_sqlite_source_pins_rooted_windows_filename_to_the_working_drive(
+def test_source_pins_rooted_windows_filename_to_the_working_drive(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A Windows path with a root and no drive needs the working drive."""
     monkeypatch.setattr(
-        sqlite_table_source,
+        source_base,
         "os",
         SimpleNamespace(path=ntpath, fspath=os.fspath, getcwd=lambda: r"C:\work"),
     )
-    monkeypatch.setattr(sqlite_table_source, "PurePath", PureWindowsPath)
-    path = sqlite_table_source._access_path(r"\input.sqlite")  # pyright: ignore[reportPrivateUsage]  # exercise Windows path semantics on any test host
+    monkeypatch.setattr(source_base, "PurePath", PureWindowsPath)
+    original, path = source_base.source_paths(r"\input.sqlite")
+    assert original == r"\input.sqlite"
     assert PureWindowsPath(path).as_uri() == "file:///C:/input.sqlite"
 
 
-def test_sqlite_source_pins_a_relative_filename_on_another_windows_drive(
+def test_source_pins_a_relative_filename_on_another_windows_drive(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Resolve the drive's current directory while preserving the filename."""
@@ -669,7 +670,7 @@ def test_sqlite_source_pins_a_relative_filename_on_another_windows_drive(
         return r"C:\source"
 
     monkeypatch.setattr(
-        sqlite_table_source,
+        source_base,
         "os",
         SimpleNamespace(
             path=SimpleNamespace(join=ntpath.join, abspath=drive_directory),
@@ -677,8 +678,9 @@ def test_sqlite_source_pins_a_relative_filename_on_another_windows_drive(
             getcwd=lambda: r"D:\work",
         ),
     )
-    monkeypatch.setattr(sqlite_table_source, "PurePath", PureWindowsPath)
-    path = sqlite_table_source._access_path(r"C:alias\..\input.sqlite")  # pyright: ignore[reportPrivateUsage]  # exercise Windows path semantics on any test host
+    monkeypatch.setattr(source_base, "PurePath", PureWindowsPath)
+    original, path = source_base.source_paths(r"C:alias\..\input.sqlite")
+    assert original == r"C:alias\..\input.sqlite"
     assert path == r"C:\source\alias\..\input.sqlite"
     assert PureWindowsPath(path).as_uri() == "file:///C:/source/alias/../input.sqlite"
 
