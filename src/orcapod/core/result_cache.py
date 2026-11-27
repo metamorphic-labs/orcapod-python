@@ -421,19 +421,22 @@ class ResultCache:
         The guarantee, and its whole extent: on one event loop or one thread,
         over one database object and its views, two computations for one input
         data hash and data context store one result, when no conditional write
-        for that table is made from inside a callback that runs during a commit
-        of the same result table (a commit started by a conditional write or
-        separately). The lookup and the write are synchronous with no await
+        for that table is made from inside a callback that runs between another
+        conditional write's lookup and the end of its commit (a schema guard
+        during a commit, or a custom logical-type encoder during serialization,
+        are examples). The lookup and the write are synchronous with no await
         between them, and nothing more: there is no lock.
 
         Not covered:
 
         - several threads on one database object (two jobs run in threads, or a
           batch commit of the table that overlaps the lookup);
-        - a conditional write made from inside a callback that runs during a
-          commit of the same result table (for example a schema guard), whether
-          a conditional write's flush or a separate flush started that commit:
-          the rows being committed are in neither the queue nor the table;
+        - a conditional write for the table made from inside a callback that
+          runs between another conditional write's lookup and the end of its
+          commit. Two examples: a schema guard during a commit (the write's own
+          flush or a separate one; the rows being committed are in neither the
+          queue nor the table), and a custom logical-type encoder while the row
+          is serialized (after the lookup missed, before the row is queued);
         - another database handle or another process;
         - an unconditional ``store`` (a function with its own result database,
           called with ``skip_cache_lookup=True``, stores another row).

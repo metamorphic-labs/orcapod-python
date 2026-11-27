@@ -12,12 +12,12 @@ Three rules:
   that finds one when it is about to store its own discards its own and uses the
   stored one, reported as a cache hit. It holds on one event loop or one thread,
   over one database object and its views, when no conditional write for the
-  table is made from inside a callback that runs during a commit of it. Several
-  threads, such a write, another database handle or process and an
-  unconditional store are not covered; two tests here record the first two as
-  known limits.
-- **One instance, one result in one run.** In ephemeral mode an async run asks
-  the persistent store once per instance.
+  table is made from inside a callback that runs between another conditional
+  write's lookup and the end of its commit. Several threads, such a write,
+  another database handle or process and an unconditional store are not
+  covered; two tests here record the first two as known limits.
+- **One instance, one result in one run.** In ephemeral mode an async run
+  remembers the first completed persistent lookup of each instance.
 
 The cases run on the synchronous and the asynchronous path unless they name one.
 """

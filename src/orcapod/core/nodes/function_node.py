@@ -4612,12 +4612,13 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 # Rows answered by the persistent store in ephemeral mode (the
                 # ITL-1503 stopgap, until ITL-1516).
                 persistent_hits: set[bytes] = set()
-                # What that lookup gave each instance of this run, made once per
-                # instance: a later occurrence of an instance takes the first
-                # one's answer, so one instance gets one result in one run, also
-                # when a persistent result for it is published in between. A
-                # miss (``None``) sends every occurrence to the ephemeral wrapper,
-                # where the conditional write keeps one result.
+                # What the first completed lookup of each instance gave, for this
+                # run: a later occurrence of the instance takes that answer, so
+                # one instance gets one result in one run, also when a persistent
+                # result for it is published in between. A miss (``None``) sends
+                # every occurrence to the ephemeral wrapper, where the conditional
+                # write keeps one result. A lookup that raised is not remembered:
+                # that occurrence delivered nothing, and the next one looks again.
                 persistent_lookups: dict[bytes, DataProtocol | None] = {}
                 # Instance ids of this run's inputs that gave a row (a cache hit or a
                 # forwarded computed row), one per input (ITL-1093).
