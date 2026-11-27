@@ -70,7 +70,14 @@ def _stream(
     )
     table = pa.Table.from_arrays(
         [pa.array(columns[n][1], columns[n][0]) for n in names],
-        schema=pa.schema([pa.field(n, columns[n][0]) for n in names]),
+        schema=pa.schema(
+            [
+                pa.field(n, columns[n][0], nullable=None in columns[n][1])
+                if n == "x"
+                else pa.field(n, columns[n][0])
+                for n in names
+            ]
+        ),
     )
     tags = ["g", "k", "x"] if role == "data_tag" else ["g", "k"]
     return ArrowTableStream(
@@ -424,3 +431,149 @@ def test_a_source_builds_plain_string_tokens_over_any_data() -> None:
     table = source.as_table(columns={"source": True})
     assert table.schema.field("_source_x").type == STR
     assert table.schema.field("_source_w").type == STR
+
+
+# ---------------------------------------------------------------------------
+# Index: the element's token has the declared type with one layer removed
+# ---------------------------------------------------------------------------
+
+
+def _index_rows(
+    stream: ArrowTableStream, i: int, route: str, out: str | None
+) -> pa.Table:
+    """``Index`` on ``x`` over ``stream``, on the sync or the async route."""
+    import asyncio
+
+    from orcapod.channels import Channel
+    from orcapod.core.operators import Index
+
+    operator = Index("x", i, out=out)
+    if route == "sync":
+        return operator(stream).as_table(columns={"source": True})
+
+    async def run() -> list[Any]:
+        incoming: Channel[Any] = Channel(buffer_size=16)
+        outgoing: Channel[Any] = Channel(buffer_size=16)
+        for row in stream.iter_data():
+            await incoming.writer.send(row)
+        await incoming.writer.close()
+        await operator.async_execute(
+            [incoming.reader],
+            outgoing.writer,
+            input_pipeline_hashes=[stream.pipeline_hash()],
+        )
+        return await outgoing.reader.collect()
+
+    rows = asyncio.run(run())
+    return pa.concat_tables(
+        [data.as_table(columns={"source": True}) for _, data in rows]
+    )
+
+
+ROUTES = pytest.mark.parametrize("route", ["sync", "async"])
+MEMBER = pa.field("member", STR, nullable=False)
+# (token type, tokens, data type, data, the element's token type)
+INDEXED: dict[
+    str, tuple[pa.DataType, list[Any], pa.DataType, list[Any], pa.DataType]
+] = {
+    "list_of_strings": (
+        large(STR),
+        [["a", "b"], ["c", "d"]],
+        large(INT),
+        [[1, 2], [3, 4]],
+        STR,
+    ),
+    "list_of_fixed": (
+        large(fixed(STR)),
+        [[["a", "b"], ["c", "d"]], [["e", "f"], ["g", "h"]]],
+        large(fixed(INT)),
+        [[[1, 2], [3, 4]], [[5, 6], [7, 8]]],
+        fixed(STR),
+    ),
+    "list_of_named_item_lists": (
+        large(pa.large_list(MEMBER)),
+        [[["a"], ["b", "c"]], [["d"], []]],
+        large(large(INT)),
+        [[[1], [2, 3]], [[4], []]],
+        pa.large_list(MEMBER),
+    ),
+    "three_levels": (
+        large(large(large(STR))),
+        [[[[]], [["a"]]], [[["b"]], [[], ["c"]]]],
+        large(large(large(INT))),
+        [[[[]], [[1]]], [[[2]], [[], [3]]]],
+        large(large(STR)),
+    ),
+}
+
+
+@ROUTES
+@ROLES
+@pytest.mark.parametrize("out", [None, "picked"])
+@pytest.mark.parametrize("i", [0, 1])
+@pytest.mark.parametrize("case", list(INDEXED))
+def test_index_gives_the_element_the_declared_token_type_less_one_layer(
+    case: str, i: int, out: str | None, role: str, route: str
+) -> None:
+    """The element's token is the token list's element, typed as that list's items.
+
+    ``Index`` typed the element's token again from its value, so a fixed-size
+    list became a ``large_list`` (which no longer fits fixed-size data), a list's
+    item field lost its name and nullability, and an empty list lost its inner
+    levels (ITL-1491). Both routes give the declared type with one layer removed.
+    """
+    token_type, tokens, data_type, data, element_type = INDEXED[case]
+    if role == "data_tag" and out is None:
+        pytest.skip("Index replaces a data column in place, not a tag")
+    stream = _stream(token_type, tokens, data_type, data, role)
+    table = _index_rows(stream, i, route, out)
+    name = f"_source_{out or 'x'}"
+    assert table.schema.field(name).type.equals(element_type, check_metadata=True), (
+        table.schema.field(name).type
+    )
+    assert table.column(name).to_pylist() == [token[i] for token in tokens]
+    assert table.column(out or "x").to_pylist() == [value[i] for value in data]
+    if out is not None:
+        assert table.schema.field("_source_x").type.equals(
+            token_type, check_metadata=True
+        )
+
+
+@ROUTES
+@pytest.mark.parametrize("out", [None, "picked"])
+def test_index_refuses_a_null_element_where_a_list_token_remains(
+    out: str | None, route: str
+) -> None:
+    """A null inner list is a valid element, but not a valid token of its own.
+
+    The stream is valid: a token list may hold a null element. ``Index`` on that
+    element would give a row a null token whose type is a list, which the
+    token-shape rule forbids; both routes refuse, naming the column. The element
+    that is a list is taken as before.
+    """
+    stream = _stream(
+        large(large(STR)),
+        [[None, ["a"]], [["b"], ["c"]]],
+        large(large(INT)),
+        [[[1], [2]], [[3], [4]]],
+    )
+    with pytest.raises((InputValidationError, ExceptionGroup)) as refused:
+        _ = _index_rows(stream, 0, route, out)
+    error: BaseException = refused.value
+    while isinstance(error, ExceptionGroup):
+        (error,) = error.exceptions
+    assert isinstance(error, InputValidationError)
+    assert f"'_source_{out or 'x'}'" in str(error) and "Index" in str(error)
+    taken = _index_rows(stream, 1, route, out)
+    assert taken.column(f"_source_{out or 'x'}").to_pylist() == [["a"], ["c"]]
+
+
+@ROUTES
+def test_index_keeps_a_null_string_element_as_a_null_token(route: str) -> None:
+    """A null element of a list of string tokens is a null string token: valid."""
+    stream = _stream(
+        large(STR), [[None, "a"], ["b", None]], large(INT), [[1, 2], [3, 4]]
+    )
+    table = _index_rows(stream, 0, route, None)
+    assert table.schema.field("_source_x").type == STR
+    assert table.column("_source_x").to_pylist() == [None, "b"]

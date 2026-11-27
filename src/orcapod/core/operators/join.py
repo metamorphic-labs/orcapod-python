@@ -208,6 +208,35 @@ def _token_fits(value: Any, kind: pa.DataType) -> bool:
     return False
 
 
+def _token_array(values: Sequence[Any], kind: pa.DataType, name: str) -> Any:
+    """Return the tokens ``values`` as an array of ``kind``, each with its shape kept.
+
+    The one way the join writes a token it made (a merged token, a fold) into a
+    column. A stream's tokens have the shape of their column (the token-shape
+    rule), so every such token fits; a token that does not is never written.
+
+    Args:
+        values: The tokens, one per row.
+        kind: The Arrow type of the token column.
+        name: The token column's name.
+
+    Returns:
+        The array.
+
+    Raises:
+        RuntimeError: If a token does not fit ``kind`` (``_token_fits``): pyarrow
+            would store a string given for a list type as its characters.
+    """
+    for value in values:
+        if not _token_fits(value, kind):
+            raise RuntimeError(
+                f"Join: a merged source-info token of column {name!r} does not have "
+                + f"the shape of its type {kind}; it is not written. This is a bug in "
+                + "Orcapod: a stream's tokens always have the shape of their column."
+            )
+    return pa.array(values, type=kind)
+
+
 def _fold_pending(value: Any) -> Any:
     """Replace every pending token position of ``value`` by its merged token."""
     if isinstance(value, list):
@@ -619,7 +648,7 @@ class Join(NonZeroInputOperator):
             the join folds them (``_fold_source_column``).
         """
         field = table.schema.field(left_name)
-        merged = pa.array(
+        merged = _token_array(
             [
                 _merge_pending(left, right)
                 for left, right in zip(
@@ -627,7 +656,8 @@ class Join(NonZeroInputOperator):
                     table.column(right_name).to_pylist(),
                 )
             ],
-            type=field.type,
+            field.type,
+            left_name,
         )
         index = table.schema.get_field_index(left_name)
         table = table.set_column(index, field, merged)
@@ -645,9 +675,10 @@ class Join(NonZeroInputOperator):
             The table with one merged token at every token position of ``name``.
         """
         field = table.schema.field(name)
-        folded = pa.array(
+        folded = _token_array(
             [_fold_pending(value) for value in table.column(name).to_pylist()],
-            type=field.type,
+            field.type,
+            name,
         )
         return table.set_column(table.schema.get_field_index(name), field, folded)
 
@@ -1283,20 +1314,21 @@ class Join(NonZeroInputOperator):
             }
         made = set(source_info)
         tokens = Join._token_columns(left, made) + Join._token_columns(right, made)
-        # A token the join makes has the type its column declares in the inputs
-        # (the sync path writes it into the left input's column): it is given as
-        # a value only when no input declares a type for it.
+        # A token the join makes is written with the type its column declares in
+        # the inputs, as the sync path writes it into the left input's column; it
+        # is given as a value only when no input declares a type for it (rows
+        # built from values).
         declared = Join._declared_token_types(left, right)
-        typed_names = [
-            name
-            for name, value in source_info.items()
-            if name in declared and _token_fits(value, declared[name])
-        ]
+        typed_names = [name for name in source_info if name in declared]
         if typed_names:
             tokens.append(
                 pa.Table.from_arrays(
                     [
-                        pa.array([source_info.pop(name)], type=declared[name])
+                        _token_array(
+                            [source_info.pop(name)],
+                            declared[name],
+                            f"{constants.SOURCE_PREFIX}{name}",
+                        )
                         for name in typed_names
                     ],
                     schema=pa.schema(
