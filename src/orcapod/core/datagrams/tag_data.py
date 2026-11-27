@@ -621,7 +621,9 @@ class Data(Datagram):
         ``with_columns_of``). Only a token created from a Python value, where no
         Arrow type exists (a row built from values, ``with_source_info``), is
         typed from its value. So a row built from values and the same row read
-        from a table give the same columns.
+        from a table give the same columns when the values' own types are the
+        table's (a hand-built list token that shows fewer list levels than the
+        table declares is typed from its value, and differs).
 
         ``as_table(columns={"source": True})`` gives the same typed columns
         (ITL-1491) and differs in two ways: a null token keeps the type its

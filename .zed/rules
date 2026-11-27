@@ -1116,9 +1116,14 @@ these preimages anywhere else.
   between two nodes, `_rows_to_table`), the row-built form of a whole table (which only
   normalizes a token column to large types, like any column, and sets its field flag), every
   change of a row (a selection, a drop, a rename, added columns), record batches
-  (`settle_token_types`: the declared type; two batches of one stream that declare two types
-  are refused), an operator's own async form (`Join` merges two rows by their typed token
-  columns, and gives as a value only a token it makes: a merged data-tag's) and a function
+  (`settle_token_types`: the declared type, compared strictly, item field names, nullability
+  and metadata included; two batches of one stream that declare two types are refused
+  whatever their order), an operator's own async form (`Join` merges two rows by their typed token
+  columns; the token it makes for a data-tag both inputs hold is written with the type the
+  inputs declare for that token column, on the sync and the async path, and inputs that
+  declare it with two types are refused by `require_shared_arrow_type`, as for a shared
+  key), a function pod's stream outside a job (`_table_from_pairs` takes each row's token
+  columns) and a function
   node, which takes the token types from its input's rows. A
   data-tag that falls through a function pod keeps its token with its type unchanged
   (`Data.with_columns_of`); a column a function returns is never a pass-through, even with
@@ -1127,7 +1132,7 @@ these preimages anywhere else.
   token is typed from its value (`arrow_utils.source_info_arrow_type`) only where it is
   first created and no Arrow type exists: a `Data` built by hand from Python values or
   given one by `with_source_info`, and the string tokens Orcapod itself creates (a source's,
-  a function output's, `Pick`'s and `Index`'s, a merged data-tag's, a placeholder's). A hand-built raw stream's
+  a function output's, `Pick`'s and `Index`'s, a placeholder's). A hand-built raw stream's
   token type is kept as it declares it (a fixed-size list stays one; a list's item field
   keeps its name and nullability).
 - The instance id reads a row's tokens through `DataProtocol.source_info_table()`: the typed
@@ -1138,7 +1143,11 @@ these preimages anywhere else.
   rows of one stream always make one table. A rename moves a column's token with it; a token held for the destination name
   before is dropped. There is one column
   per data column: a data column with no token has a null token, so a row built from values
-  and the same row read from a table have one instance id. Ids are a function of the row alone, never of the order
+  and the same row read from a table have one instance id whenever the values' own types
+  (`source_info_arrow_type`) are the table's: always for string and null tokens, and for a
+  list token that shows every list level of its column. A hand-built row whose list token
+  shows fewer levels than a table declares for it (`[None]` in a two-level column) is typed
+  from that value and is another instance. Ids are a function of the row alone, never of the order
   sessions ran in. A pipeline table keeps one type per token column: a row whose token column
   has another type than the rows recorded (a list token beside a string or null token) is
   refused, naming the column and both types (_require_one_type_per_token_column), and the write
@@ -1339,6 +1348,7 @@ data. The rules:
   expands or converts a type implicitly; the only exception is normalization to large variants.
   Inputs that disagree on a column's type are an error naming the column and both types, on
   every execution path (sync and async).
+  Something that used to complete may be changed to a refusal when the behaviour that let it complete was erroneous: a result reached through a bug (a silently changed type, a value that is not what it claims to be) is not protected by "nothing that completes may stop completing". The refusal stands until a proper fix exists, and is often the proper permanent answer. (Developer, November 27, 2026.)
   Function-output rule (developer, November 12, 2026): the returned value must be an instance of the declared type, or an exact numeric equivalent; a subclass stands in for its base.
   What is stored for a subclass instance is decided by the logical type of the declared
   class (developer, November 12, 2026, ITL-871): a plain user class is stored as the base
@@ -1822,9 +1832,11 @@ data. The rules:
   types are derived from the value, with None mapping to large_string. That rule has one
   definition, arrow_utils.source_info_arrow_type, and applies only to tokens supplied as
   Python values: ArrowTableStream.iter_data hands each row's source info to Data as Arrow
-  columns, so a type the stream already has is never re-inferred. A many→one operator must
-  emit a list for EVERY row of a list-valued column — mixing in a bare None makes per-row
-  as_table() schemas diverge and pa.concat_tables fail on the barrier path.
+  columns, so a type the stream already has is never re-inferred. A
+  many→one operator must emit a list for **every** row of a list-valued column. Rows read
+  from a table keep its column type, a null token included (ITL-1491), so they always make
+  one table; only rows built from Python values, where a bare `None` is typed `large_string`
+  and a list a list, give per-row `as_table()` schemas that diverge.
 - Operators that build lists (Batch, GroupBy, MergeJoin) build every list-valued column
   with arrow_utils.aggregated_list_array (member values in member order, lists from offsets),
   never from Python values and never pa.list_(field.type). Its type comes from

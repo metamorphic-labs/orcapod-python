@@ -1178,3 +1178,70 @@ def test_settled_tokens_against_an_input_with_no_rows_decide_as_the_sync_path(
         result = (type(error).__name__, str(error))
     assert result == sync
     assert isinstance(sync, int)
+
+
+# --- Review of PR 601: genuinely different declared token types (ITL-1491) ------------
+
+
+def _typed_token_stream(
+    tokens: list[Any],  # pyright: ignore[reportExplicitAny]  # tokens of any shape
+    keys: list[int],
+    kind: pa.DataType,
+) -> ArrowTableStream:
+    """Tags ``k`` and ``g``, data ``x`` and ``y``; ``x``'s source info declared ``kind``."""
+    return ArrowTableStream(
+        pa.table(
+            {
+                "k": pa.array(keys, pa.int64()),
+                "g": pa.array([f"g{k}" for k in keys], pa.large_string()),
+                "x": pa.array([10 * k for k in keys], pa.int64()),
+                "y": pa.array([k + 0.5 for k in keys], pa.float64()),
+                "_source_x": pa.array(tokens, kind),
+            }
+        ),
+        tag_columns=["k", "g"],
+    )
+
+
+@pytest.mark.parametrize(
+    "layout", ["keys_match", "no_key_matches", "left_empty", "right_empty"]
+)
+@pytest.mark.parametrize("deep", ["left", "right"])
+def test_merge_join_inputs_that_declare_two_token_types_are_refused(
+    deep: str, layout: str
+) -> None:
+    """Review of PR 601: the two inputs DECLARE ``_source_x`` with two types (two list
+    levels in one, one in the other), on matching keys, on keys that never match and
+    with an input that has no rows. The sync path refuses the two types of one
+    column; the kernel refuses too, with the same error, when it is built over the
+    inputs, before any batch."""
+    from orcapod.core.operators import MergeJoin
+    from orcapod.core.operators.streaming_joins import StreamingMergeJoin
+    from orcapod.errors import InputValidationError
+
+    keys = {
+        "keys_match": ([1, 2], [1, 2]),
+        "no_key_matches": ([1, 2], [7, 8]),
+        "left_empty": ([], [1, 2]),
+        "right_empty": ([1, 2], []),
+    }[layout]
+    kinds = (
+        (DEEP_TOKENS, SHALLOW_TOKENS)
+        if deep == "left"
+        else (
+            SHALLOW_TOKENS,
+            DEEP_TOKENS,
+        )
+    )
+    left, right = (
+        _typed_token_stream(
+            [[["a"]] if kind == DEEP_TOKENS else ["a"] for _ in side], side, kind
+        )
+        for side, kind in zip(keys, kinds)
+    )
+    with pytest.raises(InputValidationError) as sync_error:
+        _ = MergeJoin().static_process(left, right)
+    assert "'_source_x'" in str(sync_error.value)
+    with pytest.raises(InputValidationError) as kernel_error:
+        _ = StreamingMergeJoin(MergeJoin(), (left, right))
+    assert str(kernel_error.value) == str(sync_error.value)
