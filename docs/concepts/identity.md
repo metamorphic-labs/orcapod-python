@@ -26,11 +26,11 @@ A source's identity is its schema, its `source_id` and its key columns (the
 - If you pass `source_id` yourself, you are naming the source. The kind is part of the
   canonical ID. Two sources with the same ID, schema and key columns have the same
   content hash even when their rows differ. A pipeline checks reused IDs separately
-  when it captures or binds sources.
+  at capture, binding, loading and execution. See [source consistency](sources.md#source-ids-name-the-kind-that-reads-the-data).
 
 Two sources that differ only in their key columns name the same rows differently, so they
-are two sources: different content hashes (each gets its own cache), the same pipeline hash
-and the same `source_id`.
+have different content hashes and the same pipeline hash and `source_id`. A pipeline or
+job currently refuses to use both readings under that shared ID (ITL-1506).
 
 Rows are still identified individually. Each row carries its own content hash, and that
 per-row hash is what caching uses.

@@ -269,10 +269,10 @@ class CachedSource(RootSource):
 
     @property
     @override
-    def key_columns(self) -> tuple[str, ...] | None:
+    def _resolved_key_columns(self) -> tuple[str, ...] | None:
         """The wrapped source's key columns, or ``None`` when it is not a root source."""
         if isinstance(self._source, RootSource):
-            return self._source.key_columns
+            return self._source._resolved_key_columns
         return None
 
     def _compute_arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema]":

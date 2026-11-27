@@ -736,18 +736,13 @@ def test_fixed_different_rows_with_different_keys_are_different_rows(
 
 
 def test_fixed_row_multiset_counts_duplicates_and_ignores_order() -> None:
+    def digest(rows: list[dict[str, str | int]]) -> bytes | None:
+        return _keyed(rows, None)._fixed_row_multiset  # pyright: ignore[reportPrivateUsage]  # testing the internal digest
+
     a, b = _ROWS[0], _ROWS[1]
-    assert (
-        _keyed([a, a, b], None).fixed_row_multiset
-        == _keyed([a, b, a], None).fixed_row_multiset
-    )
-    assert (
-        _keyed([a, a, b], None).fixed_row_multiset
-        != _keyed([a, b, b], None).fixed_row_multiset
-    )
-    assert (
-        _keyed([a, b], None).fixed_row_multiset != _keyed([a], None).fixed_row_multiset
-    )
+    assert digest([a, a, b]) == digest([a, b, a])
+    assert digest([a, a, b]) != digest([a, b, b])
+    assert digest([a, b]) != digest([a])
 
 
 @pytest.mark.parametrize("reverse", [False, True])
@@ -873,7 +868,7 @@ def test_unknown_key_columns_never_hide_a_conflict_between_known_ones() -> None:
         positional.pipeline_hash().to_string(),
         *positional.output_schema(),
     )
-    assert proxy.key_columns is None
+    assert proxy._resolved_key_columns is None  # pyright: ignore[reportPrivateUsage]  # unbound proxy state
     for uses in itertools.permutations(
         [("slot 'p'", proxy), ("slot 'a'", positional), ("slot 'b'", keyed)]
     ):

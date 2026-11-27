@@ -88,9 +88,10 @@ on), and with key columns the same rows can arrive in any order. With different 
 columns the record IDs necessarily differ, so the rows are compared as a multiset of
 tags and data: every row counts as often as it occurs, and order does not count. The
 comparison follows Orcapod's Arrow value rule, which treats signed zeros as equal and
-all NaNs as equal. Sources that read again later, including files,
-databases, caches and stored job outputs, use the ID and schema without a row
-comparison. Capture and binding reject conflicts with `InconsistentSourceError`.
+all NaNs as equal. Only sources that hold their rows in memory take part in the
+content check. Sources that read rows later, including files, databases, caches and
+stored job outputs, skip the content check. Comparing those sources is tracked in
+ITL-1531. Capture and binding reject conflicts with `InconsistentSourceError`.
 Give the conflicting sources different `source_id` values.
 
 ```python
@@ -1013,13 +1014,13 @@ order or content can vary between runs, pass an explicit, stable `source_id` **a
 key columns that are unique per row; this avoids both the duplicate entries and the repeated
 deliveries.
 
-Sources that share a `source_id` and schema but have different key columns are two
-readings of one dataset, and are refused for now everywhere: at capture, `bind` (into any
-slots), load and run (`job.run()` and a node's `run()`), with `InconsistentSourceError`. When both hold their rows in memory, the
-rows are compared first (as a multiset, above): different rows are reported as such, and
-equal rows as differing only in key columns. The rows of a source read later (a file, a
-database) are not compared, and the error says so. ITL-1506 will allow distinct readings
-of one dataset in distinct named slots. Until then, give each source its own `source_id`.
+Sources that share a `source_id` and schema but have different key columns raise
+`InconsistentSourceError` during capture, binding into any slots, loading, and execution
+through `job.run()` or a node's `run()`. Orcapod compares the in-memory rows first, as
+described above. The error reports different rows when it finds a mismatch. It reports
+a difference only in key columns when all sources hold the same rows in memory.
+ITL-1506 tracks how to support multiple readings of one dataset with different key
+columns. Until that design is settled, give each source its own `source_id`.
 
 An in-memory source with key columns and no `source_id` can instead hash its rows in key
 order: pass `hash_in_key_order=True` (`ArrowTableSource`, `DictSource`, `DataFrameSource`,

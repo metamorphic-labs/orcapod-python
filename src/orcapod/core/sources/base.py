@@ -419,7 +419,7 @@ class RootSource(StreamBase):
         return arrow_schema_identity(*self.arrow_schemas, self.data_context)
 
     @property
-    def holds_fixed_rows(self) -> bool:
+    def _holds_fixed_rows(self) -> bool:
         """Whether this source holds its table, so its rows can be compared.
 
         A source that holds its table gives its rows without a read or a poll. Its
@@ -431,18 +431,18 @@ class RootSource(StreamBase):
         return False
 
     @property
-    def fixed_content(self) -> bytes | None:
+    def _fixed_content(self) -> bytes | None:
         """Digest of held rows for collision checks, or None for a live read.
 
         Tags, data and record ids (``_digest_fixed_rows``), computed on each read.
         The digest is separate from source identity.
         """
-        if not self.holds_fixed_rows:
+        if not self._holds_fixed_rows:
             return None
         return self._digest_fixed_rows()
 
     @property
-    def key_columns(self) -> tuple[str, ...] | None:
+    def _resolved_key_columns(self) -> tuple[str, ...] | None:
         """The resolved key columns that name this source's rows, in key order.
 
         ``()`` means a row is named by its position. Key columns belong to how the
@@ -453,7 +453,7 @@ class RootSource(StreamBase):
         return self._key_columns
 
     @property
-    def fixed_row_multiset(self) -> bytes | None:
+    def _fixed_row_multiset(self) -> bytes | None:
         """Digest of the held rows as a multiset of tags and data, or None for a live read.
 
         Used to compare two fixed readings of one dataset whose key columns differ
@@ -462,14 +462,14 @@ class RootSource(StreamBase):
         canonical row order of an identity table
         (``arrow_utils.canonical_identity_row_order``) and digested under the Arrow
         float rule, so ``-0.0`` equals ``0.0`` and every NaN equals every other. It is
-        ``None`` exactly when ``holds_fixed_rows`` is false; computed on each read.
+        ``None`` exactly when ``_holds_fixed_rows`` is false; computed on each read.
         """
-        if not self.holds_fixed_rows:
+        if not self._holds_fixed_rows:
             return None
         return self._digest_fixed_row_multiset()
 
     def _digest_fixed_row_multiset(self) -> bytes:
-        """Digest the rows as a multiset of tags and data (``fixed_row_multiset``)."""
+        """Digest the rows as a multiset of tags and data (``_fixed_row_multiset``)."""
         from orcapod.hashing.starfix_digest import digest_orcapod_table
         from orcapod.utils.arrow_utils import canonical_identity_row_order
 
@@ -734,6 +734,6 @@ class FixedTableSource(RootSource):
 
     @property
     @override
-    def holds_fixed_rows(self) -> bool:
+    def _holds_fixed_rows(self) -> bool:
         """Always: the table is held for the source's lifetime."""
         return True

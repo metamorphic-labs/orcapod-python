@@ -93,8 +93,8 @@ def _key_columns_conflict(
     """Describe sources of one id and schema whose key columns differ, if any.
 
     Such sources are distinct readings of one dataset. They are refused everywhere for
-    now (capture, bind, load, run), whatever slots they would take: allowing them in
-    distinct named slots is ITL-1506, after the multi-slot binding work (ITL-1442).
+    now (capture, bind, load, run), whatever slots they would take. ITL-1506 tracks
+    the design for different key columns under one source id.
     Call only after the schemas and fixed rows of ``group`` were found to agree. Only
     the sources whose key columns are known are compared: one whose key columns are
     unknown (an unbound proxy) neither causes nor suppresses a refusal. The message
@@ -109,8 +109,12 @@ def _key_columns_conflict(
     Returns:
         The error message, or ``None`` when the known key columns agree.
     """
-    known = [(where, s) for where, s in group if s.key_columns is not None]
-    if len({source.key_columns for _, source in known}) < 2:
+    known = [
+        (where, s)
+        for where, s in group
+        if s._resolved_key_columns is not None  # pyright: ignore[reportPrivateUsage]  # source consistency
+    ]
+    if len({source._resolved_key_columns for _, source in known}) < 2:  # pyright: ignore[reportPrivateUsage]  # source consistency
         return None
     where = ", ".join(location for location, _ in known)
     remedy = (
@@ -120,7 +124,7 @@ def _key_columns_conflict(
     )
     # "Only" claims the rows are equal: true only when every source of the group,
     # known key columns or not, holds rows that ``_differing_fixed_rows`` compared.
-    if all(source.holds_fixed_rows for _, source in group):
+    if all(source._holds_fixed_rows for _, source in group):  # pyright: ignore[reportPrivateUsage]  # source consistency
         return (
             f"Sources with source id {source_id!r} in {where} share one schema and "
             "the same rows, and differ only in key columns (record_id_columns), so "
@@ -160,9 +164,9 @@ def _differing_fixed_rows(
     answer never depends on the order of ``group``:
 
     - equal key columns (or unknown ones): tags, data and record ids
-      (``fixed_content``), so positional row order counts as it always has;
+      (``_fixed_content``), so positional row order counts as it always has;
     - different key columns: the record ids necessarily differ, so the rows are
-      compared as a multiset of tags and data (``fixed_row_multiset``): every
+      compared as a multiset of tags and data (``_fixed_row_multiset``): every
       occurrence counts, order does not, and floats compare by the Arrow value rule
       (``-0.0`` equals ``0.0``, NaN equals NaN).
 
@@ -177,7 +181,11 @@ def _differing_fixed_rows(
     Returns:
         The locations of the first such pair, or ``None`` when all fixed rows agree.
     """
-    fixed = [(where, s) for where, s in group if s.holds_fixed_rows]
+    fixed = [
+        (where, s)
+        for where, s in group
+        if s._holds_fixed_rows  # pyright: ignore[reportPrivateUsage]  # source consistency
+    ]
     exact: dict[int, bytes | None] = {}
     multisets: dict[int, bytes | None] = {}
 
@@ -186,13 +194,13 @@ def _differing_fixed_rows(
         held = exact if record_ids else multisets
         if id(source) not in held:
             held[id(source)] = (
-                source.fixed_content if record_ids else source.fixed_row_multiset
+                source._fixed_content if record_ids else source._fixed_row_multiset  # pyright: ignore[reportPrivateUsage]  # source consistency
             )
         return held[id(source)]
 
     for index, (first_location, first) in enumerate(fixed):
         for location, source in fixed[index + 1 :]:
-            first_keys, keys = first.key_columns, source.key_columns
+            first_keys, keys = first._resolved_key_columns, source._resolved_key_columns  # pyright: ignore[reportPrivateUsage]  # source consistency
             record_ids = first_keys is None or keys is None or first_keys == keys
             if digest(first, record_ids=record_ids) != digest(
                 source, record_ids=record_ids
