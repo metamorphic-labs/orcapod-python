@@ -17,6 +17,12 @@ from orcapod.core.operators.arrow_keys import (
     values_of,
 )
 from orcapod.core.operators.base import UnaryOperator
+from orcapod.core.operators.gathered_context import (
+    gathered_context_keys,
+    gathered_stream_context,
+    read_members,
+    with_context_keys,
+)
 from orcapod.core.data_tags import stream_data_tags
 from orcapod.core.streams import ArrowTableStream
 from orcapod.core.streams.base import typed_zero_row_table
@@ -286,6 +292,9 @@ class GroupBy(UnaryOperator):
     list-valued tag of the input can order members but cannot be a grouping
     key.
 
+    Every member of a group has the same data context, which the group takes;
+    members of different data contexts are refused (ITL-1359).
+
     Contrast with ``Batch``, which partitions by row count for throughput.  It
     has no key, so it keeps every tag column, list-valued: those lists are
     what tells a batch's members apart.
@@ -446,9 +455,10 @@ class GroupBy(UnaryOperator):
 
         Raises:
             InputValidationError: If a key is a list of any kind, or a user tag's
-                type has no order (``arrow_keys.part_without_rule``).
+                type has no order (``arrow_keys.part_without_rule``), or the members of
+                a group are of different data contexts (ITL-1359).
         """
-        table = stream.as_table(columns={"source": True, "system_tags": True})
+        table, member_contexts, rows_context = read_members(stream)
         tag_columns, _ = stream.keys()
         # The async path reaches here without ``validate_unary_input``.
         _refuse_unorderable_tags(
@@ -502,6 +512,13 @@ class GroupBy(UnaryOperator):
         # have one order.
         groups, order, offsets, bit_names = self._member_layout(
             table, non_key_tags, system_tag_columns
+        )
+        entry_contexts = gathered_context_keys(
+            "GroupBy",
+            member_contexts.take(order),
+            offsets,
+            table.select(list(tag_columns)),
+            order,
         )
 
         def emitted(c: str) -> pa.Array[Any]:
@@ -566,9 +583,9 @@ class GroupBy(UnaryOperator):
             [*keys, *(c for c in grouped_table.column_names if c not in keys)]
         )
         return ArrowTableStream(
-            grouped_table,
+            with_context_keys(grouped_table, entry_contexts),
             tag_columns=keys,
-            data_context=stream.data_context,
+            data_context=gathered_stream_context(entry_contexts, rows_context),
             data_tags=[c for c in data_tags if c in self.by],
         )
 

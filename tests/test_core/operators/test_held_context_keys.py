@@ -187,7 +187,6 @@ CASES = [
         "Batch",
         lambda: Batch(2),
         ids=(10, 30, 50),
-        sync_gap="Batch builds new rows and needs a rule for assigning context across members",
     ),
     *_case("DropColumns", lambda: DropColumns(["t1", "d3"])),
     *_case("DropDataColumns", lambda: DropDataColumns(["d2", "d3"])),
@@ -197,11 +196,7 @@ CASES = [
     ),
     *_case("DropNulls-all", DropNulls, ids=KEPT_IDS),
     *_case("DropTagColumns", lambda: DropTagColumns(["t1", "t2"])),
-    *_case(
-        "GroupBy",
-        lambda: GroupBy(MAIN.tags),
-        sync_gap="GroupBy builds new rows and needs a rule for assigning context across members",
-    ),
+    *_case("GroupBy", lambda: GroupBy(MAIN.tags)),
     *_case(
         "Index",
         lambda: Index("items", 0, out="selected"),
@@ -221,7 +216,7 @@ CASES = [
         "MergeJoin",
         MergeJoin,
         binary=True,
-        sync_gap="MergeJoin needs a rule for assigning context across inputs",
+        sync_gap="MergeJoin with no merged column gathers nothing and needs a rule for assigning context across inputs",
     ),
     *_case(
         "Pick",

@@ -4,6 +4,7 @@ from typing import Any, ClassVar, cast
 import numpy as np
 import pyarrow as pa
 
+from orcapod import contexts
 from orcapod.types.explanation import plain_repr
 from orcapod.core.operators.base import (
     BinaryOperator,
@@ -17,6 +18,12 @@ from orcapod.core.operators.join import (
     _COMMON_JOIN_KEY,  # pyright: ignore[reportPrivateUsage]  # one definition, shared with Join
     _with_common_key,  # pyright: ignore[reportPrivateUsage]  # one definition, shared with Join
     Join,
+)
+from orcapod.core.operators.gathered_context import (
+    gathered_context_keys,
+    gathered_stream_context,
+    read_members,
+    with_context_keys,
 )
 from orcapod.core.operators.key_nullability import (
     key_nullable,
@@ -33,6 +40,11 @@ from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema
 from orcapod.utils import arrow_utils, schema_utils
+
+# The data context keys of a joined row's two members, carried through the join under
+# names no column of a stream has.
+_LEFT_CONTEXT = "__orcapod_merge_join_left_context__"
+_RIGHT_CONTEXT = "__orcapod_merge_join_right_context__"
 
 
 def _output_types(
@@ -104,6 +116,40 @@ def _merged_list(
     )
 
 
+def _pair_contexts(joined: pa.Table, tag_columns: Sequence[str]) -> "pa.Array[Any]":
+    """Return the data context of each joined row, from its two members.
+
+    Args:
+        joined: The joined rows, each with the data context keys of its two members
+            (``_LEFT_CONTEXT``, ``_RIGHT_CONTEXT``).
+        tag_columns: The user tags of the joined rows.
+
+    Returns:
+        One data context key per joined row.
+
+    Raises:
+        InputValidationError: If the two members of a row are of different data contexts.
+    """
+    count = joined.num_rows
+    # Member order: the first argument's row, then the second's, as in the merged lists.
+    order = np.empty(2 * count, dtype=np.int64)
+    order[0::2] = np.arange(count, dtype=np.int64)
+    order[1::2] = np.arange(count, 2 * count, dtype=np.int64)
+    members = pa.concat_arrays(
+        [
+            joined.column(name).combine_chunks()
+            for name in (_LEFT_CONTEXT, _RIGHT_CONTEXT)
+        ]
+    )
+    return gathered_context_keys(
+        "MergeJoin",
+        members.take(pa.array(order, pa.int64())),
+        cast("pa.Int64Array", pa.array(np.arange(0, 2 * count + 1, 2), pa.int64())),
+        joined.select(list(tag_columns)),
+        pa.array(np.repeat(np.arange(count, dtype=np.int64), 2), pa.int64()),
+    )
+
+
 class MergeJoin(BinaryOperator):
     """
     Binary operator that joins two streams, merging colliding data columns
@@ -123,6 +169,10 @@ class MergeJoin(BinaryOperator):
     (``Data``) or on the async path it is typed ``large_string`` (ITL-1319).
 
     For non-colliding columns, values are kept as scalars (same as regular Join).
+
+    When columns are merged, the two rows of every output row have the same data
+    context, which the output row takes; rows of different data contexts are refused
+    (ITL-1359).
 
     Tag columns use inner join on shared tags, with union of tag schemas.
 
@@ -390,18 +440,22 @@ class MergeJoin(BinaryOperator):
 
         Raises:
             InputValidationError: If a column the two inputs share has two Arrow
-                types, or a shared tag key has a type with no rule for matching.
+                types, a shared tag key has a type with no rule for matching, or
+                the two rows of a merged row are of different data contexts
+                (ITL-1359).
         """
         self._require_tag_data_roles_agree(left_stream, right_stream)
 
+        left_rows, left_contexts, left_context = read_members(left_stream)
+        right_rows, right_contexts, right_context = read_members(right_stream)
         # Tables with source info and system tags, each input's system-tag
         # column names extended with its pipeline hash and argument index.
         left_table = arrow_utils.append_to_system_tags(
-            left_stream.as_table(columns={"source": True, "system_tags": True}),
+            left_rows,
             self._system_tag_suffix(left_stream, 0),
         )
         right_table = arrow_utils.append_to_system_tags(
-            right_stream.as_table(columns={"source": True, "system_tags": True}),
+            right_rows,
             self._system_tag_suffix(right_stream, 1),
         )
 
@@ -485,6 +539,12 @@ class MergeJoin(BinaryOperator):
         right_table = _with_common_key(right_table)
         join_keys = sorted(shared_tag_keys | {_COMMON_JOIN_KEY})
 
+        # The rows a merged list gathers are of one data context (ITL-1359). Without a
+        # merged column nothing is gathered.
+        if colliding_keys:
+            left_table = left_table.append_column(_LEFT_CONTEXT, left_contexts)
+            right_table = right_table.append_column(_RIGHT_CONTEXT, right_contexts)
+
         # The right-table columns the join suffixes with ``_right``: those the
         # left table also has, other than the keys.
         left_col_set = set(left_table.column_names) - {_COMMON_JOIN_KEY}
@@ -493,6 +553,19 @@ class MergeJoin(BinaryOperator):
 
         joined = _inner_join(left_table, right_table, join_keys)
         joined = joined.drop(_COMMON_JOIN_KEY)
+        entry_contexts: pa.Array[Any] | None = None
+        result_context: contexts.DataContext | None = None
+        if colliding_keys:
+            entry_contexts = _pair_contexts(
+                joined, sorted({*left_tag_keys, *right_tag_keys})
+            )
+            joined = joined.drop_columns([_LEFT_CONTEXT, _RIGHT_CONTEXT])
+            result_context = gathered_stream_context(
+                entry_contexts,
+                left_context
+                if left_context.context_key == right_context.context_key
+                else None,
+            )
         for left_name, right_name in right_source.items():
             joined = Join._merge_source_columns(joined, left_name, right_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
             joined = Join._fold_source_column(joined, left_name)  # pyright: ignore[reportPrivateUsage]  # Join's one rule
@@ -577,9 +650,12 @@ class MergeJoin(BinaryOperator):
             ],
             schema=result_schema,
         )
+        if entry_contexts is not None:
+            joined = with_context_keys(joined, entry_contexts)
         return ArrowTableStream(
             joined,
             tag_columns=tuple(tag_cols),
+            data_context=result_context,
             data_tags=data_tag_names(tag_schema, data_schema),
         )
 

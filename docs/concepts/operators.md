@@ -249,8 +249,8 @@ The rules:
   result's table. A stream reports one data context, and so do the rows it yields one by
   one (`iter_data`), as for any stream whose table holds rows of several (ITL-1359). Only the default
   data context ships, so this matters only for a stream built in another one. A known limitation
-  (ITL-1339): some operators (`PolarsFilter` and `MergeJoin`, likely `Join` and
-  `SemiJoin` too) return their rows in the default data context whatever their input's,
+  (ITL-1339): some operators (`PolarsFilter`, a `MergeJoin` that merges no column, likely
+  `Join` and `SemiJoin` too) return their rows in the default data context whatever their input's,
   so in another data context the rows of a branch through one of them match nothing
   beside a branch that kept its context.
 - **Data columns are disjoint**, as in `Join`; a data-tag present in several inputs is one
@@ -304,7 +304,8 @@ column (and of its source-info list) comes from the first input's row, element 1
 second's. Any value merges, a struct, a logical type or a null included, and every value is
 kept exactly as the input holds it. (A data column of the Arrow `null` type keeps that type
 in the result's table; read as rows, or on the async path, it is typed `large_string`, as
-every row reads a `null` column: ITL-1319.)
+every row reads a `null` column: ITL-1319.) The two rows of a merged row must have one
+[data context](#gathered-rows-have-one-data-context).
 
 ```python
 from orcapod.sources import DictSource
@@ -427,6 +428,16 @@ batch = Batch(batch_size=10, drop_partial_batch=True)
 `Batch` keeps every tag, list-valued. It batches blindly, by count: it has no key, so the lists
 of tag values are the only thing that tells a batch's members apart. `GroupBy` (below) has a
 key and keeps only that.
+
+#### Gathered rows have one data context
+
+A row has one data context. `Batch`, `GroupBy` and the merged lists of `MergeJoin` gather
+several rows into one, so all the rows of one entry must have the same data context, and the
+entry takes it (developer decision, November 24, 2026, ITL-1359). Rows of different data
+contexts raise `InputValidationError`, naming the operator, the contexts and one row's tags;
+nothing is converted from one context to another. The rule is per entry: entries of one result
+may be of different data contexts, each named in the data context column of the table. Only the
+default data context ships, so this matters only for a stream built in another one.
 
 ### GroupBy
 
