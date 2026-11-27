@@ -13,6 +13,8 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from upath import UPath
@@ -204,38 +206,61 @@ class _LegacyCacher:
     """A custom cacher keyed by file metadata alone."""
 
     def __init__(self) -> None:
-        self.entries: dict[tuple[UPath, int, int], ContentHash] = {}
+        self.entries: dict[tuple[UPath, int, int], object] = {}
 
     def get(self, key: FileHashKey) -> ContentHash | None:
-        return self.entries.get((key.path, key.mtime_ns, key.size))
+        # Model a custom backend whose deserialization may violate the protocol.
+        return cast(
+            "ContentHash | None", self.entries.get((key.path, key.mtime_ns, key.size))
+        )
 
     def put(self, key: FileHashKey, value: ContentHash) -> None:
         self.entries[(key.path, key.mtime_ns, key.size)] = value
 
 
 @pytest.mark.parametrize(
-    ("label", "length"),
-    [("md5", 16), ("sha256", 31), ("sha256", 33)],
-    ids=["wrong-algorithm", "short-digest", "long-digest"],
+    "cached_value",
+    [
+        pytest.param(ContentHash("md5", b"\x07" * 16), id="wrong-algorithm"),
+        pytest.param(ContentHash("sha256", b"\x07" * 31), id="short-digest"),
+        pytest.param(ContentHash("sha256", b"\x07" * 33), id="long-digest"),
+        pytest.param(b"\x07" * 32, id="raw-bytes"),
+        pytest.param(
+            SimpleNamespace(method="sha256", digest=b"\x07" * 32), id="look-alike"
+        ),
+        pytest.param(None, id="none"),
+    ],
 )
 def test_cached_file_hasher_treats_invalid_custom_hits_as_misses(
-    data_file: Path, label: str, length: int
+    data_file: Path, cached_value: object
 ):
     legacy_cache = _LegacyCacher()
     file_hasher = _CountingHasher(FileHasher().hash_algorithm)
     cached_hasher = CachedFileHasher(file_hasher, legacy_cache)
     path = UPath(data_file.resolve())
     stat = path.stat()
-    legacy_cache.put(
-        FileHashKey(path, stat.st_mtime_ns, stat.st_size, label),
-        ContentHash(label, b"\x07" * length),
-    )
+    legacy_cache.entries[(path, stat.st_mtime_ns, stat.st_size)] = cached_value
 
     expected = file_hasher.inner.hash_file(data_file)
     assert cached_hasher.hash_file(data_file) == expected
     assert file_hasher.reads == 1
     assert cached_hasher.hash_file(data_file) == expected
     assert file_hasher.reads == 1
+
+
+def test_cached_file_hasher_uses_a_valid_custom_hit_without_reading(data_file: Path):
+    legacy_cache = _LegacyCacher()
+    file_hasher = _CountingHasher(FileHasher().hash_algorithm)
+    cached_hasher = CachedFileHasher(file_hasher, legacy_cache)
+    path = UPath(data_file.resolve())
+    stat = path.stat()
+    expected = file_hasher.inner.hash_file(path)
+    legacy_cache.put(
+        FileHashKey(path, stat.st_mtime_ns, stat.st_size, expected.method), expected
+    )
+
+    assert cached_hasher.hash_file(data_file) is expected
+    assert file_hasher.reads == 0
 
 
 @pytest.mark.parametrize(("first", "second"), ALGORITHM_ORDERS)

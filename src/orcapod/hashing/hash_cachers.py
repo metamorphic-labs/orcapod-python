@@ -202,6 +202,8 @@ class SqliteHashCacher:
         ):
             # SQLite can skip the busy handler on a lock upgrade during a
             # journal-mode change. Retry the pragma after it releases its locks.
+            # The deadline limits which failures trigger another retry. Each
+            # pragma attempt and BEGIN IMMEDIATE use SQLite's own busy timeout.
             deadline = time.monotonic() + _SQLITE_BUSY_TIMEOUT_SECONDS
             while True:
                 try:

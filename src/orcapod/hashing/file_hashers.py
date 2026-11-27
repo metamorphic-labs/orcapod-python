@@ -161,7 +161,8 @@ class CachedFileHasher:
     1. Resolve the path to an absolute ``UPath`` and stat the file.
     2. Look up ``(path, mtime_ns, size, algorithm)`` in the cacher, using
        the inner hasher's ``hash_algorithm``. Each algorithm has its own entry.
-    3. Return a cached ``ContentHash`` if its label and digest length match.
+    3. Accept a hit only if it is a ``ContentHash`` with the expected label and
+       digest length.
     4. On miss: delegate to the inner hasher, store the result, return it.
 
     Both ``FileHasher`` and ``CachedFileHasher`` satisfy
@@ -212,7 +213,7 @@ class CachedFileHasher:
         key = FileHashKey(path, stat.st_mtime_ns, stat.st_size, self.hash_algorithm)
 
         hit = self.cacher.get(key)
-        if hit is not None:
+        if isinstance(hit, ContentHash):
             try:
                 require_storable(key, hit)
             except ValueError:
