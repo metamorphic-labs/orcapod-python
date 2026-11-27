@@ -254,7 +254,7 @@ def test_cached_file_hasher_uses_a_valid_custom_hit_without_reading(data_file: P
     cached_hasher = CachedFileHasher(file_hasher, legacy_cache)
     path = UPath(data_file.resolve())
     stat = path.stat()
-    expected = file_hasher.inner.hash_file(path)
+    expected = file_hasher.inner.hash_file(data_file)
     legacy_cache.put(
         FileHashKey(path, stat.st_mtime_ns, stat.st_size, expected.method), expected
     )
