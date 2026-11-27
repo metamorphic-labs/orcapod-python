@@ -11,6 +11,8 @@ from pathlib import Path
 import typer
 from upath import UPath
 
+from orcapod.hashing.hash_utils import SHA256_ALGORITHM
+
 _DEFAULT_MIN_SIZE_MB: float = 500.0
 
 
@@ -31,7 +33,7 @@ def warm_cache(
         ),
     ),
     algorithm: str = typer.Option(
-        "sha256",
+        SHA256_ALGORITHM,
         "--algorithm",
         help="Hash algorithm (sha256, xxh64, md5, …). Default: sha256.",
         show_default=True,

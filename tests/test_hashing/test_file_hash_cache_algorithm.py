@@ -1,6 +1,6 @@
 """A cached file hash is used only for the algorithm that made it (ITL-1488).
 
-The file hash cache keys an entry by the file's path, modified time and size. A
+The file hash cache keys an entry by path, modified time, size and algorithm. A
 hash made with one algorithm must never be returned for another: the file's hash
 enters identities and stored values, so a cache filled with ``md5`` must not
 change what the default ``sha256`` hasher returns.
@@ -8,8 +8,11 @@ change what the default ``sha256`` hasher returns.
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 from upath import UPath
@@ -113,8 +116,8 @@ def test_warm_cache_counts_another_algorithms_entry_as_not_cached(
 # ---------------------------------------------------------------------------
 
 
-def _key(label: str, mtime_ns: int = 1000) -> FileHashKey:
-    return FileHashKey(UPath("/a/b.txt"), mtime_ns, 100, label)
+def _key(algorithm: str, mtime_ns: int = 1000) -> FileHashKey:
+    return FileHashKey(UPath("/a/b.txt"), mtime_ns, 100, algorithm)
 
 
 @pytest.mark.parametrize(("first", "second"), [("sha256", "md5"), ("md5", "sha256")])
@@ -189,34 +192,65 @@ class _CountingHasher:
         self.reads: int = 0
 
     @property
-    def hash_label(self) -> str:
-        return self.inner.hash_label
+    def hash_algorithm(self) -> str:
+        return self.inner.hash_algorithm
 
     def hash_file(self, file_path: PathLike) -> ContentHash:
         self.reads += 1
         return self.inner.hash_file(file_path)
 
 
-@pytest.mark.parametrize(("first", "second"), [("sha256", "md5"), ("md5", "sha256")])
-def test_sqlite_alternating_algorithms_evict_but_never_hit_wrongly(
-    tmp_path: Path, data_file: Path, first: str, second: str
+@pytest.mark.parametrize(("first", "second"), ALGORITHM_ORDERS)
+def test_alternating_algorithms_keep_both_cached(
+    cacher: Cacher, data_file: Path, first: str, second: str
 ):
-    """One SQLite row per file: alternating algorithms replace each other's entry.
+    """Read the file once per algorithm, including when the cache is shared."""
+    inner = {algorithm: _CountingHasher(algorithm) for algorithm in (first, second)}
+    cached = {
+        algorithm: CachedFileHasher(inner[algorithm], cacher)
+        for algorithm in (first, second)
+    }
+    for algorithm in (first, second, first, second):
+        assert cached[algorithm].hash_file(data_file) == FileHasher(
+            algorithm=algorithm
+        ).hash_file(data_file)
+    assert (inner[first].reads, inner[second].reads) == (1, 1)
 
-    Each lookup with the other label is a miss (the file is read again), never a hit
-    on the other algorithm's hash; the same algorithm twice in a row is a hit.
-    """
-    inner = {a: _CountingHasher(a) for a in (first, second)}
-    with SqliteHashCacher(tmp_path / "cache.db") as c:
-        cached = {a: CachedFileHasher(inner[a], c) for a in (first, second)}
-        for algorithm in (first, second, first, second):
-            assert cached[algorithm].hash_file(data_file) == FileHasher(
-                algorithm=algorithm
-            ).hash_file(data_file)
-        assert (inner[first].reads, inner[second].reads) == (2, 2)  # evicted each time
 
-        assert cached[second].hash_file(data_file).method == second
-        assert inner[second].reads == 2  # same algorithm again: a hit
+def test_conflicting_hash_is_refused_and_identical_hash_is_a_noop(cacher: Cacher):
+    key = _key("sha256")
+    original = _hash_of("sha256", 1)
+    cacher.put(key, original)
+    cacher.put(key, original)
+    with pytest.raises(ValueError, match="Different hash"):
+        cacher.put(key, _hash_of("sha256", 2))
+    assert cacher.get(key) == original
+
+
+@pytest.mark.parametrize("same_hash", [True, False])
+def test_sqlite_concurrent_puts(tmp_path: Path, same_hash: bool):
+    key = _key("sha256")
+    values = (_hash_of("sha256", 1), _hash_of("sha256", 1 if same_hash else 2))
+    barrier = Barrier(2)
+    with SqliteHashCacher(tmp_path / "cache.db") as cacher:
+
+        def put(value: ContentHash) -> bool:
+            try:
+                barrier.wait(timeout=10)
+                cacher.put(key, value)
+            except ValueError as exc:
+                assert "Different hash" in str(exc)
+                return False
+            finally:
+                cacher.close()
+            return True
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            accepted = list(pool.map(put, values))
+        assert sum(accepted) == (2 if same_hash else 1)
+        assert cacher.get(key) == next(
+            value for value, success in zip(values, accepted, strict=True) if success
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -305,14 +339,12 @@ def test_every_supported_algorithm_round_trips(
     assert cacher.get(_key(label)) == value
 
 
-def _insert_raw(db_path: Path, blob: bytes, mtime_ns: int = 1000) -> None:
-    import sqlite3
-
+def _insert_raw(db_path: Path, blob: bytes | str, algorithm: str = "sha256") -> None:
     with sqlite3.connect(db_path) as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO file_hash_cache (path, mtime_ns, size, hash) "
-            "VALUES (?, ?, ?, ?)",
-            ("/a/b.txt", mtime_ns, 100, blob),
+            "INSERT INTO file_hash_cache_v2 (path, mtime_ns, size, algorithm, hash) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("/a/b.txt", 1000, 100, algorithm, blob),
         )
 
 
@@ -323,13 +355,14 @@ CRAFTED_BLOBS = [
     pytest.param(b"sha256" + b"\x07" * 32, id="no-separator"),
     pytest.param(b"SHA256:" + b"\x07" * 32, id="other-case-label"),
     pytest.param(b"md5:" + b"\x07" * 32, id="other-label"),
+    pytest.param("sha256:" + "a" * 32, id="text-instead-of-blob"),
 ]
 
 
 @pytest.mark.parametrize("match_mtime", [True, False])
 @pytest.mark.parametrize("blob", CRAFTED_BLOBS)
 def test_sqlite_reads_a_malformed_stored_hash_as_a_miss(
-    tmp_path: Path, match_mtime: bool, blob: bytes
+    tmp_path: Path, match_mtime: bool, blob: bytes | str
 ):
     db_path = tmp_path / "c.db"
     with SqliteHashCacher(db_path, match_mtime=match_mtime) as c:
@@ -373,7 +406,9 @@ def test_sqlite_read_with_an_invalid_label_is_a_miss(
     """A persisted row whose bytes begin with the invalid label is still a miss."""
     db_path = tmp_path / "c.db"
     with SqliteHashCacher(db_path, match_mtime=match_mtime) as c:
-        _insert_raw(db_path, label.encode("utf-8") + b":" + b"\x07" * 32)
+        _insert_raw(
+            db_path, label.encode("utf-8") + b":" + b"\x07" * 32, algorithm=label
+        )
         assert c.get(_key(label)) is None
 
 
@@ -396,7 +431,7 @@ def test_any_refusal_of_hashlib_is_value_error_on_put_and_a_miss_on_read(
         InMemoryHashCacher() if kind == "in_memory" else SqliteHashCacher(db_path)
     )
     if isinstance(c, SqliteHashCacher):
-        _insert_raw(db_path, b"refused_algo:" + b"\x07" * 32)
+        _insert_raw(db_path, b"refused_algo:" + b"\x07" * 32, algorithm="refused_algo")
     monkeypatch.setattr(hashlib, "new", refusing_new)
 
     with pytest.raises(ValueError):
@@ -411,7 +446,7 @@ class _CustomLabelHasher:
         self.calls: int = 0
 
     @property
-    def hash_label(self) -> str:
+    def hash_algorithm(self) -> str:
         return "app-sha256-v1"
 
     def hash_file(self, file_path: PathLike) -> ContentHash:

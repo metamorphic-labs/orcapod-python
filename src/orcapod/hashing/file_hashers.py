@@ -2,12 +2,18 @@ from dataclasses import dataclass
 
 from upath import UPath
 
-from orcapod.hashing.hash_utils import file_hash_digest_size, hash_file
+from orcapod.hashing.hash_utils import (
+    SHA256_ALGORITHM,
+    file_hash_digest_size,
+    hash_file,
+)
 from orcapod.protocols.hashing_protocols import (
     CacherProtocol,
     FileContentHasherProtocol,
 )
 from orcapod.types import ContentHash, PathLike
+
+FILE_HASH_CACHE_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -25,21 +31,21 @@ class FileHashKey:
             normalised to ``UPath`` before constructing this key.
         mtime_ns: Last-modified time in nanoseconds (``path.stat().st_mtime_ns``).
         size: File size in bytes (``path.stat().st_size``).
-        label: Hash label of the algorithm (``ContentHash.method`` of the
+        algorithm: PROVISIONAL. Hash label of the algorithm (``ContentHash.method`` of the
             hash, e.g. ``"sha256"``).
     """
 
     path: UPath
     mtime_ns: int
     size: int
-    label: str
+    algorithm: str
 
 
 def stored_hash_prefix(label: str) -> bytes | None:
     """The leading bytes of a stored hash of ``label`` (``<label>:``), if it is valid.
 
     A persistent cacher stores ``ContentHash.to_prefixed_digest()``, which starts
-    with these bytes, and matches an entry's label on them.
+    with these bytes.
 
     Args:
         label: The label of a key.
@@ -73,15 +79,15 @@ def require_storable(key: FileHashKey, value: ContentHash) -> None:
         ValueError: If the labels differ, the label names no algorithm with a fixed
             digest length, or the digest has another length.
     """
-    if value.method != key.label:
+    if value.method != key.algorithm:
         raise ValueError(
             f"A {value.method!r} hash cannot be stored under a key whose label is "
-            f"{key.label!r}"
+            f"{key.algorithm!r}"
         )
-    size = file_hash_digest_size(key.label)
+    size = file_hash_digest_size(key.algorithm)
     if len(value.digest) != size:
         raise ValueError(
-            f"A {key.label!r} digest is {size} bytes, not {len(value.digest)}"
+            f"A {key.algorithm!r} digest is {size} bytes, not {len(value.digest)}"
         )
 
 
@@ -120,14 +126,14 @@ class FileHasher:
 
     def __init__(
         self,
-        algorithm: str = "sha256",
+        algorithm: str = SHA256_ALGORITHM,
         buffer_size: int = 65536,
     ):
         self.algorithm = algorithm
         self.buffer_size = buffer_size
 
     @property
-    def hash_label(self) -> str:
+    def hash_algorithm(self) -> str:
         """The label of every hash this hasher returns: the algorithm's name."""
         return self.algorithm
 
@@ -153,9 +159,8 @@ class CachedFileHasher:
     ``hash_file``:
 
     1. Resolve the path to an absolute ``UPath`` and stat the file.
-    2. Look up ``(path, mtime_ns, size, label)`` in the cacher, ``label``
-       being the inner hasher's ``hash_label``: an entry made with another
-       algorithm is never returned (ITL-1488).
+    2. Look up ``(path, mtime_ns, size, algorithm)`` in the cacher, using
+       the inner hasher's ``hash_algorithm``. Each algorithm has its own entry.
     3. On hit: return the cached ``ContentHash`` directly.
     4. On miss: delegate to the inner hasher, store the result, return it.
 
@@ -174,7 +179,7 @@ class CachedFileHasher:
             ``CacherProtocol[FileHashKey, ContentHash]``.
 
     Raises:
-        ValueError: If ``file_hasher.hash_label`` names no algorithm with a fixed
+        ValueError: If ``file_hasher.hash_algorithm`` names no algorithm with a fixed
             digest length.
     """
 
@@ -183,14 +188,14 @@ class CachedFileHasher:
         file_hasher: FileContentHasherProtocol,
         cacher: "CacherProtocol[FileHashKey, ContentHash]",
     ) -> None:
-        _ = file_hash_digest_size(file_hasher.hash_label)
+        _ = file_hash_digest_size(file_hasher.hash_algorithm)
         self.file_hasher = file_hasher
         self.cacher = cacher
 
     @property
-    def hash_label(self) -> str:
+    def hash_algorithm(self) -> str:
         """The inner hasher's label: the label of every hash this hasher returns."""
-        return self.file_hasher.hash_label
+        return self.file_hasher.hash_algorithm
 
     def hash_file(self, file_path: PathLike) -> ContentHash:
         """Return the ``ContentHash`` for ``file_path``, using the cache.
@@ -204,7 +209,7 @@ class CachedFileHasher:
         path = file_path if isinstance(file_path, UPath) else UPath(file_path)
         path = path.resolve()
         stat = path.stat()
-        key = FileHashKey(path, stat.st_mtime_ns, stat.st_size, self.hash_label)
+        key = FileHashKey(path, stat.st_mtime_ns, stat.st_size, self.hash_algorithm)
 
         hit = self.cacher.get(key)
         if hit is not None:

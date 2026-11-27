@@ -22,8 +22,9 @@ from typing import Callable, Literal
 
 from upath import UPath
 
-from orcapod.hashing.file_hashers import FileHashKey, FileHasher
+from orcapod.hashing.file_hashers import FileHasher, FileHashKey
 from orcapod.hashing.hash_cachers import SqliteHashCacher
+from orcapod.hashing.hash_utils import SHA256_ALGORITHM
 from orcapod.types import PathLike
 
 logger = logging.getLogger(__name__)
@@ -184,7 +185,7 @@ class _HashVisitor:
                 resolved,
                 file_stat.st_mtime_ns,
                 file_stat.st_size,
-                self._hasher.hash_label,
+                self._hasher.hash_algorithm,
             )
             if not self._force and self._cacher.get(key) is not None:
                 return ("cached", file_stat.st_size)
@@ -205,7 +206,7 @@ class _DryRunVisitor:
     Args:
         cacher: Shared ``SqliteHashCacher`` instance.
         hasher: The ``FileHasher`` a real run would use. Never called: only its
-            ``hash_label`` is read, so an entry of another algorithm counts as
+            ``hash_algorithm`` is read, so an entry of another algorithm counts as
             not cached (ITL-1488).
         force: If ``True``, skip the cache check and always return ``"would_hash"``.
     """
@@ -218,7 +219,7 @@ class _DryRunVisitor:
         force: bool = False,
     ) -> None:
         self._cacher = cacher
-        self._label = hasher.hash_label
+        self._algorithm = hasher.hash_algorithm
         self._force = force
 
     def __call__(
@@ -228,7 +229,7 @@ class _DryRunVisitor:
             if self._force:
                 return ("would_hash", file_stat.st_size)
             key = FileHashKey(
-                resolved, file_stat.st_mtime_ns, file_stat.st_size, self._label
+                resolved, file_stat.st_mtime_ns, file_stat.st_size, self._algorithm
             )
             if self._cacher.get(key) is not None:
                 return ("cached", file_stat.st_size)
@@ -243,7 +244,7 @@ def populate_hash_cache(
     *,
     min_size_bytes: int = _DEFAULT_MIN_SIZE_BYTES,
     db_path: UPath | PathLike | None = None,
-    algorithm: str = "sha256",
+    algorithm: str = SHA256_ALGORITHM,
     buffer_size: int = 65536,
     max_workers: int = _DEFAULT_MAX_WORKERS,
     dry_run: bool = False,

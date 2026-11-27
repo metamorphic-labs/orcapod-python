@@ -122,7 +122,16 @@ def _to_path(file_path: PathLike) -> Path | UPath:
     return Path(file_path)
 
 
-_FIXED_DIGEST_SIZES = {"hash_path": 32, "xxh64": 8, "crc32": 4}
+SHA256_ALGORITHM = "sha256"
+_PATH_HASH_ALGORITHM = "hash_path"
+_XXH64_ALGORITHM = "xxh64"
+_CRC32_ALGORITHM = "crc32"
+
+_FIXED_DIGEST_SIZES = {
+    _PATH_HASH_ALGORITHM: 32,
+    _XXH64_ALGORITHM: 8,
+    _CRC32_ALGORITHM: 4,
+}
 
 
 def file_hash_digest_size(algorithm: str) -> int:
@@ -155,7 +164,7 @@ def file_hash_digest_size(algorithm: str) -> int:
 
 
 def hash_file(
-    file_path: PathLike, algorithm="sha256", buffer_size=65536
+    file_path: PathLike, algorithm=SHA256_ALGORITHM, buffer_size=65536
 ) -> ContentHash:
     """Calculate the hash of a file using the specified algorithm.
 
@@ -177,12 +186,12 @@ def hash_file(
         raise FileNotFoundError(f"The file {file_path} does not exist")
 
     # Hash the path string itself rather than file content
-    if algorithm == "hash_path":
+    if algorithm == _PATH_HASH_ALGORITHM:
         hasher = hashlib.sha256()
         hasher.update(str(file_path).encode("utf-8"))
         return ContentHash(method=algorithm, digest=hasher.digest())
 
-    if algorithm == "xxh64":
+    if algorithm == _XXH64_ALGORITHM:
         hasher = xxhash.xxh64()
         with path.open("rb") as file:
             while True:
@@ -192,7 +201,7 @@ def hash_file(
                 hasher.update(data)
         return ContentHash(method=algorithm, digest=hasher.digest())
 
-    if algorithm == "crc32":
+    if algorithm == _CRC32_ALGORITHM:
         crc = 0
         with path.open("rb") as file:
             while True:

@@ -6,17 +6,14 @@
     "previous": "std:v0.1:default",
     "file_hasher": {
         "_class": "orcapod.hashing.file_hashers.FileHasher",
-        "_config": {
-            "algorithm": "sha256"
-        }
+        "_config": {}
     },
     "directory_hasher": {
         "_class": "orcapod.hashing.directory_hashers.BasicDirectoryHasher",
         "_config": {
             "file_hasher": {
                 "_ref": "file_hasher"
-            },
-            "algorithm": "sha256"
+            }
         }
     },
     "type_converter": {

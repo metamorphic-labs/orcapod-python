@@ -19,7 +19,7 @@ with no memory of previous results.
 `ContentHash`. The key is a four-field struct:
 
 ```
-FileHashKey(path, mtime_ns, size, label)
+FileHashKey(path, mtime_ns, size, algorithm)
 ```
 
 The `mtime_ns` and `size` fields encode the file's identity at a specific
@@ -28,21 +28,19 @@ changes — the key is different, so the old entry is never returned. You do
 not need to explicitly invalidate entries; the key change handles it
 automatically.
 
-The `label` field names the hash algorithm (`sha256`, `md5`, ...): it is the
-label every hash of that algorithm carries. A cached hash is returned only for
-the algorithm that made it. A cache filled with another algorithm, for example
-by `orcapod warm-cache --algorithm md5`, is a miss for the default SHA-256
-hasher, which reads the file and computes its own hash; it never returns the
-MD5 value. The stored tables hold one hash per path, modification time and
-size, so hashing the same file with a second algorithm replaces the first
-algorithm's entry. Fill the cache with the algorithm your pipeline uses (the
-default, `sha256`, unless you configured another).
+`FileHashKey.algorithm` is **PROVISIONAL**. Its value is the hash label
+(`ContentHash.method`) reported by the file hasher's `hash_algorithm` property.
+The cache stores each algorithm's hash separately for a given file state.
+For example, `orcapod warm-cache --algorithm md5` fills MD5 entries. A later
+SHA-256 lookup can fill its own entries alongside them.
 
-A cacher refuses (`ValueError`) to store a hash under a key of another label, or
-a digest whose length is not that algorithm's, so the store never holds a value
-under another algorithm's key. A stored value is read only when it is exactly
-the key's label, a `:` and a digest of that algorithm's length; any other value
-is a miss, and the file is hashed again.
+A cache write raises `ValueError` if the hash label or digest length is invalid
+for the key, or if the key already holds a different hash. Writing an identical
+hash leaves the existing entry and its timestamp unchanged. Reads accept values
+in the exact format `<label>:<digest>`, with the key's label and that
+algorithm's digest length. A malformed value is a miss. If hashing the file
+again finds a different value for that same key, a writable cache raises
+`ValueError`. Clear the current cache to rebuild it.
 
 The label must name an algorithm whose digest length is fixed: a `hashlib`
 algorithm such as `sha256` or `md5`, or `hash_path`, `xxh64` or `crc32`. Every algorithm
@@ -148,7 +146,7 @@ enable_file_hash_caching(
 
 ## Ignoring mtime in cache lookups
 
-By default, a cache hit requires **path, mtime_ns, and size** to all match the stored
+By default, a cache hit requires **path, mtime_ns, size, and algorithm** to all match the stored
 entry. In several common deployment scenarios, mtime is unreliable — it changes even
 when file content has not — causing spurious cache misses and unnecessary re-hashing:
 
@@ -169,7 +167,7 @@ when file content has not — causing spurious cache misses and unnecessary re-h
   timestamps that differ from the values recorded in the cache.
 
 Set `match_mtime=False` to drop mtime from the lookup criterion. A cache hit then
-requires only **path and size** to match:
+requires **path, size, and algorithm** to match:
 
 ```python
 from orcapod.contexts import enable_file_hash_caching
@@ -177,7 +175,7 @@ from orcapod.contexts import enable_file_hash_caching
 enable_file_hash_caching(match_mtime=False)
 ```
 
-When multiple cache entries share the same path and size (recorded at different
+When multiple cache entries share the same path, size, and algorithm (recorded at different
 mtimes), Orcapod returns the hash from the entry with the most recent `mtime_ns`.
 
 **The write path is unchanged.** mtime is always recorded when a new entry is
@@ -225,16 +223,23 @@ You can override this path in two ways:
 - Set the `ORCAPOD_HASH_CACHE_DB` environment variable to the desired path.
 - Pass the `db_path` argument to `enable_file_hash_caching()`.
 
+SQLite and PostgreSQL use the new `file_hash_cache_v2` table. The versioned
+name lets the new primary key coexist with the old `file_hash_cache` table,
+which the cacher leaves untouched. SQLite records version 2 in
+`PRAGMA user_version`, and PostgreSQL records it in `file_hash_cache_v2_meta`.
+Until migration support is available (ITL-1535), let your next pipeline run or
+`orcapod warm-cache` hash the files once more to fill the new table.
+
 To inspect cached entries using the SQLite command-line tool:
 
 ```bash
-sqlite3 ~/.orcapod/file_hash_cache.db "SELECT path, size, cached_at FROM file_hash_cache LIMIT 10;"
+sqlite3 ~/.orcapod/file_hash_cache.db "SELECT path, size, algorithm, cached_at FROM file_hash_cache_v2 LIMIT 10;"
 ```
 
 To clear all cached entries:
 
 ```bash
-sqlite3 ~/.orcapod/file_hash_cache.db "DELETE FROM file_hash_cache;"
+sqlite3 ~/.orcapod/file_hash_cache.db "DELETE FROM file_hash_cache_v2;"
 ```
 
 ## When caching helps -- and when it doesn't
@@ -269,7 +274,7 @@ Orcapod ships two hash cache backends. Pick based on your deployment:
 |---|---|---|
 | Setup | Zero — file on disk | Requires a running Postgres server |
 | Scope | Per-machine | Shared across machines and pipeline runs |
-| Concurrency | Single-writer | Multi-writer safe (`ON CONFLICT DO NOTHING`) |
+| Concurrency | One writer at a time | Concurrent writers |
 | Best for | Local development, single-machine pipelines | Distributed pipelines, shared caches |
 
 ### Using the SQLite backend (default)
@@ -319,13 +324,14 @@ hasher = CachedFileHasher(file_hasher=FileHasher(), cacher=cacher)
 (`CREATE TABLE IF NOT EXISTS`):
 
 ```sql
-CREATE TABLE IF NOT EXISTS file_hash_cache (
+CREATE TABLE IF NOT EXISTS file_hash_cache_v2 (
     path      TEXT   NOT NULL,
     mtime_ns  BIGINT NOT NULL,
     size      BIGINT NOT NULL,
+    algorithm TEXT   NOT NULL,
     hash      BYTEA  NOT NULL,
     cached_at BIGINT NOT NULL DEFAULT EXTRACT(EPOCH FROM NOW())::BIGINT,
-    PRIMARY KEY (path, mtime_ns, size)
+    PRIMARY KEY (path, mtime_ns, size, algorithm)
 )
 ```
 

@@ -1,49 +1,33 @@
-# ITL-1488: the file hash cache returns a hash made with another algorithm
+# ITL-1488 file hash cache algorithm
 
-## Problem
+`CachedFileHasher` keyed entries by path, modification time, and byte size.
+After `orcapod warm-cache --force --algorithm md5`, the default SHA-256 file
+handler could return the MD5 hash with caching enabled.
 
-`CachedFileHasher` keyed a cache entry by `(path, mtime_ns, size)` only and returned a hit
-without checking which algorithm made it. After `orcapod warm-cache --force --algorithm md5`,
-the default (SHA-256) file handler returned the MD5 value with caching on.
+## Developer decisions on November 27, 2026
 
-## Fix
+- Key all cachers by `(path, mtime_ns, size, algorithm)`. With
+  `match_mtime=False`, reads select the latest matching entry within the
+  requested algorithm. Writes always use the full key.
+- A duplicate put of the same hash is a no-op. A different hash under the
+  same key raises `ValueError`. The persistent cachers compare in the same
+  transaction as the insert attempt.
+- `FileHashKey.algorithm` is provisional and carries the hash label supplied
+  by `FileContentHasherProtocol.hash_algorithm`. Cache warming uses that field
+  for actual writes and dry-run counts.
+- Store new rows in `file_hash_cache_v2` on both persistent backends. Keep the
+  old table beside it and leave its data and schema untouched. SQLite stamps
+  `PRAGMA user_version` and PostgreSQL records version 2 in
+  `file_hash_cache_v2_meta`. Migration is tracked in ITL-1535.
+- Keep strict write validation and treat malformed stored values as misses.
+  Refusals from `hashlib.new` surface as `ValueError` for a put.
 
-- `FileHashKey` gains `label`, the hash label of the algorithm (`ContentHash.method`).
-- `FileContentHasherProtocol` gains `hash_label`; `FileHasher` returns its algorithm,
-  `CachedFileHasher` its inner hasher's label and builds the key with it.
-- The cachers return an entry only for the key's label:
-  - `InMemoryHashCacher`: the label is part of the dict key (entries of two algorithms
-    coexist).
-  - `SqliteHashCacher`, `PostgresHashCacher`: the stored BLOB is already
-    `to_prefixed_digest()` (`<label>:<digest>`), so lookups filter on that prefix. No column,
-    primary key or schema version changes (no stored layout change). One row per
-    `(path, mtime_ns, size)`: a put of another algorithm replaces it (SQLite already
-    `INSERT OR REPLACE`; PostgreSQL `ON CONFLICT DO UPDATE ... WHERE hash differs`, which
-    stays safe for concurrent writers of one algorithm).
-- `populate_hash_cache` (`warm-cache`) builds keys with its hasher's label, also in a dry
-  run, so another algorithm's entry counts as not cached.
+## Regression coverage
 
-## Review follow-up (independent review of 0254962d)
-
-- `put` on every cacher calls `require_storable` first: a hash whose label is not the key's,
-  or whose digest is not that algorithm's length (`hash_utils.file_hash_digest_size`), raises
-  `ValueError` and stores nothing.
-- The persistent cachers read a stored value with `parse_stored_file_hash`: exactly the key's
-  label, `:`, and a digest of that algorithm's length; anything else is a miss.
-
-- An invalid label (an embedded NUL, a non-ASCII name, an empty or unknown name: any name
-  `hashlib.new` refuses, whatever it raises) is a `ValueError` on put
-  (`file_hash_digest_size`) and a miss on read (`stored_hash_prefix` returns `None`).
-
-## Tests
-
-`tests/test_hashing/test_file_hash_cache_algorithm.py`: two algorithms on one file over one
-cache, both orders (in-memory and SQLite); warm-cache with one algorithm, then hash with
-another; warm-cache statistics; the issue's route through `enable_file_hash_caching`; the
-cachers with `match_mtime=False`. PostgreSQL label tests in `test_postgres_hash_cacher.py`
-(`--postgres`). The test that pinned the bug as a known limitation is removed.
-
-## Out of scope
-
-Keeping several algorithms' hashes of one file in the persistent caches would need the label
-in the primary key, a stored layout change (not made).
+`tests/test_hashing/test_file_hash_cache_algorithm.py` covers both algorithm
+orders, the default file handler, warming and dry-run statistics, lookup with
+mtime disabled, strict validation, and concurrent SQLite writes.
+`tests/test_hashing/test_hash_cachers.py` verifies legacy SQLite schemas and
+the unchanged timestamp of an identical put.
+`tests/test_hashing/test_postgres_hash_cacher.py` covers both algorithm orders,
+legacy-table isolation, and identical and conflicting concurrent writers.

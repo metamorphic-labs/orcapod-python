@@ -16,7 +16,7 @@ from orcapod.types import ContentHash
 
 def make_key(path_str: str, mtime_ns: int = 1000, size: int = 100) -> FileHashKey:
     return FileHashKey(
-        path=UPath(path_str), mtime_ns=mtime_ns, size=size, label="sha256"
+        path=UPath(path_str), mtime_ns=mtime_ns, size=size, algorithm="sha256"
     )
 
 
@@ -169,18 +169,6 @@ class TestSqliteHashCacher:
         # reopening and checking persistence still works
         cacher2 = SqliteHashCacher(db)
         assert cacher2.get(make_key("/a/b.txt")) is not None
-
-    def test_idempotent_put(self, tmp_path):
-        from orcapod.hashing.hash_cachers import SqliteHashCacher
-
-        cacher = SqliteHashCacher(tmp_path / "cache.db")
-        key = make_key("/a/b.txt")
-        v1 = make_hash(digest=b"\xaa" * 32)
-        v2 = make_hash(digest=b"\xbb" * 32)
-        cacher.put(key, v1)
-        cacher.put(key, v2)  # INSERT OR REPLACE
-        result = cacher.get(key)
-        assert result.digest == v2.digest
 
 
 # ---------------------------------------------------------------------------
@@ -383,76 +371,90 @@ def _make_v0_db(path: Path) -> None:
 
 
 class TestSqliteSchemaVersion:
-    def test_fresh_db_is_stamped_v1(self, tmp_path):
-        """A freshly created SQLite cache database gets user_version = 1."""
-        import sqlite3
-        from orcapod.hashing.hash_cachers import SqliteHashCacher
-
-        db = tmp_path / "cache.db"
-        SqliteHashCacher(db)
-
-        with sqlite3.connect(db) as conn:
-            version = conn.execute("PRAGMA user_version").fetchone()[0]
-        assert version == 1
-
-    def test_v0_db_raises_with_migration_hint(self, tmp_path):
-        """Opening a V0 database (no cached_at) raises ValueError with migration command."""
-        from orcapod.hashing.hash_cachers import SqliteHashCacher
-
-        db = tmp_path / "old_cache.db"
-        _make_v0_db(db)
-
-        with pytest.raises(ValueError, match="migrate_hash_cache"):
-            SqliteHashCacher(db)
-
-    def test_v0_db_error_mentions_db_path(self, tmp_path):
-        """The migration error message includes the database path."""
-        from orcapod.hashing.hash_cachers import SqliteHashCacher
-
-        db = tmp_path / "old_cache.db"
-        _make_v0_db(db)
-
-        with pytest.raises(ValueError, match=str(db)):
-            SqliteHashCacher(db)
-
-    def test_existing_v1_db_reopens_without_error(self, tmp_path):
-        """Opening a V1 database a second time succeeds."""
+    def test_fresh_db_is_stamped_v2(self, tmp_path: Path):
         from orcapod.hashing.hash_cachers import SqliteHashCacher
 
         db = tmp_path / "cache.db"
         SqliteHashCacher(db).close()
-        # Should not raise.
-        SqliteHashCacher(db).close()
 
-    def test_manually_bumped_version_with_missing_column_raises(self, tmp_path):
-        """A DB with user_version=1 but no cached_at column raises ValueError.
-
-        Guards against manually-corrupted databases where user_version was
-        bumped without actually adding the cached_at column.
-        """
-        import sqlite3
-        from orcapod.hashing.hash_cachers import SqliteHashCacher
-
-        db = tmp_path / "corrupt.db"
         with sqlite3.connect(db) as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
+            assert conn.execute("PRAGMA user_version").fetchone() == (2,)
+
+    @pytest.mark.parametrize("version", [0, 1])
+    def test_old_cache_is_preserved_beside_new_table(
+        self, tmp_path: Path, version: int
+    ):
+        from orcapod.hashing.hash_cachers import SqliteHashCacher
+        from orcapod.hashing.migrate_hash_cache import migrate_sqlite_hash_cache
+
+        db = tmp_path / "old_cache.db"
+        _make_v0_db(db)
+        if version == 1:
+            migrate_sqlite_hash_cache(db)
+        key = make_key("/old.txt")
+        old_hash = make_hash(digest=b"\x01" * 32)
+        new_hash = make_hash(digest=b"\x02" * 32)
+        with sqlite3.connect(db) as conn:
             conn.execute(
-                """
-                CREATE TABLE file_hash_cache (
-                    path      TEXT    NOT NULL,
-                    mtime_ns  INTEGER NOT NULL,
-                    size      INTEGER NOT NULL,
-                    hash      BLOB    NOT NULL,
-                    PRIMARY KEY (path, mtime_ns, size)
-                ) WITHOUT ROWID
-                """
+                "INSERT INTO file_hash_cache (path, mtime_ns, size, hash) VALUES (?, ?, ?, ?)",
+                (str(key.path), key.mtime_ns, key.size, old_hash.to_prefixed_digest()),
             )
-            # Manually stamp user_version = 1 without adding cached_at.
-            conn.execute("PRAGMA user_version = 1")
-            conn.commit()
+            old_dump = tuple(conn.iterdump())
 
-        with pytest.raises(ValueError, match="cached_at"):
-            SqliteHashCacher(db)
+        with SqliteHashCacher(db) as cacher:
+            assert cacher.get(key) is None
+            cacher.put(key, new_hash)
+            assert cacher.get(key) == new_hash
+            cacher.clear()
+            assert cacher.get(key) is None
+
+        with sqlite3.connect(db) as conn:
+            assert conn.execute("PRAGMA user_version").fetchone() == (2,)
+            dump = tuple(conn.iterdump())
+        assert any("CREATE TABLE file_hash_cache_v2 " in line for line in dump)
+        assert (
+            tuple(line for line in dump if "file_hash_cache_v2" not in line) == old_dump
+        )
+
+    def test_existing_v2_db_reopens_without_error(self, tmp_path: Path):
+        from orcapod.hashing.hash_cachers import SqliteHashCacher
+
+        db = tmp_path / "cache.db"
+        SqliteHashCacher(db).close()
+        SqliteHashCacher(db).close()
+
+    def test_put_sets_nonzero_cached_at(self, tmp_path: Path):
+        """Fresh entries get the current epoch in the new table."""
+        import time
+
+        from orcapod.hashing.hash_cachers import SqliteHashCacher
+
+        db = tmp_path / "cache.db"
+        before = int(time.time()) - 1
+        with SqliteHashCacher(db) as cacher:
+            cacher.put(make_key("/new.txt"), make_hash())
+
+        with sqlite3.connect(db) as conn:
+            row = conn.execute(
+                "SELECT cached_at FROM file_hash_cache_v2 WHERE path='/new.txt'"
+            ).fetchone()
+        assert row is not None
+        assert row[0] > before
+
+    def test_identical_put_preserves_cached_at(self, tmp_path: Path):
+        from orcapod.hashing.hash_cachers import SqliteHashCacher
+
+        db = tmp_path / "cache.db"
+        key = make_key("/a/b.txt")
+        with SqliteHashCacher(db) as cacher:
+            cacher.put(key, make_hash())
+            with sqlite3.connect(db) as conn:
+                conn.execute("UPDATE file_hash_cache_v2 SET cached_at=1")
+            cacher.put(key, make_hash())
+        with sqlite3.connect(db) as conn:
+            assert conn.execute(
+                "SELECT cached_at FROM file_hash_cache_v2"
+            ).fetchone() == (1,)
 
 
 # ---------------------------------------------------------------------------
@@ -464,6 +466,7 @@ class TestMigrateHashCache:
     def test_migrates_v0_to_v1(self, tmp_path):
         """migrate_sqlite_hash_cache adds cached_at and stamps version 1."""
         import sqlite3
+
         from orcapod.hashing.migrate_hash_cache import migrate_sqlite_hash_cache
 
         db = tmp_path / "old.db"
@@ -481,10 +484,10 @@ class TestMigrateHashCache:
     def test_migration_idempotent(self, tmp_path, capsys):
         """Running migration twice on a V1 database prints a message and exits cleanly."""
         from orcapod.hashing.migrate_hash_cache import migrate_sqlite_hash_cache
-        from orcapod.hashing.hash_cachers import SqliteHashCacher
 
         db = tmp_path / "cache.db"
-        SqliteHashCacher(db).close()  # creates V1 DB
+        _make_v0_db(db)
+        migrate_sqlite_hash_cache(db)
         migrate_sqlite_hash_cache(db)
 
         out = capsys.readouterr().out
@@ -500,6 +503,7 @@ class TestMigrateHashCache:
     def test_non_cache_db_raises_value_error(self, tmp_path):
         """migrate_sqlite_hash_cache raises ValueError if the expected table is absent."""
         import sqlite3
+
         from orcapod.hashing.migrate_hash_cache import migrate_sqlite_hash_cache
 
         db = tmp_path / "other.db"
@@ -511,6 +515,7 @@ class TestMigrateHashCache:
     def test_preserved_rows_after_migration(self, tmp_path):
         """Rows written before migration are readable after migration."""
         import sqlite3
+
         from orcapod.hashing.migrate_hash_cache import migrate_sqlite_hash_cache
 
         db = tmp_path / "old.db"
@@ -537,6 +542,7 @@ class TestMigrateHashCache:
     def test_cached_at_column_present_but_unstamped(self, tmp_path, capsys):
         """A DB that has cached_at but user_version=0 just gets stamped to V1."""
         import sqlite3
+
         from orcapod.hashing.migrate_hash_cache import migrate_sqlite_hash_cache
 
         db = tmp_path / "unstamped.db"
@@ -567,46 +573,17 @@ class TestMigrateHashCache:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
         assert version == 1
 
-    def test_put_after_migration_sets_nonzero_cached_at(self, tmp_path):
-        """put() on a migrated DB writes the current epoch, not 0.
-
-        The migration adds cached_at with DEFAULT 0 (SQLite ALTER TABLE only
-        accepts literal defaults).  SqliteHashCacher.put() must explicitly
-        supply cached_at so migrated databases get real timestamps on new rows.
-        """
-        import sqlite3
-        import time
-        from orcapod.hashing.hash_cachers import SqliteHashCacher
-        from orcapod.hashing.migrate_hash_cache import migrate_sqlite_hash_cache
-
-        db = tmp_path / "migrated.db"
-        _make_v0_db(db)
-        migrate_sqlite_hash_cache(db)
-
-        before = int(time.time()) - 1
-        cacher = SqliteHashCacher(db)
-        cacher.put(
-            make_key("/new.txt", mtime_ns=5000, size=300),
-            make_hash(digest=b"\x99" * 32),
-        )
-        cacher.close()
-
-        with sqlite3.connect(db) as conn:
-            row = conn.execute(
-                "SELECT cached_at FROM file_hash_cache WHERE path='/new.txt'"
-            ).fetchone()
-        assert row is not None
-        assert row[0] > before, f"cached_at={row[0]} should be > {before}"
-
     def test_main_entry_point(self, tmp_path, capsys):
         """main() parses argv, runs migration, exits cleanly."""
         import sys
         from unittest.mock import patch
-        from orcapod.hashing.migrate_hash_cache import main
-        from orcapod.hashing.hash_cachers import SqliteHashCacher
+
+        from orcapod.hashing.migrate_hash_cache import main, migrate_sqlite_hash_cache
 
         db = tmp_path / "v1.db"
-        SqliteHashCacher(db).close()  # creates a V1 DB
+        _make_v0_db(db)
+        migrate_sqlite_hash_cache(db)
+        _ = capsys.readouterr()
 
         # Patch sys.argv to supply the db_path argument
         with patch.object(sys, "argv", ["migrate_hash_cache", str(db)]):
