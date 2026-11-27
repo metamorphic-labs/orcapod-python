@@ -22,11 +22,12 @@ with no memory of previous results.
 FileHashKey(path, mtime_ns, size, algorithm)
 ```
 
-The `mtime_ns` and `size` fields encode the file's identity at a specific
-point in time. If the file is modified — its modification time or byte count
-changes — the key is different, so the old entry is never returned. You do
-not need to explicitly invalidate entries; the key change handles it
-automatically.
+An ordinary lookup trusts the file's resolved path, nanosecond modification
+time, and byte size. A change to any of these fields gives the file a
+different key in the default lookup mode. If a file is rewritten to the same
+size at the same path and its original modification time is restored, the
+lookup returns the cached hash without reading the file. This hit bypasses
+the write and its conflict check.
 
 `FileHashKey.algorithm` is **PROVISIONAL**. Its value is the hash label
 (`ContentHash.method`) reported by the file hasher's `hash_algorithm` property.
@@ -38,9 +39,18 @@ A cache write raises `ValueError` if the hash label or digest length is invalid
 for the key, or if the key already holds a different hash. Writing an identical
 hash leaves the existing entry and its timestamp unchanged. Reads accept values
 in the exact format `<label>:<digest>`, with the key's label and that
-algorithm's digest length. A malformed value is a miss. If hashing the file
-again finds a different value for that same key, a writable cache raises
-`ValueError`. Clear the current cache to rebuild it.
+algorithm's digest length. An incompatible hash returned by a custom cache is
+also a miss.
+
+`orcapod warm-cache --force` skips the lookup and reads each eligible file
+again. If a new hash differs from the stored hash for the same key, the cache
+retains the original entry and the command reports a file error. If an actual
+rehash and write conflict occurs while a pipeline hashes a file column, it can
+surface as `RuntimeError: Failed to process column 'recording'`, with a
+`ValueError` cause beginning `Different hash already cached for FileHashKey`
+and naming the file and algorithm. Clear the [current cache](#cache-storage)
+and rerun the pipeline or warmer to rebuild the entries. Let file rewrites
+advance the modification time to avoid stale hits in the default mode.
 
 The label must name an algorithm whose digest length is fixed: a `hashlib`
 algorithm such as `sha256` or `md5`, or `hash_path`, `xxh64` or `crc32`. Every algorithm

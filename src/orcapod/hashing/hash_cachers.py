@@ -8,6 +8,7 @@ Provides ``InMemoryHashCacher`` (testing/ephemeral use) and
 import os
 import sqlite3
 import threading
+import time
 from contextlib import closing
 from pathlib import Path
 
@@ -19,6 +20,9 @@ from orcapod.hashing.file_hashers import (
     stored_hash_prefix,
 )
 from orcapod.types import ContentHash
+
+
+_SQLITE_BUSY_TIMEOUT_SECONDS = 5.0
 
 
 class InMemoryHashCacher:
@@ -190,8 +194,27 @@ class SqliteHashCacher:
     def _ensure_schema(self) -> None:
         """Enable WAL mode and create the version 2 cache alongside older tables."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with closing(sqlite3.connect(self.db_path)) as conn, conn:
-            conn.execute("PRAGMA journal_mode=WAL")
+        with (
+            closing(
+                sqlite3.connect(self.db_path, timeout=_SQLITE_BUSY_TIMEOUT_SECONDS)
+            ) as conn,
+            conn,
+        ):
+            # SQLite can skip the busy handler on a lock upgrade during a
+            # journal-mode change. Retry the pragma after it releases its locks.
+            deadline = time.monotonic() + _SQLITE_BUSY_TIMEOUT_SECONDS
+            while True:
+                try:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                except sqlite3.OperationalError as exc:
+                    if (
+                        exc.sqlite_errorcode != sqlite3.SQLITE_BUSY
+                        or time.monotonic() >= deadline
+                    ):
+                        raise
+                    time.sleep(0.01)
+                else:
+                    break
             conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 """

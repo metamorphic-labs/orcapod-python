@@ -200,6 +200,44 @@ class _CountingHasher:
         return self.inner.hash_file(file_path)
 
 
+class _LegacyCacher:
+    """A custom cacher keyed by file metadata alone."""
+
+    def __init__(self) -> None:
+        self.entries: dict[tuple[UPath, int, int], ContentHash] = {}
+
+    def get(self, key: FileHashKey) -> ContentHash | None:
+        return self.entries.get((key.path, key.mtime_ns, key.size))
+
+    def put(self, key: FileHashKey, value: ContentHash) -> None:
+        self.entries[(key.path, key.mtime_ns, key.size)] = value
+
+
+@pytest.mark.parametrize(
+    ("label", "length"),
+    [("md5", 16), ("sha256", 31), ("sha256", 33)],
+    ids=["wrong-algorithm", "short-digest", "long-digest"],
+)
+def test_cached_file_hasher_treats_invalid_custom_hits_as_misses(
+    data_file: Path, label: str, length: int
+):
+    legacy_cache = _LegacyCacher()
+    file_hasher = _CountingHasher(FileHasher().hash_algorithm)
+    cached_hasher = CachedFileHasher(file_hasher, legacy_cache)
+    path = UPath(data_file.resolve())
+    stat = path.stat()
+    legacy_cache.put(
+        FileHashKey(path, stat.st_mtime_ns, stat.st_size, label),
+        ContentHash(label, b"\x07" * length),
+    )
+
+    expected = file_hasher.inner.hash_file(data_file)
+    assert cached_hasher.hash_file(data_file) == expected
+    assert file_hasher.reads == 1
+    assert cached_hasher.hash_file(data_file) == expected
+    assert file_hasher.reads == 1
+
+
 @pytest.mark.parametrize(("first", "second"), ALGORITHM_ORDERS)
 def test_alternating_algorithms_keep_both_cached(
     cacher: Cacher, data_file: Path, first: str, second: str

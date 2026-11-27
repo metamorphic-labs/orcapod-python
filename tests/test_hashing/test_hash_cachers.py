@@ -1,7 +1,10 @@
 """Tests for InMemoryHashCacher and SqliteHashCacher."""
 
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 from upath import UPath
@@ -371,6 +374,32 @@ def _make_v0_db(path: Path) -> None:
 
 
 class TestSqliteSchemaVersion:
+    def test_concurrent_openers_can_enable_wal_on_a_legacy_db(self, tmp_path: Path):
+        from orcapod.hashing.hash_cachers import SqliteHashCacher
+
+        key = make_key("/a/b.txt")
+        value = make_hash()
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            # Exercise multiple fresh databases because the lock race is timing-dependent.
+            for attempt in range(35):
+                db = tmp_path / f"legacy-{attempt}.db"
+                with closing(sqlite3.connect(db)) as conn, conn:
+                    assert conn.execute("PRAGMA journal_mode").fetchone() == ("delete",)
+                    conn.execute("CREATE TABLE file_hash_cache (size INTEGER)")
+                barrier = Barrier(2)
+
+                def open_and_put() -> None:
+                    barrier.wait(timeout=10)
+                    with SqliteHashCacher(db) as cacher:
+                        cacher.put(key, value)
+                        assert cacher.get(key) == value
+
+                first = pool.submit(open_and_put)
+                second = pool.submit(open_and_put)
+                first.result()
+                second.result()
+
     def test_fresh_db_is_stamped_v2(self, tmp_path: Path):
         from orcapod.hashing.hash_cachers import SqliteHashCacher
 
