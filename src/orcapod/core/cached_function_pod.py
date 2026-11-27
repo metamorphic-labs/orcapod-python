@@ -248,6 +248,9 @@ class CachedFunctionPod(WrappedFunctionPod):
                 data, output, var_dg, exec_dg, data_context_key=self.data_context_key
             )
             if stored is not None:
+                module_logger.info(
+                    "A result for this input was stored meanwhile; using it"
+                )
                 output = stored.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: False})
             else:
                 output = output.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: True})
@@ -307,6 +310,9 @@ class CachedFunctionPod(WrappedFunctionPod):
                 data, output, var_dg, exec_dg, data_context_key=self.data_context_key
             )
             if stored is not None:
+                module_logger.info(
+                    "A result for this input was stored meanwhile; using it"
+                )
                 output = stored.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: False})
             else:
                 output = output.with_meta_columns(**{self.RESULT_COMPUTED_FLAG: True})

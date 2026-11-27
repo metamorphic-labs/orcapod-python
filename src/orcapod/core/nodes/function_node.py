@@ -1398,13 +1398,16 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
     # The same instance ids in the order the run emitted its rows (ITL-1432): the
     # order the rows are held in, so a read gives them as downstream received them.
     _run_entry_order: tuple[bytes, ...] = ()
-    # The rows an asynchronous run emitted, one per instance id of
-    # ``_run_entry_order`` (ITL-1503); ``None`` after a synchronous or load-only run,
-    # whose rows are read from the cache. Two occurrences of one instance in one
-    # async run can be delivered two results (a persistent result published between
-    # them is served to the later one), and the cache keeps one result per instance,
-    # so a read takes each occurrence's own row from here.
+    # The rows an asynchronous run emitted (ITL-1503); ``None`` after a synchronous
+    # or load-only run, whose rows are read from the cache. Two occurrences of one
+    # instance in one async run can be delivered two results (a persistent result
+    # published between them is served to the later one), and the cache keeps one
+    # result per instance, so a read takes each occurrence's row from here.
+    # ``_run_emitted_pairs`` holds each distinct row once, and
+    # ``_run_emitted_index`` one position in it per instance id of
+    # ``_run_entry_order``: occurrences delivered the same row share one pair.
     _run_emitted_pairs: list[tuple[TagProtocol, DataProtocol]] | None = None
+    _run_emitted_index: tuple[int, ...] = ()
     # Whether the last completed run was load-only, and how many of its inputs had no
     # stored result (ITL-1095). Class defaults for nodes rebuilt from a descriptor.
     _run_load_only: bool = False
@@ -1444,6 +1447,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         self._run_entry_counts = None
         self._run_entry_order = ()
         self._run_emitted_pairs = None
+        self._run_emitted_index = ()
 
         # DB persistence state (initially None; set via __init__ params or attach_databases)
         self._pipeline_database: ArrowDatabaseProtocol | None = None
@@ -1968,6 +1972,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         self._run_entry_counts = None
         self._run_entry_order = ()
         self._run_emitted_pairs = None
+        self._run_emitted_index = ()
         self._run_load_only = False
         self._run_not_stored = 0
         self._run_failed = 0
@@ -1995,8 +2000,10 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         if self._run_entry_counts is None:
             return
         if self._run_emitted_pairs is not None:
-            # An asynchronous run: each occurrence's own row, as it was delivered.
-            yield from self._run_emitted_pairs
+            # An asynchronous run: each occurrence's row, as it was delivered.
+            pairs = self._run_emitted_pairs
+            for position in self._run_emitted_index:
+                yield pairs[position]
             return
         cache = self._cached_output_datas
         for eid in self._run_entry_order:
@@ -2030,6 +2037,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         entry_ids: list[bytes],
         *,
         emitted_pairs: list[tuple[TagProtocol, DataProtocol]] | None = None,
+        emitted_index: list[int] | None = None,
         load_only: bool = False,
         not_stored: int = 0,
         failed: int = 0,
@@ -2039,9 +2047,10 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         Args:
             entry_ids: The instance ids of the run's inputs whose rows the node holds,
                 in the order the run emitted them.
-            emitted_pairs: The rows an asynchronous run emitted, one per id of
-                ``entry_ids`` in the same order; ``None`` for a run whose rows are
-                read from the cache by instance id.
+            emitted_pairs: The distinct rows an asynchronous run emitted; ``None``
+                for a run whose rows are read from the cache by instance id.
+            emitted_index: With ``emitted_pairs``, the position in it of each
+                occurrence's row, one per id of ``entry_ids`` in the same order.
             load_only: Whether the run was load-only (ITL-1095).
             not_stored: How many inputs of a load-only run had no stored result.
             failed: How many rows of the run failed (error policy ``"continue"``).
@@ -2049,6 +2058,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         self._run_entry_counts = Counter(entry_ids)
         self._run_entry_order = tuple(entry_ids)
         self._run_emitted_pairs = emitted_pairs
+        self._run_emitted_index = tuple(emitted_index or ())
         self._run_load_only = load_only
         self._run_not_stored = not_stored
         self._run_failed = failed
@@ -4311,7 +4321,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         if counts is None:
             return 0
         if self._run_emitted_pairs is not None:
-            return len(self._run_emitted_pairs)
+            return len(self._run_emitted_index)
         return sum(
             counts.get(entry_id, 0)
             for entry_id, (_, data) in self._cached_output_datas.items()
@@ -4637,8 +4647,13 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 # Instance ids of this run's inputs that gave a row (a cache hit or a
                 # forwarded computed row), one per input (ITL-1093).
                 run_entry_ids: list[bytes] = []
-                # The rows themselves, one per id above: what a read gives back.
+                # What a read gives back: each distinct row once, and per id above
+                # its position there. Occurrences of one instance delivered one
+                # result, in one way (computed or stored), are the same row and
+                # share one pair, so many repeats hold one row, not one each.
                 emitted_pairs: list[tuple[TagProtocol, DataProtocol]] = []
+                emitted_index: list[int] = []
+                pair_positions: dict[tuple[bytes, uuid.UUID, bool], int] = {}
                 # Rows whose function raised (error policy "continue").
                 failed_rows: list[int] = [0]
 
@@ -4653,8 +4668,21 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                     delivered, whatever the cache holds for its instance later.
                     """
                     await output.send((tag, data))
+                    row = (
+                        instance_id,
+                        data.datagram_uuid,
+                        bool(
+                            data.get_meta_value(
+                                CachedFunctionPod.RESULT_COMPUTED_FLAG, False
+                            )
+                        ),
+                    )
+                    position = pair_positions.get(row)
+                    if position is None:
+                        position = pair_positions[row] = len(emitted_pairs)
+                        emitted_pairs.append((tag, data))
                     run_entry_ids.append(instance_id)
-                    emitted_pairs.append((tag, data))
+                    emitted_index.append(position)
 
                 def lookup_crashed(
                     tag: TagProtocol, data: DataProtocol, exc: Exception
@@ -4938,7 +4966,10 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 # The node's rows are those of this run's inputs, as the sync path's:
                 # the cache also holds every stored result loaded above.
                 self._set_run_rows(
-                    run_entry_ids, emitted_pairs=emitted_pairs, failed=failed_rows[0]
+                    run_entry_ids,
+                    emitted_pairs=emitted_pairs,
+                    emitted_index=emitted_index,
+                    failed=failed_rows[0],
                 )
             else:
                 # No-DB path: delegate dispatch entirely to the pod. The pod closes
