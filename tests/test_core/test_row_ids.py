@@ -380,7 +380,7 @@ class TestTokensAreReadAsTheRowCarriesThem:
         from orcapod.core.streams import ArrowTableStream
 
         tokens_a = (
-            pa.array([[None, [[]]], [None, [[]]], [[["t"]]]], self.NESTED)
+            pa.array([[[], [[]]], [[], [[]]], [[["t"]]]], self.NESTED)
             if nested
             else pa.array(
                 ["s::row_0::a", "s::row_1::a", "s::row_2::a"], pa.large_string()

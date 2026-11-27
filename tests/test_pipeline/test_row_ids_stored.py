@@ -828,7 +828,7 @@ TOKEN_COLUMNS: dict[str, tuple["pa.Array[Any]", "pa.Array[Any]"]] = {
         pa.array(["s::row_0::b", None, "s::row_2::b"], pa.large_string()),
     ),
     "nested": (
-        pa.array([[None, [[]]], [None, [[]]], [[["s::row_2::a"]]]], _NESTED_TOKEN),
+        pa.array([[[], [[]]], [[], [[]]], [[["s::row_2::a"]]]], _NESTED_TOKEN),
         pa.array(
             [["s::row_0::b"], [], ["s::row_2::b", None]],
             pa.large_list(pa.large_string()),

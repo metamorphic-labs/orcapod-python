@@ -259,7 +259,7 @@ _NESTED = pa.large_list(_STRINGS)
         pytest.param(lambda: _with_source_x([[], []], _NESTED), id="empty-lists"),
         pytest.param(lambda: _with_source_x([[], []], _STRINGS), id="empty-strings"),
         pytest.param(
-            lambda: _with_source_x([[None], [None]], _NESTED), id="lists-of-null"
+            lambda: _with_source_x([[[None]], [[None]]], _NESTED), id="lists-of-null"
         ),
         pytest.param(
             lambda: Batch(batch_size=1)(
@@ -303,10 +303,10 @@ def test_source_info_types_are_the_streams(make: Any) -> None:
     ("values", "kind"),
     [
         pytest.param([["s"], []], _STRINGS, id="list-beside-empty"),
-        pytest.param([[None], [["s"]]], _NESTED, id="null-inside-beside-nested"),
+        pytest.param([[[None]], [["s"]]], _NESTED, id="null-inside-beside-nested"),
         pytest.param([[], [["s"]]], _NESTED, id="empty-beside-nested"),
         pytest.param(
-            [[None, [[]]], [[["t"]]]], pa.large_list(_NESTED), id="three-levels"
+            [[[], [[]]], [[["t"]]]], pa.large_list(_NESTED), id="three-levels"
         ),
         pytest.param(
             [["a", "b"], ["c", "d"]], pa.list_(pa.large_string(), 2), id="fixed-size"
@@ -434,7 +434,7 @@ def test_a_job_keeps_and_stores_the_token_type_of_a_batch_of_null_tokens() -> No
     ("values", "kind"),
     [
         pytest.param([["s"], []], _STRINGS, id="list-beside-empty"),
-        pytest.param([[None, [[]]], [None, [[]]]], pa.large_list(_NESTED), id="deep"),
+        pytest.param([[[], [[]]], [[], [[]]]], pa.large_list(_NESTED), id="deep"),
     ],
 )
 def test_a_job_over_tokens_no_value_could_type_alike_completes(

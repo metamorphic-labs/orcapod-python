@@ -377,12 +377,12 @@ UNTYPEABLE: dict[str, dict[str, tuple[list[Any], pa.DataType]]] = {
         "w": ([[], ["u", "v"], [None, None], []], STRINGS),
     },
     "two_levels": {
-        "x": ([[None], [[]], [["a"], None], [[None, "b"]]], NESTED),
-        "w": ([[[]], [["c"]], [None], [[], []]], NESTED),
+        "x": ([[[None]], [[]], [["a"], []], [[None, "b"]]], NESTED),
+        "w": ([[[]], [["c"]], [[None]], [[], []]], NESTED),
     },
     "three_levels": {
-        "x": ([[None, [[]]], [None, [[]]], [[["t"]]], [[]]], DEEP),
-        "w": ([[[["u"]]], [[]], [[None]], [None, [[]]]], DEEP),
+        "x": ([[[], [[]]], [[], [[]]], [[["t"]]], [[]]], DEEP),
+        "w": ([[[["u"]]], [[]], [[[None]]], [[], [[]]]], DEEP),
     },
     "one_level_beside_strings": {
         "x": ([[None], [], ["s::0::x", None], ["t"]], STRINGS),
@@ -594,7 +594,7 @@ FIXED = pa.list_(pa.large_string(), 2)
 # strings, ``path`` a list of lists of integers.
 DATA_TAG_TOKENS: dict[str, tuple[list[Any], pa.DataType]] = {
     "pair": ([["p", "q"], ["r", "s"], ["t", "u"], ["v", "w"]], FIXED),
-    "path": ([[None, ["a"]], [[]], [["b"], None], [[None]]], NESTED),
+    "path": ([[[None], ["a"]], [[]], [["b"], []], [[None]]], NESTED),
 }
 DATA_TAGS: dict[str, "pa.Array[Any]"] = {
     "pair": pa.array([["m1", "a"], ["m1", "b"], ["m2", "a"], ["m2", "b"]], FIXED),

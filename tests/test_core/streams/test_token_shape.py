@@ -156,14 +156,15 @@ VALID: dict[str, tuple[pa.DataType, list[Any], pa.DataType, list[Any]]] = {
         fixed(large(INT)),
         [[[1], []], [[2, 3], [4]]],
     ),
-    # A list token is never null, but an element inside it may be.
+    # A token's list is never null at any level, but a string inside the innermost
+    # list may be.
     "null_element": (large(STR), [["a", None], [None]], large(INT), [[1, 2], [3]]),
     "empty_list": (large(STR), [[], ["a"]], large(INT), [[], [1]]),
-    "null_inner_list": (
+    "null_string_two_levels_down": (
         large(large(STR)),
-        [[None, ["a"]], [[None]]],
+        [[[None], ["a"]], [[None, None], []]],
         large(large(INT)),
-        [[[1], [2]], [[3]]],
+        [[[1], [2]], [[3, 4], []]],
     ),
     "null_element_of_fixed": (
         fixed(STR),
@@ -562,33 +563,57 @@ def test_index_gives_the_element_the_declared_token_type_less_one_layer(
         )
 
 
-@ROUTES
 @pytest.mark.parametrize("out", [None, "picked"])
-def test_index_refuses_a_null_element_where_a_list_token_remains(
-    out: str | None, route: str
+def test_index_guards_against_a_null_element_where_a_list_token_remains(
+    out: str | None,
 ) -> None:
-    """A null inner list is a valid element, but not a valid token of its own.
+    """A null inner list is not a valid token, so no stream holds one.
 
-    The stream is valid: a token list may hold a null element. ``Index`` on that
-    element would give a row a null token whose type is a list, which the
-    token-shape rule forbids; both routes refuse, naming the column. The element
-    that is a list is taken as before.
+    A stream with ``[None, ["a"]]`` under a two-level token type is refused where
+    it is built (a token's list is never null at any level). ``Index`` keeps its
+    guard for rows that are in no stream: rows built by hand and sent over a bare
+    row channel. Taking the null element would give a row a null token whose type
+    is a list; the guard refuses, naming the column. The element that is a list
+    is taken as before.
     """
-    stream = _stream(
-        large(large(STR)),
-        [[None, ["a"]], [["b"], ["c"]]],
-        large(large(INT)),
-        [[[1], [2]], [[3], [4]]],
-    )
+    import asyncio
+
+    from orcapod.channels import Channel
+    from orcapod.core.operators import Index
+
+    token_type, data_type = large(large(STR)), large(large(INT))
+    data = [[[1], [2]], [[3], [4]]]
+    with pytest.raises(InputValidationError, match="list level 1"):
+        _ = _stream(token_type, [[None, ["a"]], [["b"], ["c"]]], data_type, data)
+    stream = _stream(token_type, [[["z"], ["a"]], [["b"], ["c"]]], data_type, data)
+    rows: list[Any] = list(stream.iter_data())
+    tag, first = rows[0]
+    rows[0] = (tag, first.with_source_info(x=pa.scalar([None, ["a"]], type=token_type)))
+
+    def taken(i: int) -> list[Any]:
+        async def run() -> list[Any]:
+            incoming: Channel[Any] = Channel(buffer_size=16)
+            outgoing: Channel[Any] = Channel(buffer_size=16)
+            for row in rows:
+                await incoming.writer.send(row)
+            await incoming.writer.close()
+            await Index("x", i, out=out).async_execute(
+                [incoming.reader],
+                outgoing.writer,
+                input_pipeline_hashes=[stream.pipeline_hash()],
+            )
+            return await outgoing.reader.collect()
+
+        return asyncio.run(run())
+
     with pytest.raises((InputValidationError, ExceptionGroup)) as refused:
-        _ = _index_rows(stream, 0, route, out)
+        _ = taken(0)
     error: BaseException = refused.value
     while isinstance(error, ExceptionGroup):
         (error,) = error.exceptions
     assert isinstance(error, InputValidationError)
     assert f"'_source_{out or 'x'}'" in str(error) and "Index" in str(error)
-    taken = _index_rows(stream, 1, route, out)
-    assert taken.column(f"_source_{out or 'x'}").to_pylist() == [["a"], ["c"]]
+    assert [d.source_info()[out or "x"] for _, d in taken(1)] == [["a"], ["c"]]
 
 
 @ROUTES

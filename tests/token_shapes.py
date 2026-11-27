@@ -72,11 +72,17 @@ def data_for(token: Any, leaf: Any, data_type: pa.DataType) -> Any:
         data_type: The data column's type (the token's layers over a leaf type).
 
     Returns:
-        ``leaf`` at every token position, in the token's lists; where the token
-        is null inside a list that the data type continues, a value of that type.
+        ``leaf`` at every token position, in the token's lists. An empty list of
+        tokens where the data type has a further list layer gets one value of
+        that inner type (a token's list is never null at any level, so an empty
+        list is the only token that shows fewer levels than its column; the data
+        beside it still holds a value).
     """
     if isinstance(token, list):
-        return [data_for(item, leaf, _item_type(data_type)) for item in token]
+        item_type = _item_type(data_type)
+        if not token and _is_list(item_type):
+            return [nested_value(leaf, item_type)]
+        return [data_for(item, leaf, item_type) for item in token]
     return nested_value(leaf, data_type)
 
 

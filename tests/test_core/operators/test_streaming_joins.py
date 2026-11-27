@@ -1291,7 +1291,7 @@ def test_a_batch_that_declares_another_token_type_than_its_stream_is_refused(
 
 @pytest.mark.parametrize(
     "tokens",
-    [[[], []], [[None], [[]]], [[[None]], [["b"]]]],
+    [[[], []], [[[None]], [[]]], [[[None]], [["b"]]]],
     ids=["empty_lists", "null_and_empty_inner_lists", "null_token_inside"],
 )
 @pytest.mark.parametrize(

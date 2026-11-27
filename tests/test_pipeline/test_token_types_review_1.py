@@ -654,7 +654,7 @@ def test_rows_built_by_hand_and_by_taking_columns_make_one_table(
 NESTED = pa.large_list(TOKENS)
 STREAM_TOKENS: dict[str, tuple[list[Any], pa.DataType]] = {
     "k": ([["p", "q"], ["r", "s"]], FIXED),
-    "g": ([[None, ["a"]], [[]]], NESTED),
+    "g": ([[[None], ["a"]], [[]]], NESTED),
 }
 
 
@@ -704,7 +704,7 @@ def test_a_function_stream_outside_a_job_keeps_fallen_through_token_types(
 def test_the_python_schema_of_a_token_follows_its_columns_type(tags: str) -> None:
     """``schema(columns={"source": True})`` agrees with ``arrow_schema``.
 
-    A token ``[None]`` in a column declared two list levels deep shows one level;
+    A token ``[]`` in a column declared two list levels deep shows one level;
     the Python schema said ``list[str]`` while the Arrow schema had two levels
     (review of PR #601, P3). A list holding only a null token is a list too.
     """
@@ -712,7 +712,7 @@ def test_the_python_schema_of_a_token_follows_its_columns_type(tags: str) -> Non
     stream = _with_tokens(
         _source("a", order, data_tags=False, shapes={"x": NESTED, "w": TOKENS}),
         order,
-        {"x": ([[None], [["t"]]], NESTED), "w": ([[None], ["u"]], TOKENS)},
+        {"x": ([[], [["t"]]], NESTED), "w": ([[None], ["u"]], TOKENS)},
         data_tags=False,
     )
     for _, data in stream.iter_data():

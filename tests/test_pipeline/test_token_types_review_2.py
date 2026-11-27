@@ -314,39 +314,32 @@ def test_a_null_inner_list_in_a_merged_token_is_refused_naming_the_column(
 ) -> None:
     """A two-level token ``[None, ["a"]]`` over a list-of-lists data-tag key.
 
-    The streams are accepted: the token-shape rule reads a token's own validity,
-    not what is inside it. Merging the two inputs' tokens position by position
-    meets a null where a list of tokens is declared, and has no list to merge.
-    ``Join`` and ``MergeJoin`` reached their guard's ``RuntimeError`` (second
-    review of PR #601, finding 4; the base stored the characters of an internal
-    marker). Both refuse with ``InputValidationError`` naming the token column, on
-    both routes, as ``Index`` refuses such an element.
+    ``Join`` and ``MergeJoin`` reached their guard's ``RuntimeError`` on such a
+    token (second review of PR #601, finding 4; the base stored the characters of
+    an internal marker). The developer then decided (November 27, 2026) that a
+    token's list is never null at any level, so the stream that holds one is
+    refused where it is built, naming the token column and the level, and the
+    operators never see it. Their refusal stays as a guard for rows that are in
+    no stream (``test_token_types_review_3.py``).
     """
+    from orcapod.errors import InputValidationError
+
     order = TAG_ORDERS[tags]
     keys = [[[1], [2]], [[3], [4]]]
     key_type = pa.large_list(INTS)
     whole = [[["p"], ["a"]], [["q"], ["b"]]]
     holed = [[None, ["a"]], [["q"], ["b"]]]
-    left = _keyed(
-        ("x", "w"),
-        keys,
-        holed if side != "right" else whole,
-        NESTED,
-        order,
-        key_type=key_type,
-    )
-    right = _keyed(
-        ("y", "v"),
-        keys,
-        holed if side != "left" else whole,
-        NESTED,
-        order,
-        key_type=key_type,
-    )
-    outcomes = _both_routes(operator, left, right)
-    _refused_alike(outcomes, "_source_k", NESTED)
-    for _, message in outcomes:
-        assert message.startswith(operator.__name__) and "null" in message
+    for data, tokens in (
+        (("x", "w"), holed if side != "right" else whole),
+        (("y", "v"), holed if side != "left" else whole),
+    ):
+        if tokens is whole:
+            continue
+        with pytest.raises(InputValidationError) as refused:
+            _ = _keyed(data, keys, tokens, NESTED, order, key_type=key_type)
+        message = str(refused.value)
+        assert "'_source_k'" in message and "'k'" in message
+        assert "list level 1" in message
     # Without the null, the same inputs merge, with the declared two levels.
     full = _keyed(("x", "w"), keys, whole, NESTED, order, key_type=key_type)
     other = _keyed(("y", "v"), keys, whole, NESTED, order, key_type=key_type)

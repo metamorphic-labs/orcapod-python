@@ -2410,8 +2410,8 @@ _TOKEN_LAYOUTS: dict[str, dict[str, tuple[list[Any], pa.DataType]]] = {
         "b": ([[], ["u", "v"], [None, None]], _TOKENS),
     },
     "two_levels": {
-        "a": ([[None], [[]], [["a"], None]], _TOKEN_LISTS),
-        "b": ([[[]], [None, []], [[None, "c"]]], _TOKEN_LISTS),
+        "a": ([[[None]], [[]], [["a"], []]], _TOKEN_LISTS),
+        "b": ([[[]], [[None], []], [[None, "c"]]], _TOKEN_LISTS),
     },
     "fixed_size_and_strings": {
         "a": ([["p", "q"], ["r", "s"], ["t", "u"]], _FIXED_TOKENS),

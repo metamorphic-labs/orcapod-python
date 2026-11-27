@@ -35,12 +35,12 @@ _UNCONVERTIBLE = pa.large_list(_NESTED)
 
 
 def _unconvertible() -> ArrowTableStream:
-    """Tokens ``[None, [[]]]``, three list levels deep: no value shows that type.
+    """Tokens ``[[], [[]]]``, three list levels deep: no value shows that type.
 
     Before ITL-1491 a row typed each token from its value, so building these rows
     into one table raised ``ArrowTypeError``. The rows now keep the stream's type.
     """
-    return _with_source_x([[None, [[]]], [None, [[]]]], _UNCONVERTIBLE)
+    return _with_source_x([[[], [[]]], [[], [[]]]], _UNCONVERTIBLE)
 
 
 def _plain() -> DictSource:
@@ -92,7 +92,7 @@ def test_a_bound_raw_source_with_nested_tokens_reads_its_rows_once() -> None:
     ]
     batched = job.nodes["batched"].as_table(columns={"source": True})
     assert batched.schema.field("_source_x").type == pa.large_list(_UNCONVERTIBLE)
-    assert batched.column("_source_x").to_pylist() == [[[None, [[]]], [None, [[]]]]]
+    assert batched.column("_source_x").to_pylist() == [[[[], [[]]], [[], [[]]]]]
 
 
 def test_a_fallback_source_nobody_reads_completes() -> None:
@@ -267,7 +267,7 @@ def test_replay_of_a_table_the_whole_table_build_cannot_use(
     odd = stored.set_column(
         position,
         pa.field("_source_x", _UNCONVERTIBLE, nullable=True),
-        pa.array([[None, [[]]]] * stored.num_rows, _UNCONVERTIBLE),
+        pa.array([[[], [[]]]] * stored.num_rows, _UNCONVERTIBLE),
     )
     seeded = InMemoryArrowDatabase()
     seeded.add_records(path, odd, record_id_column="__record_id")
@@ -281,7 +281,7 @@ def test_replay_of_a_table_the_whole_table_build_cannot_use(
         batched = replay.nodes["batched"].as_table(columns={"source": True})
         assert batched.schema.field("_source_x").type == pa.large_list(_UNCONVERTIBLE)
         assert batched.column("_source_x").to_pylist() == [
-            [[None, [[]]]] * stored.num_rows
+            [[[], [[]]]] * stored.num_rows
         ]
 
 
@@ -314,7 +314,7 @@ def test_a_bound_tap_stream_delivers_every_row_as_main_does() -> None:
 
     tap: Any = tap_pod(_deliver)
     DELIVERED.clear()
-    raw = _with_source_x([[None, [[]]], [None, [[]]]], _UNCONVERTIBLE)
+    raw = _with_source_x([[[], [[]]], [[], [[]]]], _UNCONVERTIBLE)
     tapped: Any = tap.process(raw)
     job = PipelineJob(name="tap_bound", database=InMemoryArrowDatabase())
     with job:
@@ -469,7 +469,7 @@ def test_a_lazy_output_is_described_and_opened_without_reading() -> None:
     assert out._stream is not None  # pyright: ignore[reportPrivateUsage]  # built by the read
     read = pa.Table.from_batches(batches)
     assert read.schema.field("_source_x").type == _UNCONVERTIBLE
-    assert read.column("_source_x").to_pylist() == [[None, [[]]], [None, [[]]]]
+    assert read.column("_source_x").to_pylist() == [[[], [[]]], [[], [[]]]]
 
 
 # ── round 5 ──────────────────────────────────────────────────────────────────
@@ -1376,7 +1376,7 @@ def test_held_rows_with_nested_tokens_reach_the_successor(asynchronous: bool) ->
     ]
     assert stored.num_rows == 2
     assert stored.schema.field("_source_x").type == _UNCONVERTIBLE
-    assert stored.column("_source_x").to_pylist() == [[None, [[]]], [None, [[]]]]
+    assert stored.column("_source_x").to_pylist() == [[[], [[]]], [[], [[]]]]
 
 
 def test_held_rows_with_nested_tokens_are_stored_alike_on_both_routes() -> None:
