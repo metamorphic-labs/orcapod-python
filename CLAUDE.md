@@ -1005,14 +1005,16 @@ current data context are the current entries.
 
 | Table | Layout (last path component) | Constant |
 |---|---|---|
-| Function pipeline | `pdb_v1` | `PIPELINE_DB_SCHEMA_VERSION` |
+| Function pipeline | `pdb_v2` | `PIPELINE_DB_SCHEMA_VERSION` |
 | Function result | `rdb_v1` (after the type's revision, `rev1`) | `RESULT_DB_SCHEMA_VERSION` |
-| Side-effect log | `tdb_v1` | `TRACKING_DB_SCHEMA_VERSION` |
-| Operator cache | `odb_v1` | `OPERATOR_DB_SCHEMA_VERSION` |
+| Side-effect log | `tdb_v2` | `TRACKING_DB_SCHEMA_VERSION` |
+| Operator cache | `odb_v2` | `OPERATOR_DB_SCHEMA_VERSION` |
 | Cached source | `sdb_v1` | `SOURCE_DB_SCHEMA_VERSION` |
 
-- Every layout marker starts at `v1` for the first release, 0.4.0 (developer, November 18,
-  2026, ITL-1259; 0.3.0 was withdrawn, so nothing released uses `v2`). A change to the common
+- Every layout marker started at `v1` for the first release, 0.4.0 (developer, November 18,
+  2026, ITL-1259; 0.3.0 was withdrawn). The pipeline, side-effect log and operator cache
+  layouts moved to `v2` before that release, with the three row ids (developer, November 25,
+  2026, ITL-1471; below, "Row ids"). A change to the common
   bookkeeping columns of a table kind moves its layout version, so the table gets a new path.
   Never add, rename or retype a stored column without it.
 - A function result table is at
@@ -1031,7 +1033,7 @@ current data context are the current entries.
     correct result for the same input? No: a new major. Yes: a new revision (the type's
     columns) or a new `rdb` version (the common columns). Components are delimited, never
     parsed out of one string; the major is not repeated.
-  - Pipeline tables carry no revision (`.../python.function.v1/schema:<pipeline hash>/pdb_v1`).
+  - Pipeline tables carry no revision (`.../python.function.v1/schema:<pipeline hash>/pdb_v2`).
     A saved job names the type and major only (`data_function_type_id`); the revision comes
     from the installed library's declaration (`declaration_for(type id)`).
 - A data function type's declaration (`PYTHON_FUNCTION`, beside its class in
@@ -1087,6 +1089,99 @@ current data context are the current entries.
   `contexts/logical_types.json`, never in a data context manifest: a logical type is
   versioned by its own identifier, and that file is not frozen.
 
+### Row ids: entry, instance, record
+
+A row that passes through a node has three nested ids (developer, November 25, 2026,
+ITL-1466, ITL-1471; `docs/reference/hashing.md` section 3). All three, with their preimages,
+are defined in one module, `core/row_ids.py`; never build one of these preimages anywhere else.
+
+| Id | Hash of | Column |
+|---|---|---|
+| entry id | user tags, system tags, the labelled input data hash | `__pipeline_entry_id` |
+| instance id | the entry id (labelled), the input's source-info tokens in name order | `__pipeline_instance_id` |
+| record id | the node's content hash (labelled), the instance id (labelled), the result id (`__data_id`) | `__pipeline_record_id` |
+
+- A function node identifies a row by its **instance id** (tokens included): it is the plain
+  lookup column of the pipeline table and the key of the node's in-memory cache. A new instance
+  of a known entry (same values, other tokens) writes a new row; its result normally comes from
+  the result store (same input hash), so nothing is computed.
+- A pipeline row stores its **record id** (`__pipeline_record_id`). It is the table's key,
+  and it covers the content hash of the node that records the row (developer, November 26,
+  2026): with the default pipeline-hash scope one table holds the rows of several nodes, told
+  apart by `__node_content_hash`, and two of them can record one instance with one cached
+  result, each under its own record id. Never take the node's content hash out of the record
+  id: the second node's row would be dropped as a duplicate. The row stores
+  `__node_content_hash`, so it gives its record id again from its own columns. A write skips only a row this node already stored under that record id; a
+  recompute has a new result id, so it writes a new row. There is no recomputation index:
+  among the rows of one instance, `__recorded_at` says which is the latest.
+- Only side effects and functions that take the invocation context are keyed by the **entry
+  id**: the side-effect log's row key and its `entry_id` column, and
+  `InvocationContext._entry_id_hash_ch` (`invocation_hash` is `pipeline_hash :: entry id`). A
+  token never reaches that key, so a token-only change upstream delivers nothing again.
+- The operator cache keeps its whole-row key (`_record_hash`) and stores, outside that key,
+  the row's entry id (`__pipeline_entry_id`) and its insertion time (`__recorded_at`); a row
+  passed again is skipped and keeps its first time. Every read of the cache drops both
+  (`_STORED_ONLY_COLUMNS`).
+- The column names inside a preimage are part of its recipe: renaming one moves the ids made
+  from it (the golden cases pin a pipeline table's instance ids; a record id holds a random
+  result id and cannot be pinned).
+- The placeholder of an ephemeral result that is gone (`EmptyData`) carries the source-info
+  tokens a real output would, with the sentinel `row_ids.EPHEMERAL_RESULT_GONE` in place of
+  the result id (one constant; built by `data_function.output_source_info`, as a real output's
+  tokens are). A node given a placeholder computes its instance id from those tokens, finds its
+  result in the result store by the input hash, calls nothing and writes no pipeline row
+  (developer, November 26, 2026; `FunctionJobNode._empty_data_cache_hit` is the one place
+  that holds that choice, to be reconsidered in ITL-1475).
+- The instance id reads a row's tokens through `DataProtocol.source_info_table()`: one column
+  per data column, a data column with no token having a null token. THE INTENDED RULE
+  (developer, November 27, 2026): the type of every source-info token column is fixed by the
+  pipeline, like every other column type, never taken from values. Each source and operator
+  determines its output token columns' types from its inputs' types, by its own rule, defined
+  in its own module; there is no one shape rule for all operators (`Batch` makes a list of
+  every token column; `GroupBy` makes lists of its members' token columns and folds a data-tag
+  key's tokens into one token; `MergeJoin` makes a list only for a colliding data column and
+  folds a merged data-tag key's tokens, as `Join` does; `Index` takes one list level off;
+  `Pick` writes a string token). A data-tag that falls through a function pod keeps its
+  source-info token with its type unchanged; a column a function returns is never a
+  pass-through, even with an input's name and value (its token points to the function).
+  TODAY (ITL-1471): a null token is a `large_string` null whatever type its column declares;
+  a non-null token of a row read from an Arrow table (a stream's row) keeps the type that
+  table declares, with a nullable field, not typed again from the value (a nested token
+  column would not survive it), also after a change of the row that keeps the token (a
+  selection, a drop, a rename, added columns); a token given as a Python value is typed from
+  its value (`arrow_utils.source_info_arrow_type`). STOPGAP, not the proper solution
+  (ITL-1491 will remove it): a type is still taken from values where a data-tag falls through
+  a function pod (`with_columns_of` types the copied tokens again) and at the sync edge
+  between two nodes (the row-built form, `_type_source_info_by_values`, and the rows' own
+  tables in `_rows_to_table`). That step can narrow a type an operator declared (`Batch` over
+  a nullable list-token column declares two list levels for `[None]`, whose value infers one)
+  and refuses a column whose rows infer different types; the async route passes rows on
+  without it. So a row built from values and the same row read from a table have one
+  instance id only when the table declares the types the values infer, and the two routes
+  are not guaranteed to give one token one type: the stopgap removed the case found (a
+  hand-built fixed-size-list token of a data-tag had two instance ids), not the difference.
+  Never build on the re-typing, and never write "a function passes a column through". A
+  rename moves a column's token with it; a token held for the destination name before is
+  dropped. An id is a function of the row (its values and the token column types it holds),
+  never of the order sessions ran in. A pipeline table keeps one type per token
+  column: a row whose token column has another type than the rows recorded (a list token
+  beside a string or null token) is refused, naming the column and both types
+  (`_require_one_type_per_token_column`), and the write fails as a database write error. A lookup must never fail on a row its stream holds as valid Arrow. The
+  pipeline row stores that same table (`_add_pipeline_record`), never the columns of
+  `as_table(columns={"source": True})`: every stored row gives its instance and record id
+  again from its own columns.
+- A trace resolves a held row by its **instance id**, on every branch of a function step
+  (over a source and over another node): a function node says which instance it holds each
+  row under (`FunctionJobNode.held_instance_ids`), and `provenance._entries_for` keeps the
+  stored records of that instance. Never select by comparing token values. Another run's
+  record of the same entry, with other tokens, is not that row's; several records of one
+  instance stay an inconsistency.
+- On the async path as on the sync path, a placeholder input goes to
+  `_empty_data_cache_hit`, never to the function or the pipeline writer, and under the same
+  row failure policy and events: the row starts before the lookup, and a placeholder with no
+  stored result is one failed row (`continue`) or stops the run (`fail_fast`).
+- `PostRunPayload.result_id` is the result's id (a UUID, not a hash).
+
 ### System tag evolution rules
 
 1. **Name-preserving** — single-stream ops (filter, select, map). Column name and value pass
@@ -1099,8 +1194,8 @@ current data context are the current entries.
    makes every user tag `list[T]` and keeps it a tag, while `GroupBy` keeps its scalar keys and
    drops every other user tag (ITL-1070). No tag ever moves to the data group. Source-info
    columns become `list[str]` with one element per member. System
-   tag columns must stay **scalar**, because `_build_record_id_preimage`
-   (`core/nodes/function_node.py`) hashes them directly to derive record identity. They fold
+   tag columns must stay **scalar**, because `entry_id_preimage`
+   (`core/row_ids.py`) hashes them directly to derive a row's entry id. They fold
    to a deterministic digest via `arrow_utils.fold_system_tag_values` and their column name
    gains `::{pipeline_hash}` — a blend of rules 2 and 3.
 
@@ -1768,11 +1863,15 @@ data. The rules:
   (`arrow_keys.polars_key_frame`, `arrow_keys.sort_key`) and the rows are taken from the
   table, so no value passes through Polars. A tag type with no rule (a map, an interval, a
   union, a list view) raises `TypeError` naming the column.
-- `Data` source-info values may be `str`, `None`, or `list[...]`, nested to any depth; the
-  Arrow and Python types are derived from the value, with `None` mapping to `large_string`.
-  That rule has one definition, `arrow_utils.source_info_arrow_type`, and applies only to
-  tokens supplied as Python values: `ArrowTableStream.iter_data` hands each row's source info
-  to `Data` as Arrow columns, so a type the stream already has is never re-inferred. A
+- `Data` source-info values may be `str`, `None`, or `list[...]`, nested to any depth; for a
+  token supplied as a Python value the Arrow and Python types are derived from the value, with
+  `None` mapping to `large_string`. That rule has one definition,
+  `arrow_utils.source_info_arrow_type`. `ArrowTableStream.iter_data` hands each row's source
+  info to `Data` as Arrow columns, and `source_info_table()` keeps the type the stream
+  declares. Today a declared type is still inferred again from values in three places, a
+  stopgap ITL-1491 will remove (above, "Row ids"): a row's `as_table(columns={"source": True})`
+  (so `_rows_to_table`), the row-built form (`_type_source_info_by_values`) and
+  `with_columns_of`. A
   many→one operator must emit a list for **every** row of a list-valued column — mixing a bare
   `None` into some rows makes per-row `as_table()` schemas diverge and `pa.concat_tables` fail
   on the barrier path.

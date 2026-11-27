@@ -28,9 +28,9 @@ from orcapod.system_constants import (
 JOB = "ordered"
 PIPELINE = PIPELINE_DB_SCHEMA_VERSION
 RESULT = RESULT_DB_SCHEMA_VERSION
-ENTRY = "__pipeline_entry_id"
-BASE_ENTRY = "__pipeline_base_entry_id"
-RECOMPUTATION = "__pipeline_recomputation_index"
+# The name the pipeline table's row key is read under in these tests.
+ENTRY = "__row_key"
+BASE_ENTRY = "__pipeline_instance_id"
 CALLS: list[int] = []
 DELIVERIES: list[int] = []
 
@@ -288,7 +288,7 @@ def test_async_flush_exposes_only_records_with_durable_results(
 @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
 @pytest.mark.parametrize(
     "reader",
-    ["point", "scan", "filtered", "recomputation", "cache", "source", "joined"],
+    ["point", "scan", "filtered", "recorded_again", "cache", "source", "joined"],
 )
 def test_pending_records_remain_readable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, asynchronous: bool, reader: str
@@ -343,19 +343,19 @@ def test_pending_records_remain_readable(
                 tag, data = next(
                     (tag, data)
                     for tag, data in upstream.iter_data()
-                    if writer.compute_base_entry_id(tag, data) == base_entry
+                    if writer.compute_instance_id(tag, data) == base_entry
                 )
+                # The same instance and result recorded again is the pending record
+                # itself (ITL-1471: the row key is the record id): the write reads
+                # the queued record and is skipped.
                 result_id = uuid.UUID(bytes=queued[constants.DATA_RECORD_ID][0].as_py())
                 writer.add_pipeline_record(tag, data, result_id, computed=False)
                 found = db.get_records_with_column_value(
                     path, {BASE_ENTRY: base_entry}, record_id_column=ENTRY
                 )
                 assert found is not None
-                assert Counter(found[RECOMPUTATION].to_pylist()) == Counter([0, 1])
-                assert set(found[ENTRY].to_pylist()) == {
-                    entry_id,
-                    writer.compute_pipeline_entry_id(tag, data, 1),
-                }
+                assert found[ENTRY].to_pylist() == [entry_id]
+                assert found["__computed"].to_pylist() == [True]
             observed = True
         original(view, record_path)
 

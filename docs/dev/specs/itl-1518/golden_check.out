@@ -1,0 +1,36 @@
+34 golden problem(s):
+  pipeline:rejoin_job.node[SelectDataColumns].content_hash is pinned but no longer produced
+  pipeline:rejoin_job.node[SelectDataColumns].pipeline_hash is pinned but no longer produced
+  pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"a","subject":"s1"}]._tag_record_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4 is pinned but no longer produced
+  pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"a","subject":"s1"}]._tag_source_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4 is pinned but no longer produced
+  pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"a","subject":"s1"}].data_hash is pinned but no longer produced
+  pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"a","subject":"s2"}]._tag_record_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4 is pinned but no longer produced
+  pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"a","subject":"s2"}]._tag_source_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4 is pinned but no longer produced
+  pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"a","subject":"s2"}].data_hash is pinned but no longer produced
+  pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"b","subject":"s3"}]._tag_record_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4 is pinned but no longer produced
+  pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"b","subject":"s3"}]._tag_source_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4 is pinned but no longer produced
+  pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"b","subject":"s3"}].data_hash is pinned but no longer produced
+  pipeline:rejoin_job.node[SelectDataColumns].system_tag_columns is pinned but no longer produced
+  pipeline:rejoin_job.node[ratio].content_hash moved: pinned 'semantic_v1:84f5f8ce9de0dac0e361d0b0d69f186075974bd359ccbee04ca58f2cc6fefbac', live 'semantic_v1:511d3c57512025445c23773ce648ee29b277882027ddf8a1e5080b1e2adc06a3'
+  pipeline:rejoin_job.node[ratio].pipeline_hash moved: pinned 'semantic_v1:2940d188693a284739b066b85def5c18e849c85c1de5fc9a3444d6dfbb25e7ba', live 'semantic_v1:64b6c04f3dd104e05264b806b1b24c1e20ac153ec8afd6df94d2afec64fe6b87'
+  pipeline:rejoin_job.table[golden_rejoin_job/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/schema:2940d188693a284739b066b85def5c18e849c85c1de5fc9a3444d6dfbb25e7ba/pdb_v2].instance_ids is pinned but no longer produced
+  pipeline:rejoin_job.table[golden_rejoin_job/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/schema:64b6c04f3dd104e05264b806b1b24c1e20ac153ec8afd6df94d2afec64fe6b87/pdb_v2].instance_ids is computed but not pinned
+  pipeline:rejoin_job.table_paths moved: pinned ['golden_rejoin_job/_result/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/rev1/rdb_v1', 'golden_rejoin_job/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/schema:2940d188693a284739b066b85def5c18e849c85c1de5fc9a3444d6dfbb25e7ba/pdb_v2'], live ['golden_rejoin_job/_result/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/rev1/rdb_v1', 'golden_rejoin_job/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/schema:64b6c04f3dd104e05264b806b1b24c1e20ac153ec8afd6df94d2afec64fe6b87/pdb_v2']
+  pipeline:rejoin_job_async.node[SelectDataColumns].content_hash is pinned but no longer produced
+  pipeline:rejoin_job_async.node[SelectDataColumns].pipeline_hash is pinned but no longer produced
+  pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"a","subject":"s1"}]._tag_record_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4 is pinned but no longer produced
+  pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"a","subject":"s1"}]._tag_source_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4 is pinned but no longer produced
+  pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"a","subject":"s1"}].data_hash is pinned but no longer produced
+  pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"a","subject":"s2"}]._tag_record_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4 is pinned but no longer produced
+  pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"a","subject":"s2"}]._tag_source_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4 is pinned but no longer produced
+  pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"a","subject":"s2"}].data_hash is pinned but no longer produced
+  pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"b","subject":"s3"}]._tag_record_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4 is pinned but no longer produced
+  pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"b","subject":"s3"}]._tag_source_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4 is pinned but no longer produced
+  pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"b","subject":"s3"}].data_hash is pinned but no longer produced
+  pipeline:rejoin_job_async.node[SelectDataColumns].system_tag_columns is pinned but no longer produced
+  pipeline:rejoin_job_async.node[ratio].content_hash moved: pinned 'semantic_v1:84f5f8ce9de0dac0e361d0b0d69f186075974bd359ccbee04ca58f2cc6fefbac', live 'semantic_v1:511d3c57512025445c23773ce648ee29b277882027ddf8a1e5080b1e2adc06a3'
+  pipeline:rejoin_job_async.node[ratio].pipeline_hash moved: pinned 'semantic_v1:2940d188693a284739b066b85def5c18e849c85c1de5fc9a3444d6dfbb25e7ba', live 'semantic_v1:64b6c04f3dd104e05264b806b1b24c1e20ac153ec8afd6df94d2afec64fe6b87'
+  pipeline:rejoin_job_async.table[golden_rejoin_job/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/schema:2940d188693a284739b066b85def5c18e849c85c1de5fc9a3444d6dfbb25e7ba/pdb_v2].instance_ids is pinned but no longer produced
+  pipeline:rejoin_job_async.table[golden_rejoin_job/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/schema:64b6c04f3dd104e05264b806b1b24c1e20ac153ec8afd6df94d2afec64fe6b87/pdb_v2].instance_ids is computed but not pinned
+  pipeline:rejoin_job_async.table_paths moved: pinned ['golden_rejoin_job/_result/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/rev1/rdb_v1', 'golden_rejoin_job/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/schema:2940d188693a284739b066b85def5c18e849c85c1de5fc9a3444d6dfbb25e7ba/pdb_v2'], live ['golden_rejoin_job/_result/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/rev1/rdb_v1', 'golden_rejoin_job/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/schema:64b6c04f3dd104e05264b806b1b24c1e20ac153ec8afd6df94d2afec64fe6b87/pdb_v2']
+exit=1

@@ -29,7 +29,7 @@ with contextlib.redirect_stdout(io.StringIO()):  # reuse fixtures, not their out
     CopyTagsToData = importlib.import_module("exp03_copy_tag_prototype").CopyTagsToData
 
 from orcapod import contexts, function_pod
-from orcapod.core.nodes.function_node import _build_record_id_preimage
+from orcapod.core.row_ids import entry_id_preimage as _build_record_id_preimage
 from orcapod.operators import MapData
 
 COLS = ["session_start", "experiment_start_timestamp"]

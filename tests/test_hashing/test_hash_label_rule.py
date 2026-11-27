@@ -462,7 +462,7 @@ class TestRenamingALabelMovesEveryHashItFeeds:
                 ContentHash.from_prefixed_digest(value).digest
                 for value in cast(
                     "list[bytes]",
-                    records.column("__pipeline_base_entry_id").to_pylist(),
+                    records.column("__pipeline_instance_id").to_pylist(),
                 )
             )
 
@@ -574,10 +574,10 @@ class TestNamesHoldBareDigests:
         assert BARE_SHA256.fullmatch(schema_component.removeprefix("schema:"))
 
     def test_operator_table_path_holds_bare_digests(self) -> None:
-        """An operator-cache table path holds bare digests, then the layout (``odb_v1``)."""
+        """An operator-cache table path holds bare digests, then the layout (``odb_v2``)."""
         node, store = _run_cached_join()
         (path,) = store.list_sources()
-        assert path == node.node_identity_path + ("odb_v1",)
+        assert path == node.node_identity_path + ("odb_v2",)
         assert path[0] == "Join"
         assert BARE_SHA256.fullmatch(path[1]), path
         assert path[2].startswith("schema:")

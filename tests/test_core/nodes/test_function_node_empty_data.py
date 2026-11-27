@@ -187,7 +187,7 @@ def _entries(node: FunctionJobNode) -> list[tuple[TagProtocol, DataProtocol]]:
     stored, an ``EmptyData`` placeholder for a result whose ephemeral database is gone.
     """
     entry_ids = [
-        node.compute_base_entry_id(tag, data)
+        node.compute_instance_id(tag, data)
         for tag, data in node._input_stream.iter_data()
     ]
     return list(node.get_cached_results(entry_ids).values())

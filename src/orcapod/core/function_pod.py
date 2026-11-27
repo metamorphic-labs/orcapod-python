@@ -14,6 +14,7 @@ import pyarrow as pa
 from orcapod import contexts
 from orcapod.channels import ReadableChannel, WritableChannel
 from orcapod.config import OrcapodConfig
+import orcapod.core.row_ids as row_ids
 from orcapod.core.base import TraceableBase
 from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
 from orcapod.core.datagrams import Data
@@ -191,11 +192,13 @@ class _FunctionPodBase(TraceableBase):
     ) -> Any:
         """Build a per-row ``InvocationContext`` for ctx-aware pods.
 
-        Uses the same preimage as ``SideEffectPod._execute_side_effect_row`` and
-        ``FunctionJobNode._build_entry_id_preimage``: system-tag columns +
-        ``INPUT_DATA_HASH_COL`` (``large_binary``) + recomputation index 0.
-        ``NODE_CONTENT_HASH_COL`` is intentionally excluded — it is redundant,
-        fully determined by the table path (``pipeline_hash()``) plus system tags.
+        The record-level component is the row's entry id (``row_ids.entry_id``:
+        its tags, system tags and input data hash), the id a side-effect pod keys
+        its deliveries by. The row's source-info tokens are no part of it, so a
+        row that arrives again with other tokens has the same invocation hash
+        (ITL-1471). ``NODE_CONTENT_HASH_COL`` is intentionally excluded — it is
+        redundant, fully determined by the table path (``pipeline_hash()``) plus
+        system tags.
 
         Args:
             tag: The input tag for this row.
@@ -205,22 +208,15 @@ class _FunctionPodBase(TraceableBase):
         Returns:
             An ``InvocationContext`` instance.
         """
-        import pyarrow as pa
-        from orcapod.core.nodes.function_node import _build_record_id_preimage
         from orcapod.invocation import InvocationContext, InvocationHashConfig
-        from orcapod.side_effects import _SIDE_EFFECT_RECOMPUTATION_INDEX_COL
 
-        preimage = _build_record_id_preimage(tag, data).append_column(
-            _SIDE_EFFECT_RECOMPUTATION_INDEX_COL,
-            pa.array([0], type=pa.int32()),
-        )
-        record_id_hash = self.data_context.arrow_hasher.hash_table(preimage)
+        entry_id = row_ids.entry_id(self.data_context.arrow_hasher, tag, data)
 
         return InvocationContext(
             pod_name=self.label,
             pipeline_run_id=run_id,
             _pipeline_hash_ch=self.pipeline_hash(),
-            _record_id_hash_ch=record_id_hash,
+            _entry_id_hash_ch=entry_id,
             _hash_config=InvocationHashConfig(),
             _track_completion=True,
         )
@@ -482,10 +478,10 @@ class _FunctionPodBase(TraceableBase):
         Returns:
             A ``PostRunPayload`` ready to pass to registered hooks.
         """
-        record_id = str(output_data.datagram_uuid) if output_data is not None else None
+        result_id = str(output_data.datagram_uuid) if output_data is not None else None
         invocation_context = self._build_invocation_context(tag, data, run_id=run_id)
         return PostRunPayload(
-            record_id_hash=record_id,
+            result_id=result_id,
             tag=tag,
             input=data,
             output=output_data,

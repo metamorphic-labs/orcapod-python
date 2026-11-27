@@ -1079,7 +1079,7 @@ from that database, and no rows under that key is an empty result, not an error.
   over the same sources, not only the saved run's inputs. Rows come in the order the database
   returns them; sort them if order matters. The node itself (`as_table()`, `iter_data()`,
   `head()`) is empty: it has not run in this process.
-- Operators (a join, a filter) store outputs only when caching is enabled, under `odb_v1`.
+- Operators (a join, a filter) store outputs only when caching is enabled, under `odb_v2`.
   The saved file does not record an operator's cache mode (follow-up ITL-977), so attach a
   loaded operator node in `CacheMode.REPLAY` to read the rows its run stored:
   `loaded.nodes["joined"].attach_databases(pipeline_database=store.at("<job name>"),
