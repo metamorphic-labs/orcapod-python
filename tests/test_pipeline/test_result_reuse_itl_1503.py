@@ -7,11 +7,16 @@ Two rules:
   else from the function; a fresh result is saved to the ephemeral store only, and
   nothing is ever saved to the persistent store. (A stopgap in the node, until the
   cache wrappers are redesigned: ITL-1516.)
-- **Write if missing.** A result table holds one result per input data hash. A
-  computation that finds a result stored for its input when it is about to store
-  its own discards its own and uses the stored one, reported as a cache hit.
+- **A conditional write.** A node's cache wrapper stores a result only when its
+  table holds none for the same input data hash and data context: a computation
+  that finds one when it is about to store its own discards its own and uses the
+  stored one, reported as a cache hit. It holds on one event loop or one thread,
+  over one database object and its views, for writes that are not re-entrant.
+  Several threads, a write made inside another write's flush, another database
+  handle or process and an unconditional store are not covered; two tests here
+  record the first two as known limits.
 
-Every case runs on the synchronous and the asynchronous path.
+The cases run on the synchronous and the asynchronous path unless they name one.
 """
 
 from __future__ import annotations
@@ -1073,3 +1078,123 @@ def test_many_repeats_of_one_instance_hold_few_rows_in_memory(
         data.get_meta_value(CachedFunctionPod.RESULT_COMPUTED_FLAG) for _, data in held
     ]
     assert computed.count(True) == 1 and computed.count(False) == repeats - 1
+
+
+def _occurrence_node(
+    ephemeral_mode: bool,
+) -> tuple[FunctionJobNode, ArrowTableStream, list[Any]]:
+    """A node over one stored result, and three occurrences of its one row whose
+    tags differ only in a meta column: one instance, one result, one computed flag."""
+    counted = _Counted()
+    source = _input({"a": 2})
+    persistent = InMemoryArrowDatabase()
+    _ = _seed(persistent, counted, source, {"a"})
+    if ephemeral_mode:
+        node = _ephemeral_node(
+            counted,
+            source,
+            pipeline=InMemoryArrowDatabase(),
+            persistent=persistent,
+            ephemeral=InMemoryArrowDatabase(),
+        )
+    else:
+        node = FunctionJobNode(
+            counted.pod,
+            source,
+            pipeline_database=InMemoryArrowDatabase(),
+            result_database=persistent,
+        )
+    tag, data = next(iter(source.iter_data()))
+    rows = [
+        (tag.with_meta_columns(occurrence=name), data)
+        for name in ("first", "second", "third", "second")
+    ]
+    assert len({node.compute_instance_id(*row) for row in rows}) == 1
+    return node, source, rows
+
+
+def _occurrences(pairs: list[Any]) -> list[Any]:
+    return [tag.get_meta_value("occurrence") for tag, _ in pairs]
+
+
+@pytest.mark.parametrize("ephemeral_mode", [False, True], ids=["persistent", "eph"])
+def test_async_readback_keeps_each_occurrence_s_own_tag_meta(
+    ephemeral_mode: bool,
+) -> None:
+    """Occurrences of one instance that were delivered one result but differ in
+    something a reader can see (here a tag meta column) are not the same row: a
+    read gives each its own. Only rows equal in everything share a held pair."""
+    node, _, rows = _occurrence_node(ephemeral_mode)
+
+    async def go() -> list[Any]:
+        input_ch: Channel[Any] = Channel(buffer_size=8)
+        output_ch: Channel[Any] = Channel(buffer_size=8)
+        for row in rows:
+            await input_ch.writer.send(row)
+        await input_ch.writer.close()
+        await node.async_execute(input_ch.reader, output_ch.writer)
+        return await output_ch.reader.collect()
+
+    delivered = asyncio.run(go())
+    assert _occurrences(delivered) == ["first", "second", "third", "second"]
+    assert len(set(_ids(delivered))) == 1
+
+    held = list(node.iter_data())
+    assert _occurrences(held) == _occurrences(delivered)
+    assert _ids(held) == _ids(delivered)
+    # The two equal occurrences share one held pair; the others have their own.
+    assert len({id(tag) for tag, _ in held}) == 3
+    assert held[1][0] is held[3][0]
+
+
+@pytest.mark.parametrize("ephemeral_mode", [False, True], ids=["persistent", "eph"])
+def test_sync_readback_of_occurrences_that_differ_in_tag_meta(
+    ephemeral_mode: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The sync path with the same input. It serves a repeated instance from the
+    row it already holds, so every occurrence is DELIVERED the first one's row,
+    tag meta included, and a read gives the same: readback equals delivery."""
+    node, source, rows = _occurrence_node(ephemeral_mode)
+    monkeypatch.setattr(source, "iter_data", lambda: iter(rows))
+    delivered = list(node.execute(source, error_policy="fail_fast").iter_data())
+
+    assert _occurrences(delivered) == ["first"] * 4
+    assert _occurrences(list(node.iter_data())) == _occurrences(delivered)
+
+
+@PATHS
+def test_a_write_made_inside_another_write_s_flush_is_not_covered(
+    use_async: bool,
+) -> None:
+    """A KNOWN LIMIT, not a guarantee. The conditional write covers writes that
+    are not re-entrant. Here a schema guard on the result table runs during the
+    outer write's flush, after its row left the queue and before it is stored,
+    and makes a second conditional write for the same input: it finds no result
+    and stores its own. The test asserts no uniqueness. It holds only what stays
+    true either way: each write returns a result that is stored, and nothing
+    else is."""
+    database = InMemoryArrowDatabase()
+    tag, data = next(iter(_input({"a": 2}).iter_data()))
+    pod = _Counted().pod
+    outer_pod, inner_pod = (
+        CachedFunctionPod(pod, result_database=database) for _ in range(2)
+    )
+    inner_pod.set_auto_flush(False)
+    inner: list[Any] = []
+
+    def during_flush(schema: pa.Schema) -> None:
+        if not inner:
+            inner.append(inner_pod.process_data(tag, data)[1])
+
+    with database.guard_table_schema(outer_pod.record_path, during_flush):
+        if use_async:
+            _, outer = asyncio.run(outer_pod.async_process_data(tag, data))
+        else:
+            _, outer = outer_pod.process_data(tag, data)
+    database.flush()
+
+    assert outer is not None and len(inner) == 1
+    returned = {outer.datagram_uuid.bytes, inner[0].datagram_uuid.bytes}
+    stored = _result_ids(database)
+    assert set(stored) == returned
+    assert len(stored) == len(set(stored))
