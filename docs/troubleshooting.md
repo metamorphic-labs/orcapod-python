@@ -81,13 +81,13 @@ With polars, keep the frame `with_columns` returns:
 a pandas or polars `DataFrame` stored whole in one column is a library value, not a dictionary
 column. See [Arrow types of a source](concepts/sources.md#arrow-types-of-a-source).
 
-### `TypeError: 'PosixPath' object is not iterable` from `CSVSource`
+### `TypeError: Object of type PosixPath is not JSON serializable` from `job.save`
 
-**Cause.** `CSVSource` was given a `pathlib.Path` and no `source_id`. The file path is
-typed as a string; without a `source_id` it is used to build the default one, which fails
-for a `Path`. This is a known defect.
+**Cause.** A source in the job was built from a `pathlib.Path`, as in
+`CSVSource(Path("units.csv"), ...)`. The source reads, but a job over it cannot be saved
+yet. This is a known defect (ITL-1489).
 
-**Fix.** `CSVSource(str(path), ...)`.
+**Fix.** Pass the path as a string: `CSVSource(str(path), ...)`.
 
 ### `ValueError: Parameter 'x' has no type annotation and is not specified in input_types.`
 
@@ -146,9 +146,13 @@ into a list.
 **Cause.** `group_by` was given a data column or an unknown name. Only tag columns can be
 grouping keys.
 
-**Fix.** Group by tags. If the column you want to group by is data, it should have been a
-tag: name it in `tag_columns` when you create the source. If the message says the columns
-are *list-valued tag columns*, the stream came from `batch`; group before batching.
+**Fix.** Group by tags. If the column you want to group by is data, give it the tag role
+first: `stream.tag_by("genotype").group_by(["genotype"])`, or with several columns
+`stream.tag_by("genotype", "sex").group_by(["genotype", "sex"])`. This also works after a
+join and for a column a function pod computed; see
+[Adding the tag role](concepts/data-tags.md#adding-the-tag-role-tag_by). You can also name
+the column in `tag_columns` when you create the source. If the message says the columns are
+*list-valued tag columns*, the stream came from `batch`; group before batching.
 
 ### `ValueError: Cannot hash the Polars expression '...' for an Orcapod identity`
 

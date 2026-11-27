@@ -400,7 +400,7 @@ type yet: a column of `time64` reads as `Any`, and an output annotated `-> time`
 
 Applying a pod directly, as above, computes in memory and keeps nothing. To store results and
 reuse them on later runs, record the same calls inside a `PipelineJob` that has a database
-(`store`):
+(its `database` argument):
 
 ```python
 from orcapod import PipelineJob, function_pod

@@ -141,7 +141,9 @@ Not covered here, with pointers:
   [Sources](../concepts/sources.md) and the [API reference](../api/sources.md).
 - **Running in parallel.** The `orcapod[ray]` extra adds an executor that runs function
   calls on a [Ray](https://www.ray.io/) cluster. `AsyncPipelineOrchestrator` in
-  `orcapod.pipeline` runs independent branches of a pipeline concurrently.
+  `orcapod.pipeline` runs the nodes of a pipeline side by side and a function on several rows
+  at once: see
+  [Running asynchronously](../concepts/function-pods.md#running-asynchronously-in-a-script-or-a-notebook).
 - **Arrays and your own classes as values.** NumPy arrays and tensors can be data values:
   see [Arrays and Tensors](../concepts/arrays.md). So can your own dataclasses and pydantic
   models: see [Your Own Data Types](../concepts/your-own-data-types.md).

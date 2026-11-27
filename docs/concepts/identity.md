@@ -13,9 +13,25 @@ The content hash captures schema, topology, and the **identity of the sources** 
 pipeline. It is computed recursively: each element's content hash depends on its own identity
 plus the content hashes of all its upstream elements, all the way back to the sources.
 
-A source's identity is its class, its schema, its `source_id` and its key columns (the
-`record_id_columns` that name its rows, or none when rows are named by position). What the
-`source_id` is depends on how the source was created:
+What a source's identity holds depends on its kind:
+
+| Kind of source | Its identity |
+|---|---|
+| A table, file or database source (`ArrowTableSource`, `DictSource`, `ListSource`, `DataFrameSource`, `CSVSource`, `DeltaTableSource`, the SQLite, PostgreSQL and SpiralDB table sources), without `tags_as_data` | its `source_id`, its schema and its key columns |
+| `DerivedSource` without `tags_as_data` (`node.as_source()`) | the content hash of the job node it reads, and nothing else: a `source_id` you give changes its name, not its content hash |
+| `DerivedSource` or `SpiralDBTableSource` with `tags_as_data` | its `source_id`, its schema, its key columns and the `tags_as_data` mapping |
+| `PollingSource` | its `source_id`, what its implementation states as its identity (`impl.identity()`), its tag columns and its key columns; not its schema |
+| `SourceProxy` (stands in for a source that a loaded job could not rebuild) | the content hash and the pipeline hash saved with the job |
+
+- The `source_id` is the kind of source, the version of that kind and the source's name, as
+  in `csv_v1:subjects`.
+- The key columns are the `record_id_columns` that name the rows, or none when rows are named
+  by position.
+- The Python class is not part of any identity. Two sources are one source when everything in
+  their row of the table is equal, whatever their classes; two kinds of source given one name
+  differ in their `source_id`.
+
+What the name in the `source_id` is depends on how the source was created:
 
 - If you do not pass `source_id`, an in-memory source such as `DictSource` or
   `ArrowTableSource` derives it from the data, so two sources with different rows have
@@ -23,9 +39,7 @@ A source's identity is its class, its schema, its `source_id` and its key column
 - File- and table-backed sources default to a name derived from their location (the file
   path for `CSVSource`, the table folder's path or URI for `DeltaTableSource`), not from the
   rows.
-- If you pass `source_id` yourself, you are naming the source: two sources with the same
-  class, schema, `source_id` and key columns have the same content hash even when their rows
-  differ.
+- If you pass `source_id` yourself, the table above says what the identity holds.
 
 Two sources that differ only in their key columns name the same rows differently, so they
 are two sources: different content hashes (each gets its own cache), the same pipeline hash
@@ -314,7 +328,7 @@ The order counts only where it is the point of the argument:
 | Order that counts | Why |
 |---|---|
 | `record_id_columns` of every source (by default a database table's primary key) | A record id is the canonical JSON of the key columns in key order, so the key order is part of every record id and of the source's identity. It is the explicit argument that states the order. |
-| `member_order` of `GroupBy` (ITL-1226; not in a release yet) | The explicit order of the members inside each group's lists, the argument that replaces the input's tag order there. |
+| `member_order` of `GroupBy` (ITL-1226) | The explicit order of the members inside each group's lists, the argument that replaces the input's tag order there. |
 | the inputs of an operator whose `argument_symmetry` is a tuple (`SemiJoin`, `MergeJoin`) | The inputs have roles: `SemiJoin(left, right)` keeps the rows of `left`; `MergeJoin(a, b)` lists `a`'s value first in every merged list (ITL-1281). |
 | the order of the ROWS given to a source without key columns | Its record ids are the row positions, so a reorder is a change (by decision). Row order, never column order. |
 | the order of the ROWS given to `Batch` | `Batch` groups consecutive rows: row order, never column order. |
@@ -351,10 +365,6 @@ source and stream kind, the function pod forms and a job. Today these cases stil
 data context v1 is frozen:
 
 - the order of `polars_filter`'s predicates is in its identity (ITL-1247, undecided);
-- a function pod over data-tags: its content and pipeline hash and its node's stored paths
-  depend on the input's tag order and table layout (ITL-1246);
-- a stream built directly from a table (`ArrowTableStream`): its content hash depends on
-  the order of its tags (ITL-1227);
 - which rows `head()` shows, sorted by tags, follows the tag order (ITL-1270);
 - where the columns are placed is not always the declared order: an operator places its
   output tags in its input table's column order (ITL-1249, presentation only).
