@@ -938,3 +938,53 @@ def test_node_run_checks_its_sources_like_job_run(
         _ = job.nodes[node].run()
     for name in ("matched", "fm"):
         assert job.nodes[name].as_table().num_rows == 0
+
+
+def test_each_digest_is_computed_at_most_once_per_source(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from collections import Counter
+
+    calls: Counter[tuple[str, int]] = Counter()
+    exact = RootSource._digest_fixed_rows  # pyright: ignore[reportPrivateUsage]  # counted
+    multiset = RootSource._digest_fixed_row_multiset  # pyright: ignore[reportPrivateUsage]  # counted
+
+    def counted_exact(self: RootSource) -> bytes:
+        calls["exact", id(self)] += 1
+        return exact(self)
+
+    def counted_multiset(self: RootSource) -> bytes:
+        calls["multiset", id(self)] += 1
+        return multiset(self)
+
+    monkeypatch.setattr(RootSource, "_digest_fixed_rows", counted_exact)
+    monkeypatch.setattr(RootSource, "_digest_fixed_row_multiset", counted_multiset)
+
+    rows = [{"x": 1}, {"x": 2}]
+    first = DictSource(rows, source_id="shared")
+    second = DictSource(rows, source_id="shared")
+    keyed = DictSource(rows, record_id_columns="x", source_id="shared")
+    uses = [("slot 'a'", first), ("slot 'b'", second), ("slot 'c'", keyed)]
+    for _ in range(2):
+        # A second check computes nothing: a fixed table's digests are held.
+        with pytest.raises(InconsistentSourceError, match="differ only in key"):
+            require_consistent_sources(uses)
+        # Equal keys need the exact digest, different keys the multiset digest.
+        assert calls == {
+            ("exact", id(first)): 1,
+            ("exact", id(second)): 1,
+            ("multiset", id(first)): 1,
+            ("multiset", id(second)): 1,
+            ("multiset", id(keyed)): 1,
+        }
+
+    # Two sources whose key columns differ need only the multiset digest.
+    calls.clear()
+    pair = [
+        ("slot 'a'", DictSource(rows, source_id="shared")),
+        ("slot 'b'", DictSource(rows, record_id_columns="x", source_id="shared")),
+    ]
+    with pytest.raises(InconsistentSourceError, match="differ only in key"):
+        require_consistent_sources(pair)
+    assert sorted(calls.values()) == [1, 1]
+    assert {kind for kind, _ in calls} == {"multiset"}
