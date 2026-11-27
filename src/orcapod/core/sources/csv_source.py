@@ -10,7 +10,11 @@ from typing import Any, ClassVar
 import pyarrow as pa
 from typing_extensions import override
 
-from orcapod.core.sources.base import RootSource, saved_tag_only_columns
+from orcapod.core.sources.base import (
+    RootSource,
+    saved_tag_only_columns,
+    source_paths,
+)
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.source_ids import location_source_name
 from orcapod.core.sources.reload import keep_nullable_columns, same_rows
@@ -273,6 +277,9 @@ class CSVSource(RootSource):
     Data-tags (ITL-1023): every declared tag column is a data-tag by default,
     also a data column of the same name. ``tag_only_columns`` (keyword-only) names the
     tags kept plain (tag only, not data, as in v0.3); ``True`` keeps all of them plain.
+
+    A path-like ``file_path`` is stored as its filesystem text, which also supplies
+    the default source name.
     """
 
     SOURCE_KIND: ClassVar[str] = "csv"
@@ -284,7 +291,7 @@ class CSVSource(RootSource):
 
     def __init__(
         self,
-        file_path: str,
+        file_path: str | os.PathLike[str],
         tag_columns: str | Collection[str] = (),
         system_tag_columns: Collection[str] = (),
         record_id_columns: str | Collection[str] | None = None,
@@ -294,16 +301,13 @@ class CSVSource(RootSource):
         tag_only_columns: TagOnlyColumns = (),
         **kwargs: Any,
     ) -> None:
+        self._file_path, self._access_path = source_paths(file_path)
         super().__init__(source_id=source_id, **kwargs)
         if self._source_name is None:
             # A default name is where the data lives, not a name the user gave: it is
             # not checked for a start shaped like a source id (ITL-1425).
-            self._source_name = location_source_name(str(file_path))
+            self._source_name = location_source_name(self._file_path)
 
-        self._file_path = file_path
-        # Every later read (a check, ITL-1102) opens the file found now, whatever the
-        # working directory is then.
-        self._access_path = os.path.abspath(file_path)
         self._schema = schema
         self._tag_columns: Collection[str] = _normalize_column_list(tag_columns)
         self._system_tag_columns: Collection[str] = system_tag_columns

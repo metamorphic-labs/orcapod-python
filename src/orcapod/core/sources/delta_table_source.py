@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import os
+import re
 
 from collections.abc import Collection
-from pathlib import Path
 from typing import Any, ClassVar, TYPE_CHECKING
 
 import pyarrow as pa
 from typing_extensions import override
 
-from orcapod.core.sources.base import RootSource, saved_tag_only_columns
+from orcapod.core.sources.base import (
+    RootSource,
+    saved_tag_only_columns,
+    source_paths,
+)
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.source_ids import location_source_name
 from orcapod.core.sources.reload import same_rows
@@ -19,7 +23,6 @@ from orcapod.core.sources.stream_builder import (
     SourceStreamResult,
 )
 from orcapod.databases.storage_utils import delta_to_pyarrow_dataset
-from orcapod.types import PathLike
 from orcapod.utils.lazy_module import LazyModule
 from orcapod.utils.schema_utils import _normalize_column_list
 
@@ -27,6 +30,14 @@ if TYPE_CHECKING:
     import deltalake
 else:
     deltalake = LazyModule("deltalake")
+
+
+def _is_delta_uri(path: str) -> bool:
+    """Identify a URI address, excluding Windows drive paths."""
+    return (
+        re.match(r"[a-zA-Z][a-zA-Z0-9+.-]*://", path) is not None
+        and not os.path.splitdrive(path)[0]
+    )
 
 
 class DeltaTableSource(RootSource):
@@ -57,7 +68,7 @@ class DeltaTableSource(RootSource):
 
     def __init__(
         self,
-        delta_table_path: PathLike,
+        delta_table_path: str | os.PathLike[str],
         tag_columns: str | Collection[str] = (),
         system_tag_columns: Collection[str] = (),
         record_id_columns: str | Collection[str] | None = None,
@@ -66,21 +77,21 @@ class DeltaTableSource(RootSource):
         tag_only_columns: TagOnlyColumns = (),
         **kwargs: Any,
     ) -> None:
-        resolved = Path(delta_table_path).resolve()
+        self._delta_table_path, access_path = source_paths(
+            delta_table_path, passthrough=_is_delta_uri
+        )
 
         super().__init__(source_id=source_id, **kwargs)
         if self._source_name is None:
             # The table folder's path or URI as passed: a relative path stays relative.
             # A default name is where the data lives, not a name the user gave: it is
             # not checked for a start shaped like a source id (ITL-1425).
-            self._source_name = location_source_name(os.fspath(delta_table_path))
-
-        self._delta_table_path = resolved
+            self._source_name = location_source_name(self._delta_table_path)
 
         try:
-            self._delta_table = deltalake.DeltaTable(str(self._delta_table_path))
+            self._delta_table = deltalake.DeltaTable(access_path)
         except deltalake.exceptions.TableNotFoundError:
-            raise ValueError(f"Delta table not found at {self._delta_table_path}")
+            raise ValueError(f"Delta table not found at {access_path}")
 
         self._tag_columns: Collection[str] = _normalize_column_list(tag_columns)
         self._system_tag_columns: Collection[str] = system_tag_columns
@@ -149,7 +160,7 @@ class DeltaTableSource(RootSource):
         table = self._read_table()
         if not table.schema.equals(self._table.schema, check_metadata=True):
             raise ValueError(
-                f"Delta table {str(self._delta_table_path)!r} changed its columns at "
+                f"Delta table {self._delta_table_path!r} changed its columns at "
                 f"version {version}: the source was built with {self._table.schema}, "
                 f"the table now has {table.schema}. Build a new DeltaTableSource to "
                 "read it"
@@ -169,7 +180,7 @@ class DeltaTableSource(RootSource):
         """Serialize this source's configuration to a JSON-compatible dict."""
         return {
             "source_type": self.SOURCE_KIND,
-            "delta_table_path": str(self._delta_table_path),
+            "delta_table_path": self._delta_table_path,
             "tag_columns": list(self._tag_columns),
             **self._tag_only_config(),
             "system_tag_columns": list(self._system_tag_columns),

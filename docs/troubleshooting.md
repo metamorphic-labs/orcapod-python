@@ -83,11 +83,10 @@ column. See [Arrow types of a source](concepts/sources.md#arrow-types-of-a-sourc
 
 ### `TypeError: 'PosixPath' object is not iterable` from `CSVSource`
 
-**Cause.** `CSVSource` was given a `pathlib.Path` and no `source_id`. The file path is
-typed as a string; without a `source_id` it is used to build the default one, which fails
-for a `Path`. This is a known defect.
-
-**Fix.** `CSVSource(str(path), ...)`.
+Current Orcapod accepts `str` or `os.PathLike[str]`, including `pathlib.Path`, in
+`CSVSource`, `DeltaTableSource`, and `SQLiteTableSource`. Saved jobs store the paths as
+JSON strings. If you see this error on an older version, upgrade Orcapod or pass
+`str(path)` to `CSVSource`.
 
 ### `ValueError: Parameter 'x' has no type annotation and is not specified in input_types.`
 
@@ -294,7 +293,8 @@ and what the pipeline imports must be there.
 - The job was read with `PipelineJob.load()`. A loaded job's nodes read empty until
   `loaded.run(load_only=True)`.
 - A source of the job is not bound. `job.unbound_sources` lists such sources; the nodes
-  below them do not run.
+  below them do not run. The run summary's `skipped_unbound_sources` field names the
+  skipped nodes and which slots to bind.
 
 **Fix.** Call `job.run()`, then read `job.nodes[label]`. To see everything the database
 holds for a node, whatever run it came from, use `job.nodes[label].as_source()`.

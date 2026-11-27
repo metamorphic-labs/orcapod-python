@@ -30,8 +30,23 @@ hashing) and produces the final immutable stream.
 | `DictSource` | `list[dict]` | Each dict becomes one (Tag, Data) pair |
 | `ListSource` | `list[Any]` | Each element stored under the data column given by `name`; the tag defaults to `element_index` |
 | `DataFrameSource` | Pandas or Polars `DataFrame` | Converts via Arrow |
-| `CSVSource` | File path (string) | Reads CSV into Arrow |
-| `DeltaTableSource` | Directory path | Reads Delta Lake table |
+| `CSVSource` | CSV file path | Reads CSV into Arrow |
+| `DeltaTableSource` | Table directory path | Reads Delta Lake table |
+
+`CSVSource`, `DeltaTableSource`, and `SQLiteTableSource` accept `str` or
+`os.PathLike[str]`, including `pathlib.Path`. At construction, they call `os.fspath` once
+and use its result for the default source ID, the saved job configuration, and opening the
+source. For example, a CSV path object whose `__fspath__` returns `data/entries.csv` and
+whose `__str__` returns `display.csv` gets the default ID `csv_v1:data/entries.csv`. For
+local files or tables, the source anchors a relative path to the working directory at
+construction. The reader handles symlinks and `..` in that path, and later reads keep
+the same working-directory anchor. A saved relative path is relative to the working
+directory when the job is loaded. Use absolute source paths when building a job you
+expect to load from a different working directory. If a relative path points to a
+different dataset after loading, reading the restored `CachedSource` mixes rows from
+both datasets in the existing source cache (ITL-1546).
+
+Delta URIs such as `s3://bucket/table` are saved and passed to deltalake as given.
 
 `orcapod.sources` also provides database-backed sources (`SQLiteTableSource`,
 `PostgreSQLTableSource`, `SpiralDBTableSource`) and `PollingSource` for data that arrives over

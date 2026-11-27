@@ -2,7 +2,9 @@ from __future__ import annotations
 
 
 import logging
-from datetime import datetime
+from contextlib import contextmanager
+from contextvars import ContextVar
+from datetime import datetime, timezone
 from collections.abc import Iterator
 from typing import Any, ClassVar, TYPE_CHECKING
 
@@ -51,6 +53,23 @@ if TYPE_CHECKING:
     from orcapod.protocols.database_protocols import DatabaseRegistryProtocol
 
 logger = logging.getLogger(__name__)
+
+stored_source_streams: ContextVar[dict[int, ArrowTableStream] | None] = ContextVar(
+    "stored_source_streams", default=None
+)
+
+
+@contextmanager
+def stored_source_caches(load_only: bool) -> Iterator[None]:
+    """Share snapshots of source caches for the duration of a load-only run."""
+    if not load_only or stored_source_streams.get() is not None:
+        yield
+        return
+    token = stored_source_streams.set({})
+    try:
+        yield
+    finally:
+        stored_source_streams.reset(token)
 
 
 class CachedSource(RootSource):
@@ -151,6 +170,8 @@ class CachedSource(RootSource):
         # built; ``None`` before a build. A cache shared with another source can hold
         # rows this source has not presented yet (ITL-1102).
         self._presented_hashes: set[bytes] | None = None
+        self._load_only_hashes: set[bytes] | None = None
+        self._load_only_modified_time: datetime | None = None
 
     # -------------------------------------------------------------------------
     # Serialization
@@ -206,6 +227,8 @@ class CachedSource(RootSource):
         ``SourceProxy`` preserving the original source's identity.  The
         CachedSource can still serve data from its cache database.
 
+        A saved local Delta cache must already have a root directory.
+
         Args:
             config: Dict as produced by ``to_config``.
             db_registry: Optional registry. When ``cache_database`` is a
@@ -215,6 +238,10 @@ class CachedSource(RootSource):
 
         Returns:
             A new CachedSource constructed from the config.
+
+        Raises:
+            ValueError: If a registry reference cannot be resolved without a
+                registry, or if a local Delta cache has no root directory.
         """
         from orcapod.pipeline.serialization import (
             resolve_database_from_config,
@@ -228,9 +255,10 @@ class CachedSource(RootSource):
                     f"cache_database is a registry key {cache_db_ref!r} but no "
                     "db_registry was provided."
                 )
-            cache_db = resolve_database_from_config(db_registry.resolve(cache_db_ref))
+            cache_config = db_registry.resolve(cache_db_ref)
         else:
-            cache_db = resolve_database_from_config(cache_db_ref)
+            cache_config = cache_db_ref
+        cache_db = resolve_database_from_config(cache_config, create_base_path=False)
 
         # All sources accept db_registry — always forward it so nested
         # CachedSources can resolve their own cache database references.
@@ -459,6 +487,11 @@ class CachedSource(RootSource):
             CachedSourceIdMismatchError: If the cache holds rows of another source
                 id; raised before the wrapped source is checked (ITL-1425).
         """
+        snapshots = stored_source_streams.get()
+        if snapshots is not None:
+            previous = self._load_only_hashes
+            _ = self._stored_stream(snapshots)
+            return previous != self._load_only_hashes
         if not isinstance(self._source, RootSource):
             return False
         # The cache first: a cache of another source id is refused before the
@@ -585,7 +618,7 @@ class CachedSource(RootSource):
                 "cache database), or the reader's version pinned to the one that "
                 "wrote it."
             )
-        if stored_ids:
+        if stored_ids and stored_source_streams.get() is None:
             self._source_ids_checked = True
 
     def _build_merged_stream(self) -> ArrowTableStream:
@@ -605,18 +638,52 @@ class CachedSource(RootSource):
             )
 
         stored = self._read_cached_records_with_hashes()
+        self._presented_hashes = self._record_hashes(stored)
+        self._note_stored_hashes(self._presented_hashes)
+        return self._stream_from_records(stored)
+
+    def _record_hashes(self, stored: pa.Table | None) -> set[bytes]:
+        """Return the row identities held in a cache snapshot."""
         if stored is None:
-            self._presented_hashes = set()
-            all_records = self._empty_table()
-        else:
-            self._presented_hashes = {
-                h
-                for h in stored.column(self.HASH_COLUMN_NAME).to_pylist()
-                if h is not None
-            }
-            all_records = stored.drop(
-                [self.HASH_COLUMN_NAME, constants.DATA_CONTEXT_COL]
+            return set()
+        return {
+            value
+            for value in stored.column(self.HASH_COLUMN_NAME).to_pylist()
+            if value is not None
+        }
+
+    def _stored_stream(
+        self, snapshots: dict[int, ArrowTableStream]
+    ) -> ArrowTableStream:
+        """Snapshot stored cache rows for this run without ingesting live data."""
+        if id(self) in snapshots:
+            return snapshots[id(self)]
+        self._cache_database.refresh_table(self.cache_path)
+        records = self._read_cached_records_with_hashes()
+        hashes = self._record_hashes(records)
+        stream = self._stream_from_records(records)
+        if not hashes:
+            logger.warning(
+                "Cached source %r has no stored rows for this load-only run.",
+                self.source_id,
             )
+        self._note_stored_hashes(hashes)
+        snapshots[id(self)] = stream
+        return stream
+
+    def _note_stored_hashes(self, hashes: set[bytes]) -> None:
+        """Track changes to the stored view, including rows written by a full read."""
+        if hashes != self._load_only_hashes:
+            self._load_only_hashes = hashes
+            self._load_only_modified_time = datetime.now(timezone.utc)
+
+    def _stream_from_records(self, stored: pa.Table | None) -> ArrowTableStream:
+        """Present stored cache rows using the wrapped source's schema."""
+        all_records = (
+            self._empty_table()
+            if stored is None
+            else stored.drop([self.HASH_COLUMN_NAME, constants.DATA_CONTEXT_COL])
+        )
 
         tag_keys = self._source.keys()[0]
         # Cached rows are this source's: give them its data context, not the default.
@@ -672,6 +739,14 @@ class CachedSource(RootSource):
         return pa.Table.from_pylist([], schema=arrow_schema)
 
     @property
+    @override
+    def last_modified(self) -> datetime | None:
+        """Report the timestamp for the view the current run can read."""
+        if stored_source_streams.get() is not None:
+            return self._load_only_modified_time
+        return super().last_modified
+
+    @property
     def is_stale(self) -> bool:
         """True if the wrapped source has been modified since the last build.
 
@@ -684,22 +759,24 @@ class CachedSource(RootSource):
         src_time = self._source.last_modified
         return src_time is None or src_time > own_time
 
-    def _ensure_stream(self) -> None:
-        """Build the merged stream on first access, or rebuild if source is stale."""
+    def _current_stream(self) -> ArrowTableStream:
+        """Read the run's snapshot or build the merged stream when stale."""
+        snapshots = stored_source_streams.get()
+        if snapshots is not None:
+            return self._stored_stream(snapshots)
         if self._cached_stream is not None and self.is_stale:
             self._cached_stream = None
         if self._cached_stream is None:
             self._cached_stream = self._build_merged_stream()
             self._update_modified_time()
+        return self._cached_stream
 
     def clear_cache(self) -> None:
         """Discard in-memory cached stream (forces rebuild on next access)."""
         self._cached_stream = None
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
-        self._ensure_stream()
-        assert self._cached_stream is not None
-        return self._cached_stream.iter_data()
+        return self._current_stream().iter_data()
 
     def as_table(
         self,
@@ -707,9 +784,7 @@ class CachedSource(RootSource):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> "pa.Table":
-        self._ensure_stream()
-        assert self._cached_stream is not None
-        return self._cached_stream.as_table(columns=columns, all_info=all_info)
+        return self._current_stream().as_table(columns=columns, all_info=all_info)
 
     def _typed_zero_row_table(self) -> "pa.Table | None":
         """The wrapped source's zero-row table: the cache stores that source's rows.

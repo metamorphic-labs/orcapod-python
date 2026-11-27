@@ -19,7 +19,7 @@ from orcapod.pipeline.observer import NoOpLogger
 from orcapod.pipeline.restrictions import restriction_text
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Collection, Mapping, Sequence
     from types import FrameType
 
     from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
@@ -90,6 +90,9 @@ class RunSummary:
             for new data at the start of the run (ITL-1102): each raised in
             ``check_for_new_data``, was reported by a ``SourceCheckFailedWarning``,
             and fed the run with the data it already held.
+        skipped_unbound_sources: The labels of omitted job nodes (including unbound
+            source nodes), mapped to the sorted slot names that blocked each one.
+            The labels are sorted and each slot appears once per node.
         conditions: The ``Condition`` each source of the run read under, by slot
             name (the name ``bind`` takes; a source read directly by a node's
             ``run()`` by its label), for the slots whose source has one (ITL-1218).
@@ -101,9 +104,8 @@ class RunSummary:
             slots whose source has one.
         restricted_source_ids: The source id of every restricted source (a slot in
             ``conditions``, ``limits`` or both), by slot name.
-        ran_nothing: Whether the run ran no node: every node held a current run
-            (ITL-1095). Decided by the run's plan, which counts every kind of node, so a
-            run that ran only a side-effect or operator node is not "nothing to do".
+        ran_nothing: Whether the plan executed any nodes, including operators and
+            side effects. True when it executed zero nodes.
     """
 
     def __init__(
@@ -117,6 +119,7 @@ class RunSummary:
         ran_nothing: bool = False,
         restricted_sources: Mapping[str, RestrictedSource] | None = None,
         asynchronous: bool = False,
+        skipped_unbound_sources: Mapping[str, Collection[str]] | None = None,
     ) -> None:
         """Build the summary.
 
@@ -126,18 +129,23 @@ class RunSummary:
             load_only: Whether the run loaded stored results only.
             target: The label of the node whose ``run()`` this was, if any.
             unchecked_sources: The sources that could not be checked for new data.
-            ran_nothing: Whether the run ran no node (every node held a current run).
+            ran_nothing: Whether the run ran no node.
             restricted_sources: Slot name to the source id, the condition (empty
                 for none) and the limit of each restricted source of the run
                 (``restrictions.restrictions_in_force``). Displayed by slot name
                 or direct source label.
             asynchronous: Whether the async orchestrator executed the run.
+            skipped_unbound_sources: Omitted node labels and their unbound slot names.
         """
         self.job_name: str = job_name
         self.nodes: Mapping[str, NodeRunSummary] = {node.label: node for node in nodes}
         self.load_only: bool = load_only
         self.target: str | None = target
         self.unchecked_sources: tuple[str, ...] = tuple(unchecked_sources)
+        self.skipped_unbound_sources: Mapping[str, tuple[str, ...]] = {
+            label: tuple(sorted(set(slots)))
+            for label, slots in sorted((skipped_unbound_sources or {}).items())
+        }
         self.ran_nothing: bool = ran_nothing
         self._attribution_note: str = (
             _ASYNC_ATTRIBUTION_NOTE
@@ -217,13 +225,16 @@ class RunSummary:
         # only a side-effect or operator node did something (ITL-1121).
         if self.ran_nothing:
             run = "Load-only run" if self.load_only else "Run"
+            if self.skipped_unbound_sources:
+                return f"{run} of {subject}: no nodes ran."
             return f"{run} of {subject}: nothing to do; every node holds a current run."
         if self.load_only:
             skipped = sum(node.not_stored for node in self.nodes.values())
+            available = "available " if self.skipped_unbound_sources else ""
             outcome = (
                 f"{_rows(skipped)} without a stored result skipped."
                 if skipped
-                else "every input had a stored result."
+                else f"every {available}input had a stored result."
             )
             return f"Load-only run of {subject}: {outcome}"
         if self.failed_rows:
@@ -250,27 +261,26 @@ class RunSummary:
             for slot, source_id in self.restricted_source_ids.items()
         )
 
-    def _source_lines_html(self) -> str:
-        """The unchecked and restricted source lines as HTML paragraphs, or ``""``."""
-        restricted = self._restrictions_line()
-        return self._unchecked_html() + (
-            "" if restricted is None else f"<p>{html.escape(restricted)}</p>"
+    def _source_lines(self) -> list[str]:
+        """Describe skipped nodes, source check failures and source restrictions."""
+        lines = [
+            f"{label!r}: skipped (unbound sources: {', '.join(map(repr, slots))})"
+            for label, slots in self.skipped_unbound_sources.items()
+        ]
+        lines.extend(
+            line
+            for line in (self._unchecked_line(), self._restrictions_line())
+            if line is not None
         )
+        return lines
 
-    def _unchecked_html(self) -> str:
-        """The unchecked-sources line as an HTML paragraph, or ``""``."""
-        unchecked = self._unchecked_line()
-        return "" if unchecked is None else f"<p>{html.escape(unchecked)}</p>"
+    def _source_lines_html(self) -> str:
+        """Render the source lines as HTML paragraphs."""
+        return "".join(f"<p>{html.escape(line)}</p>" for line in self._source_lines())
 
     def __repr__(self) -> str:
         """The summary as text: one line per node, and the first error of a failing one."""
-        lines = [self._headline()]
-        unchecked = self._unchecked_line()
-        if unchecked is not None:
-            lines.append(f"  {unchecked}")
-        restricted = self._restrictions_line()
-        if restricted is not None:
-            lines.append(f"  {restricted}")
+        lines = [self._headline(), *(f"  {line}" for line in self._source_lines())]
         if self._attribution_note:
             lines.append(f"  {self._attribution_note}")
         for node in self.nodes.values():
