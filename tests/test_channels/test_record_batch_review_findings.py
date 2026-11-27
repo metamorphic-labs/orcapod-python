@@ -384,7 +384,8 @@ def _list_token_stream() -> ArrowTableStream:
         pa.table(
             {
                 "k": pa.array([1, 2], pa.int64()),
-                "x": pa.array([1.5, 2.5], pa.float64()),
+                # A list token needs list data (the token-shape rule, ITL-1491).
+                "x": pa.array([[1.5], [2.5]], pa.large_list(pa.float64())),
                 "_source_x": pa.array(
                     [["s::r0::x"], ["s::r1::x"]], pa.large_list(pa.large_string())
                 ),
@@ -769,7 +770,6 @@ def test_batches_of_one_input_that_declare_two_token_types_are_refused(
     when no row would match, instead of finishing with no row. The sync path reads
     the same rows with the type their stream declares, whatever the tokens show."""
     from orcapod.core.operators import Join, MergeJoin, SemiJoin
-    from orcapod.core.operators.static_output_pod import SourceInfoTypesDisagree
     from orcapod.core.operators.streaming_joins import (
         StreamingJoin,
         StreamingMergeJoin,
@@ -780,7 +780,10 @@ def test_batches_of_one_input_that_declare_two_token_types_are_refused(
         pa.table(
             {
                 "k": pa.array([1, 2], pa.int64()),
-                "x": pa.array([10, 20], pa.int64()),
+                # ``x`` has its token's two list layers (the token-shape rule).
+                "x": pa.array(
+                    [[[10]], [[20]]], pa.large_list(pa.large_list(pa.int64()))
+                ),
                 "_source_x": pa.array([[["a"]], [["b"]]], DEEP_TOKENS),
             }
         ),
@@ -806,7 +809,9 @@ def test_batches_of_one_input_that_declare_two_token_types_are_refused(
         pa.table(
             {
                 "k": pa.array([1, 2], pa.int64()),
-                "x": pa.array([10, 20], pa.int64()),
+                "x": pa.array(
+                    [[[10]], [[20]]], pa.large_list(pa.large_list(pa.int64()))
+                ),
                 "_source_x": pa.array(tokens, DEEP_TOKENS),
             }
         ),
@@ -815,10 +820,16 @@ def test_batches_of_one_input_that_declare_two_token_types_are_refused(
     rebuilt = _token_batch(mixed, tokens, DEEP_TOKENS)
     assert rebuilt.schema.field("_source_x").type == DEEP_TOKENS
     assert rebuilt.column("_source_x").to_pylist() == tokens
+    # The batch that declares another type than its stream is refused when it
+    # arrives, first or second (a ``SourceInfoTypesDisagree`` is a ``ValueError``);
+    # the stream's own batch is taken.
     instance = make()
-    _ = instance.push(0, batches[0])
-    with pytest.raises(SourceInfoTypesDisagree):
-        _ = instance.push(0, batches[1])
+    for batch in batches:
+        if batch is shallow:
+            with pytest.raises(ValueError, match="_source_x"):
+                _ = instance.push(0, batch)
+        else:
+            _ = instance.push(0, batch)
     # The refused batch changed nothing: the input still closes, with no row.
     assert instance.close(0) == []
 
@@ -894,7 +905,10 @@ def _deep_token_stream(tokens: list[Any], keys: list[int]) -> ArrowTableStream: 
         pa.table(
             {
                 "k": pa.array(keys, pa.int64()),
-                "x": pa.array([10 * k for k in keys], pa.int64()),
+                # ``x`` has its token's two list layers (the token-shape rule).
+                "x": pa.array(
+                    [[[10 * k]] for k in keys], pa.large_list(pa.large_list(pa.int64()))
+                ),
                 "y": pa.array([k + 0.5 for k in keys], pa.float64()),
                 "_source_x": pa.array(tokens, DEEP_TOKENS),
             }
@@ -1144,7 +1158,7 @@ def test_settled_tokens_against_an_input_with_no_rows_decide_as_the_sync_path(
             pa.table(
                 {
                     "k": pa.array([], pa.int64()),
-                    "w": pa.array([], pa.int64()),
+                    "w": pa.array([], pa.large_list(pa.large_list(pa.int64()))),
                     "_source_w": pa.array([], DEEP_TOKENS),
                 }
             ),
@@ -1188,13 +1202,17 @@ def _typed_token_stream(
     keys: list[int],
     kind: pa.DataType,
 ) -> ArrowTableStream:
-    """Tags ``k`` and ``g``, data ``x`` and ``y``; ``x``'s source info declared ``kind``."""
+    """Tags ``k`` and ``g``, data ``x`` (a list) and ``y``; ``x``'s token declared ``kind``.
+
+    ``x`` is a list in every stream, so a list token and a plain string token are
+    both valid over it (the token-shape rule, ITL-1491).
+    """
     return ArrowTableStream(
         pa.table(
             {
                 "k": pa.array(keys, pa.int64()),
                 "g": pa.array([f"g{k}" for k in keys], pa.large_string()),
-                "x": pa.array([10 * k for k in keys], pa.int64()),
+                "x": pa.array([[10 * k] for k in keys], pa.large_list(pa.int64())),
                 "y": pa.array([k + 0.5 for k in keys], pa.float64()),
                 "_source_x": pa.array(tokens, kind),
             }
@@ -1206,15 +1224,15 @@ def _typed_token_stream(
 @pytest.mark.parametrize(
     "layout", ["keys_match", "no_key_matches", "left_empty", "right_empty"]
 )
-@pytest.mark.parametrize("deep", ["left", "right"])
+@pytest.mark.parametrize("listed", ["left", "right"])
 def test_merge_join_inputs_that_declare_two_token_types_are_refused(
-    deep: str, layout: str
+    listed: str, layout: str
 ) -> None:
-    """Review of PR 601: the two inputs DECLARE ``_source_x`` with two types (two list
-    levels in one, one in the other), on matching keys, on keys that never match and
-    with an input that has no rows. The sync path refuses the two types of one
-    column; the kernel refuses too, with the same error, when it is built over the
-    inputs, before any batch."""
+    """Review of PR 601: the two inputs DECLARE ``_source_x`` with two types (a list
+    of tokens in one, a plain string token in the other; both fit the list-valued
+    ``x``), on matching keys, on keys that never match and with an input that has no
+    rows. The sync path refuses the two types of one column; the kernel refuses
+    too, with the same error, when it is built over the inputs, before any batch."""
     from orcapod.core.operators import MergeJoin
     from orcapod.core.operators.streaming_joins import StreamingMergeJoin
     from orcapod.errors import InputValidationError
@@ -1225,17 +1243,11 @@ def test_merge_join_inputs_that_declare_two_token_types_are_refused(
         "left_empty": ([], [1, 2]),
         "right_empty": ([1, 2], []),
     }[layout]
-    kinds = (
-        (DEEP_TOKENS, SHALLOW_TOKENS)
-        if deep == "left"
-        else (
-            SHALLOW_TOKENS,
-            DEEP_TOKENS,
-        )
-    )
+    string = pa.large_string()
+    kinds = (SHALLOW_TOKENS, string) if listed == "left" else (string, SHALLOW_TOKENS)
     left, right = (
         _typed_token_stream(
-            [[["a"]] if kind == DEEP_TOKENS else ["a"] for _ in side], side, kind
+            [["a"] if kind == SHALLOW_TOKENS else "a" for _ in side], side, kind
         )
         for side, kind in zip(keys, kinds)
     )

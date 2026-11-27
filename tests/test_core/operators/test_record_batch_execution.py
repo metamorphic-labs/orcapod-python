@@ -511,7 +511,8 @@ def test_the_provenance_columns_have_the_row_built_schema() -> None:
         [
             pa.field("k", pa.int64()),
             pa.field(SYSTEM_TAG, pa.large_string(), metadata={"m": "1"}),
-            pa.field("x", pa.int64()),
+            # A list token needs list data (the token-shape rule, ITL-1491).
+            pa.field("x", pa.large_list(pa.int64())),
             pa.field("z", pa.int64()),
             pa.field("y", pa.int64()),
             pa.field(
@@ -525,7 +526,7 @@ def test_the_provenance_columns_have_the_row_built_schema() -> None:
             [
                 pa.array([1, 2], pa.int64()),
                 pa.array(["s", "s"], pa.large_string()),
-                pa.array([1, 2], pa.int64()),
+                pa.array([[1], [2]], pa.large_list(pa.int64())),
                 pa.array([3, 4], pa.int64()),
                 pa.array([5, 6], pa.int64()),
                 pa.array([["a"], ["b"]], schema.field("_source_x").type),
@@ -642,7 +643,8 @@ def test_empty_source_info_lists_keep_their_columns_type(layout: str) -> None:
         pa.table(
             {
                 "k": pa.array([1, 2], pa.int64()),
-                "x": pa.array([1, 2], pa.int64()),
+                # ``x`` has its token's two list layers (the token-shape rule).
+                "x": pa.array([[], []], pa.large_list(pa.large_list(pa.int64()))),
                 "z": pa.array([3, 4], pa.int64()),
                 "_source_x": pa.array(
                     [[], []], pa.large_list(pa.large_list(pa.large_string()))

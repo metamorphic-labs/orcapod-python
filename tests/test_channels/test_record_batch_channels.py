@@ -98,6 +98,35 @@ def source(n: int = 7, source_id: str = "events") -> ArrowTableSource:
     )
 
 
+def shaped_source(kind: pa.DataType, n: int = 2) -> ArrowTableSource:
+    """``source(n)`` whose ``amplitude`` has the list layers of the token type ``kind``.
+
+    A token's list layers are its data's outer list layers (the token-shape rule,
+    ITL-1491), so a test that carries ``_source_amplitude`` as ``kind`` sends it as
+    this stream.
+    """
+    from tests.token_shapes import data_type_for, nested_value
+
+    data_type = data_type_for(kind, pa.float32())
+    return ArrowTableSource(
+        pa.table(
+            {
+                "subject": pa.array([f"m{i % 3}" for i in range(n)], pa.string()),
+                "trial": pa.array(range(n), pa.int16()),
+                "amplitude": pa.array(
+                    [nested_value(0.5 * i, data_type) for i in range(n)], data_type
+                ),
+                "note": pa.array(
+                    [None if i % 4 == 1 else f"n{i}" for i in range(n)], pa.string()
+                ),
+            }
+        ),
+        tag_columns=["subject", "trial"],
+        tag_only_columns=(),
+        source_id="shaped",
+    )
+
+
 def R(stream: Any) -> pa.Table:
     """The table today's code builds from ``stream``'s rows."""
     return StaticOutputOperatorPod._rows_to_table(list(stream.iter_data()))[0]
@@ -2157,11 +2186,11 @@ ONE_TYPE_CASES: dict[
         TOKEN_LISTS,
         [[], [["b"]]],
     ),
-    # A null token in a list column, then a list token.
-    "null_then_list": (
-        [(0, [None], TOKENS), (1, [["b"]], TOKENS)],
+    # A null token inside a list, then a list token.
+    "null_element_then_list": (
+        [(0, [[None]], TOKENS), (1, [["b"]], TOKENS)],
         TOKENS,
-        [None, ["b"]],
+        [[None], ["b"]],
     ),
     # Lists whose item field is declared non-nullable keep it.
     "non_null_items": (
@@ -2197,9 +2226,9 @@ ONE_TYPE_CASES: dict[
 def test_batches_send_accepts_are_assembled(case: str) -> None:
     """What ``send`` accepts can be assembled: ``result()`` and ``to_stream()`` build
     the complete table, each source-info column of the type its batches declare."""
-    stream = source(2)
-    (batch,) = batches_of(stream)
     parts, declared, tokens = ONE_TYPE_CASES[case]
+    stream = shaped_source(declared)
+    (batch,) = batches_of(stream)
 
     async def write() -> tuple[Any, Any]:
         output = OutputChannel(stream)
@@ -2220,7 +2249,7 @@ def test_batches_send_accepts_are_assembled(case: str) -> None:
 # one type worked out from the tokens; a token column's type is now the declared one.
 TWO_TYPE_CASES: dict[str, list[tuple[int, list[Any], pa.DataType]]] = {
     "list_depth": [(0, [[]], TOKEN_LISTS), (1, [["b"]], TOKENS)],
-    "null_then_string": [(0, [None], TOKENS), (1, ["b"], TOKEN)],
+    "list_then_string": [(0, [["a"]], TOKENS), (1, ["b"], TOKEN)],
     "item_nullability": [(0, [["a"]], NON_NULL_TOKENS), (1, [["b"]], TOKENS)],
     "fixed_then_large": [(0, [["a"]], FIXED_TOKENS), (1, [["b"]], TOKENS)],
 }
@@ -2236,13 +2265,13 @@ def test_a_batch_that_declares_another_token_type_is_refused_at_send(
     batch of the accepted type after it, and assembles what it accepted."""
     from orcapod.core.operators.static_output_pod import SourceInfoTypesDisagree
 
-    stream = source(2)
-    (batch,) = batches_of(stream)
     (_, first_values, first), (_, other_values, other) = (
         TWO_TYPE_CASES[case]
         if order == "as_listed"
         else list(reversed(TWO_TYPE_CASES[case]))
     )
+    stream = shaped_source(first)
+    (batch,) = batches_of(stream)
 
     async def write() -> Any:
         output = OutputChannel(stream)
@@ -2276,7 +2305,7 @@ def test_batch_puts_arrivals_whose_tokens_show_two_depths_together() -> None:
     """``Batch(2)`` over arrivals whose source-info tokens show two depths (an empty
     list, then a list of token lists), both declared two levels deep: it groups them
     under one more list level of the declared type (ITL-1491)."""
-    stream = source(2)
+    stream = shaped_source(TOKEN_LISTS)
     (batch,) = batches_of(stream)
     op = Batch(batch_size=2)
 
