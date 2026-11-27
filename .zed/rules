@@ -1108,10 +1108,20 @@ these preimages anywhere else.
   gives it, with a nullable field, never typed again from the value (a nested token column
   would not survive it); a change of the row keeps the typed column of every
   token it keeps (a selection, a drop, a rename, added columns); a token given as a Python value is typed
-  from its value, and so is the token of a column taken from another row (`with_columns_of`,
-  a data-tag falling through a function: the edge between two nodes and a stored result type
-  it from its value too, so it has one type on every route; typed tokens from end to end are
-  ITL-1491). A rename moves a column's token with it; a token held for the destination name
+  from its value. STOPGAP, not the proper solution (developer, November 27, 2026; ITL-1491
+  removes it): the token of a column taken from another row (`with_columns_of`, a data-tag
+  that falls through a function pod) and a token at the sync edge between two nodes (the
+  row-built form) are typed again from their values. The rule: a data-tag that falls through
+  a function pod keeps its source-info token with its type unchanged; a column a function
+  returns is never a pass-through, even with an input's name and value (its token points to
+  the function); and the type of every source-info token column is determined by the
+  pipeline, like every other column type, never taken from values (sources build plain
+  `large_string` tokens; joins and single-stream operators keep the shape; `Batch`, `GroupBy`
+  and `MergeJoin` add one list level each). The stopgap exists because the sync route
+  normalizes a stream's token columns to large types between two nodes and the async route
+  passes rows on without it, so a hand-built token of another type (a fixed-size list) had
+  two instance ids. Never build on the re-typing, and never write "a function passes a
+  column through". A rename moves a column's token with it; a token held for the destination name
   before is dropped. There is one column
   per data column: a data column with no token has a null token, so a row built from values
   and the same row read from a table have one instance id. Ids are a function of the row alone, never of the order

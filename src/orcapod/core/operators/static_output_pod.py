@@ -556,6 +556,16 @@ class StaticOutputOperatorPod(TraceableBase):
         built from the same values. A ``large_string`` column is every row's type
         already and is left as it is.
 
+        Stopgap (developer, November 27, 2026; ITL-1491): typing a token column
+        from its values at the sync edge between two nodes is not the rule. The
+        type of every source-info token column is determined by the pipeline,
+        like every other column type, never taken from values (sources build
+        plain ``large_string`` tokens; joins and single-stream operators keep the
+        shape; ``Batch``, ``GroupBy`` and ``MergeJoin`` add one list level each).
+        The async route passes rows on without this step, which is the route
+        difference ITL-1491 fixes; the row-built form then reads the typed
+        column.
+
         Args:
             table: A table of user tags, system tags, data and source info, after the
                 per-slice steps (``streams.base.row_built_columns``).
