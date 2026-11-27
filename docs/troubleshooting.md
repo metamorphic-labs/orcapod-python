@@ -12,6 +12,18 @@ it is.
 
 These are raised at the line that makes the mistake, before any data is processed.
 
+### `TypeError: Condition has no truth value`
+
+**Cause.** A comparison built from `col()` describes which rows to keep. Python
+asks for a single Boolean in a chained comparison such as `1 <= col("t") <= 5`, in
+`and`, `or` and `not`, and in `if condition` or `bool(condition)`.
+
+**Fix.** Use `stream.filter(col("t").between(1, 5))` for an inclusive range or
+`stream.filter(col("t") >= 1, col("t") <= 5)` for separate comparisons. To combine
+comparisons explicitly, parenthesize each and use `&`, `|` or `~`. For a source's
+`where()`, pass separate equality keywords. To check whether a condition has any
+requirements, use `condition.is_empty`.
+
 ### `ValueError: tag_columns not found in table: {...}. Available columns: [...]`
 
 **Cause.** A name in `tag_columns` is not a column of the data.
@@ -184,8 +196,8 @@ same (`Run of job '...': 1 row failed.`).
 **Fix.** The message says how to see the full traceback:
 `job.last_run.print_traceback("label")`. While developing, run with
 `job.run(orchestrator=SyncPipelineOrchestrator(error_policy="fail_fast"))` (from
-`orcapod.pipeline`) so that the first failure stops the run and raises. See the tutorial,
-[Part 9](tutorial/09-when-things-go-wrong.md).
+`orcapod.pipeline`) so that the first failure stops the run and raises. See the tutorial
+[Handling errors](tutorial/handling-errors.md).
 
 ### `TypeError: ...() got an unexpected keyword argument 'ctx'` from a `sink_pod`
 
@@ -367,7 +379,8 @@ Arrow type you wrote as a class: build it with `make_arrow_extension_type`, whic
   `atexit` handlers and other cleanup, so close files and flush databases first.
 - When reading local Delta tables directly with deltalake, pass a native filesystem. Resolve
   `dt.table_uri` first: it is percent-encoded, and newer deltalake versions return a
-  `file://` URI.
+  `file://` URI. A native filesystem avoids Python filesystem cleanup at shutdown.
+  Handwritten Arrow extension types still require separate lifetime management.
 
   For example, with a small local Delta table opened as `dt`:
 
@@ -394,8 +407,8 @@ Arrow type you wrote as a class: build it with `make_arrow_extension_type`, whic
   are installing a version of Orcapod older than 0.2, which required the Graphviz
   development headers. The latest stable release on PyPI, which a plain `uv add orcapod`
   installs, is 0.1.4 (0.3.0 was withdrawn). Install the latest 0.4.0 release candidate:
-  `uv add "orcapod>=0.4.0rc4"`.
+  `uv add "orcapod>=0.4.0rc7"`.
 - **Python version.** Orcapod needs Python 3.11 or newer.
 - **A release candidate is not installed.** `uv add orcapod` (like `pip install orcapod`)
   takes the latest stable release and skips pre-releases. Name a candidate version, at least:
-  `uv add "orcapod>=0.4.0rc4"`.
+  `uv add "orcapod>=0.4.0rc7"`.

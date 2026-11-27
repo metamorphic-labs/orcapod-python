@@ -1,543 +1,317 @@
-"""Integration tests for SpiralDBConnector against the live dev project.
+"""Conformance of reading: the same tests on the fake and, opt-in, on SpiralDB (ITL-1186).
 
-These tests are skipped unless the ``SPIRAL_INTEGRATION_TESTS=1`` env var is set and
-``SPIRAL_PROJECT_ID`` names the project to test against.
-They require a valid auth mechanism, either:
+The fake's runs are always on. The live runs need ``SPIRAL_INTEGRATION_TESTS=1``,
+``SPIRAL_PROJECT_ID`` and a sign-in spiral-sdk finds in the environment (CI:
+``SPIRAL_CLIENT_ID`` and ``SPIRAL_PRIVATE_KEY``, see ``RELEASING.md``); with the first two
+set, a missing sign-in fails the tests rather than skipping them. ``SPIRAL_SERVER_URL``
+names another address.
 
-- Local dev: a saved ``spiral login`` (pyspiral keeps it in
-  ``~/Library/Application Support/pyspiral/`` on macOS, ``~/.config/pyspiral/`` on Linux)
-- CI (GitHub Actions, the ``spiral-integration`` job of ``Run Tests``): a
-  workload private key in the ``SPIRAL_CLIENT_ID`` (workload id) and
-  ``SPIRAL_PRIVATE_KEY`` (private JWK naming its ``kid``) env vars, which pyspiral
-  reads to request a token from ``https://auth.spiraldb.com``. The workload holds
-  the editor role on the test project. The developer sets both repository
-  secrets; setup and key rotation are in ``RELEASING.md`` ("SpiralDB integration
-  job").
-
-If the env var is set but credentials are absent, the tests fail rather than
-skip — the operator is expected to ensure auth is in place when enabling
-integration tests.
-
-Project and server URL are configurable via env vars:
-
-- ``SPIRAL_PROJECT_ID`` (required; no default)
-- ``SPIRAL_SERVER_URL`` (default: ``https://api.spiraldb.dev``)
-
-Version compatibility note (PLT-1773)
--------------------------------------
-pyspiral is in active development and must be kept current. The pinned version
-in ``uv.lock`` should be upgraded regularly (see PLT-1785 for the tracking issue).
-
-History: around 2026-06-15, ``t3.storage.dev`` (SpiralDB's object-storage
-backend) began strictly enforcing that every header in a presigned-URL request
-must appear in ``X-Amz-SignedHeaders``. pyspiral 0.11.7's embedded Rust HTTP
-client sent additional unsigned headers, causing all Vortex file reads to fail
-with ``AccessDenied: There were headers present in the request which were not
-signed``. Upgrading to pyspiral 0.14.x (which rewrote the HTTP stack in Python
-using ``httpx``) resolved the issue. If these tests start failing with a similar
-``AccessDenied`` / unsigned-headers error, upgrade pyspiral first.
+spiral-sdk cannot drop a keyed table, so a live run creates nothing anew: it uses fixed
+tables in the dataset ``orcapod_conformance`` (``ORCAPOD_SPIRAL_CONFORMANCE_DATASET`` names
+another), made on the first run and written the same rows at each. It writes through
+spiral-sdk itself, never through Orcapod, which only reads.
 """
 
 from __future__ import annotations
 
+import datetime as dt
+import math
 import os
-import uuid
+from collections.abc import Iterator
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 import pyarrow as pa
-import pyarrow.compute as pc
 import pytest
 
-from orcapod.databases import ConnectorArrowDatabase, SpiralDBConnector
-from orcapod.types import ColumnInfo
+from orcapod.databases import SpiralDBConnector
+from orcapod.databases import spiraldb_schema_table as st
+from orcapod.databases.spiraldb_connector import SpiralDBTableNotFoundError
+from orcapod.sources import SpiralDBTableSource
+from tests.test_databases import fake_spiral_sdk as fake
 
-INTEGRATION = os.environ.get("SPIRAL_INTEGRATION_TESTS") == "1"
-DEV_PROJECT = os.environ.get("SPIRAL_PROJECT_ID", "")
-DEV_OVERRIDES = {
-    "server.url": os.environ.get("SPIRAL_SERVER_URL", "https://api.spiraldb.dev")
-}
+_LIVE = os.environ.get("SPIRAL_INTEGRATION_TESTS") == "1"
+_PROJECT = os.environ.get("SPIRAL_PROJECT_ID", "")
+_URL = os.environ.get("SPIRAL_SERVER_URL", "https://api.spiraldb.dev")
+_DATASET = os.environ.get("ORCAPOD_SPIRAL_CONFORMANCE_DATASET", "orcapod_conformance")
 
-pytestmark = pytest.mark.skipif(
-    not (INTEGRATION and DEV_PROJECT),
-    reason=(
-        "Set SPIRAL_INTEGRATION_TESTS=1 and SPIRAL_PROJECT_ID to run SpiralDB "
-        "integration tests"
-    ),
+_INNER = pa.struct([pa.field("q", pa.int8()), pa.field("b", pa.large_string(), False)])
+_UNITS = pa.schema(
+    [
+        pa.field("zz", pa.int64(), False, {"unit": "mV"}),
+        pa.field(
+            "g",
+            pa.struct(
+                [
+                    pa.field("z", pa.int8(), False),
+                    pa.field("a", _INNER, False),
+                    pa.field("m", pa.large_string()),
+                ]
+            ),
+            False,
+        ),
+        pa.field("k1", pa.large_string(), False),
+        pa.field("aa", pa.float64()),
+        pa.field(
+            "ls",
+            pa.large_list(pa.struct([("z", pa.int8()), ("a", pa.int8())])),
+        ),
+        pa.field("k2", pa.int32(), False),
+        pa.field("fx", pa.list_(pa.field("item", pa.float32(), False), 2)),
+    ],
+    metadata={"who": "conformance"},
+)
+_ROWS = pa.Table.from_pylist(
+    [
+        {
+            "zz": i,
+            "g": {"z": i, "a": {"q": None, "b": "x"}, "m": None},
+            "k1": key,
+            "aa": None if i == 1 else i / 2,
+            "ls": [{"z": 1, "a": 2}],
+            "k2": i % 2,
+            "fx": [1.0, 2.0],
+        }
+        for i, key in enumerate(["b", "a", "c"])
+    ],
+    schema=_UNITS,
+)
+_TYPED = pa.table(
+    {
+        "k": pa.array([1, 2, 3], pa.int64()),
+        "h": pa.array([0.5, -0.0, float("nan")], pa.float64()).cast(pa.float16()),
+        "f": pa.array([0.1, -0.0, float("nan")], pa.float32()),
+        "d": pa.array([0.1, -0.0, float("nan")]),
+        "s": pa.array(["x", "é", None], pa.large_string()),
+        "b": pa.array([b"x", b"", None], pa.large_binary()),
+        "u": pa.array([2**64 - 1, 0, 1], pa.uint64()),
+        "sec": pa.array([1, 2, 3], pa.timestamp("s")),
+        "utc": pa.array([1, 2, 3], pa.timestamp("us", tz="UTC")),
+        "d32": pa.array([0, 1, None], pa.date32()),
+    }
 )
 
 
-def _unique_table(prefix: str = "test") -> str:
-    """Return a unique table name to avoid cross-test interference."""
-    return f"{prefix}_{uuid.uuid4().hex[:8]}"
+@dataclass(frozen=True)
+class _Place:
+    """Where the tables are."""
 
+    project: str
+    dataset: str
+    overrides: dict[str, str] | None
 
-@pytest.fixture()
-def connector():
-    c = SpiralDBConnector(
-        project_id=DEV_PROJECT,
-        dataset="default",
-        overrides=DEV_OVERRIDES,
-    )
-    yield c
-    c.close()
+    def connector(self) -> SpiralDBConnector:
+        """Return a new connector."""
+        return SpiralDBConnector(self.project, self.dataset, self.overrides)
 
-
-class TestSpiralDBConnectorIntegration:
-    def test_full_round_trip(self, connector):
-        """Create table → write records → scan → verify values."""
-        table_name = _unique_table("roundtrip")
-        try:
-            connector.create_table_if_not_exists(
-                table_name,
-                columns=[
-                    ColumnInfo("__record_id", pa.string(), nullable=False),
-                    ColumnInfo("value", pa.float64()),
-                ],
-                pk_column="__record_id",
-            )
-            records = pa.table(
-                {
-                    "__record_id": pa.array(["r1", "r2"], type=pa.string()),
-                    "value": pa.array([10.0, 20.0], type=pa.float64()),
-                }
-            )
-            connector.upsert_records(table_name, records, id_column="__record_id")
-
-            result = pa.Table.from_batches(
-                list(connector.iter_batches(f'SELECT * FROM "{table_name}"'))
-            )
-            assert result.num_rows == 2
-            assert sorted(result.column("__record_id").to_pylist()) == ["r1", "r2"]
-        finally:
-            connector.delete_table(table_name)
-
-    def test_skip_existing_true(self, connector):
-        """Write once, write again with overlapping keys — verify no duplication."""
-        table_name = _unique_table("skip")
-        try:
-            connector.create_table_if_not_exists(
-                table_name,
-                columns=[
-                    ColumnInfo("id", pa.string(), nullable=False),
-                    ColumnInfo("val", pa.int64()),
-                ],
-                pk_column="id",
-            )
-            first_write = pa.table(
-                {"id": ["a", "b"], "val": pa.array([1, 2], type=pa.int64())}
-            )
-            connector.upsert_records(table_name, first_write, id_column="id")
-
-            second_write = pa.table(
-                {"id": ["a", "c"], "val": pa.array([99, 3], type=pa.int64())}
-            )
-            connector.upsert_records(
-                table_name, second_write, id_column="id", skip_existing=True
-            )
-
-            result = pa.Table.from_batches(
-                list(connector.iter_batches(f'SELECT * FROM "{table_name}"'))
-            )
-            ids = sorted(result.column("id").to_pylist())
-            assert ids == ["a", "b", "c"]
-
-            # "a" must not have been overwritten (skip_existing=True preserved original val=1)
-            a_mask = pc.equal(result.column("id"), pa.scalar("a"))
-            a_val = result.filter(a_mask).column("val")[0].as_py()
-            assert a_val == 1
-        finally:
-            connector.delete_table(table_name)
-
-    def test_connector_arrow_database_round_trip(self, connector):
-        """ConnectorArrowDatabase: add_record → flush → get_record_by_id."""
-        # Use a unique path so each CI run creates a fresh table and never
-        # conflicts with tables left by earlier runs (e.g. with a different
-        # __record_id Arrow type from a schema-migration commit).
-        unique_suffix = uuid.uuid4().hex[:8]
-        path = ("spiraldb", f"integration_{unique_suffix}")
-        # Table name mirrors ConnectorArrowDatabase._path_to_table_name logic.
-        table_name = f"spiraldb__integration_{unique_suffix}"
-        db = ConnectorArrowDatabase(connector)
-        record = pa.table({"x": pa.array([42], type=pa.int64())})
-        try:
-            db.add_record(
-                path,
-                record_id=b"test_r1",
-                record=record,
-                flush=True,
-            )
-            result = db.get_record_by_id(path, b"test_r1")
-            assert result is not None
-            assert result.column("x")[0].as_py() == 42
-        finally:
-            connector.delete_table(table_name)
-
-
-class TestArrowMetadataRoundTrip:
-    """Integration tests for Arrow metadata preservation across write→read cycles.
-
-    Requires ``SPIRAL_INTEGRATION_TESTS=1`` and valid SpiralDB credentials.
-    """
-
-    def test_schema_metadata_round_trip(self, connector):
-        """Schema-level metadata survives a full write→read cycle."""
-        table_name = _unique_table("schema_meta")
-        schema = pa.schema(
-            [
-                pa.field("__record_id", pa.string(), nullable=False),
-                pa.field("value", pa.float64()),
-            ],
-            metadata={b"origin": b"test-suite", b"version": b"1"},
-        )
-        records = pa.table(
-            {"__record_id": pa.array(["r1"]), "value": pa.array([1.0])},
-            schema=schema,
-        )
-        try:
-            connector.create_table_if_not_exists(
-                table_name,
-                columns=[
-                    ColumnInfo("__record_id", pa.string(), nullable=False),
-                    ColumnInfo("value", pa.float64()),
-                ],
-                pk_column="__record_id",
-            )
-            connector.upsert_records(table_name, records, id_column="__record_id")
-
-            batches = list(connector.iter_batches(f'SELECT * FROM "{table_name}"'))
-            result = pa.Table.from_batches(batches)
-            assert result.schema.metadata is not None
-            assert result.schema.metadata.get(b"origin") == b"test-suite"
-            assert result.schema.metadata.get(b"version") == b"1"
-        finally:
-            connector.delete_table(table_name)
-
-    def test_field_metadata_round_trip(self, connector):
-        """Per-column field metadata survives a full write→read cycle."""
-        table_name = _unique_table("field_meta")
-        schema = pa.schema(
-            [
-                pa.field("__record_id", pa.string(), nullable=False),
-                pa.field(
-                    "value",
-                    pa.float64(),
-                    metadata={b"unit": b"meters", b"sensor": b"lidar"},
-                ),
-            ]
-        )
-        records = pa.table(
-            {"__record_id": pa.array(["r1"]), "value": pa.array([42.0])},
-            schema=schema,
-        )
-        try:
-            connector.create_table_if_not_exists(
-                table_name,
-                columns=[
-                    ColumnInfo("__record_id", pa.string(), nullable=False),
-                    ColumnInfo("value", pa.float64()),
-                ],
-                pk_column="__record_id",
-            )
-            connector.upsert_records(table_name, records, id_column="__record_id")
-
-            batches = list(connector.iter_batches(f'SELECT * FROM "{table_name}"'))
-            result = pa.Table.from_batches(batches)
-            value_meta = result.schema.field("value").metadata
-            assert value_meta is not None
-            assert value_meta.get(b"unit") == b"meters"
-            assert value_meta.get(b"sensor") == b"lidar"
-        finally:
-            connector.delete_table(table_name)
-
-    def test_extension_type_metadata_round_trip(self, connector):
-        """ARROW:extension:name / ARROW:extension:metadata field metadata survives."""
-        table_name = _unique_table("ext_meta")
-        ext_field = pa.field(
-            "path_col",
-            pa.large_string(),
-            metadata={
-                b"ARROW:extension:name": b"orcapod.path",
-                b"ARROW:extension:metadata": b"",
-            },
-        )
-        schema = pa.schema(
-            [
-                pa.field("__record_id", pa.string(), nullable=False),
-                ext_field,
-            ]
-        )
-        records = pa.table(
-            {
-                "__record_id": pa.array(["r1"]),
-                "path_col": pa.array(["/tmp/test"], type=pa.large_string()),
-            },
-            schema=schema,
-        )
-        try:
-            connector.create_table_if_not_exists(
-                table_name,
-                columns=[
-                    ColumnInfo("__record_id", pa.string(), nullable=False),
-                    ColumnInfo("path_col", pa.large_string()),
-                ],
-                pk_column="__record_id",
-            )
-            connector.upsert_records(table_name, records, id_column="__record_id")
-
-            batches = list(connector.iter_batches(f'SELECT * FROM "{table_name}"'))
-            result = pa.Table.from_batches(batches)
-            meta = result.schema.field("path_col").metadata
-            assert meta is not None
-            assert meta.get(b"ARROW:extension:name") == b"orcapod.path"
-        finally:
-            connector.delete_table(table_name)
-
-    def test_no_metadata_backward_compatible(self, connector):
-        """Plain tables with no Arrow metadata read back without spurious KV entries."""
-        table_name = _unique_table("no_meta")
-        try:
-            connector.create_table_if_not_exists(
-                table_name,
-                columns=[
-                    ColumnInfo("__record_id", pa.string(), nullable=False),
-                    ColumnInfo("value", pa.int64()),
-                ],
-                pk_column="__record_id",
-            )
-            records = pa.table(
-                {
-                    "__record_id": pa.array(["r1"]),
-                    "value": pa.array([99], type=pa.int64()),
-                }
-            )
-            connector.upsert_records(table_name, records, id_column="__record_id")
-
-            batches = list(connector.iter_batches(f'SELECT * FROM "{table_name}"'))
-            result = pa.Table.from_batches(batches)
-            assert result.schema.metadata is None
-            for field in result.schema:
-                assert field.metadata is None
-        finally:
-            connector.delete_table(table_name)
-
-    def test_connector_arrow_database_extension_type_round_trip(self, connector):
-        """Full ConnectorArrowDatabase path: write extension-typed column, read back intact."""
-        unique_suffix = uuid.uuid4().hex[:8]
-        path = ("spiraldb", f"ext_roundtrip_{unique_suffix}")
-        table_name = f"spiraldb__ext_roundtrip_{unique_suffix}"
-
-        ext_field = pa.field(
-            "path_col",
-            pa.large_string(),
-            metadata={
-                b"ARROW:extension:name": b"orcapod.path",
-                b"ARROW:extension:metadata": b"",
-            },
-        )
-        schema = pa.schema([pa.field("__record_id", pa.large_binary()), ext_field])
-        record = pa.table(
-            {
-                "__record_id": pa.array([b"test_r1"], type=pa.large_binary()),
-                "path_col": pa.array(["/data/file.npy"], type=pa.large_string()),
-            },
-            schema=schema,
-        )
-
-        db = ConnectorArrowDatabase(connector)
-        try:
-            db.add_record(path, record_id=b"test_r1", record=record, flush=True)
-            result = db.get_record_by_id(path, b"test_r1")
-            assert result is not None
-            meta = result.schema.field("path_col").metadata
-            assert meta is not None
-            assert meta.get(b"ARROW:extension:name") == b"orcapod.path"
-        finally:
-            connector.delete_table(table_name)
-
-    def test_nested_struct_field_metadata_round_trip(self, connector):
-        """Struct columns with inner-field metadata survive a full write→read cycle."""
-        table_name = _unique_table("struct_meta")
-        inner_field = pa.field("val", pa.float64(), metadata={b"unit": b"volts"})
-        struct_col = pa.field("measurement", pa.struct([inner_field]))
-        schema = pa.schema(
-            [
-                pa.field("__record_id", pa.string(), nullable=False),
-                struct_col,
-            ]
-        )
-        records = pa.table(
-            {
-                "__record_id": pa.array(["r1"]),
-                "measurement": pa.array(
-                    [{"val": 3.14}],
-                    type=pa.struct([pa.field("val", pa.float64())]),
-                ),
-            },
-            schema=schema,
-        )
-        try:
-            connector.create_table_if_not_exists(
-                table_name,
-                columns=[
-                    ColumnInfo("__record_id", pa.string(), nullable=False),
-                    ColumnInfo(
-                        "measurement", pa.struct([pa.field("val", pa.float64())])
-                    ),
-                ],
-                pk_column="__record_id",
-            )
-            connector.upsert_records(table_name, records, id_column="__record_id")
-
-            batches = list(connector.iter_batches(f'SELECT * FROM "{table_name}"'))
-            result = pa.Table.from_batches(batches)
-            inner = result.schema.field("measurement").type.field("val")
-            assert inner.metadata is not None
-            assert inner.metadata.get(b"unit") == b"volts"
-        finally:
-            connector.delete_table(table_name)
-
-
-class TestReservedNamesRefusedLive:
-    """ITL-1162 / ITL-1164 against the live service (opt-in, like every test here).
-
-    The refusal itself is decided by ``SpiralDBConnector.unstorable_column_reason``
-    before any request; the second test checks the rule against SpiralDB's own
-    refusals, so the fake's model of them stays honest.
-    """
-
-    def test_function_node_job_refused_before_anything_runs(self, connector):
-        from orcapod import PipelineJob, function_pod
-        from orcapod.errors import UnstorableColumnError
-        from orcapod.sources import DictSource
-
-        calls: list[int] = []
-
-        @function_pod(output_keys="double")
-        def double(x: int) -> int:
-            calls.append(x)
-            return 2 * x
-
-        job = PipelineJob(
-            name=_unique_table("itl1162"), database=ConnectorArrowDatabase(connector)
-        )
-        source = DictSource(
-            data=[{"k": "a", "x": 1}],
-            tag_columns=["k"],
+    def source(self, name: str, **options: Any) -> SpiralDBTableSource:
+        """Return a source on a table."""
+        return SpiralDBTableSource(
+            self.project,
+            name,
+            dataset=self.dataset,
+            overrides=self.overrides,
             tag_only_columns=True,
-            source_id="src",
+            **options,
         )
-        with pytest.raises(UnstorableColumnError) as exc_info:
-            with job:
-                _ = double.pod(source, label="dbl")
-        assert exc_info.value.column == "__input_data_hash"
-        assert calls == []
 
-    @pytest.mark.parametrize("name", ["__value", "a.b"])
-    def test_spiraldb_itself_refuses_the_names_the_connector_refuses(
-        self, connector, name
+
+def _seed(client: Any, place: _Place) -> None:
+    """Write the tables and, once, their schema rows, through the SDK."""
+    project = client.project(place.project)
+    made = {}
+    for name, keys, rows in (
+        ("units", ["k2", "k1"], _ROWS),
+        ("typed", ["k"], _TYPED),
     ):
-        assert (
-            connector.unstorable_column_reason(name, pa.int64(), primary_key=False)
-            is not None
+        key_schema = pa.schema([rows.schema.field(k) for k in keys])
+        table = project.create_keyed_table(
+            place.dataset, name, key_schema, exist_ok=True
         )
-        table = _unique_table("itl1162_names")
-        try:
-            connector.create_table_if_not_exists(
-                table,
-                [
-                    ColumnInfo("k", pa.large_string(), nullable=False),
-                    ColumnInfo(name, pa.int64(), nullable=True),
-                ],
-                pk_column="k",
+        made[name] = (table.append(rows), rows.schema)
+    schemas = project.create_keyed_table(
+        place.dataset, st.SCHEMA_TABLE, st.KEY_SCHEMA, exist_ok=True
+    )
+    if st.require_schema_table(schemas):
+        return
+    rows = []
+    for name, (table, written) in made.items():
+        presented = pa.schema(
+            [_in_order(f, written.field(f.name)) for f in table.schema()],
+            metadata=written.metadata,
+        )
+        rows.append(
+            st.SchemaRow(
+                table.resource_id,
+                name,
+                tuple(table.key_columns),
+                presented.serialize().to_pybytes(),
+                st.FROM_RECORD,
+                int(table.version_id),
             )
-            rows = pa.table(
-                {
-                    "k": pa.array(["a"], type=pa.large_string()),
-                    name: pa.array([1], type=pa.int64()),
-                }
+        )
+    scope = st.Scope(place.project, place.dataset, "0" * 64)
+    for values in (*(r.stored() for r in rows), st.marker_values(scope, rows)):
+        schemas.append(
+            pa.Table.from_pylist(
+                [{"written_at": "", "written_by": "", **values}], schema=st.ROW_SCHEMA
             )
-            with pytest.raises(Exception, match="reserved"):
-                connector.upsert_records(table, rows, id_column="k")
-        finally:
-            if table in connector.get_table_names():
-                connector.delete_table(table)
+        )
 
 
-def _ordered_rows(order: list[str], ns: list[int]) -> pa.Table:
-    """Rows ``ns`` with the columns in ``order``; ``a`` and ``c`` are both ``int64``,
-    so a positional match would swap them."""
-    columns = {
-        "__record_id": pa.array([f"r{n}".encode() for n in ns], pa.large_binary()),
-        "a": pa.array(ns, pa.int64()),
-        "c": pa.array([100 + n for n in ns], pa.int64()),
-        "b": pa.array([f"b{n}" for n in ns], pa.large_string()),
-    }
-    return pa.table({name: columns[name] for name in order})
-
-
-def _by_name(table: pa.Table) -> list[dict[str, object]]:
-    return sorted(
-        table.select(["__record_id", "a", "c", "b"]).to_pylist(), key=lambda r: r["a"]
+def _in_order(found: Any, written: Any) -> Any:
+    """Return the written field with its struct fields in SpiralDB's order."""
+    if not pa.types.is_struct(written.type):
+        return written
+    return written.with_type(
+        pa.struct([_in_order(f, written.type.field(f.name)) for f in found.type])
     )
 
 
-class TestColumnOrderLive:
-    """SpiralDB matches a write's columns by name and keeps an order of its own: the
-    key columns, then the value columns sorted by name, whatever the order written
-    (ITL-1367; the fake does the same)."""
+@pytest.fixture(
+    scope="module",
+    params=[
+        "fake",
+        pytest.param(
+            "live",
+            marks=pytest.mark.skipif(
+                not (_LIVE and _PROJECT),
+                reason="Set SPIRAL_INTEGRATION_TESTS=1 and SPIRAL_PROJECT_ID",
+            ),
+        ),
+    ],
+)
+def place(
+    request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory
+) -> Iterator[_Place]:
+    """The seeded tables, on the fake or on SpiralDB."""
+    if request.param == "fake":
+        root: Path = tmp_path_factory.mktemp("spiral")
+        with fake.install(root):
+            made = _Place("p", _DATASET, None)
+            _seed(fake.FakeClient(), made)
+            yield made
+        return
+    made = _Place(_PROJECT, _DATASET, {"server.url": _URL})
+    with made.connector() as connector:
+        _seed(connector._client, made)  # pyright: ignore[reportPrivateUsage]  # the SDK's client, for the test's own writes
+    yield made
 
-    def test_a_raw_write_in_another_order_is_matched_by_name(self, connector):
-        table = _unique_table("itl1367_raw")
-        try:
-            first = ["__record_id", "a", "c", "b"]
-            connector.create_table_if_not_exists(
-                table,
-                [
-                    ColumnInfo(n, _ordered_rows(first, [1]).schema.field(n).type)
-                    for n in first
-                ],
-                pk_column="__record_id",
-            )
-            connector.upsert_records(table, _ordered_rows(first, [1, 2]), "__record_id")
-            connector.upsert_records(
-                table,
-                _ordered_rows(["b", "c", "__record_id", "a"], [3, 4]),
-                "__record_id",
-            )
-            read = pa.Table.from_batches(
-                list(connector.iter_batches(f'SELECT * FROM "{table}"'))
-            )
-            assert read.column_names == ["__record_id", "a", "b", "c"]
-            assert _by_name(read) == _by_name(_ordered_rows(first, [1, 2, 3, 4]))
-        finally:
-            if table in connector.get_table_names():
-                connector.delete_table(table)
 
-    @pytest.mark.parametrize("when", ["after a flush", "same pending batch"])
-    def test_the_database_matches_an_append_in_another_order_by_name(
-        self, connector, when
-    ):
-        path = (_unique_table("itl1367_db"),)
-        db = ConnectorArrowDatabase(connector)
-        try:
-            first = ["__record_id", "a", "c", "b"]
-            db.add_records(
-                path, _ordered_rows(first, [1, 2]), flush=when == "after a flush"
-            )
-            db.add_records(
-                path,
-                _ordered_rows(["b", "c", "__record_id", "a"], [3, 4]),
-                record_id_column="__record_id",
-            )
-            db.add_records(
-                path,
-                _ordered_rows(["c", "__record_id", "b", "a"], [5]),
-                record_id_column="__record_id",
-            )
-            db.flush()
-            read = db.get_all_records(path, record_id_column="__record_id")
-            assert read is not None
-            assert read.column_names == ["__record_id", "a", "b", "c"]
-            assert _by_name(read) == _by_name(_ordered_rows(first, [1, 2, 3, 4, 5]))
-        finally:
-            if path[0] in connector.get_table_names():
-                connector.delete_table(path[0])
+def test_the_listing_holds_the_tables_and_not_the_schema_table(place: _Place) -> None:
+    names = place.connector().get_table_names()
+    assert {"units", "typed"} <= set(names)
+    assert st.SCHEMA_TABLE not in names
+    assert names == sorted(names)
+
+
+def test_the_presented_schema(place: _Place) -> None:
+    connector = place.connector()
+    schema = connector.get_arrow_schema("units")
+    assert connector.get_pk_columns("units") == ["k2", "k1"]
+    assert schema.names == ["k2", "k1", "aa", "fx", "ls", "zz", "g"]
+    group = schema.field("g").type
+    assert [f.name for f in group] == ["m", "z", "a"]
+    assert [f.name for f in group.field("a").type] == ["b", "q"]
+    assert [f.name for f in schema.field("ls").type.value_type] == ["z", "a"]
+    assert schema.metadata == {b"who": b"conformance"}
+    assert schema.field("zz").metadata == {b"unit": b"mV"}
+    assert [f.name for f in schema if not f.nullable] == ["k2", "k1", "zz", "g"]
+    assert not group.field("z").nullable
+    assert group.field("m").nullable
+    assert not group.field("a").type.field("b").nullable
+    for batch in connector.scan_batches("units"):
+        assert batch.schema.equals(schema, check_metadata=True)
+
+
+def test_rows_in_key_order_with_their_values(place: _Place) -> None:
+    table = pa.Table.from_batches(place.connector().scan_batches("units"))
+    keys = list(zip(table["k2"].to_pylist(), table["k1"].to_pylist()))
+    assert keys == [(0, "b"), (0, "c"), (1, "a")]
+    by_key = {(r["k2"], r["k1"]): r for r in _ROWS.to_pylist()}
+    assert [by_key[k] for k in keys] == table.to_pylist()
+
+
+def test_source_identity_and_rows(place: _Place) -> None:
+    source = place.source("units")
+    assert source.source_id == (
+        f"spiraldb_table_v1:{place.project}.{place.dataset}.units@"
+        f"{place.connector().get_spiral_table_id('units')}"
+    )
+    tags, data = source.output_schema()
+    assert dict(tags) == {"k2": int, "k1": str}
+    assert data["zz"] is int
+    rows = [(t.as_dict(), d.as_dict()) for t, d in source.iter_data()]
+    assert [t["k1"] for t, _ in rows] == ["b", "c", "a"]
+    again = place.source("units")
+    assert again.content_hash() == source.content_hash()
+    assert again.pipeline_hash() == source.pipeline_hash()
+
+
+@pytest.mark.parametrize("limit", [1, 2, 3, 9])
+def test_limit_reads_the_first_keys(place: _Place, limit: int) -> None:
+    table = pa.Table.from_batches(place.connector().scan_batches("units", limit=limit))
+    assert table["k1"].to_pylist() == ["b", "c", "a"][:limit]
+
+
+@pytest.mark.parametrize(
+    ("where", "expected"),
+    [
+        ({"h": 0.5}, [1]),
+        ({"h": -0.0}, [2]),
+        ({"h": math.nan}, [3]),
+        ({"f": 0.1}, []),
+        ({"f": -0.0}, [2]),
+        ({"f": math.nan}, [3]),
+        ({"f": 1e300}, []),
+        ({"d": 0.1}, [1]),
+        ({"d": 0.0}, []),
+        ({"s": "é"}, [2]),
+        ({"b": b""}, [2]),
+        ({"u": 2**64 - 1}, [1]),
+        ({"u": 0}, [2]),
+        ({"sec": dt.datetime(1970, 1, 1, 0, 0, 1)}, [1]),
+        ({"utc": dt.datetime(1970, 1, 1, 0, 0, 0, 2, dt.timezone.utc)}, [2]),
+        ({"d32": dt.date(1970, 1, 2)}, [2]),
+        ({"s": "x", "k": 1}, [1]),
+        ({"k": 1, "s": "é"}, []),
+        ({"h": 0.5, "s": "x"}, [1]),
+        ({"s": "x", "h": 0.5}, [1]),
+        ({"k": 1, "s": "x"}, [1]),
+        ({"s": "é", "k": 1}, []),
+    ],
+)
+def test_where(place: _Place, where: dict[str, Any], expected: list[int]) -> None:
+    batches = place.connector().scan_batches("typed", where=where)
+    assert [k for b in batches for k in b.column("k").to_pylist()] == expected
+
+
+def test_counts(place: _Place) -> None:
+    table = place.connector().lookup_table("units")
+    assert table.count_rows(at_most=2) == 2
+    assert table.row_count_estimate() == 3
+
+
+def test_versions(place: _Place) -> None:
+    connector = place.connector()
+    version = connector.get_table_version("units")
+    assert version > 0
+    pinned = pa.Table.from_batches(connector.scan_batches("units", asof=version))
+    latest = pa.Table.from_batches(connector.scan_batches("units"))
+    assert pinned.equals(latest)
+
+
+def test_a_missing_table_and_dataset(place: _Place) -> None:
+    with pytest.raises(SpiralDBTableNotFoundError):
+        place.connector().lookup_table("absent")
+    missing = SpiralDBConnector(place.project, "absent_dataset", place.overrides)
+    with pytest.raises(SpiralDBTableNotFoundError):
+        missing.lookup_table("absent")
+    assert missing.get_table_names() == []
+
+
+def test_an_early_close(place: _Place) -> None:
+    batches: Any = place.connector().scan_batches("units")
+    assert next(batches).num_rows > 0
+    batches.close()

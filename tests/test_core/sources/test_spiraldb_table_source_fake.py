@@ -3,7 +3,7 @@
 Covers the workshop path (ITL-926) through the public interface: EDI-shaped tables (every
 column nullable, composite keys with string, timestamp and uint32 columns) -> Join of two
 Spiral sources -> function pod -> PipelineJob with a Delta store -> re-run -> save and load.
-See ``tests/test_databases/fake_pyspiral.py`` for the storage behaviour modelled.
+See ``tests/test_databases/fake_spiral_sdk.py`` for the storage behaviour modelled.
 """
 
 from __future__ import annotations
@@ -19,12 +19,11 @@ import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.databases import DeltaTableDatabase
-from orcapod.errors import NullabilityRecordError
+from orcapod.errors import TableSchemaError
 from orcapod.operators import Join, SelectDataColumns
-from orcapod.databases import SpiralDBConnector
 from orcapod.sources import SpiralDBTableSource
 from orcapod.types import Schema
-from tests.test_databases import fake_pyspiral
+from tests.test_databases import fake_spiral_sdk
 
 _PROJECT = "edi-sample"
 _TS = pa.timestamp("us")
@@ -46,8 +45,8 @@ def _all_nullable(table: pa.Table) -> pa.Table:
 def spiral_root(tmp_path: Path):
     """Provide a fake root with EDI-shaped, all-nullable ``session`` and ``experiment``."""
     root = tmp_path / "spiral"
-    with fake_pyspiral.install(root):
-        project = fake_pyspiral.FakeSpiral().project(_PROJECT)
+    with fake_spiral_sdk.install(root):
+        project = fake_spiral_sdk.ExternalProject(_PROJECT)
         session = project.create_table("default.session", key_schema=_SESSION_KEYS)
         session.write(
             _all_nullable(
@@ -222,9 +221,9 @@ def test_hashes_are_stable_across_processes(spiral_root):
     source = SpiralDBTableSource(_PROJECT, "experiment", tag_only_columns=True)
     script = (
         "import json\n"
-        "from tests.test_databases import fake_pyspiral\n"
+        "from tests.test_databases import fake_spiral_sdk\n"
         "from orcapod.sources import SpiralDBTableSource\n"
-        f"with fake_pyspiral.install({str(spiral_root)!r}):\n"
+        f"with fake_spiral_sdk.install({str(spiral_root)!r}):\n"
         f"    s = SpiralDBTableSource({_PROJECT!r}, 'experiment', tag_only_columns=True)\n"
         "print(json.dumps([s.content_hash().to_string(), s.pipeline_hash().to_string()]))\n"
     )
@@ -259,15 +258,14 @@ class TestSourceId:
         Each is written through ``SpiralDBConnector``, which records its non-nullable
         columns (ITL-936); ``default.unrecorded`` holds the same row without a record.
         """
-        with fake_pyspiral.install(tmp_path / "spiral"):
+        with fake_spiral_sdk.install(tmp_path / "spiral"):
             rows = pa.table({"subject_id": ["m1"], "sex": ["F"]}, schema=self._SUBJECT)
             keys = pa.schema([pa.field("subject_id", pa.string(), False)])
             for project in ("edi-sample-a", "edi-sample-b"):
-                fake = fake_pyspiral.FakeSpiral().project(project)
+                fake = fake_spiral_sdk.ExternalProject(project)
                 fake.create_table("default.subject", key_schema=keys)
-                SpiralDBConnector(project).upsert_records(
-                    "subject", rows, id_column="subject_id"
-                )
+                fake.table("default.subject").write(rows)
+                fake.table("default.subject").record(rows.schema)
                 fake.create_table("default.unrecorded", key_schema=keys).write(rows)
             yield
 
@@ -367,22 +365,16 @@ class TestSourceId:
 class TestNullabilityErrors:
     """The source keeps the nullability error types (ITL-936)."""
 
-    def test_unreadable_record_raises_its_own_type(self, tmp_path: Path):
-        """A broken nullability record surfaces as NullabilityRecordError, naming the table."""
-        with fake_pyspiral.install(tmp_path / "spiral"):
-            project = fake_pyspiral.FakeSpiral().project(_PROJECT)
+    def test_a_damaged_schema_table_raises_its_own_type(self, tmp_path: Path):
+        """A schema table with no marker surfaces as TableSchemaError, naming the table."""
+        with fake_spiral_sdk.install(tmp_path / "spiral"):
+            project = fake_spiral_sdk.ExternalProject(_PROJECT)
             keys = pa.schema([pa.field("subject_id", pa.string(), False)])
-            project.create_table("default.subject", key_schema=keys)
-            SpiralDBConnector(_PROJECT).upsert_records(
-                "subject",
-                pa.table({"subject_id": ["m1"]}, schema=keys),
-                id_column="subject_id",
+            project.create_table("default.subject", key_schema=keys).write(
+                pa.table({"subject_id": ["m1"], "sex": ["F"]})
             )
-            table = project.table("default.subject")
-            header = json.loads(table.get_metadata()["__orcapod_nullability__"])
-            header["version"] = 99
-            table.set_metadata({"__orcapod_nullability__": json.dumps(header).encode()})
-            with pytest.raises(NullabilityRecordError) as info:
+            fake_spiral_sdk.migrate(_PROJECT, {}, complete=False)
+            with pytest.raises(TableSchemaError, match="interrupted") as info:
                 SpiralDBTableSource(_PROJECT, "subject", tag_only_columns=True)
             assert info.value.table == f"{_PROJECT}/default/subject"
 
@@ -418,9 +410,14 @@ class TestNonNullableColumns:
     def strict_root(self, tmp_path: Path):
         """Provide recorded ``session`` and ``unit`` tables and an unrecorded copy of session."""
         root = tmp_path / "spiral"
-        with fake_pyspiral.install(root):
-            project = fake_pyspiral.FakeSpiral().project(_PROJECT)
-            connector = SpiralDBConnector(_PROJECT)
+        with fake_spiral_sdk.install(root):
+            project = fake_spiral_sdk.ExternalProject(_PROJECT)
+
+            def write(name: str, rows: pa.Table) -> None:
+                """Write rows and record their schema."""
+                project.table(f"default.{name}").write(rows)
+                project.table(f"default.{name}").record(rows.schema)
+
             session_rows = pa.table(
                 {
                     "subject_id": ["m1", "m2"],
@@ -432,12 +429,12 @@ class TestNonNullableColumns:
                 schema=self._SESSION,
             )
             project.create_table("default.session", key_schema=self._KEYS)
-            connector.upsert_records("session", session_rows, id_column="subject_id")
+            write("session", session_rows)
             project.create_table(
                 "default.session_unrecorded", key_schema=self._KEYS
             ).write(session_rows)
             project.create_table("default.unit", key_schema=self._KEYS)
-            connector.upsert_records(
+            write(
                 "unit",
                 pa.table(
                     {
@@ -457,7 +454,6 @@ class TestNonNullableColumns:
                         ]
                     ),
                 ),
-                id_column="subject_id",
             )
             yield root
 

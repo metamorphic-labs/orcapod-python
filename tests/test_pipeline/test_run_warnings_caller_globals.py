@@ -41,7 +41,7 @@ from orcapod.errors import (
 )
 from orcapod.pipeline import AsyncPipelineOrchestrator
 from orcapod.sources import DictSource, SpiralDBTableSource
-from tests.test_databases import fake_pyspiral
+from tests.test_databases import fake_spiral_sdk
 
 RUN_WARNINGS = (
     RestrictedAggregationWarning,
@@ -216,8 +216,8 @@ def _rows(n: int) -> list[dict[str, Any]]:
 @pytest.fixture()
 def spiral(tmp_path: Path) -> Iterator[None]:
     """Provide a fake SpiralDB project with two tables, ``event`` and ``trial``."""
-    with fake_pyspiral.install(tmp_path / "spiral"):
-        project = fake_pyspiral.FakeSpiral().project(_PROJECT)
+    with fake_spiral_sdk.install(tmp_path / "spiral"):
+        project = fake_spiral_sdk.ExternalProject(_PROJECT)
         for name in ("event", "trial"):
             project.create_table(f"default.{name}", key_schema=_KEYS).write(
                 pa.table(

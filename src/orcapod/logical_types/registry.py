@@ -9,13 +9,13 @@ from __future__ import annotations
 import logging
 import re
 import threading
-from typing import Any, Iterable
+from typing import Any, Iterable, cast
 
 import polars as pl
 import pyarrow as pa
 
 from orcapod.errors import MissingOptionalDependencyError
-from orcapod.logical_types.arrow_lifetime import keep_for_process
+from orcapod.logical_types.arrow_lifetime import KeptInstances
 from orcapod.logical_types.identifier import LogicalTypeIdentifierError
 from orcapod.logical_types.identifier import LogicalTypeIdentifier
 from orcapod.logical_types.provisional import warn_provisional
@@ -78,6 +78,11 @@ def make_arrow_extension_type(
     and exposes it via ``get_arrow_extension_type()``. See PLT-1656 for the
     built-in implementations (``Path``, ``UPath``, ``UUID``).
 
+    A metaclass unrelated to the generated class's metaclass causes a conflict
+    when creating a subclass. Given a generated class ``Generated``, define
+    ``class CombinedMeta(type(Generated), ABCMeta): ...`` and use
+    ``metaclass=CombinedMeta`` on the subclass.
+
     Args:
         extension_name: The Arrow extension name (``ARROW:extension:name``).
         storage_type: The underlying Arrow storage type.
@@ -106,7 +111,10 @@ def make_arrow_extension_type(
         the instance suitable for passing to ``pa.register_extension_type`` or
         returning from ``get_arrow_extension_type()``. Every call, and every column
         read, gives the one instance of the class, which lives until the process ends
-        (``keep_for_process``; ITL-1422).
+        (``KeptInstances``; ITL-1422). A subclass is a type of its own, with its own
+        Arrow hooks: it has one instance for each serialized metadata it gives (with
+        its extension name and storage type), whatever arguments its ``__init__``
+        takes, kept the same way.
     """
     _name, _storage, _metadata = extension_name, storage_type, metadata or b""
     _readable = (_metadata, *(m for m in also_reads if m != _metadata))
@@ -149,30 +157,19 @@ def make_arrow_extension_type(
             )
         return cls()
 
-    shared: pa.ExtensionType | None = None
-
-    def _new(cls: type[pa.ExtensionType]) -> pa.ExtensionType:
-        return pa.ExtensionType.__new__(cls) if shared is None else shared
-
-    def _init(self: pa.ExtensionType) -> None:
-        # Python calls it again on the shared instance: never build its type twice.
-        if shared is None:
-            pa.ExtensionType.__init__(self, _storage, _name)
-
-    extension_class = type(
+    # One instance per concrete class and serialized metadata, each kept until the
+    # process ends (``KeptInstances``): a subclass keeps its own identity and hooks.
+    extension_class = KeptInstances(
         f"_ArrowExt_{_sanitize(extension_name)}",
         (pa.ExtensionType,),
         {
-            "__new__": _new,
-            "__init__": _init,
+            "__init__": lambda self: pa.ExtensionType.__init__(self, _storage, _name),
             "__arrow_ext_serialize__": lambda self: _metadata,
             "__arrow_ext_deserialize__": classmethod(_deserialize),
             "readable_metadata": _readable,
         },
     )
-    # Built here, before any other thread can see the class.
-    shared = keep_for_process(extension_class())  # pyright: ignore[reportCallIssue]  # the synthesized class takes no arguments
-    return extension_class
+    return cast("type[pa.ExtensionType]", extension_class)
 
 
 def make_polars_extension_type(

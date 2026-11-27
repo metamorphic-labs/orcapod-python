@@ -23,7 +23,7 @@ SQLite, over PostgreSQL and over SpiralDB. No PostgreSQL server and no SpiralDB 
 the PostgreSQL cell comes from the connector's own storability rule
 (``unstorable_column_reason`` and ``validate_records``, over a mocked connection), so it
 is ``KEPT BY RULE`` or ``REFUSED``, never a measured read; the SpiralDB cell is measured
-through the disk fake (``tests/test_databases/fake_pyspiral.py``). No database tells tag
+through the disk fake (``tests/test_databases/fake_spiral_sdk.py``). No database tells tag
 columns from data columns: the connector databases tell only the record-id key, which
 Orcapod always writes as ``large_binary``.
 """
@@ -50,7 +50,6 @@ from orcapod.databases import (
     InMemoryArrowDatabase,
     PostgreSQLConnector,
     SQLiteConnector,
-    SpiralDBConnector,
 )
 from orcapod.databases.delta_arrow_types import _is_recorded  # pyright: ignore[reportPrivateUsage]
 from orcapod.databases.utils import identity_node
@@ -62,7 +61,7 @@ KEPT_BY_RULE = "KEPT BY RULE"
 REFUSED = "REFUSED"
 SILENT = "SILENT"
 
-DATABASES = ("in-memory", "Delta", "SQLite", "PostgreSQL", "SpiralDB")
+DATABASES = ("in-memory", "Delta", "SQLite", "PostgreSQL")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -636,12 +635,6 @@ def open_database(name: str, root: Path) -> Iterator[Any]:
         yield DeltaTableDatabase(root / "delta")
     elif name == "SQLite":
         yield ConnectorArrowDatabase(SQLiteConnector(str(root / "store.db")))
-    elif name == "SpiralDB":
-        from tests.test_databases import fake_pyspiral
-
-        with fake_pyspiral.install(root / "spiral"):
-            fake_pyspiral.FakeSpiral().project("p")
-            yield ConnectorArrowDatabase(SpiralDBConnector("p"))
     elif name == "PostgreSQL":
         with patch("psycopg.connect") as connect:
             connect.return_value = MagicMock()
@@ -1047,29 +1040,25 @@ appended, which every database must refuse, naming the column; for a logical typ
 the same values under another logical type identifier (another extension name over the
 same storage), which would otherwise read back as the stored type. Every batch written is
 read back with `get_all_records`.
-The SpiralDB column is measured through the test suite's disk fake of SpiralDB, which
-models what SpiralDB does to a column (no SpiralDB is used). No database tells tag
+No database tells tag
 columns from data columns, so a type is kept or refused the same way in either role.
 The library value types (NumPy, pandas, Polars, torch) are
 [provisional](../concepts/arrays.md): their stored form may change in a later release.
 
 The databases: `InMemoryArrowDatabase` (in-memory), `DeltaTableDatabase` (Delta), and
-`ConnectorArrowDatabase` over `SQLiteConnector`, `PostgreSQLConnector` and
-`SpiralDBConnector`. See [The database](../concepts/pipeline-job.md#the-database) for how a
+`ConnectorArrowDatabase` over `SQLiteConnector` and `PostgreSQLConnector`. Orcapod reads
+SpiralDB but does not write it for now (`SpiralDBWriteNotSupportedError`). See [The database](../concepts/pipeline-job.md#the-database) for how a
 job uses one.
 
 Some refusals depend on the values or names as well as the type:
 
-- SpiralDB cannot store a null struct, so a struct column with a null row is refused
-  (the rows below have one); a struct column with no null row is kept.
 - SQLite reads a NaN back as NULL and `-0.0` as `0.0`, so a `double` column holding one
   is refused (the float rows below hold both); one without them is kept.
 - Delta has no `null` type: a new column, or a new nested field, holding only nulls with
   no type is refused (the `null` row below), while a `null`-typed value is kept where the
   table already stores a type.
-- Delta and SpiralDB give a map's key and item fields back as `key` and `value`, so a map
-  with other names is refused. SpiralDB does not keep metadata on a map's key or item
-  field, so a map with such metadata is refused there.
+- Delta gives a map's key and item fields back as `key` and `value`, so a map with other
+  names is refused.
 - A fixed-size list or fixed-size binary read back by Delta with another length or width
   than its type is refused on read, never padded or cut.
 - Delta refuses a column whose name holds a backtick, or is one deltalake's MERGE reserves
@@ -1134,14 +1123,10 @@ order, each field equal to the held one (the same type at every depth, the same 
 type, the same field attributes), are put in the held order, whether the table was
 flushed in between or not. The in-memory database matches them to the rows still pending,
 else the stored table; Delta to the rows still pending (it matches a stored table by name
-itself); a connector database (SQLite, PostgreSQL, SpiralDB) to the rows it has pending,
+itself); a connector database (SQLite, PostgreSQL) to the rows it has pending,
 and to the stored table when it writes or reads them, checking them first against the
 table as it is then, by exact name and type (a column with field metadata stays in its
-queued order at a flush; SpiralDB, which keeps field metadata, matches a write by name
-itself). A table keeps the column
-order the database gave its first write: the first write's order, except in SpiralDB,
-which stores and reads a table's key columns first and then its other columns sorted by
-name, whatever the order written (measured on SpiralDB itself). An append that also
+queued order at a flush). A table keeps the column order of its first write. An append that also
 adds, omits or retypes a column keeps each database's own rule. The order of a struct's
 fields is not covered: a struct whose fields are in another order is another type here.
 """

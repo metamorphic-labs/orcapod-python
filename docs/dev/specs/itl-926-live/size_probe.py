@@ -55,7 +55,7 @@ def _sizes(project_id: str, dataset: str) -> dict[str, dict[str, Any]]:
     """Return each table's manifest row count and sizes, without scanning data."""
     import spiral  # pyright: ignore[reportMissingImports]  (spiraldb extra, absent in the type-check job)
 
-    sp = spiral.Spiral()
+    sp = spiral.Spiral()  # pyright: ignore[reportAttributeAccessIssue]  # historical: measured with pyspiral, removed in ITL-1186
     project = sp.project(project_id)
     out: dict[str, dict[str, Any]] = {}
     for resource_ in sorted(project.list_tables(), key=lambda r: r.table):

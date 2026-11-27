@@ -4,7 +4,7 @@ Pipelines over scientific data pass references to files between steps. Orcapod h
 for this, and the choice of type decides **what a result's validity depends on**: the
 content of the file, or only its location.
 
-For a guided introduction see the tutorial, [Part 7](../tutorial/07-files.md).
+For a guided introduction see the tutorial [Working with files](../tutorial/files.md).
 
 ## The types
 

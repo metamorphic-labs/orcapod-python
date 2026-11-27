@@ -1,15 +1,14 @@
 # Part 4: Many rows into one
 
-So far every function has worked on one row and produced one row. A summary is different:
-the mean firing rate of a session needs *all* the units of that session at once. In Orcapod
-this takes two steps. An operator gathers the rows that belong together into a single row
-whose values are lists. Then an ordinary function pod computes over those lists.
+A summary is computed from many rows: the mean firing rate of a session needs all the units of
+that session. In Orcapod this takes two steps. An operator gathers the rows that belong
+together into one row whose values are lists. A function pod then computes over those lists.
 
 You will:
 
 - gather rows that share tag values with `group_by`
 - write a function pod that takes lists
-- compute the mean firing rate of every session, the result this tutorial is building
+- compute the mean firing rate of every session
 - gather rows by count with `batch`
 
 ```python
@@ -51,8 +50,7 @@ rates = firing_rate.pod(
 ## Group by tags
 
 `group_by` takes a list of tag columns. All rows with the same values in those columns
-become one row. The first call prints a `ProvisionalHashWarning`
-(see [Messages you can ignore](00-setup.md#messages-you-can-ignore)):
+become one row:
 
 ```python
 per_session = rates.group_by(["subject_id", "session"])
@@ -63,43 +61,34 @@ print(per_session.as_table().num_rows)
 # 8
 ```
 
-64 unit rows became 8 session rows. Compare the schema with the one you started from:
+64 unit rows became 8 session rows:
 
-- The columns you grouped by, `subject_id` and `session`, are the tags of the result. One
-  row per session.
-- The other tags, `probe` and `unit`, are gone. A session row covers many probes and units,
-  so no single value of them describes the row, and `group_by` drops them.
+- The columns you grouped by, `subject_id` and `session`, are the tags of the result.
+- The other tags, `probe` and `unit`, are dropped, because a session row covers many probes
+  and units.
 - Every data column became a list: `rate_hz` is now `list[float]`, one element per unit of
   the session.
 
 Here is the first row:
 
 ```python
-tag, data = next(iter(per_session.iter_data()))
+tag, data = next(iter(per_session))
 print(tag.as_dict())
 # {'subject_id': 'mouse_01', 'session': 's1'}
 print([round(r, 2) for r in data.as_dict()["rate_hz"]])
 # [2.48, 5.43, 11.03, 9.98, 3.58, 4.98, 2.25, 8.52]
 ```
 
-These are the eight rates of `mouse_01`'s first session, ordered by the tags that were
-dropped, taken in name order: by `probe`, then by `unit`. So probe `imec0` units 0 to 3,
-then probe `imec1` units 0 to 3 (compare the first rows of `rates` in Part 2). The members
-of a group are always in this order, whatever order the input rows arrived in and however
-the input's columns are arranged. They are never ordered by a data value. To order them
-by other tags first, name those tags: `group_by([...], member_order=["unit"])`.
+These are the eight rates of `mouse_01`'s first session. The members of a group are ordered by
+the dropped tags in name order, here `probe`, then `unit`. To order them by other tags first,
+name those tags: `group_by([...], member_order=["unit"])`.
 
-The list itself no longer says which probe or unit each rate came from. If a later step
-needs that, it has to be a data column before you group; see
-[GroupBy](../concepts/operators.md#groupby).
-
-`group_by` is an operator, so it computed nothing. Every number in those lists was already
-in `rates`.
+The list does not say which probe or unit each rate came from. If a later step needs that, it
+has to be a data column before you group; see [GroupBy](../concepts/operators.md#groupby).
 
 ## A function pod over lists
 
-A function that takes a list is written like any other. Annotate the parameter as
-`list[float]`:
+Annotate the parameter as `list[float]`:
 
 ```python
 @function_pod(output_keys="mean_rate_hz")
@@ -120,15 +109,7 @@ print(session_means.as_pandas_df())
 # 7   mouse_04      s2      5.129167
 ```
 
-That is the result this tutorial set out to compute: the mean firing rate of every session.
-The rows come out sorted by the group keys, taken in name order: `session`, then
-`subject_id`. That is why every animal's `s1` comes before any `s2`. The order you write
-the keys in does not change it: `group_by(["session", "subject_id"])` is the same
-operation.
-The knockout animals, `mouse_03` and `mouse_04`, fire less, as the generator intended.
-
-The grouped stream has one data column, `rate_hz`, and that is exactly the parameter of
-`mean_rate`, so it goes straight into the pod.
+The rows come out sorted by the group keys in name order: `session`, then `subject_id`.
 
 The whole analysis so far, written as one chain:
 
@@ -144,10 +125,10 @@ print(session_means.as_table().num_rows)
 # 8
 ```
 
-## What you can group by
+## Grouping uses tags only
 
-Only tag columns that hold a single value per row. Grouping by a data column is an error,
-and the message says so:
+You can group by tag columns that hold a single value per row. Grouping by a data column
+raises an error:
 
 ```python
 from orcapod.errors import InputValidationError
@@ -159,15 +140,12 @@ except InputValidationError as err:
 # GroupBy: ['rate_hz'] are not tag columns of the input stream. Available tag columns: ['subject_id', 'session', 'probe', 'unit']. (Data columns cannot be grouping keys: ['rate_hz'])
 ```
 
-This matters when the thing you want to group by is stored as data. `genotype` is a data
-column of `subjects`, so after a join it is still data, and you cannot group by it. Parts 1
-and 3 said that choosing tags has consequences; this is the main one. Exercise 3 shows a way
-through with what you know so far.
+`genotype` is a data column of `subjects`, so you cannot group by it, also not after a join.
+This is the main consequence of the choice of tags. Exercise 3 shows what you can do.
 
-## Batch: group by count
+## Batch
 
-`batch` gathers rows without looking at their values. With no argument, the whole stream
-becomes a single row (with the same warning, once, for `Batch`):
+`batch` gathers rows by count. With no argument, the whole stream becomes a single row:
 
 ```python
 everyone = subjects.batch()
@@ -178,9 +156,8 @@ for tag, data in everyone:
 # {'sex': ['F', 'M', 'F', 'M'], 'age_weeks': [12, 14, 11, 13], 'genotype': ['wildtype', 'wildtype', 'knockout', 'knockout']}
 ```
 
-Here the tags became lists too, since no column identifies the single row any more. With
-`batch_size=N` you get rows of `N` members each; the last one may be smaller, unless you pass
-`drop_partial_batch=True`:
+The tags became lists too. With `batch_size=N` you get rows of `N` members each. The last one
+may be smaller, unless you pass `drop_partial_batch=True`:
 
 ```python
 for tag, data in subjects.batch(batch_size=3):
@@ -189,24 +166,23 @@ for tag, data in subjects.batch(batch_size=3):
 # {'subject_id': ['mouse_04']}
 ```
 
-Use `group_by` when rows belong together because of what they are (all units of a session).
-Use `batch` when you want everything, or fixed-size chunks, regardless of content: a grand
-mean over all rows, or mini-batches for a model.
+Use `batch` for everything at once or for chunks of a fixed size, such as a grand mean over all
+rows or mini-batches for a model.
 
-If you need both, group first and batch afterwards. A batched stream has list-valued tags,
-and `group_by` cannot use those.
+If you need both `group_by` and `batch`, use them in that order. `batch` then gathers the
+grouped rows: here sessions, whose lists of units stay whole. The tags of a batched stream are
+lists, and `group_by` cannot use those.
 
-## What to remember
+## Key points
 
 - `group_by([...tags])` turns the rows sharing those tag values into one row of lists.
   `batch()` does the same by count.
-- Neither computes anything. A function pod with `list[...]` parameters does the computing.
+- A function pod with `list[...]` parameters computes over the lists.
 - You can only group by tag columns.
 - `group_by` keeps only the tags you group by; the other tags are dropped. `batch` keeps
   every tag, as a list.
 - The members of a group are ordered by the dropped tags in name order, or by the tags you
-  name in `member_order`. They are never ordered by a data value. Groups come out sorted by
-  their keys in name order.
+  name in `member_order`. Groups come out sorted by their keys in name order.
 
 ## Exercises
 
@@ -274,10 +250,6 @@ filter, then narrow, then `batch()`.)
     # knockout 5.058
     ```
 
-    Writing a loop over the genotypes works, but it is a sign that `genotype` wanted to be a
-    tag. Had the subjects table been loaded with `tag_columns=["subject_id", "genotype"]`,
-    `genotype` would have travelled through every join as a tag and a single
-    `group_by(["genotype"])` would have done it. When you design your own sources, make a
-    column a tag if you expect to group or match by it.
-
-Next: [Part 5: Keeping results](05-pipeline-job.md).
+    With `genotype` as a tag, the loop is not needed: load the subjects table with
+    `tag_columns=["subject_id", "genotype"]`, and one `group_by(["genotype"])` replaces it.
+    In your own sources, make a column a tag if you expect to group or match by it.

@@ -170,7 +170,7 @@ One row per function node: `rows` is every input row the run accounted for in th
 how many its function computed in this run, `from store` how many it read back from the
 database instead, `failed` how many raised, and `first error` the first of those errors, with the call that
 prints its full traceback (`job.last_run.print_traceback("rates")`). Here one `rates` row
-was found in the store during the run itself ([Part 5](../tutorial/05-pipeline-job.md#record-then-run)
+was found in the store during the run itself ([Part 5](../tutorial/05-pipeline-job.md#run-a-recorded-job)
 of the tutorial explains why). A load-only run (`job.run(load_only=True)`) shows how many
 rows each node loaded and how many had no stored result instead. The job keeps the summary as
 `job.last_run`. A cell that ends with `job.run();` (a semicolon) shows nothing. What a run
@@ -218,7 +218,7 @@ print(job.nodes["rates"].run().header())
 
 A view holds the default columns only (tags and data). For system tags, source info and
 the other hidden columns, ask the node: `as_table(columns=...)`, as in
-[Part 8 of the tutorial](../tutorial/08-inspecting-and-tracing.md). `run()` on each kind of
+the tutorial [Inspecting results](../tutorial/inspecting-results.md#tracing-rows). `run()` on each kind of
 object is the table "What `run()` does on each kind of object" in
 [Streams](streams.md#computing-a-stream-outside-a-job-run).
 
@@ -256,6 +256,8 @@ laid out left to right. Here is `job` as the last line of a cell, after its run,
 - **A node's details.** Click a node (or focus it and press Enter) to see its schema: its tag
   and data columns, the nodes it reads from and, for a job, its run status and the row counts
   of the job's last run.
+- **Constraining inputs.** The right input of a `SemiJoin` only decides which rows pass: a
+  dashed edge entering from the side of the box.
 - **Statuses.** Each node of a job shows one: `not run`, `current`, `stale`, `failed`,
   `loaded only`, `partial`, or `bound` or `unbound` for a source slot. Before `job.run()`
   every node but the sources says `not run`.

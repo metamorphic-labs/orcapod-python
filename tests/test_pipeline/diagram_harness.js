@@ -172,6 +172,7 @@ function observe() {
       .filter((g) => g.classList.contains('op-dag-selected'))
       .map((g) => g.getAttribute('aria-label').split(', ')[0]) : [],
     panel: root.querySelector('.op-dag-panel').classList.contains('op-dag-open'),
+    panelText: root.querySelector('.op-dag-panel').textContent,
     count: root.querySelector('.op-dag-count').textContent,
     controls: Object.fromEntries(['direction', 'collapse']
       .filter((name) => root.querySelector('.op-dag-' + name))

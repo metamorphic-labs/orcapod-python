@@ -21,7 +21,6 @@ import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.databases import InMemoryArrowDatabase
-from orcapod.databases.spiraldb_nullability import write_nullability_record
 from orcapod.databases.sqlite_connector import SQLiteConnector
 from orcapod.errors import SourceCheckFailedWarning
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
@@ -37,7 +36,7 @@ from orcapod.sources import (
     SQLiteTableSource,
 )
 from orcapod.types import ColumnInfo
-from tests.test_databases import fake_pyspiral
+from tests.test_databases import fake_spiral_sdk
 
 CALLS: list[int] = []
 ORCHESTRATORS = {"sync": SyncPipelineOrchestrator, "async": AsyncPipelineOrchestrator}
@@ -226,12 +225,12 @@ _KEYS = pa.schema([pa.field("k", pa.int64())])
 @pytest.fixture()
 def spiral(tmp_path: Path):
     """A fake project with table ``default.t`` holding k = 0, 1, 2."""
-    with fake_pyspiral.install(tmp_path / "spiral"):
-        project = fake_pyspiral.FakeSpiral().project(_PROJECT)
+    with fake_spiral_sdk.install(tmp_path / "spiral"):
+        project = fake_spiral_sdk.ExternalProject(_PROJECT)
         table = project.create_table("default.t", key_schema=_KEYS)
         table.write(_rows([0, 1, 2]))
         # SpiralDB reports every column nullable; the record says k and x are not.
-        write_nullability_record(table, _SCHEMA)
+        table.record(_SCHEMA)
         yield project
 
 
@@ -252,9 +251,9 @@ def test_spiral_new_version_is_pinned_without_reading_rows(spiral: Any) -> None:
     source = _spiral(max_rows=2)  # the table holds more rows than one read may return
     before = source.last_modified
     spiral.table("default.t").write(_rows([3]))
-    scans = len(fake_pyspiral.scan_log)
+    scans = len(fake_spiral_sdk.scan_log)
     assert source.check_for_new_data() is True  # no SourceTooLargeError: no row read
-    assert len(fake_pyspiral.scan_log) == scans
+    assert len(fake_spiral_sdk.scan_log) == scans
     assert source.last_modified is not None and before is not None
     assert source.last_modified > before
     assert source.check_for_new_data() is False
@@ -266,7 +265,7 @@ def test_spiral_reads_the_new_version_after_the_check(spiral: Any) -> None:
     assert source.check_for_new_data() is True
     _ = source.as_table()
     assert (
-        fake_pyspiral.scan_log[-1].kwargs["asof"]
+        fake_spiral_sdk.scan_log[-1].kwargs["asof"]
         == spiral.table("default.t").last_modified_at()
     )
 
@@ -279,7 +278,7 @@ def test_spiral_explicit_asof_never_moves(spiral: Any) -> None:
     assert source.check_for_new_data() is False
     assert source.last_modified == before
     _ = source.as_table()
-    assert fake_pyspiral.scan_log[-1].kwargs["asof"] == version
+    assert fake_spiral_sdk.scan_log[-1].kwargs["asof"] == version
 
 
 def test_spiral_recreated_table_fails_the_check(spiral: Any) -> None:
@@ -287,7 +286,7 @@ def test_spiral_recreated_table_fails_the_check(spiral: Any) -> None:
     spiral.drop_table("default.t")
     recreated = spiral.create_table("default.t", key_schema=_KEYS)
     recreated.write(_rows([0, 1, 2, 3]))
-    write_nullability_record(recreated, _SCHEMA)
+    recreated.record(_SCHEMA)
     with pytest.raises(ValueError, match="dropped and created again"):
         source.check_for_new_data()
 
@@ -295,9 +294,8 @@ def test_spiral_recreated_table_fails_the_check(spiral: Any) -> None:
 def test_spiral_changed_columns_fail_the_check(spiral: Any) -> None:
     source = _spiral()
     # Recording x as nullable changes the schema the source reads.
-    write_nullability_record(
-        spiral.table("default.t"),
-        pa.schema([pa.field("k", pa.int64(), False), pa.field("x", pa.int64(), True)]),
+    spiral.table("default.t").record(
+        pa.schema([pa.field("k", pa.int64(), False), pa.field("x", pa.int64(), True)])
     )
     with pytest.raises(ValueError, match="Build the source again"):
         source.check_for_new_data()
