@@ -1,0 +1,8 @@
+column_family,narrow_arrow_bytes_per_pipeline_row,narrow_delta_bytes_per_pipeline_row,narrow_zstd_prefix_bytes_per_pipeline_row,wide_arrow_bytes_per_pipeline_row,wide_delta_bytes_per_pipeline_row,wide_zstd_prefix_bytes_per_pipeline_row
+Input data hash,100,75,65,100,75,65
+Pipeline output data hash,52,37,32,52,37,32
+Pipeline record and base entry IDs,100,75,65,100,75,65
+Result record and pipeline data IDs,48,31,22,48,31,22
+Pipeline system tags,52,6.4,0.3,52,6.4,0.3
+Input provenance tokens,53,7,0.3,53,7,0.3
+Output provenance tokens,140,31,13,1400,310,130
