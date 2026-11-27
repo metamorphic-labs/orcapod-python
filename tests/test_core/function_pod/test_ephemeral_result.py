@@ -10,7 +10,6 @@ import pytest
 
 from orcapod.channels import Channel
 from orcapod.core.data_function import PythonDataFunction
-from orcapod.core.datagrams import Data, Tag
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes import FunctionNode
 from orcapod.core.nodes.function_node import FunctionJobNode
@@ -379,24 +378,33 @@ class TestBulkResolution:
         vals = {tag.as_dict()["id"]: data.as_dict()["result"] for tag, data in results}
         assert vals == {0: 20, 1: 40}
 
-    def test_persistent_result_outcompetes_ephemeral(self):
-        """Persistent result wins when both persistent and ephemeral rows share the same entry_id.
+    @pytest.mark.parametrize("later", ["persistent", "ephemeral"])
+    def test_of_two_records_of_one_instance_the_one_recorded_last_wins(self, later):
+        """A persistent and an ephemeral record of one instance: the later one is read.
 
-        Verifies the anti-join priority merge in ``_fetch_joined_records``:
-        when both ``persistent_df`` and ``ephemeral_df`` have a row for the same
-        ``_PIPELINE_ENTRY_ID_COL`` value, the ephemeral row is excluded by anti-join,
-        and the persistent result is returned (not recomputed).
+        Among the records of one instance, the one recorded last
+        (``__recorded_at``) is the current one, whichever database holds its
+        result. The two results have the same value and different ids, so the
+        id of the result read back says which record won. Nothing is computed
+        again.
 
-        Because ``add_pipeline_record`` with ``skip_cache_lookup=True`` deduplicates
-        at the DB level, constructing this scenario requires direct DB manipulation:
-        - write the persistent row normally
-        - ``flush()`` pipeline_db so it moves to committed tables (not pending)
-        - insert the ephemeral row via ``add_record(skip_duplicates=False)`` — succeeds
-          because the committed row is not in ``_pending_record_ids``
+        The node's writer records one instance once per result, so the second
+        record is written through the database: a valid record of the same
+        instance (a new result id, the record id made from the two, the row key
+        made from the node and the record id), one minute before or after the
+        first.
         """
+        import datetime
+
         import pyarrow as pa
-        from orcapod.core.nodes.function_node import _PIPELINE_ENTRY_ID_COL
+
+        from orcapod.contexts import get_default_context
+        from orcapod.core import row_ids
         from orcapod.system_constants import constants
+        from orcapod.types import ContentHash
+
+        ROW_KEY = "__row_key"  # the name the row key is read under here
+        hasher = get_default_context().arrow_hasher
 
         call_count = {"n": 0}
 
@@ -417,75 +425,69 @@ class TestBulkResolution:
         )
         node.set_ephemeral_database(ephemeral_store)
 
-        # Step 1: Write the persistent result (IS_EPHEMERAL=False)
-        node.execute(stream)
+        # The persistent record, written by the node.
+        ((_, persistent_output),) = list(node.execute(stream).iter_data())
         assert call_count["n"] == 1
-
-        # Step 2: Write a real result to ephemeral_store so the ephemeral inner-join
-        # produces a row (this makes ephemeral_df.height > 0, triggering the anti-join branch).
-        # This computation increments call_count — capture it here for the later assertion.
-        tag_obj = Tag({"id": 0})
-        data_obj = Data({"x": 10})
-        _, eph_output = node._ephemeral_cached_pod.process_data(tag_obj, data_obj)
-        assert eph_output is not None
-        eph_data_record_id = eph_output.datagram_uuid
-        count_after_setup = call_count["n"]  # 2: once from step 1, once from this call
-
-        # Step 3: Flush pipeline_db — moves the persistent row from _pending to _tables
-        # After this, _pending_record_ids is cleared for this path
         pipeline_db.flush()
-
-        # Step 4: Get the committed row and its entry_id bytes
         existing = pipeline_db.get_all_records(
-            node._versioned_pipeline_path,
-            record_id_column=_PIPELINE_ENTRY_ID_COL,
+            node._versioned_pipeline_path, record_id_column=ROW_KEY
         )
         assert existing is not None and existing.num_rows == 1
-        entry_id_bytes = existing[_PIPELINE_ENTRY_ID_COL][0].as_py()
-
-        # Step 5: Build an ephemeral copy of the row with IS_EPHEMERAL=True and the
-        # ephemeral_store's data_record_id
-        row_without_id = existing.drop([_PIPELINE_ENTRY_ID_COL])
-        eph_col_idx = row_without_id.schema.get_field_index(constants.IS_EPHEMERAL_COL)
-        rid_col_idx = row_without_id.schema.get_field_index(constants.DATA_RECORD_ID)
-        ephemeral_row = row_without_id.set_column(
-            eph_col_idx,
-            constants.IS_EPHEMERAL_COL,
-            pa.array([True], type=pa.bool_()),
-        )
-        ephemeral_row = ephemeral_row.set_column(
-            rid_col_idx,
-            constants.DATA_RECORD_ID,
-            pa.array([eph_data_record_id.bytes], type=pa.large_binary()),
+        persistent_result_id = uuid.UUID(
+            bytes=existing[constants.DATA_RECORD_ID][0].as_py()
         )
 
-        # Step 6: Insert the ephemeral row with the SAME entry_id, skip_duplicates=False.
-        # This succeeds because the flushed row is in _tables (not _pending_record_ids).
+        # A result of the same input in the ephemeral store, with its own id.
+        tag_obj, data_obj = next(iter(stream.iter_data()))
+        _, eph_output = node._ephemeral_cached_pod.process_data(tag_obj, data_obj)
+        assert eph_output is not None
+        ephemeral_result_id = eph_output.datagram_uuid
+        assert ephemeral_result_id != persistent_result_id
+        count_after_setup = call_count["n"]
+
+        # The ephemeral record of the same instance.
+        instance = ContentHash.from_prefixed_digest(
+            existing["__pipeline_instance_id"][0].as_py()
+        )
+        record = row_ids.record_id(
+            hasher, node.content_hash(), instance, ephemeral_result_id
+        )
+        recorded = existing["__recorded_at"][0].as_py()
+        shift = datetime.timedelta(minutes=1 if later == "ephemeral" else -1)
+        ephemeral_row = existing.drop([ROW_KEY])
+        for column, value in {
+            constants.IS_EPHEMERAL_COL: True,
+            constants.DATA_RECORD_ID: ephemeral_result_id.bytes,
+            "__pipeline_record_id": record.to_prefixed_digest(),
+            "__recorded_at": recorded + shift,
+        }.items():
+            index = ephemeral_row.schema.get_field_index(column)
+            field = ephemeral_row.schema.field(index)
+            ephemeral_row = ephemeral_row.set_column(
+                index, field, pa.array([value], type=field.type)
+            )
         pipeline_db.add_record(
             node._versioned_pipeline_path,
-            entry_id_bytes,
+            record.to_prefixed_digest(),
             ephemeral_row,
-            skip_duplicates=False,
         )
-
-        # Now pipeline_db has two rows for the same entry_id:
-        #   IS_EPHEMERAL=False → persistent result (result=20)
-        #   IS_EPHEMERAL=True  → ephemeral result (result=20, same value but different store)
-        both = pipeline_db.get_all_records(
-            node._versioned_pipeline_path,
-            record_id_column=_PIPELINE_ENTRY_ID_COL,
-        )
+        pipeline_db.flush()
+        both = pipeline_db.get_all_records(node._versioned_pipeline_path)
         assert both is not None and both.num_rows == 2
+        assert len(set(both["__pipeline_instance_id"].to_pylist())) == 1
+        assert len(set(both["__pipeline_record_id"].to_pylist())) == 2
 
-        # Step 7: Clear in-memory cache to force _fetch_joined_records lookup
-        node._cached_output_datas.clear()
-
-        # The anti-join should exclude the ephemeral row (entry_id clash with persistent row),
-        # returning only the persistent result. No recomputation.
-        results = list(node.execute(stream).iter_data())
-        assert len(results) == 1
-        assert results[0][1].as_dict()["result"] == 20
-        # call_count did not increase — persistent hit from anti-join merge, no recomputation
+        # A new node over the same stores reads the record recorded last.
+        reader = FunctionJobNode(
+            function_pod=pod,
+            input_stream=stream,
+            pipeline_database=pipeline_db,
+        )
+        reader.set_ephemeral_database(ephemeral_store)
+        ((_, read),) = list(reader.execute(stream).iter_data())
+        assert read.as_dict()["result"] == 20
+        expected = ephemeral_result_id if later == "ephemeral" else persistent_result_id
+        assert read.datagram_uuid == expected
         assert call_count["n"] == count_after_setup
 
 
@@ -891,31 +893,44 @@ class TestAsyncEphemeralExecution:
 
 
 # ---------------------------------------------------------------------------
-# Task 2 tests: redesigned add_pipeline_record (indexed, no skip_cache_lookup)
+# add_pipeline_record: one row per record id (ITL-1471)
 # ---------------------------------------------------------------------------
 
 
 class TestAddPipelineRecordIndexed:
-    def test_first_call_writes_at_index_zero(self):
-        """add_pipeline_record writes recomputation_index=0 on the first call."""
-        from orcapod.core.nodes.function_node import _PIPELINE_RECOMPUTATION_INDEX_COL
+    def test_first_call_writes_one_row_keyed_by_its_record_id(self):
+        """The first row's record id is hash(instance id, result id); no index column."""
+        from orcapod.core import row_ids
+        from orcapod.types import ContentHash
 
         stream = _make_stream([{"id": 0, "x": 10}])
         pipeline_db = InMemoryArrowDatabase()
         node, _ = _make_node(stream, pipeline_db=pipeline_db)
         tag, data = next(iter(stream.iter_data()))
 
-        node.add_pipeline_record(tag, data, data_record_id=uuid.uuid4(), computed=True)
+        result_id = uuid.uuid4()
+        node.add_pipeline_record(tag, data, data_record_id=result_id, computed=True)
         pipeline_db.flush()
 
-        all_records = pipeline_db.get_all_records(node._versioned_pipeline_path)
+        all_records = pipeline_db.get_all_records(
+            node._versioned_pipeline_path, record_id_column="__row_key"
+        )
         assert all_records is not None
         assert all_records.num_rows == 1
-        assert all_records.column(_PIPELINE_RECOMPUTATION_INDEX_COL)[0].as_py() == 0
+        assert "__pipeline_recomputation_index" not in all_records.column_names
+        expected = row_ids.record_id(
+            node.data_context.arrow_hasher,
+            node.content_hash(),
+            ContentHash.from_prefixed_digest(node.compute_instance_id(tag, data)),
+            result_id,
+        ).to_prefixed_digest()
+        assert all_records.column(row_ids.RECORD_ID_COL).to_pylist() == [expected]
+        # The table's key is the record id, which covers the node's content hash.
+        assert all_records.column("__row_key").to_pylist() == [expected]
 
-    def test_second_call_writes_at_index_one(self):
-        """Second add_pipeline_record call for the same base_entry_id writes at index 1."""
-        from orcapod.core.nodes.function_node import _PIPELINE_RECOMPUTATION_INDEX_COL
+    def test_second_call_with_a_new_result_writes_a_second_row(self):
+        """A recompute (a new result id) for the same instance is a new row."""
+        from orcapod.core.nodes.function_node import INSTANCE_ID_COL
 
         stream = _make_stream([{"id": 0, "x": 10}])
         pipeline_db = InMemoryArrowDatabase()
@@ -930,12 +945,35 @@ class TestAddPipelineRecordIndexed:
         all_records = pipeline_db.get_all_records(node._versioned_pipeline_path)
         assert all_records is not None
         assert all_records.num_rows == 2
-        indices = all_records.column(_PIPELINE_RECOMPUTATION_INDEX_COL).to_pylist()
-        assert sorted(indices) == [0, 1]
+        assert len(set(all_records.column(INSTANCE_ID_COL).to_pylist())) == 1
+        assert len(set(all_records.column("__data_id").to_pylist())) == 2
 
-    def test_base_entry_id_column_written(self):
-        """add_pipeline_record writes _PIPELINE_BASE_ENTRY_ID_COL to the pipeline DB row."""
-        from orcapod.core.nodes.function_node import _PIPELINE_BASE_ENTRY_ID_COL
+    def test_second_call_with_the_same_result_is_skipped(self):
+        """The same instance and result recorded again is one row, with its first time."""
+        stream = _make_stream([{"id": 0, "x": 10}])
+        pipeline_db = InMemoryArrowDatabase()
+        node, _ = _make_node(stream, pipeline_db=pipeline_db)
+        tag, data = next(iter(stream.iter_data()))
+        result_id = uuid.uuid4()
+
+        node.add_pipeline_record(tag, data, data_record_id=result_id, computed=True)
+        pipeline_db.flush()
+        first = pipeline_db.get_all_records(node._versioned_pipeline_path)
+        assert first is not None
+        node.add_pipeline_record(tag, data, data_record_id=result_id, computed=False)
+        pipeline_db.flush()
+
+        again = pipeline_db.get_all_records(node._versioned_pipeline_path)
+        assert again is not None
+        assert again.num_rows == 1
+        assert again.column("__recorded_at").to_pylist() == (
+            first.column("__recorded_at").to_pylist()
+        )
+        assert again.column("__computed").to_pylist() == [True]
+
+    def test_instance_id_column_written(self):
+        """add_pipeline_record writes INSTANCE_ID_COL to the pipeline DB row."""
+        from orcapod.core.nodes.function_node import INSTANCE_ID_COL
 
         stream = _make_stream([{"id": 0, "x": 10}])
         pipeline_db = InMemoryArrowDatabase()
@@ -947,12 +985,9 @@ class TestAddPipelineRecordIndexed:
 
         all_records = pipeline_db.get_all_records(node._versioned_pipeline_path)
         assert all_records is not None
-        assert _PIPELINE_BASE_ENTRY_ID_COL in all_records.column_names
-        expected_base_id = node.compute_base_entry_id(tag, data)
-        assert (
-            all_records.column(_PIPELINE_BASE_ENTRY_ID_COL)[0].as_py()
-            == expected_base_id
-        )
+        assert INSTANCE_ID_COL in all_records.column_names
+        expected_base_id = node.compute_instance_id(tag, data)
+        assert all_records.column(INSTANCE_ID_COL)[0].as_py() == expected_base_id
 
     def test_skip_cache_lookup_parameter_removed(self):
         """add_pipeline_record no longer accepts skip_cache_lookup — raises TypeError."""
@@ -1061,12 +1096,12 @@ class TestConcurrentMissSerialization:
 
         # Two concurrent _async_process_data_internal calls on the same (tag, data).
         # In asyncio cooperative multitasking, these serialise at add_pipeline_record
-        # (synchronous), so each gets a distinct recomputation_index.
+        # (synchronous); each computed its own result, so each row has its own key.
         async with asyncio.TaskGroup() as tg:
             tg.create_task(node._async_process_data_internal(tag, data))
             tg.create_task(node._async_process_data_internal(tag, data))
 
-        # At least one pipeline record must exist for this base_entry_id
+        # At least one pipeline record must exist for this instance_id
         pipeline_db.flush()
         all_records = pipeline_db.get_all_records(node._versioned_pipeline_path)
         assert all_records is not None
@@ -1088,13 +1123,10 @@ class TestConcurrentMissSerialization:
         assert call_count["n"] == count_before_session2  # NOT recomputed
 
     @pytest.mark.asyncio
-    async def test_sequential_add_pipeline_record_increments_index_each_time(self):
-        """Two sequential add_pipeline_record calls for the same base_entry_id
-        write at indices 0 and 1 respectively (not blocked by the existing row)."""
-        from orcapod.core.nodes.function_node import (
-            _PIPELINE_BASE_ENTRY_ID_COL,
-            _PIPELINE_RECOMPUTATION_INDEX_COL,
-        )
+    async def test_sequential_add_pipeline_record_writes_a_row_per_result(self):
+        """Two sequential add_pipeline_record calls for the same instance_id, each
+        with its own result, write two rows (not blocked by the existing row)."""
+        from orcapod.core.nodes.function_node import INSTANCE_ID_COL
 
         stream = _make_stream([{"id": 0, "x": 10}])
         pipeline_db = InMemoryArrowDatabase()
@@ -1109,8 +1141,7 @@ class TestConcurrentMissSerialization:
         assert all_records is not None
         assert all_records.num_rows == 2
 
-        base_ids = all_records.column(_PIPELINE_BASE_ENTRY_ID_COL).to_pylist()
-        assert base_ids[0] == base_ids[1]  # same base_entry_id
+        base_ids = all_records.column(INSTANCE_ID_COL).to_pylist()
+        assert base_ids[0] == base_ids[1]  # same instance_id
 
-        indices = all_records.column(_PIPELINE_RECOMPUTATION_INDEX_COL).to_pylist()
-        assert sorted(indices) == [0, 1]  # distinct indices
+        assert len(set(all_records.column("__data_id").to_pylist())) == 2

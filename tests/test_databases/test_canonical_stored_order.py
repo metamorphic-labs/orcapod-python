@@ -16,6 +16,7 @@ The SQLite and PostgreSQL connectors cannot hold Orcapod's own stored tables yet
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterator
 from contextlib import AbstractContextManager, contextmanager
 from pathlib import Path
@@ -37,7 +38,7 @@ from orcapod.types import CacheMode
 pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning")
 
 DATABASES = ("in-memory", "Delta")
-KINDS = ("pdb_v1", "rdb_v1", "tdb_v1", "odb_v1", "sdb_v1")
+KINDS = ("pdb_v2", "rdb_v1", "tdb_v2", "odb_v2", "sdb_v1")
 RECORD_ID = "__record_id"
 
 
@@ -132,10 +133,9 @@ def test_live_function_presents_declared_keys_without_a_zero_row_layout() -> Non
         assert records.select(user_columns).equals(expected.select(user_columns))
 
 
-# Function result rows are named by a fresh uuid7 each run (``__data_id``, the result
-# table's record id, and the source-info tokens of the outputs, which name it) and
-# carry the time they were computed (``__pod_ts``): not hashes, different in any two
-# runs, so compared by column only.
+# Function results and their pipeline records carry run-specific timestamps. These
+# views are compared by column only. The fixture holds the result UUIDs fixed so it
+# can also compare the pipeline record ids, which include the result UUID in v2.
 _RUN_SCOPED = ("fn.as_table", "fn.get_all_records", "fn.as_source", "cached outputs")
 
 
@@ -176,6 +176,14 @@ def _observe(database: Any) -> dict[str, Any]:
     return seen
 
 
+def _fixed_result_ids() -> AbstractContextManager[Any]:
+    """Give both runs the same distinct result UUIDs for their two rows."""
+    return patch(
+        "orcapod.core.data_function.uuid7",
+        side_effect=[uuid.UUID(int=1), uuid.UUID(int=2)],
+    )
+
+
 @pytest.fixture(params=DATABASES)
 def database_kind(request: pytest.FixtureRequest) -> str:
     return request.param
@@ -184,9 +192,10 @@ def database_kind(request: pytest.FixtureRequest) -> str:
 @pytest.fixture
 def both(database_kind: str, tmp_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     """The job observed with its tables written as before ITL-1370, and today."""
-    with _before_itl_1370():
+    with _before_itl_1370(), _fixed_result_ids():
         before = _observe(_database(database_kind, tmp_path / "before"))
-    today = _observe(_database(database_kind, tmp_path / "today"))
+    with _fixed_result_ids():
+        today = _observe(_database(database_kind, tmp_path / "today"))
     return before, today
 
 
@@ -242,20 +251,21 @@ def test_each_table_kind_is_stored_in_the_canonical_order(
     for kind in KINDS:
         names = today[f"stored {kind}"]
         assert names == [RECORD_ID, *sorted(n for n in names if n != RECORD_ID)], kind
-    pipeline = today["stored pdb_v1"]
-    after_index = pipeline.index("__pipeline_recomputation_index") + 1
-    assert pipeline[after_index : after_index + 2] == [
+    pipeline = today["stored pdb_v2"]
+    after_index = pipeline.index("__pipeline_instance_id") + 1
+    assert pipeline[after_index : after_index + 3] == [
+        "__pipeline_record_id",
         "__pipeline_run_id",
         "__recorded_at",
     ]
-    assert pipeline[after_index + 2].startswith("_source_")
+    assert pipeline[after_index + 3].startswith("_source_")
     # Pinned where no hash enters a column name.
-    assert today["stored tdb_v1"] == [
+    assert today["stored tdb_v2"] == [
         RECORD_ID,
         "__data_context",
+        "entry_id",
         "executed_at",
         "pipeline_run_id",
-        "record_id_hash",
     ]
     assert today["stored rdb_v1"] == [
         RECORD_ID,
@@ -315,7 +325,7 @@ def test_a_store_written_before_takes_new_rows_and_new_tables(
         else:
             assert names == [RECORD_ID, *sorted(n for n in names if n != RECORD_ID)]
     new_tables = set(database.list_table_paths()) - set(old_orders)
-    assert {path[-1] for path in new_tables} == {"pdb_v1", "rdb_v1"}
+    assert {path[-1] for path in new_tables} == {"pdb_v2", "rdb_v1"}
 
 
 def test_the_before_context_is_the_identity(tmp_path: Path) -> None:

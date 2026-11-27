@@ -17,7 +17,7 @@ computes the row again first, and ``head``, a cache-only send and a load-only ru
 the placeholder out. So the tests check that the tag ``get_cached_results`` returns has
 the first session's fields (types, nullability, metadata, system tags), hash and values,
 and that the run counts, the presented rows and the stored pipeline rows (each
-recomputed row on its own base entry, as the next recomputation) are unchanged.
+recomputed row on its own instance, as the next recomputation) are unchanged.
 
 The source has tags of several types (``int8``, ``float32``, ``large_string``, a struct,
 a ``large_list`` and the logical ``Path``), two or more at a time and in more than one
@@ -187,8 +187,8 @@ def _presented(job: PipelineJob, label: str) -> dict[str, tuple[Any, ...]]:
     }
 
 
-def _stored(database: Any, function: str) -> list[tuple[Any, ...]]:
-    """The stored pipeline rows of ``function``: (base entry, recomputation index)."""
+def _stored(database: Any, function: str) -> list[bytes]:
+    """The instance id of every stored pipeline row of ``function``, sorted."""
     database.flush()
     [path] = [
         p
@@ -196,12 +196,7 @@ def _stored(database: Any, function: str) -> list[tuple[Any, ...]]:
         if p[1] == function and p[-1].startswith("pdb")
     ]
     table = database.get_all_records(path)
-    return sorted(
-        zip(
-            table.column("__pipeline_base_entry_id").to_pylist(),
-            table.column("__pipeline_recomputation_index").to_pylist(),
-        )
-    )
+    return sorted(table.column("__pipeline_instance_id").to_pylist())
 
 
 ALL_MISSING, MIXED_LOAD = "all_missing", "mixed"
@@ -271,18 +266,31 @@ def test_a_cross_session_miss_keeps_its_stored_tag(
             continue
         # The public cache facade returns a miss row as (tag, EmptyData), without
         # computing it.
-        entries = sorted({entry for entry, _ in before[function]})
+        entries = sorted(set(before[function]))
         cached = second.nodes[label].get_cached_results(entries)  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType]
         pairs = cast(dict[bytes, tuple[TagProtocol, Any]], cached)
-        assert len(pairs) == 2
+        # ``one`` reads the source: one instance per row. In the mixed scenario
+        # ``two`` holds two instances of row 0 (ITL-1471): session 1's, whose
+        # result is gone, and the one the session in between recorded when ``one``
+        # computed row 0 again (new tokens), whose result is there.
+        second_instance = label == "two" and scenario == MIXED_LOAD
+        assert len(pairs) == len(entries) == (3 if second_instance else 2)
         misses = {
             _record_id(tag)
             for tag, data in pairs.values()
             if isinstance(data, EmptyData)
         }
-        assert misses == (
-            {"row_0", "row_1"} if scenario == ALL_MISSING else {"row_1"}
-        ), label
+        hits = [
+            _record_id(tag)
+            for tag, data in pairs.values()
+            if not isinstance(data, EmptyData)
+        ]
+        if scenario == ALL_MISSING:
+            assert (misses, hits) == ({"row_0", "row_1"}, []), label
+        elif second_instance:
+            assert (misses, hits) == ({"row_0", "row_1"}, ["row_0"]), label
+        else:
+            assert (misses, hits) == ({"row_1"}, ["row_0"]), label
         for tag, _ in pairs.values():
             # Hit or miss, the tag is session 1's: types, nullability, metadata (no
             # storage-only data-tag mark), system tags, hash and values.
@@ -304,13 +312,13 @@ def test_a_cross_session_miss_keeps_its_stored_tag(
     }
     for label in ("one", "two"):
         assert _presented(second, label) == presented[label], label
-    # Each recomputed row lands on its own base entry, as the next recomputation; a
-    # persistent node's rows are reused and nothing new is stored.
-    for function, label in (("inc", "one"), ("dbl", "two")):
-        now = _stored(database, function)
-        if label in ephemeral_nodes:
-            assert now == sorted(
-                [*stored[function], *[(entry, 1) for entry, _ in stored[function]]]
-            )
-        else:
-            assert now == stored[function]
+    # ``one`` reads the source, whose tokens do not change: each recomputed row is a
+    # second record of its own instance (ITL-1471: no recomputation index).
+    assert _stored(database, "inc") == sorted([*stored["inc"], *stored["inc"]])
+    # ``two`` reads ``one``'s results: a recomputed one has a new result id, so new
+    # tokens, and arrives as a new instance of its entry. It is recorded, also when
+    # ``two`` is persistent and takes its result from the result store (0 computed).
+    now = _stored(database, "dbl")
+    assert len(now) == 2 * len(stored["dbl"])
+    assert len(set(now)) == len(now)
+    assert set(stored["dbl"]) < set(now)

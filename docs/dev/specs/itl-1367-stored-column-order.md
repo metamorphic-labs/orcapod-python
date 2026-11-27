@@ -9,14 +9,16 @@ The developer's decision (2026-11-22): "We should always try to save to match th
 database order if already present, but if not yet, then use canonicalized order for new
 database." Step 1 implements the first half. ITL-1370 implements the second half.
 
-## What main writes today
+## What main wrote when the order was approved
 
 Measured with `docs/dev/scripts/itl_1367_stored_column_orders.py`: a job over a source with
 two tags declared `z_tag, a_tag` and two data columns `y, b`, running a function pod, a
 logging `Join` node, a cached source and a side-effect pod. The order of each table's first
-write (system-tag hashes shortened):
+write (system-tag hashes shortened). ITL-1471 subsequently moved the function pipeline,
+side-effect log and operator cache to `pdb_v2`, `tdb_v2` and `odb_v2`. The approved order
+applies to the columns of those layouts as well.
 
-| Table kind | Layout | Order written today |
+| Table kind | Layout | First-write order at the time |
 |---|---|---|
 | Function pipeline | `pdb_v1` | `__record_id`, `z_tag`, `a_tag`, `_tag_source_id::…`, `_tag_record_id::…`, `_source_y`, `_source_b`, `__data_id`, `__node_content_hash`, `__input_data_hash`, `__output_data_hash`, `__data_context`, `__computed`, `__is_ephemeral`, `__pipeline_base_entry_id`, `__pipeline_recomputation_index` |
 | Function result | `rdb_v1` | `__record_id`, `__input_data_hash`, `__pf_var_*` (6), `__pf_exec_*` (4), `w_out`, `c_out`, `_source_w_out`, `_source_c_out`, `__pod_ts`, `__data_context` |

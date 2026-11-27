@@ -189,13 +189,37 @@ class TestFreshRunStoresPerRowSourceInfo:
         assert stored == expected
 
 
+def _corrected_instances(
+    before: list[dict[str, Any]], after: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Check the old rows are kept as they were; return the rows recorded since.
+
+    A row whose stored tokens were wrong arrives, in a run after the fix, with the
+    right tokens: a new instance of its entry (ITL-1471). It is recorded beside the
+    old row, with the old row's result and without a function call.
+    """
+    assert [row for row in after if row in before] == before  # not rewritten
+    added = [row for row in after if row not in before]
+    old_by_id = {row["id"]: row for row in before}
+    for row in added:
+        assert row["__computed"] is False
+        assert _ids(row) == _ids(old_by_id[row["id"]])
+    return added
+
+
 class TestStoreWrittenBeforeFix:
     """A re-run never rewrites or recomputes tag rows stored before the fix."""
 
     def test_rerun_keeps_old_rows_and_runs_nothing(
         self, monkeypatch: pytest.MonkeyPatch
     ):
-        """A re-run serves old rows from the cache without rewriting them."""
+        """A re-run calls nothing, keeps the old rows and records the corrected ones.
+
+        Rows ``b`` and ``c`` were stored with row ``a``'s tokens. The re-run gives
+        them their own tokens: two new instances per node, each pointing at the
+        result already stored (behaviour change of ITL-1471, by design: before the
+        three ids such a row was a hit on its entry and nothing was recorded).
+        """
         store = InMemoryArrowDatabase()
         with monkeypatch.context() as patch:
             _broadcast_row_zero(patch)
@@ -210,9 +234,23 @@ class TestStoreWrittenBeforeFix:
         new_job = _job(store)
         _run(new_job)
 
-        assert CALLS == []  # every input is a cache hit
-        for label in _FUNCTION_NODES:
-            assert _tag_rows(new_job, label) == before[label]  # not rewritten
+        assert CALLS == []  # every result comes from the result store
+        added = {
+            label: _corrected_instances(before[label], _tag_rows(new_job, label))
+            for label in _FUNCTION_NODES
+        }
+        assert {label: _column(rows, "id") for label, rows in added.items()} == {
+            label: ["b", "c"] for label in _FUNCTION_NODES
+        }
+        for label in ("direct", "via_op"):
+            assert (
+                _column(added[label], "_source_x")
+                == (_input_source_info_tokens("x")[1:])
+            )
+        assert (
+            _column(added["second"], "_source_z")
+            == (_output_source_info_tokens(new_job, "direct", "z")[1:])
+        )
         # The run's own output carries correct source-info tokens downstream regardless.
         assert len(set(_output_source_info_tokens(new_job, "direct", "z"))) == 3
 
@@ -276,7 +314,12 @@ class TestDropOnlyTagTables:
     def test_dropping_one_tag_table_leaves_the_others(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
-        """Dropping one tag table leaves the others as they were."""
+        """Dropping one tag table leaves the others' rows as they were.
+
+        The refilled table's rows have the right tokens. The nodes after it keep
+        every old row and record rows ``b`` and ``c`` again as new instances, with
+        the tokens the fix gives them (ITL-1471); nothing is computed.
+        """
         _, before = self._pre_fix_store(tmp_path, monkeypatch)
         self._drop_tag_table(tmp_path, "direct")
 
@@ -289,5 +332,6 @@ class TestDropOnlyTagTables:
         assert _column(
             _tag_rows(job, "direct"), "_source_x"
         ) == _input_source_info_tokens("x")
-        assert _tag_rows(job, "second") == before["second"]
-        assert _tag_rows(job, "via_op") == before["via_op"]
+        for label in ("second", "via_op"):
+            added = _corrected_instances(before[label], _tag_rows(job, label))
+            assert _column(added, "id") == ["b", "c"], label

@@ -326,7 +326,7 @@ class TestRaisedRun:
 
 
 class TestDuplicateInputs:
-    """Two inputs with one base entry id give two held rows, as downstream receives them.
+    """Two inputs with one instance id give two held rows, as downstream receives them.
 
     Only a stream without system tags can carry two such inputs (a source gives every
     row its own record id), so the node is built directly over an ``ArrowTableStream``.
