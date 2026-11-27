@@ -30,7 +30,7 @@ from orcapod.core.sources.spiraldb_table_source import _checked_conditions
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.cached_source import CachedSource
 from orcapod.sources import SpiralDBTableSource
-from orcapod.core.operators import MapData
+from orcapod.core.operators import Join, MapData
 from orcapod.types import CacheMode, Condition, col
 from tests.test_databases import fake_spiral_sdk
 
@@ -1189,6 +1189,79 @@ class TestRunsAndSavedJobs:
 
         rows = job.nodes["first"].as_table().column("timestamp").to_pylist()
         assert rows == [3]
+
+    def test_registered_streams_over_two_restrictions_are_refused(
+        self, project, tmp_path
+    ):
+        """Two registered streams reading one source under two restrictions are refused,
+        in either order and in one call or two, and the job is left unchanged
+        (ITL-1387)."""
+
+        @function_pod(output_keys="a")
+        def first(amplitude: float | None) -> float | None:
+            """Return ``amplitude``."""
+            return amplitude
+
+        @function_pod(output_keys="b")
+        def second(amplitude: float | None) -> float | None:
+            """Return ``amplitude``."""
+            return amplitude
+
+        events = _source(source_id="events", tag_only_columns=True)
+        m1 = first.pod(
+            events.where(subject_id="m1").select_data_columns(["amplitude"]),
+            label="first",
+        )
+        m2 = second.pod(
+            events.where(subject_id="m2").select_data_columns(["amplitude"]),
+            label="second",
+        )
+        for streams in ((m1, m2), (m2, m1)):
+            job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
+            with pytest.raises(ValueError, match="different rows in one pipeline"):
+                job.register(*streams)
+            assert job.nodes == {}
+            job.register(streams[0])
+            held = sorted(job.nodes)
+            with pytest.raises(ValueError, match="different rows in one pipeline"):
+                job.register(streams[1])
+            assert sorted(job.nodes) == held
+
+    def test_a_registered_restricted_source_is_reported_by_slot(
+        self, project, tmp_path
+    ):
+        """A registered stream over a restricted source reports the restriction in
+        ``RunSummary`` as the same pipeline written in a block does (ITL-1387)."""
+
+        @function_pod(output_keys="a")
+        def first(amplitude: float | None) -> float | None:
+            """Return ``amplitude``."""
+            return amplitude
+
+        def build() -> Any:
+            events = _source(source_id="events", tag_only_columns=True)
+            return first.pod(
+                events.where(subject_id="m1").select_data_columns(["amplitude"]),
+                label="first",
+            )
+
+        by_hand = PipelineJob(name="h", database=DeltaTableDatabase(tmp_path / "h"))
+        with by_hand:
+            build()
+        registered = PipelineJob(name="h", database=DeltaTableDatabase(tmp_path / "r"))
+        registered.register(build())
+        expected, summary = by_hand.run(), registered.run()
+        assert summary.conditions == expected.conditions
+        assert summary.conditions == {"events": Condition.of(subject_id="m1")}
+        assert (
+            summary.restricted_source_ids
+            == expected.restricted_source_ids
+            == {"events": "spiraldb_table_v1:events"}
+        )
+        assert (
+            registered.nodes["first"].as_table().to_pylist()
+            == by_hand.nodes["first"].as_table().to_pylist()
+        )
 
     def test_a_refused_invocation_records_nothing(self, project, tmp_path):
         """After the refusal the graph holds only what was captured before it."""
@@ -2562,6 +2635,87 @@ class TestSummaryKeys:
         first = _source(label="a").where(subject_id="m1")
         second = _source(label="b").where(subject_id="m2")
         assert set(restrictions_in_force([second, first])) == {"a", "b"}
+
+
+class TestEqualStepsOverTwoRestrictions:
+    """One step over one source restricted two ways has one identity (a restriction
+    is in no hash), so the walk meets it once; the source under the second restriction
+    must still be refused, on every way a stream comes into a job (Codex review of PR
+    500, finding 1)."""
+
+    @staticmethod
+    def _picked(where: str) -> Any:
+        events = _source(source_id="events", tag_only_columns=True)
+        return events.where(subject_id=where).select_data_columns(
+            ["amplitude"], label="picked"
+        )
+
+    @staticmethod
+    def _job(tmp_path: Path, name: str = "j") -> PipelineJob:
+        return PipelineJob(name=name, database=DeltaTableDatabase(tmp_path / name))
+
+    @pytest.mark.parametrize("first, second", [("m1", "m2"), ("m2", "m1")])
+    @pytest.mark.parametrize("way", ["register", "block"])
+    def test_rebinding_the_original_job_does_not_change_absorbed_restrictions(
+        self, project, tmp_path, first: str, second: str, way: str
+    ):
+        other = self._job(tmp_path, "other")
+        other.register(self._picked(first))
+        job = self._job(tmp_path)
+        job.register(other.picked)
+        events = _source(source_id="events", tag_only_columns=True)
+        other.bind(sources={"events": events.where(subject_id=second)})
+
+        rename = MapData({"amplitude": "a2"})
+        if way == "register":
+            job.register(rename(job.picked, label="renamed"))
+        else:
+            with job:
+                rename(job.picked, label="renamed")
+        assert job.run().conditions == {"events": Condition.of(subject_id=first)}
+        assert other.run().conditions == {"events": Condition.of(subject_id=second)}
+
+    @pytest.mark.parametrize("first, second", [("m1", "m2"), ("m2", "m1")])
+    @pytest.mark.parametrize(
+        "way",
+        ["register_one_call", "register_two_calls", "block", "reopen", "absorb"],
+    )
+    def test_the_second_restriction_is_refused(
+        self, project, tmp_path, way: str, first: str, second: str
+    ):
+        left, right = self._picked(first), self._picked(second)
+        assert left.content_hash() == right.content_hash()
+        job = self._job(tmp_path)
+        if way == "register_one_call":
+            with pytest.raises(ValueError, match="different rows in one pipeline"):
+                job.register(left, right)
+            assert job.nodes == {}
+            return
+        if way == "absorb":
+            other = self._job(tmp_path, "other")
+            other.register(left)
+            job.register(other.picked)
+        else:
+            job.register(left)
+        held = sorted(job.nodes)
+
+        @function_pod(output_keys="a")
+        def after(amplitude: float | None) -> float | None:
+            """Return ``amplitude``."""
+            return amplitude
+
+        with pytest.raises(ValueError, match="different rows in one pipeline"):
+            if way in ("register_two_calls", "absorb"):
+                job.register(right)
+            elif way == "block":
+                with job:
+                    after.pod(right, label="after")
+            else:  # reopen: a step over a held node and the second restriction
+                with job:
+                    Join()(job.picked, MapData({"amplitude": "a2"})(right))
+        assert sorted(job.nodes) == held
+        rows = job.run()
+        assert rows.conditions == {"events": Condition.of(subject_id=first)}
 
 
 class TestWhereTakesEqualitiesOnly:

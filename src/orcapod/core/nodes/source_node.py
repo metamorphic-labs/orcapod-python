@@ -1506,9 +1506,9 @@ class SourceNode(SourceNodeBase):
            without the kind part (ITL-1425), so a slot keeps its name whichever kind
            or implementation version reads the data, stable across pipeline
            serialisation / deserialisation.
-        3. ``"{stream.label}:{hash_prefix}"`` for any other concrete stream type,
-           combining the cosmetic label with a short content-hash suffix to ensure
-           uniqueness.
+        3. The existing slot name when *stream* is a ``SourceJobNode``.
+        4. ``"{stream.label}:{hash}"`` for any other concrete stream type without
+           a producer. A stream made by a pod requires an explicit *name*.
 
         Args:
             stream: The upstream stream to wrap.
@@ -1530,7 +1530,11 @@ class SourceNode(SourceNodeBase):
 
             if isinstance(stream, RootSource):
                 slot_name = stream.source_name
+            elif isinstance(stream, SourceNodeBase):
+                # A job's slot keeps its name in a blueprint (ITL-1387).
+                slot_name = stream.name
             else:
+                _require_name_for_pod_stream(stream)
                 slot_name = f"{stream.label}:{stream.content_hash().to_hex()}"
         if not isinstance(stream, SourceNodeBase):
             _require_stream_arrow_types(stream, slot_name)
@@ -1585,6 +1589,8 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         ValueError: If both *tag_schema* and *data_schema* are omitted and
             *bound_source* is ``None``.
     """
+
+    _owned_by_job = False
 
     def __init__(
         self,
@@ -1691,6 +1697,19 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
     def _bound_stream(self) -> StreamProtocol | None:
         """The concrete stream bound to this slot, or ``None``."""
         return self._bound_source
+
+    def _binding_state(self) -> tuple[StreamProtocol | None, datetime | None]:
+        """Capture the source and when it was bound for a recording rollback."""
+        return self._bound_source, self._modified_time
+
+    def _restore_binding(
+        self, state: tuple[StreamProtocol | None, datetime | None]
+    ) -> None:
+        """Restore the source and its timestamp, invalidating cached identities."""
+        source, modified_time = state
+        if source is not self._bound_source:
+            self._bind(source)
+        self._modified_time = modified_time
 
     def _bind(self, value: StreamProtocol | None) -> None:
         """Check *value* and bind it, invalidating both hash caches.
@@ -2184,6 +2203,7 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
                     if isinstance(stream, RootSource):
                         slot_name = stream.source_name
                     else:
+                        _require_name_for_pod_stream(stream)
                         slot_name = f"{stream.label}:{stream.content_hash().to_hex()}"
                 _require_stream_arrow_types(stream, slot_name)
                 return cls(
@@ -2236,3 +2256,21 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         )
         node._take_saved_state_of(self)
         return node
+
+
+def _require_name_for_pod_stream(stream: StreamProtocol) -> None:
+    """Refuse to make a slot from a stream made by a pod without a name (ITL-1387).
+
+    A stream becomes a source only by the user's explicit act: naming the slot made
+    from it is that act. A pipeline never makes one implicitly: a stream given to it
+    comes in with its pod and every upstream step.
+
+    Raises:
+        ValueError: If *stream* has a producer.
+    """
+    if stream.producer is not None:
+        raise ValueError(
+            f"{stream.label!r} is made by a pod, so it becomes a source slot only when "
+            "you name the slot (name=...). In a pipeline it comes in with its steps; to "
+            "cut a pipeline there, use a node's as_source() or a source object."
+        )

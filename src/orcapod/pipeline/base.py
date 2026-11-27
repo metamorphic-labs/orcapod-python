@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Hashable
+from collections.abc import Hashable, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, cast
 
 from orcapod.core.nodes.function_node import FunctionNodeBase
 from orcapod.core.tracker import AutoRegisteringContextBasedTracker
@@ -24,6 +24,7 @@ from orcapod.utils.lazy_module import LazyModule
 if TYPE_CHECKING:
     import networkx as nx
     from orcapod.pipeline.diagram import PipelineDiagram
+    from orcapod.side_effects import SideEffectPodStream
     from orcapod.types.provenance import Highlight
     from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 else:
@@ -136,6 +137,13 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         self._nodes: dict[str, NodeT] = {}
         self._node_graph: OrcaDAG[NodeT] | None = None
         self._compiled: bool = False
+        # Each recorded step's inputs' keys, as they were when it was recorded
+        # (ITL-1387): a later rebind of another job's slot does not move them.
+        self._input_keys: dict[str, tuple[str, ...]] = {}
+        # Names given exactly by register(), to the step they name (ITL-1387).
+        self._exact_names: dict[str, str] = {}
+        # The state when the open ``with`` block was entered (ITL-1387).
+        self._state_at_entry: dict[str, Any] | None = None
 
         # --- Fields populated by compile(); used by is_runnable(), run(), save() ----
         # Populated from _persistent_node_map / _hash_graph at end of compile().
@@ -336,45 +344,397 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                 read one source under two restrictions (ITL-1218), whatever streams
                 lead there. Nothing is recorded then.
         """
+        # An input made by a pod comes in with its pod and every upstream step down
+        # to its sources (ITL-1387): a stream is a source only when the user made it
+        # one. A stream built inside the block is already held, so nothing is walked.
+        planned = self._plan_steps(invocation.input_streams)
+        self._record_planned([*planned, invocation])
+
+    def _record_planned(
+        self,
+        invocations: list[PodInvocation],
+        also_read: "Sequence[cp.StreamProtocol]" = (),
+    ) -> None:
+        """Record *invocations*, in order, after the checks that cover all of them.
+
+        Args:
+            invocations: Invocations in an order where each one's inputs that are
+                steps come before it.
+            also_read: Further streams whose sources the restriction check covers:
+                the streams given to ``register``, whose steps may already be held
+                under another restriction of one source (ITL-1387).
+
+        Raises:
+            ValueError: If the invocations read a source under another restriction
+                than the pipeline's streams read it under now, or under two
+                restrictions among themselves (ITL-1218); or a step is labelled with
+                a name given exactly to another step (``register``'s keyword names).
+                Nothing is recorded then.
+        """
         from orcapod.pipeline.restrictions import require_one_restriction
 
-        key = invocation.content_hash().to_string()
-        inputs = tuple(invocation.input_streams)
-        upstreams = [
-            (upstream, upstream.content_hash().to_string()) for upstream in inputs
-        ]
         # Checked before anything is recorded, so a refused invocation leaves the
         # graph as it was. A restriction does not change a source's identity, so the
         # pipeline keeps one restriction (or none) per source identity, whatever
-        # streams lead to it: every source this invocation reads is checked with
+        # streams lead to it: every source these invocations read is checked with
         # every source the pipeline's streams read now (nothing is remembered: a
         # slot rebound since the last invocation changes what they read).
-        require_one_restriction([*self._held_streams(), *inputs])
-        self._remember_invocation(key, invocation)
+        require_one_restriction(
+            [
+                *self._held_streams(),
+                *(stream for inv in invocations for stream in inv.input_streams),
+                *also_read,
+            ]
+        )
+        for invocation in invocations:
+            name = invocation.label
+            if name is not None and name in self._exact_names:
+                if self._exact_names[name] != invocation.content_hash().to_string():
+                    raise ValueError(
+                        f"The name {name!r} was given to another step by register(); "
+                        "a step labelled so would rename it. Give this step another "
+                        "label."
+                    )
+        for invocation in invocations:
+            self._store_invocation(invocation)
+
+    def _store_invocation(self, invocation: PodInvocation) -> None:
+        """Add *invocation* to the recorded state, with no check.
+
+        Its inputs' keys are kept as they are now, so a stream whose identity can
+        change later (a slot of another job that is rebound) still finds this step's
+        inputs; a slot of another pipeline is kept as a copy holding its binding now,
+        so this pipeline's bindings stay its own (ITL-1387).
+        """
+        key = invocation.content_hash().to_string()
+        if not self._remember_invocation(key, invocation):
+            return
+        upstreams = [
+            (upstream, upstream.content_hash().to_string())
+            for upstream in invocation.input_streams
+        ]
+        self._input_keys[key] = tuple(upstream_hash for _, upstream_hash in upstreams)
         self._hash_graph.add_node(key)
         for upstream, upstream_hash in upstreams:
             self._hash_graph.add_edge(upstream_hash, key)
             if upstream_hash not in self._source_streams:
-                self._source_streams[upstream_hash] = upstream
+                self._source_streams[upstream_hash] = self._own_leaf(
+                    upstream, upstream_hash
+                )
 
-    def _remember_invocation(self, key: str, invocation: PodInvocation) -> None:
-        """Keep the smallest explicit label when identical invocations share a node."""
+    def _own_leaf(self, stream: Any, key: str) -> Any:
+        """The leaf to keep for *stream*: a copy when it is another pipeline's slot."""
+        from orcapod.core.nodes.source_node import SourceJobNode
+
+        # A ``SourceNode`` holds no binding (a schema-only slot), so only a job's
+        # slot is copied.
+        if (
+            isinstance(stream, SourceJobNode)
+            and stream._owned_by_job  # pyright: ignore[reportPrivateUsage]  # standalone slots keep their live bindings
+            and self._persistent_node_map.get(key) is not stream
+        ):
+            return SourceJobNode.from_stream(stream)
+        return stream
+
+    def _plan_steps(
+        self,
+        streams: "Sequence[cp.StreamProtocol]",
+        names: "dict[str, str] | None" = None,
+        *,
+        refuse_label_conflicts: bool = False,
+    ) -> list[PodInvocation]:
+        """The steps that bring *streams* in, with every upstream step (ITL-1387).
+
+        Walks each stream's producer and upstreams back to its sources and returns
+        an invocation for each step the pipeline does not hold yet, upstream steps
+        first. A source (any ``RootSource``) and a slot (any ``SourceNodeBase``) end
+        the walk: a stream is a source only when the user made it one. A step the
+        pipeline holds is left as it is (its label too). A stream with no producer
+        that is neither a source nor a node (a raw ``ArrowTableStream``) is left as a
+        leaf, and the bind check refuses it when the pipeline compiles, as before.
+        Computes nothing: only producers, upstreams, labels and content hashes are
+        read.
+
+        One step reached twice in the walk takes an assigned label over none. Two
+        different assigned labels are refused when *refuse_label_conflicts* is set
+        (``register``); otherwise the smallest explicit label is kept (ITL-1436).
+
+        Args:
+            streams: The streams to bring in.
+            names: Label to give the step of a stream, by the stream's content hash
+                (``register``'s keyword names); every other step keeps the label
+                it was given.
+            refuse_label_conflicts: Refuse one step under two different labels.
+
+        Returns:
+            The invocations to record, each after the steps it reads.
+
+        Raises:
+            ValueError: If a step's pod is not attached (a node of a loaded job
+                whose function or pod was not loadable or not loaded), or, with
+                *refuse_label_conflicts*, one step is reached under two different
+                assigned labels.
+            TypeError: If a stream's producer is neither a function pod, a
+                side-effect pod nor an operator.
+        """
+        names = names or {}
+        planned: dict[str, PodInvocation] = {}
+        expanded_streams: dict[int, Any] = {}
+        # Iterative post-order walk: (stream, upstreams visited).
+        stack: list[tuple[Any, bool]] = [
+            (stream, False) for stream in reversed(streams)
+        ]
+        while stack:
+            stream, expanded = stack.pop()
+            if _is_source(stream):
+                continue
+            key = stream.content_hash().to_string()
+            if key in self._invocation_lut:
+                continue
+            producer = stream.producer
+            if producer is None:
+                if _is_node(stream):
+                    raise ValueError(_unattached_message(stream))
+                continue  # a leaf: the bind check decides when the pipeline compiles
+            if not expanded:
+                # Equal content can have distinct upstream objects with different labels.
+                # Keep visited objects alive so their ids cannot be reused during the walk.
+                if id(stream) in expanded_streams:
+                    continue
+                expanded_streams[id(stream)] = stream
+                stack.append((stream, True))
+                stack.extend((up, False) for up in reversed(tuple(stream.upstreams)))
+                continue
+            label = names.get(key, _recorded_label(stream))
+            if key in planned:
+                earlier = planned[key].label
+                if label is not None and label != earlier:
+                    if earlier is not None and refuse_label_conflicts:
+                        raise ValueError(
+                            f"One step is given two labels, {earlier!r} and "
+                            f"{label!r}: a step has one node, so give it one label."
+                        )
+                    if earlier is None or label < earlier:
+                        planned[key] = _with_label(planned[key], label)
+                continue
+            planned[key] = _invocation_of(stream, producer, label)
+        return list(planned.values())
+
+    def _remember_invocation(self, key: str, invocation: PodInvocation) -> bool:
+        """Store the chosen invocation, retaining exact names and otherwise the smallest label."""
         previous = self._invocation_lut.get(key)
         if previous is not None and previous.label is not None:
-            if invocation.label is None or previous.label < invocation.label:
-                return
+            if (
+                self._exact_names.get(previous.label) == key
+                or invocation.label is None
+                or previous.label < invocation.label
+            ):
+                return False
         self._invocation_lut[key] = invocation
+        return True
 
     def _held_streams(self) -> list[Any]:
-        """Every stream the pipeline holds: its leaves and every recorded input."""
-        return [
-            *self._source_streams.values(),
-            *(
-                stream
-                for invocation in self._invocation_lut.values()
-                for stream in invocation.input_streams
-            ),
+        """The recorded graph's leaves, including this pipeline's copies of slots."""
+        from orcapod.core.nodes.source_node import SourceJobNode
+
+        leaves = [
+            stream
+            for key, stream in self._source_streams.items()
+            if key not in self._invocation_lut
         ]
+        for key, invocation in self._invocation_lut.items():
+            for input_key, stream in zip(
+                self._input_keys.get(key, ()), invocation.input_streams
+            ):
+                if input_key in self._invocation_lut:
+                    continue
+                if (
+                    isinstance(stream, SourceJobNode)
+                    and stream._owned_by_job  # pyright: ignore[reportPrivateUsage]  # job-owned slots may have been copied
+                    and self._persistent_node_map.get(input_key) is not stream
+                ):
+                    continue  # its captured binding is already represented in leaves
+                # Equal hashes can hide distinct live leaves (including standalone slots).
+                leaves.append(stream)
+        return leaves
+
+    # ------------------------------------------------------------------
+    # register() (ITL-1387)
+    # ------------------------------------------------------------------
+
+    def register(
+        self,
+        *streams: "cp.StreamProtocol | SideEffectPodStream",
+        **named_streams: "cp.StreamProtocol | SideEffectPodStream",
+    ) -> None:
+        """Bring streams into the pipeline, with every step above them.
+
+        Each stream comes in with its pod and every upstream step down to its
+        sources, exactly as if those steps had been written inside a ``with``
+        block: the nodes, hashes, stored paths and results are the same. A stream
+        becomes a source only when you made it one (a source object, or a node's
+        ``as_source()``). Steps the pipeline already holds are not added again, and
+        registering only such steps changes nothing; a stream built on a node of
+        this pipeline adds only its new steps; a node of another pipeline or job
+        brings its steps too.
+
+        Outside a ``with`` block the pipeline is compiled at once (a job built with
+        ``auto_compile=False`` is not); inside one, when the block ends. A keyword
+        name is exact: the node is named so, never with a suffix, in every form.
+        Registering computes nothing, calls no user code and stores nothing. A
+        refused call leaves the pipeline as it was.
+
+        Args:
+            *streams: Streams to bring in; each step keeps the label it was given.
+            **named_streams: Streams to bring in, each node named by its keyword.
+
+        Raises:
+            ValueError: If no stream is given; a stream is a source (it has no step)
+                or neither a source nor made by a pod; a keyword name starts with
+                ``_``, names a step that already has another label, or is taken by
+                another step; one stream is given two names; one step is reached
+                under two different labels; a step's pod is not attached (a node of a
+                loaded job); one source is read under two restrictions; or the
+                pipeline is a loaded, read-only job.
+            TypeError: If a stream's producer is neither a function pod, a
+                side-effect pod nor an operator.
+        """
+        self._require_recordable()
+        # A side-effect stream is not typed as a StreamProtocol; every stream is
+        # read here only through producer, upstreams, labels and content hash.
+        given: list[Any] = [*streams, *named_streams.values()]
+        if not given:
+            raise ValueError("register() needs at least one stream.")
+        for stream in given:
+            if _is_source(stream):
+                raise ValueError(
+                    f"{stream.label!r} is a source: it has no step to register. "
+                    "Register a stream built from it."
+                )
+            if stream.producer is None:
+                if _is_node(stream):
+                    raise ValueError(_unattached_message(stream))
+                raise ValueError(
+                    f"{stream.label!r} is neither a source nor made by a pod, so it "
+                    "cannot be registered. Wrap its table as a source (for example "
+                    "ArrowTableSource) and build on that."
+                )
+        names: dict[str, str] = {}
+        for name, stream in named_streams.items():
+            if name.startswith("_"):
+                raise ValueError(f"A node name cannot start with '_': {name!r}.")
+            key = stream.content_hash().to_string()
+            if key in names and names[key] != name:
+                raise ValueError(
+                    f"One stream is given two names, {names[key]!r} and {name!r}."
+                )
+            held = self._invocation_lut.get(key)
+            if held is not None and held.label != name:
+                already = (
+                    "an unlabelled step" if held.label is None else repr(held.label)
+                )
+                raise ValueError(
+                    f"The step named {name!r} is already in the pipeline as {already}."
+                )
+            names[key] = name
+        planned = self._plan_steps(given, names, refuse_label_conflicts=True)
+        self._require_exact_names(names, planned)
+        reservations = {name: key for key, name in names.items()}
+        if not planned:
+            # Every step is held. The identity does not show the source restriction,
+            # so check it before reserving any names. There is nothing to compile.
+            from orcapod.pipeline.restrictions import require_one_restriction
+
+            require_one_restriction([*self._held_streams(), *given])
+            self._exact_names.update(reservations)
+            return
+        saved = self._state()
+        try:
+            self._record_planned(planned, also_read=given)
+            self._exact_names.update(reservations)
+            if not self.is_active() and self._compiles_on_exit():
+                self.compile()
+        except BaseException:
+            self._restore_state(saved)
+            raise
+
+    def _require_exact_names(
+        self, names: dict[str, str], planned: list[PodInvocation]
+    ) -> None:
+        """Refuse a keyword name that another step holds or would hold.
+
+        A keyword name is exact: no other node may be named so, or compilation would
+        number both (``<name>_1``, ``<name>_2``). Checked against every node, every
+        recorded step's label, every name given before, and every step this call
+        brings in, before anything is recorded.
+
+        Raises:
+            ValueError: If a keyword name is taken by another step.
+        """
+        if not names:
+            return
+        labels: dict[str, set[str]] = {}
+
+        def note(label: str | None, key: str) -> None:
+            if label is not None:
+                labels.setdefault(label, set()).add(key)
+
+        for key, inv in self._invocation_lut.items():
+            note(inv.label, key)
+        for inv in planned:
+            note(inv.label, inv.content_hash().to_string())
+            if inv.label is None:
+                note(_computed_label(inv), inv.content_hash().to_string())
+        for name, key in self._exact_names.items():
+            note(name, key)
+        for key, name in names.items():
+            others = labels.get(name, set()) - {key}
+            taken = self._nodes.get(name)
+            if others or (
+                taken is not None and taken is not self._persistent_node_map.get(key)
+            ):
+                raise ValueError(f"The name {name!r} is taken by another node.")
+
+    def _require_recordable(self) -> None:
+        """Refuse to record into a pipeline that cannot take new steps.
+
+        Raises:
+            ValueError: In a subclass that cannot record (a loaded job).
+        """
+
+    def _compiles_on_exit(self) -> bool:
+        """Whether the end of a ``with`` block (and ``register``) compiles."""
+        return True
+
+    #: Attributes a refused ``with`` block or ``register`` restores (ITL-1387): the
+    #: recorded steps and everything ``compile()`` publishes.
+    _STATE_ATTRIBUTES: tuple[str, ...] = (
+        "_invocation_lut",
+        "_source_streams",
+        "_input_keys",
+        "_exact_names",
+        "_hash_graph",
+        "_persistent_node_map",
+        "_nodes",
+        "_node_graph",
+        "_compiled",
+        "_node_lut",
+        "_upstreams",
+        "_graph_edges",
+    )
+
+    def _state(self) -> dict[str, Any]:
+        """A copy of the recorded and compiled state, to restore after a refusal."""
+        saved: dict[str, Any] = {}
+        for name in self._STATE_ATTRIBUTES:
+            value = getattr(self, name)
+            saved[name] = value.copy() if hasattr(value, "copy") else value
+        return saved
+
+    def _restore_state(self, saved: dict[str, Any]) -> None:
+        """Put back the state *saved* by ``_state``: the same node objects."""
+        for name, value in saved.items():
+            setattr(self, name, value.copy() if hasattr(value, "copy") else value)
 
     # ------------------------------------------------------------------
     # Diagram (ITL-1197)
@@ -453,11 +813,32 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
             ``compile()`` call.  Nothing needs to be cleared on re-entry.
         """
 
+    def __enter__(self):
+        """Enter the recording context, keeping the state to restore."""
+        self._state_at_entry = self._state()
+        return super().__enter__()
+
     def __exit__(self, exc_type=None, exc_value=None, traceback=None) -> None:
-        """Exit the recording context, compiling if no exception occurred."""
+        """Exit the recording context, compiling if no exception occurred.
+
+        A block whose body or compilation raises leaves the pipeline as it was when
+        the block was entered (ITL-1387): its recorded steps, its nodes (the same
+        objects) and its bindings, so the next block starts clean.
+        """
         super().__exit__(exc_type, exc_value, traceback)
-        if exc_type is None:
+        saved, self._state_at_entry = self._state_at_entry, None
+        if exc_type is not None:
+            if saved is not None:
+                self._restore_state(saved)
+            return
+        if not self._compiles_on_exit():
+            return
+        try:
             self.compile()
+        except BaseException:
+            if saved is not None:
+                self._restore_state(saved)
+            raise
 
     def __getattr__(self, item: str) -> Any:
         """Look up compiled nodes by label as attribute access."""
@@ -574,9 +955,10 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
             if key not in self._invocation_lut:
                 continue  # vertex with no invocation (e.g. pure source hash)
             inv = self._invocation_lut[key]
-            upstream_nodes = [
-                node_map[up.content_hash().to_string()] for up in inv.input_streams
-            ]
+            input_keys = self._input_keys.get(key) or tuple(
+                up.content_hash().to_string() for up in inv.input_streams
+            )
+            upstream_nodes = [node_map[input_key] for input_key in input_keys]
             if isinstance(inv, FunctionInvocation):
                 node_map[key] = self.function_node_class(
                     function_pod=inv.pod,
@@ -595,6 +977,9 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                     input_streams=tuple(upstream_nodes),
                     label=inv.label,
                 )
+            # The label as recorded, kept past the disambiguation below, so another
+            # pipeline that brings this node in records its step as it was written.
+            setattr(node_map[key], _RECORDED_LABEL_ATTRIBUTE, inv.label)
 
         # 4. Reserve every original label before generating any suffixes.
         name_candidates: dict[str, list] = {}
@@ -813,3 +1198,79 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
                 instance._hash_graph.add_node(h)
         instance.compile()
         return instance
+
+
+# ----------------------------------------------------------------------
+# The walk of ITL-1387: helpers
+# ----------------------------------------------------------------------
+
+#: Attribute ``compile()`` sets on each node it builds: the label its step was
+#: recorded with, before any disambiguating suffix. A node of another pipeline is
+#: brought in under that label, as its step was written.
+_RECORDED_LABEL_ATTRIBUTE = "_orcapod_recorded_label"
+_NOT_RECORDED = object()
+
+
+def _is_source(stream: Any) -> bool:
+    """True for a stream the user made a source: a ``RootSource`` or a slot."""
+    from orcapod.core.nodes.source_node import SourceNodeBase
+    from orcapod.core.sources.base import RootSource
+
+    return isinstance(stream, (RootSource, SourceNodeBase))
+
+
+def _recorded_label(stream: Any) -> str | None:
+    """The label *stream*'s step was given, or ``None`` for an unlabelled step."""
+    recorded = getattr(stream, _RECORDED_LABEL_ATTRIBUTE, _NOT_RECORDED)
+    if recorded is not _NOT_RECORDED:
+        return cast("str | None", recorded)
+    return stream.label if stream.has_assigned_label else None
+
+
+def _invocation_of(stream: Any, producer: Any, label: str | None) -> PodInvocation:
+    """The invocation that made *stream*, classified by its producer."""
+    from orcapod.core.function_pod import FunctionPodStream
+    from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+    from orcapod.side_effects import SideEffectPod
+
+    inputs = tuple(stream.upstreams)
+    if isinstance(producer, SideEffectPod):
+        return SideEffectInvocation(pod=producer, input_streams=inputs, label=label)
+    if isinstance(producer, StaticOutputOperatorPod):
+        return OperatorInvocation(pod=producer, input_streams=inputs, label=label)
+    if isinstance(stream, (FunctionPodStream, FunctionNodeBase)):
+        return FunctionInvocation(pod=producer, input_streams=inputs, label=label)
+    raise TypeError(
+        f"Cannot bring {stream.label!r} into a pipeline: its producer "
+        f"{type(producer).__name__} is neither a function pod, a side-effect pod nor "
+        "an operator."
+    )
+
+
+def _is_node(stream: Any) -> bool:
+    """True for a function, operator or side-effect node of a pipeline or job."""
+    from orcapod.core.nodes.operator_node import OperatorNode
+    from orcapod.side_effects import SideEffectNode
+
+    return isinstance(stream, (FunctionNodeBase, OperatorNode, SideEffectNode))
+
+
+def _unattached_message(stream: Any) -> str:
+    """The refusal of a node whose pod is not attached (a node of a loaded job)."""
+    return (
+        f"The function of step {stream.label!r} is not attached (it was not "
+        "loadable, or not loaded), so the step cannot be brought into a pipeline "
+        "yet. For its stored results use node.as_source()."
+    )
+
+
+def _with_label(invocation: PodInvocation, label: str | None) -> PodInvocation:
+    """*invocation* with another label."""
+    return type(invocation)(
+        pod=invocation.pod, input_streams=invocation.input_streams, label=label
+    )
+
+
+def _computed_label(invocation: PodInvocation) -> str | None:
+    """The label an unlabelled step's node takes: its pod's label."""
+    return getattr(invocation.pod, "label", None)
