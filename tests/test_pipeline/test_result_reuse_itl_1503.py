@@ -1224,7 +1224,7 @@ def test_a_write_made_inside_a_commit_of_its_table_is_not_covered(
 
 
 # ---------------------------------------------------------------------------
-# CodeRabbit on eef3e725: the row's start and the lookup, a data-tag input
+# CodeRabbit on eef3e725: a row's events and the lookup, a data-tag input
 # ---------------------------------------------------------------------------
 
 
@@ -1291,19 +1291,19 @@ def _events_with_lookups(use_async: bool, case: str) -> list[str]:
 
 
 @pytest.mark.parametrize("case", ["hit", "miss", "failing lookup", "failing function"])
-def test_the_row_starts_before_the_persistent_lookup_on_both_paths(case: str) -> None:
-    """In ephemeral mode a row starts for the observer before the persistent
-    store is asked, on the async job path as on the sync path, and its events
-    are the same in the same order: one start, never a second one when a miss
-    goes on to the function, and never none when the function then raises."""
-    expected = {
-        "hit": ["start", "persistent lookup", "end"],
-        "miss": ["start", "persistent lookup", "end"],
-        "failing lookup": ["start", "persistent lookup", "crash"],
-        "failing function": ["start", "persistent lookup", "crash"],
-    }[case]
-    assert _events_with_lookups(False, case) == expected
-    assert _events_with_lookups(True, case) == expected
+def test_a_row_s_events_and_the_persistent_lookup_on_each_path(case: str) -> None:
+    """In ephemeral mode a row has one start and one end or crash on both paths,
+    never a second start when a miss goes on to the function, and never none
+    when the function then raises.
+
+    A KNOWN DIFFERENCE, recorded as it is (ITL-1541): the sync path reports the
+    row's start before it asks the persistent store, the async job path after
+    it. On the async path a row's start, end and crash all come from the stage
+    that handles the row, so that they share one task and one input.
+    """
+    finish = "crash" if case.startswith("failing") else "end"
+    assert _events_with_lookups(False, case) == ["start", "persistent lookup", finish]
+    assert _events_with_lookups(True, case) == ["persistent lookup", "start", finish]
 
 
 def test_the_row_start_is_reported_once_in_non_ephemeral_mode() -> None:

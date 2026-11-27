@@ -4620,10 +4620,6 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 # write keeps one result. A lookup that raised is not remembered:
                 # that occurrence delivered nothing, and the next one looks again.
                 persistent_lookups: dict[bytes, DataProtocol | None] = {}
-                # Rows the route stage started before that lookup and then sent
-                # to the compute stage: the pod's own start for such a row is
-                # not reported a second time.
-                started_rows: set[bytes] = set()
                 # Instance ids of this run's inputs that gave a row (a cache hit or a
                 # forwarded computed row), one per input (ITL-1093).
                 run_entry_ids: list[bytes] = []
@@ -4708,12 +4704,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                             else:
                                 self._preflight_pipeline_write_schema()
                                 found = None
-                                correlation_key = uuid.uuid4().bytes
                                 if is_ephemeral:
-                                    # The row starts before the persistent store
-                                    # is asked, as on the sync path. On a miss the
-                                    # compute stage takes the row already started.
-                                    ctx_obs.on_data_start(node_label, tag, data)
                                     if instance_id not in persistent_lookups:
                                         try:
                                             persistent_lookups[instance_id] = (
@@ -4722,12 +4713,15 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                                                 )
                                             )
                                         except Exception as exc:
+                                            # The sync path makes this lookup
+                                            # inside the row, after its start:
+                                            # the same events here.
+                                            ctx_obs.on_data_start(node_label, tag, data)
                                             if not lookup_crashed(tag, data, exc):
                                                 raise
                                             continue
                                     found = persistent_lookups[instance_id]
-                                    if found is None:
-                                        started_rows.add(correlation_key)
+                                correlation_key = uuid.uuid4().bytes
                                 input_store[correlation_key] = (
                                     tag,
                                     data,
@@ -4739,6 +4733,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                                 if found is not None:
                                     # Not computed, stored in neither result store
                                     # again: straight to the record stage.
+                                    ctx_obs.on_data_start(node_label, tag, data)
                                     ctx_obs.on_data_end(
                                         node_label, tag, data, found, cached=False
                                     )
@@ -4842,11 +4837,6 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                         ctx_obs.on_node_end(node_label, h)
 
                     def on_data_start(self, lbl: str, tag: Any, data: Any) -> None:
-                        correlation_key = tag.get_meta_value(_TAG_NODE_INPUT_REF, None)
-                        if correlation_key in started_rows:
-                            # Started in the route stage, before the lookup.
-                            started_rows.discard(correlation_key)
-                            return
                         clean = tag.drop_meta_columns(
                             _TAG_NODE_INPUT_REF, ignore_missing=True
                         )
