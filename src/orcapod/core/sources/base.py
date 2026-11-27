@@ -419,13 +419,24 @@ class RootSource(StreamBase):
         return arrow_schema_identity(*self.arrow_schemas, self.data_context)
 
     @property
+    def holds_fixed_rows(self) -> bool:
+        """Whether this source holds rows that never change, so they can be compared.
+
+        Answered without reading or digesting any row. Sources that hold immutable
+        rows opt in; a wrapper can opt in if what it wraps holds fixed rows.
+        """
+        return False
+
+    @property
     def fixed_content(self) -> bytes | None:
         """Digest of held rows for collision checks, or None for a live read.
 
-        Sources that hold immutable rows opt in. A wrapper can opt in if its
-        delegate holds fixed rows. The digest is separate from source identity.
+        Tags, data and record ids (``_digest_fixed_rows``), computed on each read
+        unless a subclass holds it. The digest is separate from source identity.
         """
-        return None
+        if not self.holds_fixed_rows:
+            return None
+        return self._digest_fixed_rows()
 
     @property
     def key_columns(self) -> tuple[str, ...] | None:
@@ -448,10 +459,15 @@ class RootSource(StreamBase):
         canonical row order of an identity table
         (``arrow_utils.canonical_identity_row_order``) and digested under the Arrow
         float rule, so ``-0.0`` equals ``0.0`` and every NaN equals every other. It is
-        ``None`` exactly when ``fixed_content`` is.
+        ``None`` exactly when ``holds_fixed_rows`` is false; computed on each read
+        unless a subclass holds it.
         """
-        if self.fixed_content is None:
+        if not self.holds_fixed_rows:
             return None
+        return self._digest_fixed_row_multiset()
+
+    def _digest_fixed_row_multiset(self) -> bytes:
+        """Digest the rows as a multiset of tags and data (``fixed_row_multiset``)."""
         from orcapod.hashing.starfix_digest import digest_orcapod_table
         from orcapod.utils.arrow_utils import canonical_identity_row_order
 
@@ -707,10 +723,32 @@ class RootSource(StreamBase):
 
 
 class FixedTableSource(RootSource):
-    """A root that holds an Arrow table for its entire lifetime."""
+    """A root that holds an Arrow table for its entire lifetime.
+
+    Its rows never change, so each digest of them is computed once and held.
+    """
+
+    _held_fixed_content: bytes | None = None
+    _held_fixed_row_multiset: bytes | None = None
+
+    @property
+    @override
+    def holds_fixed_rows(self) -> bool:
+        """Always: the table is held for the source's lifetime."""
+        return True
 
     @property
     @override
     def fixed_content(self) -> bytes:
-        """Digest of the table this source holds."""
-        return self._digest_fixed_rows()
+        """Digest of the table this source holds, computed once."""
+        if self._held_fixed_content is None:
+            self._held_fixed_content = self._digest_fixed_rows()
+        return self._held_fixed_content
+
+    @property
+    @override
+    def fixed_row_multiset(self) -> bytes:
+        """Multiset digest of the table this source holds, computed once."""
+        if self._held_fixed_row_multiset is None:
+            self._held_fixed_row_multiset = self._digest_fixed_row_multiset()
+        return self._held_fixed_row_multiset

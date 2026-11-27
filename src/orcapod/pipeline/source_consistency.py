@@ -115,7 +115,7 @@ def _key_columns_conflict(
         "named slots (ITL-1506). For now, give each source its own name with "
         "source_id=... when it is built."
     )
-    if all(source.fixed_content is not None for _, source in known):
+    if all(source.holds_fixed_rows for _, source in known):
         return (
             f"Sources with source id {source_id!r} in {where} share one schema and "
             "the same rows, and differ only in key columns (record_id_columns), so "
@@ -144,7 +144,9 @@ def _differing_fixed_rows(
       occurrence counts, order does not, and floats compare by the Arrow value rule
       (``-0.0`` equals ``0.0``, NaN equals NaN).
 
-    Each digest is computed at most once per source.
+    Only the digests a pair needs are computed, each at most once per source in one
+    check (a source that holds its digests, ``FixedTableSource``, computes each once
+    in its lifetime).
 
     Args:
         group: Every distinct source with that id, with where it is used.
@@ -152,23 +154,25 @@ def _differing_fixed_rows(
     Returns:
         The locations of the first such pair, or ``None`` when all fixed rows agree.
     """
-    contents = [(where, s, s.fixed_content) for where, s in group]
-    fixed = [(where, s, c) for where, s, c in contents if c is not None]
+    fixed = [(where, s) for where, s in group if s.holds_fixed_rows]
+    exact: dict[int, bytes | None] = {}
     multisets: dict[int, bytes | None] = {}
 
-    def multiset(source: RootSource) -> bytes | None:
-        if id(source) not in multisets:
-            multisets[id(source)] = source.fixed_row_multiset
-        return multisets[id(source)]
+    def digest(source: RootSource, *, record_ids: bool) -> bytes | None:
+        held = exact if record_ids else multisets
+        if id(source) not in held:
+            held[id(source)] = (
+                source.fixed_content if record_ids else source.fixed_row_multiset
+            )
+        return held[id(source)]
 
-    for index, (first_location, first, first_content) in enumerate(fixed):
-        for location, source, content in fixed[index + 1 :]:
+    for index, (first_location, first) in enumerate(fixed):
+        for location, source in fixed[index + 1 :]:
             first_keys, keys = first.key_columns, source.key_columns
-            if first_keys is None or keys is None or first_keys == keys:
-                same = first_content == content
-            else:
-                same = multiset(first) == multiset(source)
-            if not same:
+            record_ids = first_keys is None or keys is None or first_keys == keys
+            if digest(first, record_ids=record_ids) != digest(
+                source, record_ids=record_ids
+            ):
                 return first_location, location
     return None
 
