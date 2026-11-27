@@ -32,6 +32,7 @@ from orcapod.operators import Batch, GroupBy, MergeJoin
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.system_constants import constants
 from orcapod.types import ContentHash
+from tests.token_shapes import data_type_for, nested_value, with_token_column
 
 HASHER = get_default_context().arrow_hasher
 ORCHESTRATORS = {"sync": SyncPipelineOrchestrator, "async": AsyncPipelineOrchestrator}
@@ -103,12 +104,39 @@ def _source(
     )
 
 
+def _shaped_source(
+    arrangement: str, tokens: dict[str, tuple[list[Any], pa.DataType]]
+) -> ArrowTableSource:
+    """``_source`` whose named data columns have the list layers of their tokens.
+
+    A token's list layers are its data's outer list layers (the token-shape rule),
+    so the slot a stream with list tokens is bound to declares list data.
+    """
+    tags, data = ARRANGEMENTS[arrangement]
+    names = [*tags, *data]
+    arrays = dict(COLUMNS)
+    for name, (_, kind) in tokens.items():
+        data_type = data_type_for(kind)
+        arrays[name] = pa.array(
+            [nested_value(v, data_type) for v in COLUMNS[name].to_pylist()], data_type
+        )
+    schema = pa.schema(pa.field(n, arrays[n].type, nullable=False) for n in names)
+    return ArrowTableSource(
+        pa.Table.from_arrays([arrays[n] for n in names], schema=schema),
+        tag_columns=list(tags),
+        tag_only_columns=True,
+        source_id="rows",
+    )
+
+
 def _with_tokens(
     arrangement: str, tokens: dict[str, tuple[list[Any], pa.DataType]]
 ) -> ArrowTableStream:
     """The source's rows as a raw stream, each named token column replaced.
 
-    The stream keeps the source's system-tag pair, so the job's slot accepts it.
+    Each such data column gets its token's list layers, the row's value at every
+    token position. The stream keeps the source's system-tag pair, so the job's
+    slot (``_shaped_source``) accepts it.
 
     Args:
         arrangement: The layout of the rows.
@@ -117,13 +145,20 @@ def _with_tokens(
     source = _source(arrangement)
     table = source.as_table(columns={"source": True, "system_tags": True})
     for name, (values, kind) in tokens.items():
-        column = f"{constants.SOURCE_PREFIX}{name}"
-        table = table.set_column(
-            table.schema.get_field_index(column),
-            pa.field(column, kind, nullable=True),
-            pa.array(values, kind),
-        )
+        table = with_token_column(table, name, values, kind)
     return ArrowTableStream(table, tag_columns=list(ARRANGEMENTS[arrangement][0]))
+
+
+def _counting(name: str, x: Any, w: Any) -> Any:
+    """A function pod ``name(x, w) -> total`` that returns 1, for the given types."""
+
+    def count(x: Any, w: Any) -> int:
+        calls[name] += 1
+        return 1
+
+    count.__name__ = count.__qualname__ = name
+    count.__annotations__ = {"x": x, "w": w, "return": int}
+    return function_pod(output_keys="total")(count)
 
 
 def _stored(database: InMemoryArrowDatabase, function: str) -> pa.Table:
@@ -355,6 +390,31 @@ UNTYPEABLE: dict[str, dict[str, tuple[list[Any], pa.DataType]]] = {
 }
 
 
+# The function over each case's data: ``x`` and ``w`` have their tokens' list layers.
+_L1, _L2, _L3 = list[int], list[list[int]], list[list[list[int]]]
+OVER: dict[str, Any] = {
+    "one_level": _counting("count_one_level", _L1, _L1),
+    "two_levels": _counting("count_two_levels", _L2, _L2),
+    "three_levels": _counting("count_three_levels", _L3, _L3),
+    "one_level_beside_strings": _counting("count_beside_strings", _L1, int),
+}
+
+
+def _untypeable_job(
+    database: InMemoryArrowDatabase, tokens: str, arrangement: str, columns: list[str]
+) -> PipelineJob:
+    """``rows -> select -> count``, the slot bound to the case's raw stream."""
+    replaced = UNTYPEABLE[tokens]
+    job = PipelineJob(name="untypeable", database=database)
+    with job:
+        selected = _shaped_source(arrangement, replaced).select_data_columns(
+            columns, label="given"
+        )
+        OVER[tokens].pod(selected, label="f")
+    job.bind(sources={"rows": _with_tokens(arrangement, replaced)})
+    return job
+
+
 @ARRANGEMENT
 @pytest.mark.parametrize("tokens", list(UNTYPEABLE))
 def test_nested_tokens_no_value_can_type_are_stored_alike_on_both_routes(
@@ -370,18 +430,12 @@ def test_nested_tokens_no_value_can_type_are_stored_alike_on_both_routes(
     the stream's token types and the same ids.
     """
     replaced = UNTYPEABLE[tokens]
-
-    def build(database: InMemoryArrowDatabase) -> PipelineJob:
-        job = PipelineJob(name="untypeable", database=database)
-        with job:
-            selected = _source(arrangement).select_data_columns(
-                ["w", "x"], label="given"
-            )
-            add.pod(selected, label="f")
-        job.bind(sources={"rows": _with_tokens(arrangement, replaced)})
-        return job
-
-    seen = _run_both(build, "add", "given")
+    name = OVER[tokens].__name__
+    seen = _run_both(
+        lambda database: _untypeable_job(database, tokens, arrangement, ["w", "x"]),
+        name,
+        "given",
+    )
     _assert_same_on_both_routes(seen, 4)
     expected = {"_source_w": pa.large_string(), "_source_x": pa.large_string()}
     expected |= {f"_source_{name}": kind for name, (_, kind) in replaced.items()}
@@ -389,9 +443,9 @@ def test_nested_tokens_no_value_can_type_are_stored_alike_on_both_routes(
     stored = seen["sync"]["stored"].sort_by(
         [("subject", "ascending"), ("session", "ascending")]
     )
-    for name, (values, _) in replaced.items():
-        assert stored.column(f"_source_{name}").to_pylist() == values
-    assert calls["add"] == 8
+    for column, (values, _) in replaced.items():
+        assert stored.column(f"_source_{column}").to_pylist() == values
+    assert calls[name] == 8
 
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
@@ -403,17 +457,9 @@ def test_the_arrangement_changes_no_instance_of_rows_with_nested_tokens(
     instances = []
     for arrangement in ARRANGEMENTS:
         database = InMemoryArrowDatabase()
-        job = PipelineJob(name="untypeable", database=database)
-        with job:
-            selected = _source(arrangement).select_data_columns(
-                ["x", "w"], label="given"
-            )
-            add.pod(selected, label="f")
-        job.bind(sources={"rows": _with_tokens(arrangement, UNTYPEABLE[tokens])})
+        job = _untypeable_job(database, tokens, arrangement, ["x", "w"])
         _ = job.run(orchestrator=ORCHESTRATORS[orchestrator]())
-        instances.append(
-            set(_stored(database, "add").column("__pipeline_instance_id").to_pylist())
-        )
+        instances.append(set(_instance_ids(_stored(database, OVER[tokens].__name__))))
     assert instances[0] == instances[1] and len(instances[0]) == 4
 
 
@@ -429,35 +475,33 @@ def test_a_second_route_over_the_same_store_finds_every_instance(
     """
     database = InMemoryArrowDatabase()
     second = next(name for name in ORCHESTRATORS if name != first)
+    name = OVER[tokens].__name__
     stored = []
     for arrangement, orchestrator in zip(ARRANGEMENTS, (first, second)):
-        job = PipelineJob(name="untypeable", database=database)
-        with job:
-            selected = _source(arrangement).select_data_columns(
-                ["x", "w"], label="given"
-            )
-            add.pod(selected, label="f")
-        job.bind(sources={"rows": _with_tokens(arrangement, UNTYPEABLE[tokens])})
+        job = _untypeable_job(database, tokens, arrangement, ["x", "w"])
         _ = job.run(orchestrator=ORCHESTRATORS[orchestrator]())
-        table = _stored(database, "add")
+        table = _stored(database, name)
         assert table.num_rows == 4, orchestrator
         stored.append(_instance_ids(table))
     assert stored[0] == stored[1]
-    assert calls["add"] == 4
+    assert calls[name] == 4
 
 
 # ---------------------------------------------------------------------------
-# A real pipeline case: an aggregation over a token column that holds nulls
+# An aggregation over a token column that holds nulls
 # ---------------------------------------------------------------------------
 
-# One-level token columns that are null in some rows. ``Batch`` and ``GroupBy``
-# declare two levels over them, with values such as ``[None]`` and ``[None, None]``,
-# which show one level only: typed from its value, such a token lost a level.
-NULL_LISTS: dict[str, tuple[list[Any], pa.DataType]] = {
-    "x": ([None, ["a"], None, None], STRINGS),
-    "w": ([["b"], None, ["c", "d"], []], STRINGS),
+# Plain string tokens that are null in some rows (a string token may be null).
+# ``Batch`` and ``GroupBy`` put them into lists, an element of which may be null:
+# ``[None]``, ``[None, "a"]``, ``[None, None]``. A null LIST token is not a valid
+# token (``test_token_shape.py``), so the aggregation never sees one. These lists
+# type the same from their values as from the column, so this is a guard, not a
+# case the re-typing from values got wrong.
+NULL_TOKENS: dict[str, tuple[list[Any], pa.DataType]] = {
+    "x": ([None, "s::1::x", None, None], pa.large_string()),
+    "w": (["s::0::w", None, "s::2::w", None], pa.large_string()),
 }
-OVER_NULL_LISTS: dict[str, tuple[Any, int]] = {
+OVER_NULL_TOKENS: dict[str, tuple[Any, int]] = {
     "batch_1": (lambda stream: Batch(batch_size=1)(stream, label="given"), 4),
     "batch_2": (lambda stream: Batch(batch_size=2)(stream, label="given"), 2),
     "group_by": (lambda stream: GroupBy(by=["subject"])(stream, label="given"), 2),
@@ -471,46 +515,46 @@ def count_members(x: list[int], w: list[int]) -> int:
     return len(x) + len(w)
 
 
-def _null_list_job(
+def _null_token_job(
     database: InMemoryArrowDatabase, aggregation: str, arrangement: str
 ) -> PipelineJob:
-    """``rows -> Batch or GroupBy -> count_members``, the slot bound to ``NULL_LISTS``."""
-    job = PipelineJob(name="null_lists", database=database)
+    """``rows -> Batch or GroupBy -> count_members``, the slot bound to ``NULL_TOKENS``."""
+    job = PipelineJob(name="null_tokens", database=database)
     with job:
         count_members.pod(
-            OVER_NULL_LISTS[aggregation][0](_source(arrangement)), label="f"
+            OVER_NULL_TOKENS[aggregation][0](_source(arrangement)), label="f"
         )
-    job.bind(sources={"rows": _with_tokens(arrangement, NULL_LISTS)})
+    job.bind(sources={"rows": _with_tokens(arrangement, NULL_TOKENS)})
     return job
 
 
 @ARRANGEMENT
-@pytest.mark.parametrize("aggregation", list(OVER_NULL_LISTS))
-def test_an_aggregation_over_null_list_tokens_keeps_two_levels_on_both_routes(
+@pytest.mark.parametrize("aggregation", list(OVER_NULL_TOKENS))
+def test_an_aggregation_over_null_tokens_is_stored_alike_on_both_routes(
     aggregation: str, arrangement: str
 ) -> None:
-    """``Batch`` and ``GroupBy`` over a list token column with nulls keep both levels.
+    """``Batch`` and ``GroupBy`` over string tokens with nulls: lists with null elements.
 
-    The aggregated token column is a list of token lists, and some of its values
-    are ``[None]`` or ``[None, None]``. The function node after it stores the
-    declared two levels on the sync and on the async route, with the same rows
-    and ids (ITL-1491: the sync edge typed ``[None]`` as one level).
+    The aggregated token column is a list of tokens, and some of its values are
+    ``[None]`` or ``[None, None]``. The function node after it stores that one list
+    level on the sync and on the async route, with the same rows and ids.
     """
-    rows = OVER_NULL_LISTS[aggregation][1]
+    rows = OVER_NULL_TOKENS[aggregation][1]
     seen = _run_both(
-        lambda database: _null_list_job(database, aggregation, arrangement),
+        lambda database: _null_token_job(database, aggregation, arrangement),
         "count_members",
         "given",
     )
     _assert_same_on_both_routes(seen, rows)
-    assert seen["sync"]["types"] == {"_source_w": NESTED, "_source_x": NESTED}
+    assert seen["sync"]["types"] == {"_source_w": STRINGS, "_source_x": STRINGS}
     tokens = seen["sync"]["stored"].column("_source_x").to_pylist()
-    assert any(token is not None and None in token for token in tokens)
+    assert all(token is not None for token in tokens)
+    assert any(None in token for token in tokens)
     assert calls["count_members"] == 2 * rows
 
 
 @pytest.mark.parametrize("orchestrator", list(ORCHESTRATORS))
-@pytest.mark.parametrize("aggregation", list(OVER_NULL_LISTS))
+@pytest.mark.parametrize("aggregation", list(OVER_NULL_TOKENS))
 def test_held_rows_of_such_an_aggregation_reach_the_function_again(
     aggregation: str, orchestrator: str
 ) -> None:
@@ -519,12 +563,11 @@ def test_held_rows_of_such_an_aggregation_reach_the_function_again(
     After a run the function node is cleared, so the next run holds the aggregation
     node (it is current) and passes its rows on to the function node, which finds
     every instance stored: no row is added and nothing is computed. The sync route
-    builds the held rows into one table at that edge, where ``[None]`` used to be
-    typed as one level.
+    builds the held rows into one table at that edge.
     """
-    rows = OVER_NULL_LISTS[aggregation][1]
+    rows = OVER_NULL_TOKENS[aggregation][1]
     database = InMemoryArrowDatabase()
-    job = _null_list_job(database, aggregation, "as_declared")
+    job = _null_token_job(database, aggregation, "as_declared")
     _ = job.run(orchestrator=ORCHESTRATORS[orchestrator]())
     first = _stored(database, "count_members")
     job.nodes["f"].clear_cache()
@@ -533,8 +576,8 @@ def test_held_rows_of_such_an_aggregation_reach_the_function_again(
     again = _stored(database, "count_members")
     assert again.num_rows == first.num_rows == rows
     assert _instance_ids(again) == _instance_ids(first)
-    assert again.schema.field("_source_x").type == NESTED
-    assert again.schema.field("_source_w").type == NESTED
+    assert again.schema.field("_source_x").type == STRINGS
+    assert again.schema.field("_source_w").type == STRINGS
     assert len(list(job.nodes["f"].iter_data())) == rows
     assert calls["count_members"] == rows
 
@@ -543,21 +586,42 @@ def test_held_rows_of_such_an_aggregation_reach_the_function_again(
 # Data-tags that fall through two functions keep their tokens, type and value
 # ---------------------------------------------------------------------------
 
-TAG_ORDERS = [("subject", "session"), ("session", "subject")]
+TAG_ORDERS = [("pair", "path"), ("path", "pair")]
 FIXED = pa.list_(pa.large_string(), 2)
-# The token column of each data-tag: a fixed-size list (a type no value gives), a
-# nested list holding a null and an empty list, and a string column with a null.
+# The token column of each data-tag: a fixed-size list (a type no value gives) and
+# a nested list holding nulls and an empty list. Each data-tag has its token's
+# list layers (the token-shape rule): ``pair`` is a fixed-size list of two
+# strings, ``path`` a list of lists of integers.
 DATA_TAG_TOKENS: dict[str, tuple[list[Any], pa.DataType]] = {
-    "subject": ([["p", "q"], ["r", "s"], ["t", "u"], ["v", "w"]], FIXED),
-    "session": ([[None, ["a"]], [[]], [["b"], None], [[None]]], NESTED),
+    "pair": ([["p", "q"], ["r", "s"], ["t", "u"], ["v", "w"]], FIXED),
+    "path": ([[None, ["a"]], [[]], [["b"], None], [[None]]], NESTED),
+}
+DATA_TAGS: dict[str, "pa.Array[Any]"] = {
+    "pair": pa.array([["m1", "a"], ["m1", "b"], ["m2", "a"], ["m2", "b"]], FIXED),
+    "path": pa.array(
+        [[[1], [1]], [[]], [[2], [2]], [[3]]], pa.large_list(pa.large_list(pa.int64()))
+    ),
 }
 
 
+def _data_tag_source(tags: tuple[str, ...]) -> ArrowTableSource:
+    """Four rows whose two tags, ``pair`` and ``path``, are data-tags too."""
+    columns = {**DATA_TAGS, "x": COLUMNS["x"], "w": COLUMNS["w"]}
+    names = [*tags, "x", "w"] if tags == TAG_ORDERS[0] else ["w", "x", *tags]
+    schema = pa.schema(pa.field(n, columns[n].type, nullable=False) for n in names)
+    return ArrowTableSource(
+        pa.Table.from_arrays([columns[n] for n in names], schema=schema),
+        tag_columns=list(tags),
+        tag_only_columns=False,
+        source_id="rows",
+    )
+
+
 def _data_tag_stream(tags: tuple[str, ...]) -> ArrowTableStream:
-    """The four rows as a raw stream whose two tags are data-tags with typed tokens."""
-    arrangement = "as_declared" if tags == TAG_ORDERS[0] else "reversed"
-    source = _source(arrangement, data_tags=True)
-    table = source.as_table(columns={"source": True, "system_tags": True})
+    """The four rows as a raw stream whose two data-tags have typed tokens."""
+    table = _data_tag_source(tags).as_table(
+        columns={"source": True, "system_tags": True}
+    )
     for name, (values, kind) in DATA_TAG_TOKENS.items():
         column = f"{constants.SOURCE_PREFIX}{name}"
         table = table.set_column(
@@ -572,13 +636,17 @@ def _data_tag_job(
     database: InMemoryArrowDatabase, tags: tuple[str, ...]
 ) -> PipelineJob:
     """``rows -> add -> twice`` over a source whose two tags are data-tags."""
-    arrangement = "as_declared" if tags == TAG_ORDERS[0] else "reversed"
     job = PipelineJob(name="data_tags", database=database)
     with job:
-        first = add.pod(_source(arrangement, data_tags=True), label="given")
+        first = add.pod(_data_tag_source(tags), label="given")
         twice.pod(first, label="f")
     job.bind(sources={"rows": _data_tag_stream(tags)})
     return job
+
+
+def _pair(row: Any) -> tuple[str, ...]:
+    """A row's ``pair`` data-tag, which names the row."""
+    return tuple(cast("list[str]", row["pair"]))
 
 
 @pytest.mark.parametrize("tags", TAG_ORDERS)
@@ -593,9 +661,10 @@ def test_data_tags_fall_through_two_functions_with_their_tokens_unchanged(
     fixed-size list and a nested list its type, on both routes. A column a function
     returns has the function's own string token.
     """
-    before = {
-        (cast("str", data["subject"]), cast("int", data["session"])): data
-        for _, data in _data_tag_stream(tags).iter_data()
+    before = {_pair(data): data for _, data in _data_tag_stream(tags).iter_data()}
+    expected = {
+        _pair(data): {name: data.source_info()[name] for name in DATA_TAG_TOKENS}
+        for data in before.values()
     }
     seen = _run_both(lambda database: _data_tag_job(database, tags), "twice", "given")
     # Each route ran over its own store, so ``total``'s token holds another result
@@ -604,18 +673,16 @@ def test_data_tags_fall_through_two_functions_with_their_tokens_unchanged(
     assert seen["sync"]["entries"] == seen["async"]["entries"]
     assert len(seen["sync"]["entries"]) == 4
     assert seen["sync"]["types"] == seen["async"]["types"]
-    fallen = [f"{constants.SOURCE_PREFIX}{name}" for name in DATA_TAG_TOKENS]
     for route in seen.values():
         assert route["stored"].num_rows == 4
-        ordered = route["stored"].sort_by(
-            [("subject", "ascending"), ("session", "ascending")]
-        )
-        for column in fallen:
-            name = column.removeprefix(constants.SOURCE_PREFIX)
-            assert ordered.column(column).to_pylist() == DATA_TAG_TOKENS[name][0]
+        stored = {
+            _pair(row): {name: row[f"_source_{name}"] for name in DATA_TAG_TOKENS}
+            for row in route["stored"].to_pylist()
+        }
+        assert stored == expected
     assert seen["sync"]["types"] == {
-        "_source_session": NESTED,
-        "_source_subject": FIXED,
+        "_source_pair": FIXED,
+        "_source_path": NESTED,
         "_source_total": pa.large_string(),
     }
     for orchestrator in ORCHESTRATORS.values():
@@ -625,9 +692,9 @@ def test_data_tags_fall_through_two_functions_with_their_tokens_unchanged(
             rows = list(job.nodes[label].iter_data())
             assert len(rows) == 4
             for _, data in rows:
-                origin = before[(data["subject"], data["session"])].source_info_table()
+                origin = before[_pair(data)].source_info_table()
                 after = data.source_info_table()
-                for name in ("subject", "session"):
+                for name in DATA_TAG_TOKENS:
                     column = f"{constants.SOURCE_PREFIX}{name}"
                     assert after.schema.field(column).type == DATA_TAG_TOKENS[name][1]
                     assert after.column(column).equals(origin.column(column))
@@ -651,8 +718,8 @@ def test_data_tags_have_one_instance_per_row_whichever_route_ran_first(
         _ = job.run(orchestrator=ORCHESTRATORS[route]())
         table = _stored(database, "twice")
         assert table.num_rows == 4, (index, route)
-        assert table.schema.field("_source_subject").type == FIXED
-        assert table.schema.field("_source_session").type == NESTED
+        assert table.schema.field("_source_pair").type == FIXED
+        assert table.schema.field("_source_path").type == NESTED
         stored.append(_instance_ids(table))
     assert all(ids == stored[0] for ids in stored) and len(set(stored[0])) == 4
     assert calls["add"] == 4 and calls["twice"] == 4

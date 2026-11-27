@@ -2401,15 +2401,17 @@ _TOKENS = pa.large_list(pa.large_string())
 _TOKEN_LISTS = pa.large_list(_TOKENS)
 _FIXED_TOKENS = pa.list_(pa.large_string(), 2)
 # Per layout: the token column of ``a`` and of ``b``, each with values that show
-# fewer list levels than the column has, a null, or a type no value gives.
+# fewer list levels than the column has, a null inside a list, or a type no value
+# gives. A token with a list layer is never null itself, and its data column has
+# the same list layers (the token-shape rule): ``_token_stream`` shapes the data.
 _TOKEN_LAYOUTS: dict[str, dict[str, tuple[list[Any], pa.DataType]]] = {
     "one_level": {
         "a": ([[None], [], ["s::0::a", None]], _TOKENS),
-        "b": ([[], ["u", "v"], None], _TOKENS),
+        "b": ([[], ["u", "v"], [None, None]], _TOKENS),
     },
     "two_levels": {
         "a": ([[None], [[]], [["a"], None]], _TOKEN_LISTS),
-        "b": ([[[]], None, [[None, "c"]]], _TOKEN_LISTS),
+        "b": ([[[]], [None, []], [[None, "c"]]], _TOKEN_LISTS),
     },
     "fixed_size_and_strings": {
         "a": ([["p", "q"], ["r", "s"], ["t", "u"]], _FIXED_TOKENS),
@@ -2430,6 +2432,8 @@ def _token_stream(
     The stream is a source's table (so it has the source's system tags) whose
     ``_source_*`` columns are replaced; ``data`` renames the two data columns.
     """
+    from tests.token_shapes import with_token_column
+
     first, second = data
     columns = {
         "g": pa.array(["m", "m", "n"], pa.large_string()),
@@ -2446,12 +2450,7 @@ def _token_stream(
     )
     table = source.as_table(columns={"source": True, "system_tags": True})
     for name, (values, kind) in zip(data, _TOKEN_LAYOUTS[layout].values()):
-        column = f"_source_{name}"
-        table = table.set_column(
-            table.schema.get_field_index(column),
-            pa.field(column, kind, nullable=True),
-            pa.array(values, kind),
-        )
+        table = with_token_column(table, name, values, kind)
     return ArrowTableStream(table, tag_columns=list(tags))
 
 
