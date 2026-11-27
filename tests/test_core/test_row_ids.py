@@ -386,11 +386,22 @@ class TestTokensAreReadAsTheRowCarriesThem:
                 ["s::row_0::a", "s::row_1::a", "s::row_2::a"], pa.large_string()
             )
         )
+        # ``a`` has its token's list layers (the token-shape rule, ITL-1491).
+        from tests.token_shapes import data_for, data_type_for
+
+        a_type = data_type_for(tokens_a.type)
+        data_a = pa.array(
+            [
+                data_for(t, v, a_type)
+                for t, v in zip(tokens_a.to_pylist(), (10, 20, 30))
+            ],
+            a_type,
+        )
         table = pa.Table.from_arrays(
             [
                 pa.array(["m1", "m1", "m2"], pa.large_string()),
                 pa.array([1, 2, 1], pa.int64()),
-                pa.array([10, 20, 30], pa.int64()),
+                data_a,
                 pa.array([0.5, 1.5, 2.5], pa.float64()),
                 tokens_a,
                 pa.array(["s::row_0::b", "s::row_1::b", None], pa.large_string()),
@@ -399,7 +410,7 @@ class TestTokensAreReadAsTheRowCarriesThem:
                 [
                     pa.field("subject", pa.large_string(), nullable=False),
                     pa.field("session", pa.int64(), nullable=False),
-                    pa.field("a", pa.int64(), nullable=False),
+                    pa.field("a", a_type, nullable=False),
                     pa.field("b", pa.float64(), nullable=False),
                     pa.field("_source_a", tokens_a.type, nullable=nested),
                     pa.field("_source_b", pa.large_string()),
