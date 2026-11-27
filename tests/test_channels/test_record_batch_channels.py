@@ -41,7 +41,6 @@ from orcapod.core.operators import (
 )
 from orcapod.core.operators.static_output_pod import (
     ROW_BUILT_OUTPUT,
-    RowBuiltFormUnavailable,
     StaticOutputOperatorPod,
     stream_from_batches,
 )
@@ -2094,7 +2093,7 @@ def test_a_batch_with_a_duplicate_column_is_refused() -> None:
 
 def test_a_batch_whose_tokens_cannot_settle_with_accepted_ones_is_refused() -> None:
     """A second batch with list tokens where the first had string tokens is refused at
-    send, with the error the complete table would raise (Codex on PR #485, round 5)."""
+    send: two batches of one stream declare one token type (Codex on PR #485, round 5)."""
     from orcapod.core.operators.static_output_pod import SourceInfoTypesDisagree
 
     stream = source()
@@ -2144,22 +2143,46 @@ def _with_amplitude_tokens(
     )
 
 
-SETTLING_CASES: dict[
+NON_NULL_TOKENS = pa.large_list(pa.field("item", TOKEN, nullable=False))
+FIXED_TOKENS = pa.list_(TOKEN, 1)
+
+# Batches that declare one token type are assembled with that type, whatever their
+# tokens show (ITL-1491: the pipeline determines a token column's type).
+ONE_TYPE_CASES: dict[
     str, tuple[list[tuple[int, list[Any], pa.DataType]], pa.DataType, list[Any]]
 ] = {
-    # An empty token list carried two levels deep, then a token list: both settle as
-    # one level of tokens.
-    "list_depth": ([(0, [[]], TOKEN_LISTS), (1, [["b"]], TOKENS)], TOKENS, [[], ["b"]]),
-    # A null token carried as a list, then a string token: both settle as strings.
-    "null_then_string": ([(0, [None], TOKENS), (1, ["b"], TOKEN)], TOKEN, [None, "b"]),
-    # Lists that differ only in their item field's nullability.
-    "item_nullability": (
-        [
-            (0, [["a"]], pa.large_list(pa.field("item", TOKEN, nullable=False))),
-            (1, [["b"]], TOKENS),
-        ],
+    # An empty token list (which shows one list level), then a token list.
+    "empty_list_two_levels": (
+        [(0, [[]], TOKEN_LISTS), (1, [[["b"]]], TOKEN_LISTS)],
+        TOKEN_LISTS,
+        [[], [["b"]]],
+    ),
+    # A null token in a list column, then a list token.
+    "null_then_list": (
+        [(0, [None], TOKENS), (1, [["b"]], TOKENS)],
         TOKENS,
+        [None, ["b"]],
+    ),
+    # Lists whose item field is declared non-nullable keep it.
+    "non_null_items": (
+        [(0, [["a"]], NON_NULL_TOKENS), (1, [["b"]], NON_NULL_TOKENS)],
+        NON_NULL_TOKENS,
         [["a"], ["b"]],
+    ),
+    # A hand-built fixed-size list stays one.
+    "fixed_size_list": (
+        [(0, [["a"]], FIXED_TOKENS), (1, [["b"]], FIXED_TOKENS)],
+        FIXED_TOKENS,
+        [["a"], ["b"]],
+    ),
+    # A token no value could type ([[], [[]]] three levels deep) is taken as declared.
+    "three_levels": (
+        [
+            (0, [[[], [[]]]], pa.large_list(TOKEN_LISTS)),
+            (1, [[[["b"]]]], pa.large_list(TOKEN_LISTS)),
+        ],
+        pa.large_list(TOKEN_LISTS),
+        [[[], [[]]], [[["b"]]]],
     ),
     # A batch with no rows has no token and fixes no type.
     "zero_rows_first": (
@@ -2170,13 +2193,13 @@ SETTLING_CASES: dict[
 }
 
 
-@pytest.mark.parametrize("case", list(SETTLING_CASES))
+@pytest.mark.parametrize("case", list(ONE_TYPE_CASES))
 def test_batches_send_accepts_are_assembled(case: str) -> None:
     """What ``send`` accepts can be assembled: ``result()`` and ``to_stream()`` build
-    the complete table, each source-info column of the type its tokens settle."""
+    the complete table, each source-info column of the type its batches declare."""
     stream = source(2)
     (batch,) = batches_of(stream)
-    parts, settled, tokens = SETTLING_CASES[case]
+    parts, declared, tokens = ONE_TYPE_CASES[case]
 
     async def write() -> tuple[Any, Any]:
         output = OutputChannel(stream)
@@ -2189,31 +2212,50 @@ def test_batches_send_accepts_are_assembled(case: str) -> None:
     result, converted = run(write)
     for assembled in (result, converted):
         table = assembled.as_table(columns=ALL)
-        assert table.schema.field("_source_amplitude").type == settled
+        assert table.schema.field("_source_amplitude").type == declared
         assert table.column("_source_amplitude").to_pylist() == tokens
 
 
-def test_a_token_that_cannot_be_represented_is_refused_at_send() -> None:
-    """A token that has no place in its column's settled type (``[[], [[]]]`` carried
-    three levels deep) is refused at send; the channel takes valid batches after it."""
+# Batches that declare two token types: before ITL-1491 the first three "settled" to
+# one type worked out from the tokens; a token column's type is now the declared one.
+TWO_TYPE_CASES: dict[str, list[tuple[int, list[Any], pa.DataType]]] = {
+    "list_depth": [(0, [[]], TOKEN_LISTS), (1, [["b"]], TOKENS)],
+    "null_then_string": [(0, [None], TOKENS), (1, ["b"], TOKEN)],
+    "item_nullability": [(0, [["a"]], NON_NULL_TOKENS), (1, [["b"]], TOKENS)],
+    "fixed_then_large": [(0, [["a"]], FIXED_TOKENS), (1, [["b"]], TOKENS)],
+}
+
+
+@pytest.mark.parametrize("order", ["as_listed", "reversed"])
+@pytest.mark.parametrize("case", list(TWO_TYPE_CASES))
+def test_a_batch_that_declares_another_token_type_is_refused_at_send(
+    case: str, order: str
+) -> None:
+    """A batch whose source-info column declares another type than the batches
+    accepted so far is refused at send, whatever its tokens are; the channel takes a
+    batch of the accepted type after it, and assembles what it accepted."""
+    from orcapod.core.operators.static_output_pod import SourceInfoTypesDisagree
+
     stream = source(2)
     (batch,) = batches_of(stream)
-    deep = pa.large_list(TOKEN_LISTS)
+    (_, first_values, first), (_, other_values, other) = (
+        TWO_TYPE_CASES[case]
+        if order == "as_listed"
+        else list(reversed(TWO_TYPE_CASES[case]))
+    )
 
-    async def write() -> list[Any]:
+    async def write() -> Any:
         output = OutputChannel(stream)
-        with pytest.raises(RowBuiltFormUnavailable, match="cannot be represented"):
-            await output.send(_with_amplitude_tokens(batch, 0, [[[], [[]]]], deep))
-        await output.send(_with_amplitude_tokens(batch, 0, [["a"]], TOKENS))
+        await output.send(_with_amplitude_tokens(batch, 0, first_values, first))
+        with pytest.raises(SourceInfoTypesDisagree, match="_source_amplitude"):
+            await output.send(_with_amplitude_tokens(batch, 1, other_values, other))
+        await output.send(_with_amplitude_tokens(batch, 1, first_values, first))
         await output.close()
-        return (
-            output.result()
-            .as_table(columns=ALL)
-            .column("_source_amplitude")
-            .to_pylist()
-        )
+        return output.result().as_table(columns=ALL)
 
-    assert run(write) == [["a"]]
+    table = run(write)
+    assert table.schema.field("_source_amplitude").type == first
+    assert table.column("_source_amplitude").to_pylist() == [*first_values] * 2
 
 
 def test_a_duplicate_system_tag_column_is_refused_on_a_declared_stream() -> None:
@@ -2230,10 +2272,10 @@ def test_a_duplicate_system_tag_column_is_refused_on_a_declared_stream() -> None
         run(write)
 
 
-def test_batch_puts_arrivals_with_differing_token_types_together() -> None:
-    """``Batch(2)`` over arrivals whose source-info tokens are carried in two types (an
-    empty list two levels deep, then a token list): it groups them, as a complete table
-    settles them."""
+def test_batch_puts_arrivals_whose_tokens_show_two_depths_together() -> None:
+    """``Batch(2)`` over arrivals whose source-info tokens show two depths (an empty
+    list, then a list of token lists), both declared two levels deep: it groups them
+    under one more list level of the declared type (ITL-1491)."""
     stream = source(2)
     (batch,) = batches_of(stream)
     op = Batch(batch_size=2)
@@ -2242,7 +2284,7 @@ def test_batch_puts_arrivals_with_differing_token_types_together() -> None:
         feed = OutputChannel(stream)
         reader = feed.open_reader()
         await feed.send(_with_amplitude_tokens(batch, 0, [[]], TOKEN_LISTS))
-        await feed.send(_with_amplitude_tokens(batch, 1, [["b"]], TOKENS))
+        await feed.send(_with_amplitude_tokens(batch, 1, [[["b"]]], TOKEN_LISTS))
         await feed.close()
         output = OutputChannel(op(stream))
         await op.async_execute_batches([reader], output)
@@ -2250,7 +2292,8 @@ def test_batch_puts_arrivals_with_differing_token_types_together() -> None:
 
     table = run(go).as_table(columns=ALL)
     assert table.num_rows == 1
-    assert table.column("_source_amplitude").to_pylist() == [[[], ["b"]]]
+    assert table.schema.field("_source_amplitude").type == pa.large_list(TOKEN_LISTS)
+    assert table.column("_source_amplitude").to_pylist() == [[[], [["b"]]]]
 
 
 def test_a_source_nodes_channel_gives_its_output_stream_as_it_is() -> None:

@@ -34,7 +34,11 @@ _UNCONVERTIBLE = pa.large_list(_NESTED)
 
 
 def _unconvertible() -> ArrowTableStream:
-    """Tokens ``[None, [[]]]``: the whole-table build is unavailable, the rows raise."""
+    """Tokens ``[None, [[]]]``, three list levels deep: no value shows that type.
+
+    Before ITL-1491 a row typed each token from its value, so building these rows
+    into one table raised ``ArrowTypeError``. The rows now keep the stream's type.
+    """
     return _with_source_x([[None, [[]]], [None, [[]]]], _UNCONVERTIBLE)
 
 
@@ -47,10 +51,11 @@ def _plain() -> DictSource:
     )
 
 
-def test_a_fallback_source_reads_its_rows_once() -> None:
-    """A source whose whole-table build is unavailable: its rows are read once, when it
-    runs, and the successor's edge raises the rows' ``ArrowTypeError`` after the
-    source's end and before the successor starts, as on ``main``."""
+def test_a_bound_raw_source_with_nested_tokens_reads_its_rows_once() -> None:
+    """A bound raw stream with nested tokens: its rows are read once, when it runs,
+    and the run completes: the successor's edge builds the rows into one table with
+    the stream's token type (ITL-1491; it used to raise the rows' ``ArrowTypeError``
+    there, after the source's end, as on ``main``)."""
     job = PipelineJob(name="read_once", database=InMemoryArrowDatabase())
     with job:
         Batch(batch_size=2)(
@@ -67,11 +72,16 @@ def test_a_fallback_source_reads_its_rows_once() -> None:
     source.iter_data = counted
     job.bind(sources={"s": source})
     observer = _NodeEvents()
-    with pytest.raises(pa.ArrowTypeError, match="Expected bytes"):
-        job.run(observer=observer)
+    job.run(observer=observer)
     assert len(reads) == 1
-    assert ("end", "s") in observer.events
-    assert ("start", "selected") not in observer.events
+    assert observer.events == [
+        (event, label)
+        for label in ("s", "selected", "batched")
+        for event in ("start", "end")
+    ]
+    batched = job.nodes["batched"].as_table(columns={"source": True})
+    assert batched.schema.field("_source_x").type == pa.large_list(_UNCONVERTIBLE)
+    assert batched.column("_source_x").to_pylist() == [[[None, [[]]], [None, [[]]]]]
 
 
 def test_a_fallback_source_nobody_reads_completes() -> None:
@@ -226,10 +236,11 @@ def _replay_job(database: InMemoryArrowDatabase, *, with_successor: bool) -> Any
 def test_replay_of_a_table_the_whole_table_build_cannot_use(
     with_successor: bool,
 ) -> None:
-    """REPLAY of a stored table with unconvertible tokens hands on its rows.
+    """REPLAY of a stored table with nested tokens hands on its rows.
 
-    The node ends as usual; a leaf completes; a successor's edge raises the rows'
-    ``ArrowTypeError``, as ``main``'s row rebuild does (Codex on PR #485, round 3).
+    The node ends as usual and a leaf completes (Codex on PR #485, round 3). A
+    successor builds the rows with the stored token type and completes too
+    (ITL-1491; its edge used to raise the rows' ``ArrowTypeError``).
     """
     logged = InMemoryArrowDatabase()
     job = PipelineJob(name="replay_odd", database=InMemoryArrowDatabase())
@@ -252,14 +263,15 @@ def test_replay_of_a_table_the_whole_table_build_cannot_use(
 
     replay = _replay_job(seeded, with_successor=with_successor)
     observer = _NodeEvents()
+    replay.run(observer=observer)
+    assert ("end", "selected") in observer.events
     if with_successor:
-        with pytest.raises(pa.ArrowTypeError, match="Expected bytes"):
-            replay.run(observer=observer)
-        assert ("end", "selected") in observer.events
-        assert ("start", "batched") not in observer.events
-    else:
-        replay.run(observer=observer)
-        assert ("end", "selected") in observer.events
+        assert ("end", "batched") in observer.events
+        batched = replay.nodes["batched"].as_table(columns={"source": True})
+        assert batched.schema.field("_source_x").type == pa.large_list(_UNCONVERTIBLE)
+        assert batched.column("_source_x").to_pylist() == [
+            [[None, [[]]]] * stored.num_rows
+        ]
 
 
 # ── round 4: the boundary of the eager route, and the lazy output itself ──────
@@ -422,8 +434,9 @@ def test_returned_function_rows_keep_their_meta(asynchronous: bool) -> None:
 def test_a_lazy_output_is_described_and_opened_without_reading() -> None:
     """Describing an unread output, or opening its channel, builds nothing.
 
-    The first read of the channel raises what the rows' build raises (Codex on PR
-    #485, round 4).
+    The first read of the channel builds the rows (Codex on PR #485, round 4), with
+    the token type their stream declares (ITL-1491; the build used to raise the
+    rows' ``ArrowTypeError``).
     """
     import asyncio
 
@@ -441,8 +454,11 @@ def test_a_lazy_output_is_described_and_opened_without_reading() -> None:
     assert "x" in out.arrow_schema().names
     channel = out.open_channel()
     assert out._stream is None  # pyright: ignore[reportPrivateUsage]  # nothing built
-    with pytest.raises(pa.ArrowTypeError, match="Expected bytes"):
-        asyncio.run(channel.collect())
+    batches = asyncio.run(channel.collect())
+    assert out._stream is not None  # pyright: ignore[reportPrivateUsage]  # built by the read
+    read = pa.Table.from_batches(batches)
+    assert read.schema.field("_source_x").type == _UNCONVERTIBLE
+    assert read.column("_source_x").to_pylist() == [[None, [[]]], [None, [[]]]]
 
 
 # ── round 5 ──────────────────────────────────────────────────────────────────
@@ -1289,49 +1305,23 @@ def _held_job() -> tuple[Any, Any, Any]:
     return job.nodes["selected"], job.nodes["after"], independent
 
 
-def test_held_rows_that_cannot_make_one_table_raise_at_the_successors_edge() -> None:
-    """Sync: a held node whose rows cannot make one table (source-info tokens of two
-    shapes) is built where its successor reads it, after an independent node has run,
-    and raises the rows' ``ArrowTypeError``, as ``main`` rebuilt the rows there.
+def _stored_by_after(after: Any) -> pa.Table:
+    """The pipeline table (``pdb_v2``) the function node ``after`` wrote."""
+    database = after._pipeline_database  # pyright: ignore[reportPrivateUsage]  # the stored rows
+    database.flush()
+    (path,) = [p for p in database.list_table_paths() if p[-1] == "pdb_v2"]
+    stored = database.get_all_records(path)
+    assert stored is not None
+    return stored
 
-    Known difference (ITL-1491): this asserts today's behaviour. The async
-    orchestrator sends the same held rows on as they are, and the function node
-    records them (the test below), so the two paths differ on this route. The
-    build here types each token again from its value
-    (``StaticOutputOperatorPod._rows_to_table``); ITL-1491 makes it read the typed
-    token columns the rows carry, after which this run completes as the async one
-    does. On ``main`` the two paths differed for these rows too."""
+
+def _held_run(asynchronous: bool) -> tuple[list[tuple[str, str]], pa.Table]:
+    """Run ``after`` over the held node's rows with nested tokens.
+
+    Returns:
+        The node and row events of the function node, and its stored rows.
+    """
     from orcapod.core.operators.static_output_pod import rows_on_read
-
-    held, after, independent = _held_job()
-    dag: OrcaDAG[Any] = OrcaDAG()
-    dag.add_node(held)
-    dag.add_node(independent)
-    dag.add_edge(held, after)
-    observer = _NodeEvents()
-    rows = list(_unconvertible().iter_data())
-    with pytest.raises(pa.ArrowTypeError, match="Expected bytes"):
-        SyncPipelineOrchestrator().run(
-            dag, observer=observer, held={held: rows_on_read(rows, held)}
-        )
-    starts = [label for event, label in observer.events if event == "start"]
-    assert starts == [independent.label]
-
-
-def test_held_rows_that_cannot_make_one_table_are_sent_on_async() -> None:
-    """Async: the held rows are sent on as the plan took them, never built into one
-    table first: the function node after the held node starts every row and ends.
-
-    The rows are valid Arrow: their token column is a nested list whose values
-    cannot be typed again from Python values. The node records each row with the
-    typed token column it carries (ITL-1471: the stored columns are the ones the
-    instance id was made from), so the run completes and both rows are stored. On
-    ``main`` ca1c35d6 the events are the same and the run then raised the rows'
-    ``ArrowTypeError``, when the record typed the tokens again.
-
-    Known difference (ITL-1491): the sync orchestrator still builds the held rows
-    into one table at the successor's edge and raises there (the test above).
-    ITL-1491 makes that build read the typed token columns too."""
     from orcapod.pipeline import AsyncPipelineOrchestrator
 
     held, after, _ = _held_job()
@@ -1344,20 +1334,82 @@ def test_held_rows_that_cannot_make_one_table_are_sent_on_async() -> None:
             self.events.append(("data", node_label))
 
     observer = DataStarts()
-    AsyncPipelineOrchestrator().run(dag, observer=observer, held_rows={held: rows})
-    assert observer.events == [
+    if asynchronous:
+        AsyncPipelineOrchestrator().run(dag, observer=observer, held_rows={held: rows})
+    else:
+        SyncPipelineOrchestrator().run(
+            dag, observer=observer, held={held: rows_on_read(rows, held)}
+        )
+    return observer.events, _stored_by_after(after)
+
+
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+def test_held_rows_with_nested_tokens_reach_the_successor(asynchronous: bool) -> None:
+    """A held node's rows with a nested token column are recorded by its successor.
+
+    The rows are valid Arrow: their token column is a nested list whose values show
+    fewer list levels than the column has. The sync orchestrator builds the held
+    rows into one table at the successor's edge; the async one sends them on as they
+    are. Both keep the stream's token type (ITL-1491), so the function node after
+    the held node starts every row, ends, and stores both rows with the nested type.
+
+    Before ITL-1491 the sync edge typed each token again from its value and raised
+    ``ArrowTypeError`` (as ``main`` did), while the async route recorded the rows.
+    """
+    events, stored = _held_run(asynchronous)
+    assert events == [
         ("start", "after"),
         ("data", "after"),
         ("data", "after"),
         ("end", "after"),
     ]
-    database = after._pipeline_database  # pyright: ignore[reportPrivateUsage]  # the stored rows
-    database.flush()
-    (path,) = [p for p in database.list_table_paths() if p[-1] == "pdb_v2"]
-    stored = database.get_all_records(path)
-    assert stored is not None and stored.num_rows == 2
+    assert stored.num_rows == 2
     assert stored.schema.field("_source_x").type == _UNCONVERTIBLE
     assert stored.column("_source_x").to_pylist() == [[None, [[]]], [None, [[]]]]
+
+
+def test_held_rows_with_nested_tokens_are_stored_alike_on_both_routes() -> None:
+    """The sync and the async route give the same events and the same stored rows:
+    tags, system tags, token columns with their types, input hashes and instance ids
+    (the result id, the record id that covers it and the times differ by design)."""
+    sync_events, sync = _held_run(False)
+    async_events, asynchronous = _held_run(True)
+    assert sync_events == async_events
+    random = {
+        "__data_id",
+        "__pipeline_record_id",
+        "__recorded_at",
+        "__pipeline_run_id",
+    }
+    kept = [name for name in sync.column_names if name not in random]
+    assert sorted(kept) == sorted(
+        name for name in asynchronous.column_names if name not in random
+    )
+    assert "__pipeline_instance_id" in kept and "_source_x" in kept
+    left = sync.select(kept).sort_by("k")
+    right = asynchronous.select(kept).sort_by("k")
+    assert left.schema.equals(right.schema)
+    assert left.to_pylist() == right.to_pylist()
+    assert len(set(left.column("__pipeline_instance_id").to_pylist())) == 2
+
+
+def test_held_rows_run_independent_nodes_first() -> None:
+    """Sync: a held node's rows are built where its successor reads them, after an
+    independent node has run (the order ``main`` gave)."""
+    from orcapod.core.operators.static_output_pod import rows_on_read
+
+    held, after, independent = _held_job()
+    dag: OrcaDAG[Any] = OrcaDAG()
+    dag.add_node(held)
+    dag.add_node(independent)
+    dag.add_edge(held, after)
+    observer = _NodeEvents()
+    rows = list(_unconvertible().iter_data())
+    SyncPipelineOrchestrator().run(
+        dag, observer=observer, held={held: rows_on_read(rows, held)}
+    )
+    starts = [label for event, label in observer.events if event == "start"]
+    assert starts == [independent.label, after.label]
 
 
 @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])

@@ -643,9 +643,7 @@ class StaticOutputOperatorPod(TraceableBase):
         """
         try:
             return StaticOutputOperatorPod._flag_by_values(
-                StaticOutputOperatorPod._type_source_info_by_values(
-                    row_built_columns(table, keys)
-                )
+                row_built_columns(table, keys)
             )
         except RowBuiltFormUnavailable:
             raise

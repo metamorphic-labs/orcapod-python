@@ -484,6 +484,22 @@ class Data(Datagram):
     # ------------------------------------------------------------------
 
     def _ensure_source_info_table(self) -> "pa.Table":
+        """Return the row's source-info columns as ``as_table`` shows them.
+
+        The type of a token column is determined by the pipeline, never taken
+        from values (developer, November 27, 2026, ITL-1491): a row read from an
+        Arrow table gives the columns that table has, with their types (a null
+        token's included) and every field nullable; the arrays are wrapped again,
+        never cast. Only a row built from Python values, for which no Arrow type
+        exists, types each token from its value
+        (``arrow_utils.source_info_arrow_type``).
+        """
+        typed = self._typed_source_info
+        if self._source_info_table is None and typed is not None:
+            self._source_info_table = pa.Table.from_arrays(
+                typed.columns,
+                schema=pa.schema([pa.field(f.name, f.type) for f in typed.schema]),
+            )
         if self._source_info_table is None:
             import pyarrow as _pa
 
@@ -585,18 +601,17 @@ class Data(Datagram):
         gives it: its type is never worked out again from its value, which a
         nested token column would not survive. A change of the row keeps the
         typed column of every token it keeps (a selection, a drop, a rename,
-        added columns); a token given as a Python value (a row built from
-        values, ``with_source_info``) is typed from its value. So a row built
-        from values and the same row read from a table give the same columns.
+        added columns, a column taken from another row with its token:
+        ``with_columns_of``). Only a token created from a Python value, where no
+        Arrow type exists (a row built from values, ``with_source_info``), is
+        typed from its value. So a row built from values and the same row read
+        from a table give the same columns.
 
-        Stopgap (developer, November 27, 2026; removed by ITL-1491): the token of
-        a column taken from another row (``with_columns_of``, a data-tag that
-        falls through a function pod) is typed again from its value too. The
-        rule is that it keeps its type unchanged; see ``with_columns_of``.
-
-        ``as_table(columns={"source": True})`` differs in two ways: it types
-        every token from its value, and it has no column for a data column whose
-        token was never given.
+        ``as_table(columns={"source": True})`` gives the same typed columns
+        (ITL-1491) and differs in two ways: a null token keeps the type its
+        column declares, so that the rows of one stream make one table; and a row
+        built from values has no column for a data column whose token was never
+        given.
 
         Returns:
             The one-row table; a table with no column when there is no data
@@ -858,24 +873,11 @@ class Data(Datagram):
         values a function returned, are not converted again. Used for the columns of
         data-tags that fall through a function pod.
 
-        The rule (developer, November 27, 2026): a data-tag that falls through a
-        function pod keeps its source-info token with its type unchanged. A column
-        a function returns is never a pass-through, even with an input's name and
-        value: its token points to the function. The type of every source-info
-        token column is determined by the pipeline, like every other column type,
-        never taken from values: sources build plain ``large_string`` tokens,
-        joins and single-stream operators keep the shape, and ``Batch``,
-        ``GroupBy`` and ``MergeJoin`` add one list level each.
-
-        Stopgap, not the proper solution: today the taken columns' tokens are
-        typed again from their values, so the token's value is kept but its type
-        may not be (a ``fixed_size_list`` token becomes a ``large_list``). The
-        reason is a difference between the two routes: the sync route normalizes
-        a stream's token columns to large types between two nodes, and the async
-        route passes rows on without it, so a hand-built token of another type (a
-        fixed-size list) had two instance ids. Typing the token from its value
-        here gives it one type, so one instance id, on both routes. ITL-1491
-        fixes the route difference and removes this re-typing.
+        A data-tag that falls through a function pod keeps its source-info token
+        with its type unchanged (developer, November 27, 2026, ITL-1491): the added
+        columns' token columns are ``other``'s, never typed again from their
+        values. A column a function returns is never a pass-through, even with an
+        input's name and value: its token points to the function.
 
         Args:
             other: The data to take the columns from.
@@ -917,18 +919,24 @@ class Data(Datagram):
             **{k: v for k, v in self._source_info.items() if k not in names},
         }
         new_p._source_info_table = None
-        # STOPGAP (developer, November 27, 2026; ITL-1491 removes it): the added
-        # columns' typed token columns are not kept, so their tokens are typed
-        # again from their values. The rule is that a data-tag that falls through
-        # a function pod keeps its token with its type unchanged, the type being
-        # determined by the pipeline and never taken from values. Until the sync
-        # and the async route agree on a token column's type between two nodes
-        # (the sync route normalizes it to large types, the async route does
-        # not), keeping the type here would give one row two instance ids. This
-        # row's own typed columns, when it has them, are kept.
-        self._keep_typed_tokens(
-            new_p, {k: k for k in Datagram.keys(self) if k not in names}
-        )
+        # The added columns keep the token columns ``other`` carries, with their
+        # types (the pipeline determines a token column's type; ITL-1491); this
+        # row's own are its typed columns when it has them, and typed from their
+        # values otherwise (a function's output, whose tokens are created here).
+        theirs = other.as_table(columns={"source": True})
+        kept = {
+            name: theirs.column(f"{constants.SOURCE_PREFIX}{name}")
+            for name in names
+            if f"{constants.SOURCE_PREFIX}{name}" in theirs.column_names
+        }
+        own = self._typed_source_info
+        if own is not None:
+            kept |= {
+                name.removeprefix(constants.SOURCE_PREFIX): own.column(name)
+                for name in own.column_names
+                if name.removeprefix(constants.SOURCE_PREFIX) not in names
+            }
+        new_p._typed_source_info = new_p._token_columns(kept)
         return new_p
 
     def copy(self, include_cache: bool = True, preserve_id: bool = True) -> Self:

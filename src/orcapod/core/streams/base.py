@@ -340,7 +340,7 @@ def row_built_provenance(table: pa.Table) -> pa.Table:
     changed = False
     for field, column in zip(table.schema, table.columns, strict=True):
         if field.name.startswith(constants.SOURCE_PREFIX):
-            kind = _source_info_value_type(field.type)
+            kind = field.type
             if kind != field.type:
                 column = column.cast(kind)
             new_field = pa.field(field.name, kind, nullable=field.nullable)

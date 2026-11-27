@@ -846,23 +846,34 @@ def test_both_routes_record_one_instance_per_row_in_a_shared_store(
 ) -> None:
     """Sessions on either route over one store: one instance id per row, no refusal.
 
-    A data-tag falls through both functions with its token. The token's type is
-    the same whether the row was just computed or is served from the stored
-    result, and on the sync as on the async route (review of PR #583: the async
-    route kept a fixed-size list where the sync edge gave a large list, so one
-    function output had two instance ids, and the second route's write was
-    refused for the token column's type). Each later session finds the first
-    one's records: nothing is computed again and no row is added.
+    A data-tag falls through both functions with its token, value and type
+    unchanged (developer, November 27, 2026, ITL-1491: the pipeline determines a
+    token column's type, never its values): ``d``'s token is the stream's
+    fixed-size list after each function, whether the row was just computed or is
+    served from the stored result, on the sync as on the async route. Review of
+    PR #583: the sync edge had typed the token again from its value (a large
+    list) while the async route kept the fixed-size list, so one function output
+    had two instance ids and the second route's write was refused for the token
+    column's type. Each later session finds the first one's records: nothing is
+    computed again and no row is added.
     """
     database = InMemoryArrowDatabase()
+    before = {
+        data.as_dict()["x"]: data.source_info_table().select(["_source_d", "_source_e"])
+        for _, data in _data_tag_stream(tags).iter_data()
+    }
     stored: list[tuple[Any, ...]] = []
     for index, route in enumerate(routes):
         out = _two_nodes_on(route, database, tags)
         assert sorted(data.as_dict()["z"] for _, data in out) == [22, 42, 62]
         for _, data in out:
-            assert data.source_info_table().schema.field(
-                "_source_d"
-            ).type == pa.large_list(pa.large_string())
+            # x = z / 2 - 1 names the input row: the token columns after the two
+            # functions equal the ones before them, type and value.
+            after = data.source_info_table()
+            assert after.schema.field("_source_d").type == _FIXED
+            origin = before[data.as_dict()["z"] // 2 - 1]
+            assert after.select(["_source_d", "_source_e"]).equals(origin)
+            assert after.schema.field("_source_z").type == pa.large_string()
         database.flush()
         (path,) = [
             p
@@ -872,7 +883,7 @@ def test_both_routes_record_one_instance_per_row_in_a_shared_store(
         table = database.get_all_records(path)
         assert table is not None
         assert table.num_rows == 3, (index, route)
-        assert table.schema.field("_source_d").type == pa.large_list(pa.large_string())
+        assert table.schema.field("_source_d").type == _FIXED
         assert table.column("_source_e").null_count == 1
         stored.append(
             tuple(
