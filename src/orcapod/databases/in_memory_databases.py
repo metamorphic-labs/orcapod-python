@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from orcapod.protocols.database_protocols import STORED_RECORD_ID_COLUMN
 from orcapod.databases._pending_commits import PendingCommit, PendingCommits
 from orcapod.databases._row_index import KeyIndex, compact_tail, matching_rows
 from orcapod.databases.utils import (
@@ -16,6 +17,7 @@ from orcapod.databases.utils import (
     first_changed_column,
     first_logical_identity_change,
     in_held_column_order,
+    records_matching_values,
 )
 from orcapod.errors import (
     InputValidationError,
@@ -47,7 +49,7 @@ class InMemoryArrowDatabase:
 
     stores_records = True
 
-    RECORD_ID_COLUMN = "__record_id"
+    RECORD_ID_COLUMN = STORED_RECORD_ID_COLUMN
 
     def __init__(
         self,
@@ -691,6 +693,21 @@ class InMemoryArrowDatabase:
             max_hierarchy_depth=config.get("max_hierarchy_depth", 10),
             _path_prefix=tuple(config.get("base_path", [])),
         )
+
+    def get_records_by_column(
+        self,
+        record_path: tuple[str, ...],
+        column: str,
+        values: Collection[Any] | pa.Array[Any],
+        record_id_column: str | None = None,
+    ) -> pa.Table | None:
+        if len(values) == 0:
+            return None
+        table = self._combined_table(self._get_record_key(record_path))
+        if table is None:
+            return None
+        matches = records_matching_values(table, column, values)
+        return self._handle_record_id_column(matches, record_id_column)
 
     def get_records_with_column_value(
         self,

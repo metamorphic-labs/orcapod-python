@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 import pyarrow as pa
+import pyarrow.compute as pc
 
+from orcapod.protocols.database_protocols import STORED_RECORD_ID_COLUMN
 from orcapod.utils import arrow_utils
 
 if TYPE_CHECKING:
@@ -35,6 +37,48 @@ def coerce_record_id(record_id: str | bytes) -> bytes:
     if isinstance(record_id, str):
         return record_id.encode()
     return record_id
+
+
+def record_lookup_ids(values: Collection[Any] | pa.Array[Any]) -> list[bytes]:
+    """Encode text record IDs and omit nulls, which cannot match an ID."""
+    ids = []
+    for value in values:
+        if isinstance(value, pa.Scalar):
+            value = value.as_py()
+        if value is not None:
+            if not isinstance(value, (str, bytes)):
+                raise TypeError(f"Record ID must be bytes or str, got {type(value)}")
+            ids.append(coerce_record_id(value))
+    return ids
+
+
+def records_matching_values(
+    table: pa.Table, column: str, values: Collection[Any] | pa.Array[Any]
+) -> pa.Table:
+    """Select rows by Arrow scalar equality, retaining the table's schema."""
+    keys = table[column]
+    if column == STORED_RECORD_ID_COLUMN:
+        if isinstance(values, pa.Array) and pa.types.is_large_binary(values.type):
+            value_set = pa.array(values, type=keys.type)
+        else:
+            value_set = pa.array(record_lookup_ids(values), type=keys.type)
+        # Entries and results from one commit can have identical ID buffers.
+        if (
+            keys.num_chunks == 1
+            and value_set.null_count == 0
+            and keys.chunk(0).equals(value_set)
+        ):
+            return table
+        return table.filter(pc.is_in(keys, value_set, skip_nulls=True))
+
+    # Let Arrow promote each scalar as it would for a single-column equality
+    # predicate. Casting the requests to the stored type can truncate numbers;
+    # hash membership also treats signed zeros and NaNs differently.
+    matches = None
+    for value in values:
+        equal = pc.equal(keys, value)
+        matches = equal if matches is None else pc.or_kleene(matches, equal)
+    return table.slice(0, 0) if matches is None else table.filter(matches)
 
 
 def as_table_committing(database: object) -> TableCommittingDatabaseProtocol | None:

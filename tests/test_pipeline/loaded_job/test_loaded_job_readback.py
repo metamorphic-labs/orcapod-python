@@ -1102,3 +1102,41 @@ def test_latest_readable_result_wins_across_both_stores(
     assert node.as_table().num_rows == 0
     loaded = node.get_cached_results([node.compute_instance_id(tag, data)])
     assert [result["value"] for _, result in loaded.values()] == [expected]
+
+
+def test_warm_delta_keeps_the_fresh_read_winner_when_recorded_timestamps_tie(
+    tmp_path: pathlib.Path,
+) -> None:
+    """Warm and fresh Delta reads choose the same result at equal timestamps."""
+    from orcapod.core.nodes.function_node import FunctionJobNode
+
+    root = tmp_path / "store"
+    store = DeltaTableDatabase(str(root))
+    job = PipelineJob(name="small", database=store)
+    with job:
+        _record_double()
+    _ = job.run()
+    node = job.nodes["dbl"]
+    assert isinstance(node, FunctionJobNode)
+    entry_id = next(node.iter_data())[0].as_dict()["id"]
+    assert isinstance(entry_id, int)
+    assert node.get_all_records() is not None
+
+    for result in (111, 222):
+        _append_recomputed_record(node, entry_id, minutes_later=1, value=result)
+        assert node.get_all_records() is not None
+
+    fresh_job = PipelineJob(name="small", database=DeltaTableDatabase(str(root)))
+    with fresh_job:
+        _record_double()
+    _ = fresh_job.run(load_only=True)
+    expected = {
+        tag.as_dict()["id"]: data.as_dict()["dbl"]
+        for tag, data in fresh_job.nodes["dbl"].iter_data()
+    }
+    # This private entry point reads the warm handle without refreshing away its
+    # incrementally appended snapshot first.
+    loaded = node._load_cached_entries()  # pyright: ignore[reportPrivateUsage]  # observe the warm lookup without a refresh
+    assert {
+        tag.as_dict()["id"]: data.as_dict()["dbl"] for tag, data in loaded.values()
+    } == expected

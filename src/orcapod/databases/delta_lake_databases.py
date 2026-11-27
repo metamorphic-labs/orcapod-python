@@ -18,6 +18,7 @@ import polars as pl
 import pyarrow as pa
 import pyarrow.compute as pc
 
+from orcapod.protocols.database_protocols import STORED_RECORD_ID_COLUMN
 from orcapod.databases._pending_commits import PendingCommit, PendingCommits
 from orcapod.databases._row_index import (
     KeyIndex,
@@ -53,6 +54,8 @@ from orcapod.databases.utils import (
     identity_node,
     identity_refusal,
     in_held_column_order,
+    record_lookup_ids,
+    records_matching_values,
     metadata_bytes,
 )
 from orcapod.errors import (
@@ -1733,7 +1736,7 @@ class DeltaTableDatabase:
     ROW_INDEX_COLUMN = "__row_index"
     stores_records = True
 
-    RECORD_ID_COLUMN = "__record_id"
+    RECORD_ID_COLUMN = STORED_RECORD_ID_COLUMN
 
     def __init__(
         self,
@@ -3226,6 +3229,49 @@ class DeltaTableDatabase:
         pending = self._pending_not_stored(record_path) if retrieve_pending else None
         stored = pa.concat_tables(tables_to_combine) if tables_to_combine else None
         return self._combine_stored_and_pending(stored, pending, record_id_column)
+
+    def get_records_by_column(
+        self,
+        record_path: tuple[str, ...],
+        column: str,
+        values: Collection[Any] | pa.Array[Any],
+        record_id_column: str | None = None,
+    ) -> pa.Table | None:
+        if len(values) == 0:
+            return None
+        stored = self._stored_rows(record_path)
+        pending = self._pending_not_stored(record_path)
+        if (
+            column == self.RECORD_ID_COLUMN
+            and stored is not None
+            and pending is None
+            and len(values) * 4 < stored.table.num_rows
+            and is_indexed_lookup(stored.table.schema.field(column).type, b"")
+            and (index := stored.columns.get(column)) is not None
+        ):
+            # Reuse the point-read index for sparse requests. A cold or dense
+            # lookup uses Arrow membership without building a Python index.
+            positions = sorted(
+                {
+                    position
+                    for key in set(record_lookup_ids(values))
+                    for position in index.get(key, ())
+                }
+            )
+            table = stored.table
+            matches = (
+                table.take(pa.array(positions, type=pa.int64()))
+                if len(positions) > 1 and table[column].num_chunks == 1
+                else rows_at(table, positions)
+            )
+        else:
+            table = self._combine_stored_and_pending(
+                None if stored is None else stored.table, pending, self.RECORD_ID_COLUMN
+            )
+            if table is None:
+                return None
+            matches = records_matching_values(table, column, values)
+        return self._handle_record_id_column(matches, record_id_column)
 
     def get_records_with_column_value(
         self,

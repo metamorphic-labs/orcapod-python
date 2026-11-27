@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, cast
 
 import pyarrow as pa
 import pytest
 
+from orcapod import function_pod
+from orcapod.channels import Channel
 from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes.function_node import (
@@ -16,7 +19,15 @@ from orcapod.core.nodes.function_node import (
     INSTANCE_ID_COL,
 )
 from orcapod.core.sources import ArrowTableSource
-from orcapod.databases import InMemoryArrowDatabase
+from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
+from orcapod.protocols.core_protocols import (
+    DataProtocol,
+    FunctionPodProtocol,
+    TagProtocol,
+)
+from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+from orcapod.sources import DictSource
+from orcapod.system_constants import constants
 
 
 def double_value(value: int) -> int:
@@ -158,3 +169,143 @@ class TestFetchJoinedRecords:
         result = executed_node._fetch_joined_records(instance_ids=[])
         assert result is not None
         assert result.table.num_rows == 0
+
+    def test_targeted_reads_still_warn_about_an_unrequested_missing_result(
+        self, caplog
+    ):
+        source = DictSource(
+            [{"id": i, "value": i + 1} for i in range(3)],
+            tag_columns=["id"],
+            tag_only_columns=True,
+        )
+        pipeline_database = InMemoryArrowDatabase()
+        results = InMemoryArrowDatabase()
+        pod = function_pod(output_keys="result")(double_value).pod
+        assert isinstance(pod, FunctionPodProtocol)
+        node = FunctionJobNode(
+            pod, source, pipeline_database=pipeline_database, result_database=results
+        )
+        rows = list(source.iter_data())
+        for row in rows:
+            node.execute_data(*row)
+        instance_ids = [node.compute_instance_id(tag, data) for tag, data in rows[:2]]
+        entries = pipeline_database.get_all_records(node._versioned_pipeline_path)
+        cached_pod = node._cached_function_pod
+        assert entries is not None and cached_pod is not None
+        result_ids = [
+            row[constants.DATA_RECORD_ID]
+            for row in entries.to_pylist()
+            if row[INSTANCE_ID_COL] in instance_ids
+        ]
+        kept = results.get_records_by_ids(
+            cached_pod.record_path, result_ids, record_id_column="rid"
+        )
+        assert kept is not None
+        partial_results = InMemoryArrowDatabase()
+        partial_results.add_records(
+            cached_pod.record_path, kept, record_id_column="rid"
+        )
+        node.attach_databases(pipeline_database, result_database=partial_results)
+
+        for requested in (instance_ids, list(reversed(instance_ids))):
+            caplog.clear()
+            found = node._fetch_joined_records(instance_ids=requested)
+            assert found is not None
+            assert found.table.num_rows == 2
+            assert set(found.table[INSTANCE_ID_COL].to_pylist()) == set(instance_ids)
+            assert (
+                "1 pipeline DB entries have no match in persistent result DB"
+                in caplog.text
+            )
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_delta_stored_and_sync_order_agree_with_the_original_read_path(
+    tmp_path, asynchronous: bool
+):
+    source = DictSource(
+        [{"id": i, "value": i + 1} for i in range(5)],
+        tag_columns=["id"],
+        tag_only_columns=True,
+    )
+    pipeline_db = InMemoryArrowDatabase()
+    result_db = DeltaTableDatabase(str(tmp_path))
+    pod = function_pod(output_keys="result")(double_value).pod
+    assert isinstance(pod, FunctionPodProtocol)
+    node = FunctionJobNode(
+        pod, source, pipeline_database=pipeline_db, result_database=result_db
+    )
+    rows = list(source.iter_data())
+    for row in rows[:2]:
+        node.execute_data(*row)
+    result_db.flush()
+    assert node.get_all_records() is not None
+    for row in rows[2:]:
+        node.execute_data(*row)
+        result_db.flush()
+        assert node.get_all_records() is not None
+
+    fresh = FunctionJobNode(
+        pod,
+        source,
+        pipeline_database=pipeline_db,
+        result_database=DeltaTableDatabase(str(tmp_path)),
+    )
+    expected = fresh.get_all_records()
+    actual = node.get_all_records()
+    assert actual is not None and expected is not None
+    assert actual.to_pylist() == expected.to_pylist()
+
+    if asynchronous:
+
+        async def run_async():
+            inputs: Channel[tuple[TagProtocol, DataProtocol]] = Channel(buffer_size=5)
+            output: Channel[tuple[TagProtocol, DataProtocol]] = Channel(buffer_size=5)
+            for row in rows:
+                await inputs.writer.send(row)
+            await inputs.writer.close()
+            await node.async_execute(inputs.reader, output.writer)
+            return await output.reader.collect()
+
+        emitted = asyncio.run(run_async())
+        assert len(emitted) == len(rows)
+        assert {
+            (tag.as_dict()["id"], data.as_dict()["result"]) for tag, data in emitted
+        } == {(i, 2 * (i + 1)) for i in range(5)}
+    else:
+        sync_rows = node.execute(source)
+        assert [tag.as_dict()["id"] for tag, _ in sync_rows.iter_data()] == list(
+            range(5)
+        )
+
+
+def test_readback_uses_existing_reads_with_a_legacy_result_wrapper():
+    class LegacyResultStore:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def at(self, *parts):
+            return LegacyResultStore(self.inner.at(*parts))
+
+        def __getattr__(self, name):
+            if name == "get_records_by_column":
+                raise AttributeError(name)
+            return getattr(self.inner, name)
+
+    source = DictSource(
+        [{"id": 0, "value": 10}], tag_columns=["id"], tag_only_columns=True
+    )
+    store = LegacyResultStore(InMemoryArrowDatabase())
+    assert not isinstance(store, ArrowDatabaseProtocol)
+    pod = function_pod(output_keys="result")(double_value).pod
+    assert isinstance(pod, FunctionPodProtocol)
+    node = FunctionJobNode(
+        pod,
+        source,
+        pipeline_database=InMemoryArrowDatabase(),
+        result_database=cast("ArrowDatabaseProtocol", cast(object, store)),
+    )
+    node.execute_data(*next(source.iter_data()))
+    result = node.get_all_records()
+    assert result is not None
+    assert result["result"].to_pylist() == [20]

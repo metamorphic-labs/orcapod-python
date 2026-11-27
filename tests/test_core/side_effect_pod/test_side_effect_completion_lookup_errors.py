@@ -11,10 +11,15 @@ from typing import Any
 
 import pytest
 
+from orcapod.core import row_ids
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import OrcapodDatabaseReadError
 from orcapod.pipeline.job import PipelineJob
-from orcapod.side_effects import SideEffectPod, SideEffectPodConfig
+from orcapod.side_effects import (
+    SideEffectJobNode,
+    SideEffectPod,
+    SideEffectPodConfig,
+)
 from orcapod.sources import DictSource
 
 
@@ -62,3 +67,77 @@ def test_completion_lookup_failure_names_the_node_and_row() -> None:
     assert info.value.tag == {"id": 0}
     assert info.value.node_label is not None
     assert delivered == []
+
+
+def test_delivery_precedes_pulling_the_next_lazy_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delivered: list[int] = []
+
+    def deliver(value: int, ctx: Any) -> None:
+        delivered.append(value)
+
+    source = DictSource(
+        [{"id": 0, "value": 10}, {"id": 1, "value": 20}, {"id": 2, "value": 99}],
+        tag_columns=["id"],
+        tag_only_columns=True,
+    )
+    rows = list(source.iter_data())
+
+    def read_lazily():
+        yield rows[0]
+        yield rows[2] if delivered else rows[1]
+
+    monkeypatch.setattr(source, "iter_data", read_lazily)
+    node = SideEffectJobNode(SideEffectPod(deliver), source)
+    node.attach_databases(InMemoryArrowDatabase())
+
+    assert [tag.as_dict()["id"] for tag, _ in node.execute(source).iter_data()] == [
+        0,
+        2,
+    ]
+    assert delivered == [10, 99]
+
+
+def test_a_later_completion_failure_keeps_the_delivered_prefix_and_row_tag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delivered: list[int] = []
+
+    def deliver(value: int, ctx: Any) -> None:
+        delivered.append(value)
+
+    source = DictSource(
+        [{"id": 0, "value": 10}, {"id": 1, "value": 20}],
+        tag_columns=["id"],
+        tag_only_columns=True,
+    )
+    pod = SideEffectPod(deliver)
+    tag, data = list(source.iter_data())[1]
+    bad_id = row_ids.entry_id(
+        pod.data_context.arrow_hasher, tag, data
+    ).to_prefixed_digest()
+    store = InMemoryArrowDatabase()
+    point_read = store.get_record_by_id
+    bulk_read = store.get_records_by_column
+
+    def read_point(path, record_id, *args, **kwargs):
+        if record_id == bad_id:
+            raise OrcapodDatabaseReadError("synthetic table", path)
+        return point_read(path, record_id, *args, **kwargs)
+
+    def read_batch(path, column, values, *args, **kwargs):
+        if bad_id in values:
+            raise OrcapodDatabaseReadError("synthetic table", path)
+        return bulk_read(path, column, values, *args, **kwargs)
+
+    monkeypatch.setattr(store, "get_record_by_id", read_point)
+    monkeypatch.setattr(store, "get_records_by_column", read_batch)
+    node = SideEffectJobNode(pod, source)
+    node.attach_databases(store)
+
+    with pytest.raises(OrcapodDatabaseReadError) as info:
+        node.execute(source)
+    assert delivered == [10]
+    assert info.value.tag == {"id": 1}
+    assert info.value.node_label == pod.label
