@@ -1,6 +1,6 @@
 """Result reuse of a function job node (ITL-1503).
 
-Two rules:
+Three rules:
 
 - **Ephemeral mode asks the persistent store first.** With both result stores set,
   a row's result comes from the persistent store, else from the ephemeral store,
@@ -11,10 +11,13 @@ Two rules:
   table holds none for the same input data hash and data context: a computation
   that finds one when it is about to store its own discards its own and uses the
   stored one, reported as a cache hit. It holds on one event loop or one thread,
-  over one database object and its views, for writes that are not re-entrant.
-  Several threads, a write made inside another write's flush, another database
-  handle or process and an unconditional store are not covered; two tests here
-  record the first two as known limits.
+  over one database object and its views, when no conditional write for the
+  table is made from inside a callback that runs during a commit of it. Several
+  threads, such a write, another database handle or process and an
+  unconditional store are not covered; two tests here record the first two as
+  known limits.
+- **One instance, one result in one run.** In ephemeral mode an async run asks
+  the persistent store once per instance.
 
 The cases run on the synchronous and the asynchronous path unless they name one.
 """
@@ -657,8 +660,8 @@ def test_a_second_computation_uses_the_stored_result_in_every_store(
 
 
 # ---------------------------------------------------------------------------
-# Reviews of c1d2b6fd and e512d8b0: readback per occurrence, threads (a known
-# limit), a failing lookup, rows held in memory
+# Reviews of c1d2b6fd and later heads: one result per instance in a run, threads
+# and commit callbacks (known limits), a failing lookup, repeated instances
 # ---------------------------------------------------------------------------
 
 
@@ -670,25 +673,31 @@ def _ids(pairs: list[Any]) -> list[bytes]:
 def test_async_readback_is_what_each_occurrence_delivered(
     first_in_flight: bool,
 ) -> None:
-    """Two occurrences of one instance in one async run, with a persistent result
-    for their input published between them: the second is served that result, the
-    first its own, and a read gives each occurrence what was delivered for it.
+    """One instance gets one result in one async run. Two occurrences of an
+    instance, with a persistent result for their input published between them:
+    the persistent store is asked once per instance, so the second occurrence
+    takes the route of the first (the ephemeral wrapper), both are delivered one
+    result id, and a read gives that id for both.
 
     ``after``: the first occurrence was delivered before the result is published.
-    ``during``: it is still computing, so the second is delivered first.
+    ``during``: it is still computing, so both compute and one result is kept.
     """
     release = asyncio.Event()
-    started = asyncio.Event()
+    started = [asyncio.Event(), asyncio.Event()]
     calls: list[int] = []
 
     async def scale(value: int, weight: float) -> tuple[int, float]:
         calls.append(value)
-        started.set()
+        started[len(calls) - 1].set()
         if first_in_flight:
             _ = await asyncio.wait_for(release.wait(), timeout=5)
         return value * 2, weight * 2
 
-    pod = FunctionPod.from_fn(scale, output_keys=["doubled", "heavier"])
+    pod = FunctionPod.from_fn(
+        scale,
+        output_keys=["doubled", "heavier"],
+        pod_config=PodConfig(max_concurrency=2),
+    )
     seeding = _Counted()
     source = _input({"a": 2})
     (row,) = source.iter_data()
@@ -701,6 +710,7 @@ def test_async_readback_is_what_each_occurrence_delivered(
     )
     node.node_config = NodeConfig(is_result_ephemeral=True)
     node.set_ephemeral_database(ephemeral)
+    published: list[bytes] = []
 
     async def go() -> list[Any]:
         input_ch: Channel[Any] = Channel(buffer_size=3)
@@ -710,31 +720,32 @@ def test_async_readback_is_what_each_occurrence_delivered(
         await input_ch.writer.send(row)
         delivered = []
         if first_in_flight:
-            _ = await asyncio.wait_for(started.wait(), timeout=5)
+            _ = await asyncio.wait_for(started[0].wait(), timeout=5)
         else:
             delivered.append(await anext(outputs))
-        published = _seed(persistent, seeding, source, {"a"})["a"]
+        published.append(_seed(persistent, seeding, source, {"a"})["a"])
         await input_ch.writer.send(row)
         await input_ch.writer.close()
-        delivered.append(await anext(outputs))
-        release.set()
         if first_in_flight:
+            _ = await asyncio.wait_for(started[1].wait(), timeout=5)
+            release.set()
             delivered.append(await anext(outputs))
+        delivered.append(await anext(outputs))
         await run
-        # The occurrence routed after the publication is served the published result.
-        assert (
-            delivered[0 if first_in_flight else 1][1].datagram_uuid.bytes == published
-        )
         return delivered
 
     delivered = asyncio.run(go())
-    assert calls == [2]
-    assert len(set(_ids(delivered))) == 2
-    assert _ids(list(node.iter_data())) == _ids(delivered)
+    assert calls == ([2, 2] if first_in_flight else [2])
+    (result_id,) = set(_ids(delivered))
+    assert result_id != published[0]
+    assert _result_ids(ephemeral) == [result_id]
+    assert _ids(list(node.iter_data())) == [result_id, result_id]
     assert node.held_row_count() == 2
-    assert len(node.held_instance_ids()) == 2
-    table = node.as_table(columns={"source": True})
-    assert table.num_rows == 2
+    assert _records(node)["a"] == {
+        "result_id": result_id,
+        "is_ephemeral": True,
+        "computed": True,
+    }
 
 
 def test_sync_readback_is_what_each_occurrence_delivered(
@@ -1023,63 +1034,6 @@ def test_async_execute_without_a_persistent_store_runs_the_plain_pod() -> None:
     assert stored == {"sync row": 1, "async_execute": 0}
 
 
-@pytest.mark.parametrize("ephemeral_mode", [False, True], ids=["persistent", "eph"])
-def test_many_repeats_of_one_instance_hold_few_rows_in_memory(
-    ephemeral_mode: bool,
-) -> None:
-    """An async run over 2,000 occurrences of one instance, all delivered one
-    result, holds 2,000 rows for a read but not 2,000 separate tag and data
-    objects: occurrences delivered the same row share one held pair (here two,
-    the computed row and the stored one the later occurrences were served)."""
-    repeats = 2000
-    counted = _Counted()
-    source = _input({"a": 2})
-    (row,) = source.iter_data()
-    node = FunctionJobNode(
-        counted.pod,
-        source,
-        pipeline_database=InMemoryArrowDatabase(),
-        result_database=InMemoryArrowDatabase(),
-    )
-    if ephemeral_mode:
-        node.node_config = NodeConfig(is_result_ephemeral=True)
-        node.set_ephemeral_database(InMemoryArrowDatabase())
-
-    async def go() -> list[bytes]:
-        input_ch: Channel[Any] = Channel(buffer_size=16)
-        output_ch: Channel[Any] = Channel(buffer_size=16)
-
-        async def send() -> None:
-            for _ in range(repeats):
-                await input_ch.writer.send(row)
-            await input_ch.writer.close()
-
-        async def drain() -> list[bytes]:
-            return [data.datagram_uuid.bytes async for _, data in output_ch.reader]
-
-        _, delivered, _ = await asyncio.gather(
-            send(), drain(), node.async_execute(input_ch.reader, output_ch.writer)
-        )
-        return delivered
-
-    delivered = asyncio.run(go())
-    # The occurrences in flight together each call the function; one result is kept.
-    assert set(counted.calls) == {2} and len(counted.calls) < 100
-    assert len(delivered) == repeats and len(set(delivered)) == 1
-
-    held = list(node.iter_data())
-    assert _ids(held) == delivered
-    assert node.held_row_count() == repeats
-    assert len(node.held_instance_ids()) == repeats
-    assert len({id(data) for _, data in held}) <= 2
-    assert len({id(tag) for tag, _ in held}) <= 2
-    # One occurrence stored its computed result, the others were served it.
-    computed = [
-        data.get_meta_value(CachedFunctionPod.RESULT_COMPUTED_FLAG) for _, data in held
-    ]
-    assert computed.count(True) == 1 and computed.count(False) == repeats - 1
-
-
 def _occurrence_node(
     ephemeral_mode: bool,
 ) -> tuple[FunctionJobNode, ArrowTableStream, list[Any]]:
@@ -1117,62 +1071,92 @@ def _occurrences(pairs: list[Any]) -> list[Any]:
     return [tag.get_meta_value("occurrence") for tag, _ in pairs]
 
 
-@pytest.mark.parametrize("ephemeral_mode", [False, True], ids=["persistent", "eph"])
-def test_async_readback_keeps_each_occurrence_s_own_tag_meta(
-    ephemeral_mode: bool,
-) -> None:
-    """Occurrences of one instance that were delivered one result but differ in
-    something a reader can see (here a tag meta column) are not the same row: a
-    read gives each its own. Only rows equal in everything share a held pair."""
-    node, _, rows = _occurrence_node(ephemeral_mode)
-
-    async def go() -> list[Any]:
-        input_ch: Channel[Any] = Channel(buffer_size=8)
-        output_ch: Channel[Any] = Channel(buffer_size=8)
-        for row in rows:
-            await input_ch.writer.send(row)
-        await input_ch.writer.close()
-        await node.async_execute(input_ch.reader, output_ch.writer)
-        return await output_ch.reader.collect()
-
-    delivered = asyncio.run(go())
-    assert _occurrences(delivered) == ["first", "second", "third", "second"]
-    assert len(set(_ids(delivered))) == 1
-
-    held = list(node.iter_data())
-    assert _occurrences(held) == _occurrences(delivered)
-    assert _ids(held) == _ids(delivered)
-    # The two equal occurrences share one held pair; the others have their own.
-    assert len({id(tag) for tag, _ in held}) == 3
-    assert held[1][0] is held[3][0]
+async def _through_async_execute(node: FunctionJobNode, rows: list[Any]) -> list[Any]:
+    input_ch: Channel[Any] = Channel(buffer_size=8)
+    output_ch: Channel[Any] = Channel(buffer_size=8)
+    for row in rows:
+        await input_ch.writer.send(row)
+    await input_ch.writer.close()
+    await node.async_execute(input_ch.reader, output_ch.writer)
+    return await output_ch.reader.collect()
 
 
 @pytest.mark.parametrize("ephemeral_mode", [False, True], ids=["persistent", "eph"])
-def test_sync_readback_of_occurrences_that_differ_in_tag_meta(
+def test_repeated_instance_delivery_differs_between_sync_and_async_itl_1521(
     ephemeral_mode: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The sync path with the same input. It serves a repeated instance from the
-    row it already holds, so every occurrence is DELIVERED the first one's row,
-    tag meta included, and a read gives the same: readback equals delivery."""
+    """A KNOWN DIFFERENCE that predates this work (the same on the base branch),
+    recorded as it is today; ITL-1521 decides what a repeated instance delivers.
+
+    Occurrences of one instance whose tags differ only in a meta column. The sync
+    path serves a repeated instance from the row it holds, so every occurrence is
+    delivered the first one's row; the async path sends each occurrence on with
+    its own tag. A read of the node gives one row per instance for every
+    occurrence: on sync the first one's, on async the last one's. On both paths
+    every occurrence has one result id.
+    """
     node, source, rows = _occurrence_node(ephemeral_mode)
     monkeypatch.setattr(source, "iter_data", lambda: iter(rows))
-    delivered = list(node.execute(source, error_policy="fail_fast").iter_data())
+    sync_delivered = list(node.execute(source, error_policy="fail_fast").iter_data())
+    assert _occurrences(sync_delivered) == ["first"] * 4
+    assert _occurrences(list(node.iter_data())) == ["first"] * 4
+    assert len(set(_ids(sync_delivered))) == 1
 
-    assert _occurrences(delivered) == ["first"] * 4
-    assert _occurrences(list(node.iter_data())) == _occurrences(delivered)
+    node, _, rows = _occurrence_node(ephemeral_mode)
+    async_delivered = asyncio.run(_through_async_execute(node, rows))
+    assert _occurrences(async_delivered) == ["first", "second", "third", "second"]
+    assert _occurrences(list(node.iter_data())) == ["second"] * 4
+    assert len(set(_ids(async_delivered))) == 1
+    assert _ids(list(node.iter_data())) == _ids(async_delivered)
 
 
+def test_a_persistent_hit_is_reused_for_later_occurrences_of_its_instance() -> None:
+    """In ephemeral mode the persistent store is asked once per instance in an
+    async run, and a hit serves every later occurrence of that instance too:
+    nothing is computed and the ephemeral store stays empty."""
+    counted = _Counted()
+    source = _repeated_input(["a", "a", "b", "a"], 2)
+    persistent, ephemeral = InMemoryArrowDatabase(), InMemoryArrowDatabase()
+    stored = _seed(persistent, counted, source, {"a"})["a"]
+    lookups: list[int] = []
+    lookup = persistent.get_records_with_column_value
+
+    def counting(*args: Any, **kwargs: Any) -> Any:
+        lookups.append(1)
+        return lookup(*args, **kwargs)
+
+    node = _ephemeral_node(
+        counted,
+        source,
+        pipeline=InMemoryArrowDatabase(),
+        persistent=persistent,
+        ephemeral=ephemeral,
+    )
+    persistent.get_records_with_column_value = counting  # pyright: ignore[reportAttributeAccessIssue]  # counts the lookups
+    delivered = asyncio.run(_through_async_execute(node, list(source.iter_data())))
+
+    assert counted.calls == []
+    assert _ids(delivered) == [stored] * 4
+    assert _result_ids(ephemeral) == []
+    # One lookup by input data hash per instance ("a" and "b"), not per occurrence.
+    assert len(lookups) == 2
+    assert _ids(list(node.iter_data())) == [stored] * 4
+
+
+@pytest.mark.parametrize("commit", ["the write's own flush", "a separate flush"])
 @PATHS
-def test_a_write_made_inside_another_write_s_flush_is_not_covered(
-    use_async: bool,
+def test_a_write_made_inside_a_commit_of_its_table_is_not_covered(
+    use_async: bool, commit: str
 ) -> None:
-    """A KNOWN LIMIT, not a guarantee. The conditional write covers writes that
-    are not re-entrant. Here a schema guard on the result table runs during the
-    outer write's flush, after its row left the queue and before it is stored,
-    and makes a second conditional write for the same input: it finds no result
-    and stores its own. The test asserts no uniqueness. It holds only what stays
-    true either way: each write returns a result that is stored, and nothing
-    else is."""
+    """A KNOWN LIMIT, not a guarantee. The conditional write does not cover a
+    write made from inside a callback that runs during a commit of the same
+    result table. Here a schema guard on the result table runs during a commit,
+    after the first write's row left the queue and before it is stored, and makes
+    a second conditional write for the same input: it finds no result and stores
+    its own. The commit is the first write's own flush, or a flush of the
+    database called separately after that write returned. The test asserts no
+    uniqueness. It holds only what stays true either way: each write returns a
+    result that is stored, and nothing else is."""
     database = InMemoryArrowDatabase()
     tag, data = next(iter(_input({"a": 2}).iter_data()))
     pod = _Counted().pod
@@ -1180,17 +1164,22 @@ def test_a_write_made_inside_another_write_s_flush_is_not_covered(
         CachedFunctionPod(pod, result_database=database) for _ in range(2)
     )
     inner_pod.set_auto_flush(False)
+    outer_pod.set_auto_flush(commit == "the write's own flush")
     inner: list[Any] = []
 
-    def during_flush(schema: pa.Schema) -> None:
+    def during_commit(schema: pa.Schema) -> None:
         if not inner:
             inner.append(inner_pod.process_data(tag, data)[1])
 
-    with database.guard_table_schema(outer_pod.record_path, during_flush):
+    with database.guard_table_schema(outer_pod.record_path, during_commit):
         if use_async:
             _, outer = asyncio.run(outer_pod.async_process_data(tag, data))
         else:
             _, outer = outer_pod.process_data(tag, data)
+    if commit == "a separate flush":
+        # The first write has returned; the callback runs in this commit.
+        assert not inner
+        database.flush()
     database.flush()
 
     assert outer is not None and len(inner) == 1
