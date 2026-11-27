@@ -35,6 +35,7 @@ from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import InputValidationError
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.system_constants import constants
+from tests.token_shapes import data_type_for, nested_value
 
 ORCHESTRATORS = {"sync": SyncPipelineOrchestrator, "async": AsyncPipelineOrchestrator}
 TAG_ORDERS = {"k_then_g": ("k", "g"), "g_then_k": ("g", "k")}
@@ -71,14 +72,15 @@ def add_three(x: int, y: int, z: int) -> int:
 
 
 @function_pod(output_keys="total")
-def add_pairs(x: list[int], w: int, v: int) -> int:
+def add_pairs(x: list[list[int]], w: int, v: int) -> int:
     """Return the sum of the merged ``x`` and the two other columns."""
     calls["add_pairs"] += 1
-    return sum(x) + w + v
+    return sum(sum(v_) for v_ in x) + w + v
 
 
 # (first data column, second data column) of each source.
 DATA = {"a": ("x", "w"), "b": ("y", "v"), "c": ("z", "u")}
+Shapes = dict[str, pa.DataType]
 
 
 def _source(
@@ -88,15 +90,32 @@ def _source(
     data: tuple[str, str] | None = None,
     keys: tuple[int, int] = (1, 2),
     data_tags: bool = True,
+    shapes: Shapes | None = None,
 ) -> ArrowTableSource:
-    """Two rows keyed ``k`` and ``g``, with the source's two data columns."""
+    """Two rows keyed ``k`` and ``g``, with the source's two data columns.
+
+    Args:
+        source_id: The source's name.
+        tags: The tag columns, in order.
+        data: The two data columns' names; the source's own by default.
+        keys: The two values of ``k``.
+        data_tags: Whether the tags are data-tags too.
+        shapes: For a column, the token type whose list layers the column is
+            given (the token-shape rule: a list token needs list data); each
+            value is wrapped in those layers.
+    """
     first, second = data or DATA[source_id]
-    columns = {
+    columns: dict[str, pa.Array[Any]] = {
         "k": pa.array(list(keys), pa.int64()),
         "g": pa.array(["m", "n"], pa.large_string()),
         first: pa.array([10, 20], pa.int64()),
         second: pa.array([100, 200], pa.int64()),
     }
+    for name, kind in (shapes or {}).items():
+        data_type = data_type_for(kind, columns[name].type)
+        columns[name] = pa.array(
+            [nested_value(v, data_type) for v in columns[name].to_pylist()], data_type
+        )
     names = [*tags, first, second]
     schema = pa.schema(pa.field(n, columns[n].type, nullable=False) for n in names)
     return ArrowTableSource(
@@ -114,7 +133,10 @@ def _with_tokens(
     *,
     data_tags: bool = True,
 ) -> ArrowTableStream:
-    """``source``'s rows as a raw stream with the named token columns replaced."""
+    """``source``'s rows as a raw stream with the named token columns replaced.
+
+    The source's columns already have the shapes of the tokens they get.
+    """
     table = source.as_table(columns={"source": True, "system_tags": True})
     for name, (values, kind) in tokens.items():
         column = f"{constants.SOURCE_PREFIX}{name}"
@@ -137,6 +159,14 @@ def _stored(database: InMemoryArrowDatabase, function: str) -> pa.Table:
     records = database.get_all_records(path)
     assert records is not None
     return records
+
+
+def _by_k(stored: pa.Table) -> pa.Table:
+    """``stored`` ordered by its key ``k``, which may be a list."""
+    order = sorted(
+        range(stored.num_rows), key=stored.column("k").to_pylist().__getitem__
+    )
+    return stored.take(order)
 
 
 def _instance_ids(stored: pa.Table) -> list[bytes]:
@@ -174,6 +204,8 @@ K_TOKENS: dict[str, tuple[list[Any], pa.DataType]] = {
     "a": ([["a1", "a2"], ["a3", "a4"]], FIXED),
     "b": ([["b1", "b2"], ["b3", "b4"]], FIXED),
 }
+# ``k`` has its token's layer: a fixed-size list of two integers (the join key).
+K_SHAPE: Shapes = {"k": FIXED}
 
 
 def _join_job(
@@ -181,19 +213,25 @@ def _join_job(
 ) -> PipelineJob:
     """``Join(a, b[, c]) -> add``; ``k`` and ``g`` are data-tags of ``a`` and ``b``.
 
-    ``c`` has plain tags, so it merges no token and leaves the first two inputs'
-    merged token pending until the join's last step.
+    ``k`` is a fixed-size list in every input, with a fixed-size-list token in
+    ``a`` and ``b``. ``c`` has plain tags, so it merges no token and leaves the
+    first two inputs' merged token pending until the join's last step.
     """
     job = PipelineJob(name="merged", database=database)
     with job:
-        sources = [_source("a", tags), _source("b", tags)]
+        sources = [
+            _source("a", tags, shapes=K_SHAPE),
+            _source("b", tags, shapes=K_SHAPE),
+        ]
         if inputs == 3:
-            sources.append(_source("c", tags, data_tags=False))
+            sources.append(_source("c", tags, data_tags=False, shapes=K_SHAPE))
         function = add_two if inputs == 2 else add_three
         function.pod(Join()(*sources, label="joined"), label="f")
     job.bind(
         sources={
-            name: _with_tokens(_source(name, tags), tags, {"k": K_TOKENS[name]})
+            name: _with_tokens(
+                _source(name, tags, shapes=K_SHAPE), tags, {"k": K_TOKENS[name]}
+            )
             for name in ("a", "b")
         }
     )
@@ -207,7 +245,8 @@ def test_a_join_keeps_the_declared_type_of_a_merged_data_tag_token(
 ) -> None:
     """Both routes store the merged token with the type both inputs declare.
 
-    ``k`` is a data-tag on two inputs, with fixed-size-list tokens. The join merges
+    ``k`` is a data-tag on two inputs, a fixed-size list of two integers with a
+    fixed-size-list token (a token's list layers are its data's). The join merges
     the two tokens position by position into the same fixed-size list (item field
     ``member``, not nullable). The async route rebuilt the merged token from its
     Python value as a ``large_list`` (review of PR #601, P1-2), also when a third
@@ -219,7 +258,7 @@ def test_a_join_keeps_the_declared_type_of_a_merged_data_tag_token(
         database = InMemoryArrowDatabase()
         job = _join_job(database, TAG_ORDERS[tags], inputs)
         _ = job.run(orchestrator=orchestrator())
-        stored = _stored(database, function).sort_by("k")
+        stored = _by_k(_stored(database, function))
         field = stored.schema.field("_source_k")
         assert field.type.equals(FIXED, check_metadata=True), (name, field.type)
         merged = cast("list[list[str]]", stored.column("_source_k").to_pylist())
@@ -256,9 +295,11 @@ def test_switching_routes_over_one_store_adds_no_row_after_a_join(
 # Q2 / P2-3: inputs that declare one token column with two types are refused
 # ---------------------------------------------------------------------------
 
-# Pairs of declarations of one token column; the values fit both.
+# Pairs of declarations of one token column over one list-valued data column; both
+# are valid there (a list token has the data's list layer; a plain string token
+# fits any data). A list against a fixed-size list is not such a pair: those tokens
+# need two data types, which the operators already refuse on the data column.
 TWO_TYPES = {
-    "fixed_and_large": (FIXED_PLAIN, TOKENS),
     "item_nullability": (
         pa.large_list(pa.field("item", TOKEN, nullable=False)),
         TOKENS,
@@ -272,7 +313,7 @@ def _values(kind: pa.DataType, prefix: str) -> list[Any]:
     """Two rows of tokens of ``kind``."""
     if kind == TOKEN:
         return [f"{prefix}1", f"{prefix}2"]
-    return [[f"{prefix}1", f"{prefix}2"], [f"{prefix}3", f"{prefix}4"]]
+    return [[f"{prefix}1"], [f"{prefix}2"]]
 
 
 def _two_typed(
@@ -280,8 +321,9 @@ def _two_typed(
 ) -> tuple[ArrowTableStream, ArrowTableStream]:
     """Two inputs that declare ``_source_<column>`` with the case's two types.
 
-    For ``column == "x"`` both inputs have the data columns ``x`` and ``w`` / ``v``
-    (``x`` collides under ``MergeJoin``); otherwise their own data columns.
+    ``column`` is a list in both inputs. For ``column == "x"`` both inputs have the
+    data columns ``x`` and ``w`` / ``v`` (``x`` collides under ``MergeJoin``);
+    otherwise their own data columns.
     """
     first, second = TWO_TYPES[case]
     if swapped:
@@ -289,7 +331,9 @@ def _two_typed(
     data = {"a": ("x", "w"), "b": ("x", "v")} if column == "x" else DATA
     streams = []
     for name, kind, source_keys in (("a", first, (1, 2)), ("b", second, keys)):
-        source = _source(name, tags, data=data[name], keys=source_keys)
+        source = _source(
+            name, tags, data=data[name], keys=source_keys, shapes={column: TOKENS}
+        )
         streams.append(
             _with_tokens(source, tags, {column: (_values(kind, name), kind)})
         )
@@ -329,9 +373,11 @@ def test_merge_join_refuses_two_declarations_of_a_colliding_token_column(
     """``MergeJoin`` refuses, on both routes, inputs whose colliding column's token
     types differ, naming the column and both types, whether or not a key matches.
 
-    On the base such a job completed: the sync edge had typed both token columns
-    again from their values (a fixed-size list became a ``large_list``), so the
-    declarations no longer differed when the operator saw them (review of PR
+    The colliding column ``x`` is a list in both inputs; one declares a list of
+    tokens for it and the other a plain string token (or lists whose items differ
+    in nullability). On the base such a job completed when the tokens' values
+    typed alike: the sync edge typed both token columns again from their values, so
+    the declarations no longer differed when the operator saw them (review of PR
     #601, P2-3; the refusal is the developer's decision of November 27, 2026).
     """
     order = TAG_ORDERS[tags]
@@ -343,8 +389,8 @@ def test_merge_join_refuses_two_declarations_of_a_colliding_token_column(
         job = PipelineJob(name="two_types", database=InMemoryArrowDatabase())
         with job:
             merged = MergeJoin()(
-                _source("a", order, data=("x", "w")),
-                _source("b", order, data=("x", "v"), keys=keys),
+                _source("a", order, data=("x", "w"), shapes={"x": TOKENS}),
+                _source("b", order, data=("x", "v"), keys=keys, shapes={"x": TOKENS}),
                 label="merged",
             )
             add_pairs.pod(merged, label="f")
@@ -364,8 +410,9 @@ def test_join_refuses_two_declarations_of_a_merged_data_tag_token(
     """``Join`` refuses, on both routes, inputs whose shared data-tag's token types
     differ, naming the column and both types, whether or not a key matches.
 
-    The sync route silently took the first input's type and the async route
-    rebuilt the token from its value (review of PR #601, P1-2 and P2-3).
+    The key ``k`` is a list in both inputs. The sync route silently took the first
+    input's type and the async route rebuilt the token from its value (review of
+    PR #601, P1-2 and P2-3).
     """
     order = TAG_ORDERS[tags]
     left, right = _two_typed("k", case, swapped, order, keys)
@@ -379,13 +426,50 @@ def test_join_refuses_two_declarations_of_a_merged_data_tag_token(
         job = PipelineJob(name="two_types", database=InMemoryArrowDatabase())
         with job:
             joined = Join()(
-                _source("a", order), _source("b", order, keys=keys), label="joined"
+                _source("a", order, shapes={"k": TOKENS}),
+                _source("b", order, keys=keys, shapes={"k": TOKENS}),
+                label="joined",
             )
             add_two.pod(joined, label="f")
         job.bind(sources={"a": left, "b": right})
         refused = _refusal(lambda: job.run(orchestrator=orchestrator()))
         assert _names_both_types(refused, "k", case)
     assert calls["add_two"] == 0
+
+
+@TAG_ORDER
+@SIDES
+def test_tokens_of_two_list_kinds_need_two_data_types_which_are_refused(
+    swapped: bool, tags: str
+) -> None:
+    """A fixed-size-list token in one input and a ``large_list`` token in the other.
+
+    The reviewer's case for P2-3. Under the token-shape rule each token needs data
+    of its own list kind, so the colliding column ``x`` has two data types, and
+    ``MergeJoin`` refuses the inputs on ``x`` itself, on both routes. (With ``x``
+    an integer in both, as in the review, neither stream can be built.)
+    """
+    order = TAG_ORDERS[tags]
+    kinds = (TOKENS, FIXED_PLAIN) if swapped else (FIXED_PLAIN, TOKENS)
+    left, right = (
+        _with_tokens(
+            _source(name, order, data=("x", extra), shapes={"x": kind}),
+            order,
+            {"x": ([[f"{name}1", f"{name}2"]] * 2, kind)},
+        )
+        for name, extra, kind in (("a", "w", kinds[0]), ("b", "v", kinds[1]))
+    )
+    sync = _refusal(lambda: MergeJoin()(left, right).as_table())
+    assert "MergeJoin" in sync and "data column 'x'" in sync
+    # The async route has no validation step: it refuses the same column when the
+    # rows meet, naming both Arrow types.
+    late = _refusal(lambda: _async_rows(MergeJoin(), left, right))
+    assert "MergeJoin" in late and "column 'x'" in late
+    scalar = _source("a", order, data=("x", "w"))
+    message = _refusal(
+        lambda: _with_tokens(scalar, order, {"x": ([["p", "q"]] * 2, FIXED_PLAIN)})
+    )
+    assert "'_source_x'" in message and "'x'" in message
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +494,9 @@ def test_a_channel_carries_a_token_columns_item_metadata(kind: str, tags: str) -
     order = TAG_ORDERS[tags]
     declared = WITH_ITEM_METADATA[kind]
     stream = _with_tokens(
-        _source("a", order), order, {"x": ([["p", "q"], ["r", "s"]], declared)}
+        _source("a", order, shapes={"x": declared}),
+        order,
+        {"x": ([["p", "q"], ["r", "s"]], declared)},
     )
     built, tag_keys, data_tags = StaticOutputOperatorPod._rows_to_table(  # pyright: ignore[reportPrivateUsage]  # the batch a node builds from its rows
         list(stream.iter_data())
@@ -490,7 +576,9 @@ def test_the_whole_table_form_drops_a_token_fields_own_metadata(tags: str) -> No
     order = TAG_ORDERS[tags]
     kind = WITH_ITEM_METADATA["large_list"]
     stream = _with_tokens(
-        _source("a", order), order, {"x": ([["p"], ["q", "r"]], kind)}
+        _source("a", order, shapes={"x": kind}),
+        order,
+        {"x": ([["p"], ["q", "r"]], kind)},
     )
     table = stream.as_table(columns=ZERO_ROW_INPUT_COLUMNS)
     index = table.schema.get_field_index("_source_x")
@@ -574,21 +662,22 @@ def test_a_function_stream_outside_a_job_keeps_fallen_through_token_types(
 ) -> None:
     """``pod(stream).as_table(columns={"source": True})`` keeps the tokens' types.
 
-    Two data-tags fall through the function with a fixed-size-list token and a
-    nested token holding a null and an empty list. The stream's table converted
-    every source-info token from its Python value and raised ``ValueError:
-    Unsupported Python type: <class 'list'>`` (review of PR #601, P2-6; it failed on
-    the base too).
+    Two data-tags fall through the function: ``k``, a fixed-size list with a
+    fixed-size-list token, and ``g``, a list of lists with a nested token holding a
+    null and an empty list. The stream's table converted every source-info token
+    from its Python value and raised ``ValueError: Unsupported Python type: <class
+    'list'>`` (review of PR #601, P2-6; it failed on the base too).
     """
     order = TAG_ORDERS[tags]
-    stream = _with_tokens(_source("a", order), order, STREAM_TOKENS)
+    shapes = {name: kind for name, (_, kind) in STREAM_TOKENS.items()}
+    stream = _with_tokens(_source("a", order, shapes=shapes), order, STREAM_TOKENS)
 
     @function_pod(output_keys="total")
     def add(x: int, w: int) -> int:
         return x + w
 
     out = add.pod(stream)
-    table = out.as_table(columns={"source": True}).sort_by("k")
+    table = out.as_table(columns={"source": True}).sort_by("total")
     assert table.column("total").to_pylist() == [110, 220]
     for name, (values, kind) in STREAM_TOKENS.items():
         field = table.schema.field(f"_source_{name}")
@@ -615,13 +704,13 @@ def test_the_python_schema_of_a_token_follows_its_columns_type(tags: str) -> Non
 
     A token ``[None]`` in a column declared two list levels deep shows one level;
     the Python schema said ``list[str]`` while the Arrow schema had two levels
-    (review of PR #601, P3). A null token in a list column is a list too.
+    (review of PR #601, P3). A list holding only a null token is a list too.
     """
     order = TAG_ORDERS[tags]
     stream = _with_tokens(
-        _source("a", order, data_tags=False),
+        _source("a", order, data_tags=False, shapes={"x": NESTED, "w": TOKENS}),
         order,
-        {"x": ([[None], [["t"]]], NESTED), "w": ([None, ["u"]], TOKENS)},
+        {"x": ([[None], [["t"]]], NESTED), "w": ([[None], ["u"]], TOKENS)},
         data_tags=False,
     )
     for _, data in stream.iter_data():
@@ -644,84 +733,62 @@ NULL_TOKENS: dict[str, tuple[list[Any], pa.DataType]] = {
 }
 
 
-def _flat(value: Any) -> list[Any]:
-    """Every token inside a (nested) token value."""
-    if isinstance(value, list):
-        return [token for item in value for token in _flat(item)]
-    return [value]
-
-
-def _merged_token_outcome(run: Any) -> Any:
-    """The type and values of ``_source_k`` in ``run()``'s table, or its refusal."""
-    try:
-        table = run()
-    except (InputValidationError, ExceptionGroup) as error:
-        while isinstance(error, ExceptionGroup):
-            (error,) = error.exceptions
-        assert isinstance(error, InputValidationError)
-        return ("refused", "'_source_k'" in str(error))
-    return (
-        str(table.schema.field("_source_k").type),
-        table.sort_by("k").column("_source_k").to_pylist(),
-    )
-
-
 @TAG_ORDER
-@SIDES
+@pytest.mark.parametrize("shaped", [False, True], ids=["scalar_key", "list_key"])
 @pytest.mark.parametrize("case", list(NULL_TOKENS))
-def test_a_join_never_stores_its_pending_marker_in_a_merged_token(
-    case: str, swapped: bool, tags: str
+def test_a_stream_whose_merged_data_tag_has_a_null_list_token_is_refused(
+    case: str, shaped: bool, tags: str
 ) -> None:
-    """A merged data-tag whose list-typed token is null on both sides.
+    """The input of the reviewer's P1-1 is refused where it is built.
 
-    The sync ``Join`` wrote its internal pending marker, a string, into the
+    A data-tag ``k`` whose token column is a list type and null. Over such inputs
+    the sync ``Join`` wrote its internal pending marker, a string, into the
     list-typed column, and pyarrow stored the string's characters as the list's
     items, with no error; the async ``Join`` stored a folded string (review of PR
     #601, P1-1; the sync fault is on ``main`` too, for a direct ``Join`` over such
-    raw streams). Both routes give one outcome, directly and in a job, and no
-    stored token holds a character of the marker.
+    raw streams). The stream is not valid (the token-shape rule): over an integer
+    ``k`` its token has a list layer its data lacks, and over a list ``k`` a token
+    with a list layer is null. It is refused when built, naming the token column,
+    its data column and both types, so no ``Join``, on either route, directly or
+    in a job, is ever given it.
     """
     order = TAG_ORDERS[tags]
     values, kind = NULL_TOKENS[case]
-    names = ("b", "a") if swapped else ("a", "b")
-    left, right = (
-        _with_tokens(_source(name, order), order, {"k": (values, kind)})
-        for name in names
+    source = _source("a", order, shapes={"k": kind} if shaped else None)
+    data_type = source.as_table().schema.field("k").type
+    message = _refusal(lambda: _with_tokens(source, order, {"k": (values, kind)}))
+    assert "'_source_k'" in message and "'k'" in message
+    assert str(kind) in message and str(data_type) in message
+    assert ("tokens are null" in message) == shaped
+
+
+def test_the_join_never_writes_a_token_that_does_not_fit_its_column() -> None:
+    """The guard behind P1-1: a merged token is checked against its column's type.
+
+    A stream's tokens have the shape of their column, so the join's merged and
+    folded tokens always fit. The join still checks before it writes: a string
+    given for a list type would be stored as its characters. Here the helpers are
+    handed what no stream can hold (null list tokens to merge), and refuse.
+    """
+    from orcapod.core.operators.join import _token_array, _token_fits  # pyright: ignore[reportPrivateUsage]  # the guard
+
+    assert _token_fits("t", TOKEN) and _token_fits(None, TOKENS)
+    assert _token_fits(["a", None], TOKENS) and _token_fits([["a"], []], NESTED)
+    assert _token_fits(["a", "b"], FIXED_PLAIN)
+    assert not _token_fits("marker", TOKENS)
+    assert not _token_fits(["a"], TOKEN)
+    assert not _token_fits(["marker"], NESTED)
+    with pytest.raises(RuntimeError, match="_source_k"):
+        _ = _token_array(["marker"], TOKENS, "_source_k")
+    assert _token_array([["a"], None], TOKENS, "_source_k").to_pylist() == [["a"], None]
+
+    table = pa.table(
+        {
+            "k": pa.array([[1], [2]], pa.large_list(pa.int64())),
+            "_source_k": pa.array([None, None], TOKENS),
+            "_merged_k": pa.array([None, None], TOKENS),
+        }
     )
-
-    def table_of(rows: list[Any]) -> pa.Table:
-        # ``k`` is a data-tag, so each row's data table holds it.
-        return pa.concat_tables(
-            [data.as_table(columns={"source": True}) for _, data in rows]
-        )
-
-    outcomes = [
-        _merged_token_outcome(
-            lambda: Join()(left, right).as_table(columns={"source": True})
-        ),
-        _merged_token_outcome(lambda: table_of(_async_rows(Join(), left, right))),
-    ]
-    for orchestrator in ORCHESTRATORS.values():
-        database = InMemoryArrowDatabase()
-        job = PipelineJob(name="null_tokens", database=database)
-        with job:
-            joined = Join()(_source("a", order), _source("b", order), label="joined")
-            add_two.pod(joined, label="f")
-        job.bind(sources=dict(zip(names, (left, right))))
-
-        def run(job: PipelineJob = job, orchestrator: Any = orchestrator) -> pa.Table:
-            _ = job.run(orchestrator=orchestrator())
-            return _stored(job.database, "add_two")  # pyright: ignore[reportArgumentType]  # the job's in-memory database
-
-        outcomes.append(_merged_token_outcome(run))
-    direct_sync, direct_async, job_sync, job_async = outcomes
-    assert direct_sync == direct_async
-    assert job_sync == job_async
-    for outcome in outcomes:
-        if outcome[0] == "refused":
-            assert outcome[1]
-            continue
-        for token in _flat(outcome[1]):
-            assert token is None or (
-                token.startswith("join_v1:") and "\x00" not in token
-            ), token
+    with pytest.raises(RuntimeError, match="_source_k") as refused:
+        _ = Join._merge_source_columns(table, "_source_k", "_merged_k")  # pyright: ignore[reportPrivateUsage]  # the sync merge
+    assert "\x00" not in str(refused.value)
