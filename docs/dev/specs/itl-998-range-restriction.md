@@ -1,6 +1,7 @@
 # ITL-998: restrict a SpiralDB read to a range of a column
 
-Status: decided and implemented on this branch. Every decision, D1 to D14, is decided (section 8). The plan is `docs/dev/plans/itl-998-plan.md`. Depends on
+The design is implemented on this branch. The developer reviewed D1 through D15 on 2026-11-27
+(section 8). The plan is `docs/dev/plans/itl-998-plan.md`. This work depends on
 ITL-1465 (D2).
 
 `SpiralDBTableSource` restricts a read by equality (`where`) and `limit=`. A long table needs a window too,
@@ -73,9 +74,8 @@ service's), booleans, and every type a value condition does not support (decimal
 structs, logical types), and floats (**D14**): they were to be allowed (`float32`, `float64`) under
 Orcapod's stance (ITL-1251: every NaN is one value and unordered, so a NaN meets no range comparison and a NaN
 bound is refused; `-0.0` equals `0.0`), but the service orders floats otherwise ("Floats", below), so a float
-range stays refused. Pushing down a rewritten float range that equals the stance is a follow-up, ITL-1477.
-Equalities accept what they accept today. A refused range points to `filter`, where Orcapod's own rules
-apply.
+range is refused for now. Pushing down a rewritten float range that matches Orcapod's comparison rules is
+tracked in ITL-1477. The float refusals will be revisited in ITL-1480. A refused range points to `filter`.
 
 The check is on the column as Orcapod reads it (`_table_schema`), so a logical type stored as an integer is
 refused. The literal takes the type SpiralDB stores (`reading.found`); the connector refuses a comparison on a
@@ -157,35 +157,35 @@ above the stored quiet NaN); a bound the stance accepts is not affected. The rew
 sent for every non-NaN bound and the four operators: 52 of 52 equal the stance. `float16`: stored, but the SDK has no `float16` literal, so
 no comparison can be sent at all.
 
-So a float range is refused (D14, option A), with the pointer to `filter`, where Orcapod's rules apply. Reading
+So a float range is refused for now (D14, option A), with the pointer to `filter`. Reading
 and comparing locally (B) gives up what a range is for, bounding the read. Pushing down a rewritten range that
 equals the stance (C: add `col >= -inf` and `col <= +inf`, which excludes every NaN, and send a zero bound as
 `+0.0` for `>` and `<=`, `-0.0` for `<` and `>=`) depends on the service's order staying as observed; it is the
 follow-up ITL-1477. D6 would apply to such a bound (`0.1` is refused on a `float32` column).
 
-**Findings (existing behaviour, not changed here):**
+**Float equality findings:**
 
-- *A float equality value a narrower column cannot hold is accepted, not refused.* `check_value_for_column` takes
-  `0.1` for a `float32` column (it refuses only a finite value beyond the type's range), and the connector then
-  reads no row, since no `float32` equals `0.1` exactly: `where(f=0.1)` returns nothing, silently. This is the
-  one exception case to D6 found so far: a float range under ITL-1477 would refuse the value that an equality
-  on the same column accepts.
-- *Float equality in `where` follows the service* (documented as "the table system's own equality"): the scan's
+- *The original float equality accepted a value a narrower column could not hold.* For a
+  `float32` column, `where(f=0.1)` returned no rows because no `float32` equals `0.1` exactly.
+  For now, `where()` raises `TypeError` at the call for float equality values the column
+  cannot hold exactly. ITL-1480 tracks revisiting this refusal.
+- *Float equality in `where` follows the service* (documented as "the table system's own equality"). The scan's
   equality ([live] on `float64`, through the SDK) does not match `-0.0` to `0.0`, and matches a NaN to the same
-  bit pattern only, so `where(x=0.0)` does not read a row holding `-0.0`, and `where(x=nan)` reads only the NaNs
-  with the bits of Python's `nan` (the quiet NaN). `filter` follows Orcapod's rule (`-0.0` equals `0.0`, every
+  bit pattern only. Before the refusal in D15, `where(x=nan)` read only the NaNs with the bits of Python's
+  `nan` (the quiet NaN). `where(x=0.0)` skips rows holding `-0.0`. `filter` follows Orcapod's rule (`-0.0` equals `0.0`, every
   NaN equals NaN).
 - *Changed here after review (D15):* an independent review of `d4115197` found that a `where` call that gives
   one column both `-0.0` and `0.0` (or two NaNs) reads rows that depend on the order of the arguments:
   `Condition.of` keeps one of two values Orcapod counts equal, and SpiralDB matches the one kept by its bits.
   With a `float64` column holding `[-0.0, +0.0]`, `where(col("id") >= 0, {"v": -0.0}, v=0.0)` read id 1 and the
-  signs reversed id 0, under identical conditions, canonical forms and saved JSON. So a SpiralDB `where` refuses
-  an equality to `-0.0` or a NaN (`TypeError` pointing to `filter`, naming ITL-1480), checked on the arguments as
-  given (before merging) and on every restriction a source applies; every other float equality is unchanged.
+  signs reversed id 0, under identical conditions, canonical forms and saved JSON. On 2026-11-27 the developer
+  decided, "for now let's error out for equality comparison to -0.0 and NaN". SpiralDB `where` raises `TypeError`
+  pointing to `filter` and ITL-1480, which tracks revisiting the float refusals. The check applies to the
+  arguments as given before merging and to every restriction a source applies.
   One form stays out of reach: a condition the user combines beforehand with `&`
   (`(col("v") == 0.0) & (col("v") == -0.0)`) has already kept `0.0`, which is pushed down as before.
-- *The test fake's `float-eq` rule says NaN equals NaN*, any NaN; the probe saw the service match a NaN by bit
-  pattern only. The fake's comparison reads Python floats, so it cannot tell NaN payloads apart.
+- *The test fake originally treated all NaNs as equal.* The probe saw the service match a
+  NaN by bit pattern only. The fake now matches NaNs by bit pattern as well.
 
 **How it is pushed down.** The scan's `filter`, not `key_ranges=`: a filter works on any column and combines
 with equalities. [live] the scan returned only the window's rows. How much the service scans to find them could
@@ -336,7 +336,8 @@ Change:
 
 - **One list of terms** to `scan_batches` (`(column, operator, value)`, equality included) instead of `where=`
   plus `comparisons=`: one loop, and `Condition.equalities` (one value per column) is no longer how a scan is
-  described.
+  described. The implemented `SpiralDBConnector.scan_batches` has a PROVISIONAL `where`
+  parameter that takes the `Condition` holding those terms.
 - `check_restriction` calls `check_equality_conditions` for a range bound: call the value check
   (`check_value_for_column`) under a neutral name; its "where names columns..." text stays.
 - `_checked_conditions` is then unused: delete it and its test import.
@@ -347,7 +348,7 @@ Change:
 
 ## 8. Decisions
 
-Decided by the developer on 2026-11-25 and 2026-11-26.
+The developer reviewed all decisions on 2026-11-27.
 
 | # | Question | Decision | State |
 |---|---|---|---|
@@ -364,7 +365,7 @@ Decided by the developer on 2026-11-25 and 2026-11-26.
 | D11 | Merge order | ITL-1465 (PR 576) first; ITL-998 may merge before 555 and 558; then the rest of the stack with 567 last | Approved |
 | D12 | Live proof of the types | Throwaway tables now; the kept conformance test on the final code before ready | Approved; probes run, section 2 |
 | D13 | Scope | `SpiralDBTableSource` only; other sources stay with ITL-1219 | Approved |
-| D14 | Float ranges, given the service's float order | A: refused, pointing to `filter` (B, read then compare locally, and C, push down a rewritten range equal to the stance, were the other options) | Approved: A; C is ITL-1477 |
-| D15 | Float equality to `-0.0` or NaN in `where` (review of `d4115197`) | Refused, `TypeError` pointing to `filter`, naming ITL-1480; every other float equality as before | Decided on the developer's behalf by the coordinator (logged) |
+| D14 | Float ranges, given the service's float order | Refused for now, pointing to `filter`. Pushdown is tracked in ITL-1477. | Approved by the developer on 2026-11-27. Revisit the refusal in ITL-1480. |
+| D15 | Float equality to `-0.0` or NaN in `where` (review of `d4115197`) | Refused for now with `TypeError` pointing to `filter`. | Decided by the developer on 2026-11-27. Revisit the refusal in ITL-1480. |
 
 One restriction per table in a pipeline stays in force; lifting it is ITL-1472, not this change.

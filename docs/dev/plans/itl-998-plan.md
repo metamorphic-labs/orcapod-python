@@ -1,7 +1,8 @@
 # ITL-998 implementation plan: range restriction for `SpiralDBTableSource`
 
 The design is `docs/dev/specs/itl-998-range-restriction.md`; its decisions are section 8. This plan implements
-D1 to D14: a float range is refused (D14, option A). The follow-up that pushes down a rewritten float range,
+D1 to D14: a float range is refused for now (D14, option A). ITL-1480 tracks revisiting the float refusals.
+The follow-up that pushes down a rewritten float range,
 ITL-1477, stays an isolated addition: one gate, one function and their tests, listed at the end.
 
 ## Branch and dependencies
@@ -53,7 +54,8 @@ ITL-1477, stays an isolated addition: one gate, one function and their tests, li
 
 ### `src/orcapod/databases/spiraldb_connector.py`
 
-- `scan_batches(where=...)` takes the source's `Condition` (its terms are the one list of `(column, operator,
+- The `where` parameter of `SpiralDBConnector.scan_batches` is PROVISIONAL and takes the source's
+  `Condition` (its terms are the one list of `(column, operator,
   value)`) instead of a mapping; done this way rather than a new `terms=` argument, since `Condition` is the one
   restriction class. One loop builds the predicate: an equality as today (`_literal`; a `float16` equality still
   compared locally, an inexact `float32` one still reads no row, as today); a comparison through one new

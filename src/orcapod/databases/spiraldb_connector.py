@@ -966,9 +966,9 @@ class SpiralDBConnector:
 
         Args:
             table_name: Plain table name (no dataset prefix).
-            where: Equalities and ranges of columns (a ``Condition`` that
-                ``check_restriction`` takes); a row is read only if all hold. A range
-                is of an integer, timestamp or date column, and SpiralDB applies it.
+            where: PROVISIONAL. Takes a ``Condition`` accepted by ``check_restriction``.
+                A row is read only if all equalities and ranges hold. SpiralDB applies
+                ranges of integer, timestamp or date columns.
             limit: Read at most this many rows, the first in key order.
             asof: Read the table as of this version (a ``get_table_version`` value).
 

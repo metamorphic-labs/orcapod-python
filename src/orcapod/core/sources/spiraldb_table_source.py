@@ -230,8 +230,8 @@ class SpiralDBTableSource(RootSource):
         system_tag_columns: Additional system-level tag columns.
         where: Column name to value, or a ``Condition`` (``orcapod.types``) of
             equalities and ranges. Only the rows that meet it are read; SpiralDB
-            applies it before any row is transferred. Each value must be exactly of
-            its column's Python type (see ``where()``, the same mechanism).
+            applies it before any row is transferred. Values follow the same type
+            and exactness rules as ``where()``.
         limit: Read at most this many rows: the first in key order (after ``where``).
         asof: Read the table as of this version (microseconds, as SpiralDB's
             transaction timestamps). If ``None`` (default), the version the table has
@@ -261,10 +261,11 @@ class SpiralDBTableSource(RootSource):
         ValueError: If the table is not found, has no key schema, a tag column or a
             ``where`` column is not in the table, a ``where`` value is ``None``, or
             ``limit``, ``max_rows`` or ``batch_rows`` is not a positive integer.
-        TypeError: If a ``where`` value has the wrong Python type or cannot be held
-            exactly by the column's Arrow type, or ``where`` holds anything but
-            equalities and ranges of integer, timestamp and date columns. Float
-            columns without a logical type also take exactly representable Python ints.
+        TypeError: If a ``where`` value has the wrong Python type, cannot be held
+            exactly by the column's Arrow type, or uses an unsupported condition.
+            Float columns without a logical type also take exactly representable
+            Python ints. The refusal of inexact float equalities holds for now
+            and will be revisited in ITL-1480.
         InputValidationError: If ``tags_as_data`` names a column that is not a tag
             column or not a key column, or a new name that is already a column, is
             given twice, or is reserved for system columns.
@@ -526,19 +527,19 @@ class SpiralDBTableSource(RootSource):
         ``col("t").between(a, b)``, which includes both ends). Write a window half-open,
         ``>= start`` and ``< stop``: adjacent windows then neither overlap nor leave a
         gap. Ranges of one column add up, and may select no row; a null meets no
-        condition. A range of another type (a float, a string) is refused: SpiralDB
-        orders floats by IEEE 754 total order, not as Orcapod does, so filter the
-        stream instead (a float range applied by SpiralDB is ITL-1477). Anything else
+        condition. Float ranges are refused for now (ITL-1477). Use ``filter`` for
+        ranges of unsupported types such as floats and strings. Anything else
         (``is_in``, a null test, ``!=``, two columns, ``|``, ``~``) is refused too.
 
-        An equality value must fit its column's Arrow type exactly. For example,
-        a plain float32 column accepts ``0.5`` and ``1`` and refuses ``0.1`` (ITL-1480).
+        For now, ``where()`` refuses float equality values that the column's Arrow
+        type cannot hold exactly. For example, a plain float32 column accepts
+        ``0.5`` and ``1`` and raises ``TypeError`` for ``0.1`` at the call.
         An equality sent to SpiralDB uses the service's own comparison. For a float column,
         ``0.0`` does not select the ``-0.0`` rows. An equality to ``-0.0`` or a NaN is
-        refused (``TypeError``): SpiralDB matches them by their bits, while Orcapod
+        refused for now (``TypeError``). SpiralDB matches them by their bits, while Orcapod
         counts ``-0.0`` equal to ``0.0`` and NaN equal to NaN, so the rows read would
-        depend on which of two equal values a condition kept (ITL-1480). To select
-        rows by such values as Orcapod matches them, filter inside the pipeline.
+        depend on which of two equal values a condition kept. ITL-1480 tracks revisiting
+        the float refusals. Use ``filter`` to compare these values by Orcapod's rules.
 
         A convenience: the arguments are given to ``Condition.of``, which builds the
         ``Condition`` (``orcapod.types``); the source checks it against its table and
@@ -562,10 +563,14 @@ class SpiralDBTableSource(RootSource):
         Raises:
             ValueError: If no condition is given, a column is not in the table, a
                 value is ``None``, or a column must equal two different values.
-            TypeError: If a value has the wrong Python type or cannot be held exactly
-                by its column's Arrow type, the column's type takes no such condition,
-                the condition holds anything but equalities and ranges, or a column
-                is to equal ``-0.0`` or a NaN (ITL-1480).
+            TypeError: If the value has the wrong Python type (for example, a NumPy
+                scalar or a date given as a string) or cannot be held exactly by the
+                column's Arrow type (for example, ``-1`` for an unsigned column).
+                Values are never converted, rounded or clamped. This error also
+                applies to unsupported conditions. For now, float equalities with
+                ``-0.0``, NaN, or values the column cannot hold exactly raise this
+                error (ITL-1480).
+                Use ``filter`` for unsupported conditions.
         """
         try:
             # As given, before merging: merging may keep 0.0 of 0.0 and -0.0, or
