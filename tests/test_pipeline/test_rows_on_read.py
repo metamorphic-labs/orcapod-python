@@ -26,6 +26,7 @@ from orcapod.types import CacheMode
 from tests.test_core.operators.test_row_built_form import (
     _NESTED,  # pyright: ignore[reportPrivateUsage]  # the shared provenance fixtures
     _NodeEvents,  # pyright: ignore[reportPrivateUsage]
+    _source,  # pyright: ignore[reportPrivateUsage]
     _source_table,  # pyright: ignore[reportPrivateUsage]
     _with_source_x,  # pyright: ignore[reportPrivateUsage]
 )
@@ -51,6 +52,16 @@ def _plain() -> DictSource:
     )
 
 
+# ``x`` as ``_unconvertible`` has it: the three list layers of its token (the
+# token-shape rule, ITL-1491: a list token needs list data of the same layers).
+NestedX = list[list[list[int]]]
+
+
+def _nested() -> Any:
+    """The source whose slot ``_unconvertible`` is bound to: ``x`` three lists deep."""
+    return _source(_UNCONVERTIBLE)
+
+
 def test_a_bound_raw_source_with_nested_tokens_reads_its_rows_once() -> None:
     """A bound raw stream with nested tokens: its rows are read once, when it runs,
     and the run completes: the successor's edge builds the rows into one table with
@@ -59,7 +70,7 @@ def test_a_bound_raw_source_with_nested_tokens_reads_its_rows_once() -> None:
     job = PipelineJob(name="read_once", database=InMemoryArrowDatabase())
     with job:
         Batch(batch_size=2)(
-            _plain().select_data_columns(["x"], label="selected"), label="batched"
+            _nested().select_data_columns(["x"], label="selected"), label="batched"
         )
     source: Any = _unconvertible()
     reads: list[int] = []
@@ -91,7 +102,7 @@ def test_a_fallback_source_nobody_reads_completes() -> None:
     """
     job = PipelineJob(name="leaf", database=InMemoryArrowDatabase())
     with job:
-        _plain().select_data_columns(["x"], label="selected")
+        _nested().select_data_columns(["x"], label="selected")
     job.bind(sources={"s": _unconvertible()})
     dag: OrcaDAG[Any] = OrcaDAG()
     dag.add_node(job.nodes["s"])
@@ -223,7 +234,7 @@ def _replay_job(database: InMemoryArrowDatabase, *, with_successor: bool) -> Any
     """``source -> select x`` with the select node replaying from ``database``."""
     job = PipelineJob(name="replay_odd", database=InMemoryArrowDatabase())
     with job:
-        selected = _plain().select_data_columns(["x"], label="selected")
+        selected = _nested().select_data_columns(["x"], label="selected")
         if with_successor:
             Batch(batch_size=2)(selected, label="batched")
     job.nodes["selected"].attach_databases(
@@ -245,7 +256,7 @@ def test_replay_of_a_table_the_whole_table_build_cannot_use(
     logged = InMemoryArrowDatabase()
     job = PipelineJob(name="replay_odd", database=InMemoryArrowDatabase())
     with job:
-        _plain().select_data_columns(["x"], label="selected")
+        _nested().select_data_columns(["x"], label="selected")
     node: Any = job.nodes["selected"]
     node.attach_databases(pipeline_database=logged, cache_mode=CacheMode.LOG)
     job.run()
@@ -277,11 +288,11 @@ def test_replay_of_a_table_the_whole_table_build_cannot_use(
 # ── round 4: the boundary of the eager route, and the lazy output itself ──────
 
 
-DELIVERED: list[int] = []
+DELIVERED: list[Any] = []
 
 
-def _deliver(x: int, ctx: Any) -> None:
-    DELIVERED.append(x)
+def _deliver(x: NestedX, ctx: Any) -> None:
+    DELIVERED.append(x[0][0][0])
 
 
 def _leaf_run(job: PipelineJob, label: str) -> _NodeEvents:
@@ -307,7 +318,7 @@ def test_a_bound_tap_stream_delivers_every_row_as_main_does() -> None:
     tapped: Any = tap.process(raw)
     job = PipelineJob(name="tap_bound", database=InMemoryArrowDatabase())
     with job:
-        _plain().select_data_columns(["x"], label="selected")
+        _nested().select_data_columns(["x"], label="selected")
     job.bind(sources={"s": tapped})
     observer = _leaf_run(job, "s")
     assert DELIVERED == [1, 2]
@@ -445,7 +456,7 @@ def test_a_lazy_output_is_described_and_opened_without_reading() -> None:
 
     job = PipelineJob(name="lazy_out", database=InMemoryArrowDatabase())
     with job:
-        _plain().select_data_columns(["x"], label="selected")
+        _nested().select_data_columns(["x"], label="selected")
     job.bind(sources={"s": _unconvertible()})
     out: Any = job.nodes["s"].execute()
     assert isinstance(out, RowsOnRead)
@@ -1289,16 +1300,16 @@ def _held_job() -> tuple[Any, Any, Any]:
     from orcapod import function_pod
 
     @function_pod(output_keys="y")
-    def plus_one(x: int) -> int:
-        return x + 1
+    def plus_one(x: NestedX) -> int:
+        return len(x) + 1
 
     job = PipelineJob(name="held_unconvertible", database=InMemoryArrowDatabase())
     with job:
-        selected = _plain().select_data_columns(["x"], label="selected")
+        selected = _nested().select_data_columns(["x"], label="selected")
         plus_one.pod(selected, label="after")
     other = PipelineJob(name="independent", database=InMemoryArrowDatabase())
     with other:
-        _plain().select_data_columns(["x"], label="independent")
+        _nested().select_data_columns(["x"], label="independent")
     independent = next(
         n for n in other.nodes.values() if type(n).__name__ == "SourceJobNode"
     )
@@ -1436,7 +1447,7 @@ def test_an_inactive_function_node_passes_rows_with_nested_tokens(
     from orcapod.core.nodes.function_node import FunctionJobNode
 
     @function_pod(output_keys="y")
-    def never(x: int) -> int:
+    def never(x: NestedX) -> int:
         raise AssertionError("an inactive function must not be called")
 
     pod = never.pod
