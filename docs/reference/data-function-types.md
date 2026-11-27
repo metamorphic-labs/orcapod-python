@@ -138,10 +138,9 @@ Every result table has, besides its type's record:
 | `__pod_ts` | `timestamp[us, tz=UTC]` | yes | when the result was stored; the newest wins when two rows share an input |
 | `__data_context` | `large_string` | no | the data context that wrote the row (`std:v1:default`) |
 
-The database keeps the row's record id, a UUID of 16 bytes, as its record id column. Like
-every table Orcapod creates, the table is stored with its record id first and every other
-column sorted by name (see [Data types per database](database-types.md)); the declared
-order above is the order the function node presents them in.
+The database keeps the row's record id, a UUID of 16 bytes, as its record id column.
+The result table follows the [database's stored column order rule and its exception](database-types.md).
+The function node presents these columns in the declared order above.
 
 ```python
 stored = types_store.get_all_records(next(p for p in types_store.list_sources() if "_result" in p))

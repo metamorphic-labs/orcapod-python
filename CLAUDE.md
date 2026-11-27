@@ -1011,15 +1011,17 @@ current data context are the current entries.
 | Operator cache | `odb_v1` | `OPERATOR_DB_SCHEMA_VERSION` |
 | Cached source | `sdb_v1` | `SOURCE_DB_SCHEMA_VERSION` |
 
-- **Stored column order** (ITL-1367 and ITL-1370): a stored table's column order is
-  the database's. ITL-1370 proposes the record id first and every other column in
-  ascending code-point order for a new table, through the shared
+- Stored column order (ITL-1367 and ITL-1370). A new table is written with the record id
+  first and every other column in ascending code-point order through the shared
   `databases/utils.canonical_column_order` helper. SpiralDB uses the same order.
-  An existing table keeps its order. An append matches exact column names when its
-  storage and logical types match the held ones. A table whose write schema contains
-  a type the append comparison does not handle keeps its first write's order when
-  the backend preserves that type. Delta normalizes view types before queueing,
-  matches merge and coerce to the queued rows by name, and uses a retrying MERGE
+  An existing table keeps its order. A new table keeps its entire first-write order if
+  any column has a type at any depth that the append comparison cannot handle
+  (dictionary-encoded, view, list view, union, interval, or run-end-encoded), a column
+  name repeats, or the record id column is absent. Matching a later append by name
+  requires the comparison to confirm every field. Reordering even part of such a table
+  could leave the writer's own next append unmatched. ITL-1529 tracks the follow-up.
+  Delta normalizes view types before queueing, matches batches to the queued rows by
+  column name, and uses a conflict-safe MERGE with retry
   for every commit to an existing table (ITL-1377). A connector database trusts nothing about a stored
   table across calls: it aligns incoming rows only with its own pending batch and checks rows
   against the table read at flush and at a read. No hash, record id, path or layout version follows a stored column order, and no

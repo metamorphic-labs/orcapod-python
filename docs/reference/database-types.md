@@ -129,17 +129,22 @@ else the stored table; Delta to the rows still pending (it matches a stored tabl
 itself); a connector database (SQLite, PostgreSQL) to the rows it has pending,
 and to the stored table when it writes or reads them, checking them first against the
 table as it is then, by exact name and type (a column with field metadata stays in its
-queued order at a flush). A new table Orcapod writes puts the record id first and sorts
-every other column by name in code-point order. SpiralDB reads
+queued order at a flush). By default, a new table Orcapod writes puts the record id first
+and sorts every other column by name in code-point order. SpiralDB reads
 its key columns first and its value columns in the same name order. Orcapod cannot
 write SpiralDB tables through spiral-sdk yet.
 
-With no pending rows, a new batch takes the canonical order. Delta applies that order
-to a new table or one already in canonical order, and uses a conflict-safe MERGE with
-retry for later commits. A table written before this change keeps its first write's
-order and accepts matching rows in any column order. If the write schema contains a
-type the append comparison does not handle, the ordering helper leaves the columns
-in input order. Delta normalizes view types before ordering.
+A new table keeps its entire first-write order if any column at any depth has a type
+the append comparison cannot handle (a dictionary-encoded type, a view type, a list
+view, a union, an interval, or a run-end-encoded type), a column name repeats, or the
+record id column is absent. Matching a later append by name requires the comparison
+to confirm every field. Reordering even part of such a table could leave the writer's
+own next append unmatched. ITL-1529 tracks the follow-up.
+
+Delta normalizes view types before checking the write schema. It matches batches to
+queued rows by column name and uses a conflict-safe MERGE with retry for commits to an
+existing table. A table written before this change keeps its first-write order and
+accepts matching rows in any column order.
 
 Stored column order has no effect on hashes, record IDs or stored paths. Orcapod's
 nodes, cached and derived sources, and observers present columns in their own order.
