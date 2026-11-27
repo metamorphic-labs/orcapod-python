@@ -1428,3 +1428,217 @@ def test_persistent_hit_keeps_the_row_s_own_data_tags(
     for tag, data in rows:
         assert held[tag.as_dict()["unit"]].as_dict() == data.as_dict()
         assert held[tag.as_dict()["unit"]].source_info() == data.source_info()
+
+
+# ---------------------------------------------------------------------------
+# Review of fc4a0b71: a row's observer events come from one task, with one input
+# ---------------------------------------------------------------------------
+
+
+class _ScopedAndPaired:
+    """An observer that does what real observers do with a row's events.
+
+    It sets a context variable at a row's start and resets that token at the
+    row's end or crash (which raises ``ValueError`` when the two calls come from
+    different tasks), and pairs the start with the end or crash by the content
+    hash of the input it is given (which raises ``KeyError`` when the two calls
+    are given different inputs).
+    """
+
+    def __init__(self) -> None:
+        from contextvars import ContextVar
+
+        self.scope: Any = ContextVar("row scope", default=None)
+        self.tokens: dict[Any, Any] = {}
+        self.trace: list[tuple[str, Any, tuple[str, ...]]] = []
+
+    def contextualize(self, *path: str) -> "_ScopedAndPaired":
+        return self
+
+    def on_run_start(self, *args: Any, **kwargs: Any) -> None: ...
+
+    def on_run_end(self, *args: Any, **kwargs: Any) -> None: ...
+
+    def on_node_start(self, *args: Any, **kwargs: Any) -> None: ...
+
+    def on_node_end(self, *args: Any, **kwargs: Any) -> None: ...
+
+    def create_data_logger(self, tag: Any, data: Any) -> Any:
+        return None
+
+    def on_data_start(self, label: str, tag: Any, data: Any) -> None:
+        key = data.content_hash()
+        self.tokens[key] = self.scope.set(key)
+        self.trace.append(("start", self.scope.get() == key, tuple(data.keys())))
+
+    def _finish(self, event: str, data: Any) -> None:
+        key = data.content_hash()
+        self.trace.append((event, self.scope.get() == key, tuple(data.keys())))
+        self.scope.reset(self.tokens.pop(key))
+
+    def on_data_end(
+        self, label: str, tag: Any, data: Any, *args: Any, **kwargs: Any
+    ) -> None:
+        self._finish("end", data)
+
+    def on_data_crash(self, label: str, tag: Any, data: Any, error: Any) -> None:
+        self._finish("crash", data)
+
+
+def _scale_or_fail(fails: bool) -> tuple[FunctionPod, list[int]]:
+    calls: list[int] = []
+
+    def scale(value: int, weight: float) -> tuple[int, float]:
+        calls.append(value)
+        if fails:
+            raise ValueError("the function failed")
+        return value * 2, weight * 2
+
+    return FunctionPod.from_fn(scale, output_keys=["doubled", "heavier"]), calls
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.RowFailuresWarning")
+@pytest.mark.parametrize("fails", [False, True], ids=["success", "function fails"])
+def test_a_job_s_async_run_keeps_a_cold_ephemeral_row_s_events_in_one_task(
+    fails: bool,
+) -> None:
+    """A cold row of a job in ephemeral mode, run with ``run_async``: its start
+    and its end or crash reach the observer from one task, so a context variable
+    set at the start is still set, and can be reset, at the end."""
+    from orcapod import PipelineJob
+    from orcapod.core.sources import DictSource
+
+    pod, calls = _scale_or_fail(fails)
+    persistent, ephemeral = InMemoryArrowDatabase(), InMemoryArrowDatabase()
+    source = DictSource(
+        [
+            {"key": "a", "group": "g", "value": 2, "weight": 1.5},
+            {"key": "b", "group": "g", "value": 3, "weight": 1.5},
+        ],
+        tag_columns=["key", "group"],
+        tag_only_columns=True,
+        source_id="rows",
+    )
+    job = PipelineJob(
+        name="scoped", database=InMemoryArrowDatabase(), result_database=persistent
+    )
+    with job:
+        pod(source, label="scaled")
+    job.set_ephemeral_database(ephemeral)
+    job.apply_node_config(NodeConfig(is_result_ephemeral=True))
+    observer = _ScopedAndPaired()
+
+    _ = asyncio.run(job.run_async(observer=observer))  # pyright: ignore[reportArgumentType]  # a recording observer
+
+    assert sorted(calls) == [2, 3]
+    assert observer.tokens == {}
+    assert sorted(event for event, _, _ in observer.trace) == sorted(
+        ["start", "start"] + (["crash", "crash"] if fails else ["end", "end"])
+    )
+    assert all(in_scope for _, in_scope, _ in observer.trace)
+    assert len(_result_ids(ephemeral)) == (0 if fails else 2)
+
+
+@pytest.mark.parametrize("fails", [False, True], ids=["success", "function fails"])
+def test_async_miss_gives_a_fall_through_pod_s_observer_one_input(fails: bool) -> None:
+    """A cold row of a pod that lets data-tags fall through, on the async job
+    path in ephemeral mode: the observer is given the same input at the row's
+    start and at its end or crash, so it can pair them."""
+    from orcapod.core.function_pod import FallThroughPod
+
+    plain, calls = _scale_or_fail(fails)
+    pod = FallThroughPod(plain, ["unit", "session"])
+    source = _data_tag_source({"u1": 2, "u2": 3}, "s1")
+    node = FunctionJobNode(
+        pod,
+        source,
+        pipeline_database=InMemoryArrowDatabase(),
+        result_database=InMemoryArrowDatabase(),
+    )
+    node.node_config = NodeConfig(is_result_ephemeral=True)
+    node.set_ephemeral_database(InMemoryArrowDatabase())
+    observer = _ScopedAndPaired()
+
+    async def go() -> None:
+        input_ch: Channel[Any] = Channel(buffer_size=4)
+        output_ch: Channel[Any] = Channel(buffer_size=4)
+        for pair in source.iter_data():
+            await input_ch.writer.send(pair)
+        await input_ch.writer.close()
+        await node.async_execute(
+            input_ch.reader,
+            output_ch.writer,
+            observer=observer,  # pyright: ignore[reportArgumentType]  # a recording observer
+            error_policy="continue",
+        )
+
+    asyncio.run(go())
+
+    assert sorted(calls) == [2, 3]
+    assert observer.tokens == {}
+    assert len(observer.trace) == 4
+    assert all(in_scope for _, in_scope, _ in observer.trace)
+    assert len({columns for _, _, columns in observer.trace}) == 1
+
+
+@pytest.mark.parametrize("database_error", [True, False], ids=["database", "other"])
+def test_a_failing_persistent_lookup_keeps_the_row_s_events_in_one_task(
+    database_error: bool,
+) -> None:
+    """The start and the crash that a failing persistent lookup reports on the
+    async job path come from one task and carry one input, also for a pod that
+    lets data-tags fall through."""
+    from orcapod.core.function_pod import FallThroughPod
+    from orcapod.errors import OrcapodDatabaseReadError
+
+    plain, calls = _scale_or_fail(False)
+    pod = FallThroughPod(plain, ["unit", "session"])
+    source = _data_tag_source({"u1": 2, "u2": 3}, "s1")
+    persistent = InMemoryArrowDatabase()
+    node = FunctionJobNode(
+        pod,
+        source,
+        pipeline_database=InMemoryArrowDatabase(),
+        result_database=persistent,
+    )
+    node.node_config = NodeConfig(is_result_ephemeral=True)
+    node.set_ephemeral_database(InMemoryArrowDatabase())
+
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        if database_error:
+            raise OrcapodDatabaseReadError("fault", ("fault",))
+        raise RuntimeError("fault")
+
+    persistent.get_records_with_column_value = broken  # pyright: ignore[reportAttributeAccessIssue]  # the injected fault
+    observer = _ScopedAndPaired()
+
+    async def go() -> None:
+        input_ch: Channel[Any] = Channel(buffer_size=4)
+        output_ch: Channel[Any] = Channel(buffer_size=4)
+        for pair in source.iter_data():
+            await input_ch.writer.send(pair)
+        await input_ch.writer.close()
+        await node.async_execute(
+            input_ch.reader,
+            output_ch.writer,
+            observer=observer,  # pyright: ignore[reportArgumentType]  # a recording observer
+            error_policy="continue",
+        )
+
+    raised: BaseException | None = None
+    try:
+        asyncio.run(go())
+    except BaseException as error:  # noqa: BLE001  # the outcome under test
+        raised = _leaf(error)
+
+    assert calls == []
+    assert (type(raised).__name__ if raised else None) == (
+        "OrcapodDatabaseReadError" if database_error else None
+    )
+    assert observer.tokens == {}
+    # A database error stops the run at the first row; another error fails each.
+    assert [event for event, _, _ in observer.trace] == ["start", "crash"] * (
+        1 if database_error else 2
+    )
+    assert all(in_scope for _, in_scope, _ in observer.trace)
+    assert len({columns for _, _, columns in observer.trace}) == 1
