@@ -534,10 +534,10 @@ def test_a_path_like_source_uses_its_text_once(
     assert path.calls == 1
 
 
-def test_csv_path_like_with_distinct_display_name_pending_developer_decision(
+def test_csv_path_like_uses_filesystem_text_for_identity_config_and_reads(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Record the filesystem-text ID for a path that main named by its display text."""
+    """Use the same filesystem text for the default ID, saved path, and reads."""
 
     class DisplayPath:
         def __str__(self) -> str:

@@ -34,8 +34,10 @@ hashing) and produces the final immutable stream.
 | `DeltaTableSource` | Table directory path | Reads Delta Lake table |
 
 `CSVSource`, `DeltaTableSource`, and `SQLiteTableSource` accept `str` or
-`os.PathLike[str]`, including `pathlib.Path`. They convert the path to text at construction
-and use the supplied spelling in saved job configurations and default source IDs. For
+`os.PathLike[str]`, including `pathlib.Path`. At construction, they call `os.fspath` once
+and use its result for the default source ID, the saved job configuration, and opening the
+source. For example, a CSV path object whose `__fspath__` returns `data/entries.csv` and
+whose `__str__` returns `display.csv` gets the default ID `csv_v1:data/entries.csv`. For
 local files or tables, the source anchors a relative path to the working directory at
 construction. The reader handles symlinks and `..` in that path, and later reads keep
 the same working-directory anchor. A saved relative path is relative to the working
