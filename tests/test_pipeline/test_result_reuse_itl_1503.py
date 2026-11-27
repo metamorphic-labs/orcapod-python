@@ -377,6 +377,74 @@ def test_both_stores_hold_a_result_the_persistent_one_is_used(use_async: bool) -
     assert sorted(_result_ids(persistent)) == sorted(in_persistent.values())
 
 
+HOOK_PATHS = ("sync row", "async row", "async_execute")
+
+
+def _hooks_fired(path: str, case: str) -> list[tuple[Any, ...]]:
+    """The post-run hook payloads one row gives on ``path``, as comparable tuples.
+
+    Args:
+        path: ``"sync row"`` (``execute``), ``"async row"``
+            (``_async_process_data_internal``) or ``"async_execute"``.
+        case: ``"persistent hit"``, ``"ephemeral hit"`` or ``"computed"``.
+    """
+    counted = _Counted()
+    fired: list[tuple[Any, ...]] = []
+
+    def record(payload: Any) -> None:
+        fired.append(
+            (
+                payload.stats.status.name,
+                payload.stats.error,
+                payload.result_id is not None,
+                None if payload.output is None else payload.output.as_dict(),
+                payload.tag.as_dict(),
+                payload.input.as_dict(),
+                payload.pod.label,
+                payload.pod.pod_hash,
+                payload.invocation_context is not None,
+            )
+        )
+
+    counted.pod.add_post_run_hook(record)
+    source = _input({"a": 1})
+    persistent, ephemeral = InMemoryArrowDatabase(), InMemoryArrowDatabase()
+    if case == "persistent hit":
+        _ = _seed(persistent, counted, source, {"a"})
+    elif case == "ephemeral hit":
+        _ = _seed(ephemeral, counted, source, {"a"})
+    fired.clear()
+    node = _ephemeral_node(
+        counted,
+        source,
+        pipeline=InMemoryArrowDatabase(),
+        persistent=persistent,
+        ephemeral=ephemeral,
+    )
+    if path == "async row":
+        # The entry point this case is about: the async form of the per-row path.
+        tag, data = next(iter(source.iter_data()))
+        _, output = asyncio.run(node._async_process_data_internal(tag, data))  # pyright: ignore[reportPrivateUsage]  # the path under test
+        assert output is not None
+    else:
+        assert len(_run(node, source, path == "async_execute")) == 1
+    assert counted.calls == ([1] if case == "computed" else [])
+    return fired
+
+
+@pytest.mark.parametrize("case", ["persistent hit", "ephemeral hit", "computed"])
+def test_every_path_fires_the_same_post_run_hooks(case: str) -> None:
+    """A row is observed alike on the sync row path, the async row path and
+    ``async_execute``: the same post-run hooks, with the same status and payload,
+    for a persistent hit served by the stopgap lookup as for an ephemeral hit and
+    a computed row. (Inside a job node no post-run hook of the pod fires today, on
+    any path, for any of the three: ITL-891. This test holds the paths equal,
+    whatever that issue decides they fire.)"""
+    by_path = {path: _hooks_fired(path, case) for path in HOOK_PATHS}
+    assert by_path["async row"] == by_path["sync row"]
+    assert by_path["async_execute"] == by_path["sync row"]
+
+
 def test_ephemeral_store_only_is_unchanged() -> None:
     """Without a persistent store the ephemeral store is asked, then the function."""
     counted = _Counted()
