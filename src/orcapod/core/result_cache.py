@@ -420,14 +420,17 @@ class ResultCache:
 
         The guarantee, and its whole extent: on one event loop or one thread,
         over one database object and its views, two computations for one input
-        data hash and data context store one result. The lookup and the write
-        are synchronous with no await between them, and nothing more: there is
-        no lock.
+        data hash and data context store one result, when their writes are not
+        re-entrant (neither is made from inside the other). The lookup and the
+        write are synchronous with no await between them, and nothing more:
+        there is no lock.
 
         Not covered:
 
         - several threads on one database object (two jobs run in threads, or a
           batch commit of the table that overlaps the lookup);
+        - a write made from inside a callback that runs during another
+          conditional write's flush (for example a schema guard);
         - another database handle or another process;
         - an unconditional ``store`` (a function with its own result database,
           called with ``skip_cache_lookup=True``, stores another row).

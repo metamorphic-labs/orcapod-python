@@ -1363,6 +1363,37 @@ def _joined_from_stored(
     return pa.Table.from_arrays(columns, names=names)
 
 
+# Every column group of a row but its content hash, which is computed from them.
+_WHOLE_ROW = ColumnConfig(meta=True, context=True, source=True, system_tags=True)
+
+
+def _same_row(
+    one: tuple[TagProtocol, DataProtocol], other: tuple[TagProtocol, DataProtocol]
+) -> bool:
+    """Whether two rows are equal in everything a reader can see.
+
+    The tag's values, meta columns and system tags, and the data's values, meta
+    columns, source info and data context, with their types and field metadata.
+    A function job node uses it to decide whether two rows an asynchronous run
+    emitted can be held as one (ITL-1503).
+
+    Args:
+        one: A (tag, data) row.
+        other: Another row.
+
+    Returns:
+        ``True`` when the rows are the same objects or equal in every column.
+    """
+    if one[0] is other[0] and one[1] is other[1]:
+        return True
+    return all(
+        mine.as_table(columns=_WHOLE_ROW).equals(
+            theirs.as_table(columns=_WHOLE_ROW), check_metadata=True
+        )
+        for mine, theirs in zip(one, other, strict=True)
+    )
+
+
 class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
     """DB-backed execution node for function pod invocations.
 
@@ -4648,12 +4679,14 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 # forwarded computed row), one per input (ITL-1093).
                 run_entry_ids: list[bytes] = []
                 # What a read gives back: each distinct row once, and per id above
-                # its position there. Occurrences of one instance delivered one
-                # result, in one way (computed or stored), are the same row and
-                # share one pair, so many repeats hold one row, not one each.
+                # its position there. Two occurrences share one pair only when
+                # the whole row a reader can see is equal (``_same_row``), so many
+                # identical repeats hold one row, not one each, and an occurrence
+                # that differs in anything keeps its own. The ids below only say
+                # which held rows an occurrence is compared with.
                 emitted_pairs: list[tuple[TagProtocol, DataProtocol]] = []
                 emitted_index: list[int] = []
-                pair_positions: dict[tuple[bytes, uuid.UUID, bool], int] = {}
+                pair_positions: dict[tuple[bytes, uuid.UUID], list[int]] = {}
                 # Rows whose function raised (error policy "continue").
                 failed_rows: list[int] = [0]
 
@@ -4668,18 +4701,15 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                     delivered, whatever the cache holds for its instance later.
                     """
                     await output.send((tag, data))
-                    row = (
-                        instance_id,
-                        data.datagram_uuid,
-                        bool(
-                            data.get_meta_value(
-                                CachedFunctionPod.RESULT_COMPUTED_FLAG, False
-                            )
-                        ),
+                    candidates = pair_positions.setdefault(
+                        (instance_id, data.datagram_uuid), []
                     )
-                    position = pair_positions.get(row)
-                    if position is None:
-                        position = pair_positions[row] = len(emitted_pairs)
+                    for position in candidates:
+                        if _same_row(emitted_pairs[position], (tag, data)):
+                            break
+                    else:
+                        position = len(emitted_pairs)
+                        candidates.append(position)
                         emitted_pairs.append((tag, data))
                     run_entry_ids.append(instance_id)
                     emitted_index.append(position)
