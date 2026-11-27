@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import uuid
 
+import pyarrow as pa
 import pytest
 
 from orcapod.core.datagrams import Data
@@ -109,14 +110,25 @@ class TestEmptyDataPayloadAccess:
 
 
 class TestEmptyDataSourceInfo:
-    def test_empty_source_info_none_by_default(self):
+    def test_no_tokens_by_default(self):
         ed = EmptyData()
-        assert ed.empty_source_info is None
+        assert ed.source_info() == {}
+        assert ed.source_info_table().num_columns == 0
 
-    def test_empty_source_info_stored(self):
-        si = {"source_id": "abc", "record_id": None}
-        ed = EmptyData(empty_source_info=si)
-        assert ed.empty_source_info == si
+    def test_tokens_are_kept_in_the_order_given(self):
+        tokens = {"total": "f:h:v0::X::total", "count": "f:h:v0::X::count"}
+        ed = EmptyData(source_info=tokens)
+        assert ed.source_info() == tokens
+        table = ed.source_info_table()
+        assert table.column_names == ["_source_total", "_source_count"]
+        assert table.to_pylist() == [
+            {"_source_total": "f:h:v0::X::total", "_source_count": "f:h:v0::X::count"}
+        ]
+        assert set(table.schema.types) == {pa.large_string()}
+
+    def test_a_copy_keeps_the_tokens(self):
+        tokens = {"total": "f:h:v0::X::total", "count": None}
+        assert EmptyData(source_info=tokens).copy().source_info() == tokens
 
 
 class TestEmptyDataMetadata:

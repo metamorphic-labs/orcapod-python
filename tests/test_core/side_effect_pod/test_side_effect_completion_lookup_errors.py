@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from typing import Any
 
-import pyarrow as pa
 import pytest
 
+from orcapod.core import row_ids
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import OrcapodDatabaseReadError
 from orcapod.pipeline.job import PipelineJob
@@ -19,8 +19,6 @@ from orcapod.side_effects import (
     SideEffectJobNode,
     SideEffectPod,
     SideEffectPodConfig,
-    _SIDE_EFFECT_RECOMPUTATION_INDEX_COL,
-    _build_record_id_preimage,
 )
 from orcapod.sources import DictSource
 
@@ -116,10 +114,9 @@ def test_a_later_completion_failure_keeps_the_delivered_prefix_and_row_tag(
     )
     pod = SideEffectPod(deliver)
     tag, data = list(source.iter_data())[1]
-    preimage = _build_record_id_preimage(tag, data).append_column(
-        _SIDE_EFFECT_RECOMPUTATION_INDEX_COL, pa.array([0], type=pa.int32())
-    )
-    bad_id = pod.data_context.arrow_hasher.hash_table(preimage).to_prefixed_digest()
+    bad_id = row_ids.entry_id(
+        pod.data_context.arrow_hasher, tag, data
+    ).to_prefixed_digest()
     store = InMemoryArrowDatabase()
     point_read = store.get_record_by_id
     bulk_read = store.get_records_by_column

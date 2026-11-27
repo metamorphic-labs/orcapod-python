@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import cast
+from typing import Any, cast
 
 import pyarrow as pa
 import pytest
@@ -15,8 +15,8 @@ from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes.function_node import (
     FunctionJobNode,
-    _PIPELINE_ENTRY_ID_COL,
-    _PIPELINE_BASE_ENTRY_ID_COL,
+    RECORD_ID_COL,
+    INSTANCE_ID_COL,
 )
 from orcapod.core.sources import ArrowTableSource
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
@@ -90,49 +90,83 @@ class TestFetchJoinedRecords:
         assert node_with_empty_db._fetch_joined_records() is None
 
     def test_returned_table_includes_pipeline_entry_id_column(self, executed_node):
-        """The returned table always contains __pipeline_entry_id."""
+        """The returned table always contains __pipeline_record_id."""
         result = executed_node._fetch_joined_records()
         assert result is not None
-        assert _PIPELINE_ENTRY_ID_COL in result.table.column_names
+        assert RECORD_ID_COL in result.table.column_names
 
     def test_taginfo_columns_present_in_result(self, executed_node):
         """taginfo_columns contains the pre-join pipeline DB column names as strings.
 
-        Specifically, _PIPELINE_ENTRY_ID_COL must be present because it is added
-        by the pipeline DB fetch (record_id_column=_PIPELINE_ENTRY_ID_COL) and
+        Specifically, RECORD_ID_COL must be present because it is added
+        by the pipeline DB fetch (record_id_column=RECORD_ID_COL) and
         captured before the join — confirming the pre-filter snapshot is correct.
         """
         result = executed_node._fetch_joined_records()
         assert result is not None
         assert isinstance(result.taginfo_columns, tuple)
         assert all(isinstance(c, str) for c in result.taginfo_columns)
-        assert _PIPELINE_ENTRY_ID_COL in result.taginfo_columns
+        assert RECORD_ID_COL in result.taginfo_columns
 
-    def test_no_base_entry_ids_returns_all_rows(self, executed_node):
-        """Calling with base_entry_ids=None returns all executed rows."""
+    def test_no_instance_ids_returns_all_rows(self, executed_node):
+        """Calling with instance_ids=None returns all executed rows."""
         result = executed_node._fetch_joined_records()
         assert result is not None
         assert result.table.num_rows == 2
 
     def test_entry_ids_filter_narrows_rows(self, executed_node):
-        """Passing a single base_entry_id returns only that row."""
+        """Passing a single instance_id returns only that row."""
         node = executed_node
         input_pairs = list(node._input_stream.iter_data())
-        base_entry_id_0 = node.compute_base_entry_id(
-            input_pairs[0][0], input_pairs[0][1]
-        )
+        instance_id_0 = node.compute_instance_id(input_pairs[0][0], input_pairs[0][1])
 
-        result = node._fetch_joined_records(base_entry_ids=[base_entry_id_0])
+        result = node._fetch_joined_records(instance_ids=[instance_id_0])
         assert result is not None
         assert result.table.num_rows == 1
-        assert (
-            result.table.column(_PIPELINE_BASE_ENTRY_ID_COL)[0].as_py()
-            == base_entry_id_0
-        )
+        assert result.table.column(INSTANCE_ID_COL)[0].as_py() == instance_id_0
 
-    def test_empty_base_entry_ids_returns_zero_rows(self, executed_node):
-        """Passing base_entry_ids=[] returns a 0-row table, not None."""
-        result = executed_node._fetch_joined_records(base_entry_ids=[])
+    @pytest.mark.parametrize("requested", [(0, 2), (2, 0), (1, 2), (2, 1, 0)])
+    def test_several_instance_ids_return_exactly_their_rows(self, requested):
+        """Several instance ids, in more than one order, return those rows only."""
+        table = pa.table(
+            {
+                "key": pa.array(["a", "b", "c"], type=pa.large_string()),
+                "part": pa.array([1, 2, 3], type=pa.int64()),
+                "value": pa.array([1, 2, 3], type=pa.int64()),
+            }
+        )
+        src = ArrowTableSource(
+            table,
+            tag_columns=["key", "part"],
+            tag_only_columns=True,
+            infer_nullable=True,
+        )
+        # The protocol's declared members are wider than the class states them
+        # (the fixtures above are in the baseline for the same call).
+        function: Any = PythonDataFunction(double_value, output_keys="result")
+        pod = FunctionPod(function)
+        node = FunctionJobNode(
+            pod,
+            src,
+            pipeline_database=InMemoryArrowDatabase(),
+            result_database=InMemoryArrowDatabase(),
+        )
+        pairs = list(node._input_stream.iter_data())
+        for tag, data in pairs:
+            node.execute_data(tag, data)
+        ids = [node.compute_instance_id(tag, data) for tag, data in pairs]
+        assert len(set(ids)) == 3
+
+        result = node._fetch_joined_records(instance_ids=[ids[i] for i in requested])
+        assert result is not None
+        found = cast("list[bytes]", result.table.column(INSTANCE_ID_COL).to_pylist())
+        assert sorted(found) == sorted(ids[i] for i in requested)
+        keys = cast("list[str]", result.table.column("key").to_pylist())
+        assert sorted(keys) == sorted("abc"[i] for i in requested)
+
+    def test_empty_instance_ids_returns_zero_rows(self, executed_node):
+        """Passing instance_ids=[] returns a 0-row table, not None."""
+        result = executed_node._fetch_joined_records(instance_ids=[])
         assert result is not None
         assert result.table.num_rows == 0
 
@@ -154,14 +188,14 @@ class TestFetchJoinedRecords:
         rows = list(source.iter_data())
         for row in rows:
             node.execute_data(*row)
-        entry_ids = [node.compute_base_entry_id(tag, data) for tag, data in rows[:2]]
+        instance_ids = [node.compute_instance_id(tag, data) for tag, data in rows[:2]]
         entries = pipeline_database.get_all_records(node._versioned_pipeline_path)
         cached_pod = node._cached_function_pod
         assert entries is not None and cached_pod is not None
         result_ids = [
             row[constants.DATA_RECORD_ID]
             for row in entries.to_pylist()
-            if row[_PIPELINE_BASE_ENTRY_ID_COL] in entry_ids
+            if row[INSTANCE_ID_COL] in instance_ids
         ]
         kept = results.get_records_by_ids(
             cached_pod.record_path, result_ids, record_id_column="rid"
@@ -173,14 +207,12 @@ class TestFetchJoinedRecords:
         )
         node.attach_databases(pipeline_database, result_database=partial_results)
 
-        for requested in (entry_ids, list(reversed(entry_ids))):
+        for requested in (instance_ids, list(reversed(instance_ids))):
             caplog.clear()
-            found = node._fetch_joined_records(base_entry_ids=requested)
+            found = node._fetch_joined_records(instance_ids=requested)
             assert found is not None
             assert found.table.num_rows == 2
-            assert set(found.table[_PIPELINE_BASE_ENTRY_ID_COL].to_pylist()) == set(
-                entry_ids
-            )
+            assert set(found.table[INSTANCE_ID_COL].to_pylist()) == set(instance_ids)
             assert (
                 "1 pipeline DB entries have no match in persistent result DB"
                 in caplog.text

@@ -29,8 +29,8 @@ by information already present in every stored record and is therefore redundant
 This module is an investigation artefact for ITL-533. It demonstrates two
 concrete properties:
 
-1. base_entry_id (hash of system_tags + INPUT_DATA_HASH_COL) already uniquely
-   identifies distinct input rows — different inputs produce different base_entry_ids
+1. instance_id (hash of system_tags + INPUT_DATA_HASH_COL) already uniquely
+   identifies distinct input rows — different inputs produce different instance_ids
    without any help from NODE_CONTENT_HASH_COL.
 
 2. _filter_by_content_hash() is a no-op for correctness: patching it to pass all
@@ -38,23 +38,23 @@ concrete properties:
 
 The deeper insight tying both properties together:
 
-NODE_CONTENT_HASH_COL is always in lockstep with base_entry_id. There is no
-scenario where base_entry_id is the same but NODE_CONTENT_HASH_COL differs, because:
+NODE_CONTENT_HASH_COL is always in lockstep with instance_id. There is no
+scenario where instance_id is the same but NODE_CONTENT_HASH_COL differs, because:
 
-  - base_entry_id = hash(system_tags + INPUT_DATA_HASH_COL)
+  - instance_id = hash(system_tags + INPUT_DATA_HASH_COL)
   - system_tags encode source_id, which defaults to table_hash (content-addressed)
   - ArrowTableSource.identity_structure() = (class_name, schema, source_id)
   - Same source_id + same schema → same source content_hash → same node content_hash
     → same NODE_CONTENT_HASH_COL
 
 So the two cases are:
-  a) Different inputs → different base_entry_id → records already distinct.
+  a) Different inputs → different instance_id → records already distinct.
      NODE_CONTENT_HASH_COL adds nothing.
-  b) Same inputs → same base_entry_id AND same NODE_CONTENT_HASH_COL.
+  b) Same inputs → same instance_id AND same NODE_CONTENT_HASH_COL.
      Same logical record should have the same record_id (idempotency is correct).
 
 Together these confirm: removing NODE_CONTENT_HASH_COL from the preimage is safe.
-The combination of system_tags + INPUT_DATA_HASH_COL + recomputation_index is
+The combination of system_tags + INPUT_DATA_HASH_COL is
 sufficient for unique record identification.
 """
 
@@ -64,6 +64,7 @@ import random
 
 import pyarrow as pa
 
+from orcapod.core import row_ids
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.data_function import PythonDataFunction
@@ -89,29 +90,29 @@ def _make_source_stream(values: list[int]) -> ArrowTableSource:
     )
 
 
-def _all_base_entry_ids(node: FunctionJobNode, stream) -> set[bytes]:
-    """Return the set of base_entry_ids for all (tag, data) pairs in stream."""
-    return {node.compute_base_entry_id(tag, data) for tag, data in stream.iter_data()}
+def _all_instance_ids(node: FunctionJobNode, stream) -> set[bytes]:
+    """Return the set of instance_ids for all (tag, data) pairs in stream."""
+    return {node.compute_instance_id(tag, data) for tag, data in stream.iter_data()}
 
 
 # ---------------------------------------------------------------------------
-# Property 1: base_entry_id uniqueness across distinct inputs
+# Property 1: instance_id uniqueness across distinct inputs
 #
 # Two nodes sharing the same pipeline table (same pipeline_hash, different
-# content_hash) produce *different* base_entry_ids when processing different
+# content_hash) produce *different* instance_ids when processing different
 # input rows.  system_tags (content-addressed source_id) alone ensures this.
 # ---------------------------------------------------------------------------
 
 
 class TestBaseEntryIdUniqueness:
-    """base_entry_id uniquely identifies distinct input rows across node instances."""
+    """instance_id uniquely identifies distinct input rows across node instances."""
 
-    def test_different_source_data_different_base_entry_id(self, double_pf):
-        """Rows from two sources with different data → different base_entry_ids.
+    def test_different_source_data_different_instance_id(self, double_pf):
+        """Rows from two sources with different data → different instance_ids.
 
         Even though node1 and node2 share the same pipeline_hash (same function +
         same schema), their inputs come from sources with different table_hash-derived
-        source_ids.  system_tags therefore differ → different base_entry_id.
+        source_ids.  system_tags therefore differ → different instance_id.
         """
         db = InMemoryArrowDatabase()
         src1 = _make_source_stream([10, 20, 30])  # source_id = hash(this table)
@@ -133,17 +134,17 @@ class TestBaseEntryIdUniqueness:
         # But have different content_hashes (different upstream data)
         assert node1.content_hash() != node2.content_hash()
 
-        ids1 = _all_base_entry_ids(node1, src1)
-        ids2 = _all_base_entry_ids(node2, src2)
+        ids1 = _all_instance_ids(node1, src1)
+        ids2 = _all_instance_ids(node2, src2)
 
-        # No overlap: different rows → different base_entry_ids
+        # No overlap: different rows → different instance_ids
         assert ids1.isdisjoint(ids2), (
-            "base_entry_ids from different sources must not collide; "
+            "instance_ids from different sources must not collide; "
             "NODE_CONTENT_HASH_COL is therefore not needed to distinguish them."
         )
 
-    def test_different_row_within_source_different_base_entry_id(self, double_pf):
-        """Distinct rows within the same source always have different base_entry_ids."""
+    def test_different_row_within_source_different_instance_id(self, double_pf):
+        """Distinct rows within the same source always have different instance_ids."""
         db = InMemoryArrowDatabase()
         src = _make_source_stream([10, 20, 30])
 
@@ -153,13 +154,13 @@ class TestBaseEntryIdUniqueness:
             pipeline_database=db,
         )
 
-        ids = [node.compute_base_entry_id(tag, data) for tag, data in src.iter_data()]
+        ids = [node.compute_instance_id(tag, data) for tag, data in src.iter_data()]
         assert len(ids) == len(set(ids)), (
-            "Every row in a source must have a unique base_entry_id."
+            "Every row in a source must have a unique instance_id."
         )
 
     def test_no_collision_across_six_distinct_inputs(self, double_pf):
-        """base_entry_ids for all six rows across two sources are pairwise distinct."""
+        """instance_ids for all six rows across two sources are pairwise distinct."""
         db = InMemoryArrowDatabase()
         src1 = _make_source_stream([1, 2, 3])
         src2 = _make_source_stream([4, 5, 6])
@@ -175,11 +176,11 @@ class TestBaseEntryIdUniqueness:
             pipeline_database=db,
         )
 
-        all_ids = list(_all_base_entry_ids(node1, src1)) + list(
-            _all_base_entry_ids(node2, src2)
+        all_ids = list(_all_instance_ids(node1, src1)) + list(
+            _all_instance_ids(node2, src2)
         )
         assert len(all_ids) == len(set(all_ids)), (
-            "All six base_entry_ids must be distinct — no collisions without "
+            "All six instance_ids must be distinct — no collisions without "
             "NODE_CONTENT_HASH_COL."
         )
 
@@ -194,20 +195,15 @@ class TestBaseEntryIdUniqueness:
 class TestPreimageShape:
     """Preimage column membership — confirms the post-ITL-533 state."""
 
-    def test_node_content_hash_col_not_in_preimage_keys(self, double_pf):
+    def test_node_content_hash_col_not_in_preimage_keys(self):
         """Regression: preimage = system_tags + INPUT_DATA_HASH_COL only.
 
         NODE_CONTENT_HASH_COL must be absent from the record_id preimage
         after ITL-533.
         """
         src = _make_source_stream([10])
-        node = FunctionJobNode(
-            function_pod=FunctionPod(data_function=double_pf),
-            input_stream=src,
-            pipeline_database=InMemoryArrowDatabase(),
-        )
         tag, data = next(iter(src.iter_data()))
-        preimage = node._build_entry_id_preimage(tag, data)
+        preimage = row_ids.entry_id_preimage(tag, data)
 
         assert constants.INPUT_DATA_HASH_COL in preimage.column_names, (
             "INPUT_DATA_HASH_COL must be in the preimage."
@@ -224,7 +220,6 @@ class TestPreimageShape:
         INPUT_DATA_HASH_COL must use large_binary (to_prefixed_digest), not large_string.
         """
         from orcapod.side_effects import InvocationContext
-        from orcapod.core.nodes.function_node import _build_record_id_preimage
 
         def ctx_fn(x: int, ctx: InvocationContext) -> int:
             return x * 2
@@ -240,7 +235,7 @@ class TestPreimageShape:
         assert "::" in inv_ctx.invocation_hash
 
         # Verify the preimage shape by calling the shared helper directly.
-        base_preimage = _build_record_id_preimage(tag, data)
+        base_preimage = row_ids.entry_id_preimage(tag, data)
 
         assert constants.INPUT_DATA_HASH_COL in base_preimage.column_names, (
             "INPUT_DATA_HASH_COL must be in the invocation context preimage."
@@ -254,10 +249,10 @@ class TestPreimageShape:
             == pa.large_binary()
         ), "INPUT_DATA_HASH_COL in the preimage must be large_binary."
 
-    def test_node_content_hash_lockstep_with_base_entry_id(self, double_pf):
-        """node_content_hash is always in lockstep with base_entry_id.
+    def test_node_content_hash_lockstep_with_instance_id(self, double_pf):
+        """node_content_hash is always in lockstep with instance_id.
 
-        Same input (same source_id, same data) → same base_entry_id AND
+        Same input (same source_id, same data) → same instance_id AND
         same node content_hash.  There is no case where one differs
         without the other differing too: ArrowTableSource.identity_structure()
         = (class_name, schema, source_id), so equal source_ids + equal schemas
@@ -291,15 +286,15 @@ class TestPreimageShape:
         )
 
         for tag, data in src.iter_data():
-            eid1 = node1.compute_base_entry_id(tag, data)
-            eid2 = node2.compute_base_entry_id(tag, data)
-            # Same input → same base_entry_id ...
+            eid1 = node1.compute_instance_id(tag, data)
+            eid2 = node2.compute_instance_id(tag, data)
+            # Same input → same instance_id ...
             assert eid1 == eid2
             # ... and node content_hash values are also equal — the two are inseparable.
             # (NODE_CONTENT_HASH_COL is no longer in the preimage after ITL-533;
             # node.content_hash() is the canonical way to verify this invariant.)
             assert node1.content_hash() == node2.content_hash(), (
-                "node content_hash must be identical when base_entry_id is identical."
+                "node content_hash must be identical when instance_id is identical."
             )
 
 
@@ -546,7 +541,7 @@ class TestLockstepPropertyRandomized:
 class TestTdbVersioning:
     """``SideEffectJobNode.attach_databases()`` must write to the tdb_v2 path."""
 
-    def test_tdb_v1_path_used_after_attach(self):
+    def test_tdb_v2_path_used_after_attach(self):
         """After attaching a DB, ``_table_path`` ends with ``TRACKING_DB_SCHEMA_VERSION``."""
         import pyarrow as pa
         from orcapod.core.sources.arrow_table_source import ArrowTableSource
@@ -600,7 +595,7 @@ class TestTdbVersioning:
         old_path = node.node_uri + (f"schema:{node.pipeline_hash().to_string()}",)
         fake_record_id = b"\xde\xad" * 8
         fake_row = pa.table(
-            {"record_id_hash": pa.array(["old_hash"], type=pa.large_string())}
+            {"entry_id": pa.array(["old_hash"], type=pa.large_string())}
         )
         db.add_record(old_path, fake_record_id, fake_row)
 

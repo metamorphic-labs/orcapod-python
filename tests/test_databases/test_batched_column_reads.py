@@ -22,7 +22,7 @@ from orcapod.protocols.database_protocols import (
     STORED_RECORD_ID_COLUMN,
     ArrowDatabaseProtocol,
 )
-from tests.test_databases import fake_pyspiral
+from tests.test_databases import fake_spiral_sdk
 
 _PATH = ("records",)
 _SIZE = 1_050
@@ -122,29 +122,34 @@ def test_discard_store_returns_no_matches() -> None:
 
 
 def test_fake_uses_one_scan_for_many_record_ids(tmp_path: Path) -> None:
-    with fake_pyspiral.install(tmp_path):
+    with fake_spiral_sdk.install(tmp_path):
+        rows = _rows(0, 41).rename_columns([STORED_RECORD_ID_COLUMN, "group", "text"])
+        table = fake_spiral_sdk.ExternalProject("p").create_table(
+            "default.records", key_schema=[rows.schema.field(STORED_RECORD_ID_COLUMN)]
+        )
+        table.write(rows)
+        table.record(rows.schema)
         database = ConnectorArrowDatabase(SpiralDBConnector("p"))
-        database.add_records(_PATH, _rows(0, 41), record_id_column="rid", flush=True)
         ids = [str(i).encode() for i in range(0, 40, 2)] + [b"missing"]
-        fake_pyspiral.scan_log.clear()
+        fake_spiral_sdk.scan_log.clear()
         previous_rows = {
             row["text"].to_pylist()[0]
             for record_id in ids
             if (row := database.get_record_by_id(_PATH, record_id)) is not None
         }
-        assert len(fake_pyspiral.scan_log) == len(ids)
+        assert len(fake_spiral_sdk.scan_log) == len(ids)
 
-        fake_pyspiral.scan_log.clear()
+        fake_spiral_sdk.scan_log.clear()
         result = database.get_records_by_column(
             _PATH, STORED_RECORD_ID_COLUMN, [*reversed(ids), ids[0]]
         )
         assert result is not None
         assert set(result["text"].to_pylist()) == previous_rows
         assert result.num_rows == len(previous_rows)
-        assert len(fake_pyspiral.scan_log) == 1
+        assert len(fake_spiral_sdk.scan_log) == 1
 
         assert database.get_records_by_column(_PATH, "group", []) is None
-        assert len(fake_pyspiral.scan_log) == 1
+        assert len(fake_spiral_sdk.scan_log) == 1
 
 
 def test_delta_reuses_the_loaded_rows_across_lookup_batches(

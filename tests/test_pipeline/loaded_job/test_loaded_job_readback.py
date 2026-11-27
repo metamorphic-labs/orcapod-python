@@ -18,7 +18,7 @@ import sys
 import uuid
 import warnings
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -325,14 +325,15 @@ def test_loaded_function_node_with_store_is_read_only(saved: pathlib.Path) -> No
 
 
 def _append_recomputed_record(
-    node: Any, entry_id: int, recomputation_index: int, value: int
+    node: Any, entry_id: int, minutes_later: int, value: int
 ) -> None:
     """Store a recomputed result for the entry tagged ``id == entry_id``.
 
     Non-public on purpose: no public call recomputes a stored entry in a test, so
     this writes what a recomputation writes -- a result record with *value* and a
-    pipeline record for the same base entry with *recomputation_index* -- straight
-    into the node's store.
+    pipeline record for the same instance, recorded *minutes_later* than the
+    entry's original record -- straight into the node's store. Among the records
+    of one instance the one recorded last is the current one (ITL-1471).
     """
     from orcapod.system_constants import constants
 
@@ -345,19 +346,20 @@ def _append_recomputed_record(
     )
     pipeline_db = node._pipeline_database
     table_path = node._versioned_pipeline_path
-    entry_id_col = "__pipeline_entry_id"
+    entry_id_col = "__row_key"  # the name the table's row key is read under here
     records = pipeline_db.get_all_records(table_path, record_id_column=entry_id_col)
-    # The entry's original record: selected by its tag value, never by row order.
-    index_col = "__pipeline_recomputation_index"
+    # The entry's original record: selected by its tag value and its recording
+    # time (the earliest), never by row order.
+    time_col = "__recorded_at"
     id_type = records.schema.field("id").type
-    index_type = records.schema.field(index_col).type
-    record = records.filter(
-        pc.and_(
-            pc.equal(records.column("id"), pa.scalar(entry_id, type=id_type)),
-            pc.equal(records.column(index_col), pa.scalar(0, type=index_type)),
-        )
+    of_entry = records.filter(
+        pc.equal(records.column("id"), pa.scalar(entry_id, type=id_type))
+    )
+    record = of_entry.filter(
+        pc.equal(of_entry.column(time_col), pc.min(of_entry.column(time_col)))
     )
     assert record.num_rows == 1
+    recorded_at = record.column(time_col)[0].as_py()
     old_record_id = record.column(record_id_col)[0]
     result = results.filter(pc.equal(results.column(record_id_col), old_record_id))
 
@@ -375,8 +377,26 @@ def _append_recomputed_record(
     reader.result_database.add_records(
         reader.record_path, result, record_id_column=record_id_col, flush=True
     )
-    record = replaced(record, entry_id_col, [uuid.uuid4().bytes])
-    record = replaced(record, "__pipeline_recomputation_index", [recomputation_index])
+    # The recomputed record: its record id is made from the node's content hash,
+    # the instance and the new result id, and is its key (ITL-1471).
+    from orcapod.core import row_ids
+    from orcapod.types import ContentHash
+
+    new_record = row_ids.record_id(
+        node.data_context.arrow_hasher,
+        ContentHash.from_prefixed_digest(
+            record.column("__node_content_hash")[0].as_py()
+        ),
+        ContentHash.from_prefixed_digest(
+            record.column("__pipeline_instance_id")[0].as_py()
+        ),
+        uuid.UUID(bytes=new_record_id),
+    )
+    record = replaced(record, "__pipeline_record_id", [new_record.to_prefixed_digest()])
+    record = replaced(record, entry_id_col, [new_record.to_prefixed_digest()])
+    record = replaced(
+        record, time_col, [recorded_at + datetime.timedelta(minutes=minutes_later)]
+    )
     record = replaced(record, record_id_col, [new_record_id])
     pipeline_db.add_records(
         table_path, record, record_id_column=entry_id_col, flush=True
@@ -429,15 +449,16 @@ def test_other_context_records_do_not_satisfy_saved_expectation(
 def test_recomputed_entry_is_read_once_with_its_latest_result(
     tmp_path: pathlib.Path,
 ) -> None:
-    """A loaded node's load-only run reads one row per entry: the greatest recomputation
-    index wins."""
+    """A loaded node's load-only run reads one row per entry: the record recorded
+    last wins."""
     path = _save_small_job(tmp_path, _record_double)
     node = PipelineJob.load(path).nodes["dbl"]
     # A loaded node is empty until it runs (ITL-1095): read its stored view.
     entry_id = next(iter(node.as_source().iter_data()))[0].as_dict()["id"]
-    # Index 2 is stored before index 1, so "last record wins" would pick 111.
-    _append_recomputed_record(node, entry_id, recomputation_index=2, value=222)
-    _append_recomputed_record(node, entry_id, recomputation_index=1, value=111)
+    # The later record is stored before the earlier one, so "last row wins" would
+    # pick 111.
+    _append_recomputed_record(node, entry_id, minutes_later=2, value=222)
+    _append_recomputed_record(node, entry_id, minutes_later=1, value=111)
 
     reloaded_job = PipelineJob.load(path)
     reloaded_job.bind(sources={"dsrc": _dict_source()})
@@ -454,7 +475,7 @@ def test_recomputed_entry_is_read_once_with_its_latest_result(
 def test_live_node_hot_load_reads_the_latest_recomputed_result(
     tmp_path: pathlib.Path,
 ) -> None:
-    """A live node hot-loading from its database also keeps the greatest index."""
+    """A live node hot-loading from its database also keeps the record recorded last."""
     # Behaviour change (ITL-904): the hot-load used to keep whichever record of an
     # entry the join returned last; it now keeps the latest recomputation.
     store = DeltaTableDatabase(str(tmp_path / "store"))
@@ -464,8 +485,8 @@ def test_live_node_hot_load_reads_the_latest_recomputed_result(
     _ = job.run()
     node = job.nodes["dbl"]
     entry_id = next(iter(node.iter_data()))[0].as_dict()["id"]
-    _append_recomputed_record(node, entry_id, recomputation_index=2, value=222)
-    _append_recomputed_record(node, entry_id, recomputation_index=1, value=111)
+    _append_recomputed_record(node, entry_id, minutes_later=2, value=222)
+    _append_recomputed_record(node, entry_id, minutes_later=1, value=111)
 
     fresh = PipelineJob(name="small", database=store)
     with fresh:
@@ -517,14 +538,45 @@ def test_newer_unavailable_result_does_not_expose_old_persistent_result(
 
     path = _save_small_job(tmp_path, _record_double)
     store = DeltaTableDatabase(str(tmp_path / "store"))
-    (table_path,) = [p for p in store.list_sources() if p[-1] == "pdb_v1"]
+    (table_path,) = [p for p in store.list_sources() if p[-1] == "pdb_v2"]
     records = store.get_all_records(table_path, record_id_column="__rid")
     assert records is not None
-    # Public database writes reproduce historical recomputations without executing a pod.
+    # Public database writes reproduce historical recomputations without executing a pod:
+    # each is a valid record of its instance, with a new result id, the record id made
+    # from the node's content hash and the two, which is also the row's key.
+    from orcapod.contexts import get_default_context
+    from orcapod.core import row_ids
+    from orcapod.types import ContentHash
+
+    hasher = get_default_context().arrow_hasher
+    result_ids = [uuid.uuid4() for _ in range(records.num_rows)]
+    record_ids = [
+        row_ids.record_id(
+            hasher,
+            ContentHash.from_prefixed_digest(node),
+            ContentHash.from_prefixed_digest(instance),
+            result,
+        )
+        for node, instance, result in zip(
+            cast(
+                "list[bytes]",
+                records.column(constants.NODE_CONTENT_HASH_COL).to_pylist(),
+            ),
+            cast("list[bytes]", records.column("__pipeline_instance_id").to_pylist()),
+            result_ids,
+        )
+    ]
     for column, values in {
-        "__rid": [uuid.uuid4().bytes for _ in range(records.num_rows)],
+        "__rid": [r.to_prefixed_digest() for r in record_ids],
+        "__pipeline_record_id": [r.to_prefixed_digest() for r in record_ids],
+        constants.DATA_RECORD_ID: [r.bytes for r in result_ids],
         constants.IS_EPHEMERAL_COL: [True] * records.num_rows,
-        "__pipeline_recomputation_index": [1] * records.num_rows,
+        "__recorded_at": [
+            recorded + datetime.timedelta(minutes=1)
+            for recorded in cast(
+                "list[datetime.datetime]", records.column("__recorded_at").to_pylist()
+            )
+        ],
     }.items():
         index = records.schema.get_field_index(column)
         field = records.schema.field(index)
@@ -1048,13 +1100,14 @@ def test_latest_readable_result_wins_across_both_stores(
     # A cleared node is empty until it runs (ITL-1095); the readback of the entry, the
     # lookup a run makes, picks the newest recomputation from whichever database holds it.
     assert node.as_table().num_rows == 0
-    loaded = node.get_cached_results([node.compute_base_entry_id(tag, data)])
+    loaded = node.get_cached_results([node.compute_instance_id(tag, data)])
     assert [result["value"] for _, result in loaded.values()] == [expected]
 
 
-def test_warm_delta_keeps_the_fresh_read_winner_when_recomputation_indexes_tie(
+def test_warm_delta_keeps_the_fresh_read_winner_when_recorded_timestamps_tie(
     tmp_path: pathlib.Path,
 ) -> None:
+    """Warm and fresh Delta reads choose the same result at equal timestamps."""
     from orcapod.core.nodes.function_node import FunctionJobNode
 
     root = tmp_path / "store"
@@ -1070,7 +1123,7 @@ def test_warm_delta_keeps_the_fresh_read_winner_when_recomputation_indexes_tie(
     assert node.get_all_records() is not None
 
     for result in (111, 222):
-        _append_recomputed_record(node, entry_id, recomputation_index=1, value=result)
+        _append_recomputed_record(node, entry_id, minutes_later=1, value=result)
         assert node.get_all_records() is not None
 
     fresh_job = PipelineJob(name="small", database=DeltaTableDatabase(str(root)))

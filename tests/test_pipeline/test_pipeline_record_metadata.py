@@ -44,8 +44,7 @@ from tests.test_databases.test_connector_arrow_database import MockDBConnector
 
 RUN_ID = "__pipeline_run_id"
 RECORDED_AT = "__recorded_at"
-INDEX = "__pipeline_recomputation_index"
-BASE_ENTRY = "__pipeline_base_entry_id"
+INSTANCE = "__pipeline_instance_id"
 RECORD_ID = "__record_id"
 ORCHESTRATORS = {"sync": SyncPipelineOrchestrator, "async": AsyncPipelineOrchestrator}
 
@@ -103,10 +102,21 @@ def pipeline_path(store: ArrowDatabaseProtocol) -> tuple[str, ...]:
 
 
 def pipeline_rows(store: ArrowDatabaseProtocol) -> pa.Table:
-    """Read the pipeline table with stable ordering and its physical row ID."""
+    """Read the pipeline table with stable ordering and its physical row ID.
+
+    Rows of one site are in the order they were recorded (ITL-1471: the recording
+    time tells the records of one instance apart).
+    """
     table = store.get_all_records(pipeline_path(store), record_id_column=RECORD_ID)
     assert table is not None
-    return table.sort_by([("site", "ascending"), (INDEX, "ascending")])
+    return _recorded_order(table)
+
+
+def _recorded_order(table: pa.Table) -> pa.Table:
+    """Sort by site, then by recording time when the table has one."""
+    if RECORDED_AT in table.column_names:
+        return table.sort_by([("site", "ascending"), (RECORDED_AT, "ascending")])
+    return table.sort_by([("site", "ascending")])
 
 
 class RunObserver(NoOpObserver):
@@ -222,7 +232,7 @@ def test_job_records_keep_their_original_metadata(
         RECORDED_AT, pa.timestamp("us", tz="UTC"), nullable=False
     )
     assert original[RUN_ID].to_pylist() == [observer.run_id] * 2
-    assert original[INDEX].to_pylist() == [0, 0]
+    assert "__pipeline_recomputation_index" not in original.column_names
     original_times = cast(list[datetime], original[RECORDED_AT].to_pylist())
     assert all(before <= recorded <= after for recorded in original_times)
 
@@ -257,9 +267,12 @@ def test_job_records_keep_their_original_metadata(
         after_recompute = datetime.now(timezone.utc)
         assert next_run.run_id and next_run.run_id != observer.run_id
         records = pipeline_rows(store)
-        assert records.filter(pc.field(INDEX) == 0).equals(original)
-        new = records.filter(pc.field(INDEX) == 1)
-        assert new[BASE_ENTRY].to_pylist() == original[BASE_ENTRY].to_pylist()
+        # The first run's rows are untouched; each recompute is a new row of the
+        # same instance, keyed by its new result id.
+        assert records.filter(pc.field(RUN_ID) == observer.run_id).equals(original)
+        new = records.filter(pc.field(RUN_ID) == next_run.run_id)
+        assert new.num_rows == 2 and records.num_rows == 4
+        assert new[INSTANCE].to_pylist() == original[INSTANCE].to_pylist()
         assert set(new[RECORD_ID].to_pylist()).isdisjoint(
             original[RECORD_ID].to_pylist()
         )
@@ -474,9 +487,7 @@ def test_legacy_schema_is_refused_before_evaluation(
     assert results.list_table_paths() == []
     retained = pipeline.get_all_records(path, record_id_column=RECORD_ID)
     assert retained is not None
-    assert retained.sort_by([("site", "ascending"), (INDEX, "ascending")]).equals(
-        legacy
-    )
+    assert _recorded_order(retained).equals(legacy)
 
 
 @pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
@@ -656,13 +667,16 @@ def test_pipeline_record_requires_an_output(
         assert store.list_table_paths() == []
 
 
-@pytest.mark.parametrize(
-    ("orchestrator", "indices"), [("sync", [0]), ("async", [0, 1])]
-)
-def test_identical_inputs_without_system_tags(
-    orchestrator: str, indices: list[int]
-) -> None:
-    """Sync reuses the first entry, while async can schedule both copies as misses."""
+@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
+def test_identical_inputs_without_system_tags(orchestrator: str) -> None:
+    """Two copies of one input are one instance, with one row per result.
+
+    Sync reuses the first entry: one row. Async can schedule both copies as misses
+    before either result is stored; when each then computed its own result, each
+    has its own record id and both rows are stored, and when the second took the
+    first's result, the second write is the same record and is skipped. Which of
+    the two happens depends on scheduling, so both are accepted on the async path.
+    """
     table = source().as_table().select(["site", "group", "x", "y"]).take([0, 0])
     stream = ArrowTableStream(table, tag_columns=["site", "group"])
     store = InMemoryArrowDatabase()
@@ -670,4 +684,7 @@ def test_identical_inputs_without_system_tags(
     assert isinstance(pod, FunctionPod)
     node = FunctionJobNode(pod, stream, pipeline_database=store)
     assert execute_standalone(node, stream, orchestrator) == 2
-    assert pipeline_rows(store)[INDEX].to_pylist() == indices
+    stored = pipeline_rows(store)
+    assert stored.num_rows in ((1,) if orchestrator == "sync" else (1, 2))
+    assert len(set(stored[INSTANCE].to_pylist())) == 1
+    assert len(set(stored["__data_id"].to_pylist())) == stored.num_rows

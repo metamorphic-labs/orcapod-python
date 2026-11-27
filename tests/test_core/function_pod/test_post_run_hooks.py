@@ -72,7 +72,7 @@ class TestSingleHookPayload:
         assert p.stats.duration_ms >= 0
         assert p.stats.error is None
         assert p.output is not None
-        assert p.record_id_hash == str(p.output.datagram_uuid)
+        assert p.result_id == str(p.output.datagram_uuid)
         assert p.pod.label == pod.label
         assert p.pod.pod_hash == pod.content_hash().to_string()
         assert p.input is not None
@@ -217,7 +217,7 @@ class TestErrorStatus:
         assert isinstance(p.stats.error, RuntimeError)
         assert str(p.stats.error) == "boom"
         assert p.output is None
-        assert p.record_id_hash is None
+        assert p.result_id is None
 
     def test_original_exception_reraises_after_hooks(self):
         def explodes(x: int) -> int:
@@ -255,7 +255,7 @@ class TestFilteredOutput:
         assert len(payloads) == 1
         p = payloads[0]
         assert p.output is None
-        assert p.record_id_hash is None
+        assert p.result_id is None
         assert p.stats.status == InvocationStatus.COMPUTED
         assert p.stats.error is None
 
@@ -394,7 +394,7 @@ class TestCacheHitStatus:
         stream2 = pod.process(_make_stream(n=1))
         list(stream2.iter_data())
 
-        assert payloads[1].record_id_hash is not None
+        assert payloads[1].result_id is not None
         assert payloads[1].output is not None
 
 

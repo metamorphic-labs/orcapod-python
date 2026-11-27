@@ -307,10 +307,10 @@
     dl.appendChild(dd);
   }
   function select(i) {
-    var n = model.nodes[i], inputs = [];
+    var n = model.nodes[i], inputs = [], limits = [];
     selected = n.label;
     model.edges.forEach(function (e) {
-      if (e.target === i) inputs.push(model.nodes[e.source].label);
+      if (e.target === i) (e.constrains ? limits : inputs).push(model.nodes[e.source].text || model.nodes[e.source].label);
     });
     svg.querySelectorAll('.op-dag-node').forEach(function (g) {
       g.classList.toggle('op-dag-selected', +g.getAttribute('data-index') === i);
@@ -322,12 +322,13 @@
     panel.textContent = '';
     var head = document.createElement('div');
     head.style.fontWeight = '600';
-    head.textContent = n.label + ' \u2014 ' + [n.kind_text, n.detail, n.status].filter(Boolean).join(' \u00b7 ');
+    head.textContent = (n.text || n.label) + ' \u2014 ' + [n.kind_text, n.detail, n.status].filter(Boolean).join(' \u00b7 ');
     panel.appendChild(head);
     var dl = document.createElement('dl');
     row(dl, 'tags', schema(n.tag_schema));
     row(dl, 'data', schema(n.data_schema));
     row(dl, 'inputs', inputs.join(', ') || 'none');
+    if (limits.length) row(dl, 'constrained by', limits.join(', '));
     if (n.asked) row(dl, 'question', n.asked);
     if (n.mark) row(dl, 'highlight', n.mark);
     n.facts.forEach(function (f) { row(dl, f[0], f[1]); });

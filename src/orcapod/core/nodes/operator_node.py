@@ -22,6 +22,7 @@ import sys
 import logging
 from abc import abstractmethod
 from collections.abc import Collection, Iterator, Mapping, Sequence
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import pyarrow as pa
@@ -91,10 +92,30 @@ from orcapod.protocols.core_protocols import (
 from orcapod.protocols.core_protocols.operator_pod import OperatorPodProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import OPERATOR_DB_SCHEMA_VERSION, constants
+import orcapod.core.row_ids as row_ids
 from orcapod.types import CacheMode, ColumnConfig, ContentHash, Schema
 from orcapod.utils import arrow_utils
 
 logger = logging.getLogger(__name__)
+
+# The insertion time of an operator cache row (``timestamp[us, tz=UTC]``, not null).
+OPERATOR_RECORDED_AT_COL = "__recorded_at"
+
+# What an operator cache row is stored with beside its key and is never served: its
+# entry id and its insertion time. Neither is part of the row key (ITL-1471).
+_STORED_ONLY_COLUMNS = (row_ids.ENTRY_ID_COL, OPERATOR_RECORDED_AT_COL)
+
+
+def _stored_only_fields() -> "tuple[pa.Field[Any], pa.Field[Any]]":
+    """The fields of ``_STORED_ONLY_COLUMNS``, in that order: one definition for the
+    writer and for the check of the database when it is attached."""
+    return (
+        pa.field(row_ids.ENTRY_ID_COL, pa.large_binary(), nullable=False),
+        pa.field(
+            OPERATOR_RECORDED_AT_COL, pa.timestamp("us", tz="UTC"), nullable=False
+        ),
+    )
+
 
 if TYPE_CHECKING:
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
@@ -947,8 +968,9 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
         """Refuse a database that cannot store this node's cache (ITL-1162).
 
         With caching on, checks the cache's own columns (``__node_content_hash``,
-        ``__data_context``); the operator's output columns are checked when they
-        are written. Nothing is computed and nothing changes.
+        ``__data_context``, and the entry id and insertion time every row is stored
+        with, ``_stored_only_fields``); the operator's output columns are checked
+        when they are written. Nothing is computed and nothing changes.
 
         Args:
             pipeline_database: The database for the cache.
@@ -967,6 +989,7 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
                     [
                         pa.field(constants.NODE_CONTENT_HASH_COL, pa.large_binary()),
                         data_context_field(),
+                        *_stored_only_fields(),
                     ]
                 ),
             )
@@ -1397,6 +1420,15 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
             require_same_data_context(row_context_key, self.data_context_key)
         output_table = output_table.drop([constants.CONTEXT_KEY])
 
+        # The entry id of each row (ITL-1471) is computed from the row as the stream
+        # gives it, before the bookkeeping columns are added.
+        rows = list(stream.iter_data())
+        if len(rows) != output_table.num_rows:
+            raise RuntimeError(
+                f"OperatorJobNode {self.label!r}: the output gave {len(rows)} rows "
+                f"and a table of {output_table.num_rows}"
+            )
+
         # Always append the node content hash column first so that it is included
         # in the per-row HASH_COLUMN_NAME computation below.  This makes record IDs
         # run-scoped: identical rows from different runs carry a different
@@ -1419,19 +1451,38 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
         )
 
         # Per-row record hashes for dedup: hash(tag + data + system_tags + node_content_hash).
+        # The same pass gives each row its entry id: its tags, system tags and the
+        # hash of its data (``row_ids.entry_id``), the id a side effect keys the
+        # row by. It is no part of the row key.
         arrow_hasher = self.data_context.arrow_hasher
         record_hashes = []
+        entry_ids = []
+        row = 0
         for batch in output_table.to_batches():
             for i in range(len(batch)):
                 # A hash stored as a value carries its label: b"<label>:<digest>".
                 record_hashes.append(
                     arrow_hasher.hash_table(batch.slice(i, 1)).to_prefixed_digest()
                 )
+                entry_ids.append(
+                    row_ids.entry_id(arrow_hasher, *rows[row]).to_prefixed_digest()
+                )
+                row += 1
 
         output_table = output_table.add_column(
             0,
             self.HASH_COLUMN_NAME,
             pa.array(record_hashes, type=pa.large_binary()),
+        )
+        # Appended after the row key is computed, so neither enters it: the entry
+        # id, and the time of insertion. A row already stored is skipped below and
+        # keeps its first time.
+        entry_id_field, recorded_at_field = _stored_only_fields()
+        stored_table = output_table.append_column(
+            entry_id_field, pa.array(entry_ids, type=entry_id_field.type)
+        ).append_column(
+            recorded_at_field,
+            pa.array([datetime.now(timezone.utc)] * n_rows, recorded_at_field.type),
         )
 
         # Store — record IDs are run-scoped (NODE_CONTENT_HASH_COL is included in
@@ -1444,7 +1495,7 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
             pipeline_database.add_records(
                 self._stored_table_path,
                 with_data_context(
-                    mark_data_tags(output_table, stream_data_tags(self)),
+                    mark_data_tags(stored_table, stream_data_tags(self)),
                     self.data_context_key,
                 ),
                 record_id_column=self.HASH_COLUMN_NAME,
@@ -1491,6 +1542,10 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
         The rows keep the marker; a read into a stream drops it
         (``_stream_over_stored``).
 
+        The columns a row is stored with beside its key, its entry id and its
+        insertion time (``_STORED_ONLY_COLUMNS``, ITL-1471), are dropped here, so no
+        read that serves rows shows them.
+
         Returns:
             The rows, with ``HASH_COLUMN_NAME`` and ``NODE_CONTENT_HASH_COL`` and without
             the ``__data_context`` column, or ``None`` when the table does not exist.
@@ -1514,7 +1569,9 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
                 self._pipeline_database.base_path + self._stored_table_path,
                 stored_rows - records.num_rows,
             )
-        return self._in_row_order_on_read(records.drop([constants.DATA_CONTEXT_COL]))
+        return self._in_row_order_on_read(
+            records.drop([constants.DATA_CONTEXT_COL, *_STORED_ONLY_COLUMNS])
+        )
 
     def _in_row_order_on_read(self, records: "pa.Table") -> "pa.Table":
         """Put a stored table's user columns in row order; bookkeeping stays in place.

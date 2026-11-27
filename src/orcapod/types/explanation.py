@@ -89,9 +89,11 @@ class SourceReading:
             ]
         if not self.known:
             applied = "not known for this source kind"
-        elif self.condition or self.limit is not None:
+        elif not self.condition.is_empty or self.limit is not None:
             parts = (
-                [f"where {self.condition.canonical_text()}"] if self.condition else []
+                []
+                if self.condition.is_empty
+                else [f"where {self.condition.canonical_text()}"]
             )
             if self.limit is not None:
                 parts.append(f"limit {self.limit}")
