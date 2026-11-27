@@ -19,8 +19,14 @@ distinct ``(upstream, node)`` pair once, as before, and an operator's ``inputs``
 
 from __future__ import annotations
 
-from collections.abc import Collection, Iterable, Sequence
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
+from collections.abc import Iterable, Sequence
+from typing import TYPE_CHECKING, Any, TypeVar, cast
+
+from orcapod.core.operators.repeated_operands import (
+    SymmetryDeclaring,
+    is_flat_commutative,
+    read_argument_symmetry,
+)
 
 if TYPE_CHECKING:
     from orcapod.pipeline.dag import GraphProtocol
@@ -33,22 +39,14 @@ Position = int | None
 commutative one, whose inputs have no position."""
 
 
-class _SymmetryDeclaring(Protocol):
-    """A pod, as far as positions read it: its argument symmetry."""
-
-    def argument_symmetry(self, streams: Collection[StreamProtocol]) -> object: ...
-
-
 def input_positions(
-    pod: _SymmetryDeclaring | None, inputs: Sequence[object]
+    pod: SymmetryDeclaring | None, inputs: Sequence[object]
 ) -> tuple[Position, ...]:
     """The position of each of ``inputs`` of ``pod``.
 
-    For an operator, the kind of ``pod.argument_symmetry(inputs)`` decides, with any
-    number of inputs: a ``tuple`` (ordered: ``MergeJoin``, ``SemiJoin``, a unary
-    operator) gives each input its argument index, a ``frozenset`` (commutative:
-    ``Join``, ``Rejoin``, also given one input) gives every input ``None``. Only the
-    kind of the returned group is read. A function pod is recorded with its one
+    A flat set of the inputs (commutative: ``Join``, ``Rejoin``, even with one input)
+    gives every input ``None``. Other groups, including nested groups, preserve
+    each input's argument index. A function pod is recorded with its one
     (joined) input and a side-effect pod takes one input: position 0. A pod that is not
     known (``None``: a node a loaded file keeps read-only, or of a kind this version
     does not restore) has its inputs in the argument order the file gives, so each its
@@ -67,7 +65,7 @@ def input_positions(
     if not isinstance(pod, StaticOutputOperatorPod) or not inputs:
         return tuple(range(len(inputs)))
     streams = cast("Sequence[StreamProtocol]", inputs)
-    if isinstance(pod.argument_symmetry(streams), frozenset):
+    if is_flat_commutative(read_argument_symmetry(pod, streams), streams):
         return (None,) * len(inputs)
     return tuple(range(len(inputs)))
 

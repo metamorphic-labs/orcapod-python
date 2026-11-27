@@ -262,7 +262,12 @@ class OperatorNodeBase(StreamBase):
         return self.pipeline_identity_structure()
 
     def pipeline_identity_structure(self) -> Any:
-        return (self._operator, self._operator.argument_symmetry(self._input_streams))
+        from orcapod.core.operators.repeated_operands import read_argument_symmetry
+
+        return (
+            self._operator,
+            read_argument_symmetry(self._operator, self._input_streams),
+        )
 
     # ------------------------------------------------------------------
     # Read-only overrides (for deserialized nodes without live operator)

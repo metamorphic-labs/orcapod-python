@@ -1861,17 +1861,21 @@ class DynamicPodStream(StreamBase):
         return super().pipeline_hash(hasher)
 
     def identity_structure(self) -> Any:
+        from orcapod.core.operators.repeated_operands import read_argument_symmetry
+
         self._pod._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         structure = (self._pod,)
         if self._upstreams:
-            structure += (self._pod.argument_symmetry(self._upstreams),)
+            structure += (read_argument_symmetry(self._pod, self._upstreams),)
         return structure
 
     def pipeline_identity_structure(self) -> Any:
+        from orcapod.core.operators.repeated_operands import read_argument_symmetry
+
         self._pod._note_provisional_identity_use()  # a direct read is a use (ITL-1279)
         structure = (self._pod,)
         if self._upstreams:
-            structure += (self._pod.argument_symmetry(self._upstreams),)
+            structure += (read_argument_symmetry(self._pod, self._upstreams),)
         return structure
 
     @property

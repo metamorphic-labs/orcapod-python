@@ -309,21 +309,8 @@ class BinaryOperator(StaticOutputOperatorPod):
 
     def argument_symmetry(self, streams: Collection[StreamProtocol]) -> ArgumentGroup:
         if self.is_commutative():
-            # return as symmetric group, refusing one stream twice for now
-            # (ITL-1419; a stopgap until ITL-1511)
-            from orcapod.core.operators.repeated_operands import (
-                RepeatedOperandError,
-                operand_set,
-            )
-
-            try:
-                return operand_set(streams)
-            except RepeatedOperandError as err:
-                # Named here only when this operator's own operands repeat.
-                raise err.named(type(self).__name__) from None
-        else:
-            # return as ordered group
-            return tuple(streams)
+            return frozenset(streams)
+        return tuple(streams)
 
     async def async_execute(
         self,

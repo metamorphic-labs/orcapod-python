@@ -84,6 +84,10 @@ def require_positively_commutative(
         ValueError: If the operator is not positively known to be commutative.
     """
     from orcapod.core.operators.base import BinaryOperator
+    from orcapod.core.operators.repeated_operands import (
+        is_flat_commutative,
+        read_argument_symmetry,
+    )
 
     # A binary operator given one stream twice has one edge in a legacy file (an edge
     # list cannot repeat an edge), so its two inputs cannot be restored (CodeRabbit on
@@ -107,13 +111,10 @@ def require_positively_commutative(
     if operator is None or len(input_streams) != len(input_keys):
         raise refusal
     try:
-        symmetry = operator.argument_symmetry(input_streams)
+        symmetry = read_argument_symmetry(operator, input_streams)
     except Exception as exc:
         raise refusal from exc
-    if not isinstance(symmetry, frozenset):
-        raise refusal
-    members = cast("frozenset[Any]", symmetry)
-    if {id(member) for member in members} != {id(stream) for stream in input_streams}:
+    if not is_flat_commutative(symmetry, input_streams):
         raise refusal
 
 

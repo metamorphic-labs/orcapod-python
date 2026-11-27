@@ -2,9 +2,8 @@
 
 An edge is ``(upstream, node, position)``: one upstream given to two inputs of an ordered
 operator is two edges, so ``MergeJoin()(a, a)`` and ``SemiJoin()(a, a)`` run in a job as
-they run standalone. ``Join``, ``Rejoin`` and a function pod given one stream twice are
-refused by the operator (or the pod's join) itself, standalone and in a job, for now (a
-stopgap until ITL-1511).
+they run standalone. Reading argument symmetry for ``Join``, ``Rejoin``, or a function
+pod's join refuses repeated operands as a stopgap until ITL-1511.
 
 Inputs have two tag columns (``id``, ``key``) and two data columns (``x``, ``y``), in two
 layouts (tag order and column order swapped).
@@ -14,17 +13,23 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Collection
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
 
 import pyarrow as pa
 import pytest
+from typing_extensions import override
 
 from orcapod import Pipeline, PipelineJob, function_pod, sources
 from orcapod.core.operators import Join, MergeJoin, Rejoin, SemiJoin
+from orcapod.core.operators.repeated_operands import RepeatedOperandError
+from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
-from orcapod.errors import InputValidationError
+from orcapod.errors import InconsistentSourceError, InputValidationError
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
+from orcapod.protocols.core_protocols import ArgumentGroup, StreamProtocol
 
 
 LAYOUTS = ["tags_id_key", "tags_key_id"]
@@ -296,7 +301,7 @@ def test_a_source_fed_twice_has_the_events_of_a_source_fed_once(mode: str) -> No
 # ── what stays refused ───────────────────────────────────────────────────────
 
 
-def _data_tags_only(name: str = "d") -> Any:
+def _data_tags_only(name: str = "d") -> sources.ArrowTableSource:
     """A source whose one tag is a data-tag and which has no other data column: no
     data column overlaps when it is given twice. ``id`` repeats a value, so
     ``Join(d, d)`` would give 5 rows where ``Join(d)`` gives 3."""
@@ -426,11 +431,9 @@ def test_a_step_over_a_repeated_join_is_refused_in_either_order(
     assert job.once.as_table().num_rows == 3
 
 
-def _raw_with_map(values: list[int]) -> Any:
+def _raw_with_map(values: list[int]) -> ArrowTableStream:
     """A raw stream (no source) with a map data column: its identity hashes its rows,
     and a map value cannot be hashed."""
-    from orcapod.core.streams.arrow_table_stream import ArrowTableStream
-
     table = pa.table(
         {
             "id": pa.array(values, pa.int64()),
@@ -621,8 +624,6 @@ def test_a_join_over_a_repeated_rejoin_raises_the_rejoin_refusal(
     wrapped in a plain ``InputValidationError``; a function pod adds its context. The
     ``Rejoin`` is built outside the job (inside, recording it is refused first, before
     any step over it)."""
-    from orcapod.core.operators.repeated_operands import RepeatedOperandError
-
     d, d2, w = _data_tags_only(), _data_tags_only(), _data_tags_and_data()
     rejoined = Rejoin()(d, d2)
     with pytest.raises(RepeatedOperandError) as err:
@@ -685,3 +686,67 @@ def test_one_data_tag_stream_twice_runs_in_a_job_with_the_standalone_schema(
     assert job.step.keys() == standalone.keys()
     assert stream_data_tags(job.step) == stream_data_tags(standalone)
     assert stream_data_tags(standalone)  # the data-tags are kept, in both roles
+
+
+@pytest.mark.skipif(
+    find_spec("orcapod.pipeline.source_consistency") is None,
+    reason="Requires the source consistency rule introduced by PR 577",
+)
+def test_ordered_inputs_cannot_alias_distinct_sources() -> None:
+    """Refuse a second source object before an ordered job can alias its inputs."""
+    left = sources.ArrowTableSource(
+        pa.table({"id": [1], "key": ["k"], "x": [1]}),
+        tag_columns=["key"],
+        tag_only_columns=True,
+        source_id="same",
+        record_id_columns=["id"],
+    )
+    right = sources.ArrowTableSource(
+        pa.table({"id": [2], "key": ["k"], "x": [2]}),
+        tag_columns=["key"],
+        tag_only_columns=True,
+        source_id="same",
+        record_id_columns=["id"],
+    )
+    assert left is not right
+    assert left.content_hash() == right.content_hash()
+    assert MergeJoin()(left, right).as_table()["x"].to_pylist() == [[1, 2]]
+
+    job = PipelineJob(database=InMemoryArrowDatabase())
+    with job, pytest.raises(InconsistentSourceError):
+        _ = MergeJoin()(left, right, label="step")
+    assert "step" not in job.nodes
+
+
+class OwnJoin(Join):
+    """An extension declaring its own flat commutative group."""
+
+    @override
+    def argument_symmetry(self, streams: Collection[StreamProtocol]) -> ArgumentGroup:
+        """Describe the operands as a commutative group."""
+        return frozenset(streams)
+
+
+def test_custom_commutative_operator_cannot_collapse_a_repeated_identity() -> None:
+    d = _data_tags_only()
+    repeated = OwnJoin()(d, d)
+    assert repeated.as_table().num_rows == 5
+    assert OwnJoin()(d).as_table().num_rows == 3
+    for form_identity in (repeated.content_hash, repeated.pipeline_hash):
+        with pytest.raises(RepeatedOperandError, match=rf"OwnJoin: the {REFUSAL}"):
+            _ = form_identity()
+    job = PipelineJob(database=InMemoryArrowDatabase())
+    with job, pytest.raises(RepeatedOperandError, match=rf"OwnJoin: the {REFUSAL}"):
+        _ = OwnJoin()(d, d, label="step")
+    assert "step" not in job.nodes
+
+
+def test_hashing_error_has_precedence_over_repeat_in_both_orders() -> None:
+    d = _data_tags_only()
+    raw = _raw_with_map([1, 2])
+    with pytest.raises(ValueError) as own:
+        _ = raw.content_hash()
+    for inputs in ((d, d, raw), (raw, d, d)):
+        with pytest.raises(type(own.value)) as formed:
+            _ = Join()(*inputs).content_hash()
+        assert str(formed.value) == str(own.value)

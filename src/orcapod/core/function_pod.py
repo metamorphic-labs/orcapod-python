@@ -883,10 +883,13 @@ class _FunctionPodBase(TraceableBase):
                 supported yet, a stopgap until ITL-1511): the join that formed the set
                 is named, and this function added as context.
         """
-        from orcapod.core.operators.repeated_operands import RepeatedOperandError
+        from orcapod.core.operators.repeated_operands import (
+            RepeatedOperandError,
+            read_argument_symmetry,
+        )
 
         try:
-            return self.multi_stream_handler().argument_symmetry(streams)
+            return read_argument_symmetry(self.multi_stream_handler(), streams)
         except RepeatedOperandError as err:
             err.add_context(
                 f"the inputs of the function pod of {self.canonical_function_name!r}"

@@ -33,17 +33,14 @@ recorded over them compiled in one order and failed in the other), and that the 
 added its own error for an operand that cannot be hashed.
 
 On 2026-11-27 the developer approved refusing repeated operands as a stopgap until
-ITL-1511. The refusal occurs when the pod forms its identity from its operands as a set.
-`core/operators/repeated_operands.operand_set` builds that set
-and raises `RepeatedOperandError` (an `InputValidationError`) when two operands have one
-identity (they are equal as the set compares them). This includes two separately built
-sources with the same source ID and schema. `Join.argument_symmetry` (so also
-`Rejoin`), the commutative branch of `BinaryOperator.argument_symmetry` and the function
-pod's `argument_symmetry` call it. The error names the operator whose own operands repeat
-(`RepeatedOperandError.named`, set once); a pod downstream, and a function pod whose join
-got the operands, add context (`add_context`) and never replace that name (verification
-of the third head). Hashing, recording and compiling form the identity. An operand whose
-identity cannot be computed raises its existing hashing error. Standalone row reads such as
+ITL-1511. `core/operators/repeated_operands.read_argument_symmetry` reads the operator's
+grouping and raises `RepeatedOperandError` (an `InputValidationError`) if an unordered
+group has collapsed repeated operands. The check applies to built-in and custom
+operators because it reads their result. The error names the operator whose own
+operands repeat. A downstream pod or the function pod whose join received the operands
+can add context with `add_context`. Hashing, recording and compiling form the identity.
+Set formation completes before checking for collapsed operands, so the existing hashing
+error for an unhashable operand wins in either argument order. Standalone row reads such as
 `Join()(d, d).as_table()` or a function pod's row read over several inputs can proceed
 when they skip identity formation. A job refuses the same invocation. The developer
 accepted this discrepancy as part of the stopgap, and ITL-1511 will remove it.
@@ -51,9 +48,11 @@ accepted this discrepancy as part of the stopgap, and ITL-1511 will remove it.
 ## Change
 
 1. **One rule for positions** (new `src/orcapod/pipeline/edges.py`): `input_positions(pod,
-   inputs)` gives each input of an operator its argument index when the operator's
-   `argument_symmetry` is a tuple (`MergeJoin`, `SemiJoin`: 0 and 1) and `None` when it is a
-   `frozenset` (`Join`, `Rejoin`, even with one input). A function or side-effect pod's
+   inputs)` gives each input of an operator its argument index for ordered groups
+   (`MergeJoin`, `SemiJoin`: 0 and 1), including nested ordered groups. A flat
+   `frozenset` of the inputs gives each position `None` (`Join`, `Rejoin`, even with
+   one input). This is the same distinction used by the legacy loader. Changes to how
+   operators declare symmetry are tracked separately in ITL-1548. A function or side-effect pod's
    one input is at 0. Positions exist in memory. When ITL-1511 allows repeats, each
    identical edge will get an occurrence number so it can be identified individually. Used by
    `_record_invocation`, `compile`, the `PipelineJob` rebuild of a blueprint and the loader.

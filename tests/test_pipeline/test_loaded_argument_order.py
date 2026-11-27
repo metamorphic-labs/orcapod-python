@@ -271,6 +271,23 @@ register_operator("SchemaAwareSemiJoin", SchemaAwareSemiJoin)
 register_operator("NestedMergeJoin", NestedMergeJoin)
 
 
+def test_nested_ordered_edges_keep_both_positions_after_load(tmp_path: Path) -> None:
+    a = _inputs(tmp_path)["a"]
+    db = DeltaTableDatabase(tmp_path / "db")
+    job = PipelineJob(database=db)
+    with job:
+        _ = NestedMergeJoin()(a, a, label="step")
+    blueprint = job.pipeline
+    blueprint_path = tmp_path / "nested.pipeline.json"
+    blueprint.save(blueprint_path)
+    job_path = tmp_path / "nested.job.json"
+    job.save(job_path)
+    loaded_job = PipelineJob.load(job_path, database=db)
+
+    for graph in (job, blueprint, Pipeline.load(blueprint_path), loaded_job):
+        assert [position for _, _, position in graph._graph_edges] == [0, 1]  # pyright: ignore[reportPrivateUsage]
+
+
 def _legacy_custom(
     tmp_path: Path, make: Callable[[dict[str, Any]], Any], blueprint: bool
 ) -> tuple[Path, Path, PipelineJob]:
