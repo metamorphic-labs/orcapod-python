@@ -473,6 +473,92 @@ def write_sqlite_input(path: Path, value: int) -> None:
         connection.commit()
 
 
+class SQLitePath:
+    """A path-like object whose display name is not its filesystem name."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.calls = 0
+
+    def __fspath__(self) -> str:
+        self.calls += 1
+        return self.path
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "relative",
+        "absolute",
+        "pathlib",
+        "pathlike",
+        "dot-dot",
+        pytest.param(
+            "file-prefix",
+            marks=pytest.mark.skipif(
+                sys.platform == "win32", reason="colon in filename"
+            ),
+        ),
+    ],
+)
+def test_sqlite_job_round_trip_keeps_path_text_and_default_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    """Save the original spelling and keep both live and restored reads pinned."""
+    original = tmp_path / "original"
+    elsewhere = tmp_path / "elsewhere"
+    for directory, value in ((original, 2), (elsewhere, 99)):
+        (directory / "child").mkdir(parents=True)
+        name = "file:input.sqlite" if kind == "file-prefix" else "input.sqlite"
+        write_sqlite_input(directory / name, value)
+
+    pathlike = SQLitePath("input.sqlite")
+    paths: dict[str, str | os.PathLike[str]] = {
+        "relative": "./input.sqlite",
+        "absolute": str(original / "input.sqlite"),
+        "pathlib": Path("input.sqlite"),
+        "pathlike": pathlike,
+        "dot-dot": "child/../input.sqlite",
+        "file-prefix": "file:input.sqlite",
+    }
+    expected_path = pathlike.path if kind == "pathlike" else str(paths[kind])
+    # This is the default ID format on main, including the unmodified filename.
+    expected_id = f"sqlite_table_v1:{expected_path}:main.samples"
+    monkeypatch.chdir(original)
+    source = SQLiteTableSource(paths[kind], "samples")
+    job = PipelineJob("sqlite_paths", database=DeltaTableDatabase(original / "store"))
+    with job:
+        _ = total.pod(source)
+    assert source.source_id == expected_id
+    assert source.to_config()["db_path"] == expected_path
+
+    saved = original / "job.json"
+    job.save(saved)
+    loaded = PipelineJob.load(saved)
+    restored = next(iter(loaded.sources.values()))
+    assert isinstance(restored, SQLiteTableSource)
+    assert restored.source_id == expected_id
+    resaved = original / "resaved.json"
+    loaded.save(resaved)
+    assert resaved.read_bytes() == saved.read_bytes()
+
+    monkeypatch.chdir(elsewhere)
+    for current in (source, restored):
+        assert current.check_for_new_data() is False
+        assert current.as_table().column("x").to_pylist() == [2] * 3
+    assert pathlike.calls == (1 if kind == "pathlike" else 0)
+    # An absolute filename in a previously saved job is still read from its old location.
+    if kind == "absolute":
+        loaded_elsewhere = PipelineJob.load(saved)
+        assert (
+            next(iter(loaded_elsewhere.sources.values()))
+            .as_table()
+            .column("x")
+            .to_pylist()
+            == [2] * 3
+        )
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="colon in filename")
 def test_sqlite_source_load_preserves_filename_interpretation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

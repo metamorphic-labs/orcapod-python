@@ -1041,9 +1041,8 @@ If a cached source's Delta cache cannot be opened, its source slot stays unbound
 For a remote Delta database, the connection is deferred until the store is accessed.
 Saving the loaded job retains unavailable store and source cache locations.
 
-An existing SQLite source is opened read-only. When its database file is missing,
-the source slot stays unbound and the file stays absent. SQLite may create its own
-`-wal` and `-shm` working files when reading an existing WAL database.
+See [Saving and loading](pipeline-job.md#saving-and-loading) for how loading handles
+SQLite source paths and write-ahead log files.
 
 For example:
 

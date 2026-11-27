@@ -45,22 +45,21 @@ if TYPE_CHECKING:
     from orcapod.config import OrcapodConfig
 
 
-def _access_path(db_path: str | os.PathLike[str]) -> str:
+def _access_path(db_path: str) -> str:
     """The path a later read opens: a file path made absolute, a special name as given.
 
     SQLite's empty and in-memory database names are kept as given.
     """
-    text = os.fspath(db_path)
-    if text in {"", ":memory:"} or PurePath(text).is_absolute():
-        return text
+    if db_path in {"", ":memory:"} or PurePath(db_path).is_absolute():
+        return db_path
     # Pin the directory without normalizing the filename. The filesystem must
     # still follow a symlink before processing a following '..'.
-    pinned = os.path.join(os.getcwd(), text)
+    pinned = os.path.join(os.getcwd(), db_path)
     if PurePath(pinned).is_absolute():
         return pinned
     # A relative Windows filename on another drive uses that drive's current
     # directory. Resolve only the bare drive before appending the original name.
-    return os.path.join(os.path.abspath(PurePath(text).drive), text)
+    return os.path.join(os.path.abspath(PurePath(db_path).drive), db_path)
 
 
 class SQLiteTableSource(DBTableSource):
@@ -83,8 +82,9 @@ class SQLiteTableSource(DBTableSource):
        connection is released immediately to avoid holding file locks.
 
     Args:
-        db_path: Path to the SQLite database file, or ``":memory:"`` for an
-            in-process in-memory database.
+        db_path: String or path-like object for the SQLite database file, or
+            ``":memory:"`` for an in-process in-memory database. The original path
+            text supplies the default source name and is saved in the configuration.
         table_name: Name of the table to expose as a source.
         tag_columns: Columns to use as tag columns. A bare string is
             accepted as a single column name. If ``None`` (default),
@@ -116,7 +116,7 @@ class SQLiteTableSource(DBTableSource):
 
     def __init__(
         self,
-        db_path: str | os.PathLike,
+        db_path: str | os.PathLike[str],
         table_name: str,
         tag_columns: str | Collection[str] | None = None,
         system_tag_columns: Collection[str] = (),
@@ -129,9 +129,9 @@ class SQLiteTableSource(DBTableSource):
         tag_only_columns: TagOnlyColumns = (),
         _read_only: bool = False,
     ) -> None:
-        self._db_path = db_path
-        # Keep the original name for identity and resolve the filename once for I/O.
-        self._access_path = _access_path(db_path)
+        self._db_path = os.fspath(db_path)
+        # Keep the original name for configuration and identity, and pin where reads go.
+        self._access_path = _access_path(self._db_path)
         self._read_only = _read_only
         connector = SQLiteConnector(self._access_path, _read_only=_read_only)
 
@@ -210,7 +210,7 @@ class SQLiteTableSource(DBTableSource):
         # The path is read up to the last ``:main.``, so only the table name must not
         # hold a ``:``; the path is kept as passed, colons included (``C:\\data``).
         table = joined_location(":", f"main.{table_name}")
-        return f"{os.fspath(self._db_path)}:{table}"
+        return f"{self._db_path}:{table}"
 
     @contextmanager
     @override
@@ -229,7 +229,7 @@ class SQLiteTableSource(DBTableSource):
         """Serialize source configuration to a JSON-compatible dict."""
         base = super().to_config()
         base.pop("connector", None)
-        return {**base, "source_type": self.SOURCE_KIND, "db_path": str(self._db_path)}
+        return {**base, "source_type": self.SOURCE_KIND, "db_path": self._db_path}
 
     @classmethod
     def from_config(

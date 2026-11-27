@@ -493,13 +493,24 @@ tables. A remote Delta store's location is checked when it is accessed.
 
 Saving a loaded job keeps the recorded locations of databases and source caches
 that could not be opened, so a later load can find them when they return.
-An existing SQLite source opens read-only. A missing SQLite database file stays
-absent and its source slot stays unbound. SQLite may create its own `-wal` and
-`-shm` working files while reading an existing WAL database.
-SQLite paths are literal filenames. A relative path is resolved in the working
-directory when the source is built or loaded. SQLite follows symlinks as it opens
-the filename, including when a symlink is followed by `..`. The source keeps
-using that path if the working directory changes before a refresh.
+
+Loading a job creates no files or directories, with one exception. If an existing
+SQLite database uses write-ahead logging (WAL), you may see `-wal` and `-shm`
+files appear next to it. SQLite can create these working files as part of opening
+the database in read-only mode. This is expected and harmless. Orcapod writes
+nothing to the database. A missing SQLite database file stays absent and its
+source slot stays unbound.
+
+SQLite saves the supplied path text and uses it in the default source ID. A
+relative path stays relative in the saved job, so loading the job in a different
+working directory reads relative to that directory. Each live or restored source
+pins its absolute filename when built and keeps using it after a working-directory
+change. SQLite treats a `file:` prefix as part of the filename and follows symlinks
+as it opens the file, including when a symlink is followed by `..`.
+
+The `create_base_path` option on `DeltaTableDatabase.from_config()` is
+**provisional**. Passing `False` requires the saved local root and scope directories
+to exist. Job loading uses this setting.
 
 The file records each node's own Arrow types, so saving types
 every node from its inputs' types, as previewing an empty job does, and costs what that

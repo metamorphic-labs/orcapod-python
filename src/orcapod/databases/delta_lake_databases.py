@@ -3420,7 +3420,7 @@ class DeltaTableDatabase:
 
         Args:
             config: The saved database configuration.
-            create_base_path: Create a missing local root when true. When false,
+            create_base_path: PROVISIONAL. Create a missing local root when true. When false,
                 require existing directories for the root and the saved scope.
                 Remote stores are opened lazily.
         """
