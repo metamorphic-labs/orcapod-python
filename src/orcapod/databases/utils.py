@@ -560,34 +560,76 @@ def first_logical_identity_change(
     return None
 
 
-def in_held_column_order(
-    records: "pa.Table", held: "Sequence[pa.Field[Any]] | None"
-) -> "pa.Table":
-    """``records`` with its columns in the order the database holds them (ITL-1367).
+def canonical_column_order(records: "pa.Table", record_id_column: str) -> "pa.Table":
+    """``records`` with its columns in the canonical order of a new table (ITL-1370).
 
-    An append matches columns by name, never by position: when ``records`` has
-    exactly the held columns in another order, and each of its fields equals the held
-    field of its name, its columns are put in the held order. Equal is one rule
-    (``_same_field``): the same type at every depth (in the large variants, a logical
-    type with its own name and metadata, at any depth) and no change the append
-    check reports (``appended_field_change``: field metadata and nested field
-    attributes at every depth). Names are matched exactly, as Arrow matches them:
-    ``a`` and ``A`` are two columns.
+    The record id column, then every other column sorted by name, by code point
+    (Python's ``sorted`` on ``str``): the order SpiralDB stores every table in, so all
+    five databases store and read one order. Nothing else depends on it: no hash, path
+    or record id reads a stored table's column order, and every reader presents its
+    rows in its own layout whatever the stored order
+    (``utils.arrow_utils.in_presented_order``). Names that repeat, or rows without the
+    record id column, or a column of a type the append comparison does not handle (a
+    dictionary, a view type, a union, ...: ``_handled``), are returned as given, for the
+    database's own rule: such a table keeps the order of its first write.
+
+    Args:
+        records: The rows that create the table.
+        record_id_column: The record id column, as the database names it.
+
+    Returns:
+        ``records``, reordered or as given.
+    """
+    names = records.column_names
+    if len(set(names)) != len(names) or record_id_column not in names:
+        return records
+    # A column whose type the append comparison does not handle (``_handled``)
+    # could not be matched by name later: the rows keep their order, so a writer
+    # that never changes its order always matches its own first write (codex review
+    # of PR 496).
+    if not all(_handled(field.type) for field in records.schema):
+        return records
+    order = [record_id_column, *sorted(n for n in names if n != record_id_column)]
+    if order == names:
+        return records
+    return records.select(order)
+
+
+def in_held_column_order(
+    records: "pa.Table",
+    held: "Sequence[pa.Field[Any]] | None",
+    record_id_column: str,
+) -> "pa.Table":
+    """``records`` with its columns in the order the database holds them (ITL-1367),
+    or in the canonical order when nothing is held (ITL-1370).
+
+    With nothing held (``held`` is ``None``: no batch pending and, where the database
+    looks, no stored table), the rows are put in the canonical order
+    (``canonical_column_order``), the order a new table is written in. Otherwise an
+    append matches columns by name, never by position: when ``records`` has exactly
+    the held columns in another order, and each of its fields equals the held field of
+    its name, its columns are put in the held order. Equal is one rule
+    (``_same_field``): a type tree the comparison handles entirely, the same at every
+    depth (in the large variants, a logical type with its own name and metadata, at
+    any depth), and no change the append check reports (``appended_field_change``:
+    field metadata and nested field attributes at every depth). Names are matched
+    exactly, as Arrow matches them: ``a`` and ``A`` are two columns.
 
     Anything else is returned exactly as given, so the database's own rule applies
-    as before: no held table, a column added or missing, a field that differs in any
-    way (a struct whose children are in another order included: ITL-1368), a name that
-    repeats.
+    as before: a column added or missing, a field that differs in any way (a struct
+    whose children are in another order included: ITL-1368), a type the comparison
+    does not handle, a name that repeats.
 
     Args:
         records: The rows to append, the record id column already named as held.
         held: The held columns, in the held order, or ``None`` when nothing is held.
+        record_id_column: The record id column, as the database names it.
 
     Returns:
         ``records``, reordered or as given.
     """
     if held is None:
-        return records
+        return canonical_column_order(records, record_id_column)
     names = records.column_names
     held_names = [field.name for field in held]
     if names == held_names:

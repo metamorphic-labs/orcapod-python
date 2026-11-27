@@ -3646,6 +3646,10 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 stored_rows - taginfo.num_rows,
             )
 
+        # Presented in the node's layout, whatever order the tables are stored in
+        # (ITL-1370).
+        layout = self._presented_layout()
+        taginfo = arrow_utils.in_presented_order(taginfo, layout)
         taginfo_columns = tuple(taginfo.column_names)
         taginfo_schema = taginfo.schema
         data_tags = self._stored_data_tags(taginfo_schema)
@@ -3849,6 +3853,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 else (taginfo_schema, results_schema)
             ),
         )
+        joined = arrow_utils.in_presented_order(joined, layout)
         # In memory, each row names its data context in the datagram context column.
         joined = joined.append_column(
             pa.field(constants.CONTEXT_KEY, pa.large_string(), nullable=False),
@@ -3933,6 +3938,24 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 "node's pipeline; nothing was read."
             )
         return expected
+
+    def _presented_layout(self) -> list[str]:
+        """The columns of this node's rows in the order it presents them (ITL-1370).
+
+        Use the zero-row table when available. Otherwise use the node's declared
+        or saved tag and data keys, then the data columns' source info. Other stored
+        columns follow by name (``arrow_utils.in_presented_order``).
+        """
+        if self._input_stream is not None:
+            zero = self._zero_row_output_table()
+            if zero is not None:
+                return zero.column_names
+        tags, data = self.keys()
+        return [
+            *tags,
+            *data,
+            *(f"{constants.SOURCE_PREFIX}{name}" for name in data),
+        ]
 
     def _stored_tag_keys(self, fetched: _JoinedRecords) -> tuple[str, ...]:
         """Return the user tag columns of the records in *fetched*.

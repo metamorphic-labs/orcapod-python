@@ -1,22 +1,24 @@
-# ITL-1367 step 2 (proposal): a canonical column order for a new stored table
+# ITL-1367 step 2: a canonical column order for a new stored table
 
-Status: **proposal, not implemented.** It changes the stored form of every table kind, so
-the developer decides. Step 1 (ITL-1367, this pull request) is implemented: an append whose
-columns are the held table's columns in another order is put in the held order by every
-database, and a table keeps the order its database gave its first write.
+Status: ITL-1367 is merged and ITL-1370 implements canonical writes and reader
+layouts. The developer approved the exact stored order in PR #496 on 2026-11-22
+and confirmed it on 2026-11-24 and 2026-11-27.
+The reader layouts are listed in `CLAUDE.md` under “Stored column order”.
 
 The developer's decision (2026-11-22): "We should always try to save to match the existing
 database order if already present, but if not yet, then use canonicalized order for new
-database." Step 1 is the first half. This document proposes the second half.
+database." Step 1 implements the first half. ITL-1370 implements the second half.
 
-## What main writes today
+## What main wrote when the order was approved
 
 Measured with `docs/dev/scripts/itl_1367_stored_column_orders.py`: a job over a source with
 two tags declared `z_tag, a_tag` and two data columns `y, b`, running a function pod, a
 logging `Join` node, a cached source and a side-effect pod. The order of each table's first
-write (system-tag hashes shortened):
+write (system-tag hashes shortened). ITL-1471 subsequently moved the function pipeline,
+side-effect log and operator cache to `pdb_v2`, `tdb_v2` and `odb_v2`. The approved order
+applies to the columns of those layouts as well.
 
-| Table kind | Layout | Order written today |
+| Table kind | Layout | First-write order at the time |
 |---|---|---|
 | Function pipeline | `pdb_v1` | `__record_id`, `z_tag`, `a_tag`, `_tag_source_id::…`, `_tag_record_id::…`, `_source_y`, `_source_b`, `__data_id`, `__node_content_hash`, `__input_data_hash`, `__output_data_hash`, `__data_context`, `__computed`, `__is_ephemeral`, `__pipeline_base_entry_id`, `__pipeline_recomputation_index` |
 | Function result | `rdb_v1` | `__record_id`, `__input_data_hash`, `__pf_var_*` (6), `__pf_exec_*` (4), `w_out`, `c_out`, `_source_w_out`, `_source_c_out`, `__pod_ts`, `__data_context` |
@@ -66,18 +68,26 @@ two things per database:
   also the order a read returns;
 - **the order a read returns**: for SpiralDB, always SpiralDB's own.
 
-The proposal below makes the two meanings coincide in all five databases.
+The canonical order below matches the order SpiralDB reads for a table with one
+record id key.
 
-## The proposal
+## The approved order
 
-**A new table's columns are written in this order: the record id column, then every other
-column sorted by name, by code point.** No other rule.
+**By default, a new table is written with the record id column first and every other
+column sorted by name in code-point order.**
+
+A new table keeps its entire first-write order if any column at any depth has a type
+the append comparison cannot handle (a dictionary-encoded type, a view type, a list
+view, a union, an interval, or a run-end-encoded type), a column name repeats, or the
+record id column is absent. Matching a later append by name requires the comparison
+to confirm every field. Reordering even part of such a table could leave the writer's
+own next append unmatched. Delta normalizes view types before checking the schema.
+ITL-1529 tracks the follow-up.
 
 - **Where:** in the database, in the shared step of step 1
   (`databases/utils.in_held_column_order`): with no held table (`held is None`), it returns
-  the rows in the canonical order instead of as given. Its callers do not change. The
-  database is the one place that sees every write of every table kind, so no table kind can
-  be forgotten, and a future table kind gets the rule without doing anything.
+  the rows in the canonical order when the schema qualifies. The shared step applies the
+  same rule to every table kind.
 - **Why not role groups (record id, user tags, system tags, data, source info, meta):** a
   database does not know a tag from a data column, so a role-grouped order can only be
   produced by each caller (five table kinds, each building its table its own way, plus every
@@ -96,12 +106,11 @@ column sorted by name, by code point.** No other rule.
 
 ## Which stored tables change
 
-Every table **created** after the change, of every kind in the table above, in the
-in-memory, Delta, SQLite and PostgreSQL databases: each is written in an order no table
-kind uses today (the record id, then for example `__data_context`, `__input_data_hash`,
+The rule applies to qualifying tables of every kind **created** after the change in the
+in-memory, Delta, SQLite and PostgreSQL databases. A qualifying function result table
+starts with the record id, followed by `__data_context`, `__input_data_hash`,
 `__pf_exec_…`, `__pf_var_…`, `__pod_ts`, `_source_c_out`, `_source_w_out`, `c_out`,
-`w_out` for a function result table). SpiralDB tables change in nothing: they are read in
-that order already.
+and `w_out`. SpiralDB already reads single-key tables in that order.
 
 A table **already stored** keeps its order: step 1 puts every later append in the held
 order. Nothing is rewritten.
@@ -111,13 +120,10 @@ order. Nothing is rewritten.
 - **Readers that present stored rows in the stored order.** An operator node puts a stored
   read in row order (`_in_row_order_on_read`). Others present the stored order as it is:
   `CachedSource` (its stream is the cache read), `DerivedSource` (a node's stored records),
-  a function node's stored view and anything that calls `get_all_records`. Under the
-  proposal their column order would change (presentation only, but visible, and different
-  for a table created before the change and one created after). The proposal therefore
-  includes one helper that puts a stored read in row order (user tags, system tags, data,
-  source info; CLAUDE.md, "Important implementation details"), used by every reader, so
-  what a reader presents never depends on the stored order. On SpiralDB this is already
-  needed today.
+  a function node's stored view and anything that calls `get_all_records`. ITL-1370 uses
+  one helper to apply each reader's presentation order (see “Stored column order” in
+  `CLAUDE.md`). This gives readers the same presentation for tables created before and
+  after the change, including SpiralDB tables.
 - **The ITL-1347 differential** (`docs/dev/scripts/itl_1347/`, on the job-speed branch):
   its `exact` mode compares stored tables column order included
   (`compare.py`, `_schema_differences`: `column order: …`). A run of the branch against
@@ -131,13 +137,11 @@ order. Nothing is rewritten.
   identities, never from a stored table's layout; record ids are built before a row is
   written. The golden check (`generate_golden_hashes.py --check`) and the differential's
   `set` mode are the evidence to collect when it is implemented.
-- **Layout versions:** recommended none. A layout version moves when a table kind's
+- **Layout versions:** no change. A layout version moves when a table kind's
   columns are added, renamed or retyped (CLAUDE.md, "Stored tables"), because a reader of
   the old layout would misread the new one. Here no column changes, every read is by name,
   and step 1 lets old and new tables take appends in any order. A table written in the old
-  order is read as current, as it would be by a SpiralDB read today. The developer may
-  still prefer a new marker so that a table's order tells its generation; it would move
-  every stored path, which nothing else here needs.
+  order is read as current, as it would be by a SpiralDB read today.
 - **Data function type snapshots** (`src/orcapod/data_function_types/`) list a type's
   record columns; the list is the declaration, not the stored order, and does not change.
 
@@ -153,11 +157,3 @@ replaces `in_held_column_order` without changing its callers. `hash_table` and
 value may reach the semantic hasher in field order: ITL-1368 has to establish first
 whether any hash depends on it, and a struct whose fields are reordered on write must read
 back, and hash, as its type declares.
-
-## Decision needed
-
-1. Adopt the canonical order (record id, then every column by name, code point) for new
-   tables, in the database's shared step? Or a role-grouped order built by each caller?
-2. Readers put stored reads in row order (one helper), so presentation never follows the
-   stored order?
-3. No layout version change?

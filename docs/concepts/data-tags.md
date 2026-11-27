@@ -372,8 +372,8 @@ pipeline_table = next(
     for path in database.list_table_paths()
     if "_result" not in path
 )
-print(stored_data_tags(pipeline_table.schema))
-# ('unit', 'time')
+print(sorted(stored_data_tags(pipeline_table.schema)))
+# ['time', 'unit']
 ```
 
 A node reads the binding back from its table, and refuses a table whose marker disagrees

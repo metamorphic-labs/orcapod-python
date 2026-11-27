@@ -139,13 +139,15 @@ Every result table has, besides its type's record:
 | `__data_context` | `large_string` | no | the data context that wrote the row (`std:v1:default`) |
 
 The database keeps the row's record id, a UUID of 16 bytes, as its record id column.
+The result table follows the [database's stored column order rule and its exception](database-types.md).
+The function node presents these columns in the declared order above.
 
 ```python
 stored = types_store.get_all_records(next(p for p in types_store.list_sources() if "_result" in p))
 print([name for name in stored.column_names if not name.startswith("__pf_")])
-# ['__input_data_hash', 'total', 'label', '_source_total', '_source_label', '__pod_ts', '__data_context']
+# ['__data_context', '__input_data_hash', '__pod_ts', '_source_label', '_source_total', 'label', 'total']
 print([name for name in stored.column_names if name.startswith("__pf_var_")])
-# ['__pf_var_function_name', '__pf_var_function_version', '__pf_var_function_module', '__pf_var_function_signature_hash', '__pf_var_function_content_hash', '__pf_var_git_hash']
+# ['__pf_var_function_content_hash', '__pf_var_function_module', '__pf_var_function_name', '__pf_var_function_signature_hash', '__pf_var_function_version', '__pf_var_git_hash']
 ```
 
 ## The pipeline columns, `pdb_v2`

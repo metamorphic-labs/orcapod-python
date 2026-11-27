@@ -7,6 +7,10 @@ from typing import ClassVar, TYPE_CHECKING
 
 import polars as pl
 
+from orcapod.pipeline.logging_observer import LOG_COLUMNS
+from orcapod.pipeline.status_observer import STATUS_COLUMNS
+from orcapod.utils import arrow_utils
+
 if TYPE_CHECKING:
     from upath import UPath
 
@@ -89,8 +93,11 @@ class ObservabilityReader:
                     df = pl.read_delta(str(table_dir))
                     df = df.with_columns(pl.lit(node_name).alias("node_label"))
                     frames.append(df)
-            self._status_df = (
-                pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+            df = pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+            # The columns in the observer's order, whatever order each table is
+            # stored in (ITL-1370).
+            self._status_df = df.select(
+                arrow_utils.presented_column_order(df.columns, STATUS_COLUMNS)
             )
         return self._status_df
 
@@ -103,8 +110,11 @@ class ObservabilityReader:
                     df = pl.read_delta(str(table_dir))
                     df = df.with_columns(pl.lit(node_name).alias("node_label"))
                     frames.append(df)
-            self._logs_df = (
-                pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+            df = pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+            # The columns in the observer's order, whatever order each table is
+            # stored in (ITL-1370).
+            self._logs_df = df.select(
+                arrow_utils.presented_column_order(df.columns, LOG_COLUMNS)
             )
         return self._logs_df
 

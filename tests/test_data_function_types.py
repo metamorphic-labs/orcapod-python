@@ -92,7 +92,9 @@ def _expected_result_columns(
     """Every column of the result table, in stored order: (name, Arrow type, nullable).
 
     The record id, the common columns and the type's declared columns come from
-    their declarations; the outputs from the function's output schema.
+    their declarations; the outputs from the function's output schema. A new table is
+    stored in the canonical order (ITL-1370): the record id, then every other column
+    by name.
     """
     common = {column.name: column for column in COMMON_RESULT_COLUMNS}
     declaration = data_function.declaration
@@ -105,8 +107,7 @@ def _expected_result_columns(
             data_function.output_data_schema
         )
     )
-    return [
-        (RECORD_ID, "large_binary", True),
+    columns = [
         entry(constants.INPUT_DATA_HASH_COL, common[constants.INPUT_DATA_HASH_COL]),
         *(
             entry(f"{constants.PF_VARIATION_PREFIX}{c.name}", c)
@@ -124,6 +125,7 @@ def _expected_result_columns(
         entry(constants.POD_TIMESTAMP, common[constants.POD_TIMESTAMP]),
         entry(constants.DATA_CONTEXT_COL, common[constants.DATA_CONTEXT_COL]),
     ]
+    return [(RECORD_ID, "large_binary", True), *sorted(columns)]
 
 
 def _stored_columns(

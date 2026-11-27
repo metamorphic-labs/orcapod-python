@@ -19,11 +19,10 @@ back with ``get_all_records``, then compared exactly with what was written (ever
   column, a failed read). The test fails on any silent cell.
 
 The databases: in-memory, Delta Lake (local directory), the connector database over
-SQLite, over PostgreSQL and over SpiralDB. No PostgreSQL server and no SpiralDB is used:
+SQLite and over PostgreSQL. No PostgreSQL server is used:
 the PostgreSQL cell comes from the connector's own storability rule
 (``unstorable_column_reason`` and ``validate_records``, over a mocked connection), so it
-is ``KEPT BY RULE`` or ``REFUSED``, never a measured read; the SpiralDB cell is measured
-through the disk fake (``tests/test_databases/fake_spiral_sdk.py``). No database tells tag
+is ``KEPT BY RULE`` or ``REFUSED``, never a measured read. No database tells tag
 columns from data columns: the connector databases tell only the record-id key, which
 Orcapod always writes as ``large_binary``.
 """
@@ -1126,8 +1125,27 @@ else the stored table; Delta to the rows still pending (it matches a stored tabl
 itself); a connector database (SQLite, PostgreSQL) to the rows it has pending,
 and to the stored table when it writes or reads them, checking them first against the
 table as it is then, by exact name and type (a column with field metadata stays in its
-queued order at a flush). A table keeps the column order of its first write. An append that also
-adds, omits or retypes a column keeps each database's own rule. The order of a struct's
+queued order at a flush). By default, a new table Orcapod writes puts the record id first
+and sorts every other column by name in code-point order. SpiralDB reads
+its key columns first and its value columns in the same name order. Orcapod cannot
+write SpiralDB tables through spiral-sdk yet.
+
+A new table keeps its entire first-write order if any column at any depth has a type
+the append comparison cannot handle (a dictionary-encoded type, a view type, a list
+view, a union, an interval, or a run-end-encoded type), a column name repeats, or the
+record id column is absent. Matching a later append by name requires the comparison
+to confirm every field. Reordering even part of such a table could leave the writer's
+own next append unmatched. ITL-1529 tracks the follow-up.
+
+Delta normalizes view types before checking the write schema. It matches batches to
+queued rows by column name and uses a conflict-safe MERGE with retry for commits to an
+existing table. A table written before this change keeps its first-write order and
+accepts matching rows in any column order.
+
+Stored column order has no effect on hashes, record IDs or stored paths. Orcapod's
+nodes, cached and derived sources, and observers present columns in their own order.
+An append that also adds, omits or retypes a column keeps each database's own rule.
+The order of a struct's
 fields is not covered: a struct whose fields are in another order is another type here.
 """
 

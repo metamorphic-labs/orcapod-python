@@ -8,7 +8,7 @@ import sys
 import time
 import uuid
 from collections import defaultdict
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Collection, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,6 +18,7 @@ import polars as pl
 import pyarrow as pa
 import pyarrow.compute as pc
 
+import orcapod.databases.utils as database_utils
 from orcapod.databases._pending_commits import PendingCommit, PendingCommits
 from orcapod.databases._row_index import (
     KeyIndex,
@@ -57,12 +58,13 @@ from orcapod.databases.utils import (
 )
 from orcapod.errors import (
     InputValidationError,
-    StoredTableSchemaError,
     OrcapodDatabaseReadError,
+    StoredTableSchemaError,
     TableListingNotSupportedError,
     TypeIdentityError,
     UnstorableColumnError,
 )
+from orcapod.system_constants import constants
 from orcapod.utils import arrow_utils
 from orcapod.utils.lazy_module import LazyModule
 
@@ -773,24 +775,37 @@ def _reported_field(error: BaseException, schema: pa.Schema) -> tuple[str, Any]:
     ``int64``, so a collision deeper down is not seen there. The struct Delta refuses
     holds the pair, and the field is named by its path (``outer.right.ᲊ``) with its
     type. Names come from the schema, the longest one Delta's message quotes, so a
-    name holding a quote is named whole. ``(the reported text, null)`` when no struct
-    is refused.
+    name holding a quote is named whole. If Delta names a top-level source-info
+    column, the probe checks user columns first to find a user-facing collision.
+    ``(the reported text, null)`` when no struct is refused.
     """
     messages = [str(seen) for seen in _error_chain(error)]
+    reported = _duplicate_name_in(error) or ""
 
     def quoted(field: "pa.Field[Any]") -> bool:
         return any(f"(case-insensitive): '{field.name}'" in m for m in messages)
 
     for prefix, children in _structs_of(schema):
-        probe = pa.schema([pa.field(c.name, pa.int64()) for c in children])
+        prioritize_data = not prefix and reported.startswith(constants.SOURCE_PREFIX)
+        probe_fields = children
+        if prioritize_data:
+            probe_fields = sorted(
+                children, key=lambda c: c.name.startswith(constants.SOURCE_PREFIX)
+            )
+        probe = pa.schema([pa.field(c.name, pa.int64()) for c in probe_fields])
         try:
             deltalake.Schema.from_arrow(probe)
         except Exception as refused:  # noqa: BLE001  # only a duplicate name is looked at
-            if _duplicate_name_in(refused) is None:
+            collision = _duplicate_name_in(refused)
+            if collision is None:
                 continue
             named = [c for c in children if quoted(c)]
             if named:
                 field = max(named, key=lambda c: len(c.name))
+                if prioritize_data and not collision.startswith(
+                    constants.SOURCE_PREFIX
+                ):
+                    field = next((c for c in children if c.name == collision), field)
                 return prefix + field.name, field.type
     # No struct of the batch is refused on its own: the pair is a batch column and a
     # stored column. Name the batch's column, with its type.
@@ -798,7 +813,7 @@ def _reported_field(error: BaseException, schema: pa.Schema) -> tuple[str, Any]:
     if top:
         field = max(top, key=lambda f: len(f.name))
         return field.name, field.type
-    return _duplicate_name_in(error) or "", pa.null()
+    return reported, pa.null()
 
 
 def _structs_of(schema: pa.Schema) -> list[tuple[str, list["pa.Field[Any]"]]]:
@@ -940,6 +955,25 @@ def _column_change(held: "pa.Field[Any]", field: "pa.Field[Any]") -> str | None:
         arrow_utils.normalize_to_large_types(field.type, keep_null=True),
         field.name,
     )
+
+
+def _is_canonical(names: Sequence[str], record_id_column: str) -> bool:
+    """Whether a stored table's columns are in the canonical order (ITL-1370)."""
+    names = list(names)
+    return names == [
+        record_id_column,
+        *sorted(n for n in names if n != record_id_column),
+    ]
+
+
+def _by_name(table: pa.Table, schema: pa.Schema) -> pa.Table:
+    """``table`` with its columns in ``schema``'s order, matched by name, when it has
+    exactly ``schema``'s names (a cast matches columns by position); otherwise as
+    given, for the cast to refuse as before (ITL-1370)."""
+    names = schema.names
+    if table.column_names == names or sorted(table.column_names) != sorted(names):
+        return table
+    return table.select(names)
 
 
 def _held_columns(delta_table: deltalake.DeltaTable) -> dict[str, "pa.Field[Any]"]:
@@ -2671,6 +2705,18 @@ class DeltaTableDatabase:
                         "nothing was written."
                     )
 
+    def _takes_canonical_order(self, record_path: tuple[str, ...]) -> bool:
+        """Whether rows for this table are written in the canonical order (ITL-1370):
+        no table is stored, or it is stored in the canonical order. A table that
+        cannot be loaded is left to the flush to report; its rows keep their order."""
+        try:
+            delta_table = self._get_delta_table(record_path)
+        except OrcapodDatabaseReadError:
+            return False
+        return delta_table is None or _is_canonical(
+            delta_table.schema().to_arrow().names, self.RECORD_ID_COLUMN
+        )
+
     def _refuse_untyped_null_columns(
         self, record_path: tuple[str, ...], schema: pa.Schema
     ) -> None:
@@ -2822,11 +2868,19 @@ class DeltaTableDatabase:
 
         # Columns match by name within a pending batch: rows with the pending
         # batch's columns in another order, each field equal, are put in its order
-        # (ITL-1367). Only the pending batch: a stored table already takes an append
-        # by name (delta-rs), and the batch is left exactly as main holds it.
+        # (ITL-1367). The first batch of a pending batch is queued in the order it
+        # will be presented before commit: canonical for a new or canonical table
+        # and as given for a table stored in another order (ITL-1370). The stored
+        # table is cached by the append checks.
         pending = self._pending_batches.get(self._get_record_key(record_path))
         if pending is not None:
-            filtered_table = in_held_column_order(filtered_table, list(pending.schema))
+            filtered_table = in_held_column_order(
+                filtered_table, list(pending.schema), self.RECORD_ID_COLUMN
+            )
+        elif self._takes_canonical_order(record_path):
+            filtered_table = database_utils.canonical_column_order(
+                filtered_table, self.RECORD_ID_COLUMN
+            )
 
         # Step 4: the rows' field attributes, compared as given: a merge or a
         # coercion casts them to the pending batch's schema, which would give them
@@ -2977,15 +3031,23 @@ class DeltaTableDatabase:
                 # Unify schemas and cast both input table and pending batch
                 unified_schema = pa.unify_schemas([pending_batch.schema, table.schema])
 
-                # The input and the pending batch, cast to the unified schema.
-                return table.cast(unified_schema), pending_batch.cast(unified_schema)
+                # The input and the pending batch, cast to the unified schema, their
+                # columns matched by name first (ITL-1370: a batch is queued in the
+                # canonical order, the rows may come in their writer's order).
+                return (
+                    _by_name(table, unified_schema).cast(unified_schema),
+                    _by_name(pending_batch, unified_schema).cast(unified_schema),
+                )
             except Exception as e:
                 # TODO: perform more careful error check
                 raise ValueError(f"Cannot merge schemas: {e}")
         elif schema_handling == "coerce":
             try:
-                # Coerce input table to match existing pending batch schema
-                return table.cast(pending_batch.schema), None
+                # Coerce input table to match existing pending batch schema, its
+                # columns matched by name first (ITL-1370).
+                return _by_name(table, pending_batch.schema).cast(
+                    pending_batch.schema
+                ), None
             except Exception as e:
                 raise ValueError(f"Cannot coerce schema: {e}")
         else:
@@ -3791,9 +3853,6 @@ class DeltaTableDatabase:
         """
         from deltalake.exceptions import CommitFailedError, TableNotFoundError
 
-        # A column whose type Delta would not give back is written in its integer
-        # form with its type recorded (ITL-928).
-        combined_table = to_delta_layout(original_table)
         # Only TableNotFoundError means "absent": a table that exists but cannot be
         # loaded is never created over (ITL-884).
         try:
@@ -3806,6 +3865,14 @@ class DeltaTableDatabase:
             raise OrcapodDatabaseReadError(
                 table_uri, abs_path_components
             ) from load_error
+
+        if delta_table is None:
+            original_table = database_utils.canonical_column_order(
+                original_table, self.RECORD_ID_COLUMN
+            )
+        # A column whose type Delta would not give back is written in its integer
+        # form with its type recorded (ITL-928).
+        combined_table = to_delta_layout(original_table)
 
         check = self._pending_commits.schema_check(record_key)
         if check is not None:

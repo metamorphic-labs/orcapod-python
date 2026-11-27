@@ -18,26 +18,30 @@ import os
 import sqlite3
 import uuid
 from collections.abc import Iterator
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pyarrow as pa
 import pytest
 
+import orcapod.databases.utils as database_utils
 from orcapod.databases import (
     ConnectorArrowDatabase,
     DeltaTableDatabase,
     ExtensionAwareDatabase,
     InMemoryArrowDatabase,
+    SpiralDBConnector,
     SQLiteConnector,
 )
 from orcapod.databases.utils import in_held_column_order
 from orcapod.errors import (
     InputValidationError,
+    UnrecordedTableSchemaWarning,
     UnstorableColumnError,
 )
+from tests.test_databases import fake_spiral_sdk
 from tests.test_databases.type_matrix import open_database
 
 PATH = ("t",)
@@ -73,11 +77,32 @@ def _rows(order: list[str], ns: list[int]) -> pa.Table:
     )
 
 
-def _given_order(database: str, first: list[str], stored: bool = True) -> list[str]:
+GENERATIONS = ("canonical", "before ITL-1370")
+
+
+def _first_write(generation: str) -> Any:
+    """The context a table's first write is made in: today's (the canonical order,
+    ITL-1370), or as before ITL-1370 (the order written), which a store may still
+    hold; the shared step's canonical order is switched off for that write."""
+    if generation == "canonical":
+        return nullcontext()
+    return patch.object(
+        database_utils,
+        "canonical_column_order",
+        lambda records, record_id: records,
+        create=True,
+    )
+
+
+def _given_order(first: list[str], generation: str = "canonical") -> list[str]:
     """The order a database gives a table first written in ``first``.
 
-    The first write's order.
+    A new table is written in the canonical order, the record id then every other
+    column by name (ITL-1370); a table written before ITL-1370 keeps the order of its
+    first write.
     """
+    if generation == "canonical":
+        return [ID, *sorted(n for n in first if n != ID)]
     return first
 
 
@@ -97,24 +122,30 @@ def _add(db: Any, table: pa.Table, flush: bool = False) -> None:
 @pytest.mark.parametrize("first", FIRST_ORDERS)
 @pytest.mark.parametrize("second", SECOND_ORDERS)
 @pytest.mark.parametrize("when", ["after a flush", "same pending batch"])
+@pytest.mark.parametrize("generation", GENERATIONS)
 def test_an_append_in_another_order_is_matched_by_name(
-    tmp_path: Path, database: str, first: str, second: str, when: str
+    tmp_path: Path, database: str, first: str, second: str, when: str, generation: str
 ) -> None:
     first_order, second_order = FIRST_ORDERS[first], SECOND_ORDERS[second]
     with ExitStack() as stack:
         db = stack.enter_context(open_database(database, tmp_path))
-        _add(db, _rows(first_order, [1, 2]), flush=when == "after a flush")
+        with _first_write(generation):
+            _add(db, _rows(first_order, [1, 2]), flush=when == "after a flush")
         _add(db, _rows(second_order, [3, 4]))
         # Before the flush: the pending rows (and the stored ones) read by name.
         _check(
             db.get_all_records(PATH, record_id_column=ID),
-            _given_order(database, first_order, stored=when == "after a flush"),
+            _given_order(first_order, generation),
             [1, 2, 3, 4],
         )
-        db.flush()
+        # Delta creates the table at the flush: as before ITL-1370 in that generation.
+        with (
+            _first_write(generation) if when == "same pending batch" else nullcontext()
+        ):
+            db.flush()
         _check(
             db.get_all_records(PATH, record_id_column=ID),
-            _given_order(database, first_order),
+            _given_order(first_order, generation),
             [1, 2, 3, 4],
         )
 
@@ -122,11 +153,14 @@ def test_an_append_in_another_order_is_matched_by_name(
 @pytest.mark.parametrize("database", DURABLE)
 @pytest.mark.parametrize("first", FIRST_ORDERS)
 @pytest.mark.parametrize("second", SECOND_ORDERS)
+@pytest.mark.parametrize("generation", GENERATIONS)
 def test_an_append_in_another_order_after_reopening_is_matched_by_name(
-    tmp_path: Path, database: str, first: str, second: str
+    tmp_path: Path, database: str, first: str, second: str, generation: str
 ) -> None:
+    """A store written before ITL-1370 (or after) is reopened by today's code: an
+    old-order table keeps its order and takes appends in any order (ITL-1367)."""
     first_order, second_order = FIRST_ORDERS[first], SECOND_ORDERS[second]
-    with open_database(database, tmp_path) as db:
+    with open_database(database, tmp_path) as db, _first_write(generation):
         _add(db, _rows(first_order, [1, 2]), flush=True)
     with open_database(database, tmp_path) as db:
         _add(db, _rows(second_order, [3, 4]))
@@ -135,24 +169,24 @@ def test_an_append_in_another_order_after_reopening_is_matched_by_name(
     with open_database(database, tmp_path) as db:
         _check(
             db.get_all_records(PATH, record_id_column=ID),
-            _given_order(database, first_order),
+            _given_order(first_order, generation),
             [1, 2, 3, 4, 5],
         )
 
 
 @pytest.mark.parametrize("database", DATABASES)
-def test_a_new_table_keeps_the_order_the_database_gave_its_first_write(
+def test_a_new_table_is_written_in_the_canonical_order(
     tmp_path: Path, database: str
 ) -> None:
-    """The first write's order is kept, whichever order it is; nothing is sorted by
-    Orcapod."""
+    """A new table is the record id, then every other column by name (ITL-1370),
+    whatever order its first write has, in every writable database."""
     with open_database(database, tmp_path) as db:
         for n, order in enumerate([["c", "b", "a", ID], [ID, "a", "b", "c"]]):
             path = (f"t{n}",)
             db.add_records(path, _rows(order, [1]), record_id_column=ID, flush=True)
             table = db.get_all_records(path, record_id_column=ID)
             assert table is not None
-            assert table.column_names == _given_order(database, order)
+            assert table.column_names == _given_order(order)
 
 
 # Today's verdict for an append that is reordered AND retypes ``a`` (``int32`` where
@@ -209,7 +243,8 @@ def test_a_table_created_again_in_another_order_is_read_as_it_is_now(
         with sqlite3.connect(tmp_path / "store.db") as other:
             other.execute('DROP TABLE "t"')
         other_db = ConnectorArrowDatabase(SQLiteConnector(str(tmp_path / "store.db")))
-        _add(other_db, _rows(["b", ID, "c", "a"], [3]), flush=True)
+        with _first_write("before ITL-1370"):  # created again, another order
+            _add(other_db, _rows(["b", ID, "c", "a"], [3]), flush=True)
         _add(db, _rows([ID, "a", "c", "b"], [4]), flush=True)
         _check(
             db.get_all_records(PATH, record_id_column=ID),
@@ -230,7 +265,8 @@ def test_rows_queued_before_a_table_is_created_again_are_read_with_it_by_name(
         with sqlite3.connect(tmp_path / "store.db") as other:
             other.execute('DROP TABLE "t"')
         other_db = ConnectorArrowDatabase(SQLiteConnector(str(tmp_path / "store.db")))
-        _add(other_db, _rows(["b", ID, "c", "a"], [3]), flush=True)
+        with _first_write("before ITL-1370"):  # created again, another order
+            _add(other_db, _rows(["b", ID, "c", "a"], [3]), flush=True)
         _check(
             db.get_all_records(PATH, record_id_column=ID), ["b", ID, "c", "a"], [2, 3]
         )
@@ -240,6 +276,38 @@ def test_rows_queued_before_a_table_is_created_again_are_read_with_it_by_name(
             ["b", ID, "c", "a"],
             [2, 3],
         )
+
+
+def test_a_spiraldb_table_deleted_and_created_again_in_another_order(
+    tmp_path: Path,
+) -> None:
+    """The same reader sees the replacement after an external writer recreates it."""
+    stored_id = ConnectorArrowDatabase.RECORD_ID_COLUMN
+    key_schema = [(stored_id, pa.large_binary())]
+    with fake_spiral_sdk.install(tmp_path):
+        project = fake_spiral_sdk.ExternalProject("append-order")
+        given = _rows([ID, "a", "c", "b"], [1]).rename_columns(
+            [stored_id, "a", "c", "b"]
+        )
+        table = project.create_table("default.t", key_schema=key_schema)
+        table.write(given)
+        table.record(given.schema)
+        db = ConnectorArrowDatabase(SpiralDBConnector("append-order"))
+        _check(db.get_all_records(PATH, record_id_column=ID), [ID, "a", "b", "c"], [1])
+
+        project.drop_table("default.t")
+        replacement = project.create_table("default.t", key_schema=key_schema)
+        given = _rows(["b", ID, "c", "a"], [3]).rename_columns(
+            ["b", stored_id, "c", "a"]
+        )
+        replacement.write(given)
+        replacement.write(
+            _rows([ID, "a", "c", "b"], [4]).rename_columns([stored_id, "a", "c", "b"])
+        )
+        replacement.record(given.schema)
+        with pytest.warns(UnrecordedTableSchemaWarning, match="no longer holds"):
+            rows = db.get_all_records(PATH, record_id_column=ID)
+        _check(rows, [ID, "a", "b", "c"], [3, 4])
 
 
 # ── The shared step ────────────────────────────────────────────────────────────
@@ -257,7 +325,7 @@ def _table(*names: str) -> pa.Table:
 
 def test_the_step_reorders_the_held_columns_by_name() -> None:
     given = _table("c", "a", "b")
-    out = in_held_column_order(given, _held("a", "b", "c"))
+    out = in_held_column_order(given, _held("a", "b", "c"), "rid")
     assert out.column_names == ["a", "b", "c"]
     assert out.to_pylist() == [{"a": 1, "b": 2, "c": 0}]
 
@@ -271,14 +339,14 @@ def test_the_step_keeps_the_given_fields() -> None:
         schema=pa.schema([field, pa.field("a", pa.int64())]),
     )
     held = [pa.field("a", pa.int64()), field.with_nullable(True)]
-    out = in_held_column_order(given, held)
+    out = in_held_column_order(given, held, "rid")
     assert out.column_names == ["a", "c"]
     assert out.schema.field("c").equals(field, check_metadata=True)
 
 
 def test_the_step_matches_names_exactly() -> None:
     """``a`` and ``A`` are two columns, as Arrow matches names exactly."""
-    out = in_held_column_order(_table("A", "a", "c"), _held("a", "c", "A"))
+    out = in_held_column_order(_table("A", "a", "c"), _held("a", "c", "A"), "rid")
     assert out.column_names == ["a", "c", "A"]
     assert out.to_pylist() == [{"A": 0, "a": 1, "c": 2}]
 
@@ -332,9 +400,9 @@ def test_the_step_matches_a_logical_type_only_to_itself_at_every_depth(nest: str
     held_table = pa.table({"b": [0], "a": _unit_column("m", nest)})
     held = list(held_table.schema)
     same = pa.table({"a": _unit_column("m", nest), "b": [1]})
-    assert in_held_column_order(same, held).column_names == ["b", "a"]
+    assert in_held_column_order(same, held, "rid").column_names == ["b", "a"]
     other = pa.table({"a": _unit_column("s", nest), "b": [1]})
-    assert in_held_column_order(other, held) is other
+    assert in_held_column_order(other, held, "rid") is other
 
 
 def test_the_step_matches_a_field_annotation_only_to_itself() -> None:
@@ -354,9 +422,11 @@ def test_the_step_matches_a_field_annotation_only_to_itself() -> None:
 
     given = annotated(one)
     held_one = [a, _annotated("text", one)]
-    assert in_held_column_order(given, held_one).column_names == ["a", "text"]
-    assert in_held_column_order(given, [a, _annotated("text", two)]) is given
-    assert in_held_column_order(given, [a, pa.field("text", pa.string())]) is given
+    assert in_held_column_order(given, held_one, "rid").column_names == ["a", "text"]
+    assert in_held_column_order(given, [a, _annotated("text", two)], "rid") is given
+    assert (
+        in_held_column_order(given, [a, pa.field("text", pa.string())], "rid") is given
+    )
     live = pa.table(
         {
             "text": pa.ExtensionArray.from_storage(
@@ -366,14 +436,14 @@ def test_the_step_matches_a_field_annotation_only_to_itself() -> None:
         }
     )
     assert (
-        in_held_column_order(live, held_one) is live
+        in_held_column_order(live, held_one, "rid") is live
     )  # a live type is not its storage
 
 
 def test_the_step_compares_types_in_their_large_variants() -> None:
     given = pa.table({"b": pa.array(["x"], pa.string()), "a": [1]})
     out = in_held_column_order(
-        given, [pa.field("a", pa.int64()), pa.field("b", pa.large_string())]
+        given, [pa.field("a", pa.int64()), pa.field("b", pa.large_string())], "rid"
     )
     assert out.column_names == ["a", "b"]
 
@@ -412,7 +482,7 @@ def test_the_step_compares_types_in_their_large_variants() -> None:
 def test_the_step_leaves_anything_else_as_given(
     given: pa.Table, held: list[Any] | None
 ) -> None:
-    assert in_held_column_order(given, held) is given
+    assert in_held_column_order(given, held, "rid") is given
 
 
 @pytest.mark.parametrize("database", ["in-memory"])
@@ -533,9 +603,13 @@ def test_a_reordered_append_is_stored_once_across_writers(
     MERGE (ITL-1377): the stale commit fails, is retried against the table as it is
     then, and leaves the id alone, so it keeps the first writer's row."""
     stale, other = DeltaTableDatabase(tmp_path), DeltaTableDatabase(tmp_path)
-    stale.add_records(
-        PATH, _race_rows(1, 10, ("rid", "a", "b")), record_id_column="rid", flush=True
-    )
+    with _first_write("before ITL-1370"):
+        stale.add_records(
+            PATH,
+            _race_rows(1, 10, ("rid", "b", "a")),
+            record_id_column="rid",
+            flush=True,
+        )
     snapshot = stale._snapshot_for_commit
 
     def interleave(*args: Any) -> Any:
@@ -619,7 +693,7 @@ def test_an_aligned_append_looks_the_stored_table_up_once(tmp_path: Path) -> Non
         db.flush()
         assert (names.call_count, info.call_count) == (2, 2)
     _check(
-        db.get_all_records(PATH, record_id_column=ID), [ID, "a", "c", "b"], [1, 2, 3]
+        db.get_all_records(PATH, record_id_column=ID), [ID, "a", "b", "c"], [1, 2, 3]
     )
 
 
@@ -693,18 +767,23 @@ def test_a_table_changed_between_queue_and_flush_is_refused_as_on_main(
 def test_a_table_dropped_and_written_again_by_the_same_handle_takes_the_new_order(
     tmp_path: Path,
 ) -> None:
-    """The handle that wrote the dropped table writes the replacement in the order of
-    its new first write, as main does: nothing of the dropped table is remembered."""
+    """The handle that wrote the dropped table writes the replacement as a new table:
+    in the canonical order (ITL-1370), nothing of the dropped table remembered. The
+    dropped table is stored in another order (``a, rid, b``, as before ITL-1370), so a
+    handle that remembered it would show it (PR 491 Codex round 2, finding 4)."""
     path = tmp_path / "store.db"
     db = _sqlite(path)
-    db.add_records(PATH, _abc(1), record_id_column="rid", flush=True)
+    with _first_write("before ITL-1370"):
+        db.add_records(
+            PATH, _abc(1, ("a", "rid", "b")), record_id_column="rid", flush=True
+        )
     with sqlite3.connect(path) as other:
         other.execute('DROP TABLE "t"')
     db.add_records(PATH, _abc(2, ("b", "rid", "a")), record_id_column="rid", flush=True)
     table = _sqlite(path).get_all_records(PATH, record_id_column="rid")
     assert table is not None
-    assert table.column_names == ["b", "rid", "a"]
-    assert table.to_pylist() == [{"b": 200, "rid": bytes([2]), "a": 20}]
+    assert table.column_names == ["rid", "a", "b"]
+    assert table.to_pylist() == [{"rid": bytes([2]), "a": 20, "b": 200}]
 
 
 def test_a_queued_row_is_read_from_memory(tmp_path: Path) -> None:
@@ -727,7 +806,7 @@ def test_a_queued_row_is_read_from_memory(tmp_path: Path) -> None:
         ):
             queued = db.get_record_by_id(PATH, bytes([2]), record_id_column="rid")
         assert queued is not None
-        assert queued.column_names == ["rid", "z", "a"]
+        assert queued.column_names == ["rid", "a", "z"]  # queued canonical, ITL-1370
         db.flush()
         committed = db.get_record_by_id(PATH, bytes([2]), record_id_column="rid")
         assert committed is not None
@@ -828,6 +907,55 @@ def test_two_logical_types_over_one_storage_type_are_not_reordered(
     assert stored_rows.column("rid").to_pylist() == [bytes([1])]
 
 
+@pytest.mark.parametrize("backend", ["in-memory", "Delta"])
+@pytest.mark.parametrize("stored", [False, True], ids=["pending", "committed"])
+def test_two_annotated_logical_types_over_one_storage_type_are_not_reordered(
+    tmp_path: Path, backend: str, stored: bool
+) -> None:
+    """The annotated form of the case above (PR 491 Codex round 2, finding 3): the
+    column is held as its storage type with an ``ARROW:extension`` annotation, and a
+    permuted append carries another logical type's annotation. Refused as on main,
+    never read back under the held type (main's verdicts, measured on 321284ae)."""
+    from tests.test_databases.test_extension_aware_database import (
+        _make_converter_with_type,
+    )
+
+    one = _make_converter_with_type("test.itl1367.annotated.held")
+    two = _make_converter_with_type("test.itl1367.annotated.other")
+
+    def rows(n: int, ext_type: Any, order: list[str]) -> pa.Table:
+        return (
+            _abc(n)
+            .append_column(
+                _annotated("text", ext_type).with_type(pa.large_string()),
+                pa.array([str(n)], pa.large_string()),
+            )
+            .select(order)
+        )
+
+    inner = (
+        InMemoryArrowDatabase()
+        if backend == "in-memory"
+        else DeltaTableDatabase(tmp_path / "delta")
+    )
+    ExtensionAwareDatabase(inner, one[0]).add_records(
+        PATH,
+        rows(1, one[1], ["rid", "a", "b", "text"]),
+        record_id_column="rid",
+        flush=stored,
+    )
+    second = ExtensionAwareDatabase(inner, two[0])
+    permuted = rows(2, two[1], ["text", "b", "rid", "a"])
+    with pytest.raises(InputValidationError) as refused:
+        second.add_records(PATH, permuted, record_id_column="rid")
+    assert "'test.itl1367.annotated.other;'" in str(refused.value)
+    assert "'test.itl1367.annotated.held;'" in str(refused.value)
+    inner.flush()
+    stored_rows = inner.get_all_records(PATH, record_id_column="rid")
+    assert stored_rows is not None
+    assert stored_rows.column("rid").to_pylist() == [bytes([1])]
+
+
 @pytest.mark.parametrize(
     ("schema_handling", "a"),
     [
@@ -875,18 +1003,19 @@ def test_a_delta_table_created_again_in_another_order_takes_the_batch(
 
     from deltalake import DeltaTable, write_deltalake
 
-    order = ("b", "__record_id", "a")
+    order = ("__record_id", "a", "b")
 
     def rows(n: int) -> pa.Table:
         return _abc(n).rename_columns(["__record_id", "a", "b"]).select(order)
 
     db = DeltaTableDatabase(tmp_path)
-    db.add_records(
-        PATH,
-        rows(1).select(["__record_id", "a", "b"]),
-        flush=True,
-        record_id_column="__record_id",
-    )
+    with _first_write("before ITL-1370"):
+        db.add_records(
+            PATH,
+            rows(1).select(["b", "__record_id", "a"]),
+            flush=True,
+            record_id_column="__record_id",
+        )
     shutil.rmtree(tmp_path / "t")
     write_deltalake(tmp_path / "t", rows(1), mode="overwrite")
     db.add_records(PATH, rows(2), record_id_column="__record_id")
@@ -908,6 +1037,34 @@ def test_a_delta_table_created_again_in_another_order_takes_the_batch(
     )
     assert table is not None
     assert sorted(cast(list[int], table.column("a").to_pylist())) == [10, 20, 30]
+
+
+@pytest.mark.parametrize("schema_handling", ["error", "merge", "coerce"])
+def test_a_delta_table_stored_before_itl_1370_takes_mains_commits(
+    tmp_path: Path, schema_handling: str
+) -> None:
+    """A Delta table stored in a first-write order that is not canonical (written
+    before ITL-1370, or by another writer) keeps that order. Both later batches
+    commit by MERGE as on main (ITL-1377), and every row is stored by name."""
+    from deltalake import DeltaTable
+
+    db = DeltaTableDatabase(tmp_path)
+    kwargs: dict[str, Any] = {
+        "record_id_column": "rid",
+        "schema_handling": schema_handling,
+    }
+    with _first_write("before ITL-1370"):
+        db.add_records(PATH, _abc(1, ("b", "rid", "a")), flush=True, **kwargs)
+    db.add_records(PATH, _abc(2, ("b", "rid", "a")), flush=True, **kwargs)
+    db.add_records(PATH, _abc(3), flush=True, **kwargs)
+    operations = [entry["operation"] for entry in DeltaTable(tmp_path / "t").history()]
+    assert operations == ["MERGE", "MERGE", "WRITE"]  # newest first
+    table = DeltaTableDatabase(tmp_path).get_all_records(PATH, record_id_column="rid")
+    assert table is not None
+    assert table.column_names == ["b", "rid", "a"]
+    assert sorted(table.to_pylist(), key=str) == [
+        {"b": 100 * n, "rid": bytes([n]), "a": 10 * n} for n in (1, 2, 3)
+    ]
 
 
 def _extension_values(type_: Any) -> Any:
@@ -992,7 +1149,7 @@ def test_a_column_of_a_type_the_comparison_does_not_handle_is_never_reordered(
     held_values, given_values = _container_columns()[kind]
     held = list(pa.table({"b": [0], "a": held_values}).schema)
     given = pa.table({"a": given_values, "b": [1]})
-    assert in_held_column_order(given, held) is given
+    assert in_held_column_order(given, held, "rid") is given
 
 
 class _KeyNotNullSQLite(SQLiteConnector):
@@ -1020,10 +1177,10 @@ def test_queued_rows_combine_with_a_stored_key_read_back_not_null(
     _add(db, _rows([ID, "a", "c", "b"], [1, 2]), flush=True)
     _add(db, _rows(order, [3, 4]))
     before = db.get_all_records(PATH, record_id_column=ID)
-    _check(before, [ID, "a", "c", "b"], [1, 2, 3, 4])
+    _check(before, [ID, "a", "b", "c"], [1, 2, 3, 4])
     db.flush()
     _check(
-        db.get_all_records(PATH, record_id_column=ID), [ID, "a", "c", "b"], [1, 2, 3, 4]
+        db.get_all_records(PATH, record_id_column=ID), [ID, "a", "b", "c"], [1, 2, 3, 4]
     )
 
 
@@ -1033,6 +1190,8 @@ def test_queued_rows_combine_with_a_stored_key_read_back_not_null(
 @pytest.fixture
 def postgresql_database() -> Iterator[ConnectorArrowDatabase]:
     psycopg = pytest.importorskip("psycopg")
+    from psycopg import sql
+
     from orcapod.databases import PostgreSQLConnector
 
     host = os.environ.get("PGHOST", "localhost")
@@ -1044,15 +1203,93 @@ def postgresql_database() -> Iterator[ConnectorArrowDatabase]:
         f"host={host} port={port} dbname={dbname} user={user} password={password}"
     )
     schema = f"test_{uuid.uuid4().hex[:12]}"
+    identifier = sql.Identifier(schema)
     with psycopg.connect(base_dsn, autocommit=True) as admin:
-        admin.execute(f"CREATE SCHEMA {schema}")
-    connector = PostgreSQLConnector(f"{base_dsn} options=-csearch_path={schema}")
-    try:
-        yield ConnectorArrowDatabase(connector)
-    finally:
-        connector.close()
+        admin.execute(sql.SQL("CREATE SCHEMA {}").format(identifier))
+
+    def drop() -> None:
         with psycopg.connect(base_dsn, autocommit=True) as admin:
-            admin.execute(f"DROP SCHEMA IF EXISTS {schema} CASCADE")
+            admin.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(identifier)
+            )
+
+    with _dropped_after(
+        lambda: PostgreSQLConnector(f"{base_dsn} options=-csearch_path={schema}"), drop
+    ) as connector:
+        yield ConnectorArrowDatabase(connector)
+
+
+@contextmanager
+def _dropped_after(connect: Any, drop: Any) -> Iterator[Any]:
+    """The connector ``connect`` makes, closed if it was made; ``drop`` always runs
+    afterwards, also when ``connect`` or the close raises (CodeRabbit on PR 496: the
+    schema used to stay behind when the connector could not be created)."""
+    connector = None
+    try:
+        connector = connect()
+        yield connector
+    finally:
+        try:
+            if connector is not None:
+                connector.close()
+        finally:
+            drop()
+
+
+class _Closing:
+    def __init__(self, fail: bool) -> None:
+        self.fail = fail
+
+    def close(self) -> None:
+        if self.fail:
+            raise RuntimeError("close failed")
+
+
+def test_the_postgresql_fixture_quotes_schema_identifiers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Setup and cleanup quote the same identifier, even if its name has a quote."""
+    psycopg = pytest.importorskip("psycopg")
+    import orcapod.databases
+
+    admin = MagicMock()
+    admin.__enter__.return_value = admin
+    monkeypatch.setattr(psycopg, "connect", lambda *_args, **_kwargs: admin)
+    monkeypatch.setattr(uuid, "uuid4", lambda: MagicMock(hex='quoted"name'))
+    monkeypatch.setattr(
+        orcapod.databases, "PostgreSQLConnector", lambda _: _Closing(False)
+    )
+
+    fixture = getattr(postgresql_database, "__wrapped__")
+    with contextmanager(fixture)():
+        pass
+
+    statements = [call.args[0].as_string() for call in admin.execute.call_args_list]
+    assert statements == [
+        'CREATE SCHEMA "test_quoted""name"',
+        'DROP SCHEMA IF EXISTS "test_quoted""name" CASCADE',
+    ]
+
+
+@pytest.mark.parametrize("failure", ["connect", "close", "none"])
+def test_the_postgresql_schema_is_dropped_whatever_fails(failure: str) -> None:
+    """The fixture's cleanup drops the schema when the connector cannot be created,
+    when closing it fails, and when nothing fails."""
+    dropped: list[bool] = []
+
+    def connect() -> Any:
+        if failure == "connect":
+            raise RuntimeError("connect failed")
+        return _Closing(fail=failure == "close")
+
+    if failure == "none":
+        with _dropped_after(connect, lambda: dropped.append(True)):
+            pass
+    else:
+        with pytest.raises(RuntimeError):
+            with _dropped_after(connect, lambda: dropped.append(True)):
+                pass
+    assert dropped == [True]
 
 
 @pytest.mark.postgres
@@ -1066,6 +1303,7 @@ def test_postgresql_matches_an_append_in_another_order_by_name(
     first_order, second_order = FIRST_ORDERS[first], SECOND_ORDERS[second]
     _add(db, _rows(first_order, [1, 2]), flush=when == "after a flush")
     _add(db, _rows(second_order, [3, 4]))
-    _check(db.get_all_records(PATH, record_id_column=ID), first_order, [1, 2, 3, 4])
+    expected = _given_order(first_order)  # canonical (ITL-1370)
+    _check(db.get_all_records(PATH, record_id_column=ID), expected, [1, 2, 3, 4])
     db.flush()
-    _check(db.get_all_records(PATH, record_id_column=ID), first_order, [1, 2, 3, 4])
+    _check(db.get_all_records(PATH, record_id_column=ID), expected, [1, 2, 3, 4])

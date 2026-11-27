@@ -1574,33 +1574,21 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
         )
 
     def _in_row_order_on_read(self, records: "pa.Table") -> "pa.Table":
-        """Put a stored table's user columns in row order; bookkeeping stays in place.
+        """Present a stored table in the node's row order, whatever order it is
+        stored in (ITL-1370).
 
-        A node run on its own stored its rows in its operator's column order before
-        ITL-1133 (a join lists its data before its system tags); every writer now
-        stores the row order (``StaticOutputOperatorPod._in_row_order``). Read in row
-        order, such a table gives the columns of every other path, and a table in row
-        order is returned unchanged. Only the order changes: no column is added,
-        dropped, renamed or retyped, and the bookkeeping columns (``__``, and
-        ``HASH_COLUMN_NAME``) keep their positions.
+        The record hash first, then the node's columns in row order (user tags, system
+        tags, data, source info: its zero-row table, ``_in_row_order``), then any other
+        column (the node content hash) by name (``arrow_utils.in_presented_order``).
+        A table is stored in the database's order: the canonical order for a table
+        created since ITL-1370, the order of its first write for an older one (a node
+        run on its own before ITL-1133 stored its operator's order). Only the order
+        changes: no column is added, dropped, renamed or retyped.
         """
-        names = records.column_names
-
-        def bookkeeping(name: str) -> bool:
-            return (
-                name.startswith(constants.META_PREFIX) or name == self.HASH_COLUMN_NAME
-            )
-
-        user = [n for n in names if not bookkeeping(n)]
-        ordered = iter(
-            StaticOutputOperatorPod._in_row_order(
-                records.select(user), self.keys()[0]
-            ).column_names
-        )
-        order = [n if bookkeeping(n) else next(ordered) for n in names]
-        if order == names:
-            return records
-        return records.select(order)
+        layout = StaticOutputOperatorPod._in_row_order(
+            self._make_empty_table(), self.keys()[0]
+        ).column_names
+        return arrow_utils.in_presented_order(records, [self.HASH_COLUMN_NAME, *layout])
 
     def _make_empty_table(self) -> "pa.Table":
         """Build the zero-row table this node reads as when it holds no rows.

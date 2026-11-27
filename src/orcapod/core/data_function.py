@@ -27,7 +27,7 @@ from orcapod.hashing.semantic_hashing.builtin_handlers import (
     default_value_refused,
     hash_default_value,
 )
-from orcapod.core.result_cache import ResultCache
+from orcapod.core.result_cache import ResultCache, result_table_layout
 from orcapod.errors import (
     NoOutputsDeclaredError,
     OutputTypeError,
@@ -1505,6 +1505,9 @@ class CachedDataFunction(DataFunctionWrapper):
             auto_flush=True,
             # The first uri component is the function's name; no hash before it.
             name_path=record_path_prefix + self.uri[:1],
+            layout=result_table_layout(
+                self.declaration, tuple(self.output_data_schema)
+            ),
         )
 
     @property

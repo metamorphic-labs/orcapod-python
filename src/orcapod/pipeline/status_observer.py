@@ -60,6 +60,7 @@ from uuid_utils import uuid7
 
 from orcapod.pipeline.observer import NoOpLogger
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
+from orcapod.utils import arrow_utils
 from orcapod.types import SchemaLike
 
 if TYPE_CHECKING:
@@ -71,6 +72,18 @@ logger = logging.getLogger(__name__)
 
 # Default path within the database where status rows are stored.
 DEFAULT_STATUS_PATH: tuple[str, ...] = ("execution_status",)
+
+STATUS_COLUMNS: tuple[str, ...] = (
+    "_status_id",
+    "_status_run_id",
+    "_status_pipeline_uri",
+    "_status_state",
+    "_status_timestamp",
+    "_status_error_summary",
+)
+"""The columns every status row has, in the order the observer presents them; the
+node's tag columns follow, by name (ITL-1370: a stored table's order is the
+database's, so a read is put in this order)."""
 
 _NOOP_LOGGER = NoOpLogger()
 
@@ -199,7 +212,12 @@ class StatusObserver:
             sources = self._db.list_sources()
         except (AttributeError, NotImplementedError):
             # Fall back to direct read for DBs that don't implement list_sources
-            return self._db.get_all_records(DEFAULT_STATUS_PATH)
+            table = self._db.get_all_records(DEFAULT_STATUS_PATH)
+            return (
+                None
+                if table is None
+                else arrow_utils.in_presented_order(table, STATUS_COLUMNS)
+            )
 
         parts = []
         for src in sources:
@@ -208,12 +226,16 @@ class StatusObserver:
                 if tbl is not None and tbl.num_rows > 0:
                     if "__record_id" in tbl.schema.names:
                         tbl = tbl.drop(["__record_id"])
-                    parts.append(tbl)
+                    parts.append(arrow_utils.in_presented_order(tbl, STATUS_COLUMNS))
         if not parts:
             return None
         if len(parts) == 1:
             return parts[0]
-        return pa.concat_tables(parts, promote_options="default")
+        # Ordered after the union: node tables carry different tags, and the
+        # concatenation lists them in the order the parts first name them (ITL-1370).
+        return arrow_utils.in_presented_order(
+            pa.concat_tables(parts, promote_options="default"), STATUS_COLUMNS
+        )
 
     # -- serialization --
 

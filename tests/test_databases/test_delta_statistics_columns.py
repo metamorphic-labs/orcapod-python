@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime
 import decimal
+import json
 from pathlib import Path
 from typing import Any, cast
 
@@ -20,13 +21,13 @@ import pyarrow as pa
 import pytest
 
 from orcapod.databases import DeltaTableDatabase
-from orcapod.errors import InputValidationError, UnstorableColumnError
 from orcapod.databases.delta_statistics import (
     NUM_INDEXED_COLUMNS_PROPERTY,
     STATS_COLUMNS_PROPERTY,
     statistics_columns,
     statistics_configuration,
 )
+from orcapod.errors import InputValidationError, UnstorableColumnError
 
 STATS_WARNING = "deltalake_core::writer::stats"
 PATH = ("t",)
@@ -199,7 +200,10 @@ class TestStatisticsRule:
 
 
 class TestNewTableWritePaths:
-    """Every write path on a new table logs no statistics warning."""
+    """Every write path on a new table logs no statistics warning.
+
+    The property lists the columns in the table's column order, the canonical order
+    of a new table (ITL-1370): ``__data_context`` before ``v``."""
 
     def test_create_append_merge_and_schema_evolution(
         self, tmp_path: Path, capfd: pytest.CaptureFixture[str]
@@ -210,7 +214,7 @@ class TestNewTableWritePaths:
         db.add_records(PATH, rows(range(0, 10)), flush=True)
         assert stats_warnings(capfd) == [], "create"
         assert configuration(tmp_path / "t") == {
-            STATS_COLUMNS_PROPERTY: "`v`,`__data_context`"
+            STATS_COLUMNS_PROPERTY: "`__data_context`,`v`"
         }
 
         db.add_records(PATH, rows(range(10, 20)), flush=True)
@@ -229,7 +233,7 @@ class TestNewTableWritePaths:
 
         # The property is never changed: a column added later has no statistics.
         assert configuration(tmp_path / "t") == {
-            STATS_COLUMNS_PROPERTY: "`v`,`__data_context`"
+            STATS_COLUMNS_PROPERTY: "`__data_context`,`v`"
         }
         assert all(
             stats == {"v", "__data_context"}
@@ -364,7 +368,16 @@ class TestEveryColumnKind:
         assert stats_warnings(capfd) == []
 
         assert set(statistics_columns(_delta_schema(tmp_path / "t"))) == LISTED
-        assert all(stats == LISTED for stats in columns_with_statistics(tmp_path / "t"))
+        # Read the file statistics from the transaction log. The flattened
+        # Delta action view omits some minima after nested columns in this schema.
+        adds = [
+            action["add"]
+            for log in (tmp_path / "t" / "_delta_log").glob("*.json")
+            for line in log.read_text().splitlines()
+            if "add" in (action := json.loads(line))
+        ]
+        assert adds
+        assert all(set(json.loads(add["stats"])["minValues"]) == LISTED for add in adds)
         assert len(stored_ids(db)) == 9
         # The stored values come back as written.
         fresh = DeltaTableDatabase(tmp_path).get_all_records(
@@ -531,5 +544,5 @@ class TestTablesCreatedElsewhere:
             f"id{i}".encode() for i in range(20)
         )
         assert configuration(tmp_path / "t") == {
-            STATS_COLUMNS_PROPERTY: "`v`,`__data_context`"
+            STATS_COLUMNS_PROPERTY: "`__data_context`,`v`"
         }

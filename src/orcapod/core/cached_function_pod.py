@@ -23,7 +23,11 @@ from orcapod.contexts.stored import (
     data_context_field,
     require_storable,
 )
-from orcapod.core.result_cache import ResultCache, pod_timestamp_type
+from orcapod.core.result_cache import (
+    ResultCache,
+    pod_timestamp_type,
+    result_table_layout,
+)
 from orcapod.hooks import InvocationStatus
 from orcapod.protocols.core_protocols import (
     FunctionPodProtocol,
@@ -75,6 +79,10 @@ class CachedFunctionPod(WrappedFunctionPod):
             # The uri holds no hash up to the function's name, which comes after
             # "side_effect_function" for a pod that takes the invocation context.
             name_path=self.uri[: 2 if function_pod.ctx_arg_name is not None else 1],
+            layout=result_table_layout(
+                function_pod.data_function.declaration,
+                tuple(function_pod.data_function.output_data_schema),
+            ),
         )
 
     def require_storable_results(self) -> None:

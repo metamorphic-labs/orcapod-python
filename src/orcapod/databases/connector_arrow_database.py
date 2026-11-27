@@ -486,7 +486,9 @@ class ConnectorArrowDatabase:
         # The held schemas are gathered once for both checks (one table listing).
         held = self._held_schemas(record_path)
         self._refuse_changed_columns(record_path, records, held, identity_only=True)
-        records = in_held_column_order(records, self._held_column_order(record_path))
+        records = in_held_column_order(
+            records, self._held_column_order(record_path), self.RECORD_ID_COLUMN
+        )
         self._refuse_changed_columns(record_path, records, held)
 
         records = self._deduplicate_within_table(records)
@@ -536,7 +538,8 @@ class ConnectorArrowDatabase:
     def _held_column_order(
         self, record_path: tuple[str, ...]
     ) -> "list[pa.Field[Any]] | None":
-        """The columns of the batch pending for the table, in its order, or ``None``.
+        """The columns of the batch pending for the table, in its order, or ``None``
+        (the rows are then queued in the canonical order, ITL-1370).
 
         An append is aligned when it is queued only to rows this handle queued
         (ITL-1367): nothing about a stored table is trusted across calls, since
@@ -786,7 +789,7 @@ class ConnectorArrowDatabase:
 
                 # Checked by exact name and type above: only then are the rows put
                 # in the stored order, by name (ITL-1367).
-                pending = in_held_column_order(pending, existing)
+                pending = in_held_column_order(pending, existing, self.RECORD_ID_COLUMN)
 
             self._connector.create_table_if_not_exists(
                 table_name, columns, pk_column=self.RECORD_ID_COLUMN
@@ -856,6 +859,7 @@ class ConnectorArrowDatabase:
                         f.with_type(normalize_to_large_types(f.type, keep_null=True))
                         for f in committed.schema
                     ],
+                    self.RECORD_ID_COLUMN,
                 )
             parts.append(pending)
 

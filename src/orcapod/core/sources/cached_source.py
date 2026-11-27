@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-
 import logging
 from datetime import datetime
 from collections.abc import Iterator
@@ -45,7 +44,7 @@ from orcapod.protocols.core_protocols import DataProtocol, SourceProtocol, TagPr
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 from orcapod.system_constants import SOURCE_DB_SCHEMA_VERSION, constants
 from orcapod.types import ColumnConfig, Schema
-from orcapod.utils import schema_utils
+from orcapod.utils import arrow_utils, schema_utils
 
 if TYPE_CHECKING:
     from orcapod.protocols.database_protocols import DatabaseRegistryProtocol
@@ -493,7 +492,12 @@ class CachedSource(RootSource):
         records = self._read_cached_records_with_hashes()
         if records is None:
             return None
-        return records.drop([self.HASH_COLUMN_NAME, constants.DATA_CONTEXT_COL])
+        # In the wrapped source's layout, as ``as_table()`` presents them, whatever
+        # order the cache table is stored in (ITL-1370).
+        return arrow_utils.in_presented_order(
+            records.drop([self.HASH_COLUMN_NAME, constants.DATA_CONTEXT_COL]),
+            self._empty_table().column_names,
+        )
 
     def _read_cached_records_with_hashes(self) -> "pa.Table | None":
         """Read the cached rows written under the current data context, as stored.
@@ -614,8 +618,11 @@ class CachedSource(RootSource):
                 for h in stored.column(self.HASH_COLUMN_NAME).to_pylist()
                 if h is not None
             }
-            all_records = stored.drop(
-                [self.HASH_COLUMN_NAME, constants.DATA_CONTEXT_COL]
+            # Presented in the wrapped source's layout, whatever order the cache
+            # table is stored in (ITL-1370).
+            all_records = arrow_utils.in_presented_order(
+                stored.drop([self.HASH_COLUMN_NAME, constants.DATA_CONTEXT_COL]),
+                self._empty_table().column_names,
             )
 
         tag_keys = self._source.keys()[0]

@@ -53,6 +53,7 @@ from uuid_utils import uuid7
 
 from orcapod.pipeline.logging_capture import install_capture_streams
 from orcapod.protocols.core_protocols import DataProtocol, TagProtocol
+from orcapod.utils import arrow_utils
 
 if TYPE_CHECKING:
     import pyarrow as pa
@@ -63,6 +64,11 @@ logger = logging.getLogger(__name__)
 
 # Default path (table name) within the database where log rows are stored.
 DEFAULT_LOG_PATH: tuple[str, ...] = ("execution_logs",)
+
+LOG_COLUMNS: tuple[str, ...] = ("_log_id", "_log_run_id", "_log_timestamp")
+"""The columns every log row has, in the order the observer presents them; the
+captured fields and the tag columns follow, by name (ITL-1370: a stored table's
+order is the database's, so a read is put in this order)."""
 
 
 class DataLogger:
@@ -246,7 +252,12 @@ class LoggingObserver:
         try:
             sources = self._db.list_sources()
         except (AttributeError, NotImplementedError):
-            return self._db.get_all_records(DEFAULT_LOG_PATH)
+            table = self._db.get_all_records(DEFAULT_LOG_PATH)
+            return (
+                None
+                if table is None
+                else arrow_utils.in_presented_order(table, LOG_COLUMNS)
+            )
 
         parts = []
         for src in sources:
@@ -255,12 +266,16 @@ class LoggingObserver:
                 if tbl is not None and tbl.num_rows > 0:
                     if "__record_id" in tbl.schema.names:
                         tbl = tbl.drop(["__record_id"])
-                    parts.append(tbl)
+                    parts.append(arrow_utils.in_presented_order(tbl, LOG_COLUMNS))
         if not parts:
             return None
         if len(parts) == 1:
             return parts[0]
-        return pa.concat_tables(parts, promote_options="default")
+        # Ordered after the union: node tables carry different tags, and the
+        # concatenation lists them in the order the parts first name them (ITL-1370).
+        return arrow_utils.in_presented_order(
+            pa.concat_tables(parts, promote_options="default"), LOG_COLUMNS
+        )
 
     # -- serialization --
 
