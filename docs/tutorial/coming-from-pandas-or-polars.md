@@ -1,62 +1,70 @@
 # Coming from pandas or Polars
 
-If you already work with data frames, most of Orcapod will look familiar: a stream is a table,
-and you select, filter, join and group it. This page shows the Orcapod form of what you
-already do, then the three places where Orcapod works differently. The same analysis written
-in pandas and in Polars is in the [appendix](#appendix-the-same-analysis-in-pandas-and-polars),
-so you can compare the two line by line.
+Follow one analysis in Orcapod and compare each step with pandas and Polars. You will compute
+the mean firing rate of the units in each recording session.
 
 **Before you start:** Part 0 of the [core course](index.md#core-course). The core course
 explains each step on this page in more detail.
+
+## Tags and data
+
+Tags identify what each row is about, here a unit or a session. With `tag_only_columns=True`,
+the remaining columns hold the data that functions can use ([Part 1](01-first-stream.md)).
 
 ```python
 from workshop_data import make_dataset
 from orcapod.sources import CSVSource
 
 data_dir = make_dataset()
+unit_keys = ["subject_id", "session", "probe", "unit"]
+session_keys = ["subject_id", "session"]
 
 units = CSVSource(
     str(data_dir / "units.csv"),
-    tag_columns=["subject_id", "session", "probe", "unit"], tag_only_columns=True,
+    tag_columns=unit_keys,
+    tag_only_columns=True,
     source_id="units",
 )
 sessions = CSVSource(
     str(data_dir / "sessions.csv"),
-    tag_columns=["subject_id", "session"], tag_only_columns=True,
+    tag_columns=session_keys,
+    tag_only_columns=True,
     source_id="sessions",
 )
-```
-
-Where pandas has `pd.read_csv` and Polars `pl.read_csv`, Orcapod has a source. What you add is
-`tag_columns`: here, the columns that say which unit or session a row is about. The next
-section explains why.
-`tag_only_columns=True` keeps those columns out of the data, as in the tutorial.
-
-## Tags and data
-
-Each column of these streams is either a **tag** or **data** (a column can also be both, a
-*data-tag*: see [Data-tags](../concepts/data-tags.md)). `keys()` gives the two groups:
-
-```python
 print(units.keys())
 # (('subject_id', 'session', 'probe', 'unit'), ('region', 'depth_um', 'n_spikes'))
 ```
 
-Here the tags name a unit of a probe in a session of a mouse. Data are what was measured
-about it. A pandas index or the `on=` columns of a join play a similar part, but in Orcapod the
-roles are part of the stream and every step uses them:
+!!! note "Equivalent steps in pandas / Polars"
 
-- `join` matches rows on the tags the two streams share. There is no `on=` argument.
-- `group_by` groups by tags only.
-- A function receives data columns and returns new data columns. The tags on this page never
-  reach it; the tags of each row are carried to its result.
+    Both frames read the same rows and keep the keys as ordinary columns.
 
-[Part 1](01-first-stream.md) explains how to choose tags.
+    **pandas**
+
+    ```python
+    from datetime import date
+
+    import pandas as pd
+
+    pd_units = pd.read_csv(data_dir / "units.csv")
+    pd_sessions = pd.read_csv(
+        data_dir / "sessions.csv", converters={"date": date.fromisoformat}
+    )
+    ```
+
+    **Polars**
+
+    ```python
+    import polars as pl
+
+    pl_units = pl.read_csv(data_dir / "units.csv")
+    pl_sessions = pl.read_csv(data_dir / "sessions.csv", try_parse_dates=True)
+    ```
 
 ## Select
 
-`select_data_columns` keeps the data columns you name, like `df[["n_spikes"]]` in pandas or
-`df.select("n_spikes")` in Polars. The tags stay:
+`select_data_columns` keeps the data columns you name and carries the tags along.
+[Part 3](03-operators.md) also covers dropping columns and renaming data columns with `map_data`.
 
 ```python
 counts = units.select_data_columns(["n_spikes"])
@@ -64,13 +72,24 @@ print(counts.keys())
 # (('subject_id', 'session', 'probe', 'unit'), ('n_spikes',))
 ```
 
-`drop_data_columns`, `select_tag_columns` and `drop_tag_columns` work the same way, and
-`map_data` renames data columns, like `rename(columns=...)` ([Part 3](03-operators.md)).
+!!! note "Equivalent steps in pandas / Polars"
+
+    **pandas**
+
+    ```python
+    pd_counts = pd_units[unit_keys + ["n_spikes"]]
+    ```
+
+    **Polars**
+
+    ```python
+    pl_counts = pl_units.select(unit_keys + ["n_spikes"])
+    ```
 
 ## Filter
 
-`filter` keeps the rows where a condition holds. `col` names a column, as `pl.col` does in
-Polars:
+[`filter`](03-operators.md#filter) keeps the rows where a condition holds. Here we filter the
+original units to see how many exceed 1,200 spikes, then continue the rate analysis with all units.
 
 ```python
 from orcapod import col
@@ -80,13 +99,29 @@ print(busy.as_table().num_rows)
 # 3
 ```
 
-Keyword arguments test equality: `units.filter(probe="imec0")`. [Part 3](03-operators.md#filter)
-lists the conditions `filter` takes, and `polars_filter` takes a Polars expression.
+!!! note "Equivalent steps in pandas / Polars"
+
+    **pandas**
+
+    ```python
+    pd_busy = pd_units[pd_units["n_spikes"] > 1200]
+    print(len(pd_busy))
+    # 3
+    ```
+
+    **Polars**
+
+    ```python
+    pl_busy = pl_units.filter(pl.col("n_spikes") > 1200)
+    print(pl_busy.height)
+    # 3
+    ```
 
 ## Join
 
-`join` matches the rows of two streams on every tag column they share, here `subject_id` and
-`session`:
+[`join`](03-operators.md#join) does an inner join on every tag the streams share, here
+`subject_id` and `session`. Select `duration_s` from the sessions first so the joined data
+contains just the inputs to the rate calculation.
 
 ```python
 durations = sessions.select_data_columns(["duration_s"])
@@ -95,27 +130,31 @@ print(joined.keys())
 # (('subject_id', 'session', 'probe', 'unit'), ('duration_s', 'n_spikes'))
 ```
 
-It is always an inner join: a row with no partner is dropped. `units` and `counts` both have
-the data column `n_spikes`, so joining them is refused, where pandas would add `_x` and `_y`
-suffixes:
+!!! note "Equivalent steps in pandas / Polars"
 
-```python
-from orcapod.errors import InputValidationError
+    The frames keep `n_spikes` before `duration_s` because it comes from the left frame.
+    Orcapod's join presents the data columns in name order. Sort on the unit keys to compare rows
+    across the three joined results.
 
-try:
-    units.join(counts)
-except InputValidationError as err:
-    print(err)
-# Input streams are not compatible: Datas should not have overlapping keys, but ['n_spikes'] found in CSVSource and SelectDataColumns.
-```
+    **pandas**
 
-Rename one of the columns first, with `map_data`. [Part 3](03-operators.md#join) has more.
+    ```python
+    pd_durations = pd_sessions[session_keys + ["duration_s"]]
+    pd_joined = pd_counts.merge(pd_durations, on=session_keys, how="inner")
+    ```
+
+    **Polars**
+
+    ```python
+    pl_durations = pl_sessions.select(session_keys + ["duration_s"])
+    pl_joined = pl_counts.join(pl_durations, on=session_keys, how="inner")
+    ```
 
 ## Add a column through a function
 
-In pandas you would write `df.assign(rate_hz=df.n_spikes / df.duration_s)`; in Polars,
-`df.with_columns(rate_hz=pl.col("n_spikes") / pl.col("duration_s"))`. In Orcapod, every new
-value is computed by a Python function, made into a **function pod**:
+A [function pod](02-function-pods.md) computes a value for each row from the data columns whose
+names match its parameters. The output carries the original tags and the data named in
+`output_keys`.
 
 ```python
 from orcapod import function_pod
@@ -131,22 +170,34 @@ print(rates.keys())
 # (('subject_id', 'session', 'probe', 'unit'), ('rate_hz',))
 ```
 
-The function is applied to each row, with the data columns whose names match its parameters.
-Its result is a new stream with the same tags and the columns named in `output_keys`. The
-input's data columns are not kept: join them back if you need them.
+!!! note "Equivalent steps in pandas / Polars"
 
-Operators such as `filter` and `join` never compute a new value; functions do. Because
-Orcapod calls the function, it knows which inputs produced which output
-([Part 2](02-function-pods.md)).
+    Keep just the unit keys and `rate_hz` to match the function pod's output.
+
+    **pandas**
+
+    ```python
+    pd_rates = pd_joined.assign(
+        rate_hz=lambda df: df["n_spikes"] / df["duration_s"]
+    )[unit_keys + ["rate_hz"]]
+    ```
+
+    **Polars**
+
+    ```python
+    pl_rates = pl_joined.with_columns(
+        rate_hz=pl.col("n_spikes") / pl.col("duration_s")
+    ).select(unit_keys + ["rate_hz"])
+    ```
 
 ## Group
 
-`group_by` gathers the rows that share the tags you name. Where the pandas and Polars versions
-of this analysis (in the appendix) call `.mean()` on each group, here `group_by` gives each
-group's `rate_hz` values as a list, and a function reduces the list:
+`group_by` keeps the named tags and gathers each group's `rate_hz` values into a list
+([Part 4](04-many-rows-into-one.md)). A function reduces each list to a mean when `run()`
+computes the stream.
 
 ```python
-per_session = rates.group_by(["subject_id", "session"])
+per_session = rates.group_by(session_keys)
 print(per_session.output_schema())
 # (Schema({'subject_id': str, 'session': str}), Schema({'rate_hz': list[float]}))
 
@@ -172,12 +223,62 @@ print(means.run().sort_by_tags().head(3))
 # └─────────────┴──────────┴──────────────┘
 ```
 
-`group_by` keeps only the tags you group by; the other tags (`probe`, `unit`) are dropped.
-[Part 4](04-many-rows-into-one.md) explains why, and how the members of a group are ordered.
+!!! note "Equivalent steps in pandas / Polars"
 
-`run()` computes the stream and returns a view of its rows. Building `rates` and `means`
-called neither function: the functions are called when you ask for rows (`run()`,
-`as_table()`), not when you write the step.
+    Both frames compute the mean directly. The previews show sessions in key order.
+    An Orcapod stream has no promised row order, so sort after reading it with `as_polars_df()`.
+
+    **pandas**
+
+    ```python
+    pd_means = (
+        pd_rates.groupby(session_keys, as_index=False, sort=True)["rate_hz"]
+        .mean()
+        .rename(columns={"rate_hz": "mean_rate_hz"})
+    )
+    print(pd_means.head(3))
+    #   subject_id session  mean_rate_hz
+    # 0   mouse_01      s1      6.033333
+    # 1   mouse_01      s2      6.793750
+    # 2   mouse_02      s1      5.845833
+    ```
+
+    **Polars**
+
+    ```python
+    pl_means = (
+        pl_rates.group_by(session_keys)
+        .agg(mean_rate_hz=pl.col("rate_hz").mean())
+        .sort(session_keys)
+    )
+    print(pl_means.head(3))
+    # shape: (3, 3)
+    # ┌────────────┬─────────┬──────────────┐
+    # │ subject_id ┆ session ┆ mean_rate_hz │
+    # │ ---        ┆ ---     ┆ ---          │
+    # │ str        ┆ str     ┆ f64          │
+    # ╞════════════╪═════════╪══════════════╡
+    # │ mouse_01   ┆ s1      ┆ 6.033333     │
+    # │ mouse_01   ┆ s2      ┆ 6.79375      │
+    # │ mouse_02   ┆ s1      ┆ 5.845833     │
+    # └────────────┴─────────┴──────────────┘
+    ```
+
+    **Orcapod as a Polars frame**
+
+    ```python
+    print(means.as_polars_df().sort(session_keys).head(3))
+    # shape: (3, 3)
+    # ┌────────────┬─────────┬──────────────┐
+    # │ subject_id ┆ session ┆ mean_rate_hz │
+    # │ ---        ┆ ---     ┆ ---          │
+    # │ str        ┆ str     ┆ f64          │
+    # ╞════════════╪═════════╪══════════════╡
+    # │ mouse_01   ┆ s1      ┆ 6.033333     │
+    # │ mouse_01   ┆ s2      ┆ 6.79375      │
+    # │ mouse_02   ┆ s1      ┆ 5.845833     │
+    # └────────────┴─────────┴──────────────┘
+    ```
 
 ## Where Orcapod differs
 
@@ -204,6 +305,8 @@ pandas and Polars both accept `> 1200.0` on an integer column. Orcapod's `filter
 on `n_spikes`, which holds integers:
 
 ```python
+from orcapod.errors import InputValidationError
+
 try:
     units.filter(col("n_spikes") > 1200.0)
 except InputValidationError as err:
@@ -239,68 +342,13 @@ The tag columns decide what a join matches and what a group keeps, so choose the
 A value you want to compute with belongs in a data column, because a function receives data
 columns; a column that must be both is a data-tag ([Data-tags](../concepts/data-tags.md)).
 
-## Appendix: the same analysis in pandas and Polars
-
-Here are the mean firing rates computed in pandas and in Polars, then read from the Orcapod
-stream `means` as a Polars data frame with `as_polars_df()`, for comparison. The three give the same numbers.
+Orcapod also requires distinct data column names in a join. Both `units` and `counts` have
+`n_spikes`, so rename one with `map_data` before joining them.
 
 ```python
-import pandas as pd
-
-pd_units = pd.read_csv(data_dir / "units.csv")
-pd_sessions = pd.read_csv(data_dir / "sessions.csv")
-pd_means = (
-    pd_units.merge(pd_sessions, on=["subject_id", "session"])
-    .assign(rate_hz=lambda df: df["n_spikes"] / df["duration_s"])
-    .groupby(["subject_id", "session"], as_index=False)["rate_hz"]
-    .mean()
-    .rename(columns={"rate_hz": "mean_rate_hz"})
-)
-print(pd_means.head(3))
-#   subject_id session  mean_rate_hz
-# 0   mouse_01      s1      6.033333
-# 1   mouse_01      s2      6.793750
-# 2   mouse_02      s1      5.845833
+try:
+    units.join(counts)
+except InputValidationError as err:
+    print(err)
+# Input streams are not compatible: Datas should not have overlapping keys, but ['n_spikes'] found in CSVSource and SelectDataColumns.
 ```
-
-```python
-import polars as pl
-
-pl_units = pl.read_csv(data_dir / "units.csv")
-pl_sessions = pl.read_csv(data_dir / "sessions.csv")
-pl_means = (
-    pl_units.join(pl_sessions, on=["subject_id", "session"])
-    .with_columns(rate_hz=pl.col("n_spikes") / pl.col("duration_s"))
-    .group_by(["subject_id", "session"])
-    .agg(mean_rate_hz=pl.col("rate_hz").mean())
-    .sort(["subject_id", "session"])
-)
-print(pl_means.head(3))
-# shape: (3, 3)
-# ┌────────────┬─────────┬──────────────┐
-# │ subject_id ┆ session ┆ mean_rate_hz │
-# │ ---        ┆ ---     ┆ ---          │
-# │ str        ┆ str     ┆ f64          │
-# ╞════════════╪═════════╪══════════════╡
-# │ mouse_01   ┆ s1      ┆ 6.033333     │
-# │ mouse_01   ┆ s2      ┆ 6.79375      │
-# │ mouse_02   ┆ s1      ┆ 5.845833     │
-# └────────────┴─────────┴──────────────┘
-```
-
-```python
-print(means.as_polars_df().sort(["subject_id", "session"]).head(3))
-# shape: (3, 3)
-# ┌────────────┬─────────┬──────────────┐
-# │ subject_id ┆ session ┆ mean_rate_hz │
-# │ ---        ┆ ---     ┆ ---          │
-# │ str        ┆ str     ┆ f64          │
-# ╞════════════╪═════════╪══════════════╡
-# │ mouse_01   ┆ s1      ┆ 6.033333     │
-# │ mouse_01   ┆ s2      ┆ 6.79375      │
-# │ mouse_02   ┆ s1      ┆ 5.845833     │
-# └────────────┴─────────┴──────────────┘
-```
-
-The rows of an Orcapod stream come in no promised order, so sort a data frame read from one
-before you compare it.
