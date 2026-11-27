@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import pytest
+from typing_extensions import override
 from upath import UPath
 
 from orcapod.hashing.cache_population import populate_hash_cache
@@ -427,6 +428,40 @@ def _insert_raw(db_path: Path, blob: bytes | str, algorithm: str = "sha256") -> 
         )
 
 
+class _VersionedContentHash(ContentHash):
+    @override
+    def to_prefixed_digest(self) -> bytes:
+        return b"v2:" + super().to_prefixed_digest()
+
+
+@pytest.mark.parametrize("match_mtime", [True, False])
+@pytest.mark.parametrize("same_digest", [True, False])
+def test_sqlite_preserves_valid_rows_with_custom_serialization(
+    tmp_path: Path,
+    match_mtime: bool,
+    same_digest: bool,
+    caplog: pytest.LogCaptureFixture,
+):
+    db_path = tmp_path / "cache.db"
+    key = _key("sha256")
+    original = _hash_of("sha256")
+    incoming = _VersionedContentHash("sha256", bytes([1 if same_digest else 2]) * 32)
+    blob = original.to_prefixed_digest()
+    with SqliteHashCacher(db_path, match_mtime=match_mtime) as cache:
+        _insert_raw(db_path, blob)
+        if same_digest:
+            cache.put(key, incoming)
+        else:
+            with pytest.raises(ValueError, match="Different hash"):
+                cache.put(key, incoming)
+        assert cache.get(key) == original
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "SELECT hash, cached_at FROM file_hash_cache_v2"
+        ).fetchall() == [(blob, 1)]
+    assert not caplog.records
+
+
 CRAFTED_BLOBS = [
     pytest.param(b"sha256:" + b"\x07" * 25, id="raw-32-byte-blob-starting-with-prefix"),
     pytest.param(b"sha256:" + b"\x07" * 33, id="digest-too-long"),
@@ -453,7 +488,7 @@ def test_sqlite_repairs_a_malformed_stored_hash(
         assert c.get(key) is None
         value = _hash_of("sha256")
         before = int(time.time())
-        c.put(key, value)
+        c.put(key, _VersionedContentHash(value.method, value.digest))
         assert c.get(key) == value
         with pytest.raises(ValueError, match="Different hash"):
             c.put(key, _hash_of("sha256", fill=2))

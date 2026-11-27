@@ -16,7 +16,7 @@ from orcapod.hashing.file_hashers import (
     FileHashKey,
     matches_stored_file_hash,
     parse_stored_file_hash,
-    require_storable,
+    serialize_storable_file_hash,
     stored_hash_format,
 )
 from orcapod.types import ContentHash
@@ -213,7 +213,10 @@ class PostgresHashCacher:
                 (checked before the write guards), or if a write finds a different
                 well-formed hash under the same key.
         """
-        digest_size = require_storable(key, value)
+        algorithm = str.__str__(key.algorithm)
+        prefix, digest_size, stored_value = serialize_storable_file_hash(
+            algorithm, value
+        )
         if self._read_only:
             return
         if (
@@ -223,9 +226,7 @@ class PostgresHashCacher:
         ):
             return
         conn = self._connection()
-        fields = (str(key.path), key.mtime_ns, key.size, key.algorithm)
-        stored_value = value.to_prefixed_digest()
-        prefix = stored_value[:-digest_size]
+        fields = (str(key.path), key.mtime_ns, key.size, algorithm)
         with conn.transaction():
             while True:
                 inserted = conn.execute(

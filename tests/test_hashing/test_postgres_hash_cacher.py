@@ -24,11 +24,12 @@ from typing import cast
 from uuid import uuid4
 
 import pytest
+from typing_extensions import override
 from upath import UPath
 
 psycopg = pytest.importorskip("psycopg")
 
-from psycopg import Connection, sql  # noqa: E402
+from psycopg import Connection, connect, sql  # noqa: E402
 from testcontainers.postgres import PostgresContainer  # noqa: E402
 
 from orcapod.hashing.file_hashers import FileHashKey  # noqa: E402
@@ -50,6 +51,12 @@ def make_key(
 
 def make_hash(digest: bytes = b"\xab" * 32) -> ContentHash:
     return ContentHash(method="sha256", digest=digest)
+
+
+class _VersionedContentHash(ContentHash):
+    @override
+    def to_prefixed_digest(self) -> bytes:
+        return b"v2:" + super().to_prefixed_digest()
 
 
 def _insert_raw(pg_conninfo: str, key: FileHashKey, blob: bytes) -> None:
@@ -829,6 +836,35 @@ _CRAFTED_BLOBS = [
 @pytest.mark.postgres
 class TestPostgresHashCacherStrictStore:
     @pytest.mark.parametrize("match_mtime", [True, False])
+    @pytest.mark.parametrize("same_digest", [True, False])
+    def test_preserves_valid_rows_with_custom_serialization(
+        self,
+        pg_conninfo: str,
+        match_mtime: bool,
+        same_digest: bool,
+        caplog: pytest.LogCaptureFixture,
+    ):
+        key = make_key()
+        original = make_hash()
+        incoming = _VersionedContentHash(
+            "sha256", original.digest if same_digest else b"\x01" * 32
+        )
+        blob = original.to_prefixed_digest()
+        with PostgresHashCacher(pg_conninfo, match_mtime=match_mtime) as cache:
+            _insert_raw(pg_conninfo, key, blob)
+            if same_digest:
+                cache.put(key, incoming)
+            else:
+                with pytest.raises(ValueError, match="Different hash"):
+                    cache.put(key, incoming)
+            assert cache.get(key) == original
+        with connect(pg_conninfo) as conn:
+            assert conn.execute(
+                "SELECT hash, cached_at FROM file_hash_cache_v2"
+            ).fetchall() == [(blob, 1)]
+        assert not caplog.records
+
+    @pytest.mark.parametrize("match_mtime", [True, False])
     @pytest.mark.parametrize(
         ("key_label", "value_label"), [("sha256", "md5"), ("md5", "sha256")]
     )
@@ -874,7 +910,7 @@ class TestPostgresHashCacherStrictStore:
             before_row = conn.execute(
                 "SELECT EXTRACT(EPOCH FROM clock_timestamp())::BIGINT"
             ).fetchone()
-            cacher.put(key, value)
+            cacher.put(key, _VersionedContentHash(value.method, value.digest))
             assert cacher.get(key) == value
             with pytest.raises(ValueError, match="Different hash"):
                 cacher.put(key, make_hash(b"\x01" * 32))

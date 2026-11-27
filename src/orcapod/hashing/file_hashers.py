@@ -49,19 +49,20 @@ def stored_hash_format(label: str) -> tuple[bytes, int] | None:
         digest_size = file_hash_digest_size(label)
     except ValueError:
         return None
-    return f"{label}:".encode("ascii"), digest_size
+    return label.encode("ascii") + b":", digest_size
 
 
-def require_storable(key: FileHashKey, value: ContentHash) -> int:
-    """Refuse to store ``value`` under ``key`` unless it is a hash of the key's algorithm.
+def require_storable(algorithm: str, method: str, digest: bytes) -> int:
+    """Require a hash of the key's algorithm and return the validated digest size.
 
     Every file hash cacher calls this first in ``put``, so a store never holds a
     value under another algorithm's key (ITL-1488): the value's label must be the
     key's, and its digest exactly that algorithm's length.
 
     Args:
-        key: The key the value would be stored under.
-        value: The hash to store.
+        algorithm: The key's algorithm label.
+        method: The incoming hash's algorithm label.
+        digest: The incoming hash's raw digest.
 
     Returns:
         The validated digest size.
@@ -70,17 +71,27 @@ def require_storable(key: FileHashKey, value: ContentHash) -> int:
         ValueError: If the labels differ, the label names no algorithm with a fixed
             digest length, or the digest has another length.
     """
-    if value.method != key.algorithm:
+    if str.__eq__(algorithm, method) is not True:
         raise ValueError(
-            f"A {value.method!r} hash cannot be stored under a key whose label is "
-            f"{key.algorithm!r}"
+            f"A {method!r} hash cannot be stored under a key whose label is "
+            f"{algorithm!r}"
         )
-    size = file_hash_digest_size(key.algorithm)
-    if len(value.digest) != size:
-        raise ValueError(
-            f"A {key.algorithm!r} digest is {size} bytes, not {len(value.digest)}"
-        )
+    size = file_hash_digest_size(algorithm)
+    if len(digest) != size:
+        raise ValueError(f"A {algorithm!r} digest is {size} bytes, not {len(digest)}")
     return size
+
+
+def serialize_storable_file_hash(
+    algorithm: str, value: ContentHash
+) -> tuple[bytes, int, bytes]:
+    """Return the key's prefix and digest size, and the canonical bytes to store."""
+    # Snapshot the raw buffer so validation and serialization use the same bytes,
+    # even if a subclass overrides digest access or bytes operations.
+    digest = memoryview(value.digest).tobytes()
+    digest_size = require_storable(algorithm, value.method, digest)
+    prefix = algorithm.encode("ascii") + b":"
+    return prefix, digest_size, prefix + digest
 
 
 def matches_stored_file_hash(blob: object, prefix: bytes, digest_size: int) -> bool:
@@ -99,7 +110,7 @@ def parse_stored_file_hash(
 ) -> ContentHash | None:
     """Read a stored ``<label>:<digest>`` value strictly, for one algorithm.
 
-    A persistent cacher stores ``ContentHash.to_prefixed_digest()``. The value is
+    A persistent cacher stores the canonical prefix and raw digest. The value is
     read only when it is exactly ``label``, a ``:`` and a digest of that
     algorithm's length; anything else (another label, a raw digest whose bytes
     happen to begin with ``<label>:``, a digest of another length) is a miss.
@@ -224,7 +235,7 @@ class CachedFileHasher:
         hit = self.cacher.get(key)
         if isinstance(hit, ContentHash):
             try:
-                _ = require_storable(key, hit)
+                _ = require_storable(key.algorithm, hit.method, hit.digest)
             except ValueError:
                 pass  # Custom backends can return an incompatible cached hash.
             else:
