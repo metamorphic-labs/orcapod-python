@@ -272,9 +272,9 @@ def row_built_columns(
        column of ``table``.
     3. Normalized to the large types without keeping ``null``: each row's datagram
        stores a ``null`` column as ``large_string`` (``Datagram._init_from_table``).
-    4. The system-tag fields as a row builds them from its values
-       (``row_built_provenance``): no field metadata. A source-info column keeps the
-       type the stream gives it (ITL-1491).
+    4. The system-tag and source-info fields as a row builds them
+       (``row_built_provenance``): no field metadata of their own. A source-info
+       column keeps the type the stream gives it (ITL-1491).
 
     Whether a system-tag or source-info field is nullable depends on its values over
     the complete table (``StaticOutputOperatorPod._flag_by_values``), so it is not
@@ -296,14 +296,15 @@ def row_built_columns(
 
 
 def row_built_provenance(table: pa.Table) -> pa.Table:
-    """Give ``table``'s system-tag fields the form a row builds.
+    """Give ``table``'s system-tag and source-info fields the form a row builds.
 
-    A row rebuilds its system tags from their values, so their fields carry no field
-    metadata. A source-info column is left as it is: its type is determined by the
-    pipeline and a row carries the typed column, so it is never typed from its tokens
-    (developer, November 27, 2026, ITL-1491). The fields' nullability is left as it is
-    (``StaticOutputOperatorPod._flag_by_values`` decides it). Other fields are not
-    touched.
+    A row builds its system-tag and source-info fields anew, so the fields carry no
+    field metadata of their own. A source-info column's type is left as it is, the
+    metadata of a list's item field included: the type is determined by the
+    pipeline and a row carries the typed column, so it is never typed from its
+    tokens (developer, November 27, 2026, ITL-1491). The fields' nullability is left
+    as it is (``StaticOutputOperatorPod._flag_by_values`` decides it). Other fields
+    are not touched.
 
     Args:
         table: A table of user tags, system tags, data and source info.
@@ -311,10 +312,9 @@ def row_built_provenance(table: pa.Table) -> pa.Table:
     Returns:
         The same columns under the rebuilt fields.
     """
+    prefixes = (constants.SYSTEM_TAG_PREFIX, constants.SOURCE_PREFIX)
     fields = [
-        field.remove_metadata()
-        if field.name.startswith(constants.SYSTEM_TAG_PREFIX)
-        else field
+        field.remove_metadata() if field.name.startswith(prefixes) else field
         for field in table.schema
     ]
     if all(

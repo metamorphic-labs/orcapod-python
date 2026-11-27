@@ -1131,6 +1131,41 @@ def _no_content_hashes() -> pa.Array[Any]:
     return pa.array([], type=pa.large_string())
 
 
+def _token_rows(rows: "Sequence[pa.Table]") -> pa.Table:
+    """Put the one-row source-info tables of a stream's rows under one another.
+
+    Every column keeps the Arrow type its rows carry. A row that has no column for
+    a token another row has (a row built from values without that token) gets a
+    null there.
+
+    Args:
+        rows: One table of ``_source_*`` columns per row, in row order.
+
+    Returns:
+        The table of every row's source-info columns, in first-seen column order,
+        every field nullable.
+    """
+    types: dict[str, pa.DataType] = {}
+    for row in rows:
+        for field in row.schema:
+            _ = types.setdefault(field.name, field.type)
+    schema = pa.schema([pa.field(name, kind) for name, kind in types.items()])
+    return pa.concat_tables(
+        [
+            pa.Table.from_arrays(
+                [
+                    row.column(name)
+                    if name in row.column_names
+                    else pa.nulls(row.num_rows, kind)
+                    for name, kind in types.items()
+                ],
+                schema=schema,
+            )
+            for row in rows
+        ]
+    )
+
+
 class FunctionPodStream(StreamBase):
     """Recomputable stream wrapping a data function."""
 
@@ -1544,22 +1579,43 @@ class FunctionPodStream(StreamBase):
                 {**tag_schema, **data_schema}, self.data_context.type_converter
             )
         tag_tables: list[pa.Table] = []
+        token_tables: list[pa.Table] = []
         all_data = []
         data_schema = None
         # A data-tag that falls through the pod is one column: it is laid
         # out from the tags, with its exact Arrow type, never converted from its
         # Python value (ITL-1023).
         shared: set[str] = set()
+        source_prefix = constants.SOURCE_PREFIX
         for tag, data in pairs:
             if data_schema is None:
                 shared = set(tag.keys()) & set(data.keys())
                 data_schema = data.arrow_schema(all_info=True)
-                data_schema = pa.schema(f for f in data_schema if f.name not in shared)
+                data_schema = pa.schema(
+                    f
+                    for f in data_schema
+                    if f.name not in shared and not f.name.startswith(source_prefix)
+                )
             # Tags are passed through untouched: each row's own Arrow table keeps
             # the input's tag types, a logical type included (ITL-928).
             tag_tables.append(tag.as_table(columns={"system_tags": True}))
+            # So are the source-info tokens: each row's own token columns, with
+            # the types the row carries, never converted from their Python
+            # values (ITL-1491).
+            row_table = data.as_table(columns={"source": True})
+            token_tables.append(
+                row_table.select(
+                    [n for n in row_table.column_names if n.startswith(source_prefix)]
+                )
+            )
             row = data.as_dict(all_info=True)
-            all_data.append({k: v for k, v in row.items() if k not in shared})
+            all_data.append(
+                {
+                    k: v
+                    for k, v in row.items()
+                    if k not in shared and not k.startswith(source_prefix)
+                }
+            )
 
         # TODO: re-verify the implemetation of this conversion
         converter = self.data_context.type_converter
@@ -1567,10 +1623,8 @@ class FunctionPodStream(StreamBase):
         # The data columns have declared types: convert each value as its column's
         # type, never as the type the value happens to have. A subclass instance
         # returned for a base-class column is then refused instead of being stored
-        # as the base without its own fields (ITL-972). The remaining columns
-        # (meta, source info) take the Arrow types of the first row's schema
-        # (``data_schema``); a source-info column's is the one the row carries
-        # (ITL-1491).
+        # as the base without its own fields (ITL-972). Only the meta columns are
+        # typed from their values.
         python_schema = dict(infer_python_schema_from_pylist_data(all_data))
         python_schema.update(self.output_schema()[1])
         struct_data = converter.python_dicts_to_struct_dicts(
@@ -1580,7 +1634,9 @@ class FunctionPodStream(StreamBase):
         all_data_as_tables: pa.Table = pa.Table.from_pylist(
             struct_data, schema=data_schema
         )
-        return arrow_utils.hstack_tables(all_tags_as_tables, all_data_as_tables)
+        return arrow_utils.hstack_tables(
+            all_tags_as_tables, all_data_as_tables, _token_rows(token_tables)
+        )
 
     def as_table(
         self,

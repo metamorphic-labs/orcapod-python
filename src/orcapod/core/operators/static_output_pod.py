@@ -1312,8 +1312,10 @@ def settle_token_types(
 
     A source-info column's type is the one its batch declares: the pipeline determines
     it, and it is never taken from the tokens' values (developer, November 27, 2026,
-    ITL-1491). Every batch of one stream therefore declares the same type; a batch
-    that declares another is refused. A batch with no rows has no token and settles
+    ITL-1491). Every batch of one stream therefore declares the same type, compared
+    strictly (list kind, depth, and each item field's name, nullability and
+    metadata), so that the order of the batches never decides the table's type; a
+    batch that declares another is refused. A batch with no rows has no token and settles
     nothing (its column may be of the ``null`` type of a zero-row form).
 
     Args:
@@ -1333,7 +1335,11 @@ def settle_token_types(
     for field in batch.schema:
         if not field.name.startswith(constants.SOURCE_PREFIX):
             continue
-        if settled.setdefault(field.name, field.type) != field.type:
+        accepted_type = settled.setdefault(field.name, field.type)
+        # Strictly: the item fields' names, nullability and metadata too. pyarrow's
+        # ``==`` takes lists with differently named items as equal, and a table
+        # made of such batches would take the first batch's name.
+        if not accepted_type.equals(field.type, check_metadata=True):
             raise SourceInfoTypesDisagree(field.name)
     return settled
 

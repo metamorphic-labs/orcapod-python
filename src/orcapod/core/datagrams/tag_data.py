@@ -309,12 +309,26 @@ def _source_info_python_type(value: "SourceInfoValue") -> DataType:
         ``str`` for scalars and unknowns, ``list[...]`` nested to the token's
         depth for lists.
     """
-    import pyarrow as _pa
+    return _token_python_type(arrow_utils.source_info_arrow_type(value))
 
-    arrow_type = arrow_utils.source_info_arrow_type(value)
+
+def _token_python_type(arrow_type: "pa.DataType") -> DataType:
+    """The Python type of a source-info column of ``arrow_type``.
+
+    Args:
+        arrow_type: A token column's Arrow type: a string, or a list of any kind
+            (large, plain or fixed-size) of a token type.
+
+    Returns:
+        ``str``, under one ``list[...]`` per list level of ``arrow_type``.
+    """
     depth = 0
-    while _pa.types.is_large_list(arrow_type):
-        arrow_type = arrow_type.value_type
+    while (
+        pa.types.is_large_list(arrow_type)
+        or pa.types.is_list(arrow_type)
+        or pa.types.is_fixed_size_list(arrow_type)
+    ):
+        arrow_type = arrow_type.value_type  # pyright: ignore[reportAttributeAccessIssue, reportUnknownMemberType, reportUnknownVariableType]  # a list type has a value type
         depth += 1
     python_type: DataType = str
     for _ in range(depth):
@@ -624,34 +638,48 @@ class Data(Datagram):
             names = Datagram.keys(self)
             if all(name in self._source_info for name in names):
                 return self._ensure_source_info_table()
-            return self._token_columns({})
+            return self._token_columns({}, every_column=True)
         # The fields of a row's own table: the name and the type, nullable, as
         # ``_source_info_field`` makes them (a stream's may be non-null). The
         # arrays are the stream's, wrapped again, never cast. A null token is a
-        # ``large_string`` null whatever its column declares.
-        columns = [
-            pa.chunked_array([pa.nulls(1, _NULL_TOKEN_TYPE)])
-            if column.null_count == len(column)
-            else column
-            for column in typed.columns
-        ]
+        # ``large_string`` null whatever its column declares, and so is the token
+        # of a data column the row holds no token column for.
+        null = pa.chunked_array([pa.nulls(1, _NULL_TOKEN_TYPE)])
+        columns: "list[pa.ChunkedArray[Any]]" = []
+        names: "list[str]" = []
+        for name in Datagram.keys(self):
+            column_name = f"{constants.SOURCE_PREFIX}{name}"
+            column = (
+                typed.column(column_name) if column_name in typed.column_names else null
+            )
+            columns.append(null if column.null_count == len(column) else column)
+            names.append(column_name)
         return pa.Table.from_arrays(
             columns,
             schema=pa.schema(
-                [pa.field(f.name, c.type) for f, c in zip(typed.schema, columns)]
+                [pa.field(name, column.type) for name, column in zip(names, columns)]
             ),
         )
 
-    def _token_columns(self, kept: "Mapping[str, pa.ChunkedArray[Any]]") -> "pa.Table":
-        """Return one token column per data column this row holds, in their order.
+    def _token_columns(
+        self, kept: "Mapping[str, pa.ChunkedArray[Any]]", *, every_column: bool = False
+    ) -> "pa.Table":
+        """Return this row's token columns, in the order of its data columns.
+
+        A row has a token column for each data column it holds a token for (a
+        null token included), as ``as_table(columns={"source": True})`` shows
+        them: a row read from a table for every data column, a row built from
+        values only for the tokens it was given.
 
         Args:
             kept: The typed column of each token that is kept as it was read,
                 by the name of the data column it now belongs to.
+            every_column: Give every data column a column, null when the row holds
+                no token for it (the form of ``source_info_table``).
 
         Returns:
             A one-row table: for a data column in ``kept`` that column, for any
-            other the row's token typed from its value (null when it has none).
+            other the row's token typed from its value.
         """
         arrays: "list[pa.ChunkedArray[Any]]" = []
         fields: "list[pa.Field[Any]]" = []
@@ -659,6 +687,8 @@ class Data(Datagram):
             column_name = f"{constants.SOURCE_PREFIX}{name}"
             array = kept.get(name)
             if array is None:
+                if not every_column and name not in self._source_info:
+                    continue
                 token = self._source_info.get(name)
                 token_type = _source_info_field(column_name, token).type
                 array = pa.chunked_array([pa.array([token], type=token_type)])
@@ -728,10 +758,16 @@ class Data(Datagram):
         schema = dict(super().schema(columns=columns, all_info=all_info))
         column_config = ColumnConfig.handle_config(columns, all_info=all_info)
         if column_config.source:
+            # A token column's Python type follows its Arrow type when the row
+            # carries one (ITL-1491), so it agrees with ``arrow_schema``; only a
+            # token given as a value is typed from that value.
+            typed = self._typed_source_info
             for key in super().keys():
-                schema[f"{constants.SOURCE_PREFIX}{key}"] = _source_info_python_type(
-                    self._source_info.get(key)
-                )
+                name = f"{constants.SOURCE_PREFIX}{key}"
+                if typed is not None and name in typed.column_names:
+                    schema[name] = _token_python_type(typed.schema.field(name).type)
+                else:
+                    schema[name] = _source_info_python_type(self._source_info.get(key))
         return Schema(schema)
 
     def arrow_schema(
@@ -916,8 +952,15 @@ class Data(Datagram):
         new_p._data_arrow_schema = None
         # The added columns' source info is ``other``'s; an entry this data holds for
         # one of them (it does not hold the column) does not override it.
+        # A taken column has a token only when ``other`` shows a token column for
+        # it, so the row has the token columns of the same row built by hand.
+        theirs = other.as_table(columns={"source": True})
         new_p._source_info = {
-            **{name: other_info.get(name) for name in names},
+            **{
+                name: other_info.get(name)
+                for name in names
+                if f"{constants.SOURCE_PREFIX}{name}" in theirs.column_names
+            },
             **{k: v for k, v in self._source_info.items() if k not in names},
         }
         new_p._source_info_table = None
@@ -925,7 +968,6 @@ class Data(Datagram):
         # types (the pipeline determines a token column's type; ITL-1491); this
         # row's own are its typed columns when it has them, and typed from their
         # values otherwise (a function's output, whose tokens are created here).
-        theirs = other.as_table(columns={"source": True})
         kept = {
             name: theirs.column(f"{constants.SOURCE_PREFIX}{name}")
             for name in names

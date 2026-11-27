@@ -124,7 +124,7 @@ def _with_tokens(
             pa.array(values, kind),
         )
     return ArrowTableStream(
-        table, tag_columns=list(tags), data_tags=list(tags) if data_tags else None
+        table, tag_columns=list(tags), data_tags=list(tags) if data_tags else []
     )
 
 
@@ -297,10 +297,26 @@ def _two_typed(
 
 
 def _refusal(run: Any) -> str:
-    """The message of the ``InputValidationError`` ``run`` raises."""
-    with pytest.raises(InputValidationError) as refused:
+    """The message of the ``InputValidationError`` ``run`` raises.
+
+    The async ``Join`` runs in a task group, which wraps the error it raises.
+    """
+    with pytest.raises((InputValidationError, ExceptionGroup)) as refused:
         run()
-    return str(refused.value)
+    error: BaseException = refused.value
+    while isinstance(error, ExceptionGroup):
+        (error,) = error.exceptions
+    assert isinstance(error, InputValidationError)
+    return str(error)
+
+
+def _names_both_types(message: str, column: str, case: str) -> bool:
+    """Whether a refusal names the column and both declared types."""
+    from orcapod.utils import arrow_utils
+
+    return f"'_source_{column}'" in message and all(
+        arrow_utils.describe_arrow_type(kind) in message for kind in TWO_TYPES[case]
+    )
 
 
 @TAG_ORDER
@@ -321,7 +337,7 @@ def test_merge_join_refuses_two_declarations_of_a_colliding_token_column(
     order = TAG_ORDERS[tags]
     left, right = _two_typed("x", case, swapped, order, keys)
     sync = _refusal(lambda: MergeJoin()(left, right).as_table())
-    assert "_source_x" in sync and "MergeJoin" in sync
+    assert sync.startswith("MergeJoin") and _names_both_types(sync, "x", case)
     assert _refusal(lambda: _async_rows(MergeJoin(), left, right)) == sync
     for orchestrator in ORCHESTRATORS.values():
         job = PipelineJob(name="two_types", database=InMemoryArrowDatabase())
@@ -333,7 +349,8 @@ def test_merge_join_refuses_two_declarations_of_a_colliding_token_column(
             )
             add_pairs.pod(merged, label="f")
         job.bind(sources={"a": left, "b": right})
-        assert "_source_x" in _refusal(lambda: job.run(orchestrator=orchestrator()))
+        refused = _refusal(lambda: job.run(orchestrator=orchestrator()))
+        assert _names_both_types(refused, "x", case)
     assert calls["add_pairs"] == 0
 
 
@@ -352,9 +369,12 @@ def test_join_refuses_two_declarations_of_a_merged_data_tag_token(
     """
     order = TAG_ORDERS[tags]
     left, right = _two_typed("k", case, swapped, order, keys)
-    sync = _refusal(lambda: Join()(left, right).as_table())
-    assert "_source_k" in sync and "Join" in sync
-    assert _refusal(lambda: _async_rows(Join(), left, right)) == sync
+    # The commutative Join names its inputs in no fixed order: both types are named.
+    for refused in (
+        _refusal(lambda: Join()(left, right).as_table()),
+        _refusal(lambda: _async_rows(Join(), left, right)),
+    ):
+        assert refused.startswith("Join") and _names_both_types(refused, "k", case)
     for orchestrator in ORCHESTRATORS.values():
         job = PipelineJob(name="two_types", database=InMemoryArrowDatabase())
         with job:
@@ -363,7 +383,8 @@ def test_join_refuses_two_declarations_of_a_merged_data_tag_token(
             )
             add_two.pod(joined, label="f")
         job.bind(sources={"a": left, "b": right})
-        assert "_source_k" in _refusal(lambda: job.run(orchestrator=orchestrator()))
+        refused = _refusal(lambda: job.run(orchestrator=orchestrator()))
+        assert _names_both_types(refused, "k", case)
     assert calls["add_two"] == 0
 
 
@@ -480,8 +501,9 @@ def test_the_whole_table_form_drops_a_token_fields_own_metadata(tags: str) -> No
     )
     marked = ArrowTableStream(table, tag_columns=list(order), data_tags=list(order))
     built, _, _ = StaticOutputOperatorPod._rows_to_table(list(marked.iter_data()))  # pyright: ignore[reportPrivateUsage]  # the rows' form
+    assert table.schema.field("_source_x").metadata == {b"top": b"level"}
     formed = StaticOutputOperatorPod._row_built_form(  # pyright: ignore[reportPrivateUsage]  # the whole-table form
-        marked.as_table(columns=ZERO_ROW_INPUT_COLUMNS), marked.keys()
+        table, marked.keys()
     )
     assert formed.schema.equals(built.schema, check_metadata=True)
     assert not formed.schema.field("_source_x").metadata

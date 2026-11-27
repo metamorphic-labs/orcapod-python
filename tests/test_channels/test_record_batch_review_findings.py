@@ -394,26 +394,19 @@ def _list_token_stream() -> ArrowTableStream:
     )
 
 
-@pytest.mark.parametrize("where", ["top_level", "list_item"])
-def test_a_source_info_field_carries_no_metadata(where: str) -> None:
+def test_a_source_info_field_carries_no_metadata_of_its_own() -> None:
     """Codex on PR 483, round 2, finding 3: a source-info field carries no field
-    metadata, at its own level or on a list item, as a row builds it."""
-    stream = source() if where == "top_level" else _list_token_stream()
+    metadata at its own level, as a row builds it."""
+    stream = source()
     (batch,) = batches_of(stream)
     index = next(
         i for i, n in enumerate(batch.schema.names) if n.startswith("_source_")
     )
     field = batch.schema.field(index)
-    if where == "top_level":
-        tagged = pa.RecordBatch.from_arrays(
-            batch.columns,
-            schema=batch.schema.set(index, field.with_metadata({"m": "1"})),
-        )
-    else:
-        tagged_type = _with_metadata_inside(field.type)
-        tagged = batch.set_column(
-            index, field.with_type(tagged_type), batch.column(index).cast(tagged_type)
-        )
+    tagged = pa.RecordBatch.from_arrays(
+        batch.columns,
+        schema=batch.schema.set(index, field.with_metadata({"m": "1"})),
+    )
 
     async def write() -> None:
         output = OutputChannel(stream)
@@ -422,6 +415,40 @@ def test_a_source_info_field_carries_no_metadata(where: str) -> None:
         await output.send(batch)
 
     asyncio.run(write())
+
+
+def test_a_token_columns_item_metadata_is_part_of_its_declared_type() -> None:
+    """Restated for ITL-1491 (review of PR #601, P2-4): metadata on a token list's
+    item field is part of the column's type, which a row keeps as its stream
+    declares it, so a batch that carries it is taken (it used to be refused as
+    "carrying field metadata", when a row rebuilt its token type from the value).
+    Batches of one stream declare one token type, compared strictly: after it, a
+    batch without the metadata is refused, and another with it is taken."""
+    from orcapod.core.operators.static_output_pod import SourceInfoTypesDisagree
+
+    stream = _list_token_stream()
+    (batch,) = batches_of(stream)
+    index = next(
+        i for i, n in enumerate(batch.schema.names) if n.startswith("_source_")
+    )
+    field = batch.schema.field(index)
+    tagged_type = _with_metadata_inside(field.type)
+    tagged = batch.set_column(
+        index, field.with_type(tagged_type), batch.column(index).cast(tagged_type)
+    )
+
+    async def write() -> pa.Table:
+        output = OutputChannel(stream)
+        await output.send(tagged.slice(0, 1))
+        with pytest.raises(SourceInfoTypesDisagree, match=field.name):
+            await output.send(batch.slice(1, 1))
+        await output.send(tagged.slice(1, 1))
+        await output.close()
+        return output.result().as_table(columns={"source": True})
+
+    result = asyncio.run(write())
+    assert result.schema.field(field.name).type.equals(tagged_type, check_metadata=True)
+    assert result.num_rows == 2
 
 
 # --- A null-typed source-info column (Codex on PR 483, round 2, finding 5: declined) --

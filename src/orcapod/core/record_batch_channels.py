@@ -433,7 +433,9 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
     source-info column's type compared with the description's: it is the one the
     batch declares (a stream bound to a slot may declare another token type than
     the slot's description), which every batch of the channel must then declare
-    (``settle_token_types``); it must only be a token type (``_is_token_type``).
+    exactly (``settle_token_types``); it must only be a token type
+    (``_is_token_type``), and it may carry metadata on a list's item field, as its
+    stream declares it.
     """
     sent = batch.schema
     if sorted(declared.names) != sorted(sent.names):
@@ -445,9 +447,9 @@ def _schema_mismatch(declared: pa.Schema, batch: pa.RecordBatch) -> str | None:
         if column.name.startswith(constants.SOURCE_PREFIX):
             if not _is_token_type(column.type):
                 return f"column {column.name!r} is {column.type}, not a token type"
-            if column.metadata or not column.type.equals(
-                _without_metadata(column.type), check_metadata=True
-            ):
+            # A row builds the field anew, so the field itself has no metadata; its
+            # type is the stream's, the metadata of a list's item field included.
+            if column.metadata:
                 return f"column {column.name!r} carries field metadata"
             continue
         if column.type != carried:
