@@ -8,8 +8,9 @@ explains each step on this page in more detail.
 
 ## Tags and data
 
-Tags identify what each row is about, here a unit or a session. With `tag_only_columns=True`,
-the remaining columns hold the data that functions can use ([Part 1](01-first-stream.md)).
+A tag helps identify what a row is about, here a unit or a session. With
+`tag_only_columns=True`, the remaining columns hold the data that functions can use
+([Part 1](01-first-stream.md)).
 
 ```python
 from workshop_data import make_dataset
