@@ -1206,8 +1206,7 @@ are defined in one module, `core/row_ids.py`; never build one of these preimages
   The type rule is the pure function
   `schema_utils.token_layers_fit`; `token_shape_violations` lists the violating columns and
   `token_shape_error` words the `InputValidationError`, which names the token column, the
-  data column and both types. Never loosen it. NOT covered: held rows on the async route
-  (above, ITL-1534), a record batch sent into an
+  data column and both types. Never loosen it. NOT covered: a record batch sent into an
   `OutputChannel` (the channels are not wired into nodes; the stream `result()` builds is
   checked; the follow-up is ITL-1526), and a `Data` built by hand outside a stream. The null check reads the
   validity of EVERY list level of a list-typed token column (`schema_utils.null_list_level`:

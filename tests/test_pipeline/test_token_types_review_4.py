@@ -162,9 +162,14 @@ def test_merge_join_s_sync_call_guards_against_a_null_inner_list(
 def test_index_s_sync_call_guards_against_a_null_element(layout: str) -> None:
     """``Index`` called on a stream whose row hands out a null inner list (no
     stream holds one): taking that element would give a null token whose type is
-    a list, and the sync path refuses, naming the operator and the column. (With
-    ``out`` the row keeps ``x`` and its token, and the result stream is refused
-    where it is built.)"""
+    a list, and the sync path refuses, naming the operator and the column.
+
+    This test gives no ``out``. With ``out="picked"`` both outcomes are correct
+    too, and differ by the element taken: taking the null list (index 0) meets
+    the same guard, which names ``_source_picked``; taking the valid element
+    (index 1) succeeds in the row operation, the row keeps ``x`` with its
+    tampered token, and the result stream is then refused where it is built,
+    for ``_source_x``."""
     data_type = pa.large_list(pa.large_list(pa.int64()))
     columns: dict[str, Any] = {
         "g": pa.array(["m", "n"], STR),
