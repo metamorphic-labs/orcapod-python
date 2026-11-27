@@ -473,6 +473,75 @@ def write_sqlite_input(path: Path, value: int) -> None:
         connection.commit()
 
 
+def test_loading_relative_sqlite_from_another_directory_only_creates_wal_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Load a saved relative SQLite binding from three different directories."""
+
+    def contents(directory: Path) -> dict[Path, bytes | None]:
+        return {
+            path.relative_to(directory): path.read_bytes() if path.is_file() else None
+            for path in directory.rglob("*")
+        }
+
+    filename = "input.sqlite"
+    original = tmp_path / "original"
+    original.mkdir()
+    write_sqlite_input(original / filename, 1)
+    monkeypatch.chdir(original)
+    source = SQLiteTableSource(filename, "samples", source_id="file")
+    job = PipelineJob("sqlite_paths", database=DeltaTableDatabase(original / "store"))
+    with job:
+        _ = total.pod(source)
+    saved = original / "job.json"
+    job.save(saved)
+    saved_binding = json.loads(saved.read_bytes())["bindings"]["sources"]["file"]
+    assert saved_binding["db_path"] == filename
+
+    missing_dir = tmp_path / "missing"
+    missing_dir.mkdir()
+    (missing_dir / "nested").mkdir()
+    _ = (missing_dir / "nested" / "existing.txt").write_bytes(b"keep these bytes")
+    before = contents(missing_dir)
+    monkeypatch.chdir(missing_dir)
+    missing = PipelineJob.load(saved)
+    assert contents(missing_dir) == before
+    assert missing.unbound_sources == ["file"]
+    resaved = original / "resaved.json"
+    missing.save(resaved)
+    assert (
+        json.loads(resaved.read_bytes())["bindings"]["sources"]["file"] == saved_binding
+    )
+
+    for journal_mode, value in (("delete", 2), ("wal", 3)):
+        directory = tmp_path / journal_mode
+        directory.mkdir()
+        database = directory / filename
+        write_sqlite_input(database, value)
+        with closing(sqlite3.connect(database)) as connection:
+            assert connection.execute(
+                f"PRAGMA journal_mode={journal_mode}"
+            ).fetchone() == (journal_mode,)
+        before = contents(directory)
+        assert set(before) == {Path(filename)}
+        monkeypatch.chdir(directory)
+        restored = PipelineJob.load(saved).sources["file"]
+        assert isinstance(restored, SQLiteTableSource)
+        after = contents(directory)
+        created = after.keys() - before.keys()
+        assert created == (
+            {Path(f"{filename}-wal"), Path(f"{filename}-shm")}
+            if journal_mode == "wal"
+            else set()
+        )
+        assert all(after[path] is not None for path in created)
+        assert after[Path(filename)] == before[Path(filename)]
+
+        monkeypatch.chdir(original)
+        assert restored.check_for_new_data() is False
+        assert restored.as_table().column("x").to_pylist() == [value] * 3
+
+
 class SQLitePath:
     """A path-like object whose display name is not its filesystem name."""
 
