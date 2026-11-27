@@ -1013,13 +1013,13 @@ order or content can vary between runs, pass an explicit, stable `source_id` **a
 key columns that are unique per row; this avoids both the duplicate entries and the repeated
 deliveries.
 
-A pipeline currently refuses sources that share a `source_id` and schema but have
-different key columns: they are two readings of one dataset that would take one slot
-name. When both hold their rows in memory, the rows are compared first (as a multiset,
-above), so the error says they differ only in key columns; the rows of a source read
-later (a file, a database) are not compared, and the error says so. ITL-1506 will allow
-distinct readings of one dataset in distinct named slots. Until then, give each source
-its own `source_id`.
+Sources that share a `source_id` and schema but have different key columns are two
+readings of one dataset, and are refused for now everywhere: at capture, `bind` (into any
+slots) and load, with `InconsistentSourceError`. When both hold their rows in memory, the
+rows are compared first (as a multiset, above): different rows are reported as such, and
+equal rows as differing only in key columns. The rows of a source read later (a file, a
+database) are not compared, and the error says so. ITL-1506 will allow distinct readings
+of one dataset in distinct named slots. Until then, give each source its own `source_id`.
 
 An in-memory source with key columns and no `source_id` can instead hash its rows in key
 order: pass `hash_in_key_order=True` (`ArrowTableSource`, `DictSource`, `DataFrameSource`,

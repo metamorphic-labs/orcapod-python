@@ -51,13 +51,8 @@ def _refuse_sources_sharing_a_slot_name(
     Only sources are refused here: a slot of another stream is named by its label and
     content hash.
 
-    Sources with one source id and schema whose key columns differ are distinct
-    readings of one dataset. ``require_consistent_sources`` has already compared the
-    rows of fixed sources (as a multiset of tags and data, since record ids follow the
-    key columns), so when every source is fixed they differ only in key columns. A
-    source read later (a file, a database) has no rows to compare, and the message
-    says so instead of claiming the rows agree. ITL-1506 will allow such readings in
-    distinct named slots.
+    Sources with one source id and schema whose key columns differ never get here:
+    ``require_consistent_sources`` refuses them first (ITL-1506).
 
     Raises:
         SourceSlotNameCollisionError: Naming every full source id and the remedy.
@@ -70,29 +65,6 @@ def _refuse_sources_sharing_a_slot_name(
     from orcapod.errors import SourceSlotNameCollisionError
 
     ids = sorted({s.source_id for s in sources})
-    if len(ids) == 1:
-        keys = {s.key_columns for s in sources}
-        # Schema agreement (and, for fixed sources, row agreement) was checked
-        # before slot naming.
-        if None not in keys and len(keys) == len(sources):
-            remedy = (
-                "A later version will allow distinct readings of one dataset in "
-                "distinct named slots (ITL-1506). For now, give each source its own "
-                "name with source_id=... when it is built."
-            )
-            if all(s.fixed_content is not None for s in sources):
-                raise SourceSlotNameCollisionError(
-                    f"{len(sources)} sources with source id {ids[0]!r} share one "
-                    "schema and the same rows, and differ only in key columns "
-                    f"(record_id_columns). They would take the same slot name "
-                    f"{slot_name!r}, so this is refused for now. {remedy}"
-                )
-            raise SourceSlotNameCollisionError(
-                f"{len(sources)} sources with source id {ids[0]!r} share one schema "
-                "and have different key columns (record_id_columns). The rows of a "
-                "source read later are not compared. They would take the same slot "
-                f"name {slot_name!r}, so this is refused for now. {remedy}"
-            )
     described = (
         ", ".join(repr(i) for i in ids)
         if len(ids) > 1

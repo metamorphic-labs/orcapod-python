@@ -560,7 +560,10 @@ class InconsistentSourceError(ValueError):
     """Raised when two sources in a pipeline disagree at a shared address.
 
     Sources sharing a ``source_id`` must have the same schema. If both hold
-    fixed content, their tags, data and record IDs must also agree. Two
+    fixed content, their rows must also agree: tags, data and record IDs with
+    equal key columns, tags and data as a multiset with different ones. Sources
+    sharing a ``source_id`` and schema with different key columns are refused
+    for now, in any slots (ITL-1506 will allow them in distinct named slots). Two
     different schemas competing for one input slot also raise this error.
 
     Resolution: assign distinct ``source_id`` values to the conflicting sources
@@ -766,8 +769,6 @@ class SourceSlotNameCollisionError(ValueError):
     different sources (another kind, another version or another id) whose names are
     equal would share one slot and one would replace the other. The job refuses
     them; give one of them its own name (``source_id=`` when it is built).
-    ITL-1506 will lift this refusal for sources that differ only in key columns
-    when they have distinct named slots.
     """
 
 

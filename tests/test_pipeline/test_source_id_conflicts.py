@@ -300,7 +300,7 @@ def test_same_source_id_with_different_key_columns_is_refused_at_build(
     assert first.arrow_schemas == second.arrow_schemas
     assert first.content_hash() != second.content_hash()
 
-    with pytest.raises(SourceSlotNameCollisionError, match="ITL-1506"):
+    with pytest.raises(InconsistentSourceError, match="ITL-1506"):
         with Pipeline("conflicts"):
             both.pod(first, label="fa")
             both.pod(second, label="fb")
@@ -336,20 +336,48 @@ def test_row_order_counts_only_for_positional_ids(keyed: bool) -> None:
         _refused(first, second, Pipeline("conflicts"), both.pod)
 
 
-def test_bind_compares_rows_without_record_ids_when_keys_differ() -> None:
-    # A source id names a dataset; key columns only name its rows. Two readings of
-    # the same rows with other keys bind into distinct named slots; other rows do not.
-    job = _job()
+@pytest.mark.parametrize("reverse", [False, True])
+def test_bind_refuses_same_rows_with_different_keys(reverse: bool) -> None:
+    # Refused in any slots for now: distinct slots for distinct readings of one
+    # dataset are ITL-1506, after the multi-slot binding work (ITL-1442).
     positional = _dict(1)
     keyed = DictSource([{"x": 1}], record_id_columns="x", source_id="shared")
-    job.bind(sources={"left": positional, "right": keyed})
-    assert job.sources["left"] is positional
-    assert job.sources["right"] is keyed
-
+    pair = (keyed, positional) if reverse else (positional, keyed)
     job = _job()
+    before = dict(job.sources)
+    with pytest.raises(InconsistentSourceError) as error:
+        job.bind(sources={"left": pair[0], "right": pair[1]})
+    message = str(error.value)
+    assert "differ only in key columns" in message
+    assert "ITL-1506" in message
+    assert "slot 'left'" in message and "slot 'right'" in message
+    assert dict(job.sources) == before
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_bind_refuses_different_rows_with_different_keys(reverse: bool) -> None:
+    positional = _dict(1)
     other = DictSource([{"x": 100}], record_id_columns="x", source_id="shared")
+    pair = (other, positional) if reverse else (positional, other)
     with pytest.raises(InconsistentSourceError, match="different rows"):
-        job.bind(sources={"left": positional, "right": other})
+        _job().bind(sources={"left": pair[0], "right": pair[1]})
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_bind_refuses_live_sources_with_different_keys(
+    tmp_path: Path, reverse: bool
+) -> None:
+    path = tmp_path / "shared.csv"
+    path.write_text("x\n1\n2\n")
+    positional = CSVSource(str(path), source_id="shared")
+    keyed = CSVSource(str(path), source_id="shared", record_id_columns="x")
+    pair = (keyed, positional) if reverse else (positional, keyed)
+    with pytest.raises(InconsistentSourceError) as error:
+        _job().bind(sources={"left": pair[0], "right": pair[1]})
+    message = str(error.value)
+    assert "differ only" not in message
+    assert "not compared" in message
+    assert "ITL-1506" in message
 
 
 def test_nulls_nan_signed_zero_and_nested_values() -> None:
@@ -643,7 +671,7 @@ def _keyed(
 
 
 def _capture(first: RootSource, second: RootSource, pod: _FunctionPodBase) -> str:
-    with pytest.raises(SourceSlotNameCollisionError) as error:
+    with pytest.raises(InconsistentSourceError) as error:
         with Pipeline("conflicts"):
             pod(first, label="fa")
             pod(second, label="fb")

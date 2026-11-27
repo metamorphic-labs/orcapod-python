@@ -111,6 +111,46 @@ def _same_fixed_rows(first: RootSource, other: RootSource) -> bool:
     return first.fixed_row_multiset == other.fixed_row_multiset
 
 
+def _key_columns_conflict(
+    source_id: str, group: list[tuple[str, RootSource]]
+) -> str | None:
+    """Describe sources of one id and schema whose key columns differ, if any.
+
+    Such sources are distinct readings of one dataset. They are refused everywhere for
+    now (capture, bind, load, run), whatever slots they would take: allowing them in
+    distinct named slots is ITL-1506, after the multi-slot binding work (ITL-1442).
+    Call only after the schemas and fixed rows of ``group`` were found to agree. A
+    source whose key columns are unknown (an unbound proxy) is not compared.
+
+    Args:
+        source_id: The shared source id.
+        group: Every distinct source with that id, with where it is used.
+
+    Returns:
+        The error message, or ``None`` when the key columns agree.
+    """
+    keys = {source.key_columns for _, source in group}
+    if None in keys or len(keys) < 2:
+        return None
+    where = ", ".join(location for location, _ in group)
+    remedy = (
+        "A later version will allow distinct readings of one dataset in distinct "
+        "named slots (ITL-1506). For now, give each source its own name with "
+        "source_id=... when it is built."
+    )
+    if all(source.fixed_content is not None for _, source in group):
+        return (
+            f"Sources with source id {source_id!r} in {where} share one schema and "
+            "the same rows, and differ only in key columns (record_id_columns), so "
+            f"this is refused for now. {remedy}"
+        )
+    return (
+        f"Sources with source id {source_id!r} in {where} share one schema and have "
+        "different key columns (record_id_columns). The rows of a source read later "
+        f"are not compared. This is refused for now. {remedy}"
+    )
+
+
 def require_consistent_sources(
     uses: Iterable[SourceUse],
     rebinding: Rebinding = (),
@@ -120,8 +160,9 @@ def require_consistent_sources(
     Compare distinct objects only. A live source has no fixed rows to compare,
     but does not prevent comparing two fixed sources that share its address.
     Fixed sources are compared by ``_same_fixed_rows``: record ids count only when
-    their key columns are equal. For a bind, use the prospective sources alongside
-    every unchanged binding.
+    their key columns are equal. Sources whose schemas and fixed rows agree but whose
+    key columns differ are then refused too (``_key_columns_conflict``, ITL-1506).
+    For a bind, use the prospective sources alongside every unchanged binding.
 
     Raises:
         InconsistentSourceError: Naming the sources and remedy for a conflict.
@@ -154,3 +195,7 @@ def require_consistent_sources(
                     f"Source {source_id!r} has different rows in {fixed_location} "
                     f"and {location}. Give the sources different source_id values."
                 )
+
+        message = _key_columns_conflict(source_id, group)
+        if message is not None:
+            raise InconsistentSourceError(message)
