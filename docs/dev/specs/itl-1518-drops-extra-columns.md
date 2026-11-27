@@ -37,7 +37,7 @@ pertain to it are provisional.
   ```
 
 - Evidence beside this file, in `itl-1518/`: `golden_check.out` (the check's own list),
-  `golden_differences.txt` (every pinned entry of every golden file against the computed value, with
+  `golden_differences.out` (every pinned entry of every golden file against the computed value, with
   both values), `compare_golden.py`.
 
 ## 3. (a) The golden entries that move
@@ -95,7 +95,7 @@ The list for `rejoin_job`; `rejoin_job_async` has the same 17 entries with the s
 | 16 | `table[golden_rejoin_job/<uri>/schema:64b6c04f...6b87/pdb_v2].instance_ids` | (not pinned) | the same three instance ids as entry 15 | P-new: the same rows at the new path |
 | 17 | `table_paths` | `golden_rejoin_job/_result/<uri>/rev1/rdb_v1`, `golden_rejoin_job/<uri>/schema:2940d188...e7ba/pdb_v2` | `golden_rejoin_job/_result/<uri>/rev1/rdb_v1`, `golden_rejoin_job/<uri>/schema:64b6c04f...6b87/pdb_v2` | L |
 
-The full keys and values are in `itl-1518/golden_differences.txt`.
+The full keys and values are in `itl-1518/golden_differences.out`.
 
 Unchanged in the two cases: the result table path and its `input_data_hashes` entry (the input data
 hash covers `age` and `weight` only, as after today's select), the pipeline table's instance ids,

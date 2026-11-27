@@ -1,0 +1,82 @@
+computed 2480 {'arrow': 222, 'datagram': 329, 'pipeline': 1372, 'schema': 335, 'semantic': 190, 'torch': 32} pinned 2504
+GONE   provisional/pipeline.json pipeline:group_by_nan_keys.data_tag_key.row[{"k":null}].key_bits 
+   was null
+GONE   provisional/pipeline.json pipeline:group_by_nan_keys.row[{"k":null}].key_bits 
+   was null
+GONE   provisional/pipeline.json pipeline:rejoin_job.node[SelectDataColumns].content_hash 
+   was "semantic_v1:96904fb283607c88e95e96842137d3683aea92ddb26978b2cd1c075eb5f8ebf7"
+GONE   provisional/pipeline.json pipeline:rejoin_job.node[SelectDataColumns].pipeline_hash 
+   was "semantic_v1:646655f033644fd96e1c1ea0fd56af969e3afe16c76b1cb176aa343a3d2ebbe5"
+GONE   provisional/pipeline.json pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"a","subject":"s1"}]._tag_record_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4 
+   was "row_0"
+GONE   provisional/pipeline.json pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"a","subject":"s1"}]._tag_source_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4 
+   was "dict_v1:rejoin_origin"
+GONE   provisional/pipeline.json pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"a","subject":"s1"}].data_hash 
+   was "arrow_v1:000002d1c5b49de38ef6efc552c2a47b8ab59dd267f8eb55d91814edee99b1b52acc65"
+GONE   provisional/pipeline.json pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"a","subject":"s2"}]._tag_record_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4 
+   was "row_1"
+GONE   provisional/pipeline.json pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"a","subject":"s2"}]._tag_source_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4 
+   was "dict_v1:rejoin_origin"
+GONE   provisional/pipeline.json pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"a","subject":"s2"}].data_hash 
+   was "arrow_v1:000002338ce8710f5ecb156a72c8446651adb7b0c21635d0aa92d298f09da56faed0f8"
+GONE   provisional/pipeline.json pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"b","subject":"s3"}]._tag_record_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4 
+   was "row_2"
+GONE   provisional/pipeline.json pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"b","subject":"s3"}]._tag_source_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4 
+   was "dict_v1:rejoin_origin"
+GONE   provisional/pipeline.json pipeline:rejoin_job.node[SelectDataColumns].row[{"cohort":"b","subject":"s3"}].data_hash 
+   was "arrow_v1:0000023401f1ce40c8cfdd6e4f343d7ffdcd51c1f0521f44cf6030e27e1ca0da154616"
+GONE   provisional/pipeline.json pipeline:rejoin_job.node[SelectDataColumns].system_tag_columns 
+   was ["_tag_source_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4", "_tag_record_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4"]
+MOVED  provisional/pipeline.json pipeline:rejoin_job.node[ratio].content_hash
+   was "semantic_v1:84f5f8ce9de0dac0e361d0b0d69f186075974bd359ccbee04ca58f2cc6fefbac" 
+   now "semantic_v1:511d3c57512025445c23773ce648ee29b277882027ddf8a1e5080b1e2adc06a3"
+MOVED  provisional/pipeline.json pipeline:rejoin_job.node[ratio].pipeline_hash
+   was "semantic_v1:2940d188693a284739b066b85def5c18e849c85c1de5fc9a3444d6dfbb25e7ba" 
+   now "semantic_v1:64b6c04f3dd104e05264b806b1b24c1e20ac153ec8afd6df94d2afec64fe6b87"
+GONE   provisional/pipeline.json pipeline:rejoin_job.table[golden_rejoin_job/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/schema:2940d188693a284739b066b85def5c18e849c85c1de5fc9a3444d6dfbb25e7ba/pdb_v2].instance_ids 
+   was ["arrow_v1:00000264d51dd01edfbb777f7047d25e7cdb50e4f52e6b01454ffc56b70aa5b166b920", "arrow_v1:0000029b103c78b5c06ac0fe36d793fe576563a8609b835d662cf78a5828436f9b8aa3", "arrow_v1:000002b71bb228680318fe2cc0fc599241136f0fedc28658bda79e2a90915b87c82ef0"]
+NEW    pipeline:rejoin_job.table[golden_rejoin_job/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/schema:64b6c04f3dd104e05264b806b1b24c1e20ac153ec8afd6df94d2afec64fe6b87/pdb_v2].instance_ids 
+   -> ["arrow_v1:00000264d51dd01edfbb777f7047d25e7cdb50e4f52e6b01454ffc56b70aa5b166b920", "arrow_v1:0000029b103c78b5c06ac0fe36d793fe576563a8609b835d662cf78a5828436f9b8aa3", "arrow_v1:000002b71bb228680318fe2cc0fc599241136f0fedc28658bda79e2a90915b87c82ef0"]
+MOVED  provisional/pipeline.json pipeline:rejoin_job.table_paths
+   was ["golden_rejoin_job/_result/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/rev1/rdb_v1", "golden_rejoin_job/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/schema:2940d188693a284739b066b85def5c18e849c85c1de5fc9a3444d6dfbb25e7ba/pdb_v2"] 
+   now ["golden_rejoin_job/_result/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/rev1/rdb_v1", "golden_rejoin_job/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/schema:64b6c04f3dd104e05264b806b1b24c1e20ac153ec8afd6df94d2afec64fe6b87/pdb_v2"]
+GONE   provisional/pipeline.json pipeline:rejoin_job_async.node[SelectDataColumns].content_hash 
+   was "semantic_v1:96904fb283607c88e95e96842137d3683aea92ddb26978b2cd1c075eb5f8ebf7"
+GONE   provisional/pipeline.json pipeline:rejoin_job_async.node[SelectDataColumns].pipeline_hash 
+   was "semantic_v1:646655f033644fd96e1c1ea0fd56af969e3afe16c76b1cb176aa343a3d2ebbe5"
+GONE   provisional/pipeline.json pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"a","subject":"s1"}]._tag_record_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4 
+   was "row_0"
+GONE   provisional/pipeline.json pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"a","subject":"s1"}]._tag_source_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4 
+   was "dict_v1:rejoin_origin"
+GONE   provisional/pipeline.json pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"a","subject":"s1"}].data_hash 
+   was "arrow_v1:000002d1c5b49de38ef6efc552c2a47b8ab59dd267f8eb55d91814edee99b1b52acc65"
+GONE   provisional/pipeline.json pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"a","subject":"s2"}]._tag_record_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4 
+   was "row_1"
+GONE   provisional/pipeline.json pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"a","subject":"s2"}]._tag_source_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4 
+   was "dict_v1:rejoin_origin"
+GONE   provisional/pipeline.json pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"a","subject":"s2"}].data_hash 
+   was "arrow_v1:000002338ce8710f5ecb156a72c8446651adb7b0c21635d0aa92d298f09da56faed0f8"
+GONE   provisional/pipeline.json pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"b","subject":"s3"}]._tag_record_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4 
+   was "row_2"
+GONE   provisional/pipeline.json pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"b","subject":"s3"}]._tag_source_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4 
+   was "dict_v1:rejoin_origin"
+GONE   provisional/pipeline.json pipeline:rejoin_job_async.node[SelectDataColumns].row[{"cohort":"b","subject":"s3"}].data_hash 
+   was "arrow_v1:0000023401f1ce40c8cfdd6e4f343d7ffdcd51c1f0521f44cf6030e27e1ca0da154616"
+GONE   provisional/pipeline.json pipeline:rejoin_job_async.node[SelectDataColumns].system_tag_columns 
+   was ["_tag_source_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4", "_tag_record_id::b5bbcf9ae6104dc1b569e22587fbde690abf127944838a4e1a1c96bf347db0e4"]
+MOVED  provisional/pipeline.json pipeline:rejoin_job_async.node[ratio].content_hash
+   was "semantic_v1:84f5f8ce9de0dac0e361d0b0d69f186075974bd359ccbee04ca58f2cc6fefbac" 
+   now "semantic_v1:511d3c57512025445c23773ce648ee29b277882027ddf8a1e5080b1e2adc06a3"
+MOVED  provisional/pipeline.json pipeline:rejoin_job_async.node[ratio].pipeline_hash
+   was "semantic_v1:2940d188693a284739b066b85def5c18e849c85c1de5fc9a3444d6dfbb25e7ba" 
+   now "semantic_v1:64b6c04f3dd104e05264b806b1b24c1e20ac153ec8afd6df94d2afec64fe6b87"
+GONE   provisional/pipeline.json pipeline:rejoin_job_async.table[golden_rejoin_job/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/schema:2940d188693a284739b066b85def5c18e849c85c1de5fc9a3444d6dfbb25e7ba/pdb_v2].instance_ids 
+   was ["arrow_v1:00000264d51dd01edfbb777f7047d25e7cdb50e4f52e6b01454ffc56b70aa5b166b920", "arrow_v1:0000029b103c78b5c06ac0fe36d793fe576563a8609b835d662cf78a5828436f9b8aa3", "arrow_v1:000002b71bb228680318fe2cc0fc599241136f0fedc28658bda79e2a90915b87c82ef0"]
+NEW    pipeline:rejoin_job_async.table[golden_rejoin_job/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/schema:64b6c04f3dd104e05264b806b1b24c1e20ac153ec8afd6df94d2afec64fe6b87/pdb_v2].instance_ids 
+   -> ["arrow_v1:00000264d51dd01edfbb777f7047d25e7cdb50e4f52e6b01454ffc56b70aa5b166b920", "arrow_v1:0000029b103c78b5c06ac0fe36d793fe576563a8609b835d662cf78a5828436f9b8aa3", "arrow_v1:000002b71bb228680318fe2cc0fc599241136f0fedc28658bda79e2a90915b87c82ef0"]
+MOVED  provisional/pipeline.json pipeline:rejoin_job_async.table_paths
+   was ["golden_rejoin_job/_result/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/rev1/rdb_v1", "golden_rejoin_job/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/schema:2940d188693a284739b066b85def5c18e849c85c1de5fc9a3444d6dfbb25e7ba/pdb_v2"] 
+   now ["golden_rejoin_job/_result/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/rev1/rdb_v1", "golden_rejoin_job/golden_ratio/43ebfd98b0b9497b3b820bb330f4727dd540e67883fd7588fdd98d1f176733b3/v0/python.function.v1/schema:64b6c04f3dd104e05264b806b1b24c1e20ac153ec8afd6df94d2afec64fe6b87/pdb_v2"]
+GONE   semantic-01.json semantic:function.stored_content.without_source 
+   was null
+differ 37
