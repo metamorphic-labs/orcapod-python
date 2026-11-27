@@ -649,3 +649,362 @@ def test_a_second_computation_uses_the_stored_result_in_every_store(
     assert output.source_info() == first[0].source_info()
     database.flush()
     assert _result_ids(database) == [first[0].datagram_uuid.bytes]
+
+
+# ---------------------------------------------------------------------------
+# Review of c1d2b6fd: readback per occurrence, threads, a failing lookup
+# ---------------------------------------------------------------------------
+
+
+def _ids(pairs: list[Any]) -> list[bytes]:
+    return [data.datagram_uuid.bytes for _, data in pairs]
+
+
+@pytest.mark.parametrize("first_in_flight", [False, True], ids=["after", "during"])
+def test_async_readback_is_what_each_occurrence_delivered(
+    first_in_flight: bool,
+) -> None:
+    """Two occurrences of one instance in one async run, with a persistent result
+    for their input published between them: the second is served that result, the
+    first its own, and a read gives each occurrence what was delivered for it.
+
+    ``after``: the first occurrence was delivered before the result is published.
+    ``during``: it is still computing, so the second is delivered first.
+    """
+    release = asyncio.Event()
+    started = asyncio.Event()
+    calls: list[int] = []
+
+    async def scale(value: int, weight: float) -> tuple[int, float]:
+        calls.append(value)
+        started.set()
+        if first_in_flight:
+            _ = await asyncio.wait_for(release.wait(), timeout=5)
+        return value * 2, weight * 2
+
+    pod = FunctionPod.from_fn(scale, output_keys=["doubled", "heavier"])
+    seeding = _Counted()
+    source = _input({"a": 2})
+    (row,) = source.iter_data()
+    persistent, ephemeral = InMemoryArrowDatabase(), InMemoryArrowDatabase()
+    node = FunctionJobNode(
+        pod,
+        source,
+        pipeline_database=InMemoryArrowDatabase(),
+        result_database=persistent,
+    )
+    node.node_config = NodeConfig(is_result_ephemeral=True)
+    node.set_ephemeral_database(ephemeral)
+
+    async def go() -> list[Any]:
+        input_ch: Channel[Any] = Channel(buffer_size=3)
+        output_ch: Channel[Any] = Channel(buffer_size=3)
+        outputs = output_ch.reader.__aiter__()
+        run = asyncio.create_task(node.async_execute(input_ch.reader, output_ch.writer))
+        await input_ch.writer.send(row)
+        delivered = []
+        if first_in_flight:
+            _ = await asyncio.wait_for(started.wait(), timeout=5)
+        else:
+            delivered.append(await anext(outputs))
+        published = _seed(persistent, seeding, source, {"a"})["a"]
+        await input_ch.writer.send(row)
+        await input_ch.writer.close()
+        delivered.append(await anext(outputs))
+        release.set()
+        if first_in_flight:
+            delivered.append(await anext(outputs))
+        await run
+        # The occurrence routed after the publication is served the published result.
+        assert (
+            delivered[0 if first_in_flight else 1][1].datagram_uuid.bytes == published
+        )
+        return delivered
+
+    delivered = asyncio.run(go())
+    assert calls == [2]
+    assert len(set(_ids(delivered))) == 2
+    assert _ids(list(node.iter_data())) == _ids(delivered)
+    assert node.held_row_count() == 2
+    assert len(node.held_instance_ids()) == 2
+    table = node.as_table(columns={"source": True})
+    assert table.num_rows == 2
+
+
+def test_sync_readback_is_what_each_occurrence_delivered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The sync path with the same shape. It reads its whole input before the
+    first row, and serves a repeated instance from the rows it holds: a persistent
+    result published while the input is read is served to the first occurrence,
+    the second gets the same row, and a read gives both."""
+    counted, seeding = _Counted(), _Counted()
+    source = _repeated_input(["a", "a"], 2)
+    persistent, ephemeral = InMemoryArrowDatabase(), InMemoryArrowDatabase()
+    node = _ephemeral_node(
+        counted,
+        source,
+        pipeline=InMemoryArrowDatabase(),
+        persistent=persistent,
+        ephemeral=ephemeral,
+    )
+    rows = list(source.iter_data())
+    published: list[bytes] = []
+
+    def publishing_between_rows() -> Any:
+        yield rows[0]
+        monkeypatch.undo()
+        published.append(_seed(persistent, seeding, source, {"a"})["a"])
+        yield rows[1]
+
+    monkeypatch.setattr(source, "iter_data", publishing_between_rows)
+    delivered = list(node.execute(source, error_policy="fail_fast").iter_data())
+
+    assert counted.calls == []
+    assert _ids(delivered) == [published[0], published[0]]
+    assert _ids(list(node.iter_data())) == _ids(delivered)
+
+
+@pytest.mark.parametrize("store", ["memory", "delta"])
+@pytest.mark.parametrize("auto_flush", [True, False], ids=["committed", "queued"])
+def test_two_threads_on_one_database_store_one_result(
+    store: str, auto_flush: bool, tmp_path: Path
+) -> None:
+    """Two threads compute one input over one database object. Both miss the first
+    lookup; the second thread reaches its write while the first is between its own
+    lookup and its write. One result is stored and both threads return it."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    database = _stores(tmp_path)[store]
+    lookup = database.get_records_with_column_value
+    local = threading.local()
+    both_missed = threading.Barrier(2)
+    first_in_write = threading.Event()
+    second_looked = threading.Event()
+    first_done = threading.Event()
+
+    def staged_lookup(*args: Any, **kwargs: Any) -> Any:
+        result = lookup(*args, **kwargs)
+        local.lookups += 1
+        if local.lookups == 1:
+            _ = both_missed.wait(10)
+        elif local.role == 1:
+            # Between this thread's lookup and its write: give the other thread
+            # the time to look the table up too, if nothing holds it back.
+            first_in_write.set()
+            _ = second_looked.wait(0.5)
+        else:
+            second_looked.set()
+            assert first_done.wait(10)
+        return result
+
+    database.get_records_with_column_value = staged_lookup
+
+    def scale(value: int, weight: float) -> tuple[int, float]:
+        if local.role == 2:
+            assert first_in_write.wait(10)
+        return value * 2, weight * 2
+
+    plain = FunctionPod.from_fn(scale, output_keys=["doubled", "heavier"])
+    pods = [CachedFunctionPod(plain, result_database=database) for _ in range(2)]
+    for pod in pods:
+        pod.set_auto_flush(auto_flush)
+    tag, data = next(iter(_input({"a": 2}).iter_data()))
+
+    def run(role: int) -> tuple[bytes, Any]:
+        local.role, local.lookups = role, 0
+        try:
+            _, output = pods[role - 1].process_data(tag, data)
+        finally:
+            if role == 1:
+                first_done.set()
+        assert output is not None
+        return (
+            output.datagram_uuid.bytes,
+            output.get_meta_value(CachedFunctionPod.RESULT_COMPUTED_FLAG),
+        )
+
+    with ThreadPoolExecutor(2) as pool:
+        (first_id, first_computed), (second_id, second_computed) = pool.map(run, (1, 2))
+    database.flush()
+
+    assert _result_ids(database) == [first_id]
+    assert second_id == first_id
+    assert (first_computed, second_computed) == (True, False)
+
+
+class _RowEvents:
+    """An observer that records each row event with the row's key."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str]] = []
+
+    def contextualize(self, *path: str) -> "_RowEvents":
+        return self
+
+    def on_run_start(self, *args: Any, **kwargs: Any) -> None: ...
+
+    def on_run_end(self, *args: Any, **kwargs: Any) -> None: ...
+
+    def on_node_start(self, *args: Any, **kwargs: Any) -> None: ...
+
+    def on_node_end(self, *args: Any, **kwargs: Any) -> None: ...
+
+    def create_data_logger(self, tag: Any, data: Any) -> Any:
+        return None
+
+    def on_data_start(self, label: str, tag: Any, data: Any) -> None:
+        self.events.append(("start", tag.as_dict()["key"]))
+
+    def on_data_end(self, label: str, tag: Any, *args: Any, **kwargs: Any) -> None:
+        self.events.append(("end", tag.as_dict()["key"]))
+
+    def on_data_crash(self, label: str, tag: Any, data: Any, error: Any) -> None:
+        self.events.append(("crash", tag.as_dict()["key"]))
+
+
+def _leaf(error: BaseException) -> BaseException:
+    while isinstance(error, BaseExceptionGroup):
+        assert len(error.exceptions) == 1
+        error = error.exceptions[0]
+    return error
+
+
+def _failing_lookup_outcome(
+    use_async: bool, database_error: bool, error_policy: Any
+) -> dict[str, Any]:
+    """What a run reports when the persistent store's lookup by input hash raises."""
+    from orcapod.errors import OrcapodDatabaseReadError
+
+    counted = _Counted()
+    source = _input({"a": 2, "b": 3})
+    persistent, ephemeral = InMemoryArrowDatabase(), InMemoryArrowDatabase()
+    node = _ephemeral_node(
+        counted,
+        source,
+        pipeline=InMemoryArrowDatabase(),
+        persistent=persistent,
+        ephemeral=ephemeral,
+    )
+    node.label = "scaled"
+
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        if database_error:
+            raise OrcapodDatabaseReadError("fault", ("fault",))
+        raise RuntimeError("fault")
+
+    persistent.get_records_with_column_value = broken  # pyright: ignore[reportAttributeAccessIssue]  # the injected fault
+    observer = _RowEvents()
+
+    async def go() -> None:
+        input_ch: Channel[Any] = Channel(buffer_size=8)
+        output_ch: Channel[Any] = Channel(buffer_size=8)
+        for pair in source.iter_data():
+            await input_ch.writer.send(pair)
+        await input_ch.writer.close()
+        await node.async_execute(
+            input_ch.reader,
+            output_ch.writer,
+            observer=observer,  # pyright: ignore[reportArgumentType]  # a recording observer
+            error_policy=error_policy,
+        )
+
+    raised: BaseException | None = None
+    try:
+        if use_async:
+            asyncio.run(go())
+        else:
+            _ = node.execute(
+                source,
+                observer=observer,  # pyright: ignore[reportArgumentType]  # a recording observer
+                error_policy=error_policy,
+            )
+    except BaseException as error:  # noqa: BLE001  # the outcome under test
+        raised = _leaf(error)
+    return {
+        "events": observer.events,
+        "error": None if raised is None else type(raised).__name__,
+        "node_label": getattr(raised, "node_label", None),
+        "tag": getattr(raised, "tag", None),
+        "calls": counted.calls,
+        "rows": len(list(node.iter_data())),
+        "ephemeral results": len(_result_ids(ephemeral)),
+    }
+
+
+@pytest.mark.parametrize("error_policy", ["continue", "fail_fast"])
+@pytest.mark.parametrize("database_error", [True, False], ids=["database", "other"])
+def test_a_failing_persistent_lookup_is_reported_alike_on_both_paths(
+    database_error: bool, error_policy: str
+) -> None:
+    """A persistent lookup that raises, in ephemeral mode, gives the async job path
+    what it gives the sync path: the row's start and crash events, the node and
+    tag on a database error, and the same end under each error policy (a database
+    error stops the run whatever the policy; another error is a failed row)."""
+    sync = _failing_lookup_outcome(False, database_error, error_policy)
+    assert sync["events"][:2] == [("start", "a"), ("crash", "a")]
+    assert sync["calls"] == []
+    if database_error:
+        assert (sync["error"], sync["node_label"]) == (
+            "OrcapodDatabaseReadError",
+            "scaled",
+        )
+        assert sync["tag"] == {"key": "a", "group": "g"}
+    assert _failing_lookup_outcome(True, database_error, error_policy) == sync
+
+
+def test_a_result_this_pipeline_recorded_is_served_before_the_persistent_store() -> (
+    None
+):
+    """The persistent store comes first only in the lookup by input data hash,
+    after the row's instance was not found: a result this node's own pipeline
+    record points to (here an ephemeral one) is still served first, on both paths,
+    when the persistent store holds another result for the same input."""
+    counted = _Counted()
+    source = _input({"a": 2})
+    pipeline, persistent, ephemeral = (InMemoryArrowDatabase() for _ in range(3))
+
+    def node() -> FunctionJobNode:
+        return _ephemeral_node(
+            counted,
+            source,
+            pipeline=pipeline,
+            persistent=persistent,
+            ephemeral=ephemeral,
+        )
+
+    recorded = _ids(_run(node(), source, False))
+    assert counted.calls == [2]
+    published = _seed(persistent, counted, source, {"a"})["a"]
+    assert recorded != [published]
+    for use_async in (False, True):
+        assert _ids(_run(node(), source, use_async)) == recorded
+    assert counted.calls == []
+
+
+def test_async_execute_without_a_persistent_store_runs_the_plain_pod() -> None:
+    """What ``async_execute`` does today for a node with only an ephemeral database
+    (behaviour of the base branch, recorded here, not a rule): it hands the rows to
+    the plain pod, so the ephemeral store is neither read nor written and the
+    pod's post-run hook fires, while the row paths go through the ephemeral
+    wrapper and fire none (ITL-891)."""
+    fired: dict[str, list[str]] = {}
+    stored: dict[str, int] = {}
+    for path in ("sync row", "async_execute"):
+        counted = _Counted()
+        fired[path] = []
+        counted.pod.add_post_run_hook(
+            lambda payload, path=path: fired[path].append(payload.stats.status.name)
+        )
+        source = _input({"a": 2})
+        ephemeral = InMemoryArrowDatabase()
+        node = FunctionJobNode(counted.pod, source, ephemeral_database=ephemeral)
+        node.node_config = NodeConfig(is_result_ephemeral=True)
+        if path == "sync row":
+            _ = node.execute_data(*next(iter(source.iter_data())))
+        else:
+            assert len(_run(node, source, True)) == 1
+        stored[path] = len(_result_ids(ephemeral))
+    assert fired == {"sync row": [], "async_execute": ["COMPUTED"]}
+    assert stored == {"sync row": 1, "async_execute": 0}
