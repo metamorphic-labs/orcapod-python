@@ -11,7 +11,7 @@ data columns in two orders, each with its own source-info token.
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 import pytest
@@ -393,7 +393,7 @@ class TestTokensAreReadAsTheRowCarriesThem:
         data_a = pa.array(
             [
                 data_for(t, v, a_type)
-                for t, v in zip(tokens_a.to_pylist(), (10, 20, 30))
+                for t, v in zip(cast("Any", tokens_a).to_pylist(), (10, 20, 30))
             ],
             a_type,
         )

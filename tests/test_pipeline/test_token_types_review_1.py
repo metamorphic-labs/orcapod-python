@@ -163,9 +163,8 @@ def _stored(database: InMemoryArrowDatabase, function: str) -> pa.Table:
 
 def _by_k(stored: pa.Table) -> pa.Table:
     """``stored`` ordered by its key ``k``, which may be a list."""
-    order = sorted(
-        range(stored.num_rows), key=stored.column("k").to_pylist().__getitem__
-    )
+    keys = [repr(key) for key in stored.column("k").to_pylist()]
+    order = sorted(range(stored.num_rows), key=keys.__getitem__)
     return stored.take(order)
 
 

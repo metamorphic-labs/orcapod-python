@@ -7,7 +7,7 @@ one gives its data column the same layers with these helpers.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 import pyarrow as pa
 
@@ -34,6 +34,11 @@ def data_type_for(
     return leaf
 
 
+def _item_type(kind: pa.DataType) -> pa.DataType:
+    """The type of a list type's items."""
+    return cast("pa.DataType", cast("Any", kind).value_type)
+
+
 def _is_list(kind: pa.DataType) -> bool:
     return (
         pa.types.is_large_list(kind)
@@ -49,8 +54,12 @@ def nested_value(leaf: Any, data_type: pa.DataType) -> Any:
     """
     if not _is_list(data_type):
         return leaf
-    inner = nested_value(leaf, data_type.value_type)
-    count = data_type.list_size if pa.types.is_fixed_size_list(data_type) else 1
+    inner = nested_value(leaf, _item_type(data_type))
+    count = (
+        cast("Any", data_type).list_size
+        if pa.types.is_fixed_size_list(data_type)
+        else 1
+    )
     return [inner] * count
 
 
@@ -67,7 +76,7 @@ def data_for(token: Any, leaf: Any, data_type: pa.DataType) -> Any:
         is null inside a list that the data type continues, a value of that type.
     """
     if isinstance(token, list):
-        return [data_for(item, leaf, data_type.value_type) for item in token]
+        return [data_for(item, leaf, _item_type(data_type)) for item in token]
     return nested_value(leaf, data_type)
 
 
