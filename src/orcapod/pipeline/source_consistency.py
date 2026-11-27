@@ -128,6 +128,23 @@ def _key_columns_conflict(
     )
 
 
+def _underlying(source: RootSource) -> RootSource:
+    """The source whose rows ``source`` presents: a bound proxy's delegate, unwrapped.
+
+    Args:
+        source: A source in a consistency check.
+
+    Returns:
+        The innermost bound root source behind any proxies, or ``source`` itself.
+    """
+    from orcapod.core.sources.base import RootSource
+    from orcapod.core.sources.source_proxy import SourceProxy
+
+    while isinstance(source, SourceProxy) and isinstance(source.delegate, RootSource):
+        source = source.delegate
+    return source
+
+
 def _differing_fixed_rows(
     group: list[tuple[str, RootSource]],
 ) -> tuple[str, str] | None:
@@ -144,9 +161,10 @@ def _differing_fixed_rows(
       occurrence counts, order does not, and floats compare by the Arrow value rule
       (``-0.0`` equals ``0.0``, NaN equals NaN).
 
-    Only the digests a pair needs are computed, each at most once per source in one
-    check (a source that holds its digests, ``FixedTableSource``, computes each once
-    in its lifetime).
+    Only the digests a pair needs are computed, each at most once per check for each
+    underlying source: a bound proxy is digested as the source it stands in for
+    (``_underlying``). Nothing is held across checks: an in-memory table can share
+    memory with the caller's data, which the caller can change between checks.
 
     Args:
         group: Every distinct source with that id, with where it is used.
@@ -159,6 +177,7 @@ def _differing_fixed_rows(
     multisets: dict[int, bytes | None] = {}
 
     def digest(source: RootSource, *, record_ids: bool) -> bytes | None:
+        source = _underlying(source)
         held = exact if record_ids else multisets
         if id(source) not in held:
             held[id(source)] = (

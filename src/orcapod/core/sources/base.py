@@ -431,8 +431,8 @@ class RootSource(StreamBase):
     def fixed_content(self) -> bytes | None:
         """Digest of held rows for collision checks, or None for a live read.
 
-        Tags, data and record ids (``_digest_fixed_rows``), computed on each read
-        unless a subclass holds it. The digest is separate from source identity.
+        Tags, data and record ids (``_digest_fixed_rows``), computed on each read.
+        The digest is separate from source identity.
         """
         if not self.holds_fixed_rows:
             return None
@@ -459,8 +459,7 @@ class RootSource(StreamBase):
         canonical row order of an identity table
         (``arrow_utils.canonical_identity_row_order``) and digested under the Arrow
         float rule, so ``-0.0`` equals ``0.0`` and every NaN equals every other. It is
-        ``None`` exactly when ``holds_fixed_rows`` is false; computed on each read
-        unless a subclass holds it.
+        ``None`` exactly when ``holds_fixed_rows`` is false; computed on each read.
         """
         if not self.holds_fixed_rows:
             return None
@@ -725,30 +724,13 @@ class RootSource(StreamBase):
 class FixedTableSource(RootSource):
     """A root that holds an Arrow table for its entire lifetime.
 
-    Its rows never change, so each digest of them is computed once and held.
+    Its digests are never held: the table can share memory with the caller's data (a
+    pandas frame, a NumPy array), which the caller can still change. A consistency
+    check digests it at most once per check.
     """
-
-    _held_fixed_content: bytes | None = None
-    _held_fixed_row_multiset: bytes | None = None
 
     @property
     @override
     def holds_fixed_rows(self) -> bool:
         """Always: the table is held for the source's lifetime."""
         return True
-
-    @property
-    @override
-    def fixed_content(self) -> bytes:
-        """Digest of the table this source holds, computed once."""
-        if self._held_fixed_content is None:
-            self._held_fixed_content = self._digest_fixed_rows()
-        return self._held_fixed_content
-
-    @property
-    @override
-    def fixed_row_multiset(self) -> bytes:
-        """Multiset digest of the table this source holds, computed once."""
-        if self._held_fixed_row_multiset is None:
-            self._held_fixed_row_multiset = self._digest_fixed_row_multiset()
-        return self._held_fixed_row_multiset
