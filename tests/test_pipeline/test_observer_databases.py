@@ -44,6 +44,18 @@ class _DerivedSpiralConnector(SpiralDBConnector):
     """A SpiralDB connector subclass still uses the same store."""
 
 
+class _SlottedExtensionWrapper(ExtensionAwareDatabase):
+    """Store the wrapped database in a slot."""
+
+    __slots__ = ("_db",)
+
+
+class _SlottedConnectorDatabase(ConnectorArrowDatabase):
+    """Store the connector in a slot."""
+
+    __slots__ = ("_connector",)
+
+
 @final
 class _DelegatingConnectorDatabase(ConnectorArrowDatabase):
     """Implement the database interface through a delegate without a connector."""
@@ -85,6 +97,18 @@ def capture_install() -> Iterator[Mock]:
     """Track capture setup without replacing pytest's streams."""
     with patch("orcapod.pipeline.logging_observer.install_capture_streams") as install:
         yield install
+
+
+@pytest.fixture(params=["wrapper-slot", "connector-slot"])
+def slotted_spiral_store(
+    request: pytest.FixtureRequest, spiral_connector: SpiralDBConnector
+) -> ArrowDatabaseProtocol:
+    """Build a SpiralDB store with one of the inspected references in a slot."""
+    if cast(str, request.param) == "wrapper-slot":
+        return _SlottedExtensionWrapper(
+            ConnectorArrowDatabase(spiral_connector), UniversalTypeConverter()
+        )
+    return _SlottedConnectorDatabase(spiral_connector)
 
 
 def _wrap(db: ArrowDatabaseProtocol) -> ExtensionAwareDatabase:
@@ -164,6 +188,70 @@ def test_spiral_store_subclasses_are_refused(
             _ = observer_class(db)
 
     capture_install.assert_not_called()
+
+
+@pytest.mark.parametrize("observer_class", _OBSERVERS)
+def test_spiral_store_with_slotted_reference_is_refused(
+    observer_class: type[StatusObserver] | type[LoggingObserver],
+    slotted_spiral_store: ArrowDatabaseProtocol,
+    capture_install: Mock,
+) -> None:
+    with pytest.raises(SpiralDBObserverNotSupportedError, match=_REFUSAL):
+        _ = observer_class(slotted_spiral_store)
+
+    capture_install.assert_not_called()
+
+
+@pytest.mark.parametrize("use_resolver", [False, True])
+def test_nested_composite_refuses_slotted_spiral_store_before_capture(
+    use_resolver: bool,
+    slotted_spiral_store: ArrowDatabaseProtocol,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capture_install: Mock,
+) -> None:
+    class RegisteredStore:
+        @classmethod
+        def from_config(cls, _config: dict[str, object]) -> ArrowDatabaseProtocol:
+            return slotted_spiral_store
+
+    monkeypatch.setattr(
+        serialization, "DATABASE_REGISTRY", serialization.DATABASE_REGISTRY.copy()
+    )
+    serialization.register_database("test_slotted_spiral", RegisteredStore)
+    delta_path = tmp_path / "delta"
+    config: dict[str, object] = {
+        "type": "composite",
+        "observers": [
+            {
+                "type": "logging",
+                "database": {"type": "delta_table", "root_uri": str(delta_path)},
+            },
+            {
+                "type": "composite",
+                "observers": [
+                    {"type": "status", "database": {"type": "test_slotted_spiral"}}
+                ],
+            },
+        ],
+    }
+
+    with pytest.raises(SpiralDBObserverNotSupportedError, match=_REFUSAL):
+        if use_resolver:
+            _ = serialization.resolve_observer_from_config(config)
+        else:
+            _ = CompositeObserver.from_config(config)
+
+    capture_install.assert_not_called()
+    assert delta_path.is_dir()
+
+
+def test_composite_from_config_accepts_typed_config_and_registry() -> None:
+    """Keep the documented registry and a narrower typed config callable."""
+    config: dict[str, list[dict[str, str]]] = {"observers": []}
+    _ = CompositeObserver.from_config(
+        config, serialization.DatabaseRegistry().to_dict()
+    )
 
 
 @pytest.mark.parametrize("observer_class", _OBSERVERS)

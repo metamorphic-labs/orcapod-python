@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from inspect import getattr_static
+from types import MemberDescriptorType
 from typing import TYPE_CHECKING, cast
 
 from orcapod.databases import (
@@ -14,6 +15,17 @@ from orcapod.errors import SpiralDBObserverNotSupportedError
 
 if TYPE_CHECKING:
     from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+
+
+def _stored_reference(instance: object, name: str) -> object:
+    """Read an instance field or native slot without calling attribute hooks."""
+    value = cast(object, getattr_static(instance, name, None))
+    if type(value) is MemberDescriptorType:
+        try:
+            return cast(object, value.__get__(instance, type(instance)))
+        except AttributeError:
+            return None
+    return value
 
 
 def require_observer_database(database: ArrowDatabaseProtocol) -> None:
@@ -35,11 +47,11 @@ def require_observer_database(database: ArrowDatabaseProtocol) -> None:
         if id(backend) in seen:
             return
         seen.add(id(backend))
-        backend = cast(object, getattr_static(backend, "_db", None))
+        backend = _stored_reference(backend, "_db")
     if not issubclass(type(backend), ConnectorArrowDatabase):
         return
 
-    connector = cast(object, getattr_static(backend, "_connector", None))
+    connector = _stored_reference(backend, "_connector")
     if issubclass(type(connector), SpiralDBConnector):
         raise SpiralDBObserverNotSupportedError(
             "Observers cannot record to a SpiralDB store in this version. "
