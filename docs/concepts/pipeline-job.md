@@ -181,6 +181,12 @@ A `CachedSource` is not a node of the job: its cache is kept in the cache databa
 the path it was created with, whatever job reads it, so two jobs given one `CachedSource`
 (or one cache database and path) share its cache.
 
+When a saved `CachedSource` wraps a relative file path, the path is relative to the
+working directory when the job is loaded. The restored source still uses the original
+cache. If the path points to a different dataset there, reading the restored source
+mixes rows from both datasets in that cache (ITL-1546). Use absolute source paths when
+building a job you expect to load from a different working directory.
+
 Every run reads a function node's stored tables (its result table and its pipeline
 records) as they are when the node starts: results that another job, or another handle on
 the same database (a second `DeltaTableDatabase` over the same directory, another

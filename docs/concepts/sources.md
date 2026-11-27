@@ -38,9 +38,13 @@ hashing) and produces the final immutable stream.
 and use the supplied spelling in saved job configurations and default source IDs. For
 local files or tables, the source anchors a relative path to the working directory at
 construction. The reader handles symlinks and `..` in that path, and later reads keep
-the same working-directory anchor. When a saved job contains
-a relative path, loading it interprets that path relative to the working directory at load
-time. Delta URIs such as `s3://bucket/table` are saved and passed to deltalake as given.
+the same working-directory anchor. A saved relative path is relative to the working
+directory when the job is loaded. Use absolute source paths when building a job you
+expect to load from a different working directory. If a relative path points to a
+different dataset after loading, reading the restored `CachedSource` mixes rows from
+both datasets in the existing source cache (ITL-1546).
+
+Delta URIs such as `s3://bucket/table` are saved and passed to deltalake as given.
 
 `orcapod.sources` also provides database-backed sources (`SQLiteTableSource`,
 `PostgreSQLTableSource`, `SpiralDBTableSource`) and `PollingSource` for data that arrives over

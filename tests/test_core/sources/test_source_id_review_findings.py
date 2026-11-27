@@ -534,6 +534,29 @@ def test_a_path_like_source_uses_its_text_once(
     assert path.calls == 1
 
 
+def test_csv_path_like_with_distinct_display_name_pending_developer_decision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Record the filesystem-text ID for a path that main named by its display text."""
+
+    class DisplayPath:
+        def __str__(self) -> str:
+            return "display.csv"
+
+        def __fspath__(self) -> str:
+            return "data/entries.csv"
+
+    (tmp_path / "data").mkdir()
+    _ = _write_csv(tmp_path / "data" / "entries.csv", ROWS)
+    monkeypatch.chdir(tmp_path)
+    path = DisplayPath()
+    source = _csv(path)
+    assert str(path) == "display.csv"
+    assert source.source_id == "csv_v1:data/entries.csv"
+    assert source.to_config()["file_path"] == "data/entries.csv"
+    assert source.as_table().num_rows == len(ROWS)
+
+
 @pytest.mark.parametrize(
     "kind,path_key,kind_part",
     [("csv", "file_path", "csv_v1"), ("delta", "delta_table_path", "delta_table_v1")],
@@ -759,9 +782,10 @@ def test_file_source_refresh_schema_error_names_the_supplied_path(
 
 
 @pytest.mark.parametrize("kind", ["csv", "delta"])
-def test_relative_source_cache_rebinding_pending_developer_decision(
+def test_relative_source_cache_rebinding_mixes_datasets(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
 ) -> None:
+    """A relative source can add another dataset to the original cache (ITL-1546)."""
     from deltalake import write_deltalake
 
     original = tmp_path / "original"
@@ -792,7 +816,6 @@ def test_relative_source_cache_rebinding_pending_developer_decision(
         assert restored.cache_path == cache.cache_path
         return _sorted_weights(restored.as_table())
 
-    # Record current behavior pending a decision about relative source paths in caches.
     monkeypatch.chdir(elsewhere)
     assert restored_weights() == [9.0, 22.0, 25.5, 27.25, 40.0]
     monkeypatch.chdir(original)
