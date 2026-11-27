@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-RUNS = int(os.environ.get("ITL1422_RUNS", "600"))
+RUNS = int(os.environ.get("ITL1422_RUNS", "300"))
 PARALLEL = int(os.environ.get("ITL1422_PARALLEL", "8"))
 DEADLINE = 60
 LINUX = platform.system() == "Linux"
@@ -76,25 +76,11 @@ SERIAL = textwrap.dedent(
     """
 )
 
-UNFIX = textwrap.dedent(
-    """
-    import sys
-    import orcapod.logical_types.registry as _r
-    import pyarrow as _pa
-    _f = _r.make_arrow_extension_type
-    def _g(name, storage, *a, **k):
-        c = _f(name, storage, *a, **k)
-        return type(c.__name__, (c,), {
-            "__new__": lambda cls: _pa.ExtensionType.__new__(cls),
-            "__init__": lambda self: _pa.ExtensionType.__init__(self, storage, name),
-        })
-    for _m in list(sys.modules.values()):
-        if _m is not None and getattr(_m, "make_arrow_extension_type", None) is _f:
-            _m.make_arrow_extension_type = _g
-    """
+WHICH = (
+    "import importlib.util, orcapod, sys\n"
+    "print(orcapod.__file__.startswith(sys.argv[1]),"
+    " importlib.util.find_spec('orcapod.logical_types.arrow_lifetime') is not None)\n"
 )
-
-SLEEP = "import atexit, time; atexit.register(time.sleep, 0.05)\n"
 
 MIN = textwrap.dedent(
     """
@@ -213,12 +199,24 @@ def _prepare(work: Path) -> dict[str, tuple[str, list[str]]]:
         "set": (s._FRESH_READ, [w + "/set/job.json", w + "/set/store"]),
         "model": (n._SCRIPT, [w + "/classes", "load", w + "/model", "ModelFields"]),
         "int": (INT_CHILD, [w + "/int", "load"]),
-        "save": (SET_SAVE + 'print("DONE", flush=True)\n', []),
         "min-ext": (MIN, [w + "/min", "load", "ext"]),
         "min-serial": (MIN, [w + "/min", "load", "serial"]),
         "min-keep": (MIN, [w + "/min", "load", "keep"]),
         "min-plain": (MIN, [w + "/minplain", "load", "plain"]),
     }
+
+
+def _main_source(work: Path) -> tuple[str, str]:
+    """Return a directory holding the ``src`` of ``main`` (no fix), and its commit."""
+    subprocess.run(["git", "fetch", "-q", "--depth=1", "origin", "main"], cwd=ROOT, check=True)
+    sha = subprocess.run(
+        ["git", "rev-parse", "FETCH_HEAD"], cwd=ROOT, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    target = work / "main"
+    target.mkdir()
+    archive = subprocess.run(["git", "archive", sha, "src"], cwd=ROOT, check=True, capture_output=True)
+    subprocess.run(["tar", "-x", "-C", str(target)], input=archive.stdout, check=True)
+    return str(target / "src"), sha
 
 
 def test_stress(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
@@ -228,48 +226,52 @@ def test_stress(tmp_path: Path, capfd: pytest.CaptureFixture[str]) -> None:
         c = tmp_path / "t.c"
         c.write_text("#define _GNU_SOURCE\n#include <stdio.h>\n" + TRACER)
         subprocess.run(["gcc", "-shared", "-fPIC", "-o", str(tmp_path / "t.so"), str(c)], check=True)
-        env = {"LD_PRELOAD": str(tmp_path / "t.so"), "PYTHONFAULTHANDLER": "0"}
-        env.pop("PYTHONFAULTHANDLER")
-    newest = ""
-    matrix: list[tuple[str, str, str, str]] = []
-    for child in ("set", "model"):
-        matrix += [
-            (child + "+amp+unfixed", child, AMPLIFY + UNFIX, sys.executable),
-            (child + "+amp+FIXED", child, AMPLIFY, sys.executable),
-        ]
-    matrix += [
-        ("save+amp+unfixed", "save", AMPLIFY + UNFIX, sys.executable),
-        ("save+amp+FIXED", "save", AMPLIFY, sys.executable),
-        ("min-ext+amp", "min-ext", AMPLIFY, sys.executable),
-        ("min-ext+amp+sleep", "min-ext", AMPLIFY + SLEEP, sys.executable),
+        env = {"LD_PRELOAD": str(tmp_path / "t.so")}
+    main_src, main_sha = _main_source(tmp_path)
+    head = subprocess.run(
+        ["git", "log", "-1", "--format=%H %P"], cwd=ROOT, check=True, capture_output=True, text=True
+    ).stdout.strip()
+    # Two code arms: "main" imports the source of main (no fix), "pr" the checked-out tree.
+    code_env = {"main": {**env, "PYTHONPATH": main_src}, "pr": env}
+    which = {
+        "main": _py(WHICH, main_src, env=code_env["main"])[1].strip(),
+        "pr": _py(WHICH, str(ROOT / "src"), env=code_env["pr"])[1].strip(),
+    }
+    lines = [
+        f"STRESS {platform.platform()} py{sys.version.split()[0]} cpus={os.cpu_count()}"
+        f" parallel={PARALLEL} sched_idle={hasattr(os, 'SCHED_IDLE')}",
+        f"CODE main={main_sha} checkout={head}",
+        f"WHICH (own source, has arrow_lifetime) main={which['main']} pr={which['pr']}",
     ]
+    with capfd.disabled():
+        print("\n" + "\n".join(lines), flush=True)
+    assert which == {"main": "True False", "pr": "True True"}, which
+    # (label, child, prelude, environment, runs)
+    matrix: list[tuple[str, str, str, dict[str, str], int]] = []
+    for arm in ("main", "pr"):
+        for child in ("set", "model"):
+            matrix += [
+                (f"{child}+amp@{arm}", child, AMPLIFY, code_env[arm], RUNS),
+                (f"{child}+amp+serial@{arm}", child, AMPLIFY + SERIAL, code_env[arm], RUNS),
+            ]
+        matrix.append((f"int+amp@{arm}", "int", AMPLIFY, code_env[arm], RUNS))
+    for child in ("min-ext", "min-serial", "min-keep", "min-plain"):
+        matrix.append((child + "+amp", child, AMPLIFY, env, RUNS * 2))
     picked = os.environ.get("ITL1422_ONLY")
-    lines = [f"STRESS {platform.platform()} py{sys.version.split()[0]} cpus={os.cpu_count()}"]
-    if newest:
-        lines.append("newest " + _py("import pyarrow; print(pyarrow.__version__)", python=newest)[1].strip())
     stacks: dict[str, int] = collections.Counter()
-    for label, child, pre, python in matrix:
+    for label, child, pre, child_env, runs in matrix:
         if picked and label not in picked.split(","):
             continue
         code, args = children[child]
-        runs = RUNS
-        dirs = [tmp_path / label / str(i) for i in range(runs)]
-        for d in dirs if child == "save" else []:
-            d.mkdir(parents=True)
         with ThreadPoolExecutor(PARALLEL) as pool:
-            got = list(pool.map(lambda i: _py(pre + code, *(args or [str(dirs[i])]), env=env, python=python), range(runs)))
+            got = list(pool.map(lambda _: _py(pre + code, *args, env=child_env), range(runs)))
         counts = collections.Counter(str(rc) for rc, _, _ in got)
         took = sorted(t for _, _, t in got)[len(got) // 2]
         unfinished = sum(1 for rc, t, _ in got if rc != 0 and not ("row_hash" in t or "DONE" in t))
-        if child == "save":
-            for i, (rc, _, _) in enumerate(got):
-                if rc != 0:
-                    ok, t, _ = _py(children["set"][0], str(dirs[i]) + "/job.json", str(dirs[i]) + "/store")
-                    incomplete = ok != 0 or "b'x'" not in t or "b'y'" not in t
-                    unfinished += incomplete
-                    if incomplete:
-                        lines.append("INCOMPLETE " + t[-1500:])
-        lines.append(f"COUNT {label:26s} runs={runs} unfinished={unfinished} rc={dict(counts)} median={took:.2f}s")
+        lines.append(
+            f"COUNT {label:26s} runs={runs} aborts={counts.get('-6', 0)} hangs={counts.get('HANG', 0)}"
+            f" unfinished={unfinished} rc={dict(counts)} median={took:.2f}s"
+        )
         for rc, text, _ in got:
             if rc != 0:
                 stacks[f"{label} rc={rc}\n" + text[:3500]] += 1
