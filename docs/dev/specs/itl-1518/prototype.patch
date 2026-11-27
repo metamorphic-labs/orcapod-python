@@ -1,0 +1,371 @@
+diff --git a/src/orcapod/core/function_pod.py b/src/orcapod/core/function_pod.py
+index 8a24c3b4..d4fb87f0 100644
+--- a/src/orcapod/core/function_pod.py
++++ b/src/orcapod/core/function_pod.py
+@@ -175,12 +175,32 @@ class _FunctionPodBase(TraceableBase):
+         return PodConfig()
+ 
+     def identity_structure(self) -> Any:
++        mark = getattr(self, "_o34_mark", None)  # PROTOTYPE (ITL-1472, O34, variant B)
++        if mark is _O34_LABEL:  # in the node's tuple, not the pod's identity
++            mark = None
+         if self._ctx_arg_name is not None:
+-            return (self.data_function, self._ctx_arg_name)
+-        return self.data_function
++            base: Any = (self.data_function, self._ctx_arg_name)
++        else:
++            base = self.data_function
++        if mark is None:
++            return base
++        if mark is True:
++            return (base, ("drop_extra", True))
++        if isinstance(mark, tuple):
++            return (base, ("ignored_columns", mark))
++        return (base, ("input", mark))
+ 
+     def pipeline_identity_structure(self) -> Any:
+-        return self.data_function
++        mark = getattr(self, "_o34_mark", None)
++        if mark is _O34_LABEL:
++            mark = None
++        if mark is None:
++            return self.data_function
++        if mark is True:
++            return (self.data_function, ("drop_extra", True))
++        if isinstance(mark, tuple):
++            return (self.data_function, ("ignored_columns", mark))
++        return (self.data_function, ("input", mark))
+ 
+     def _build_invocation_context(
+         self,
+@@ -804,7 +824,7 @@ class _FunctionPodBase(TraceableBase):
+         # nothing is unused and no select is added (developer, November 12, 2026,
+         # ITL-807). No data function kind accepts them today.
+         if strict or self.data_function.accepts_arbitrary_keywords:
+-            return self.process(*streams, label=label)
++            return _o34_marked(self, "strict").process(*streams, label=label)
+ 
+         input_stream = self.handle_input_streams(*streams)
+         _, data_schema = input_stream.output_schema()
+@@ -844,7 +864,7 @@ class _FunctionPodBase(TraceableBase):
+             self._validate_input_schema(
+                 Schema({name: data_schema[name] for name in checked})
+             )
+-            from orcapod.core.operators import SelectDataColumns
++            from orcapod.core.operators.column_selection import ParameterColumns
+ 
+             logger.info(
+                 "Function pod %r: dropped data columns %s, which are not "
+@@ -854,13 +874,21 @@ class _FunctionPodBase(TraceableBase):
+             )
+             # The select is Orcapod's own step: the data-tags it turns into
+             # plain tags are not reported (ITL-1023).
++            # PROTOTYPE (ITL-1472, O34): no step; the pod reads these columns.
+             with materialization_diagnostic_off():
+-                input_stream = SelectDataColumns(columns=kept)(input_stream)
+-        if fall_through_pod is not None and data_tags:
+-            return FallThroughPod(fall_through_pod, data_tags).process(
++                input_stream = ParameterColumns(kept).process(input_stream)
++        token = _O34_LENIENT.set(True)
++        ignored = tuple(sorted(dropped)) if dropped and kept else None
++        try:
++            if fall_through_pod is not None and data_tags:
++                return FallThroughPod(
++                    _o34_marked(fall_through_pod, "lenient", ignored), data_tags
++                ).process(input_stream, label=label)
++            return _o34_marked(self, "lenient", ignored).process(
+                 input_stream, label=label
+             )
+-        return self.process(input_stream, label=label)
++        finally:
++            _O34_LENIENT.reset(token)
+ 
+     def argument_symmetry(self, streams: Collection[StreamProtocol]) -> ArgumentGroup:
+         return self.multi_stream_handler().argument_symmetry(streams)
+@@ -968,6 +996,17 @@ class FunctionPod(_FunctionPodBase):
+         """
+         logger.debug("Invoking kernel %s on streams: %s", self, streams)
+ 
++        # PROTOTYPE (ITL-1472, O34, variant B with the strict mode marked): a direct
++        # ``process`` is the strict mode.
++        import os
++
++        if (
++            os.environ.get("O34_MARK") == "strict"
++            and not _O34_LENIENT.get()
++            and getattr(self, "_o34_mark", None) is None
++        ):
++            return _o34_marked(self, "strict").process(*streams, label=label)
++
+         input_stream = self.handle_input_streams(*streams)
+ 
+         # perform input stream schema validation
+@@ -1194,6 +1233,7 @@ class FunctionPodStream(StreamBase):
+         return (
+             self._function_pod,
+             self._function_pod.argument_symmetry((self._input_stream,)),
++            *drops_extra_columns_suffix(self._function_pod),  # PROTOTYPE (O34)
+         )
+ 
+     def pipeline_identity_structure(self) -> Any:
+@@ -2283,6 +2323,56 @@ def with_fall_through(
+     return output
+ 
+ 
++import contextvars  # noqa: E402  # PROTOTYPE
++
++# PROTOTYPE (ITL-1472, O34): the one label appended to a function node's identity
++# tuple when its pod drops data columns its function does not take.
++_O34_LABEL = "drops_extra_columns"
++
++
++def drops_extra_columns_suffix(pod: Any) -> tuple[str, ...]:
++    """``(label,)`` when ``pod`` drops extra columns, else ``()``."""
++    plain = getattr(pod, "_plain_pod", pod)
++    return (_O34_LABEL,) if getattr(plain, "_o34_mark", None) is _O34_LABEL else ()
++
++
++_O34_LENIENT: contextvars.ContextVar[bool] = contextvars.ContextVar(
++    "o34_lenient", default=False
++)
++
++
++def _o34_marked(pod: Any, mode: str, ignored: Any = None) -> Any:
++    """PROTOTYPE (ITL-1472, O34, variant B): ``pod`` with its input mode in its identity.
++
++    ``O34_MARK`` names the mode that is marked (``lenient`` or ``strict``); the other
++    mode, and every pod when it is unset (variant A), keeps today's identity.
++    """
++    import copy
++    import os
++
++    chosen = os.environ.get("O34_MARK")
++    if not isinstance(pod, FunctionPod):
++        return pod
++    if chosen in ("ignored", "bool", "label"):
++        # Marked only where the default mode ignores columns: with the names
++        # ("ignored"), a boolean field ("bool") or, the developer's encoding, one
++        # label appended to the node's identity tuple ("label").
++        if mode != "lenient" or not ignored:
++            return pod
++        mark: Any = (
++            ignored if chosen == "ignored" else True if chosen == "bool" else _O34_LABEL
++        )
++    elif chosen == mode:
++        mark = mode
++    else:
++        return pod
++    marked = copy.copy(pod)
++    marked._content_hash_cache = {}
++    marked._pipeline_hash_cache = {}
++    marked._o34_mark = mark
++    return marked
++
++
+ def function_input_schema(pod: object, input_schema: Schema) -> Schema:
+     """The part of an input data schema that ``pod``'s function takes."""
+     if isinstance(pod, FallThroughPod):
+diff --git a/src/orcapod/core/nodes/function_node.py b/src/orcapod/core/nodes/function_node.py
+index 9a035305..93e13985 100644
+--- a/src/orcapod/core/nodes/function_node.py
++++ b/src/orcapod/core/nodes/function_node.py
+@@ -408,7 +408,50 @@ def run_job_node(
+         warn_row_failures(summary, caller)
+ 
+ 
++class _O34Narrowed:
++    """PROTOTYPE (ITL-1472, O34): a channel whose rows hold the pod's columns only."""
++
++    def __init__(self, channel: Any, pod: Any) -> None:
++        self._channel, self._pod, self._drop = channel, pod, None
++
++    def __getattr__(self, name: str) -> Any:
++        return getattr(self._channel, name)
++
++    def __aiter__(self) -> Any:
++        return self._rows()
++
++    async def _rows(self) -> Any:
++        async for tag, data in self._channel:
++            if self._drop is None:
++                parameters = self._pod.input_data_schema if self._pod else None
++                data_tags = getattr(self._pod, "fall_through_tags", ())
++                self._drop = (
++                    []
++                    if parameters is None
++                    else [
++                        k
++                        for k in data.keys()
++                        if k not in parameters and k not in data_tags
++                    ]
++                )
++                if len(self._drop) == len(data.keys()):
++                    self._drop = []
++            yield (tag, data.drop(*self._drop) if self._drop else data)
++
++
+ class FunctionNodeBase(StreamBase):
++    def _o34_narrow(self, stream: Any) -> Any:
++        """PROTOTYPE (ITL-1472, O34): ``stream`` as this node's pod reads it."""
++        from orcapod.core.operators.column_selection import parameter_columns
++
++        pod = getattr(self, "_function_pod", None)
++        if pod is None:
++            return stream
++        try:
++            return parameter_columns(pod, stream)
++        except Exception:  # noqa: BLE001  # a stream that cannot state its schema
++            return stream
++
+     """Shared base for ``FunctionNode`` and ``FunctionJobNode``.
+ 
+     Carries all non-DB state: identity, schema, upstreams, and properties
+@@ -460,6 +503,16 @@ class FunctionNodeBase(StreamBase):
+             # data function's full schema, because ctx is auto-injected per row.
+             expected_data_schema = function_pod.input_data_schema
+             # Fall-through columns (ITL-1023) pass by the function.
++            # PROTOTYPE (ITL-1472, O34): columns that are not parameters are ignored.
++            incoming_data_types = type(incoming_data_types)(
++                {
++                    k: v
++                    for k, v in incoming_data_types.items()
++                    if k in expected_data_schema
++                    or k in getattr(function_pod, "fall_through_tags", ())
++                },
++                optional_fields=incoming_data_types.optional_fields,
++            )
+             reason = schema_utils.schema_incompatibility(
+                 function_input_schema(function_pod, incoming_data_types),
+                 expected_data_schema,
+@@ -2647,6 +2700,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
+         """
+         from orcapod.pipeline.observer import NoOpObserver
+ 
++        input_stream = self._o34_narrow(input_stream)  # PROTOTYPE (ITL-1472, O34)
+         if load_only:
+             return self._output_stream(self._execute_load_only(input_stream, observer))
+         if self._function_pod is None:
+@@ -4474,6 +4528,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
+         """
+         from orcapod.pipeline.serialization import LoadStatus
+ 
++        input_channel = _O34Narrowed(input_channel, self._function_pod)  # PROTOTYPE
+         if load_only:
+             await self._async_execute_load_only(input_channel, output, observer)
+             return
+diff --git a/src/orcapod/core/operators/column_selection.py b/src/orcapod/core/operators/column_selection.py
+index cbc6570b..e6d6fab1 100644
+--- a/src/orcapod/core/operators/column_selection.py
++++ b/src/orcapod/core/operators/column_selection.py
+@@ -347,6 +347,37 @@ class SelectDataColumns(UnaryOperator):
+         )
+ 
+ 
++class _NoTracker:
++    """PROTOTYPE (ITL-1472, O34): records nothing."""
++
++    def record_operator_pod_invocation(self, *args: Any, **kwargs: Any) -> None:
++        return None
++
++
++class ParameterColumns(SelectDataColumns):
++    """PROTOTYPE (ITL-1472, O34): the columns a function pod reads of its input.
++
++    Not a step: it is recorded nowhere, and the stream it gives has the identity of
++    its input (``DynamicPodStream`` asks ``TRANSPARENT``).
++    """
++
++    TRANSPARENT: ClassVar[bool] = True
++
++    def __init__(self, columns: str | Collection[str]):
++        super().__init__(columns, strict=True, tracker_manager=_NoTracker())
++
++
++def parameter_columns(pod: Any, stream: Any) -> Any:
++    """PROTOTYPE: ``stream`` as ``pod`` reads it: parameters and fall-through tags."""
++    _, data_schema = stream.output_schema()
++    parameters = pod.input_data_schema
++    data_tags = getattr(pod, "fall_through_tags", ())
++    kept = [n for n in data_schema if n in parameters or n in data_tags]
++    if not kept or len(kept) == len(data_schema):
++        return stream
++    return ParameterColumns(kept).process(stream)
++
++
+ class DropTagColumns(UnaryOperator):
+     """
+     Operator that drops specified columns from a stream.
+diff --git a/src/orcapod/core/operators/static_output_pod.py b/src/orcapod/core/operators/static_output_pod.py
+index f829d44a..7127ae7c 100644
+--- a/src/orcapod/core/operators/static_output_pod.py
++++ b/src/orcapod/core/operators/static_output_pod.py
+@@ -1846,6 +1846,8 @@ class DynamicPodStream(StreamBase):
+             The content hash, unchanged by the note.
+         """
+         self._pod._note_provisional_identity_use()
++        if getattr(self._pod, "TRANSPARENT", False):  # PROTOTYPE (ITL-1472, O34)
++            return self._upstreams[0].content_hash(hasher)
+         return super().content_hash(hasher)
+ 
+     def pipeline_hash(self, hasher=None) -> ContentHash:
+@@ -1858,6 +1860,8 @@ class DynamicPodStream(StreamBase):
+             The pipeline hash, unchanged by the note.
+         """
+         self._pod._note_provisional_identity_use()
++        if getattr(self._pod, "TRANSPARENT", False):  # PROTOTYPE (ITL-1472, O34)
++            return self._upstreams[0].pipeline_hash(hasher)
+         return super().pipeline_hash(hasher)
+ 
+     def identity_structure(self) -> Any:
+diff --git a/src/orcapod/core/streams/base.py b/src/orcapod/core/streams/base.py
+index 9f8b731f..73e28cb8 100644
+--- a/src/orcapod/core/streams/base.py
++++ b/src/orcapod/core/streams/base.py
+@@ -761,7 +761,13 @@ class StreamBase(TraceableBase):
+ 
+     def identity_structure(self) -> Any:
+         if self.producer is not None:
+-            return (self.producer, self.producer.argument_symmetry(self.upstreams))
++            from orcapod.core.function_pod import drops_extra_columns_suffix
++
++            return (
++                self.producer,
++                self.producer.argument_symmetry(self.upstreams),
++                *drops_extra_columns_suffix(self.producer),  # PROTOTYPE (O34)
++            )
+ 
+         raise NotImplementedError("StreamBase.identity_structure")
+ 
+diff --git a/src/orcapod/pipeline/base.py b/src/orcapod/pipeline/base.py
+index 966809d9..9c8f32e2 100644
+--- a/src/orcapod/pipeline/base.py
++++ b/src/orcapod/pipeline/base.py
+@@ -355,6 +355,9 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
+         for upstream, upstream_hash in upstreams:
+             self._hash_graph.add_edge(upstream_hash, key)
+             if upstream_hash not in self._source_streams:
++                # PROTOTYPE (ITL-1472, O34): a pod's view of its input is not a leaf.
++                while getattr(getattr(upstream, "producer", None), "TRANSPARENT", False):
++                    upstream = upstream.upstreams[0]
+                 self._source_streams[upstream_hash] = upstream
+ 
+     def _remember_invocation(self, key: str, invocation: PodInvocation) -> None:
+diff --git a/src/orcapod/pipeline/pod_invocation.py b/src/orcapod/pipeline/pod_invocation.py
+index 5569222d..2816a955 100644
+--- a/src/orcapod/pipeline/pod_invocation.py
++++ b/src/orcapod/pipeline/pod_invocation.py
+@@ -76,7 +76,13 @@ class PodInvocation(ContentIdentifiableBase):
+         This matches the identity structure of the corresponding compiled
+         node, ensuring hash equality between invocation and node.
+         """
+-        return (self._pod, self._pod.argument_symmetry(self._input_streams))
++        from orcapod.core.function_pod import drops_extra_columns_suffix
++
++        return (
++            self._pod,
++            self._pod.argument_symmetry(self._input_streams),
++            *drops_extra_columns_suffix(self._pod),  # PROTOTYPE (ITL-1472, O34)
++        )
+ 
+     def pipeline_identity_structure(self) -> Any:
+         """Return same as ``identity_structure()``."""

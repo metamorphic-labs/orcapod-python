@@ -1,0 +1,32 @@
+calls in this run: {}
+  node Join                         OperatorJobNode    c=e3ae9672aa p=575aeffd15
+  node a                            SourceJobNode      c=6b304269b0 p=2581c9c268
+  node add_two                      FunctionJobNode    c=31531185c4 p=e867ea781c
+  node b                            SourceJobNode      c=55e93213ea p=6364a4f9c0
+  node double_wide                  FunctionJobNode    c=bd146b465c p=861145e877
+  node dt                           SourceJobNode      c=dd5b3e8c0c p=c51ee2adba
+  node halve_narrow                 FunctionJobNode    c=be73b57e33 p=318c1ac883
+  node narrow                       SourceJobNode      c=a6f510eb4b p=2ad9ee7280
+  node scale_datatags               FunctionJobNode    c=9486109a24 p=6f84e5f133
+  node triple_down                  FunctionJobNode    c=618133d13f p=25054c1485
+  node wide                         SourceJobNode      c=91a19f1691 p=1e11870837
+  rows double_wide 3 ['doubled', 'subject', 't']
+  rows triple_down 3 ['subject', 't', 'tripled']
+  rows halve_narrow 3 ['halved', 'subject', 't']
+  rows add_two 3 ['subject', 't', 'total']
+  rows scale_datatags 3 ['scaled', 'subject', 't']
+tables in the store:
+    3 rows  store/scale/db2a8dbe19e033421a1e38fe61f32c1ce815934b2b1f2c462fc89c42a7f63929/v0/python.function.v1/schema:fca0692262857914d6b5b1e4cfb0098e5ffe1d8ae87390dba6df577dfeedfb2a/pdb_v2
+    3 rows  store/scale/db2a8dbe19e033421a1e38fe61f32c1ce815934b2b1f2c462fc89c42a7f63929/v0/python.function.v1/schema:6f84e5f133dd27788b5da45ad6bd88d2718f612c7764643c54824feeb3dbf37b/pdb_v2
+    3 rows  store/halve/33dee9f51b439bd82359e2cf8d3b1aa722fbaaae212b25d9577f44a816a1b906/v0/python.function.v1/schema:318c1ac883bb279415261ce754701421cd2823adde5d240975ecb23fe2eec3b0/pdb_v2
+    3 rows  store/add/b840ab474a1f0e9bc6e4f33b3536584efc97782c333100f78cc42058c3e9c307/v0/python.function.v1/schema:e867ea781c30d57070debb858afd63bda7215903dd715d7f1f700a49b749263c/pdb_v2
+    3 rows  store/add/b840ab474a1f0e9bc6e4f33b3536584efc97782c333100f78cc42058c3e9c307/v0/python.function.v1/schema:ce5a7f2f151ef8f90ae98e425e161c084f593083ebf484b84ab5c3410a1d1573/pdb_v2
+    3 rows  store/double/f741c0fb382f2f9961ea9abbb8fd5fad30eee802c3885b8e54ee267733232525/v0/python.function.v1/schema:861145e8778e4b2a0ba0ce818d423e31e22f85407d65bc048a04964a6c0fb1bc/pdb_v2
+    3 rows  store/double/f741c0fb382f2f9961ea9abbb8fd5fad30eee802c3885b8e54ee267733232525/v0/python.function.v1/schema:aebb47da97fb3ae0ac89f20309fda5574eff277e08d74389d2f3dd0b1af0c484/pdb_v2
+    3 rows  store/_result/scale/db2a8dbe19e033421a1e38fe61f32c1ce815934b2b1f2c462fc89c42a7f63929/v0/python.function.v1/rev1/rdb_v1
+    3 rows  store/_result/halve/33dee9f51b439bd82359e2cf8d3b1aa722fbaaae212b25d9577f44a816a1b906/v0/python.function.v1/rev1/rdb_v1
+    3 rows  store/_result/add/b840ab474a1f0e9bc6e4f33b3536584efc97782c333100f78cc42058c3e9c307/v0/python.function.v1/rev1/rdb_v1
+    3 rows  store/_result/double/f741c0fb382f2f9961ea9abbb8fd5fad30eee802c3885b8e54ee267733232525/v0/python.function.v1/rev1/rdb_v1
+    3 rows  store/_result/triple/42db866ccb252e53965e707c268d9581c3754970e3b04b4f2a04ec95e2bbba08/v0/python.function.v1/rev1/rdb_v1
+    3 rows  store/triple/42db866ccb252e53965e707c268d9581c3754970e3b04b4f2a04ec95e2bbba08/v0/python.function.v1/schema:25054c148535bc7cf6e96273e203d2fcb1a1e25a0c23a9dde2005db5ff7df8ef/pdb_v2
+    3 rows  store/triple/42db866ccb252e53965e707c268d9581c3754970e3b04b4f2a04ec95e2bbba08/v0/python.function.v1/schema:c3976f0dc929f098068f18846192479937f75172d1bc373a7bc5515b14068b7c/pdb_v2
