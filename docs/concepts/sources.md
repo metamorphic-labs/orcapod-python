@@ -218,7 +218,10 @@ categorical column) is not a dictionary column: it is a library value, stored an
 (see [Arrays and other library values](arrays.md)), and is accepted. Supporting
 dictionary-encoded columns themselves is future work (ITL-1277).
 
-Named Python rows in `DataFrameSource` and `PollingSource` must supply the same fields.
+`DataFrameSource` uses Polars to infer the columns of Python inputs and checks the
+resulting column names for reserved names.
+
+Named Python rows returned to `PollingSource` must supply the same fields.
 For sparse mappings, include every key and use `None` for missing values. A namedtuple
 can supply the column names for positional rows of the same width. Different model or
 dataclass classes can share a batch when conversion keeps each field in its named

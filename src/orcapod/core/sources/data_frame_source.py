@@ -456,7 +456,7 @@ def _frame_from_columns(
 def source_dataframe(
     data: FrameInitTypes, system_tag_columns: Collection[str] = ()
 ) -> pl.DataFrame:
-    """Validate named row layouts before Polars can project or relabel fields.
+    """Convert a polling batch, validating layouts before Polars infers columns.
 
     Args:
         data: Tabular or column input, or Python rows with a consistent named layout.
@@ -487,16 +487,12 @@ def source_dataframe(
 
 
 class DataFrameSource(RootSource):
-    """A source backed by a Polars DataFrame or supported tabular or column input.
-
-    Named Python rows must supply the same fields. Typed rows can use different
-    classes of the same kind when conversion keeps every field and value in its
-    intended column. A namedtuple can be followed by positional rows of the same
-    width. Entirely unnamed input uses Polars' column names. A ``None`` row keeps
-    its position as a null row. Named Series can be passed as columns.
+    """A source backed by a Polars DataFrame or other Polars-compatible data.
 
     The DataFrame is converted to an Arrow table and enriched by
     ``SourceStreamBuilder`` (source-info, schema-hash, system tags).
+    Column names beginning with an underscore are reserved. For Python row
+    inputs, the check applies to the columns inferred by Polars.
 
     Data-tags (ITL-1023): every declared tag column is a data-tag by default,
     also a data column of the same name. ``tag_only_columns`` (keyword-only) names the
@@ -535,7 +531,13 @@ class DataFrameSource(RootSource):
 
         if schema is not None:
             require_source_column_names(schema.names, system_tag_columns)
-        df = source_dataframe(data, system_tag_columns)
+        if isinstance(data, pd.DataFrame):
+            require_source_column_names(
+                [str(name) for name in data.columns], system_tag_columns
+            )
+        elif isinstance(data, (pa.Table, pa.RecordBatch)):
+            require_source_column_names(data.schema.names, system_tag_columns)
+        df = pl.DataFrame(data)
         require_source_column_names(df.columns, system_tag_columns)
 
         # Convert any Object-dtype columns to Arrow-compatible types.

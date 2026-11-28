@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import sqlite3
+from array import array
+from collections import UserList, deque
 from re import escape
 from collections.abc import Collection, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar, TypedDict
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple, TypedDict
 
 import deltalake
 import polars as pl
@@ -321,37 +323,45 @@ def test_csv_refuses_reserved_header_before_parsing_bad_rows(
             build()
 
 
-def test_frame_stops_at_first_reserved_series_in_iterator() -> None:
+def test_polling_stops_at_first_reserved_series_in_iterator() -> None:
     def columns() -> Iterator[pl.Series]:
         yield pl.Series("k", [1, 2])
         yield pl.Series("_foo", [3, 4])
         pytest.fail("reserved columns must stop iteration")
 
     with pytest.raises(InputValidationError, match="'_foo'.*drop them first"):
-        DataFrameSource(columns())
+        PollingSource(
+            _Poll(None, columns()), ["k"], source_id="poll", record_id_columns="k"
+        ).as_table()
 
 
 @pytest.mark.parametrize("as_iterator", [False, True], ids=["sequence", "iterator"])
-def test_positional_frame_input_checks_following_row_names(as_iterator: bool) -> None:
+def test_dataframe_source_uses_inferred_positional_column_names(
+    as_iterator: bool,
+) -> None:
     from collections import namedtuple
 
     row = namedtuple("ReservedRecord", ["k", "_hidden"], rename=True)
     rows: list[Any] = [(1, 2), row(3, 4)]
-    with pytest.raises(InputValidationError, match="'_1'.*drop them first"):
-        DataFrameSource(iter(rows) if as_iterator else rows)
+    expected = pl.DataFrame(iter(rows) if as_iterator else rows)
+    source = DataFrameSource(iter(rows) if as_iterator else rows)
+    assert source.as_table().to_pylist() == expected.to_dicts()
 
 
 @pytest.mark.parametrize("as_iterator", [False, True], ids=["sequence", "iterator"])
-def test_dataframe_source_adds_row_context_to_field_name_error(
+def test_polling_adds_row_context_to_field_name_error(
     as_iterator: bool,
 ) -> None:
     rows: list[Any] = [{"k": 1, "g": "a", "x": 3, "y": 5}, {1: 2}]
     with pytest.raises(
         InputValidationError, match=r"Source row 1.*needs string field names"
     ) as info:
-        _ = DataFrameSource(
-            iter(rows) if as_iterator else rows, tag_columns=TAGS, tag_only_columns=True
-        )
+        PollingSource(
+            _Poll(None, iter(rows) if as_iterator else rows),
+            TAGS,
+            source_id="poll",
+            record_id_columns="k",
+        ).as_table()
     cause = info.value.__cause__
     assert isinstance(cause, InputValidationError)
     assert str(cause) == "needs string field names."
@@ -368,16 +378,20 @@ def _late_reserved_rows(reverse: bool) -> list[dict[str, int]]:
 
 
 @pytest.mark.parametrize("iterable", [list, iter], ids=["sequence", "iterator"])
-def test_dataframe_source_checks_fields_beyond_polars_inference(iterable) -> None:
-    message = "'_foo'.*drop them first"
-    if iterable is list:
-        message = "'_foo'.*'_source_x'.*drop them first"
-    with pytest.raises(InputValidationError, match=message):
-        DataFrameSource(
-            iterable(_late_reserved_rows(False)),
-            tag_columns=TAGS,
-            tag_only_columns=True,
-        )
+def test_dataframe_source_checks_inferred_column_names(iterable) -> None:
+    rows = [{"k": 1, "x": 2, "_foo": 3, "_source_x": 4}]
+    with pytest.raises(
+        InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
+    ):
+        DataFrameSource(iterable(rows), tag_columns=["k"], tag_only_columns=True)
+
+
+@pytest.mark.parametrize("iterable", [list, iter], ids=["sequence", "iterator"])
+def test_dataframe_source_preserves_polars_inference_window(iterable) -> None:
+    rows = _late_reserved_rows(False)
+    expected = pl.DataFrame(iterable(rows))
+    source = DataFrameSource(iterable(rows), tag_columns=TAGS, tag_only_columns=True)
+    assert source.as_table().to_pylist() == expected.select(*TAGS, "x", "y").to_dicts()
 
 
 def test_dataframe_source_preserves_inference_for_single_pass_rows() -> None:
@@ -395,7 +409,7 @@ def test_dataframe_source_preserves_inference_for_single_pass_rows() -> None:
     assert source.source_id == expected.source_id
 
 
-def test_dataframe_source_stops_after_the_first_invalid_iterator_row() -> None:
+def test_polling_stops_after_the_first_invalid_iterator_row() -> None:
     def rows() -> Iterator[dict[str, int]]:
         yield {"k": 1, "x": 2, "_foo": 3, "_source_x": 4}
         pytest.fail("reserved fields must stop iteration")
@@ -403,7 +417,9 @@ def test_dataframe_source_stops_after_the_first_invalid_iterator_row() -> None:
     with pytest.raises(
         InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
     ):
-        DataFrameSource(rows(), tag_columns=["k"], tag_only_columns=True)
+        PollingSource(
+            _Poll(None, rows()), ["k"], source_id="poll", record_id_columns="k"
+        ).as_table()
 
 
 @dataclass
@@ -644,15 +660,6 @@ FRAME_ROW_CASES = [
 ]
 
 
-@pytest.mark.parametrize("rows, message", FRAME_ROW_CASES)
-@pytest.mark.parametrize("use_iterator", [False, True], ids=["sequence", "iterator"])
-def test_dataframe_source_checks_named_row_shapes(
-    rows: list[Any], message: str, use_iterator: bool
-) -> None:
-    with pytest.raises(InputValidationError, match=message):
-        DataFrameSource(iter(rows) if use_iterator else rows)
-
-
 @pytest.mark.parametrize(
     ("row_type", "x_values", "arrow_type"),
     [
@@ -701,18 +708,11 @@ def test_homogeneous_typed_rows_keep_schema_and_identity(
     )
 
 
-@pytest.mark.parametrize(
-    "rows",
-    [
-        [None, {"k": 1, "x": 2}, None, {"x": 4, "k": 3}],
-        [None, _FrameRow(1, 2), None, _FrameRow(3, 4)],
-    ],
-    ids=["mapping", "dataclass"],
-)
 @pytest.mark.parametrize("use_iterator", [False, True], ids=["sequence", "iterator"])
 def test_frame_rows_keep_null_positions_and_match_mapping_fields_by_name(
-    rows: list[Any], use_iterator: bool
+    use_iterator: bool,
 ) -> None:
+    rows = [None, {"k": 1, "x": 2}, None, {"x": 4, "k": 3}]
     source = DataFrameSource(
         iter(rows) if use_iterator else rows, tag_columns=["k"], tag_only_columns=True
     )
@@ -1105,11 +1105,15 @@ class _Poll:
 
 @pytest.mark.parametrize("rows, message", FRAME_ROW_CASES)
 @pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("use_iterator", [False, True], ids=["sequence", "iterator"])
 def test_polling_checks_named_row_shapes(
-    rows: list[Any], message: str, use_async: bool
+    rows: list[Any], message: str, use_async: bool, use_iterator: bool
 ) -> None:
     source = PollingSource(
-        _Poll(None, rows), ["k"], source_id="poll", record_id_columns="k"
+        _Poll(None, iter(rows) if use_iterator else rows),
+        ["k"],
+        source_id="poll",
+        record_id_columns="k",
     )
 
     async def read_first() -> None:
@@ -1500,6 +1504,78 @@ def test_named_frame_inputs_keep_polars_conversion(kind: str, path: str) -> None
     assert DumpOverride.calls == expected_dump_calls
 
 
+@pytest.mark.parametrize("iterator", [False, True], ids=["sequence", "iterator"])
+@pytest.mark.parametrize(
+    "tail",
+    [
+        range(3, 5),
+        deque([3, 4]),
+        array("q", [3, 4]),
+        UserList([3, 4]),
+        memoryview(bytes([3, 4])),
+        bytes([3, 4]),
+        bytearray([3, 4]),
+    ],
+    ids=lambda tail: type(tail).__name__,
+)
+def test_dataframe_source_accepts_polars_positional_tails(
+    tail: object, iterator: bool
+) -> None:
+    class Reading(NamedTuple):
+        k: int
+        x: int
+
+    rows: list[Any] = [Reading(1, 2), tail]
+    source = DataFrameSource(
+        iter(rows) if iterator else rows, ["k"], tag_only_columns=True
+    )
+    assert source.as_table().to_pylist() == [{"k": 1, "x": 2}, {"k": 3, "x": 4}]
+
+
+@pytest.mark.parametrize("iterator", [False, True], ids=["sequence", "iterator"])
+@pytest.mark.parametrize("alias", ["k", "other"], ids=["overlapping", "distinct"])
+def test_dataframe_source_preserves_flat_model_columns(
+    alias: str, iterator: bool
+) -> None:
+    class Reading(_PlainFrameModel):
+        model_config = ConfigDict(serialize_by_alias=True)
+        x: int = Field(serialization_alias=alias)
+
+    rows = [Reading(k=1, x=2), Reading(k=3, x=4)]
+    source = DataFrameSource(
+        iter(rows) if iterator else rows, ["k"], tag_only_columns=True
+    )
+    assert source.as_table().to_pylist() == [{"k": 1, "x": 2}, {"k": 3, "x": 4}]
+
+
+@pytest.mark.parametrize("iterator", [False, True], ids=["sequence", "iterator"])
+@pytest.mark.parametrize(
+    "mixed_classes", [False, True], ids=["same-class", "mixed-class"]
+)
+def test_dataframe_source_preserves_polars_numeric_inference(
+    mixed_classes: bool, iterator: bool
+) -> None:
+    class Reading(NamedTuple):
+        k: int
+        x: int | float
+
+    class OtherReading(NamedTuple):
+        k: int
+        x: int | float
+
+    second = OtherReading if mixed_classes else Reading
+    rows = [Reading(1, 9_007_199_254_740_993), second(2, 1.5)]
+    source = DataFrameSource(
+        iter(rows) if iterator else rows, ["k"], tag_only_columns=True
+    )
+    table = source.as_table()
+    assert table.schema.field("x").type == pa.float64()
+    assert table.to_pylist() == [
+        {"k": 1, "x": 9_007_199_254_740_992.0},
+        {"k": 2, "x": 1.5},
+    ]
+
+
 @pytest.mark.parametrize(
     "kind", ["tuple", "list", "numpy", "reordered-model", "reordered-nested-dataclass"]
 )
@@ -1569,8 +1645,8 @@ def _read_frame_poll(
 @pytest.mark.parametrize("kind", ["dataclass", "model"])
 @pytest.mark.parametrize("value", [4.9, 4.0], ids=["lossy", "exact"])
 @pytest.mark.parametrize("iterator", [False, True], ids=["sequence", "iterator"])
-@pytest.mark.parametrize("path", ["frame", "poll-sync", "poll-async"])
-def test_frame_refuses_lossy_mixed_typed_values(
+@pytest.mark.parametrize("path", ["poll-sync", "poll-async"])
+def test_polling_refuses_lossy_mixed_typed_values(
     kind: str, value: float, iterator: bool, path: str
 ) -> None:
     @dataclass
@@ -1591,12 +1667,6 @@ def test_frame_refuses_lossy_mixed_typed_values(
     expected = [{"k": 1, "x": 2}, {"k": 3, "x": 4}]
 
     def read() -> list[dict[str, Any]]:
-        if path == "frame":
-            return (
-                DataFrameSource(data, ["k"], tag_only_columns=True)
-                .as_table()
-                .to_pylist()
-            )
         poll = PollingSource(
             _Poll(None, data), ["k"], source_id="poll", record_id_columns="k"
         )
@@ -1676,12 +1746,12 @@ def test_cached_source_refuses_reserved_stored_user_columns() -> None:
         cached.as_table()
 
 
-@pytest.mark.parametrize("path", ["frame", "poll-sync", "poll-async"])
+@pytest.mark.parametrize("path", ["poll-sync", "poll-async"])
 @pytest.mark.parametrize(
     ("kind", "field"),
     [("namedtuple", "_1"), ("namedtuple", "label"), ("series", "_hidden")],
 )
-def test_numpy_first_batch_refuses_names_that_would_be_lost(
+def test_polling_numpy_first_batch_refuses_names_that_would_be_lost(
     path: str, kind: str, field: str
 ) -> None:
     from collections import namedtuple
@@ -1700,24 +1770,13 @@ def test_numpy_first_batch_refuses_names_that_would_be_lost(
     batch = [np.array([1, 2]), column]
 
     with pytest.raises(InputValidationError, match=escape(repr(field))):
-        if path == "frame":
-            DataFrameSource(batch)
-        else:
-            source = PollingSource(
-                _Poll(None, batch),
-                ["column_0"],
-                source_id="poll",
-                record_id_columns="column_0",
-            )
-            if path == "poll-sync":
-                source.as_table()
-            else:
-
-                async def read() -> None:
-                    async with contextlib.aclosing(source.async_iter_data()) as rows:
-                        await anext(rows)
-
-                asyncio.run(read())
+        source = PollingSource(
+            _Poll(None, batch),
+            ["column_0"],
+            source_id="poll",
+            record_id_columns="column_0",
+        )
+        _read_frame_poll(source, path, 2)
 
 
 @pytest.mark.parametrize("system_field", ["_tag_fake", "_tag::fake"])
