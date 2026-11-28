@@ -39,13 +39,13 @@ class SQLStoreConnector(Protocol):
         ...
 
     def get_store_table_paths(
-        self, name: str, *, exact: bool = False
+        self, name: str, *, exact: bool = False, schema: str | None = None
     ) -> list[tuple[str, str, str]]:
         """Return schema, physical name and stored JSON path for each record table."""
         ...
 
     def store_table_transaction(
-        self, table_name: str, path_json: str
+        self, table_name: str, path_json: str, *, schema: str
     ) -> AbstractContextManager[tuple[str, bool]]:
         """Verify or register a path and yield its schema and table existence."""
         ...

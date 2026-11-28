@@ -312,30 +312,32 @@ class ConnectorArrowDatabase:
     # ── Committed data access ─────────────────────────────────────────────────
 
     def _find_committed_table(
-        self, table_name: str, full_path: tuple[str, ...]
+        self, table_name: str, full_path: tuple[str, ...], *, schema: str | None
     ) -> tuple[str | None, str] | None:
         """Return the verified schema and name of a committed table."""
         if self._sql_store is None:
             if table_name in self._connector.get_table_names():
                 return None, table_name
             return None
-        for schema, name, path_json in self._sql_store.get_store_table_paths(
-            table_name, exact=True
+        for table_schema, name, path_json in self._sql_store.get_store_table_paths(
+            table_name, exact=True, schema=schema
         ):
             require_store_table_owner(
                 table_name,
                 self._plain_path(full_path),
                 stored_path(table_name, path_json),
             )
-            return schema, name
+            return table_schema, name
         return None
 
-    def _get_committed_table(self, record_path: tuple[str, ...]) -> pa.Table | None:
+    def _get_committed_table(
+        self, record_path: tuple[str, ...], *, schema: str | None
+    ) -> pa.Table | None:
         """Fetch all committed records for a path from the connector."""
         full_path = self._path_prefix + record_path
         table_name = self._path_to_table_name(full_path)
         self._require_table_name(table_name)
-        table = self._find_committed_table(table_name, full_path)
+        table = self._find_committed_table(table_name, full_path, schema=schema)
         if table is None:
             return None
         schema, name = table
@@ -368,14 +370,16 @@ class ConnectorArrowDatabase:
                 full_prefix, hint_length=_SQL_HINT_LENGTH
             )
             owners: dict[str, tuple[str, ...]] = {}
-            for _, name, path_json in self._sql_store.get_store_table_paths(stem):
+            current_schema = self._sql_store.get_current_store_schema()
+            for _, name, path_json in self._sql_store.get_store_table_paths(
+                stem, schema=current_schema
+            ):
                 path = stored_path(name, path_json)
                 if self._path_to_table_name(path) != name:
                     raise OrcapodDatabaseError(
                         f"Table {name!r} does not match its stored path {path!r}"
                     )
                 owners[name] = path
-            current_schema = self._sql_store.get_current_store_schema()
             for (schema, name), (_, path) in self._pending_table_owners.items():
                 if schema != current_schema:
                     continue
@@ -422,9 +426,10 @@ class ConnectorArrowDatabase:
         record_key = self._get_record_key(record_path)
         if self._sql_store is None and record_key in self._pending_batches:
             return True
-        return self._find_committed_table(table_name, full_path) is not None or (
-            record_key in self._pending_batches
-        )
+        schema = self._schema_from_record_key(record_key)
+        return self._find_committed_table(
+            table_name, full_path, schema=schema
+        ) is not None or (record_key in self._pending_batches)
 
     # ── Storable columns ──────────────────────────────────────────────────────
 
@@ -445,7 +450,8 @@ class ConnectorArrowDatabase:
         # not be reported as a stored table that could not be read.
         record_key = self._get_record_key(record_path)
         try:
-            table = self._find_committed_table(table_name, full_path)
+            schema = self._schema_from_record_key(record_key)
+            table = self._find_committed_table(table_name, full_path, schema=schema)
             if table is None:
                 pending = self._pending_batches.get(record_key)
                 return None if pending is None else pending.schema
@@ -602,9 +608,9 @@ class ConnectorArrowDatabase:
         record_key = self._get_record_key(record_path)
         pending_owner_key: tuple[str, str] | None = None
         if self._sql_store is not None:
-            _ = self._find_committed_table(table_name, full_path)
             schema = self._schema_from_record_key(record_key)
             assert schema is not None
+            _ = self._find_committed_table(table_name, full_path, schema=schema)
             pending_owner_key = (schema, table_name)
             queued = self._pending_table_owners.get(pending_owner_key)
             if queued is not None and queued[0] != record_key:
@@ -718,16 +724,17 @@ class ConnectorArrowDatabase:
         if not self.keeps_field_metadata:
             return None
         held: list[pa.Schema] = []
-        pending = self._pending_batches.get(self._get_record_key(record_path))
+        record_key = self._get_record_key(record_path)
+        pending = self._pending_batches.get(record_key)
         if pending is not None:
             held.append(pending.schema)
         full_path = self._path_prefix + record_path
         table_name = self._path_to_table_name(full_path)
-        schema = self._schema_from_record_key(self._get_record_key(record_path))
+        schema = self._schema_from_record_key(record_key)
         stored_key = (schema, table_name)
         stored = self._stored_schemas.get(stored_key)
         if stored is None:
-            table = self._find_committed_table(table_name, full_path)
+            table = self._find_committed_table(table_name, full_path, schema=schema)
             if table is not None:
                 schema, name = table
                 stored = self._read_stored_schema(name, schema)
@@ -886,8 +893,8 @@ class ConnectorArrowDatabase:
 
     def _flush_by_key(self, record_key: str) -> None:
         """Commit the ready records at a key shared by all views."""
+        queued_schema = self._schema_from_record_key(record_key)
         if self._sql_store is not None:
-            queued_schema = self._schema_from_record_key(record_key)
             active_schema = self._sql_store.get_current_store_schema()
             if queued_schema != active_schema:
                 raise OrcapodDatabaseError(
@@ -907,13 +914,17 @@ class ConnectorArrowDatabase:
 
         try:
             self._require_table_name(table_name)
-            transaction = (
-                nullcontext((None, table_name in self._connector.get_table_names()))
-                if self._sql_store is None
-                else self._sql_store.store_table_transaction(
-                    table_name, store_table_path_json(record_path).decode()
+            if self._sql_store is None:
+                transaction = nullcontext(
+                    (None, table_name in self._connector.get_table_names())
                 )
-            )
+            else:
+                assert queued_schema is not None
+                transaction = self._sql_store.store_table_transaction(
+                    table_name,
+                    store_table_path_json(record_path).decode(),
+                    schema=queued_schema,
+                )
             with transaction as (schema, table_exists):
                 self._write_ready_batch(
                     record_key, table_name, pending, skip_existing, table_exists, schema
@@ -1002,6 +1013,7 @@ class ConnectorArrowDatabase:
             self.flush()
         record_id = coerce_record_id(record_id)
         record_key = self._get_record_key(record_path)
+        schema = self._schema_from_record_key(record_key)
 
         # Check pending first
         if record_id in self._pending_record_ids.get(record_key, set()):
@@ -1011,12 +1023,12 @@ class ConnectorArrowDatabase:
                 if self._sql_store is not None:
                     full_path = self._path_prefix + record_path
                     _ = self._find_committed_table(
-                        self._path_to_table_name(full_path), full_path
+                        self._path_to_table_name(full_path), full_path, schema=schema
                     )
                 return self._handle_record_id_column(filtered, record_id_column)
 
         # Check committed
-        committed = self._get_committed_table(record_path)
+        committed = self._get_committed_table(record_path, schema=schema)
         if committed is None:
             return None
         filtered = committed.filter(pc.field(self.RECORD_ID_COLUMN) == record_id)
@@ -1032,7 +1044,9 @@ class ConnectorArrowDatabase:
         record_key = self._get_record_key(record_path)
         parts: list[pa.Table] = []
 
-        committed = self._get_committed_table(record_path)
+        committed = self._get_committed_table(
+            record_path, schema=self._schema_from_record_key(record_key)
+        )
         if committed is not None and committed.num_rows > 0:
             parts.append(committed)
         pending = self._pending_batches.get(record_key)

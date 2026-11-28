@@ -303,9 +303,10 @@ class SQLiteConnector:
             return [row["name"] for row in cursor]
 
     def get_store_table_paths(
-        self, name: str, *, exact: bool = False
+        self, name: str, *, exact: bool = False, schema: str | None = None
     ) -> list[tuple[str, str, str]]:
         """Return registered record tables matching a physical name or prefix."""
+        assert schema in (None, "main")
         with self._lock:
             conn = self._require_open()
             if (
@@ -350,9 +351,10 @@ class SQLiteConnector:
 
     @contextmanager
     def store_table_transaction(
-        self, table_name: str, path_json: str
+        self, table_name: str, path_json: str, *, schema: str
     ) -> Iterator[tuple[str, bool]]:
         """Register and write a record table, yielding whether it already exists."""
+        assert schema == "main"
         with self._lock:
             conn = self._require_open()
             _ = conn.execute("BEGIN IMMEDIATE")

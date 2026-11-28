@@ -26,6 +26,7 @@ import os
 import uuid
 from collections.abc import Iterator
 from typing import cast
+from unittest.mock import DEFAULT, patch
 
 import psycopg
 import pyarrow as pa
@@ -246,9 +247,24 @@ class TestGetColumnInfo:
     ) -> None:
         assert connector.get_column_info("no_such_table") == []
 
-    def test_raises_on_invalid_table_name(self, connector: PostgreSQLConnector) -> None:
-        with pytest.raises(ValueError, match="double-quote"):
-            connector.get_column_info('bad"name')
+    def test_accepts_a_decoded_quoted_table_name(
+        self, connector: PostgreSQLConnector
+    ) -> None:
+        _, _, _, schema = connector.current_location()
+        table = sql.Identifier(schema, 'order"items')
+        conn = connector._require_open()
+        _ = conn.execute(
+            sql.SQL("CREATE TABLE {} (value BIGINT NOT NULL)").format(table)
+        )
+        _ = conn.execute(sql.SQL("INSERT INTO {} VALUES (7)").format(table))
+        conn.commit()
+
+        query = sql.SQL("SELECT value FROM {}").format(table).as_string(conn)
+        batches = list(connector.iter_batches(query))
+
+        assert len(batches) == 1
+        assert batches[0].schema == pa.schema([pa.field("value", pa.int64(), False)])
+        assert batches[0].column(0).to_pylist() == [7]
 
     def test_array_column(self, connector: PostgreSQLConnector) -> None:
         with connector._conn.cursor() as cur:
@@ -974,6 +990,78 @@ def test_pending_rows_remain_bound_to_their_postgresql_schema(
         with psycopg.connect(base_dsn, autocommit=True) as admin:
             _ = admin.execute(
                 sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema_b))
+            )
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize("operation", ["read", "flush"])
+def test_store_uses_the_queued_schema_when_a_preferred_schema_appears(
+    connector: PostgreSQLConnector, operation: str
+) -> None:
+    base_dsn = _base_dsn()
+    preferred = f"preferred_{uuid.uuid4().hex[:12]}"
+    fallback = connector.get_current_store_schema()
+    conn = connector._require_open()
+    _ = conn.execute(
+        sql.SQL("SET search_path TO {}, {}").format(
+            sql.Identifier(preferred), sql.Identifier(fallback)
+        )
+    )
+    conn.commit()
+    db = ConnectorArrowDatabase(connector)
+    path = ("same",)
+    db.add_record(path, b"stored", pa.table({"value": [1]}), flush=True)
+    db.add_record(path, b"queued", pa.table({"value": [2]}))
+
+    def create_preferred_schema(*_args: object, **_kwargs: object) -> object:
+        with psycopg.connect(base_dsn, autocommit=True) as admin:
+            _ = admin.execute(
+                sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(preferred))
+            )
+        with PostgreSQLConnector(
+            f"{base_dsn} options=-csearch_path={preferred}"
+        ) as other:
+            ConnectorArrowDatabase(other).add_record(
+                path, b"queued", pa.table({"value": [3]}), flush=True
+            )
+        return DEFAULT
+
+    try:
+        if operation == "read":
+            with patch.object(
+                connector,
+                "get_store_table_paths",
+                wraps=connector.get_store_table_paths,
+                side_effect=create_preferred_schema,
+            ):
+                rows = db.get_all_records(path)
+            assert rows is not None and rows.to_pylist() == [{"value": 1}, {"value": 2}]
+        else:
+            with patch.object(
+                connector,
+                "store_table_transaction",
+                wraps=connector.store_table_transaction,
+                side_effect=create_preferred_schema,
+            ):
+                db.flush()
+            rows = db.get_all_records(path)
+            assert rows is not None and rows.to_pylist() == [{"value": 3}]
+            _ = conn.execute(
+                sql.SQL("SET search_path TO {}").format(sql.Identifier(fallback))
+            )
+            rows = db.get_all_records(path, record_id_column="id")
+            assert rows is not None
+            assert {row["id"]: row["value"] for row in rows.to_pylist()} == {
+                b"stored": 1,
+                b"queued": 2,
+            }
+    finally:
+        conn.rollback()
+        with psycopg.connect(base_dsn, autocommit=True) as admin:
+            _ = admin.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    sql.Identifier(preferred)
+                )
             )
 
 

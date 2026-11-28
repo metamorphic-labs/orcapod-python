@@ -466,7 +466,7 @@ class PostgreSQLConnector:
                 return [row[0] for row in cur.fetchall()]
 
     def get_store_table_paths(
-        self, name: str, *, exact: bool = False
+        self, name: str, *, exact: bool = False, schema: str | None = None
     ) -> list[tuple[str, str, str]]:
         """Return registered record tables matching a physical name or prefix."""
         from psycopg import sql as pg_sql
@@ -483,9 +483,9 @@ class PostgreSQLConnector:
                 FROM pg_catalog.pg_namespace AS ns
                 LEFT JOIN pg_catalog.pg_class AS rel ON rel.relnamespace = ns.oid
                   AND rel.relname = %s AND rel.relkind = 'r'
-                WHERE ns.nspname = current_schema()
+                WHERE ns.nspname = COALESCE(%s, current_schema())
                 """,
-                (STORE_PATH_CATALOG,),
+                (STORE_PATH_CATALOG, schema),
             )
             row = cur.fetchone()
             if row is None:
@@ -544,7 +544,7 @@ class PostgreSQLConnector:
 
     @contextmanager
     def store_table_transaction(
-        self, table_name: str, path_json: str
+        self, table_name: str, path_json: str, *, schema: str
     ) -> Iterator[tuple[str, bool]]:
         """Register and write a record table, yielding whether it already exists."""
         from psycopg import sql as pg_sql
@@ -558,17 +558,18 @@ class PostgreSQLConnector:
                     # catalog does not exist yet. 0x4F524341 is the Orcapod lock key.
                     _ = cur.execute(
                         """
-                        SELECT nspname, oid = pg_my_temp_schema() OR pg_is_other_temp_schema(oid),
+                        SELECT oid = pg_my_temp_schema() OR pg_is_other_temp_schema(oid),
                                pg_advisory_xact_lock(%s, oid::integer)
-                        FROM pg_catalog.pg_namespace WHERE nspname = current_schema()
+                        FROM pg_catalog.pg_namespace WHERE nspname = %s
                         """,
-                        (0x4F524341,),
+                        (0x4F524341, schema),
                     )
                     location = cur.fetchone()
-                    if location is None or location[0] is None:
-                        raise OrcapodDatabaseError("PostgreSQL has no current schema")
-                    schema = cast(str, location[0])
-                    _require_persistent_store_schema(schema, location[1])
+                    if location is None:
+                        raise OrcapodDatabaseError(
+                            f"PostgreSQL store schema {schema!r} no longer exists"
+                        )
+                    _require_persistent_store_schema(schema, location[0])
                     catalog = pg_sql.Identifier(schema, STORE_PATH_CATALOG)
                     fields = pg_sql.SQL(STORE_PATH_CATALOG_FIELDS).format(
                         layout_version=pg_sql.Literal(STORE_PATH_LAYOUT_VERSION)
@@ -739,7 +740,6 @@ class PostgreSQLConnector:
         self._require_table_name(table_name)
         with self._lock:
             conn = self._require_open()
-            self._validate_table_name(table_name)
             with conn.transaction(force_rollback=True), conn.cursor() as cur:
                 cur.execute(
                     """
