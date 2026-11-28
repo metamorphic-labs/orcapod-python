@@ -194,6 +194,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # job's own ``_result`` location, which holds none of their results, and a save
         # writes the configuration back as it was (ITL-1408).
         self._unresolved_result_database: dict[str, Any] | None = None
+        # The same for the job's own database: the saved configuration of one that
+        # could not be rebuilt, written back by a save until one is given (ITL-1391).
+        self._unresolved_database: dict[str, Any] | None = None
         self._execution_context = execution_context
         self._auto_compile = auto_compile
         # name → bound concrete source (user-facing API: job.sources).
@@ -602,6 +605,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # the job as it was, its database included (ITL-1112).
         self._database = new_database
         self._result_database = new_result_database
+        if database is not None:
+            self._unresolved_database = None
         if result_database_given:
             self._unresolved_result_database = None
 
@@ -1743,8 +1748,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             else:
                 sources_block[spec_name] = {"source_type": "unknown"}
 
-        # Database config (best-effort)
-        database_block = None
+        # Database config (best-effort). A loaded job's database that could not be
+        # rebuilt is written back as it was saved (ITL-1391).
+        database_block = self._unresolved_database
         if self._database is not None and hasattr(self._database, "to_config"):
             database_block = self._database.to_config()
         # A separate result database (ITL-1408), saved by the same rule; ``None`` when
@@ -1845,9 +1851,11 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         Args:
             path: Path to the JSON file produced by ``save()``.
             database: Optional database override. When provided, takes precedence
-                over any database configuration in the file.
+                over any database configuration in the file. Required when the file's
+                database is a connector database.
             result_database: Optional override of the separate function-result
-                database (ITL-1408). When provided, it is used whatever the file
+                database (ITL-1408), required when the file names a connector
+                database. When provided, it is used whatever the file
                 says. Otherwise the one the file names is rebuilt from its saved
                 configuration, as the job's database is; a file that names none
                 keeps the results in the job's database (``<name>/_result``). When
@@ -1868,7 +1876,10 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 saved before the database key was renamed (``bindings.store``
                 instead of ``bindings.database``) and no ``database`` is given.
                 An explicit ``database`` makes the saved block irrelevant, so
-                such a file then loads.
+                such a file then loads. Also if the file's database or result
+                database is a connector database (SQLite, PostgreSQL, SpiralDB) and
+                the argument that gives it is missing: a connector is not rebuilt
+                from a file. The message names each such binding.
         """
         import json as _json
         import os
@@ -1884,6 +1895,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             require_current_format,
             require_tag_only_columns,
             resolve_source_from_config,
+            saved_connector_kind,
+            saved_database_kind,
+            saved_source_kind,
         )
 
         path = _Path(path)
@@ -1898,6 +1912,26 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         except ValueError as exc:
             exc.add_note(f"Loading the job file {path}")
             raise
+
+        # A connector is supplied by the user, never rebuilt from the file (ITL-1391):
+        # refused before anything is rebuilt. Nothing of the saved configuration is
+        # shown.
+        missing: list[str] = []
+        for slot_name, given in (
+            ("database", database),
+            ("result_database", result_database),
+        ):
+            kind = saved_connector_kind(data.get("bindings", {}).get(slot_name))
+            if kind is not None and given is None:
+                missing.append(
+                    f"bindings.{slot_name} is a connector database ({kind}): pass "
+                    f"{slot_name}=ConnectorArrowDatabase(<your connector>)"
+                )
+        if missing:
+            raise ValueError(
+                f"{path}: a database connector is not rebuilt from a saved job; it "
+                "must be given to PipelineJob.load. " + "; ".join(missing) + "."
+            )
 
         # Reconstruct pipeline from embedded blueprint data
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as tmp:
@@ -1925,7 +1959,6 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         for spec_name, src_config in (
             data.get("bindings", {}).get("sources", {}).items()
         ):
-            source_type = src_config.get("source_type")
             # Every source states its plain tags (ITL-1019): a refusal is the file's
             # error, not a source that could not be rebuilt.
             try:
@@ -1968,7 +2001,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     "results are still readable from the database. To read source node "
                     "%r itself, bind a source: job.bind(sources={%r: <source>}).",
                     spec_name,
-                    source_type,
+                    saved_source_kind(src_config),
                     spec_name,
                     spec_name,
                 )
@@ -1984,8 +2017,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     "To read source node %r itself, bind a source: "
                     "job.bind(sources={%r: <source>}).",
                     spec_name,
-                    source_type,
-                    exc,
+                    saved_source_kind(src_config),
+                    # Its type, never its text (ITL-1391).
+                    type(exc).__name__,
                     spec_name,
                     spec_name,
                 )
@@ -1996,6 +2030,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         # Reconstruct database
         effective_database = database
+        unresolved_database: dict[str, Any] | None = None
         if effective_database is None:
             bindings = data.get("bindings", {})
             if bindings.get("store") and "database" not in bindings:
@@ -2017,11 +2052,15 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
                     effective_database = resolve_database_from_config(store_config)
                 except Exception as exc:
+                    unresolved_database = store_config
+                    # The exception's type, never its text (ITL-1391).
                     logger.warning(
-                        "Could not reconstruct the database from its saved config: %s. "
+                        "Could not reconstruct the database from its saved config: "
+                        "bindings.database (%s): %s. "
                         "Node results cannot be read until a database is given: "
                         "PipelineJob.load(path, database=...) or job.bind(database=...).",
-                        exc,
+                        saved_database_kind(store_config),
+                        type(exc).__name__,
                     )
 
         # Reconstruct the job directly without going through to_invocations().
@@ -2058,11 +2097,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     unresolved_result_database = result_config
                     logger.warning(
                         "Could not reconstruct the job's separate result database "
-                        "(bindings.result_database) from its saved config: %s. The "
+                        "(bindings.result_database) from its saved config (%s): %s. The "
                         "function nodes' results cannot be read until it is given: "
                         "PipelineJob.load(path, result_database=...) or "
                         "job.bind(result_database=...).",
-                        exc,
+                        saved_database_kind(result_config),
+                        type(exc).__name__,
                     )
 
         job = cls(
@@ -2071,6 +2111,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             result_database=effective_result_database,
         )
         job._unresolved_result_database = unresolved_result_database
+        job._unresolved_database = unresolved_database
         job._loaded = True
         job._compiled_pipeline = pipeline
         # Mark compiled so save() / compiled_pipeline can be accessed.

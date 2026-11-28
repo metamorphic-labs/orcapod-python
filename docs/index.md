@@ -72,3 +72,5 @@ for tag, data in result:
 - [Concepts](concepts/sources.md) -- deeper explanations of Orcapod's core abstractions.
 - [Troubleshooting](troubleshooting.md) -- common errors, their causes and fixes.
 - [API Reference](api/index.md) -- complete reference for all public classes and functions.
+- [Contributing](https://github.com/metamorphic-labs/orcapod-python/blob/main/CONTRIBUTING.md)
+  -- development setup, the checks a pull request must pass, and the project's conventions.

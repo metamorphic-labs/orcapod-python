@@ -20,6 +20,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import os
 
 import pytest
 
@@ -549,13 +550,14 @@ class TestConfigTypes:
         assert OrchestratorType.SYNCHRONOUS.value == "synchronous"
         assert OrchestratorType.ASYNC_CHANNELS.value == "async_channels"
 
-    def test_pipeline_config_defaults(self):
+    def test_pipeline_config_defaults(self, monkeypatch: pytest.MonkeyPatch):
         from orcapod.types import OrchestratorType, PipelineConfig
 
+        monkeypatch.setattr(os, "process_cpu_count", lambda: 4, raising=False)
         cfg = PipelineConfig()
         assert cfg.orchestrator == OrchestratorType.SYNCHRONOUS
         assert cfg.channel_buffer_size == 64
-        assert cfg.default_max_concurrency is None
+        assert cfg.default_max_concurrency == 4
 
     def test_pipeline_config_custom(self):
         from orcapod.types import OrchestratorType, PipelineConfig
@@ -575,7 +577,7 @@ class TestConfigTypes:
         cfg = NodeConfig()
         assert cfg.is_result_ephemeral is None
         pod_cfg = PodConfig()
-        assert pod_cfg.max_concurrency is None
+        assert pod_cfg.max_concurrency == "inherit"
 
     def test_resolve_concurrency_node_overrides_pipeline(self):
         from orcapod.types import PipelineConfig, PodConfig, resolve_concurrency
@@ -591,9 +593,10 @@ class TestConfigTypes:
         pipeline = PipelineConfig(default_max_concurrency=8)
         assert resolve_concurrency(node, pipeline) == 8
 
-    def test_resolve_concurrency_both_none(self):
+    def test_resolve_concurrency_both_default(self, monkeypatch: pytest.MonkeyPatch):
         from orcapod.types import PipelineConfig, PodConfig, resolve_concurrency
 
+        monkeypatch.setattr(os, "process_cpu_count", lambda: 4, raising=False)
         node = PodConfig()
         pipeline = PipelineConfig()
-        assert resolve_concurrency(node, pipeline) is None
+        assert resolve_concurrency(node, pipeline) == 4

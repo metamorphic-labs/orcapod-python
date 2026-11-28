@@ -355,7 +355,7 @@ def test_narrower_then_nullable_runs_append_to_one_path(
     assert second.ok
     assert set(database.list_table_paths(())) == paths
     assert sorted(job.nodes["inc"].as_table().column("z").to_pylist()) == [0, 4]
-    stored = [database.get_all_records(path) for path in paths if path[-1] == "pdb_v1"]
+    stored = [database.get_all_records(path) for path in paths if path[-1] == "pdb_v2"]
     assert [None if table is None else table.num_rows for table in stored] == [4]
 
 
@@ -396,7 +396,7 @@ def test_loaded_csv_of_another_type_is_left_unbound(
     with caplog.at_level(logging.WARNING):
         job = PipelineJob.load(path)
     assert any(
-        "'csv'" in r.getMessage() and "declared int" in r.getMessage()
+        "'csv' (csv)" in r.getMessage() and "SourceSpecMismatchError" in r.getMessage()
         for r in caplog.records
     )
     assert job.unbound_sources == ["csv"]

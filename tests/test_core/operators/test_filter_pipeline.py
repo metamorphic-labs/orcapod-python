@@ -294,22 +294,29 @@ def test_a_filter_reads_what_the_source_selects(
 @pytest.mark.parametrize(
     "value, alone, with_where",
     [
-        (float("nan"), [1, 3], [1, 3]),
-        (-0.0, [4, 5], [4]),
+        (float("nan"), [1, 3], None),
+        (-0.0, [4, 5], None),
+        (0.0, [4, 5], [5]),
         (2.0, [6], [6]),
     ],
-    ids=["NaN", "signed zero", "ordinary float"],
+    ids=["NaN", "negative zero", "zero", "ordinary float"],
 )
 def test_where_and_filter_on_a_float_column(project, value, alone, with_where):
     """CodeRabbit on PR 493 (spec 483, Major) and PR 498 (sources.md:447, operators.md:861):
-    ``filter`` matches floats by Orcapod's rule (NaN equals NaN); ``where`` by the table
-    system's equality (SpiralDB's, as measured on the service: NaN equals NaN and 0.0 does
-    not equal -0.0), so ``where`` plus ``filter`` can keep fewer rows than the ``filter``
-    alone, and only for a zero."""
+    ``filter`` matches floats by Orcapod's rule (NaN equals NaN, -0.0 equals 0.0);
+    ``where`` by the table system's equality (SpiralDB's, as measured on the service:
+    0.0 does not equal -0.0), so ``where`` plus ``filter`` can keep fewer rows than the
+    ``filter`` alone, and only for a zero. ``where`` refuses -0.0 and NaN (ITL-1480):
+    SpiralDB matches them by their bits."""
     assert _timestamps(_events().filter(reading=value)) == alone
-    assert (
-        _timestamps(_events().where(reading=value).filter(reading=value)) == with_where
-    )
+    if with_where is None:
+        with pytest.raises(TypeError, match="ITL-1480"):
+            _events().where(reading=value)
+    else:
+        assert (
+            _timestamps(_events().where(reading=value).filter(reading=value))
+            == with_where
+        )
 
 
 @pytest.mark.parametrize(

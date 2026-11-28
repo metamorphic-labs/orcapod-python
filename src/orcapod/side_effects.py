@@ -20,8 +20,8 @@ from typing_extensions import override
 
 from orcapod.core.base import TraceableBase
 from orcapod.core.nodes.staleness import RunHoldingNode
+import orcapod.core.row_ids as row_ids
 from orcapod.core.nodes.function_node import (
-    _build_record_id_preimage,
     rows_as_output_stream,
     run_job_node,
 )
@@ -80,9 +80,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Column name used in the record-ID preimage table (same semantic as
-# ``_PIPELINE_RECOMPUTATION_INDEX_COL`` in ``function_node.py``).
-_SIDE_EFFECT_RECOMPUTATION_INDEX_COL = "__pipeline_recomputation_index"
+# The invocation log's column holding the row's entry id, which is also its key.
+INVOCATION_LOG_ENTRY_ID_COL = "entry_id"
 
 
 # ---------------------------------------------------------------------------
@@ -418,18 +417,15 @@ def _execute_side_effect_row(
 ) -> tuple[TagProtocol, DataProtocol] | None:
     """Execute delivery for one (tag, data) row.
 
-    Computes a deterministic ``record_id`` from a preimage built by
-    ``_build_record_id_preimage(tag, data)`` plus a fixed recomputation index
-    of ``0``.  The preimage covers:
+    A delivery is keyed by the row's entry id (``row_ids.entry_id``, ITL-1471):
+    the hash of its user tags, its system tags and its input data hash
+    (``data.content_hash().to_prefixed_digest()``: the digest with its label,
+    ITL-1154). The row's source-info tokens are no part of it, so a row that
+    arrives again with other tokens (its upstream result was computed again) is
+    the same entry and is not delivered again.
 
-    * tag system-tag columns,
-    * ``INPUT_DATA_HASH_COL`` (``data.content_hash().to_prefixed_digest()``: the
-      digest with its label, ITL-1154), and
-    * ``_SIDE_EFFECT_RECOMPUTATION_INDEX_COL`` fixed at ``0`` (side effects
-      never recompute).
-
-    The invocation hash is ``pipeline_hash :: record_id_hash``, where
-    ``pipeline_hash`` uniquely identifies the table path and ``record_id_hash``
+    The invocation hash is ``pipeline_hash :: entry id``, where
+    ``pipeline_hash`` uniquely identifies the table path and the entry id
     uniquely identifies the entry within that table.
 
     Args:
@@ -450,23 +446,18 @@ def _execute_side_effect_row(
     """
     require_same_data_context(data.data_context_key, data_context_key)
 
-    # 1. Build the preimage — delegates to the shared helper used by FunctionJobNode.
-    #    Appends the recomputation index (fixed at 0; side effects never recompute).
-    preimage = _build_record_id_preimage(tag, data).append_column(
-        _SIDE_EFFECT_RECOMPUTATION_INDEX_COL,
-        pa.array([0], type=pa.int32()),
-    )
-    record_id_hash: ContentHash = arrow_hasher.hash_table(preimage)
-    record_id: bytes = record_id_hash.to_prefixed_digest()
+    # 1. The row's entry id: the key of its delivery.
+    entry_id_hash: ContentHash = row_ids.entry_id(arrow_hasher, tag, data)
+    entry_id: bytes = entry_id_hash.to_prefixed_digest()
 
-    # 2. Completion check — look up by deterministic record_id.
+    # 2. Completion check — look up by the entry id.
     if (
         pod_config.track_completion
         and pipeline_database is not None
         and table_path is not None
     ):
         try:
-            prior = pipeline_database.get_record_by_id(table_path, record_id)
+            prior = pipeline_database.get_record_by_id(table_path, entry_id)
         except OrcapodDatabaseError as exc:
             # A failed lookup fails the run like a failed write: name pod and row.
             exc.add_context(node_label=pod_name, tag=tag.as_dict())
@@ -479,7 +470,7 @@ def _execute_side_effect_row(
         pod_name=pod_name,
         pipeline_run_id=run_id,
         _pipeline_hash_ch=pipeline_hash_ch,
-        _record_id_hash_ch=record_id_hash,
+        _entry_id_hash_ch=entry_id_hash,
         _hash_config=pod_config.hash_config,
         _track_completion=pod_config.track_completion,
     )
@@ -497,8 +488,7 @@ def _execute_side_effect_row(
             _write_invocation_row(
                 pipeline_database=pipeline_database,
                 table_path=table_path,
-                record_id=record_id,
-                record_id_hash_bytes=record_id_hash.to_prefixed_digest(),
+                entry_id=entry_id,
                 run_id=run_id,
                 data_context_key=data_context_key,
             )
@@ -522,7 +512,7 @@ def _invocation_log_schema() -> pa.Schema:
     """The columns of an invocation log row, before ``__data_context`` is appended."""
     return pa.schema(
         [
-            pa.field("record_id_hash", pa.large_binary()),
+            pa.field(INVOCATION_LOG_ENTRY_ID_COL, pa.large_binary()),
             pa.field("pipeline_run_id", pa.large_string()),
             pa.field("executed_at", pa.timestamp("us", tz="UTC")),
         ]
@@ -538,33 +528,31 @@ def _write_invocation_row(
     *,
     pipeline_database: ArrowDatabaseProtocol,
     table_path: tuple[str, ...],
-    record_id: bytes,
-    record_id_hash_bytes: bytes,
+    entry_id: bytes,
     run_id: str | None,
     data_context_key: str,
 ) -> None:
     """Write one success row to the side-effect invocation log table.
 
-    Only called on successful delivery. Uses a deterministic ``record_id``
-    (the prefixed digest of the unified preimage hash) so that
-    ``get_record_by_id`` can look up prior completions without a column scan.
+    Only called on successful delivery. The row's key is the entry id of the
+    delivered row, so that ``get_record_by_id`` can look up prior completions
+    without a column scan; the ``entry_id`` column holds the same value, for a
+    reader of the table.
 
     Args:
         pipeline_database: The attached pipeline database.
         table_path: Path tuple for the invocation log table.
-        record_id: Deterministic bytes key for this ``(input, pod version)``
-            pair — the prefixed digest of the unified preimage hash.
-        record_id_hash_bytes: Binary prefixed digest of the record-ID hash
-            (stored for human inspection via ``ContentHash.from_prefixed_digest``).
+        entry_id: The delivered row's entry id, as its labelled digest
+            (``ContentHash.from_prefixed_digest`` reads it back).
         run_id: Pipeline run identifier (or ``None`` for standalone mode).
         data_context_key: Key of the data context whose hasher produced
-            ``record_id``; stored on the row as ``__data_context``.
+            ``entry_id``; stored on the row as ``__data_context``.
     """
     executed_at = datetime.datetime.now(datetime.timezone.utc)
     record = pa.Table.from_pylist(
         [
             {
-                "record_id_hash": record_id_hash_bytes,
+                INVOCATION_LOG_ENTRY_ID_COL: entry_id,
                 "pipeline_run_id": run_id,
                 "executed_at": executed_at,
             }
@@ -574,7 +562,7 @@ def _write_invocation_row(
     try:
         pipeline_database.add_record(
             table_path,
-            record_id,
+            entry_id,
             with_data_context(record, data_context_key),
             skip_duplicates=True,
         )

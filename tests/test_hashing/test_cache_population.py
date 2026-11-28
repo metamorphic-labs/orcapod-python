@@ -6,6 +6,7 @@ from pathlib import Path
 
 import dataclasses
 import pytest
+from orcapod.hashing.file_hashers import FileHasher
 from typer.testing import CliRunner
 
 
@@ -492,7 +493,7 @@ class TestVisitors:
         file_stat = resolved.stat()
 
         with SqliteHashCacher(db) as cacher:
-            visitor = _DryRunVisitor(cacher)
+            visitor = _DryRunVisitor(cacher, FileHasher())
             outcome, nbytes = visitor(resolved, file_stat)
 
         assert outcome == "would_hash"
@@ -511,7 +512,7 @@ class TestVisitors:
         file_stat = resolved.stat()
 
         with SqliteHashCacher(db) as cacher:
-            visitor = _DryRunVisitor(cacher)
+            visitor = _DryRunVisitor(cacher, FileHasher())
             outcome, nbytes = visitor(resolved, file_stat)
 
         assert outcome == "cached"
@@ -530,7 +531,7 @@ class TestVisitors:
         file_stat = resolved.stat()
 
         with SqliteHashCacher(db) as cacher:
-            visitor = _DryRunVisitor(cacher, force=True)
+            visitor = _DryRunVisitor(cacher, FileHasher(), force=True)
             outcome, nbytes = visitor(resolved, file_stat)
 
         assert outcome == "would_hash"

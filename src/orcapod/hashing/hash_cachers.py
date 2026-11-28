@@ -5,18 +5,29 @@ Provides ``InMemoryHashCacher`` (testing/ephemeral use) and
 ``CacherProtocol[FileHashKey, ContentHash]``.
 """
 
+import logging
 import os
 import sqlite3
 import threading
+import time
+from contextlib import closing
 from pathlib import Path
+from typing import cast
 
-from orcapod.hashing.file_hashers import FileHashKey
+from orcapod.hashing.file_hashers import (
+    FILE_HASH_CACHE_SCHEMA_VERSION,
+    FileHashKey,
+    matches_stored_file_hash,
+    parse_stored_file_hash,
+    require_storable,
+    serialize_storable_file_hash,
+    stored_hash_format,
+)
 from orcapod.types import ContentHash
 
-# Current SQLite schema version.  Stored in PRAGMA user_version.
-# V0 (default) = legacy schema without the cached_at column.
-# V1            = current schema: added cached_at column.
-_SQLITE_SCHEMA_VERSION = 1
+logger = logging.getLogger(__name__)
+
+_SQLITE_BUSY_TIMEOUT_SECONDS = 5.0
 
 
 class InMemoryHashCacher:
@@ -33,8 +44,8 @@ class InMemoryHashCacher:
             ``None`` and ``0`` disable the threshold (default behaviour).
             Negative values raise ``ValueError``. Defaults to ``None``.
         match_mtime: When ``True`` (default), cache hits require
-            ``path``, ``mtime_ns``, and ``size`` to all match. When
-            ``False``, only ``path`` and ``size`` are compared; among
+            ``path``, ``mtime_ns``, ``size``, and ``algorithm`` to all match. When
+            ``False``, ``path``, ``size``, and ``algorithm`` are compared; among
             multiple matching entries the one with the highest ``mtime_ns``
             is returned. The write path is unaffected — ``mtime_ns`` is
             always stored.
@@ -52,9 +63,11 @@ class InMemoryHashCacher:
                 f"min_cache_size_bytes must be None or a non-negative integer, "
                 f"got {min_cache_size_bytes!r}"
             )
-        # Nested dict: (path, size) → {mtime_ns: ContentHash}.
-        # Separating the mtime_ns level from (path, size) makes both lookup
-        # modes O(1)/O(k) instead of O(n) over all cached entries.
+        # Nested dict: (path, size, algorithm) → {mtime_ns: ContentHash}.
+        # Separating the mtime_ns level from (path, size, algorithm) makes both
+        # lookup modes O(1)/O(k) instead of O(n) over all cached entries. The
+        # algorithm is part of the key: a hash of another algorithm is never
+        # returned (ITL-1488).
         self._cache: dict[tuple, dict[int, ContentHash]] = {}
         self._read_only = read_only
         self._min_cache_size_bytes = min_cache_size_bytes
@@ -63,8 +76,8 @@ class InMemoryHashCacher:
     def get(self, key: FileHashKey) -> ContentHash | None:
         """Return the cached ``ContentHash`` for ``key``, or ``None`` on miss.
 
-        When ``match_mtime=True`` (default), all three key fields must match.
-        When ``match_mtime=False``, only ``path`` and ``size`` are compared;
+        When ``match_mtime=True`` (default), all four key fields must match.
+        When ``match_mtime=False``, ``path``, ``size``, and ``algorithm`` are compared;
         among all matching entries the one with the highest ``mtime_ns`` is
         returned.
 
@@ -74,7 +87,7 @@ class InMemoryHashCacher:
         Returns:
             Cached ``ContentHash``, or ``None`` if not found.
         """
-        inner = self._cache.get((key.path, key.size))
+        inner = self._cache.get((key.path, key.size, key.algorithm))
         if inner is None:
             return None
         if self._match_mtime:
@@ -89,12 +102,18 @@ class InMemoryHashCacher:
         """Store ``value`` under ``key``.
 
         No-ops silently when ``read_only=True`` or when ``key.size`` is below
-        ``min_cache_size_bytes``.
+        ``min_cache_size_bytes``. Putting the existing hash is also a no-op.
 
         Args:
             key: File hash cache key.
             value: ``ContentHash`` to store.
+
+        Raises:
+            ValueError: If the hash label or digest length is invalid for the key
+                (checked before the write guards), or if a write finds a different
+                hash under the same key.
         """
+        _ = require_storable(key.algorithm, value.method, value.digest)
         if self._read_only:
             return
         if (
@@ -103,7 +122,9 @@ class InMemoryHashCacher:
             and key.size < self._min_cache_size_bytes
         ):
             return
-        self._cache.setdefault((key.path, key.size), {})[key.mtime_ns] = value
+        entries = self._cache.setdefault((key.path, key.size, key.algorithm), {})
+        if entries.setdefault(key.mtime_ns, value) != value:
+            raise ValueError(f"Different hash already cached for {key!r}")
 
     def clear(self) -> None:
         """Remove all entries from the cache."""
@@ -121,12 +142,13 @@ class InMemoryHashCacher:
 class SqliteHashCacher:
     """SQLite-backed file hash cacher.
 
-    Stores file hashes keyed on ``(path, mtime_ns, size)`` in a local
+    Stores file hashes keyed on ``(path, mtime_ns, size, algorithm)`` in a local
     SQLite database. Uses WAL mode for single-writer/multi-reader
     concurrency and thread-local connections for thread safety.
 
     The hash is stored as a BLOB in ``{method}:{raw_digest}`` format via
-    ``ContentHash.to_prefixed_digest()``.
+    ``ContentHash.to_prefixed_digest()``. Each algorithm has its own row in
+    ``file_hash_cache_v2``. Older cache tables are left untouched.
 
     Args:
         db_path: Path to the SQLite database file. Defaults to
@@ -139,8 +161,8 @@ class SqliteHashCacher:
             ``None`` and ``0`` disable the threshold (default behaviour).
             Negative values raise ``ValueError``. Defaults to ``None``.
         match_mtime: When ``True`` (default), cache hits require
-            ``path``, ``mtime_ns``, and ``size`` to all match. When
-            ``False``, only ``path`` and ``size`` are compared; among
+            ``path``, ``mtime_ns``, ``size``, and ``algorithm`` to all match. When
+            ``False``, ``path``, ``size``, and ``algorithm`` are compared; among
             multiple matching entries the one with the highest ``mtime_ns``
             is returned. The write path is unaffected — ``mtime_ns`` is
             always stored.
@@ -175,77 +197,56 @@ class SqliteHashCacher:
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
-        """Create the cache table, enable WAL mode, and verify schema version.
-
-        Uses a dedicated one-shot connection so schema setup happens once on
-        construction, independent of the thread-local connection pool.
-
-        Schema version is tracked via ``PRAGMA user_version``:
-
-        * **V0** (default SQLite value) — legacy schema without ``cached_at``.
-        * **V1** — current schema with ``cached_at``.
-
-        If the database already contains a ``file_hash_cache`` table that is
-        missing the ``cached_at`` column (V0), a ``ValueError`` is raised
-        with instructions to run the bundled migration script.
-
-        Raises:
-            ValueError: If an existing database uses an outdated schema.
-        """
+        """Enable WAL mode and create the version 2 cache alongside older tables."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
-
-            # Create table with current schema (no-op if already exists).
+        with (
+            closing(
+                sqlite3.connect(self.db_path, timeout=_SQLITE_BUSY_TIMEOUT_SECONDS)
+            ) as conn,
+            conn,
+        ):
+            # SQLite can skip the busy handler on a lock upgrade during a
+            # journal-mode change. Retry the pragma after it releases its locks.
+            # The deadline limits which failures trigger another retry. Each
+            # pragma attempt and BEGIN IMMEDIATE use SQLite's own busy timeout.
+            deadline = time.monotonic() + _SQLITE_BUSY_TIMEOUT_SECONDS
+            while True:
+                try:
+                    conn.execute("PRAGMA journal_mode=WAL")
+                except sqlite3.OperationalError as exc:
+                    if (
+                        exc.sqlite_errorcode != sqlite3.SQLITE_BUSY
+                        or time.monotonic() >= deadline
+                    ):
+                        raise
+                    time.sleep(0.01)
+                else:
+                    break
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 """
-                CREATE TABLE IF NOT EXISTS file_hash_cache (
+                CREATE TABLE IF NOT EXISTS file_hash_cache_v2 (
                     path      TEXT    NOT NULL,
                     mtime_ns  INTEGER NOT NULL,
                     size      INTEGER NOT NULL,
+                    algorithm TEXT    NOT NULL,
                     hash      BLOB    NOT NULL,
                     cached_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
-                    PRIMARY KEY (path, mtime_ns, size)
+                    PRIMARY KEY (path, mtime_ns, size, algorithm)
                 ) WITHOUT ROWID
                 """
             )
-
-            # Supporting index for match_mtime=False lookups: WHERE path=? AND size=?
-            # ORDER BY mtime_ns DESC.  The PK (path, mtime_ns, size) cannot serve this
-            # efficiently because size is not a leftmost prefix.
             conn.execute(
                 """
-                CREATE INDEX IF NOT EXISTS idx_file_hash_cache_path_size_mtime
-                ON file_hash_cache (path, size, mtime_ns DESC)
+                CREATE INDEX IF NOT EXISTS idx_file_hash_cache_v2_path_size_algorithm_mtime
+                ON file_hash_cache_v2 (path, size, algorithm, mtime_ns DESC)
                 """
             )
 
+            # user_version tracks the layout of the current table.
             version = conn.execute("PRAGMA user_version").fetchone()[0]
-
-            # Always validate the cached_at column is present, regardless of
-            # user_version.  A manually-bumped user_version without the matching
-            # schema change would otherwise cause a cryptic INSERT failure in
-            # put() rather than a clear diagnostic here.
-            columns = {
-                row[1] for row in conn.execute("PRAGMA table_info(file_hash_cache)")
-            }
-            if "cached_at" not in columns:
-                raise ValueError(
-                    f"SQLite hash cache at '{self.db_path}' uses an outdated "
-                    f"schema (version {version}, missing 'cached_at' column). "
-                    f"Run the migration script to upgrade:\n\n"
-                    f"    python -m orcapod.hashing.migrate_hash_cache "
-                    f"{self.db_path}\n"
-                )
-
-            if version < _SQLITE_SCHEMA_VERSION:
-                # Version stamp is missing or outdated — stamp it now.
-                # (Reaches here when the table was created by code before
-                # schema versioning was introduced, so cached_at exists
-                # but user_version is still 0.)
-                conn.execute(f"PRAGMA user_version = {_SQLITE_SCHEMA_VERSION}")
-
-            conn.commit()
+            if version < FILE_HASH_CACHE_SCHEMA_VERSION:
+                conn.execute(f"PRAGMA user_version = {FILE_HASH_CACHE_SCHEMA_VERSION}")
 
     def _connection(self) -> sqlite3.Connection:
         """Return this thread's connection, opening it on first use."""
@@ -259,10 +260,9 @@ class SqliteHashCacher:
     def get(self, key: FileHashKey) -> ContentHash | None:
         """Return the cached ``ContentHash`` for ``key``, or ``None`` on miss.
 
-        When ``match_mtime=True`` (default), the query filters on
-        ``path``, ``mtime_ns``, and ``size``. When ``match_mtime=False``,
-        only ``path`` and ``size`` are filtered and results are ordered
-        by ``mtime_ns DESC`` so the most recent entry is returned.
+        When ``match_mtime=True`` (default), all four key fields must match.
+        When ``match_mtime=False``, the newest entry for the path, size and
+        algorithm is returned.
 
         Args:
             key: File hash cache key.
@@ -270,36 +270,48 @@ class SqliteHashCacher:
         Returns:
             Cached ``ContentHash``, or ``None`` if not found.
         """
+        algorithm = str.__str__(key.algorithm)
+        hash_format = stored_hash_format(algorithm)
+        if hash_format is None:
+            return None
         conn = self._connection()
         if self._match_mtime:
-            cursor = conn.execute(
-                "SELECT hash FROM file_hash_cache WHERE path=? AND mtime_ns=? AND size=?",
-                (str(key.path), key.mtime_ns, key.size),
-            )
+            row = conn.execute(
+                "SELECT CASE WHEN typeof(hash)='blob' THEN hash END FROM file_hash_cache_v2 "
+                "WHERE path=? AND mtime_ns=? AND size=? AND algorithm=?",
+                (str(key.path), key.mtime_ns, key.size, algorithm),
+            ).fetchone()
         else:
-            cursor = conn.execute(
-                "SELECT hash FROM file_hash_cache "
-                "WHERE path=? AND size=? ORDER BY mtime_ns DESC LIMIT 1",
-                (str(key.path), key.size),
-            )
-        row = cursor.fetchone()
-        if row is None:
+            row = conn.execute(
+                "SELECT CASE WHEN typeof(hash)='blob' THEN hash END FROM file_hash_cache_v2 "
+                "WHERE path=? AND size=? AND algorithm=? ORDER BY mtime_ns DESC LIMIT 1",
+                (str(key.path), key.size, algorithm),
+            ).fetchone()
+        if row is None or not isinstance(row[0], bytes):
             return None
-        blob: bytes = row[0]
-        method_bytes, digest = blob.split(b":", 1)
-        return ContentHash(method=method_bytes.decode("ascii"), digest=digest)
+        return parse_stored_file_hash(row[0], algorithm, *hash_format)
 
     def put(self, key: FileHashKey, value: ContentHash) -> None:
         """Store ``value`` under ``key``.
 
         No-ops silently when ``read_only=True`` or when ``key.size`` is below
-        ``min_cache_size_bytes``. Uses ``INSERT OR REPLACE`` so writes are
-        idempotent when they do proceed.
+        ``min_cache_size_bytes``. Putting the existing hash is also a no-op.
+        Replacing a malformed stored value refreshes its timestamp and logs a warning.
 
         Args:
             key: File hash cache key.
             value: ``ContentHash`` to store.
+
+        Raises:
+            ValueError: If the hash label or digest length is invalid for the key
+                (checked before the write guards), if the store matches a row
+                with another label, or if a different well-formed hash exists
+                under the same key.
         """
+        algorithm = str.__str__(key.algorithm)
+        prefix, digest_size, stored_value = serialize_storable_file_hash(
+            algorithm, value
+        )
         if self._read_only:
             return
         if (
@@ -309,19 +321,58 @@ class SqliteHashCacher:
         ):
             return
         conn = self._connection()
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO file_hash_cache (path, mtime_ns, size, hash, cached_at)
-            VALUES (?, ?, ?, ?, strftime('%s', 'now'))
-            """,
-            (str(key.path), key.mtime_ns, key.size, value.to_prefixed_digest()),
+        fields = (str(key.path), key.mtime_ns, key.size, algorithm)
+        # The INSERT starts a write transaction, even when it encounters a
+        # conflict. Keep the writer lock through the comparison.
+        with conn:
+            inserted = conn.execute(
+                """
+                INSERT INTO file_hash_cache_v2 (path, mtime_ns, size, algorithm, hash)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (path, mtime_ns, size, algorithm) DO NOTHING
+                """,
+                (*fields, stored_value),
+            )
+            if inserted.rowcount == 1:
+                return
+            existing = cast(
+                "tuple[object, object] | None",
+                conn.execute(
+                    """
+                    SELECT algorithm, CASE WHEN typeof(hash)='blob' THEN hash END
+                    FROM file_hash_cache_v2
+                    WHERE path=? AND mtime_ns=? AND size=? AND algorithm=?
+                    """,
+                    fields,
+                ).fetchone(),
+            )
+            if existing is None:
+                raise ValueError(f"Different hash already cached for {key!r}")
+            stored_algorithm, blob = existing
+            if str.__eq__(algorithm, stored_algorithm) is not True:
+                raise ValueError(
+                    f"Cache matched a row with algorithm label {stored_algorithm!r} "
+                    f"for key label {algorithm!r}"
+                )
+            if blob == stored_value:
+                return
+            if matches_stored_file_hash(blob, prefix, digest_size):
+                raise ValueError(f"Different hash already cached for {key!r}")
+            _ = conn.execute(
+                """
+                UPDATE file_hash_cache_v2 SET hash=?, cached_at=strftime('%s', 'now')
+                WHERE path=? AND mtime_ns=? AND size=? AND algorithm=?
+                """,
+                (stored_value, *fields),
+            )
+        logger.warning(
+            "Replaced a malformed cached hash for %s (%s)", key.path, algorithm
         )
-        conn.commit()
 
     def clear(self) -> None:
         """Delete all rows from the cache table."""
         conn = self._connection()
-        conn.execute("DELETE FROM file_hash_cache")
+        conn.execute("DELETE FROM file_hash_cache_v2")
         conn.commit()
 
     def close(self) -> None:

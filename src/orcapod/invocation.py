@@ -78,7 +78,8 @@ class InvocationContext:
         pipeline_run_id: The current pipeline run identifier, or ``None``
             for standalone / lazy pipelines.
         _pipeline_hash_ch: Internal. Pipeline-level ``ContentHash`` component.
-        _record_id_hash_ch: Internal. Record-level ``ContentHash`` component.
+        _entry_id_hash_ch: Internal. The row's entry id (``row_ids.entry_id``),
+            the record-level ``ContentHash`` component.
         _hash_config: Internal. Default encoding config for ``format_id``.
         _track_completion: Internal. When ``True`` omits ``pipeline_run_id``
             from the hash string.
@@ -89,14 +90,14 @@ class InvocationContext:
         pod_name: str,
         pipeline_run_id: str | None,
         _pipeline_hash_ch: ContentHash,
-        _record_id_hash_ch: ContentHash,
+        _entry_id_hash_ch: ContentHash,
         _hash_config: InvocationHashConfig,
         _track_completion: bool,
     ) -> None:
         self.pod_name = pod_name
         self.pipeline_run_id = pipeline_run_id
         self._pipeline_hash_ch = _pipeline_hash_ch
-        self._record_id_hash_ch = _record_id_hash_ch
+        self._entry_id_hash_ch = _entry_id_hash_ch
         self._hash_config = _hash_config
         self._track_completion = _track_completion
 
@@ -123,7 +124,7 @@ class InvocationContext:
         """
         cfg = config or self._hash_config
         c1 = _serialize_component(self._pipeline_hash_ch, cfg)
-        c2 = _serialize_component(self._record_id_hash_ch, cfg)
+        c2 = _serialize_component(self._entry_id_hash_ch, cfg)
         if not self._track_completion and self.pipeline_run_id is not None:
             return f"{c1}::{c2}::{self.pipeline_run_id}"
         return f"{c1}::{c2}"

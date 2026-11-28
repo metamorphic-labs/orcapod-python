@@ -179,6 +179,12 @@ for a text listing, or `job.diagram().save("pipeline.html")` for a page; the sam
 
 ## Errors when running a job
 
+### An async function pod uses too much memory
+
+Lower the pod's `max_concurrency` if several simultaneous calls hold more memory than the
+run can spare. For example, use `PodConfig(max_concurrency=1)` to allow one call at a time
+for that pod. See [Limiting in-flight calls](concepts/function-pods.md#limiting-in-flight-calls).
+
 ### `ValueError: PipelineJob.run() requires a database.`
 
 **Cause.** The job was created without `database=`.
@@ -357,11 +363,18 @@ on a worker thread. If that cleanup runs while the interpreter is shutting down,
 cannot take the GIL and never finishes, and Arrow's thread pool waits for it forever. Your data
 is not affected: the hang happens after every write has completed.
 
+Any column type written in Python (a `pyarrow.ExtensionType` subclass) has the same problem,
+whatever the filesystem: Arrow's worker threads hold references to the types of the columns they
+read, and destroying the last reference to such a type takes the GIL.
+
 **What Orcapod does.** `DeltaTableDatabase` and `DeltaTableSource` read **local** Delta tables
-through a native pyarrow filesystem, so they are not affected. Tables on cloud storage
+through a native pyarrow filesystem, and the column types of Orcapod's logical types live until
+the process ends, so reading them is not affected. Tables on cloud storage
 (`s3://`, `gs://`, `az://` and similar) still use deltalake's reader and can still hang at exit.
 Reading a Delta table yourself with `deltalake.DeltaTable(...).to_pyarrow_table()` or
-`to_pyarrow_dataset()` is affected too, whatever the storage.
+`to_pyarrow_dataset()` is affected too, whatever the storage. So is a logical type of your own whose
+Arrow type you wrote as a class: build it with `make_arrow_extension_type`, which keeps it alive
+([Logical type identifiers](concepts/logical-type-identifiers.md#declaring-the-identifier-of-your-own-type)).
 
 **Workarounds.**
 
@@ -372,7 +385,8 @@ Reading a Delta table yourself with `deltalake.DeltaTable(...).to_pyarrow_table(
   `atexit` handlers and other cleanup, so close files and flush databases first.
 - When reading local Delta tables directly with deltalake, pass a native filesystem. Resolve
   `dt.table_uri` first: it is percent-encoded, and newer deltalake versions return a
-  `file://` URI.
+  `file://` URI. A native filesystem avoids Python filesystem cleanup at shutdown.
+  Handwritten Arrow extension types still require separate lifetime management.
 
   For example, with a small local Delta table opened as `dt`:
 

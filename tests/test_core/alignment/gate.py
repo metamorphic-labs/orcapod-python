@@ -177,7 +177,6 @@ def fails(x: int) -> bool:
     return x % 3 == FAILING_REMAINDER
 
 
-@function_pod(output_keys="y")
 async def gated_scale(x: int) -> int:
     """Return ``10 * x`` once ``GATE`` lets the row keyed ``x`` complete."""
     await GATE.wait_turn(x)
@@ -187,7 +186,6 @@ async def gated_scale(x: int) -> int:
         GATE.finish(x)
 
 
-@function_pod(output_keys="y")
 async def gated_fragile(x: int) -> int:
     """As ``gated_scale``, but raise for every ``x`` where ``fails(x)``."""
     await GATE.wait_turn(x)

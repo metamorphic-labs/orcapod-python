@@ -48,6 +48,9 @@ from orcapod.utils.arrow_utils import (
     normalize_to_large_types,
 )
 
+#: The ``type`` of a connector database's saved configuration.
+CONNECTOR_DATABASE_TYPE = "connector_arrow_database"
+
 
 def _arrow_schema_to_column_infos(schema: pa.Schema) -> list[ColumnInfo]:
     """Convert a PyArrow schema to a list of ColumnInfo."""
@@ -923,7 +926,7 @@ class ConnectorArrowDatabase:
     def to_config(self, db_registry: Any = None) -> dict[str, Any]:
         """Serialize configuration to a JSON-compatible dict."""
         return {
-            "type": "connector_arrow_database",
+            "type": CONNECTOR_DATABASE_TYPE,
             "connector": self._connector.to_config(),
             "base_path": list(self._path_prefix),
             "max_hierarchy_depth": self.max_hierarchy_depth,
@@ -931,14 +934,15 @@ class ConnectorArrowDatabase:
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> ConnectorArrowDatabase:
-        """Reconstruct a ConnectorArrowDatabase from config.
+        """Refuse: a connector is not rebuilt from a saved configuration (ITL-1391).
+
+        The connection is the user's to supply: a loaded job is given its database,
+        ``PipelineJob.load(path, database=ConnectorArrowDatabase(<connector>))``.
 
         Raises:
-            NotImplementedError: Always — requires a connector registry that
-                maps ``connector_type`` keys to ``from_config`` classmethods.
-                Implement alongside connector classes in PLT-1074/1075/1076.
+            NotImplementedError: Always.
         """
         raise NotImplementedError(
-            "ConnectorArrowDatabase.from_config requires a registered connector "
-            "factory (connector_type → class). Implement in PLT-1074/1075/1076."
+            "A connector database is not rebuilt from its saved configuration: build "
+            "ConnectorArrowDatabase(<connector>) and pass it."
         )

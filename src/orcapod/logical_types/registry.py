@@ -9,12 +9,13 @@ from __future__ import annotations
 import logging
 import re
 import threading
-from typing import Any, Iterable
+from typing import Any, Iterable, cast
 
 import polars as pl
 import pyarrow as pa
 
 from orcapod.errors import MissingOptionalDependencyError
+from orcapod.logical_types.arrow_lifetime import KeptInstances
 from orcapod.logical_types.identifier import LogicalTypeIdentifierError
 from orcapod.logical_types.identifier import LogicalTypeIdentifier
 from orcapod.logical_types.provisional import warn_provisional
@@ -77,6 +78,11 @@ def make_arrow_extension_type(
     and exposes it via ``get_arrow_extension_type()``. See PLT-1656 for the
     built-in implementations (``Path``, ``UPath``, ``UUID``).
 
+    A metaclass unrelated to the generated class's metaclass causes a conflict
+    when creating a subclass. Given a generated class ``Generated``, define
+    ``class CombinedMeta(type(Generated), ABCMeta): ...`` and use
+    ``metaclass=CombinedMeta`` on the subclass.
+
     Args:
         extension_name: The Arrow extension name (``ARROW:extension:name``).
         storage_type: The underlying Arrow storage type.
@@ -102,8 +108,13 @@ def make_arrow_extension_type(
 
     Returns:
         A ``pa.ExtensionType`` subclass. Call it with no arguments to obtain
-        an instance suitable for passing to ``pa.register_extension_type`` or
-        returning from ``get_arrow_extension_type()``.
+        the instance suitable for passing to ``pa.register_extension_type`` or
+        returning from ``get_arrow_extension_type()``. Every call, and every column
+        read, gives the one instance of the class, which lives until the process ends
+        (``KeptInstances``; ITL-1422). A subclass is a type of its own, with its own
+        Arrow hooks: it has one instance for each serialized metadata it gives (with
+        its extension name and storage type), whatever arguments its ``__init__``
+        takes, kept the same way.
     """
     _name, _storage, _metadata = extension_name, storage_type, metadata or b""
     _readable = (_metadata, *(m for m in also_reads if m != _metadata))
@@ -146,7 +157,9 @@ def make_arrow_extension_type(
             )
         return cls()
 
-    return type(
+    # One instance per concrete class and serialized metadata, each kept until the
+    # process ends (``KeptInstances``): a subclass keeps its own identity and hooks.
+    extension_class = KeptInstances(
         f"_ArrowExt_{_sanitize(extension_name)}",
         (pa.ExtensionType,),
         {
@@ -156,6 +169,7 @@ def make_arrow_extension_type(
             "readable_metadata": _readable,
         },
     )
+    return cast("type[pa.ExtensionType]", extension_class)
 
 
 def make_polars_extension_type(

@@ -1,12 +1,20 @@
+import os
+
 import pytest
 
-from orcapod.types import NodeConfig, PipelineConfig, PodConfig, resolve_concurrency
+from orcapod.types import (
+    DEFAULT_FUNCTION_POD_CONCURRENCY_CAP,
+    NodeConfig,
+    PipelineConfig,
+    PodConfig,
+    resolve_concurrency,
+)
 
 
 class TestPodConfig:
     def test_defaults(self):
         config = PodConfig()
-        assert config.max_concurrency is None
+        assert config.max_concurrency == "inherit"
 
     def test_max_concurrency(self):
         config = PodConfig(max_concurrency=4)
@@ -65,18 +73,49 @@ class TestNodeConfig:
 
 
 class TestResolveConcurrency:
+    @pytest.mark.parametrize("has_process_count", [True, False])
+    @pytest.mark.parametrize(
+        ("cpu_count", "expected"),
+        [
+            (1, 1),
+            (4, 4),
+            (DEFAULT_FUNCTION_POD_CONCURRENCY_CAP, 16),
+            (64, DEFAULT_FUNCTION_POD_CONCURRENCY_CAP),
+            (None, 1),
+        ],
+    )
+    def test_default_concurrency_uses_usable_cpus(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        has_process_count: bool,
+        cpu_count: int | None,
+        expected: int,
+    ) -> None:
+        if has_process_count:
+            monkeypatch.setattr(os, "cpu_count", lambda: 8)
+            monkeypatch.setattr(
+                os, "process_cpu_count", lambda: cpu_count, raising=False
+            )
+        else:
+            monkeypatch.delattr(os, "process_cpu_count", raising=False)
+            monkeypatch.setattr(os, "cpu_count", lambda: cpu_count)
+
+        pipeline = PipelineConfig()
+        assert pipeline.default_max_concurrency == expected
+        assert resolve_concurrency(PodConfig(), pipeline) == expected
+
     def test_pod_config_wins_over_pipeline(self):
         pod = PodConfig(max_concurrency=4)
         pipeline = PipelineConfig(default_max_concurrency=2)
         assert resolve_concurrency(pod, pipeline) == 4
 
-    def test_falls_back_to_pipeline_when_pod_is_none(self):
-        pod = PodConfig(max_concurrency=None)
+    def test_falls_back_to_pipeline_when_pod_inherits(self):
+        pod = PodConfig()
         pipeline = PipelineConfig(default_max_concurrency=2)
         assert resolve_concurrency(pod, pipeline) == 2
 
-    def test_both_none_returns_none(self):
-        pod = PodConfig(max_concurrency=None)
+    def test_inherits_unlimited_pipeline_config(self):
+        pod = PodConfig()
         pipeline = PipelineConfig(default_max_concurrency=None)
         assert resolve_concurrency(pod, pipeline) is None
 

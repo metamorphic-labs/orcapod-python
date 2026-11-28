@@ -183,7 +183,8 @@ class FunctionRun:
         computed_here: ``True`` if this row's entry ran the function; ``False`` if it
             reused a result stored for equal input values (memoized).
         result_id: The stored result's id (hex), as in the output's source-info token.
-        entry_id: The pipeline entry's id, with its label.
+        record_id: The id of the pipeline table's row, with its label: the hash of
+            the row's instance id and its result id (ITL-1471).
         run_id: The id of the job run that recorded the entry, when stored.
         recorded_at: When the entry was recorded, when stored.
     """
@@ -196,7 +197,7 @@ class FunctionRun:
     computed_at: datetime | None
     computed_here: bool
     result_id: str
-    entry_id: str
+    record_id: str
     run_id: str | None = None
     recorded_at: datetime | None = None
 
