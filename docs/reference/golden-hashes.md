@@ -205,7 +205,7 @@ rewrites it in place.
   (`cases.DECLARABLE_PROVISIONAL_SOURCES`).
 - **Today:** 1218 entries: `pipeline` 1018, `semantic` 58, `datagram` 50, `schema` 40,
   `torch` 32 and `arrow` 20 (the keys of `data/v1/provisional/*.json`). 475 of them moved out
-  of the frozen files, values unchanged, before `v1` was frozen: the `PolarsFilter` cases
+  of the frozen files, values unchanged, before `v1` was frozen: the cases of `PolarsFilter` (an operator that is not recommended)
   (`polars_filter`, `polars_filter_expr`, `polars_filter_expr_job` and the `semantic` case
   `polars_expr`, 86 entries) with ITL-1266; the cases of the other provisional operators (229
   entries) and of the library value types (128 entries, with the 12 of `GoldenWithArray`)

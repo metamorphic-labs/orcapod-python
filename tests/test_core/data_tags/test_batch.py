@@ -31,6 +31,10 @@ from orcapod.pipeline import (
 from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.system_constants import constants
 
+# PolarsFilter is built here on purpose; the warning of every construction is tested in
+# test_polars_filter_warning.py (ITL-1296).
+pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning")
+
 ROWS = [
     {"s": "s1", "x": 20, "y": 5},
     {"s": "s1", "x": 10, "y": 4},

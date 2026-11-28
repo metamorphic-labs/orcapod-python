@@ -91,9 +91,14 @@ from .several_items import (
 
 # Selecting or dropping the data role of a data-tag warns that the tag is materialized;
 # that warning is tested in the data-tag tests, not here.
-pytestmark = pytest.mark.filterwarnings(
-    "ignore::orcapod.core.data_tags.DataTagMaterializationWarning"
-)
+pytestmark = [
+    pytest.mark.filterwarnings(
+        "ignore::orcapod.core.data_tags.DataTagMaterializationWarning"
+    ),
+    # PolarsFilter is built here on purpose; the warning of every construction is tested in
+    # test_polars_filter_warning.py (ITL-1296).
+    pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning"),
+]
 
 
 @dataclass(frozen=True)
