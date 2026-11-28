@@ -31,6 +31,7 @@ from orcapod.pipeline.node_run import (
     check_sources,
     clear_run_rows,
     plan_run,
+    run_databases,
 )
 from orcapod.pipeline.restrictions import (
     refuse_restricted_operator_caches,
@@ -1511,49 +1512,32 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             OrcapodDatabaseReadError: As for ``run``.
             OrcapodDatabaseWriteError: As for ``run``.
         """
-        pipeline_db = prepared.pipeline_db
-        result_db = prepared.result_db
-        # Flush databases. Every view of the database shares one set of pending
-        # batches, so a failed batch can leave the ones after it unwritten.
         pending_note = (
             "Writes that were still pending when the flush failed, such as a "
             + "cache_mode=LOG operator's output or a node's last records, may not "
             + "have been stored."
         )
-        database = pipeline_db
-        try:
-            if not load_only and plan.to_run:
-                # A load-only run writes nothing and commits nothing, and a run that
-                # ran no node touches no database (ITL-1095).
-                # Pending results gate the pipeline records that name them (ITL-1412),
-                # across databases too, so no order of these flushes publishes a record
-                # before its result.
+        # A load-only run writes nothing. Held nodes belong to earlier runs (ITL-1095).
+        databases = [] if load_only else run_databases(plan.to_run)
+        for database in databases:
+            try:
                 database.flush()
-                database = result_db
-                database.flush()
-                if self._result_database is not None:
-                    # A separate result database (ITL-1408): records the result flush
-                    # just released are still queued in the pipeline database.
-                    database = pipeline_db
-                    database.flush()
-        except OrcapodDatabaseReadError as exc:
-            # A stored table could not be read: report the read failure itself.
-            exc.add_note(pending_note)
-            # A run whose commit failed did not complete: no node holds its rows.
-            clear_run_rows(plan.to_run)
-            raise
-        except Exception as exc:
-            flush_error = OrcapodDatabaseWriteError(
-                database_write_path(database), flush=True
-            )
-            flush_error.add_note(pending_note)
-            clear_run_rows(plan.to_run)
-            raise flush_error from exc
-        except BaseException:
-            # An interruption (KeyboardInterrupt, cancellation) leaves the commit's
-            # outcome unknown: no node holds the run's rows. Re-raised unchanged.
-            clear_run_rows(plan.to_run)
-            raise
+            except OrcapodDatabaseReadError as exc:
+                # A stored table could not be read: report the read failure itself.
+                exc.add_note(pending_note)
+                clear_run_rows(plan.to_run)
+                raise
+            except Exception as exc:
+                flush_error = OrcapodDatabaseWriteError(
+                    database_write_path(database), flush=True
+                )
+                flush_error.add_note(pending_note)
+                clear_run_rows(plan.to_run)
+                raise flush_error from exc
+            except BaseException:
+                # An interruption leaves the commit's outcome unknown.
+                clear_run_rows(plan.to_run)
+                raise
 
         # Mutate self in place.
         self._has_run = True
