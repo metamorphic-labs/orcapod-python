@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -17,10 +18,12 @@ from typing import Any
 
 import pytest
 
-from orcapod import PipelineJob
+from orcapod import PipelineJob, errors
 from orcapod.core.cached_function_pod import CachedFunctionPod
+from orcapod.core.datagrams import Data, Datagram
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.operators import Join
+from orcapod.core.result_cache import ResultCache
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
@@ -180,6 +183,80 @@ def test_row_in_the_pod_cache_is_not_recomputed_by_a_job() -> None:
     counter.calls.clear()
     run_job(cached_pod, InMemoryArrowDatabase(), "sync")
     assert counter.calls == [5]
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "lookup",
+        "stream-sync",
+        "stream-async",
+        "job-sync",
+        "job-async",
+        "late-hit-sync",
+        "late-hit-async",
+    ],
+)
+def test_pod_cache_refuses_reserved_output_keys(
+    path: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stored row written before output validation must fail on every hit path."""
+    counter = Counter()
+    pod = counter.pod()
+    cache_db = InMemoryArrowDatabase()
+    cached = CachedFunctionPod(pod, result_database=cache_db)
+    source = make_source()
+    cache = ResultCache(
+        cache_db, pod.uri, pod.data_function.declaration.revision_component
+    )
+    inputs = [data for _, data in source.iter_data()]
+    for data in inputs:
+        cache.store(
+            data,
+            Data({"total": 5, "_foo": 6, "_tag_fake": 7}),
+            Datagram({}),
+            Datagram({}),
+            data_context_key=pod.data_context_key,
+        )
+    match = "'_foo'.*'_tag_fake'.*reserved"
+    if path == "lookup":
+        with pytest.raises(errors.InputValidationError, match=match):
+            _ = cached.lookup_cached_data(inputs[0])
+    elif path.startswith("job-"):
+        job = PipelineJob(name="reject_reserved", database=InMemoryArrowDatabase())
+        with job:
+            _ = cached(source, label="add")
+        with pytest.warns(errors.RowFailuresWarning, match=match):
+            _ = job.run(orchestrator=ORCHESTRATORS[path.removeprefix("job-")]())
+        records = job.nodes["add"].get_all_records()
+        assert records is None or records.num_rows == 0
+    else:
+        if path.startswith("late-hit-"):
+            # Make the first lookup miss. The conditional write will find the row.
+            lookup = cache_db.get_records_with_column_value
+            miss = True
+
+            def miss_first_lookup(*args: Any, **kwargs: Any):
+                nonlocal miss
+                if miss:
+                    miss = False
+                    return None
+                return lookup(*args, **kwargs)
+
+            monkeypatch.setattr(
+                cache_db, "get_records_with_column_value", miss_first_lookup
+            )
+        stream = cached(source)
+
+        async def consume() -> None:
+            _ = [row async for row in stream.async_iter_data()]
+
+        with pytest.raises(errors.InputValidationError, match=match):
+            if path.endswith("-async"):
+                asyncio.run(consume())
+            else:
+                _ = list(stream.iter_data())
+    assert counter.calls == ([2] if path.startswith("late-hit-") else [])
 
 
 def test_inputs_are_joined_once() -> None:

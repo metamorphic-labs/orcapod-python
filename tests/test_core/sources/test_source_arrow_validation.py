@@ -301,6 +301,22 @@ def test_dataframe_source_guides_series_iterators_to_named_columns() -> None:
     ]
 
 
+@pytest.mark.parametrize("as_iterator", [False, True], ids=["sequence", "iterator"])
+def test_dataframe_source_adds_row_context_to_field_name_error(
+    as_iterator: bool,
+) -> None:
+    rows: list[Any] = [{"k": 1, "g": "a", "x": 3, "y": 5}, {1: 2}]
+    with pytest.raises(
+        InputValidationError, match=r"Source row 1.*needs string field names"
+    ) as info:
+        _ = DataFrameSource(
+            iter(rows) if as_iterator else rows, tag_columns=TAGS, tag_only_columns=True
+        )
+    cause = info.value.__cause__
+    assert isinstance(cause, InputValidationError)
+    assert str(cause) == "needs string field names."
+
+
 def _late_reserved_rows(reverse: bool) -> list[dict[str, int]]:
     rows = [{"g": 0, "k": i, "x": i + 1, "y": i + 2} for i in range(1002)]
     names = ("_foo", "_source_x")
@@ -702,6 +718,13 @@ def test_rereading_an_orcapod_table_requires_dropping_system_columns() -> None:
     assert rebuilt.as_table().equals(source.as_table())
 
 
+def test_arrow_source_documents_reserved_column_refusal() -> None:
+    table = pa.table({"k": [1, 2], "g": ["a", "b"], "x": [3, 4], "_foo": [5, 6]})
+    with pytest.raises(InputValidationError, match="'_foo'.*drop them first"):
+        _ = ArrowTableSource(table, tag_columns=TAGS, tag_only_columns=True)
+    assert "refuses reserved column names" in (ArrowTableSource.__doc__ or "")
+
+
 def test_database_refuses_reserved_columns_before_reading_rows() -> None:
     class SchemaOnlyConnector(_Connector):
         def iter_batches(self, query, params=None, batch_size=1000):
@@ -1012,6 +1035,26 @@ def test_polling_checks_named_row_shapes(
 
 
 @pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+def test_polling_refuses_reserved_frame_names_before_preprocessing(
+    use_async: bool,
+) -> None:
+    batch = pl.DataFrame({"k": [1, 2], "x": [None, None], "_foo": [3, 4]})
+    source = PollingSource(
+        _Poll(None, batch), ["k"], source_id="poll", record_id_columns="k"
+    )
+
+    async def read_first() -> None:
+        async with contextlib.aclosing(source.async_iter_data()) as rows:
+            await anext(rows)
+
+    with pytest.raises(InputValidationError, match="'_foo'.*drop them first"):
+        if use_async:
+            asyncio.run(read_first())
+        else:
+            source.as_table()
+
+
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
 @pytest.mark.parametrize("reverse", [False, True], ids=["foo-first", "source-first"])
 @pytest.mark.parametrize("as_tag", [False, True], ids=["data", "tag"])
 def test_polling_checks_raw_fields_beyond_polars_inference(
@@ -1077,11 +1120,19 @@ def test_polling_refuses_null_in_declaration_and_batch(values: list[Any]) -> Non
         PollingSource(
             _Poll(table.schema, batch), TAGS, source_id="poll", record_id_columns="k"
         )
+    # A polled batch checks names first, as DataFrameSource does.
     poll = PollingSource(
         _Poll(None, batch), TAGS, source_id="poll", record_id_columns="k"
     )
+    with pytest.raises(InputValidationError, match=r"'__unused'.*drop them first"):
+        poll.check_for_new_data()
+    legal = pl.from_arrow(_table(pa.field("unused", pa.large_list(pa.null())), values))
+    assert isinstance(legal, pl.DataFrame)
+    poll = PollingSource(
+        _Poll(None, legal), TAGS, source_id="poll", record_id_columns="k"
+    )
     with pytest.raises(
-        InputValidationError, match=r"'__unused'.*declare a supported nullable type"
+        InputValidationError, match=r"'unused'.*declare a supported nullable type"
     ):
         poll.check_for_new_data()
 

@@ -895,6 +895,8 @@ class PollingSource(RootSource, Generic[T]):
         skipped so that a spurious all-non-nullable schema is never recorded.
         """
 
+        require_source_column_names(df.columns)
+
         # Handle Object-dtype columns (same pattern as DataFrameSource)
         object_columns = [c for c in df.columns if df[c].dtype == pl.Object]
         if object_columns:
@@ -905,7 +907,6 @@ class PollingSource(RootSource, Generic[T]):
 
         arrow_table = df.to_arrow()
         require_supported_nullable_types(arrow_table.schema)
-        require_source_column_names(arrow_table.column_names)
 
         # Establish canonical schema on first call; apply it on every call.
         if self._canonical_arrow_schema is None:

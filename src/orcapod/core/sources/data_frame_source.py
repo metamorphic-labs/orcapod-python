@@ -43,7 +43,7 @@ class _FrameRow(NamedTuple):
         return (*self.names, *self.non_column_names)
 
 
-def _describe_model_row(value: BaseModel, index: int) -> _FrameRow:
+def _describe_model_row(value: BaseModel) -> _FrameRow:
     """Read the model's field names without running its serialization code."""
     model = type(value)
     declared = model.model_fields
@@ -66,32 +66,41 @@ def _describe_model_row(value: BaseModel, index: int) -> _FrameRow:
             if field.serialization_alias is not None
         )
     if not all(isinstance(name, str) for name in exposed):
-        raise InputValidationError(f"Source row {index} needs string field names.")
+        raise InputValidationError("needs string field names.")
     return _FrameRow(
         value, tuple(declared), model, tuple(sorted(exposed - declared.keys()))
     )
 
 
-def _describe_frame_row(value: Any, index: int) -> _FrameRow | None:
+def _describe_frame_row(value: Any) -> _FrameRow | None:
     """Read top-level field names while preserving typed row values."""
     if value is None:
         return None
     if isinstance(value, Mapping):
         names = tuple(value)
         if not all(isinstance(name, str) for name in names):
-            raise InputValidationError(f"Source row {index} needs string field names.")
+            raise InputValidationError("needs string field names.")
         return _FrameRow(value if isinstance(value, dict) else dict(value), names, dict)
     if isinstance(value, BaseModel):
-        return _describe_model_row(value, index)
+        return _describe_model_row(value)
     if is_dataclass(value) and not isinstance(value, type):
         return _FrameRow(
             value, tuple(field.name for field in fields(value)), type(value)
         )
     raise InputValidationError(
-        f"Source row {index} ({type(value).__name__}) needs named fields. "
+        f"({type(value).__name__}) needs named fields. "
         "Use a mapping, dataclass or Pydantic model for rows. "
         "Pass named Polars Series as a list of columns."
     )
+
+
+def _describe_frame_rows(values: Iterable[Any]) -> Iterator[_FrameRow | None]:
+    """Attach the input row's index to an error from its descriptor."""
+    for index, value in enumerate(values):
+        try:
+            yield _describe_frame_row(value)
+        except InputValidationError as exc:
+            raise InputValidationError(f"Source row {index} {exc}") from exc
 
 
 def _checked_frame_rows(
@@ -224,7 +233,7 @@ def source_dataframe(
     elif isinstance(data, Sequence):
         if all(isinstance(column, pl.Series) for column in data):
             return pl.DataFrame(data)
-        rows = [_describe_frame_row(row, index) for index, row in enumerate(data)]
+        rows = list(_describe_frame_rows(data))
         _require_materialized_row_names(rows, system_tag_columns)
         return _frame_from_checked_rows(
             _checked_frame_rows(rows, system_tag_columns), materialized=True
@@ -236,7 +245,7 @@ def source_dataframe(
     ):
         return _frame_from_checked_rows(
             _checked_frame_rows(
-                (_describe_frame_row(row, index) for index, row in enumerate(data)),
+                _describe_frame_rows(data),
                 system_tag_columns,
             ),
             materialized=False,

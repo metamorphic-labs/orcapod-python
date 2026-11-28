@@ -23,9 +23,11 @@ logger = logging.getLogger(__name__)
 class ArrowTableSource(RootSource):
     """A source backed by an in-memory PyArrow Table.
 
-    Uses ``SourceStreamBuilder`` to strip system columns, add per-row
-    source-info provenance columns and a system tag column encoding the
-    schema hash, then wraps the result in an ``ArrowTableStream``.
+    ``SourceStreamBuilder`` refuses reserved column names beginning with ``_``.
+    Rename your own columns or drop system columns before building the source.
+    The builder adds per-row source-info provenance columns and a system tag
+    column encoding the schema hash, then wraps the result in an
+    ``ArrowTableStream``.
 
     Nullable handling
     -----------------
