@@ -1782,8 +1782,8 @@ class TestSortSystemTagValues:
         result = sort_system_tag_values(table, tied_positions=((0, 1), (3, 4)))
         assert result.to_pylist() == [dict(zip(fields, expected, strict=True))]
 
-    def test_no_op_for_single_position_groups(self):
-        """Groups with only one position should be left untouched."""
+    def test_no_op_for_position_outside_tie(self):
+        """Groups outside a full hash tie should be left untouched."""
         from orcapod.system_constants import constants
         from orcapod.utils.arrow_utils import sort_system_tag_values
 
@@ -1797,7 +1797,7 @@ class TestSortSystemTagValues:
             }
         )
 
-        result = sort_system_tag_values(table, tied_positions=((0, 1),))
+        result = sort_system_tag_values(table, tied_positions=((1, 2),))
         assert result.column(sid).to_pylist() == ["hello", "world"]
         assert result.column(rid).to_pylist() == ["row_0", "row_1"]
 

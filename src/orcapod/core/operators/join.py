@@ -587,11 +587,8 @@ class Join(NonZeroInputOperator):
         tied_positions = tied_pipeline_positions(hashes)
 
         system_tag_fields: dict[str, DataType] = {}
-        names_by_input: list[dict[str, str]] = []
         for idx, stream in enumerate(ordered_streams):
             stream_tag_schema, _ = stream.output_schema(columns={"system_tags": True})
-            names: dict[str, str] = {}
-            names_by_input.append(names)
             for col_name, col_type in stream_tag_schema.items():
                 if col_name.startswith(constants.SYSTEM_TAG_PREFIX):
                     new_name = (
@@ -599,28 +596,6 @@ class Join(NonZeroInputOperator):
                         f"{hashes[idx].to_hex(n_char)}:{idx}"
                     )
                     system_tag_fields[new_name] = col_type
-                    names[col_name] = new_name
-        if arrow_utils.has_tied_system_tag_bundles(
-            system_tag_fields.keys(), tied_positions
-        ):
-            fields = [
-                field.with_name(names[field.name])
-                for stream, names in zip(ordered_streams, names_by_input, strict=True)
-                for field in stream.arrow_schema()
-                if field.name in names
-            ]
-            if len(fields) == len(system_tag_fields):
-                declared = pa.schema(fields).empty_table()
-                canonical, renamed = arrow_utils.sort_tied_system_tag_bundles(
-                    declared, tied_positions
-                )
-                types_by_name = {
-                    renamed.get(name, name): kind
-                    for name, kind in system_tag_fields.items()
-                }
-                system_tag_fields = {
-                    name: types_by_name[name] for name in canonical.column_names
-                }
         nullable = arrow_utils.sorted_system_tag_nullability(
             {
                 name: kind is type(None) or type(None) in get_args(kind)
@@ -1003,7 +978,11 @@ class Join(NonZeroInputOperator):
                 )
 
             await self._binary_streaming_join(
-                inputs[left_idx], inputs[right_idx], output, merge_fn
+                inputs[left_idx],
+                inputs[right_idx],
+                output,
+                merge_fn,
+                tied=bool(tied_positions),
             )
             return
 
@@ -1067,9 +1046,14 @@ class Join(NonZeroInputOperator):
         # compared with every other input's as it arrives, whether or not any row
         # matches (the sync path compares the inputs' tables before it joins).
         first_rows: dict[int, tuple[TagProtocol, DataProtocol]] = {}
+        ties = {position: group[0] for group in tied_positions for position in group}
 
         def declare(position: int, tag: TagProtocol, data: DataProtocol) -> None:
             for other, (other_tag, other_data) in sorted(first_rows.items()):
+                if position in ties and ties[position] == ties.get(other):
+                    arrow_utils.require_matching_system_tag_fields(
+                        tag.system_tags(), other_tag.system_tags()
+                    )
                 if other < position:
                     self._check_merged_token_types(other_tag, other_data, tag, data)
                 else:
@@ -1132,6 +1116,8 @@ class Join(NonZeroInputOperator):
             [TagProtocol, DataProtocol, TagProtocol, DataProtocol],
             tuple[TagProtocol, DataProtocol],
         ],
+        *,
+        tied: bool = False,
     ) -> None:
         """Binary symmetric hash join.
 
@@ -1147,6 +1133,7 @@ class Join(NonZeroInputOperator):
             output: Output channel for matched rows.
             merge_fn: Callable(left_tag, left_pkt, right_tag, right_pkt)
                 that produces the merged (Tag, Data) pair.
+            tied: Whether both inputs share a full pipeline hash.
         """
         _SENTINEL = object()
         queue: asyncio.Queue = asyncio.Queue(maxsize=64)
@@ -1203,6 +1190,10 @@ class Join(NonZeroInputOperator):
                         (first_tag, first), (second_tag, second) = (
                             rows if other == 0 else rows[::-1]
                         )
+                        if tied:
+                            arrow_utils.require_matching_system_tag_fields(
+                                first_tag.system_tags(), second_tag.system_tags()
+                            )
                         self._check_merged_token_types(
                             first_tag, first, second_tag, second
                         )

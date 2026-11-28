@@ -402,7 +402,7 @@ A record id is the row identifier (rule 8), built from row positions or key valu
 | in-memory lookup keys for a validated operator input or input pair (ITL-1358) | `core/operators/index.py:Index.validate_unary_input`, `core/operators/index.py:Index.async_execute`, `core/operators/pick.py:Pick.validate_unary_input`, `core/operators/pick.py:Pick.async_execute`, `core/operators/semijoin.py:SemiJoin.validate_binary_inputs`, `core/operators/semijoin.py:SemiJoin.async_execute` |
 | in-memory topological sort of compiled and restored nodes, using the pipeline hash to order ready invocations | `pipeline/base.py:AbstractPipelineBase._ordered_node_map.<locals>.order_key` |
 | canonical input order (sort by digest). Inputs with equal pipeline hashes (developer decision, November 16, 2026, ITL-1154: kept as it is): system-tag column names follow the stable pipeline-hash sort; each row's values are sorted by (source id, record id) by `sort_system_tag_values`, so the result does not depend on argument order; the operator's identity holds its inputs as a frozenset | `core/operators/join.py:Join.order_input_streams.<locals>.<lambda>` |
-| compare full pipeline digests in memory to find the canonical positions that share a hash before ordering custom system-tag fields and values | `core/operators/join.py:tied_pipeline_positions.<locals>.<genexpr>` |
+| compare full pipeline digests in memory to find the canonical positions that share a hash before sorting source and record ID pairs | `core/operators/join.py:tied_pipeline_positions.<locals>.<genexpr>` |
 | in-memory identity and repr | `core/base.py:ContentIdentifiableBase.__hash__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__hash__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__eq__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__repr__` |
 | comparing a stored hash with the computed one; comparing two schema hashes (bind, a stored read, a polled batch); error text | `core/nodes/source_node.py:SourceNodeBase._arrow_type_issue`, `core/sources/derived_source.py:DerivedSource._require_origin_types`, `core/sources/polling_source.py:PollingSource._require_declared_types`, `core/nodes/operator_node.py:OperatorJobNode._read_run_records`, `core/sources/source_proxy.py:SourceProxy.bind`, `core/data_function_proxy.py:DataFunctionProxy.bind`, `pipeline/job.py:PipelineJob.bind`, `errors.py:EphemeralResultMissingError.__init__` |
 
@@ -1166,10 +1166,10 @@ and `k` such stages stacked carry each one `2 ** k` times (ITL-1114). The table 
 `head()` and the notebook preview of a stream that has not run are built from carries the system
 tag columns too, so those calls are as wide as the joins make them (ITL-1132).
 
-For tied operands that carry custom system tags, Join assigns positions by the
-complete system-tag declarations. It orders each matched row's system tags together
-among operands with the same declarations. Custom tags stay with their source and
-record IDs and each field keeps its declaration.
+Join sorts source and record IDs as pairs within each full pipeline hash tie.
+The tied operands must declare the same system-tag names. Custom system tags keep
+their input positions and field declarations. Shortening a printed suffix never
+allows ID pairs to move between different full pipeline hashes.
 
 ---
 
