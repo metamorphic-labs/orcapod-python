@@ -1414,7 +1414,9 @@ class Join(NonZeroInputOperator):
             return None
         joined = arrow_utils.hstack_tables(*present)
         return (
-            arrow_utils.sort_system_tag_values(joined, tied_positions=tied_positions)
+            arrow_utils.sort_system_tag_values(
+                joined, tied_positions=tied_positions, keep_custom_with_ids=True
+            )
             if final
             else joined
         )
