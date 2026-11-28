@@ -245,18 +245,60 @@ def test_csv_refuses_reserved_declared_columns_before_parsing_values(
 
 
 @pytest.mark.parametrize("declared", [True, False], ids=["declared", "inferred"])
+@pytest.mark.parametrize("header_kind", ["short", "long-quoted", "long-unquoted"])
+@pytest.mark.parametrize("refresh", [False, True], ids=["construction", "refresh"])
 def test_csv_refuses_reserved_header_before_parsing_bad_rows(
-    tmp_path: Path, declared: bool
+    tmp_path: Path, declared: bool, header_kind: str, refresh: bool
 ) -> None:
     path = tmp_path / "rows.csv"
-    path.write_text(
-        '\ufeff\r\nk,x,"_foo","_source_x"\r\n1,invalid,token,source,extra\r\n'
-    )
     schema = pa.schema([("k", pa.int64()), ("x", pa.int64())]) if declared else None
+
+    def build() -> CSVSource:
+        return CSVSource(
+            str(path), tag_columns=["k"], tag_only_columns=True, schema=schema
+        )
+
+    source = None
+    if refresh:
+        path.write_text("k,x\n1,2\n3,4\n")
+        source = build()
+    # Cross the csv module's default size limit with a quoted field and an escaped quote.
+    first = (
+        '"' + "x" * 131073 + '\r\n,""name"'
+        if header_kind == "long-quoted"
+        else "x" * 131073
+        if header_kind == "long-unquoted"
+        else "k"
+    )
+    path.write_text(
+        f'\ufeff\r\n{first},x,"_foo","_source_x"\r\n1,invalid,token,source,extra\r\n'
+    )
     with pytest.raises(
         InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
     ):
-        CSVSource(str(path), tag_columns=["k"], schema=schema)
+        if source is not None:
+            source.check_for_new_data()
+        else:
+            build()
+
+
+def test_dataframe_source_guides_series_iterators_to_named_columns() -> None:
+    columns = [
+        pl.Series(name, values)
+        for name, values in {
+            "k": [1, 2],
+            "g": ["a", "b"],
+            "x": [3, 4],
+            "y": [5, 6],
+        }.items()
+    ]
+    with pytest.raises(InputValidationError, match=r"Series.*list of columns"):
+        DataFrameSource(iter(columns), tag_columns=TAGS, tag_only_columns=True)
+    source = DataFrameSource(columns, tag_columns=TAGS, tag_only_columns=True)
+    assert source.as_table().to_pylist() == [
+        {"k": 1, "g": "a", "x": 3, "y": 5},
+        {"k": 2, "g": "b", "x": 4, "y": 6},
+    ]
 
 
 def _late_reserved_rows(reverse: bool) -> list[dict[str, int]]:
@@ -305,7 +347,7 @@ def test_dataframe_source_stops_after_the_first_invalid_iterator_row() -> None:
     with pytest.raises(
         InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
     ):
-        DataFrameSource(rows(), tag_columns=["k"])
+        DataFrameSource(rows(), tag_columns=["k"], tag_only_columns=True)
 
 
 @dataclass
@@ -340,12 +382,31 @@ class _ReorderedFrameRow:
 @dataclass
 class _TypedFrameRow:
     k: int
+    g: str
     x: float
+    y: int
+
+
+@dataclass
+class _ReorderedTypedFrameRow:
+    y: int
+    g: str
+    x: float
+    k: int
 
 
 class _TypedFrameModel(BaseModel):
     k: int
+    g: str
     x: list[int]
+    y: int
+
+
+class _ReorderedTypedFrameModel(BaseModel):
+    y: int
+    g: str
+    x: list[int]
+    k: int
 
 
 class _FrameModel(BaseModel):
@@ -457,8 +518,13 @@ FRAME_ROW_CASES = [
     ),
     pytest.param(
         [_FrameRow(i, i + 2) for i in range(101)] + [_RenamedFrameRow(101, 12345)],
-        r"row 101.*field names.*'x'.*'y'",
+        r"row 101.*field names.*'x'.*'y'.*same field names",
         id="different-legal-fields",
+    ),
+    pytest.param(
+        [{"k": 1, "g": 2, "x": 3, "y": 4}, {"g": 5, "k": 6, "y": 7, "z": 8}],
+        r"row 1.*Missing \['x'\], extra \['z'\].*same field names.*None",
+        id="sparse-mapping",
     ),
     pytest.param(
         [_FrameRow(1, 2), _ReorderedFrameRow(4, 3)],
@@ -488,24 +554,51 @@ def test_dataframe_source_checks_named_row_shapes(
 
 
 @pytest.mark.parametrize(
-    ("rows", "arrow_type"),
+    ("row_type", "x_values", "arrow_type"),
     [
-        ([_TypedFrameRow(1, 2)], pa.float64()),
-        ([_TypedFrameModel(k=1, x=[])], pa.large_list(pa.int64())),
+        (_TypedFrameRow, (2, 4.5), pa.float64()),
+        (_ReorderedTypedFrameRow, (2, 4.5), pa.float64()),
+        (_TypedFrameModel, ([], [4, 5]), pa.large_list(pa.int64())),
+        (_ReorderedTypedFrameModel, ([], [4, 5]), pa.large_list(pa.int64())),
     ],
-    ids=["dataclass-float", "pydantic-empty-list"],
+    ids=["dataclass", "dataclass-reordered", "pydantic", "pydantic-reordered"],
 )
 @pytest.mark.parametrize("use_iterator", [False, True], ids=["sequence", "iterator"])
+@pytest.mark.parametrize("tag_order", [TAGS, TAGS[::-1]], ids=["g-k", "k-g"])
 def test_homogeneous_typed_rows_keep_schema_and_identity(
-    rows: list[Any], arrow_type: pa.DataType, use_iterator: bool
+    row_type: type,
+    x_values: tuple[Any, Any],
+    arrow_type: pa.DataType,
+    use_iterator: bool,
+    tag_order: tuple[str, ...],
 ) -> None:
-    expected = DataFrameSource(pl.DataFrame(rows), tag_columns=["k"])
-    source = DataFrameSource(iter(rows) if use_iterator else rows, tag_columns=["k"])
+    rows = [
+        row_type(k=1, g="a", x=x_values[0], y=3),
+        row_type(k=2, g="b", x=x_values[1], y=5),
+    ]
+    frame = pl.DataFrame(rows)
+    expected = DataFrameSource(frame, tag_columns=tag_order, tag_only_columns=True)
+    canonical = DataFrameSource(
+        frame.select("k", "g", "x", "y"), tag_columns=TAGS, tag_only_columns=True
+    )
+    source = DataFrameSource(
+        iter(rows) if use_iterator else rows,
+        tag_columns=tag_order,
+        tag_only_columns=True,
+    )
     assert source.as_table().schema.field("x").type == arrow_type
+    assert source.as_table().schema == expected.as_table().schema
     assert source.as_table().equals(expected.as_table())
-    assert source.source_id == expected.source_id
-    assert source.content_hash() == expected.content_hash()
-    assert source.pipeline_hash() == expected.pipeline_hash()
+    assert (
+        source.as_table()
+        .select(["k", "g", "x", "y"])
+        .equals(canonical.as_table().select(["k", "g", "x", "y"]))
+    )
+    assert source.source_id == expected.source_id == canonical.source_id
+    assert source.content_hash() == expected.content_hash() == canonical.content_hash()
+    assert (
+        source.pipeline_hash() == expected.pipeline_hash() == canonical.pipeline_hash()
+    )
 
 
 @pytest.mark.parametrize(
@@ -520,7 +613,9 @@ def test_homogeneous_typed_rows_keep_schema_and_identity(
 def test_frame_rows_keep_null_positions_and_match_mapping_fields_by_name(
     rows: list[Any], use_iterator: bool
 ) -> None:
-    source = DataFrameSource(iter(rows) if use_iterator else rows, tag_columns=["k"])
+    source = DataFrameSource(
+        iter(rows) if use_iterator else rows, tag_columns=["k"], tag_only_columns=True
+    )
     assert source.as_table().to_pylist() == [
         {"k": None, "x": None},
         {"k": 1, "x": 2},
@@ -615,8 +710,94 @@ def test_database_refuses_reserved_columns_before_reading_rows() -> None:
     table = _table(pa.field("_foo", pa.string()), ["a", "b"])
     with pytest.raises(InputValidationError, match="'_foo'.*drop them first"):
         DBTableSource(
-            SchemaOnlyConnector(table), "rows", tag_columns=TAGS, source_id="rows"
+            SchemaOnlyConnector(table),
+            "rows",
+            tag_columns=TAGS,
+            tag_only_columns=True,
+            source_id="rows",
         )
+
+
+@pytest.mark.parametrize("metadata", ["absent", "partial"])
+@pytest.mark.parametrize("refresh", [False, True], ids=["construction", "refresh"])
+def test_database_refuses_reserved_batch_names_with_incomplete_metadata(
+    metadata: str, refresh: bool
+) -> None:
+    class Connector(_Connector):
+        def get_column_info(self, table_name: str) -> list[ColumnInfo]:
+            if metadata == "absent":
+                return []
+            return [
+                ColumnInfo(field.name, field.type, field.nullable)
+                for field in list(self.table.schema)[:2]
+            ]
+
+        def iter_batches(
+            self, query: str, params: Any = None, batch_size: int = 1000
+        ) -> Iterator[pa.RecordBatch]:
+            yield from self.table.to_batches(max_chunksize=1)
+            if "_foo" in self.table.column_names:
+                pytest.fail("a reserved name in a batch must prevent further fetches")
+
+    reserved = _table(pa.field("_foo", pa.string()), ["a", "b"]).append_column(
+        "_source_x", pa.array(["c", "d"])
+    )
+    connector = Connector(reserved.drop(["_foo", "_source_x"]) if refresh else reserved)
+
+    def build() -> DBTableSource:
+        return DBTableSource(
+            connector, "rows", tag_columns=TAGS, tag_only_columns=True, source_id="rows"
+        )
+
+    if refresh:
+        source = build()
+        old = source.as_table()
+        connector.table = reserved
+        with pytest.raises(
+            InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
+        ):
+            source.check_for_new_data()
+        assert source.as_table().equals(old)
+    else:
+        with pytest.raises(
+            InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
+        ):
+            build()
+
+
+@pytest.mark.parametrize("refresh", [False, True], ids=["construction", "refresh"])
+def test_delta_refuses_reserved_names_before_scanning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refresh: bool
+) -> None:
+    path = tmp_path / "delta"
+    reserved = _table(pa.field("_foo", pa.string()), ["a", "b"]).append_column(
+        "_source_x", pa.array(["c", "d"])
+    )
+
+    def fail_scan(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("the Delta log already declares the reserved columns")
+
+    def build() -> DeltaTableSource:
+        return DeltaTableSource(path, tag_columns=TAGS, tag_only_columns=True)
+
+    if refresh:
+        deltalake.write_deltalake(path, reserved.drop(["_foo", "_source_x"]))
+        source = build()
+        old = source.as_table()
+        deltalake.write_deltalake(path, reserved, mode="append", schema_mode="merge")
+        monkeypatch.setattr(deltalake.DeltaTable, "to_pyarrow_dataset", fail_scan)
+        with pytest.raises(
+            InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
+        ):
+            source.check_for_new_data()
+        assert source.as_table().equals(old)
+    else:
+        deltalake.write_deltalake(path, reserved)
+        monkeypatch.setattr(deltalake.DeltaTable, "to_pyarrow_dataset", fail_scan)
+        with pytest.raises(
+            InputValidationError, match="'_foo'.*'_source_x'.*drop them first"
+        ):
+            build()
 
 
 def test_source_accepts_underscores_after_the_first_character() -> None:

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import csv
 import functools
 import io
 import math
@@ -31,6 +30,43 @@ _INFINITY = re.compile(r"\s*[+-]?inf(inity)?\s*", re.IGNORECASE)
 """The texts pyarrow's CSV reader reads as an infinity: ``inf`` or ``infinity``, any
 case, with an optional sign and surrounding spaces."""
 
+_CSV_UNQUOTED = re.compile(r"[^,\r\n]*")
+_CSV_QUOTED = re.compile(r'(?:[^"]++|"")*+')
+
+
+def _csv_header_names(text: io.TextIOBase) -> list[str]:
+    """Read the first nonempty CSV record without a field size limit."""
+    line = next((line for line in text if line not in ("\n", "\r", "\r\n")), "")
+    if not line:
+        return []
+
+    names: list[str] = []
+    pos = 0
+    while True:
+        quoted: list[str] = []
+        if line[pos : pos + 1] == '"':
+            pos += 1
+            while True:
+                field = _CSV_QUOTED.match(line, pos)
+                assert field is not None
+                quoted.append(field[0])
+                pos = field.end()
+                if pos < len(line):
+                    pos += 1  # Closing quote. Doubled quotes belong to the field.
+                    break
+                line = text.readline()
+                if not line:
+                    return names  # Leave the unfinished field for Arrow to diagnose.
+                pos = 0
+
+        field = _CSV_UNQUOTED.match(line, pos)
+        assert field is not None
+        names.append("".join(quoted).replace('""', '"') + field[0])
+        pos = field.end()
+        if line[pos : pos + 1] != ",":
+            return names
+        pos += 1
+
 
 def _require_csv_header_names(
     stream: pa.NativeFile, system_tag_columns: Collection[str]
@@ -42,13 +78,8 @@ def _require_csv_header_names(
         errors="surrogateescape",
         newline="",
     ) as text:
-        try:
-            names = next((row for row in csv.reader(text) if row), None)
-        except csv.Error:
-            # Let Arrow handle headers outside the text reader's limits.
-            return
-    if names is not None:
-        require_source_column_names(names, system_tag_columns)
+        names = _csv_header_names(text)
+    require_source_column_names(names, system_tag_columns)
 
 
 def _storage_type(declared: pa.DataType) -> pa.DataType:
@@ -376,8 +407,8 @@ class CSVSource(RootSource):
                 pa.input_stream(self._access_path), self._system_tag_columns
             )
             table: pa.Table = pa_csv.read_csv(self._access_path)
-            require_supported_nullable_types(table.schema)
             require_source_column_names(table.column_names, self._system_tag_columns)
+            require_supported_nullable_types(table.schema)
             return table.cast(arrow_utils.infer_schema_nullable(table))
         require_source_column_names(self._schema.names, self._system_tag_columns)
         require_supported_nullable_types(self._schema)

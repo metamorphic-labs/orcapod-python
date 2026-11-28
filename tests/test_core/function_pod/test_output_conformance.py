@@ -35,14 +35,16 @@ import numpy as np
 import pytest
 
 from pydantic import BaseModel
+from typing_extensions import override
 
 from orcapod import PipelineJob, errors, function_pod
-from orcapod.core.data_function import PythonDataFunction
+from orcapod.core.data_function import CachedDataFunction, PythonDataFunction
 from orcapod.core.datagrams import Data
 from orcapod.core.function_pod import FunctionPod
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.pipeline.observer import NoOpObserver
+from orcapod.protocols.core_protocols import DataFunctionProtocol, DataProtocol
 from orcapod.sources import DictSource
 
 
@@ -314,24 +316,121 @@ _POSITIONAL_SEQUENCE = types.GenericAlias(Sequence, (int, int))
             ("first", "_second"),
             _TWO_TEXT,
             errors.OutputContainerTypeError,
-            id="multiple-outputs",
+            id="reserved-last",
+        ),
+        pytest.param(
+            ("_second", "first"),
+            _TWO_TEXT[::-1],
+            errors.OutputContainerTypeError,
+            id="reserved-first",
         ),
     ],
 )
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
 def test_reserved_output_names_are_refused_before_return_validation(
     reserved_keys: str | tuple[str, ...],
     allowed_keys: str | tuple[str, ...],
     return_error: type[errors.OutputTypeError],
+    asynchronous: bool,
 ) -> None:
-    fn = _multi_output_function(tuple[str, str], {"first": "a", "second": "b"})
+    fn = _multi_output_function(
+        tuple[str, str], {"first": "a", "second": "b"}, asynchronous=asynchronous
+    )
 
     with pytest.raises(errors.InputValidationError, match="reserved"):
         _ = PythonDataFunction(fn, output_keys=reserved_keys)
 
     data_function = PythonDataFunction(fn, output_keys=allowed_keys)
     with pytest.raises(return_error, match="returned dict") as caught:
-        _ = data_function.call(Data({"x": 7, "y": "b"}))
+        data = Data({"x": 7, "y": "b"})
+        if asynchronous:
+            _ = asyncio.run(data_function.async_call(data))
+        else:
+            _ = data_function.call(data)
     assert type(caught.value) is return_error
+
+
+@pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("reverse", [False, True], ids=["original", "reversed"])
+@pytest.mark.parametrize("path", ["standalone", "job", "data-function-cache"])
+def test_public_function_pod_rejects_reserved_returned_data_keys(
+    asynchronous: bool, reverse: bool, path: str
+) -> None:
+    """A custom function's row can contain keys its declared outputs did not."""
+    items = [("out", 4), ("_tag_fake", 5), ("_content_hash", 6), ("_foo", 7)]
+    if reverse:
+        items.reverse()
+
+    def declared(x: int, y: int) -> int:
+        return x + y
+
+    class CustomFunction(PythonDataFunction):
+        @override
+        def call(self, data: DataProtocol, **kwargs: object) -> Data:
+            return Data(
+                dict(items),
+                meta_info={"__debug": "diagnostic"},
+                source_info={"out": "token"},
+            )
+
+        @override
+        async def async_call(self, data: DataProtocol, **kwargs: object) -> Data:
+            return self.call(data, **kwargs)
+
+    source = DictSource(
+        [{"k": 1, "g": "a", "x": 2, "y": 3}, {"k": 2, "g": "b", "x": 4, "y": 5}],
+        tag_columns=["g", "k"] if reverse else ["k", "g"],
+        tag_only_columns=True,
+    )
+    function = cast(object, CustomFunction(declared, output_keys=["out"]))
+    assert isinstance(function, DataFunctionProtocol)
+    cache = (
+        CachedDataFunction(function, result_database=InMemoryArrowDatabase())
+        if path == "data-function-cache"
+        else None
+    )
+    pod = FunctionPod(cache if cache is not None else function)
+    message = "'_content_hash'.*'_foo'.*'_tag_fake'.*reserved"
+    if path == "job":
+        job = PipelineJob(name="custom_output", database=InMemoryArrowDatabase())
+        with job:
+            _ = pod(source, label="node")
+        observer = _CrashRecorder()
+        orchestrator = (
+            AsyncPipelineOrchestrator() if asynchronous else SyncPipelineOrchestrator()
+        )
+        with pytest.warns(errors.RowFailuresWarning, match=message):
+            _ = job.run(orchestrator=orchestrator, observer=observer)
+        assert len(observer.crashes) == 2
+        for error in observer.crashes:
+            assert isinstance(error, errors.InputValidationError)
+            assert all(name in str(error) for name, _ in items if name.startswith("_"))
+        records = job.nodes["node"].get_all_records()
+        assert records is None or records.num_rows == 0
+    else:
+        stream = pod(source)
+
+        async def collect() -> list[DataProtocol]:
+            return [output async for _, output in stream.async_iter_data()]
+
+        with pytest.raises(errors.InputValidationError, match=message):
+            if asynchronous:
+                _ = asyncio.run(collect())
+            else:
+                _ = list(stream.iter_data())
+        if cache is not None:
+            assert all(
+                cache.get_cached_output_for_data(data) is None
+                for _, data in source.iter_data()
+            )
+        # Legal data, metadata and source information still pass through.
+        items[:] = [("out", 4)]
+        outputs = (
+            asyncio.run(collect())
+            if asynchronous
+            else [output for _, output in stream.iter_data()]
+        )
+        assert [output.as_dict() for output in outputs] == [{"out": 4}, {"out": 4}]
 
 
 @pytest.mark.parametrize(

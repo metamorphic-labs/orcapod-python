@@ -229,7 +229,10 @@ class DBTableSource(RootSource):
         require_source_column_names(
             [info.name for info in col_infos], self._system_tag_columns
         )
-        batches = list(connector.iter_batches(self._query))
+        batches: list[pa.RecordBatch] = []
+        for batch in connector.iter_batches(self._query):
+            require_source_column_names(batch.schema.names, self._system_tag_columns)
+            batches.append(batch)
         if not batches:
             raise ValueError(f"Table {self._table_name!r} is empty.")
         table: pa.Table = pa.Table.from_batches(batches)

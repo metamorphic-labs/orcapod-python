@@ -360,13 +360,19 @@ class _FunctionPodBase(TraceableBase):
         Returns:
             A ``(tag, output_data)`` tuple; ``output_data`` is ``None`` if
             the function filters the data out.
+
+        Raises:
+            InputValidationError: If a returned data column uses a reserved name.
         """
         extra: dict[str, Any] = {}
         if self._ctx_arg_name is not None:
             extra[self._ctx_arg_name] = self._build_invocation_context(
                 tag, data, run_id=run_id
             )
-        return tag, self.data_function.call(data, logger=logger, **extra)
+        output = self.data_function.call(data, logger=logger, **extra)
+        if output is not None:
+            schema_utils.require_names_not_system(output.keys())
+        return tag, output
 
     async def async_process_data(
         self,
@@ -391,13 +397,19 @@ class _FunctionPodBase(TraceableBase):
         Returns:
             A ``(tag, output_data)`` tuple; ``output_data`` is ``None`` if
             the function filters the data out.
+
+        Raises:
+            InputValidationError: If a returned data column uses a reserved name.
         """
         extra: dict[str, Any] = {}
         if self._ctx_arg_name is not None:
             extra[self._ctx_arg_name] = self._build_invocation_context(
                 tag, data, run_id=run_id
             )
-        return tag, await self.data_function.async_call(data, logger=logger, **extra)
+        output = await self.data_function.async_call(data, logger=logger, **extra)
+        if output is not None:
+            schema_utils.require_names_not_system(output.keys())
+        return tag, output
 
     def add_post_run_hook(self, hook: PostRunHook) -> None:
         """Register a post-run hook on this pod.

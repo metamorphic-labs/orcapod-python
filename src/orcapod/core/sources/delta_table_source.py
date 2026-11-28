@@ -15,6 +15,7 @@ from orcapod.core.sources.source_ids import location_source_name
 from orcapod.core.sources.reload import same_rows
 from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
+    require_source_column_names,
     SourceStreamBuilder,
     SourceStreamResult,
 )
@@ -106,6 +107,10 @@ class DeltaTableSource(RootSource):
 
     def _read_table(self) -> "pa.Table":
         """Read the table at the Delta version ``self._delta_table`` is loaded at."""
+        require_source_column_names(
+            [field.name for field in self._delta_table.schema().fields],
+            self._system_tag_columns,
+        )
         # The Delta log stores field-level nullable flags; to_pyarrow_dataset()
         # preserves them exactly — no inference needed.
         return delta_to_pyarrow_dataset(

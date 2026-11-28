@@ -89,7 +89,8 @@ def _describe_frame_row(value: Any, index: int) -> _FrameRow | None:
         )
     raise InputValidationError(
         f"Source row {index} ({type(value).__name__}) needs named fields. "
-        "Use a mapping, dataclass or Pydantic model."
+        "Use a mapping, dataclass or Pydantic model for rows. "
+        "Pass named Polars Series as a list of columns."
     )
 
 
@@ -127,7 +128,9 @@ def _checked_frame_rows(
             if names != expected:
                 raise InputValidationError(
                     f"Source row {index} has different field names. "
-                    f"Missing {sorted(expected - names)!r}, extra {sorted(names - expected)!r}."
+                    f"Missing {sorted(expected - names)!r}, extra {sorted(names - expected)!r}. "
+                    "Use the same field names in every row. For mappings, add missing "
+                    "fields with None where appropriate and remove unintended fields."
                 )
             if row.row_type is not first.row_type or (
                 row.row_type is not dict and row.names != first.names
@@ -209,7 +212,7 @@ def source_dataframe(
     """Validate named row layouts before Polars can project or relabel fields.
 
     Args:
-        data: Raw data accepted by the Polars DataFrame constructor.
+        data: Tabular or column input, or Python rows with a consistent named layout.
         system_tag_columns: Columns nominated as custom system tags.
 
     Returns:
@@ -242,12 +245,13 @@ def source_dataframe(
 
 
 class DataFrameSource(RootSource):
-    """A source backed by a Polars DataFrame (or any Polars-compatible data).
+    """A source backed by a Polars DataFrame or supported tabular or column input.
 
     Python rows must be mappings with the same keys, or dataclass or Pydantic
     rows of one class with the same declared fields. Put extra or computed
     Pydantic fields in mappings, and use mappings for models with custom
-    serialization. A ``None`` row keeps its position as a null row.
+    serialization. A ``None`` row keeps its position as a null row. Pass
+    named Polars Series as a list of columns.
 
     The DataFrame is converted to an Arrow table and enriched by
     ``SourceStreamBuilder`` (source-info, schema-hash, system tags).
