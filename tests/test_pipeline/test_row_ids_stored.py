@@ -23,7 +23,7 @@ import uuid
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -587,7 +587,7 @@ def check_pipeline_record_timestamp_tie(
     database: ArrowDatabaseProtocol,
     reverse: bool,
     use_async: bool,
-    results_gone: bool,
+    available_results: Literal["both", "neither", "lesser"],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Seed same-instance records by running the job in two isolated sessions."""
@@ -622,8 +622,12 @@ def check_pipeline_record_timestamp_tie(
         job.set_ephemeral_database(ephemeral)
         return job
 
-    def run(job: PipelineJob) -> None:
-        summary = asyncio.run(job.run_async()) if use_async else job.run()
+    def run(job: PipelineJob, *, load_only: bool = False) -> None:
+        summary = (
+            asyncio.run(job.run_async(load_only=load_only))
+            if use_async
+            else job.run(load_only=load_only)
+        )
         assert summary.ok
 
     seed_records = InMemoryArrowDatabase()
@@ -655,7 +659,7 @@ def check_pipeline_record_timestamp_tie(
     assert len(set(result_ids)) == 2
     winner = max(result_ids)
 
-    if results_gone:
+    if available_results == "neither":
         gone = make_job(database, InMemoryArrowDatabase())
         ((_, placeholder),) = (
             gone.function_pods["compute"].get_cached_results(instances[:1]).values()
@@ -668,12 +672,16 @@ def check_pipeline_record_timestamp_tie(
         return
 
     result_rows = pa.concat_tables(results).sort_by([(KEY, direction)])
+    if available_results == "lesser":
+        # The greater id belongs to a missing result. The available result wins.
+        winner = min(result_ids)
+        result_rows = result_rows.slice(_values(result_rows, KEY).index(winner), 1)
     for index in range(result_rows.num_rows):
         result_db.add_records(
             result_path, result_rows.slice(index, 1), record_id_column=KEY, flush=True
         )
     reader = make_job(database, result_db)
-    run(reader)
+    run(reader, load_only=available_results == "lesser")
     node = reader.nodes["compute"]
     ((_, selected),) = node.iter_data()
     assert selected.datagram_uuid.bytes == winner
@@ -681,20 +689,26 @@ def check_pipeline_record_timestamp_tie(
         zip(_values(result_rows, KEY), _values(result_rows, "result"), strict=True)
     )
     assert selected.as_dict()["result"] == expected[winner]
-    assert sorted(node.as_source().as_table().column("result").to_pylist()) == [10, 20]
+    historical_values = (
+        [expected[winner]] if available_results == "lesser" else [10, 20]
+    )
+    assert (
+        sorted(node.as_source().as_table().column("result").to_pylist())
+        == historical_values
+    )
 
 
 @pytest.mark.parametrize(
     "reverse", [False, True], ids=["lesser-first", "greater-first"]
 )
 @pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize("results_gone", [False, True], ids=["stored", "gone"])
+@pytest.mark.parametrize("available_results", ["both", "neither", "lesser"])
 @pytest.mark.parametrize("backend", ["memory", "delta", "extension"])
 def test_pipeline_record_timestamp_tie(
     backend: str,
     reverse: bool,
     use_async: bool,
-    results_gone: bool,
+    available_results: Literal["both", "neither", "lesser"],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -704,7 +718,7 @@ def test_pipeline_record_timestamp_tie(
     elif backend == "extension":
         database = ExtensionAwareDatabase(database, UniversalTypeConverter())
     check_pipeline_record_timestamp_tie(
-        database, reverse, use_async, results_gone, monkeypatch
+        database, reverse, use_async, available_results, monkeypatch
     )
 
 

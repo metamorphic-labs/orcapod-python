@@ -3651,31 +3651,27 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         self,
         instance_ids: list[bytes] | None = None,
     ) -> _JoinedRecords | None:
-        """Internal primitive: fetch both DBs and inner-join, supporting two databases.
+        """Join pipeline records to their results and collect missing-result placeholders.
 
-        Fetches ``taginfo`` from the pipeline database, partitions rows by
-        ``IS_EPHEMERAL_COL`` into persistent and ephemeral groups, performs two
-        independent inner joins (one per database), merges with persistent priority
-        via an anti-join, and returns the combined result.
+        Partition the pipeline rows by ``IS_EPHEMERAL_COL`` and join each group
+        to its result database by the exact result id. Keep all matched rows
+        from both databases. Log a warning for persistent rows with a missing
+        result. For ephemeral rows with a missing result, keep a placeholder
+        per instance from the latest record, breaking ties by the greater
+        result id.
 
-        Persistent miss rows (tag entry with no matching result DB row) emit a
-        WARNING-level log. Ephemeral miss rows (cross-session miss) are silently
-        dropped.
-
-        If ``instance_ids`` is provided, the result is filtered to matching
+        If ``instance_ids`` is provided, filter joined rows to matching
         ``INSTANCE_ID_COL`` values before conversion to Arrow.
 
         Args:
-            instance_ids: If given, return only rows whose
+            instance_ids: If given, keep only joined rows whose
                 ``INSTANCE_ID_COL`` value is in this list.
-                If ``None``, return all rows.
 
         Returns:
-            A ``_JoinedRecords`` whose ``table`` always includes a
-            ``INSTANCE_ID_COL`` column, or ``None`` when either
-            the pipeline database or cached function pod is absent. A 0-row
-            table (not ``None``) is returned when both fetches succeed but
-            no matching rows exist — callers check ``num_rows`` themselves.
+            The joined table with its ``INSTANCE_ID_COL`` column and any
+            placeholders. The table can be empty even when placeholders exist.
+            Returns ``None`` when the pipeline database, cached function pod,
+            or pipeline table is absent.
         """
         if self._cached_function_pod is None or self._pipeline_database is None:
             return None

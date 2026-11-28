@@ -180,7 +180,9 @@ stored that record, so the table keeps every distinct record of every node:
 
 - the same instance recorded again with the same result is one row;
 - a recompute has a new result, so it is a new row. The instance's current record
-  has the latest `__recorded_at`, with ties broken by the greater result id;
+  has the latest `__recorded_at`. On a tie, a record with an available result
+  wins over one whose ephemeral result is gone. If both results are available
+  or both are gone, the greater result id wins;
 - an input that arrives with other source-info tokens (its upstream result was
   computed again) is a new instance: it gets a new row. Its result is looked up
   in the result database by the input data hash: when a result is stored there
