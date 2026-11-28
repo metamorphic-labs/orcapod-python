@@ -26,10 +26,12 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+import pyarrow as pa
 import pytest
 
 from orcapod import PipelineJob, function_pod
-from orcapod.core.sources import DictSource
+from orcapod.core.nodes import FunctionJobNode, OperatorJobNode
+from orcapod.core.sources import ArrowTableSource, DictSource
 from orcapod.core.streams.base import StreamBase
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import InputValidationError, SourceSpecMismatchError
@@ -574,21 +576,59 @@ class TestMemoInvalidation:
         }
         assert after == before
 
-    def test_setting_an_operator_nodes_upstreams_changes_its_schema(self) -> None:
-        """Setting an operator node's ``upstreams`` changes its own schema."""
+    @pytest.mark.parametrize(
+        "other",
+        [
+            _one_row_source(1.5),
+            DictSource(
+                [{"id": 1, "x": 1}],
+                tag_columns=["id", "x"],
+                tag_only_columns=False,
+            ),
+            DictSource(
+                [{"id": 1, "other": 1}], tag_columns=["id"], tag_only_columns=True
+            ),
+            DictSource(
+                [{"id": 1, "x": None}, {"id": 2, "x": 1}],
+                tag_columns=["id"],
+                tag_only_columns=True,
+            ),
+        ],
+        ids=["type", "role", "name", "nullability"],
+    )
+    def test_operator_rewiring_to_another_schema_is_atomic(
+        self, other: DictSource
+    ) -> None:
+        """A refused rewire preserves the wired graph's schemas and table identities."""
         job = _rename_job()
         node = job.nodes["renamed"]
-        assert node.output_schema()[1]["y"] is int
+        downstream = job.nodes["renamed_again"]
+        assert isinstance(node, OperatorJobNode)
+        assert isinstance(downstream, OperatorJobNode)
+        upstreams = node.upstreams
+        before = [
+            (step.output_schema(), step.pipeline_hash()) for step in (node, downstream)
+        ]
+        assert before[1][0][1]["z"] is int
 
-        node.upstreams = (_one_row_source(1.5),)
+        with pytest.raises(ValueError, match="'renamed'") as error:
+            node.upstreams = (other,)
 
-        assert node.output_schema()[1]["y"] is float
+        for original, replacement in zip(
+            upstreams[0].output_schema(), other.output_schema()
+        ):
+            assert repr(original) in str(error.value)
+            assert repr(replacement) in str(error.value)
+        assert node.upstreams is upstreams
+        for step, (schema, pipeline_hash) in zip((node, downstream), before):
+            assert step.output_schema() is schema
+            assert step.pipeline_hash() == pipeline_hash
 
-    def test_setting_a_function_nodes_upstreams_changes_its_schema(self) -> None:
-        """Setting a function node's ``upstreams`` changes its own schema."""
-        job = _function_job()
-        node = job.nodes["plus_one"]
-        assert node.output_schema()[0]["id"] is int
+    def test_function_rewiring_to_another_tag_schema_is_refused(self) -> None:
+        """A function node refuses changing its upstream's tag type."""
+        node = _function_job().nodes["plus_one"]
+        assert isinstance(node, FunctionJobNode)
+        before = node.upstreams[0]
         other = DictSource(
             [{"id": "one", "x": 1}],
             tag_columns=["id"],
@@ -596,23 +636,52 @@ class TestMemoInvalidation:
             source_id="other",
         )
 
+        with pytest.raises(ValueError, match="'plus_one'"):
+            node.upstreams = (other,)
+
+        assert node.upstreams[0] is before
+        assert node.output_schema()[0]["id"] is int
+
+    def test_rewiring_refuses_a_different_arrow_type_for_the_same_python_type(
+        self,
+    ) -> None:
+        """A change of integer width is also a change of input schema."""
+        node = _rename_job().nodes["renamed"]
+        assert isinstance(node, OperatorJobNode)
+        before = node.upstreams
+        other = ArrowTableSource(
+            pa.table(
+                {"id": [1], "x": [2]},
+                schema=pa.schema(
+                    [
+                        pa.field("id", pa.int64(), False),
+                        pa.field("x", pa.int32(), False),
+                    ]
+                ),
+            ),
+            tag_columns=["id"],
+            tag_only_columns=True,
+        )
+        assert other.output_schema() == before[0].output_schema()
+
+        with pytest.raises(ValueError, match=r"(?s)'renamed'.*int64.*int32"):
+            node.upstreams = (other,)
+
+        assert node.upstreams is before
+
+    @pytest.mark.parametrize(
+        ("build_job", "label"), [(_rename_job, "renamed"), (_function_job, "plus_one")]
+    )
+    def test_rewiring_to_the_same_schema_replaces_the_input(
+        self, build_job: Callable[[], PipelineJob], label: str
+    ) -> None:
+        """Both setters accept a different stream with equivalent upstream schemas."""
+        node = build_job().nodes[label]
+        assert isinstance(node, (FunctionJobNode, OperatorJobNode))
+        before = node.output_schema()
+        other = _one_row_source(2)
+
         node.upstreams = (other,)
 
-        assert node.output_schema()[0]["id"] is str
-
-    @pytest.mark.xfail(
-        strict=True,
-        reason=(
-            "Setting a wired node's upstreams clears its own memo only; the nodes "
-            "downstream of it keep theirs (ITL-1111). Nothing in orcapod sets "
-            "upstreams after construction."
-        ),
-    )
-    def test_setting_upstreams_changes_downstream_schemas(self) -> None:
-        """Setting a node's ``upstreams`` should change the schemas downstream of it."""
-        job = _rename_job()
-        assert job.nodes["renamed_again"].output_schema()[1]["z"] is int
-
-        job.nodes["renamed"].upstreams = (_one_row_source(1.5),)
-
-        assert job.nodes["renamed_again"].output_schema()[1]["z"] is float
+        assert node.upstreams[0] is other
+        assert node.output_schema() == before

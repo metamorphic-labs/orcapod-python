@@ -30,6 +30,7 @@ import pyarrow.compute as pc
 
 from orcapod import contexts
 from orcapod.core.nodes.provenance_methods import ProvenanceMethods
+from orcapod.core.nodes.upstream_schema import require_same_upstream_schemas
 from orcapod.core.data_tags import (
     mark_data_tags,
     data_tag_names,
@@ -363,15 +364,17 @@ class OperatorNodeBase(StreamBase):
 
     @upstreams.setter
     def upstreams(self, value: tuple[StreamProtocol, ...]) -> None:
-        """Replace the node's inputs.
+        """Replace the node's inputs with inputs of the same schemas.
 
         Raises:
-            ValueError: If the node caches (``LOG`` or ``REPLAY``) and a source
-                feeding ``value`` is restricted (ITL-1218); nothing changes.
+            ValueError: If the input count or a schema differs, or if the node
+                caches (``LOG`` or ``REPLAY``) and a source feeding ``value`` is
+                restricted (ITL-1218).
         """
         from orcapod.pipeline.restrictions import refuse_restricted_operator_cache
 
         refuse_restricted_operator_cache(self, self.cache_mode, streams=value)
+        require_same_upstream_schemas(self, value)
         self._input_streams = value
         self._forget_output_schema()
 

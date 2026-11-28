@@ -650,18 +650,16 @@ async def test_reused_pick_on_logical_mapping(logical_first: bool) -> None:
     (
         "op",
         "old_value",
-        "old_type",
         "current_value",
-        "current_type",
+        "data_type",
         "expected",
         "expected_type",
     ),
     [
-        (Index("c", 0), [3], list[int], [Path("/a")], list[Path], Path("/a"), Path),
+        (Index("c", 0), [Path("/old")], [Path("/a")], list[Path], Path("/a"), Path),
         (
             Pick("c", "k"),
-            {"k": 3},
-            dict[str, int],
+            {"k": "old"},
             {"k": "a"},
             dict[str, str],
             "a",
@@ -674,18 +672,17 @@ async def test_reused_pick_on_logical_mapping(logical_first: bool) -> None:
 async def test_rewired_projection_uses_current_input(
     op: UnaryOperator,
     old_value: DataValue,
-    old_type: DataType,
     current_value: DataValue,
-    current_type: DataType,
+    data_type: DataType,
     expected: object,
     expected_type: type,
 ) -> None:
-    """Schema prediction and both job paths follow a rewired upstream description."""
+    """Both job paths project values from a replacement of the same schema."""
     original = DictSource(
-        [{"c": old_value, "x": 1}], data_schema={"c": old_type, "x": int}
+        [{"c": old_value, "x": 1}], data_schema={"c": data_type, "x": int}
     )
     current = DictSource(
-        [{"c": current_value, "x": 1}], data_schema={"c": current_type, "x": int}
+        [{"c": current_value, "x": 1}], data_schema={"c": data_type, "x": int}
     )
     job = PipelineJob(name="rewired", database=InMemoryArrowDatabase())
     with job:

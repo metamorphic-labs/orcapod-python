@@ -34,6 +34,7 @@ import pyarrow as pa
 
 from orcapod import contexts
 from orcapod.core.nodes.provenance_methods import ProvenanceMethods
+from orcapod.core.nodes.upstream_schema import require_same_upstream_schemas
 from orcapod.core.function_pod import (
     fall_through_tags,
     function_input,
@@ -554,8 +555,14 @@ class FunctionNodeBase(StreamBase):
 
     @upstreams.setter
     def upstreams(self, value: tuple[StreamProtocol, ...]) -> None:
+        """Replace the node's input with one of the same schema.
+
+        Raises:
+            ValueError: If there is not exactly one input or its schema differs.
+        """
         if len(value) != 1:
             raise ValueError("FunctionPod can only have one upstream")
+        require_same_upstream_schemas(self, value)
         self._input_stream = value[0]
         self._forget_output_schema()
 
