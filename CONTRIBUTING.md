@@ -37,10 +37,11 @@ uv run pytest tests/
   error fails the check. The existing errors are recorded in `.basedpyright/baseline.json`.
   Fix a new error, and do not regenerate the baseline to hide it.
 - **Tests.** The full suite takes a while; while you work, run the folder or file you
-  changed, for example `uv run pytest tests/test_docs/`. CI's own test command differs from
-  the local one: it names the Python version (3.13 on a pull request; 3.11, 3.12 and 3.13 on
-  `main`), runs in parallel with coverage, and leaves out the PostgreSQL tests, which a
-  separate job runs.
+  changed, for example `uv run pytest tests/test_docs/`. CI runs the main, PostgreSQL and
+  specification test suites in separate jobs with coverage. All three run on Python 3.13
+  on pull requests and on Python 3.11, 3.12 and 3.13 on pushes to `main`. A failure specific
+  to Python 3.11 or 3.12 is first seen on `main` for any of these suites. The main test job
+  runs in parallel.
 
 Two more commands were not run while writing this page:
 
