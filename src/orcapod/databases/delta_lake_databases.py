@@ -2044,11 +2044,12 @@ class DeltaTableDatabase:
                     return
             try:
                 cached.update_incremental()
-            except Exception:  # noqa: BLE001  # let the next load report any read failure
-                self._delta_table_cache.pop(record_key, None)
-            else:
-                if stamp is not None:
-                    self._local_log_stamps[table_uri] = (ref(cached), stamp)
+            except Exception:  # noqa: BLE001  # the commit reload reports the failure
+                # Keep the readable snapshot for lookups during the rest of the
+                # batch. The failed refresh must be retried on the next strict add.
+                return
+            if stamp is not None:
+                self._local_log_stamps[table_uri] = (ref(cached), stamp)
             return
         if record_key in self._absent_tables:
             try:
