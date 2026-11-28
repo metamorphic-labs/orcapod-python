@@ -47,7 +47,10 @@ from orcapod.types import ColumnConfig, Condition, ContentHash, Schema
 from orcapod.utils import arrow_utils
 
 if TYPE_CHECKING:
-    from orcapod.protocols.hashing_protocols import SemanticHasherProtocol
+    from orcapod.protocols.hashing_protocols import (
+        IdentityWalkProtocol,
+        SemanticHasherProtocol,
+    )
     from orcapod.types.explanation import Explanation
 
 # TODO: consider using this instead of making copy of dicts
@@ -768,14 +771,16 @@ class StreamBase(TraceableBase, IdentityChainsMixin):
         producer = self.producer
         return inputs if producer is None else producer.argument_symmetry(inputs)
 
-    def _identity_leaf(self) -> tuple[str, ContentHash] | None:
-        """Reuse the content hash and slot name of a root stream."""
+    def _identity_leaf(
+        self, walk: IdentityWalkProtocol
+    ) -> tuple[str | None, ContentHash] | None:
+        """A named source stands for its slot; a raw input has no slot name."""
         if self.producer is not None or self._identity_inputs():
             return None
-        from orcapod.core.nodes.source_node import slot_name_for
+        from orcapod.core.sources.base import RootSource
 
-        content = self.content_hash()
-        return slot_name_for(self, content), content
+        name = self.source_name if isinstance(self, RootSource) else None
+        return name, self.content_hash()
 
     @property
     @abstractmethod

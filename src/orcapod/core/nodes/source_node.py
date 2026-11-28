@@ -73,7 +73,10 @@ if TYPE_CHECKING:
         RecordBatchInput,
     )
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
-    from orcapod.protocols.hashing_protocols import SemanticHasherProtocol
+    from orcapod.protocols.hashing_protocols import (
+        IdentityWalkProtocol,
+        SemanticHasherProtocol,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -751,10 +754,21 @@ class SourceNodeBase(TraceableBase, IdentityChainsMixin, ABC):
         """Use the slot's structural hasher for the walk."""
         return self.data_context.semantic_hasher
 
-    def _identity_leaf(self) -> tuple[str, ContentHash | None]:
-        """Use the slot's name and the live binding's own content hash."""
+    def _identity_leaf(
+        self, walk: IdentityWalkProtocol
+    ) -> tuple[str, ContentHash | None]:
+        """Use the declared slot name and follow the binding to a concrete source."""
         bound = self._bound_stream()
-        return self.name, None if bound is None else bound.content_hash()
+        if bound is None:
+            return self.name, None
+        from orcapod.core.sources.base import RootSource
+
+        if isinstance(bound, RootSource):
+            return self.name, bound.content_hash()
+        sources = walk.visit(bound).sources
+        if sources is None or isinstance(bound, SourceNodeBase):
+            return self.name, sources
+        return self.name, bound.content_hash()
 
     def _bound_stream(self) -> "StreamProtocol | None":
         """The concrete stream bound to this slot; a declaration has none."""
@@ -1723,6 +1737,7 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         self._declared_form = form
         self._invalidate_content_hash_cache()
         self._invalidate_pipeline_hash_cache()
+        self._invalidate_identity_chains()
 
     @property
     def last_modified(self) -> datetime | None:

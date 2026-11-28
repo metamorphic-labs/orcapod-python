@@ -29,6 +29,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from orcapod import contexts
+from orcapod.core.identity_chains import INPUT_SYMMETRY_KEY, decode_input_symmetry
 from orcapod.core.nodes.provenance_methods import ProvenanceMethods
 from orcapod.core.data_tags import (
     mark_data_tags,
@@ -84,6 +85,7 @@ from orcapod.contexts.stored import (
     with_data_context,
 )
 from orcapod.protocols.core_protocols import (
+    ArgumentGroup,
     DataProtocol,
     StreamProtocol,
     TagProtocol,
@@ -91,6 +93,7 @@ from orcapod.protocols.core_protocols import (
 )
 from orcapod.protocols.core_protocols.operator_pod import OperatorPodProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+from orcapod.protocols.hashing_protocols import IdentityWalkProtocol
 from orcapod.system_constants import OPERATOR_DB_SCHEMA_VERSION, constants
 import orcapod.core.row_ids as row_ids
 from orcapod.types import CacheMode, ColumnConfig, ContentHash, Schema
@@ -295,7 +298,7 @@ class OperatorNodeBase(StreamBase):
     def identity_structure(self) -> Any:
         return self.pipeline_identity_structure()
 
-    def _identity_leaf(self) -> None:
+    def _identity_leaf(self, walk: IdentityWalkProtocol) -> None:
         """An operator remains a computation when its pod is unavailable."""
         return None
 
@@ -335,6 +338,13 @@ class OperatorNodeBase(StreamBase):
     # ------------------------------------------------------------------
     # Stream interface
     # ------------------------------------------------------------------
+
+    def _identity_symmetry(self, inputs: tuple[StreamProtocol, ...]) -> ArgumentGroup:
+        """Recover the grouping of a saved operator when its producer is missing."""
+        saved = self._descriptor.get(INPUT_SYMMETRY_KEY)
+        if self._operator is None and saved is not None:
+            return decode_input_symmetry(saved, inputs)
+        return super()._identity_symmetry(inputs)
 
     @property
     def producer(self) -> OperatorPodProtocol:
@@ -377,6 +387,7 @@ class OperatorNodeBase(StreamBase):
 
         refuse_restricted_operator_cache(self, self.cache_mode, streams=value)
         self._input_streams = value
+        self._invalidate_identity_chains(names=True)
         self._forget_output_schema()
 
     @property

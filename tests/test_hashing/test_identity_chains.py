@@ -19,6 +19,7 @@ from orcapod.types import ContentHash
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from orcapod.protocols.core_protocols import StreamProtocol
     from orcapod.protocols.hashing_protocols import IdentityChainProtocol
 
 
@@ -302,3 +303,182 @@ def test_equal_structure_join_pipeline_hash_depends_only_on_structure() -> None:
     left, right = _data_tags("a"), _data_tags("b")
     assert left.pipeline_hash() == right.pipeline_hash()
     assert Join()(left, left).pipeline_hash() == Join()(left, right).pipeline_hash()
+
+
+@pytest.mark.parametrize("missing_builtin", [False, True])
+def test_loaded_commutative_stub_keeps_chains(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing_builtin: bool
+) -> None:
+    """A missing producer must still pool its inputs in symmetric order."""
+    from orcapod.pipeline.serialization import OPERATOR_REGISTRY
+    from orcapod.sources import CSVSource
+
+    class UnregisteredJoin(Join):
+        """An operator whose config has no registered loader."""
+
+    inputs = []
+    for name, value in (("a", "x"), ("b", "y")):
+        path = tmp_path / f"{name}.csv"
+        path.write_text(f"k,{value}\n1,3\n")
+        inputs.append(CSVSource(str(path), tag_columns=["k"], source_id=name))
+    inputs.sort(key=lambda source: source.pipeline_hash().to_hex(), reverse=True)
+    assert inputs[0].pipeline_hash() != inputs[1].pipeline_hash()
+    job = PipelineJob(name="saved_symmetry", database=InMemoryArrowDatabase())
+    with job:
+        (Join() if missing_builtin else UnregisteredJoin())(*inputs, label="joined")
+    job.run()
+    expected = _hashes(job.nodes["joined"])
+    path = tmp_path / "job.json"
+    job.save(path)
+    if missing_builtin:
+        monkeypatch.delitem(OPERATOR_REGISTRY, "Join")
+    loaded = PipelineJob.load(path, database=job.database)
+    assert loaded.nodes["joined"].producer is None
+    assert _hashes(loaded.nodes["joined"]) == expected
+    loaded.save(path)
+    assert (
+        _hashes(PipelineJob.load(path, database=job.database).nodes["joined"])
+        == expected
+    )
+
+
+@pytest.mark.parametrize("downstream", [False, True])
+def test_raw_stream_label_never_enters_chains(downstream: bool) -> None:
+    """Raw inputs and their projections ignore labels."""
+    import pyarrow as pa
+
+    from orcapod.core.streams.arrow_table_stream import ArrowTableStream
+
+    table = pa.table({"k": [1], "x": [3]})
+    before = ArrowTableStream(table, tag_columns=["k"], label="before")
+    after = ArrowTableStream(table, tag_columns=["k"], label="after")
+    left = before.select_data_columns(["x"]) if downstream else before
+    right = after.select_data_columns(["x"]) if downstream else after
+    assert left.name_chain() == right.name_chain()
+    assert _hashes(left) == _hashes(right)
+
+
+def test_chain_hashes_are_memoized_through_a_long_chain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reads reuse pooled hashes and rebind invalidates only source hashes."""
+    from orcapod.core import identity_chains
+
+    source = _source("reading", False)
+    job = PipelineJob(name="long_chain", database=InMemoryArrowDatabase())
+    with job:
+        plain = source
+        for index in range(50):
+            plain = plain.select_data_columns(["x"], label=f"project_{index}")
+    result = job.nodes["project_49"]
+    hashes: list[str] = []
+    visits: list[IdentityChainProtocol] = []
+    original_hash = identity_chains._hash  # pyright: ignore[reportPrivateUsage]  # Count hash computations.
+    original_visit = identity_chains.IdentityWalk.visit
+
+    def count_hash(label: str, preimage: tuple[object, ...]) -> ContentHash:
+        hashes.append(label)
+        return original_hash(label, preimage)
+
+    def count_visit(
+        walk: identity_chains.IdentityWalk, element: IdentityChainProtocol
+    ) -> identity_chains.IdentityChains:
+        visits.append(element)
+        return original_visit(walk, element)
+
+    monkeypatch.setattr(identity_chains, "_hash", count_hash)
+    monkeypatch.setattr(identity_chains.IdentityWalk, "visit", count_visit)
+    before = _hashes(result)
+    assert len({id(element) for element in visits}) == 51
+    assert hashes
+    hashes.clear()
+    visits.clear()
+    assert _hashes(result) == before
+    assert hashes == []
+    assert visits == [result, result]
+    visits.clear()
+    job.bind(sources={"reading": _source("rebound", False)})
+    after = _hashes(result)
+    assert after[0] != before[0]
+    assert after[1] == before[1]
+    assert hashes == [identity_chains.CONTENT_HASH_LABEL]
+    assert len({id(element) for element in visits}) == 51
+    hashes.clear()
+    assert _hashes(result) == after
+    assert hashes == []
+
+
+@pytest.mark.parametrize("inner_job", [False, True])
+def test_unbound_slot_binding_has_no_source_chain(inner_job: bool) -> None:
+    """A binding cannot turn an unbound slot into a concrete source identity."""
+    source = _source("reading", False)
+    outer = PipelineJob(name="outer", database=InMemoryArrowDatabase())
+    with outer:
+        add.pod(source, label="result")
+    inner = PipelineJob(name="inner", database=InMemoryArrowDatabase())
+    if inner_job:
+        with inner:
+            add.pod(source, label="unused")
+        from orcapod.core.nodes.source_node import SourceJobNode
+
+        slot = inner.nodes["reading"]
+        assert isinstance(slot, SourceJobNode)
+        slot.bound_source = None
+    else:
+        slot = SourceNode.from_stream(source, name="inner_slot")
+    outer.bind(sources={"reading": slot})
+    result = outer.nodes["result"]
+    assert result.source_chain() is None
+    with pytest.raises(UnboundSourceError, match="unbound.*reading"):
+        result._chain_content_hash()
+    if inner_job:
+        inner.bind(sources={"reading": source})
+        assert result.source_chain() == source.content_hash()
+
+
+@pytest.mark.parametrize("has_rows", [False, True])
+def test_row_materialization_keeps_both_chains(has_rows: bool) -> None:
+    """Both empty and nonempty row builds represent the original source."""
+    from orcapod.core.operators.static_output_pod import RowsOnRead
+
+    source = _source("reading", False)
+    wrapped = RowsOnRead(list(source) if has_rows else [], source)
+    assert _hashes(wrapped.built()) == _hashes(wrapped) == _hashes(source)
+    wrapped.release_built()
+    assert _hashes(wrapped.built()) == _hashes(source)
+
+
+def test_async_batch_input_keeps_both_chains() -> None:
+    """A barrier operator's row-built input reports the original job slot hashes."""
+    from orcapod.operators import Batch
+
+    seen: list[tuple[object, object]] = []
+
+    class InspectBatch(Batch):
+        """Read the rebuilt input identities when processing the rows."""
+
+        def unary_static_process(self, stream: StreamProtocol) -> StreamProtocol:
+            seen.append(_hashes(stream))
+            return super().unary_static_process(stream)
+
+    source = _source("reading", False)
+    job = PipelineJob(name="batch_input_identity", database=InMemoryArrowDatabase())
+    with job:
+        InspectBatch(2)(source)
+    _run(job, run_async=True)
+    assert seen == [_hashes(job.nodes["reading"])]
+
+
+def test_copying_a_slot_under_a_new_name_recomputes_the_name_chain() -> None:
+    """The renamed slot and its descendants use the new declaration's name."""
+    from orcapod.core.nodes.source_node import SourceJobNode
+
+    reading = SourceJobNode.from_stream(_source("reading", False))
+    original = add.pod(reading)
+    before = _hashes(original)
+    renamed = SourceJobNode.from_stream(reading, name="renamed")
+    result = add.pod(renamed)
+    after = _hashes(result)
+    assert after[0] == before[0]
+    assert after[1] != before[1]
+    assert _hashes(original) == before

@@ -109,6 +109,7 @@ from orcapod.protocols.core_protocols import (
     TrackerManagerProtocol,
 )
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+from orcapod.protocols.hashing_protocols import IdentityWalkProtocol
 from orcapod.protocols.observability_protocols import (
     DataExecutionLoggerProtocol,
     ExecutionObserverProtocol,
@@ -557,6 +558,7 @@ class FunctionNodeBase(StreamBase):
         if len(value) != 1:
             raise ValueError("FunctionPod can only have one upstream")
         self._input_stream = value[0]
+        self._invalidate_identity_chains(names=True)
         self._forget_output_schema()
 
     # ------------------------------------------------------------------
@@ -996,7 +998,7 @@ class FunctionNode(FunctionNodeBase):
             return self._saved_identity_inputs
         return super()._identity_inputs()
 
-    def _identity_leaf(self) -> None:
+    def _identity_leaf(self, walk: IdentityWalkProtocol) -> None:
         """A blueprint function remains a computation when its pod is unavailable."""
         return None
 

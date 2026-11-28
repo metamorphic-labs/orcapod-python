@@ -1821,3 +1821,41 @@ class TestPollingSourceTagOrder:
             self._source(tags, ["a", "b", "c"]).content_hash()
             != self._source(tags, ["c", "b", "a"]).content_hash()
         )
+
+
+def test_polling_leaf_chains_are_available_before_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Neither leaf chain needs a schema or a polling attempt."""
+    source = PollingSource(
+        NoArgSource(), tag_columns=["id"], source_id="pending", record_id_columns=["id"]
+    )
+
+    def unexpected_poll() -> None:
+        pytest.fail("leaf identities must not poll for a schema")
+
+    monkeypatch.setattr(source, "_sync_poll_and_commit", unexpected_poll)
+    assert source.source_chain() == source.content_hash()
+    name_chain = source.name_chain()
+    source.label = "new label"
+    assert source.name_chain() == name_chain
+    with pytest.raises(ValueError, match="requires a schema"):
+        source.node_hash()
+    with pytest.raises(ValueError, match="requires a schema"):
+        source._chain_content_hash()
+
+
+def test_polling_leaf_chains_stay_stable_when_a_batch_supplies_schema() -> None:
+    """Learning the schema enables combined hashes without changing leaf chains."""
+    source = PollingSource(
+        FakeDynamicSource(batches=[_batch(1, 10)]),
+        tag_columns="id",
+        record_id_columns="id",
+    )
+    before = source.source_chain(), source.name_chain()
+    with pytest.raises(ValueError, match="requires a schema"):
+        source.node_hash()
+    assert list(source)
+    assert (source.source_chain(), source.name_chain()) == before
+    assert source.node_hash()
+    assert source._chain_content_hash()

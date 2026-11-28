@@ -17,7 +17,11 @@ from orcapod.core.streams.base import (
 )
 from orcapod.core.streams.view import StreamView
 from orcapod.protocols.core_protocols import PodProtocol, StreamProtocol, TagProtocol
-from orcapod.protocols.hashing_protocols import PipelineElementProtocol
+from orcapod.protocols.hashing_protocols import (
+    IdentityChains,
+    IdentityWalkProtocol,
+    PipelineElementProtocol,
+)
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema, SourceInfoValue
 from orcapod.utils import arrow_utils, schema_utils
@@ -272,6 +276,14 @@ class ArrowTableStream(StreamBase):
         return arrow_utils.canonical_identity_row_order(
             table, self._tag_columns, self.data_context.arrow_hasher
         )
+
+    _identity_origin: StreamProtocol | None = None
+
+    def _identity_chains(self, walk: IdentityWalkProtocol) -> IdentityChains:
+        """A row build represents the original stream for the new chains."""
+        if self._identity_origin is not None:
+            return walk.visit(self._identity_origin)
+        return super()._identity_chains(walk)
 
     def _identity_inputs(self) -> tuple[StreamProtocol, ...]:
         """A table without a producer hashes as a root."""

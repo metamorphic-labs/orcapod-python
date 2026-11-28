@@ -45,7 +45,7 @@ from orcapod.errors import (
     SchemaInconsistencyError,
 )
 from orcapod.system_constants import constants
-from orcapod.types import ColumnConfig, Cursor, PollingConfig, Schema
+from orcapod.types import ContentHash, ColumnConfig, Cursor, PollingConfig, Schema
 from orcapod.utils import arrow_utils
 from orcapod.utils.arrow_utils import system_tag_column_names
 from orcapod.utils.schema_utils import (
@@ -55,6 +55,7 @@ from orcapod.utils.schema_utils import (
 )
 
 if TYPE_CHECKING:
+    from orcapod.protocols.hashing_protocols import SemanticHasherProtocol
     from polars._typing import FrameInitTypes
 
     from orcapod.core.streams.arrow_table_stream import ArrowTableStream
@@ -426,6 +427,12 @@ class PollingSource(RootSource, Generic[T]):
     # -------------------------------------------------------------------------
     # Identity
     # -------------------------------------------------------------------------
+
+    def _identity_pipeline_hash(self, hasher: SemanticHasherProtocol) -> ContentHash:
+        """The combined hashes require a declared schema or a committed batch."""
+        if self._declared_arrow is None and not self._batches:
+            raise ValueError("Polling source pipeline structure requires a schema.")
+        return super()._identity_pipeline_hash(hasher)
 
     def identity_structure(self) -> Any:
         """Identity from the source id, the impl's own identity, tags and key columns.

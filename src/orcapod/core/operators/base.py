@@ -267,7 +267,9 @@ class UnaryOperator(StaticOutputOperatorPod):
                 # The typed empty stream the sync path returns needs a schema the
                 # channel does not carry (ITL-858), so nothing is emitted (ITL-865).
                 return
-            stream = self._materialize_input_stream(rows, input_pipeline_hashes[0])
+            stream = self._materialize_input_stream(
+                rows, input_pipeline_hashes[0], inputs[0]
+            )
             result = self.static_process(stream)
             for tag, data in result.iter_data():
                 await output.send((tag, data))
@@ -385,8 +387,12 @@ class BinaryOperator(StaticOutputOperatorPod):
                 # empty stream needs a schema the channels do not carry (ITL-858),
                 # so nothing is emitted (ITL-865).
                 return
-            left_stream = self._materialize_input_stream(left_rows, left_hash)
-            right_stream = self._materialize_input_stream(right_rows, right_hash)
+            left_stream = self._materialize_input_stream(
+                left_rows, left_hash, inputs[0]
+            )
+            right_stream = self._materialize_input_stream(
+                right_rows, right_hash, inputs[1]
+            )
             result = self.static_process(left_stream, right_stream)
             for tag, data in result.iter_data():
                 await output.send((tag, data))

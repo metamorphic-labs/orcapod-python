@@ -300,7 +300,8 @@ reordered.
 
 A stream, invocation or job node carries three chains. `pipeline_hash()` describes the
 structure. `source_chain()` starts at each slot with the bound source's own content hash.
-`name_chain()` starts with the slot's name. A single-input step passes both chains
+`name_chain()` starts with the slot's name. A raw stream outside a slot contributes
+an anonymous name term. Display labels do not participate. A single-input step passes both chains
 through unchanged unless the step contributes a term of its own. Multiple inputs are pooled in argument order for an ordered
 operator and by pipeline hash for a commutative operator. Within a pipeline-hash tie,
 the source and name chains each sort their own values. Repeated inputs contribute
@@ -312,7 +313,14 @@ contributing slot is unbound. The chain-based content hash is available internal
 `_chain_content_hash()` until the switch to `content_hash()`. Orcapod continues to use
 the existing hashes for graph keys and persistence. ITL-1590 tracks cases where the
 existing pipeline hash depends on source equality within a commutative input tie.
-A read-only operator whose pod cannot be restored uses its saved input order.
+An operator descriptor records nondefault input grouping in its optional
+`input_symmetry` field. A read-only operator uses that grouping when its pod cannot
+be restored. Older descriptors without this field use their saved argument order
+when the pod is unavailable.
+
+A polling source can report its source and name chains before it knows its schema.
+Its combined hashes require the pipeline hash, so they raise `ValueError` until
+the source declares a schema or commits its first batch.
 
 ## Hash site inventory
 
@@ -339,7 +347,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 | Location | What is hashed | Algorithm / label | Used as | Call sites |
 |---|---|---|---|---|
 | structure hasher | a Python value as a tagged JSON tree | SHA-256 of canonical JSON, `semantic_v1` | every `content_hash()` / `pipeline_hash()`, type and function hash; the names built on schema hashes | `hashing/semantic_hashing/semantic_hasher.py:SemanticAwarePythonHasher._hash_to_content_hash` |
-| three-chain hashes | a slot name, a pool of upstream chains, or the pipeline hash paired with one chain | SHA-256 of canonical JSON, with the corresponding chain or combined-hash label | into a hash for chain pooling and combining, or returned by an identity accessor | `core/identity_chains.py:_hash`, `core/identity_chains.py:_pool`, `core/identity_chains.py:IdentityChainsMixin._identity_chains`, `core/identity_chains.py:IdentityChainsMixin._chain_content_hash`, `core/identity_chains.py:IdentityChainsMixin.node_hash` |
+| three-chain hashes | a slot name, a pool of upstream chains, or the pipeline hash paired with one chain | SHA-256 of canonical JSON, with the corresponding chain or combined-hash label | into a hash for chain pooling and combining, or returned by an identity accessor | `core/identity_chains.py:_hash`, `core/identity_chains.py:_pool`, `core/identity_chains.py:IdentityChainsMixin._identity_hash`, `core/identity_chains.py:IdentityChainsMixin._compute_identity_chains.<locals>.<genexpr>`, `core/identity_chains.py:IdentityChainsMixin._chain_content_hash`, `core/identity_chains.py:IdentityChainsMixin.node_hash` |
 | Arrow hasher | a table after the semantic visitor | starfix, `arrow_v1` (a table Orcapod built: float rule on); `hash_table_strict`: `arrow_strict_v1` (a pyarrow table given as a value: every bit counts); `hash_table_ordered`: `arrow_ordered_v1` (a library value's digest: every bit counts); `hash_schema`: `arrow_schema_v1` | row data hashes, entry ids, row keys, default source ids, table values; every schema in an identity | `hashing/arrow_hashers.py:StarfixArrowHasher.hash_table`, `hashing/arrow_hashers.py:StarfixArrowHasher.hash_table_strict`, `hashing/arrow_hashers.py:StarfixArrowHasher.hash_table_ordered`, `hashing/arrow_hashers.py:StarfixArrowHasher.hash_schema`, `hashing/arrow_hashers.py:StarfixArrowHasher._digest`, `hashing/starfix_digest.py:_digest_table`, `hashing/starfix_digest.py:digest_schema` |
 | file hasher | a file's bytes | the configured digest function, label = its name (`sha256` in the data context; others: ITL-1155) | `File` value hash | `hashing/hash_utils.py:hash_file`, `hashing/hash_cachers.py:SqliteHashCacher.get`, `hashing/hash_cachers.py:SqliteHashCacher.put` |
 | directory hasher | a directory tree | Merkle tree of SHA-256 entries, `directory_v1`; file leaves taken with their label | `Directory` value hash | `hashing/directory_hashers.py:BasicDirectoryHasher.hash_directory`, `hashing/directory_hashers.py:_hash_dir` |

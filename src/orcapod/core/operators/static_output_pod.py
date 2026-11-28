@@ -986,7 +986,7 @@ class StaticOutputOperatorPod(TraceableBase):
             # otherwise it would fall back to a root's schema-only hash and an
             # operator would name its system tags after that. A source's pipeline
             # hash is that schema-only hash already.
-            stream: StreamProtocol = _RowsOfStream(
+            stream = _RowsOfStream(
                 table,
                 tag_columns=tag_keys,
                 pipeline_hash=upstream.pipeline_hash(),
@@ -1005,6 +1005,7 @@ class StaticOutputOperatorPod(TraceableBase):
                 upstreams=upstream.upstreams,
                 data_context=context,
             )
+        stream._identity_origin = upstream  # pyright: ignore[reportPrivateUsage]  # This stream is a row representation.
         # Every complete node output in the row-built form ends here (the rows'
         # rebuild, F's output, a stored-table output) or, with no row, in
         # ``_materialize_upstream``'s zero-row input: the places that mark it
@@ -1016,6 +1017,7 @@ class StaticOutputOperatorPod(TraceableBase):
     def _materialize_input_stream(
         rows: Sequence[tuple[TagProtocol, DataProtocol]],
         pipeline_hash: ContentHash,
+        reader: ReadableChannel[tuple[TagProtocol, DataProtocol]],
     ) -> StreamProtocol:
         """Rebuild an input stream from the rows a barrier ``async_execute`` collected.
 
@@ -1030,6 +1032,7 @@ class StaticOutputOperatorPod(TraceableBase):
         Args:
             rows: Non-empty sequence of (Tag, Data) pairs.
             pipeline_hash: The pipeline hash of the stream the rows came from.
+            reader: The input channel, which carries the original stream in a job.
 
         Returns:
             A stream over the rows, in order.
@@ -1037,6 +1040,7 @@ class StaticOutputOperatorPod(TraceableBase):
         Raises:
             ValueError: If ``rows`` is empty.
         """
+        from orcapod.core.nodes.operator_node import job_input_stream
         from orcapod.system_constants import constants
 
         table, tag_keys, data_tags = StaticOutputOperatorPod._rows_to_table(rows)
@@ -1044,13 +1048,15 @@ class StaticOutputOperatorPod(TraceableBase):
             pa.field(constants.CONTEXT_KEY, pa.large_string(), nullable=False),
             pa.array([data.data_context_key for _, data in rows], pa.large_string()),
         )
-        return _RowsOfStream(
+        stream = _RowsOfStream(
             table,
             tag_columns=tag_keys,
             pipeline_hash=pipeline_hash,
             data_tags=data_tags,
             data_context=contexts.resolve_context(rows[0][1].data_context_key),
         )
+        stream._identity_origin = job_input_stream(reader)  # pyright: ignore[reportPrivateUsage]  # This stream is a row representation.
+        return stream
 
     async def async_execute(
         self,
@@ -1093,8 +1099,10 @@ class StaticOutputOperatorPod(TraceableBase):
                 # the channels do not carry (ITL-858), so nothing is emitted (ITL-865).
                 return
             streams = [
-                self._materialize_input_stream(rows, pipeline_hash)
-                for rows, pipeline_hash in zip(all_rows, input_pipeline_hashes)
+                self._materialize_input_stream(rows, pipeline_hash, reader)
+                for rows, pipeline_hash, reader in zip(
+                    all_rows, input_pipeline_hashes, inputs, strict=True
+                )
             ]
             result = self.static_process(*streams)
             for tag, data in result.iter_data():
@@ -1942,16 +1950,16 @@ class DynamicPodStream(StreamBase):
                 # not (a raw stream's meta columns enter its hash, and its zero-row
                 # table has none): the system-tag names then follow the upstream's
                 # hash, as on the sync path (``_as_upstream_stream``'s rule).
-                inputs.append(
-                    _RowsOfStream(
-                        table,
-                        tag_columns=upstream.keys()[0],
-                        pipeline_hash=upstream.pipeline_hash(),
-                        data_tags=stream_data_tags(upstream),
-                        upstreams=upstream.upstreams,
-                        data_context=context,
-                    )
+                rows = _RowsOfStream(
+                    table,
+                    tag_columns=upstream.keys()[0],
+                    pipeline_hash=upstream.pipeline_hash(),
+                    data_tags=stream_data_tags(upstream),
+                    upstreams=upstream.upstreams,
+                    data_context=context,
                 )
+                rows._identity_origin = upstream  # pyright: ignore[reportPrivateUsage]  # This stream is a row representation.
+                inputs.append(rows)
                 continue
             inputs.append(
                 ArrowTableStream(

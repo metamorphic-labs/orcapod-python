@@ -16,16 +16,16 @@ if TYPE_CHECKING:
 class IdentityChains:
     """The three chains of one element. An unbound slot leaves sources absent."""
 
-    structure: ContentHash
+    pipeline_hash: Callable[[SemanticHasherProtocol], ContentHash]
     sources: ContentHash | None
     names: ContentHash
+    unbound_slots: frozenset[str] = frozenset()
 
 
 class IdentityWalkProtocol(Protocol):
     """One traversal with a common structural hasher and live slot bindings."""
 
     hasher: SemanticHasherProtocol
-    unbound_slots: set[str]
 
     def visit(self, element: IdentityChainProtocol) -> IdentityChains:
         """Compute the element's chains or reuse them from this walk."""
