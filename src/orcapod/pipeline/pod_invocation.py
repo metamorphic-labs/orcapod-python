@@ -10,18 +10,25 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from orcapod.core.base import ContentIdentifiableBase
+from orcapod.contexts import resolve_context
+from orcapod.core.base import ContentIdentifiableBase, PipelineElementBase
+from orcapod.core.identity_chains import IdentityChainsMixin
 
 if TYPE_CHECKING:
     from orcapod.protocols.core_protocols import (
+        ArgumentGroup,
         FunctionPodProtocol,
         OperatorPodProtocol,
         SideEffectPodProtocol,
         StreamProtocol,
     )
+    from orcapod.protocols.hashing_protocols import SemanticHasherProtocol
+    from orcapod.types import ContentHash
 
 
-class PodInvocation(ContentIdentifiableBase):
+class PodInvocation(  # pyright: ignore[reportUnsafeMultipleInheritance]  # Both hash bases use cooperative super().__init__.
+    ContentIdentifiableBase, PipelineElementBase, IdentityChainsMixin
+):
     """Abstract recording primitive for a pod applied to input streams.
 
     ``PodInvocation.identity_structure()`` returns
@@ -69,6 +76,27 @@ class PodInvocation(ContentIdentifiableBase):
     # ------------------------------------------------------------------
     # Identity — mirrors StreamBase.identity_structure()
     # ------------------------------------------------------------------
+
+    @property
+    def _identity_hasher(self) -> SemanticHasherProtocol:
+        """Use the same structural hasher as the node for this invocation."""
+        return resolve_context(self._pod.data_context_key).semantic_hasher
+
+    def _identity_inputs(self) -> tuple[StreamProtocol, ...]:
+        """Return the recorded arguments in order."""
+        return self.input_streams
+
+    def _identity_symmetry(self, inputs: tuple[StreamProtocol, ...]) -> ArgumentGroup:
+        """Respect the recorded pod's argument symmetry."""
+        return self._pod.argument_symmetry(inputs)
+
+    def pipeline_hash(
+        self, hasher: SemanticHasherProtocol | None = None
+    ) -> ContentHash:
+        """Return the structure hash of this invocation."""
+        return super().pipeline_hash(
+            self._identity_hasher if hasher is None else hasher
+        )
 
     def identity_structure(self) -> Any:
         """Return ``(pod, pod.argument_symmetry(input_streams))``.

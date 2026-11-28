@@ -262,6 +262,24 @@ def run_scenario() -> None:
     from tests.test_hashing.golden import cases
 
     _ = cases.compute_all()
+    from orcapod.operators import Join
+    from orcapod.sources import DictSource, PollingSource
+    from tests.test_channels.test_polling_source import NoArgSource
+
+    left, right = (
+        DictSource(
+            [{"tag": 1}],
+            tag_columns=["tag"],
+            tag_only_columns=False,
+            source_id=name,
+        )
+        for name in ("chain-left", "chain-right")
+    )
+    joined = Join()(left, right)
+    _ = joined._chain_content_hash()
+    _ = joined.node_hash()
+    pending = PollingSource(NoArgSource(), tag_columns=["id"], record_id_columns=["id"])
+    _ = pending.node_hash()
     hasher = get_default_context().semantic_hasher
     with tempfile.TemporaryDirectory() as tmp:
         root = _Path(tmp)

@@ -276,9 +276,18 @@ def identity(stream: Any) -> dict[str, Any]:
     tag_keys, _ = stream.keys()
     all_tags, _ = stream.keys(columns={"system_tags": True})
     tag_schema, data_schema = stream.output_schema()
+    content_hash = stream.content_hash().to_string()
+    if isinstance(stream, ArrowTableStream) and stream.producer is None:
+        with pytest.raises(ValueError, match="undefined.*hashing Arrow rows"):
+            _ = stream._chain_content_hash()
+        chain_content_hash = None
+    else:
+        chain_content_hash = stream._chain_content_hash().to_string()
     return {
-        "content_hash": stream.content_hash().to_string(),
+        "content_hash": content_hash,
         "pipeline_hash": stream.pipeline_hash().to_string(),
+        "chain_content_hash": chain_content_hash,
+        "node_hash": stream.node_hash().to_string(),
         "system_tag_names": sorted(k for k in all_tags if k not in tag_keys),
         "output_schema": (
             sorted((k, repr(t)) for k, t in tag_schema.items()),
@@ -1125,6 +1134,8 @@ def _job(
         out[f"{label}.hashes"] = (
             node.content_hash().to_string(),
             node.pipeline_hash().to_string(),
+            node._chain_content_hash().to_string(),
+            node.node_hash().to_string(),
         )
         out[f"{label}.rows"] = row_identity(list(node.iter_data()))
     derived = job.nodes["pod" if pod else "join"].as_source()

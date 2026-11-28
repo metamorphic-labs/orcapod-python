@@ -280,7 +280,9 @@ class Batch(UnaryOperator):
                 # Must collect all rows — barrier fallback
                 rows = await inputs[0].collect()
                 if rows:
-                    stream = self._materialize_input_stream(rows, pipeline_hash)
+                    stream = self._materialize_input_stream(
+                        rows, pipeline_hash, inputs[0]
+                    )
                     result = self.unary_static_process(stream)
                     for tag, data in result.iter_data():
                         await output.send((tag, data))
@@ -290,7 +292,9 @@ class Batch(UnaryOperator):
             async for tag, data in inputs[0]:
                 batch.append((tag, data))
                 if len(batch) >= self.batch_size:
-                    stream = self._materialize_input_stream(batch, pipeline_hash)
+                    stream = self._materialize_input_stream(
+                        batch, pipeline_hash, inputs[0]
+                    )
                     result = self.unary_static_process(stream)
                     for out_tag, out_data in result.iter_data():
                         await output.send((out_tag, out_data))
@@ -298,7 +302,7 @@ class Batch(UnaryOperator):
 
             # Flush partial batch
             if batch and not self.drop_partial_batch:
-                stream = self._materialize_input_stream(batch, pipeline_hash)
+                stream = self._materialize_input_stream(batch, pipeline_hash, inputs[0])
                 result = self.unary_static_process(stream)
                 for out_tag, out_data in result.iter_data():
                     await output.send((out_tag, out_data))

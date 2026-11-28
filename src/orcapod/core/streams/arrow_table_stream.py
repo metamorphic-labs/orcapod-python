@@ -10,6 +10,7 @@ import pyarrow as pa
 from orcapod.hashing.orcapod_table import OrcapodTable
 from orcapod import contexts
 from orcapod.core.datagrams import Data, Tag
+from orcapod.core.identity_chains import refuse_identity_io
 from orcapod.core.streams.base import (
     ZERO_ROW_INPUT_COLUMNS,
     StreamBase,
@@ -17,7 +18,11 @@ from orcapod.core.streams.base import (
 )
 from orcapod.core.streams.view import StreamView
 from orcapod.protocols.core_protocols import PodProtocol, StreamProtocol, TagProtocol
-from orcapod.protocols.hashing_protocols import PipelineElementProtocol
+from orcapod.protocols.hashing_protocols import (
+    IdentityChains,
+    IdentityWalkProtocol,
+    PipelineElementProtocol,
+)
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, Schema, SourceInfoValue
 from orcapod.utils import arrow_utils, schema_utils
@@ -227,6 +232,7 @@ class ArrowTableStream(StreamBase):
         # none of them in an order the input chose (developer, November 18 and 19,
         # 2026, ITL-1227): the table in its canonical row order (``_identity_table``),
         # hashed whole by the Arrow table handler, and the names as sorted tuples.
+        refuse_identity_io("this stream requires hashing Arrow rows")
         return (
             self.__class__.__name__,
             # A table Orcapod built: hashed by ``hash_table`` (Orcapod's float rule),
@@ -272,6 +278,18 @@ class ArrowTableStream(StreamBase):
         return arrow_utils.canonical_identity_row_order(
             table, self._tag_columns, self.data_context.arrow_hasher
         )
+
+    _identity_origin: StreamProtocol | None = None
+
+    def _identity_chains(self, walk: IdentityWalkProtocol) -> IdentityChains:
+        """A row build represents the original stream for the new chains."""
+        if self._identity_origin is not None:
+            return walk.visit(self._identity_origin)
+        return super()._identity_chains(walk)
+
+    def _identity_inputs(self) -> tuple[StreamProtocol, ...]:
+        """A table without a producer hashes as a root."""
+        return self.upstreams if self.producer is not None else ()
 
     def pipeline_identity_structure(self) -> Any:
         if self._producer is None or not isinstance(

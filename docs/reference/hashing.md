@@ -71,7 +71,7 @@ The container cell keeps its element count prefix, so it is self-contained and d
 depend on the cell boundary. `tests/test_hashing/test_hash_grammar.py` fails if any of these
 stops holding.
 
-The labels of v0.3:
+Hash labels:
 
 | Label | Names | Defined in |
 |---|---|---|
@@ -93,6 +93,11 @@ The labels of v0.3:
 | `batch_v1` | the folded source id and record id of `Batch` (site 6b) | `BATCH_FOLD_LABEL`, `core/operators/batch.py` |
 | `group_v1` | the folded source id and record id of `GroupBy` (site 6b), and the merged source-info token of a data-tag group key | `GROUP_BY_FOLD_LABEL`, `core/operators/group_by.py` |
 | `join_v1` | the merged source-info token of a key that is a data-tag on several inputs of a `Join` (site 6b) | `JOIN_FOLD_LABEL`, `core/operators/join.py` |
+| `slot_name_v1` | SHA-256 of the canonical tuple `("slot", name)` | `SLOT_NAME_HASH_LABEL`, `core/identity_chains.py` |
+| `source_chain_v1` | SHA-256 of the canonical tuple of upstream source chains, with any local contribution | `SOURCE_CHAIN_HASH_LABEL`, `core/identity_chains.py` |
+| `name_chain_v1` | SHA-256 of the canonical tuple of upstream name chains, with any local contribution | `NAME_CHAIN_HASH_LABEL`, `core/identity_chains.py` |
+| `content_hash_v1` | SHA-256 of the canonical tuple of the pipeline hash and source chain | `CONTENT_HASH_LABEL`, `core/identity_chains.py` |
+| `node_hash_v1` | SHA-256 of the canonical tuple of the pipeline hash and name chain | `NODE_HASH_LABEL`, `core/identity_chains.py` |
 | `sha256` | the file content hash: SHA-256 of the file's bytes | the file hasher's `algorithm` |
 
 Where a hash appears, and in which form:
@@ -291,6 +296,44 @@ reusable as its data changes: a default in-memory source id is the hash of the w
 key order with `hash_in_key_order=True`), and a position moves when rows are inserted or
 reordered.
 
+## Structure, source and name chains
+
+A stream, invocation or job node carries three chains. `pipeline_hash()` describes the
+structure. `source_chain()` starts at each slot with the bound source's own content hash.
+`name_chain()` starts with the slot's name. A raw stream outside a slot contributes
+an anonymous name term. Display labels do not participate. A single-input step passes both chains
+through unchanged unless the step contributes a term of its own. Ordered groups pool
+inputs in argument order. Commutative groups use the pipeline hash's canonical order,
+including when a group contains other groups. Within a tie the source and name chains
+each sort their own values. Repeated inputs contribute at every position.
+
+`node_hash()` combines the pipeline hash and the name chain. The chain-based content
+hash combines the pipeline hash and the source chain and is undefined while any
+contributing slot is unbound. The chain-based content hash is available internally as
+`_chain_content_hash()` until the switch to `content_hash()`. Orcapod continues to use
+the existing hashes for graph keys and persistence. ITL-1590 tracks cases where the
+existing pipeline hash depends on source equality within a commutative input tie.
+The saved job format does not carry input symmetry yet. A loaded built-in `Index`
+uses the saved pipeline hash and passes through the chains of its single input.
+Other unavailable operators raise an error for either chain or combined hash.
+The legacy pipeline and content hashes are available from the descriptor.
+
+A polling source, including one wrapped in a cache, can report its source chain,
+name chain, and node hash before it knows its schema. The node hash combines a
+pending polling-source structure term with the name chain without polling. Once a batch
+supplies the schema, the node hash combines the pipeline hash with the same name
+chain. The chain-based content hash requires the schema. Downstream identities that
+need the pipeline hash report that it is undefined until the schema is known.
+Polling source chain reads use the memoized legacy content hash when available.
+If computing that hash would call the polling implementation, the identity read
+raises an undefined-identity error.
+
+A plain derived source, including one wrapped in a cache, has no source chain while
+a contributing slot of its origin is unbound. Chain accessors report an undefined
+identity when they would have to build a lazy upstream from rows or hash a raw
+Arrow stream's rows. A raw Arrow stream itself can report its node hash from its
+schema and anonymous name.
+
 ## Hash site inventory
 
 Every place Orcapod produces a digest, and every place it reads one, with its class
@@ -316,6 +359,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 | Location | What is hashed | Algorithm / label | Used as | Call sites |
 |---|---|---|---|---|
 | structure hasher | a Python value as a tagged JSON tree | SHA-256 of canonical JSON, `semantic_v1` | every `content_hash()` / `pipeline_hash()`, type and function hash; the names built on schema hashes | `hashing/semantic_hashing/semantic_hasher.py:SemanticAwarePythonHasher._hash_to_content_hash` |
+| three-chain hashes | a slot name, a pool of upstream chains, or the pipeline hash paired with one chain | SHA-256 of canonical JSON, with the corresponding chain or combined-hash label | into a hash for chain pooling and combining, or returned by an identity accessor | `core/identity_chains.py:_hash`, `core/identity_chains.py:_pool`, `core/identity_chains.py:IdentityChainsMixin._identity_hash`, `core/identity_chains.py:IdentityChainsMixin._compute_identity_chains.<locals>.<genexpr>`, `core/identity_chains.py:IdentityChainsMixin._chain_content_hash`, `core/identity_chains.py:IdentityChainsMixin.node_hash`, `core/sources/polling_source.py:PollingSource._identity_node_pipeline_hash` |
 | Arrow hasher | a table after the semantic visitor | starfix, `arrow_v1` (a table Orcapod built: float rule on); `hash_table_strict`: `arrow_strict_v1` (a pyarrow table given as a value: every bit counts); `hash_table_ordered`: `arrow_ordered_v1` (a library value's digest: every bit counts); `hash_schema`: `arrow_schema_v1` | row data hashes, entry ids, row keys, default source ids, table values; every schema in an identity | `hashing/arrow_hashers.py:StarfixArrowHasher.hash_table`, `hashing/arrow_hashers.py:StarfixArrowHasher.hash_table_strict`, `hashing/arrow_hashers.py:StarfixArrowHasher.hash_table_ordered`, `hashing/arrow_hashers.py:StarfixArrowHasher.hash_schema`, `hashing/arrow_hashers.py:StarfixArrowHasher._digest`, `hashing/starfix_digest.py:_digest_table`, `hashing/starfix_digest.py:digest_schema` |
 | file hasher | a file's bytes | the configured digest function, label = its name (`sha256` in the data context; others: ITL-1155) | `File` value hash | `hashing/hash_utils.py:hash_file`, `hashing/hash_cachers.py:SqliteHashCacher.get`, `hashing/hash_cachers.py:SqliteHashCacher.put` |
 | directory hasher | a directory tree | Merkle tree of SHA-256 entries, `directory_v1`; file leaves taken with their label | `Directory` value hash | `hashing/directory_hashers.py:BasicDirectoryHasher.hash_directory`, `hashing/directory_hashers.py:_hash_dir` |
@@ -340,7 +384,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 
 | Location | Hash consumed | Into | Form | Call sites |
 |---|---|---|---|---|
-| nested hash in a structure | any nested hash: types, schemas, upstream streams, value hashes | the enclosing structure hash | `{"__type__": "hash", "label": ..., "digest": ...}` | `hashing/semantic_hashing/semantic_hasher.py:_nested_hash` |
+| nested hash in a structure | any nested hash: types, schemas, upstream streams, value hashes | the enclosing structure hash | `{"__type__": "hash", "label": ..., "digest": ...}` | `hashing/semantic_hashing/semantic_hasher.py:nested_hash` |
 | schema identity | the `arrow_schema_v1` hashes of a source's or slot's Arrow tag and data schemas, or of a function's output Arrow schema | a source's content and pipeline identity, system-tag column names, the function `uri` | the `ContentHash` objects, nested | `utils/schema_utils.py:arrow_schema_identity`, `utils/schema_utils.py:compute_schema_hash`, `core/data_function.py:DataFunctionBase.output_data_schema_hash` |
 | union and generic alias arguments | argument type hashes, sorted by digest, then label (ordering only) | the type hash, via the nested form | as above | `hashing/semantic_hashing/builtin_handlers.py:_sorted_hashes`, `hashing/semantic_hashing/builtin_handlers.py:_sorted_hashes.<locals>.<lambda>` |
 | logical-type cell, scalar and container | a value-hashed cell's value hash | the Arrow table hash | `<identifier>::<label>:<digest>`; a container cell: count, then per element a marker, a u64 length and the element token | `hashing/visitors.py:SemanticHashingVisitor.visit_extension` |
@@ -376,7 +420,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 | function `uri` (output-schema digest) | `core/data_function.py:DataFunctionBase.output_data_schema_hash` |
 | operator `uri` | `core/operators/static_output_pod.py:StaticOutputOperatorPod.uri` |
 | `schema:` / `instance:` / `node:` path components | `core/nodes/function_node.py:FunctionNodeBase.node_identity_path`, `core/nodes/operator_node.py:OperatorNodeBase.node_identity_path`, `side_effects.py:SideEffectJobNode.attach_databases`, `core/sources/cached_source.py:CachedSource._unversioned_cache_path` |
-| source-node slot names | `core/nodes/source_node.py:SourceNode.from_stream`, `core/nodes/source_node.py:SourceJobNode.from_stream` |
+| implicit source-node slot names for streams with no source name | `core/nodes/source_node.py:slot_name_for` |
 | source system-tag column name (schema digest) | `utils/schema_utils.py:compute_schema_hash` |
 | system-tag suffixes of `Join`, `MergeJoin`, `Batch`, `GroupBy` | `core/operators/join.py:Join._compute_system_tag_suffixes`, `core/operators/join.py:Join._predict_system_tag_schema`, `core/operators/join.py:Join.static_process`, `core/operators/merge_join.py:MergeJoin._system_tag_suffix`, `core/operators/batch.py:Batch.unary_output_schema`, `core/operators/batch.py:Batch.unary_static_process`, `core/operators/group_by.py:GroupBy.unary_output_schema`, `core/operators/group_by.py:GroupBy.unary_static_process` |
 | a saved hash shown as a digest | `core/nodes/function_node.py:_bare_digest` |
@@ -402,6 +446,7 @@ A record id is the row identifier (rule 8), built from row positions or key valu
 | in-memory lookup keys for a validated operator input or input pair (ITL-1358) | `core/operators/index.py:Index.validate_unary_input`, `core/operators/index.py:Index.async_execute`, `core/operators/pick.py:Pick.validate_unary_input`, `core/operators/pick.py:Pick.async_execute`, `core/operators/semijoin.py:SemiJoin.validate_binary_inputs`, `core/operators/semijoin.py:SemiJoin.async_execute` |
 | in-memory topological sort of compiled and restored nodes, using the pipeline hash to order ready invocations | `pipeline/base.py:AbstractPipelineBase._ordered_node_map.<locals>.order_key` |
 | canonical input order (sort by digest). Inputs with equal pipeline hashes (developer decision, November 16, 2026, ITL-1154: kept as it is): system-tag column names follow the stable pipeline-hash sort; each row's values are sorted by (source id, record id) by `sort_system_tag_values`, so the result does not depend on argument order; the operator's identity holds its inputs as a frozenset | `core/operators/join.py:Join.order_input_streams.<locals>.<lambda>` |
+| canonical input order for source and name chains (pipeline inputs' canonical JSON, then each chain's labelled hash within a tie) | `core/identity_chains.py:_pool_group` |
 | in-memory identity and repr | `core/base.py:ContentIdentifiableBase.__hash__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__hash__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__eq__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__repr__` |
 | comparing a stored hash with the computed one; comparing two schema hashes (bind, a stored read, a polled batch); error text | `core/nodes/source_node.py:SourceNodeBase._arrow_type_issue`, `core/sources/derived_source.py:DerivedSource._require_origin_types`, `core/sources/polling_source.py:PollingSource._require_declared_types`, `core/nodes/operator_node.py:OperatorJobNode._read_run_records`, `core/sources/source_proxy.py:SourceProxy.bind`, `core/data_function_proxy.py:DataFunctionProxy.bind`, `pipeline/job.py:PipelineJob.bind`, `errors.py:EphemeralResultMissingError.__init__` |
 

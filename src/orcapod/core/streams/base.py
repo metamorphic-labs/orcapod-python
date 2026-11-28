@@ -25,6 +25,7 @@ import pyarrow as pa
 
 from orcapod.core.base import TraceableBase
 from orcapod.core.data_tags import data_tag_names
+from orcapod.core.identity_chains import IdentityChainsMixin
 from orcapod.core.streams.record_batch_input import SOURCE_BATCH_ROWS, InputChannel
 from orcapod.core.streams.view import (
     SCHEMA_NEEDS_POLL_NOTE,
@@ -34,6 +35,7 @@ from orcapod.core.streams.view import (
     preview_html,
 )
 from orcapod.protocols.core_protocols import (
+    ArgumentGroup,
     DataProtocol,
     PodProtocol,
     StreamProtocol,
@@ -41,10 +43,14 @@ from orcapod.protocols.core_protocols import (
 )
 from orcapod.protocols.core_protocols.streams import RecordBatchInput
 from orcapod.system_constants import constants
-from orcapod.types import ColumnConfig, Condition, Schema
+from orcapod.types import ColumnConfig, Condition, ContentHash, Schema
 from orcapod.utils import arrow_utils
 
 if TYPE_CHECKING:
+    from orcapod.protocols.hashing_protocols import (
+        IdentityWalkProtocol,
+        SemanticHasherProtocol,
+    )
     from orcapod.types.explanation import Explanation
 
 # TODO: consider using this instead of making copy of dicts
@@ -750,7 +756,40 @@ def _rename_map(
     return {str(old): str(new) for old, new in pairs.items()}
 
 
-class StreamBase(TraceableBase):
+class StreamBase(TraceableBase, IdentityChainsMixin):
+    @property
+    def _identity_hasher(self) -> SemanticHasherProtocol:
+        """Use the stream's structural hasher for the walk."""
+        return self.data_context.semantic_hasher
+
+    def _identity_inputs(self) -> tuple[StreamProtocol, ...]:
+        """Return the stream's upstreams in argument order."""
+        return self.upstreams
+
+    def _identity_symmetry(self, inputs: tuple[StreamProtocol, ...]) -> ArgumentGroup:
+        """Respect the producer's symmetry, or the input order with no producer."""
+        producer = self.producer
+        return inputs if producer is None else producer.argument_symmetry(inputs)
+
+    def _identity_leaf(
+        self, walk: IdentityWalkProtocol
+    ) -> tuple[str | None, ContentHash | None] | None:
+        """A named source stands for its slot; a raw input has no slot name."""
+        if self.producer is not None or self._identity_inputs():
+            return None
+        from orcapod.core.sources.base import RootSource
+
+        name = None
+        if isinstance(self, RootSource):
+            try:
+                name = self.source_name
+            except ValueError:
+                # The saved-source fallback already names an anonymous source.
+                if self.source_id != "unknown":
+                    raise
+                name = "unknown"
+        return name, walk.binding_hash(self) if walk.include_sources else None
+
     @property
     @abstractmethod
     def producer(self) -> PodProtocol | None: ...

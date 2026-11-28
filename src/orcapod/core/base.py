@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any
 
@@ -10,6 +13,20 @@ from orcapod.config import DEFAULT_CONFIG, OrcapodConfig
 from orcapod.types import ContentHash
 
 logger = logging.getLogger(__name__)
+
+_live_content_hashes: ContextVar[
+    dict[int, tuple[object, dict[str, ContentHash]]] | None
+] = ContextVar("live_content_hashes", default=None)
+
+
+@contextmanager
+def live_content_hashes() -> Iterator[None]:
+    """Compute content hashes in a temporary cache for a live binding read."""
+    token = _live_content_hashes.set({})
+    try:
+        yield
+    finally:
+        _live_content_hashes.reset(token)
 
 
 # Base classes for Orcapod core components, providing common functionality.
@@ -144,6 +161,11 @@ class ContentIdentifiableBase(DataContextMixin, ABC):
         """
         ...
 
+    @property
+    def _content_hash_depends_on_bindings(self) -> bool:
+        """Whether a live identity read must bypass the legacy content memo."""
+        return True
+
     def content_hash(self, hasher=None) -> ContentHash:
         """
         Compute a hash based on the content of this object.
@@ -165,15 +187,20 @@ class ContentIdentifiableBase(DataContextMixin, ABC):
         if hasher is None:
             hasher = self.data_context.semantic_hasher
         cache_key = hasher.hasher_id
+        cache = self._content_hash_cache
+        live_cache = _live_content_hashes.get()
+        if live_cache is not None and self._content_hash_depends_on_bindings:
+            # Keep each object alive for the read so its id stays unique.
+            cache = live_cache.setdefault(id(self), (self, {}))[1]
 
         def content_resolver(obj):
             return obj.content_hash(hasher)
 
-        if cache_key not in self._content_hash_cache:
-            self._content_hash_cache[cache_key] = hasher.hash_object(
+        if cache_key not in cache:
+            cache[cache_key] = hasher.hash_object(
                 self.identity_structure(), resolver=content_resolver
             )
-        return self._content_hash_cache[cache_key]
+        return cache[cache_key]
 
     def __hash__(self) -> int:
         """

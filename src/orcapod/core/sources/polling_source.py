@@ -22,6 +22,7 @@ import polars as pl
 import pyarrow as pa
 from typing_extensions import override
 
+from orcapod.core.identity_chains import refuse_identity_io
 from orcapod.core.sources.base import RootSource
 from orcapod.core.sources.source_ids import hash_source_name
 from orcapod.logical_types.canonical_form import declaration_form_schema
@@ -45,7 +46,7 @@ from orcapod.errors import (
     SchemaInconsistencyError,
 )
 from orcapod.system_constants import constants
-from orcapod.types import ColumnConfig, Cursor, PollingConfig, Schema
+from orcapod.types import ContentHash, ColumnConfig, Cursor, PollingConfig, Schema
 from orcapod.utils import arrow_utils
 from orcapod.utils.arrow_utils import system_tag_column_names
 from orcapod.utils.schema_utils import (
@@ -55,6 +56,7 @@ from orcapod.utils.schema_utils import (
 )
 
 if TYPE_CHECKING:
+    from orcapod.protocols.hashing_protocols import SemanticHasherProtocol
     from polars._typing import FrameInitTypes
 
     from orcapod.core.streams.arrow_table_stream import ArrowTableStream
@@ -427,6 +429,29 @@ class PollingSource(RootSource, Generic[T]):
     # Identity
     # -------------------------------------------------------------------------
 
+    def _identity_pipeline_hash(self, hasher: SemanticHasherProtocol) -> ContentHash:
+        """The source combination requires a declared schema or a committed batch."""
+        if self._declared_arrow is None and not self._batches:
+            raise ValueError(
+                "Polling source pipeline identity is undefined: it requires a schema."
+            )
+        return super()._identity_pipeline_hash(hasher)
+
+    def _identity_node_pipeline_hash(
+        self, hasher: SemanticHasherProtocol
+    ) -> ContentHash:
+        """Use a pending-schema structure term until the first batch commits."""
+        if self._declared_arrow is None and not self._batches:
+            self._note_provisional_identity_use()
+            return hasher.hash_object(("polling_source", None))
+        return super()._identity_node_pipeline_hash(hasher)
+
+    @property
+    @override
+    def _content_hash_depends_on_bindings(self) -> bool:
+        """A polling implementation's identity has no upstream slot bindings."""
+        return False
+
     def identity_structure(self) -> Any:
         """Identity from the source id, the impl's own identity, tags and key columns.
 
@@ -441,6 +466,7 @@ class PollingSource(RootSource, Generic[T]):
         known only after a poll (ITL-1316 decides this source's identity).
         """
         self._note_provisional_identity_use()  # a direct read is a use (ITL-1331)
+        refuse_identity_io("this polling source requires calling its identity callback")
         return (
             self.source_id,
             self._impl.identity(),
@@ -502,6 +528,7 @@ class PollingSource(RootSource, Generic[T]):
                 return tag_schema, self._data_schema
         if self._batches:
             return self._batches[0].output_schema(columns=columns, all_info=all_info)
+        refuse_identity_io()
         _ = self._sync_poll_and_commit()
         return self._get_combined_stream().output_schema(
             columns=columns, all_info=all_info
@@ -539,6 +566,7 @@ class PollingSource(RootSource, Generic[T]):
                 return tag_keys, tuple(self._data_schema.keys())
         if self._batches:
             return self._batches[0].keys(columns=columns, all_info=all_info)
+        refuse_identity_io()
         _ = self._sync_poll_and_commit()
         return self._get_combined_stream().keys(columns=columns, all_info=all_info)
 
@@ -767,6 +795,7 @@ class PollingSource(RootSource, Generic[T]):
 
         Safe to call concurrently with ``async_iter_data``.
         """
+        refuse_identity_io()
         with self._state_lock:
             cursor_snapshot = self._cursor
 

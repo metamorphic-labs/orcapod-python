@@ -36,6 +36,7 @@ from orcapod.core.data_tags import (
     stream_data_tags,
 )
 from orcapod.core.function_pod import FunctionPodStream
+from orcapod.core.identity_chains import refuse_identity_io
 from orcapod.core.operators.provisional import (
     provisional_operator_name,
     warn_provisional_operator,
@@ -74,6 +75,7 @@ from orcapod.types import ColumnConfig, ContentHash, Schema
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from orcapod.protocols.hashing_protocols import IdentityChains, IdentityWalkProtocol
     from orcapod.protocols.hashing_protocols import SemanticHasherProtocol
 
 
@@ -985,7 +987,7 @@ class StaticOutputOperatorPod(TraceableBase):
             # otherwise it would fall back to a root's schema-only hash and an
             # operator would name its system tags after that. A source's pipeline
             # hash is that schema-only hash already.
-            stream: StreamProtocol = _RowsOfStream(
+            stream = _RowsOfStream(
                 table,
                 tag_columns=tag_keys,
                 pipeline_hash=upstream.pipeline_hash(),
@@ -1004,6 +1006,7 @@ class StaticOutputOperatorPod(TraceableBase):
                 upstreams=upstream.upstreams,
                 data_context=context,
             )
+        stream._identity_origin = upstream  # pyright: ignore[reportPrivateUsage]  # This stream is a row representation.
         # Every complete node output in the row-built form ends here (the rows'
         # rebuild, F's output, a stored-table output) or, with no row, in
         # ``_materialize_upstream``'s zero-row input: the places that mark it
@@ -1015,6 +1018,7 @@ class StaticOutputOperatorPod(TraceableBase):
     def _materialize_input_stream(
         rows: Sequence[tuple[TagProtocol, DataProtocol]],
         pipeline_hash: ContentHash,
+        reader: ReadableChannel[tuple[TagProtocol, DataProtocol]],
     ) -> StreamProtocol:
         """Rebuild an input stream from the rows a barrier ``async_execute`` collected.
 
@@ -1029,6 +1033,7 @@ class StaticOutputOperatorPod(TraceableBase):
         Args:
             rows: Non-empty sequence of (Tag, Data) pairs.
             pipeline_hash: The pipeline hash of the stream the rows came from.
+            reader: The input channel, which carries the original stream in a job.
 
         Returns:
             A stream over the rows, in order.
@@ -1036,6 +1041,7 @@ class StaticOutputOperatorPod(TraceableBase):
         Raises:
             ValueError: If ``rows`` is empty.
         """
+        from orcapod.core.nodes.operator_node import job_input_stream
         from orcapod.system_constants import constants
 
         table, tag_keys, data_tags = StaticOutputOperatorPod._rows_to_table(rows)
@@ -1043,13 +1049,15 @@ class StaticOutputOperatorPod(TraceableBase):
             pa.field(constants.CONTEXT_KEY, pa.large_string(), nullable=False),
             pa.array([data.data_context_key for _, data in rows], pa.large_string()),
         )
-        return _RowsOfStream(
+        stream = _RowsOfStream(
             table,
             tag_columns=tag_keys,
             pipeline_hash=pipeline_hash,
             data_tags=data_tags,
             data_context=contexts.resolve_context(rows[0][1].data_context_key),
         )
+        stream._identity_origin = job_input_stream(reader)  # pyright: ignore[reportPrivateUsage]  # This stream is a row representation.
+        return stream
 
     async def async_execute(
         self,
@@ -1092,8 +1100,10 @@ class StaticOutputOperatorPod(TraceableBase):
                 # the channels do not carry (ITL-858), so nothing is emitted (ITL-865).
                 return
             streams = [
-                self._materialize_input_stream(rows, pipeline_hash)
-                for rows, pipeline_hash in zip(all_rows, input_pipeline_hashes)
+                self._materialize_input_stream(rows, pipeline_hash, reader)
+                for rows, pipeline_hash, reader in zip(
+                    all_rows, input_pipeline_hashes, inputs, strict=True
+                )
             ]
             result = self.static_process(*streams)
             for tag, data in result.iter_data():
@@ -1580,6 +1590,7 @@ class RowsOnRead:
     def built(self) -> StreamProtocol:
         """The stream, built from the rows on the first call (``main``'s row path)."""
         if self._stream is None:
+            refuse_identity_io("this stream requires materializing rows")
             self._stream = StaticOutputOperatorPod._materialize_upstream(
                 self._rows, self._node
             )
@@ -1661,6 +1672,26 @@ class RowsOnRead:
     def last_modified(self) -> Any:
         source = self._stream if self._stream is not None else self._node
         return getattr(source, "last_modified", None)
+
+    def _identity_chains(self, walk: IdentityWalkProtocol) -> IdentityChains:
+        """Use the stream this output describes without building its rows."""
+        return walk.visit(self._node)
+
+    def source_chain(self) -> ContentHash | None:
+        """Return the underlying node's source chain."""
+        return self._node.source_chain()
+
+    def name_chain(self) -> ContentHash:
+        """Return the underlying node's name chain."""
+        return self._node.name_chain()
+
+    def _chain_content_hash(self) -> ContentHash:
+        """Return the underlying node's chain-based content hash."""
+        return self._node._chain_content_hash()  # pyright: ignore[reportPrivateUsage]  # Transparent stream wrapper.
+
+    def node_hash(self) -> ContentHash:
+        """Return the underlying node's node hash."""
+        return self._node.node_hash()
 
     def __getattr__(self, name: str) -> Any:
         # Every other member (``join``, ``as_polars_df``, ...) is the built stream's.
@@ -1772,6 +1803,10 @@ class _RowsOfStream(ArrowTableStream):
             data_context=data_context,
         )
         self._input_pipeline_hash: ContentHash = pipeline_hash
+
+    def _identity_inputs(self) -> tuple[StreamProtocol, ...]:
+        """Preserve the restored node's lineage even without its pod."""
+        return self.upstreams
 
     def pipeline_hash(
         self, hasher: SemanticHasherProtocol | None = None
@@ -1917,16 +1952,16 @@ class DynamicPodStream(StreamBase):
                 # not (a raw stream's meta columns enter its hash, and its zero-row
                 # table has none): the system-tag names then follow the upstream's
                 # hash, as on the sync path (``_as_upstream_stream``'s rule).
-                inputs.append(
-                    _RowsOfStream(
-                        table,
-                        tag_columns=upstream.keys()[0],
-                        pipeline_hash=upstream.pipeline_hash(),
-                        data_tags=stream_data_tags(upstream),
-                        upstreams=upstream.upstreams,
-                        data_context=context,
-                    )
+                rows = _RowsOfStream(
+                    table,
+                    tag_columns=upstream.keys()[0],
+                    pipeline_hash=upstream.pipeline_hash(),
+                    data_tags=stream_data_tags(upstream),
+                    upstreams=upstream.upstreams,
+                    data_context=context,
                 )
+                rows._identity_origin = upstream  # pyright: ignore[reportPrivateUsage]  # This stream is a row representation.
+                inputs.append(rows)
                 continue
             inputs.append(
                 ArrowTableStream(

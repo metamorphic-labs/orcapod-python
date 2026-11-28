@@ -17,7 +17,7 @@ from orcapod.core.sources.polling_source import PollingSource
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import CursorInvalidatedError
 from orcapod.protocols.core_protocols.sources import DynamicSourceProtocol
-from orcapod.types import Cursor, PollingConfig, Schema
+from orcapod.types import ContentHash, Cursor, PollingConfig, Schema
 
 
 # ===========================================================================
@@ -1821,3 +1821,144 @@ class TestPollingSourceTagOrder:
             self._source(tags, ["a", "b", "c"]).content_hash()
             != self._source(tags, ["c", "b", "a"]).content_hash()
         )
+
+
+@pytest.mark.parametrize("cached", [False, True])
+def test_polling_chain_reads_do_not_call_user_code(
+    monkeypatch: pytest.MonkeyPatch, cached: bool
+) -> None:
+    """Source identity can reuse the legacy memo but cannot run the implementation."""
+    from orcapod.databases import InMemoryArrowDatabase
+    from orcapod.sources import CachedSource
+
+    impl = FakeDynamicSource(
+        batches=[_batch(1, 10)], schema_override=Schema({"id": int, "v": int})
+    )
+    source = PollingSource(
+        impl, tag_columns="id", source_id="declared", record_id_columns="id"
+    )
+    stream = CachedSource(source, InMemoryArrowDatabase()) if cached else source
+
+    def unexpected_callback(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("a new identity read called the polling implementation")
+
+    with monkeypatch.context() as guard:
+        for method in ("identity", "schema", "poll", "fetch"):
+            guard.setattr(impl, method, unexpected_callback)
+        assert stream.name_chain() and stream.node_hash()
+        for accessor in (stream.source_chain, stream._chain_content_hash):
+            with pytest.raises(ValueError, match="undefined.*polling.*identity"):
+                _ = accessor()
+
+    expected = stream.content_hash()
+    with monkeypatch.context() as guard:
+        for method in ("identity", "schema", "poll", "fetch"):
+            guard.setattr(impl, method, unexpected_callback)
+        assert stream.source_chain() == expected
+        assert stream._chain_content_hash()
+
+
+def test_polling_leaf_chains_are_available_before_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Neither leaf chain needs a schema or a polling attempt."""
+    source = PollingSource(
+        NoArgSource(), tag_columns=["id"], source_id="pending", record_id_columns=["id"]
+    )
+
+    def unexpected_poll() -> None:
+        pytest.fail("pending identities must not poll for a schema")
+
+    expected = source.content_hash()
+    monkeypatch.setattr(source, "_sync_poll_and_commit", unexpected_poll)
+    assert source.source_chain() == expected
+    name_chain = source.name_chain()
+    node_hash = source.node_hash()
+    assert isinstance(node_hash, ContentHash)
+    source.label = "new label"
+    assert source.name_chain() == name_chain
+    assert source.node_hash() == node_hash
+    with pytest.raises(ValueError, match="requires a schema"):
+        source._chain_content_hash()
+
+
+def test_polling_leaf_chains_stay_stable_when_a_batch_supplies_schema() -> None:
+    """Learning the schema enables content identity while leaf chains stay stable."""
+    source = PollingSource(
+        FakeDynamicSource(batches=[_batch(1, 10)]),
+        tag_columns="id",
+        record_id_columns="id",
+    )
+    _ = source.content_hash()
+    before = source.source_chain(), source.name_chain()
+    pending_hash = source.node_hash()
+    assert isinstance(pending_hash, ContentHash)
+    assert list(source)
+    assert (source.source_chain(), source.name_chain()) == before
+    assert source.node_hash() != pending_hash
+    assert source._chain_content_hash()
+
+
+def test_cached_polling_source_has_node_hash_without_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cache preserves the pending structure term of a polling source."""
+    from orcapod.databases import InMemoryArrowDatabase
+    from orcapod.sources import CachedSource
+
+    source = PollingSource(
+        FakeDynamicSource(batches=[_batch(1, 10)]),
+        tag_columns="id",
+        source_id="pending",
+        record_id_columns="id",
+    )
+    cached = CachedSource(source, InMemoryArrowDatabase())
+    expected = cached.content_hash()
+    assert source.content_hash() == expected
+    with monkeypatch.context() as guard:
+
+        def unexpected_fetch() -> None:
+            pytest.fail("pending identities must not fetch for a schema")
+
+        guard.setattr(source, "_sync_poll_and_commit", unexpected_fetch)
+        assert cached.source_chain() == source.source_chain()
+        assert cached.name_chain() == source.name_chain()
+        pending = cached.node_hash()
+        assert pending == source.node_hash()
+        with pytest.raises(ValueError, match="requires a schema"):
+            _ = cached._chain_content_hash()
+    assert list(source)
+    assert cached.node_hash() == source.node_hash() != pending
+    assert cached._chain_content_hash() == source._chain_content_hash()
+
+
+def test_batch_identities_do_not_fetch_pending_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A downstream identity cannot infer a schema by polling its input."""
+    from orcapod.protocols.core_protocols import StreamProtocol
+    from orcapod.operators import Batch
+
+    impl = FakeDynamicSource(batches=[_batch(1, 10)])
+    source = PollingSource(
+        impl, tag_columns="id", source_id="pending", record_id_columns="id"
+    )
+    result = Batch(2)(source)
+    assert isinstance(result, StreamProtocol)
+
+    def unexpected_fetch() -> None:
+        pytest.fail("pending identities must not fetch for a schema")
+
+    with monkeypatch.context() as guard:
+        guard.setattr(source, "_sync_poll_and_commit", unexpected_fetch)
+        guard.setattr(impl, "identity", unexpected_fetch)
+        name = result.name_chain()
+    _ = source.content_hash()
+    with monkeypatch.context() as guard:
+        guard.setattr(source, "_sync_poll_and_commit", unexpected_fetch)
+        for accessor in (result.node_hash, result._chain_content_hash):
+            with pytest.raises(ValueError, match="undefined.*requires a schema"):
+                _ = accessor()
+    assert list(source)
+    assert result.name_chain() == name
+    assert result.node_hash() and result._chain_content_hash()

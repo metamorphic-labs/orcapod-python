@@ -91,6 +91,7 @@ from orcapod.protocols.core_protocols import (
 )
 from orcapod.protocols.core_protocols.operator_pod import OperatorPodProtocol
 from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+from orcapod.protocols.hashing_protocols import IdentityWalkProtocol
 from orcapod.system_constants import OPERATOR_DB_SCHEMA_VERSION, constants
 import orcapod.core.row_ids as row_ids
 from orcapod.types import CacheMode, ColumnConfig, ContentHash, Schema
@@ -263,7 +264,7 @@ class OperatorNodeBase(StreamBase):
         self._stored_schema: dict = {}
         self._stored_node_uri: tuple[str, ...] = ()
         self._stored_pipeline_path: tuple[str, ...] = ()
-        self._descriptor: dict = {}
+        self._descriptor: dict[str, Any] = {}
 
         if table_scope not in ("pipeline_hash", "content_hash"):
             raise ValueError(
@@ -294,6 +295,32 @@ class OperatorNodeBase(StreamBase):
 
     def identity_structure(self) -> Any:
         return self.pipeline_identity_structure()
+
+    def _identity_leaf(self, walk: IdentityWalkProtocol) -> None:
+        """Require the operator's grouping unless the saved unary form suffices."""
+        if self._operator is None:
+            from orcapod.core.operators.index import Index
+
+            saved_config: object = self._descriptor.get("operator_config")
+            config = (
+                cast("dict[str, object]", saved_config)
+                if isinstance(saved_config, dict)
+                else {}
+            )
+            if (
+                config.get("class_name") == Index.__name__
+                and config.get("module_path") == Index.__module__
+                and self._stored_pipeline_hash is not None
+                and len(self._identity_inputs()) == 1
+            ):
+                # Index contributes no chain terms and has exactly one input,
+                # so the saved structure and the input's chains suffice.
+                return None
+            raise ValueError(
+                "Cannot compute operator identity chains because the saved form "
+                "does not carry input symmetry yet and the operator is unavailable."
+            )
+        return None
 
     def pipeline_identity_structure(self) -> Any:
         return (self._operator, self._operator.argument_symmetry(self._input_streams))
@@ -373,6 +400,7 @@ class OperatorNodeBase(StreamBase):
 
         refuse_restricted_operator_cache(self, self.cache_mode, streams=value)
         self._input_streams = value
+        self._invalidate_identity_chains(names=True)
         self._forget_output_schema()
 
     @property
@@ -627,6 +655,14 @@ class OperatorNode(OperatorNodeBase):
     and serialized to disk via ``Pipeline.save()``.
     """
 
+    _saved_identity_inputs: tuple[StreamProtocol, ...] | None = None
+
+    def _identity_inputs(self) -> tuple[StreamProtocol, ...]:
+        """Retain a restored blueprint node's inputs for its identity walk."""
+        if self._saved_identity_inputs is not None:
+            return self._saved_identity_inputs
+        return super()._identity_inputs()
+
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
         """Raise ``PipelineJobRequiredError`` — blueprint nodes cannot produce data.
 
@@ -782,6 +818,7 @@ class OperatorNode(OperatorNodeBase):
         # From OperatorNodeBase
         node._operator = None
         node._input_streams = ()
+        node._saved_identity_inputs = tuple(input_streams)
         node.tracker_manager = DEFAULT_TRACKER_MANAGER
 
         # Descriptor metadata for read-only access

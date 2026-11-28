@@ -50,6 +50,8 @@ from orcapod.utils import schema_utils
 
 if TYPE_CHECKING:
     from orcapod.protocols.database_protocols import DatabaseRegistryProtocol
+    from orcapod.protocols.hashing_protocols import SemanticHasherProtocol
+    from orcapod.types import ContentHash
 
 logger = logging.getLogger(__name__)
 
@@ -255,6 +257,14 @@ class CachedSource(RootSource):
     # Identity — delegate to wrapped source
     # -------------------------------------------------------------------------
 
+    @property
+    @override
+    def _content_hash_depends_on_bindings(self) -> bool:
+        """Use the live memo whenever the wrapped preimage may follow a binding."""
+        if isinstance(self._source, RootSource):
+            return self._source._content_hash_depends_on_bindings
+        return True
+
     def identity_structure(self) -> Any:
         return self._source.identity_structure()
 
@@ -267,6 +277,26 @@ class CachedSource(RootSource):
     def source_name(self) -> str:
         """The name part of the wrapped source's source id."""
         return parse_source_id(self._source.source_id).name
+
+    @override
+    def _identity_pipeline_hash(self, hasher: SemanticHasherProtocol) -> ContentHash:
+        """Use the wrapped source's schema guard before inspecting cached structure."""
+        if isinstance(self._source, RootSource) and schema_requires_io(
+            self._source, ColumnConfig()
+        ):
+            return self._source._identity_pipeline_hash(hasher)
+        return super()._identity_pipeline_hash(hasher)
+
+    @override
+    def _identity_node_pipeline_hash(
+        self, hasher: SemanticHasherProtocol
+    ) -> ContentHash:
+        """Use the wrapped source's pending structure until its schema is known."""
+        if isinstance(self._source, RootSource) and schema_requires_io(
+            self._source, ColumnConfig()
+        ):
+            return self._source._identity_node_pipeline_hash(hasher)
+        return super()._identity_node_pipeline_hash(hasher)
 
     def _compute_arrow_schemas(self) -> "tuple[pa.Schema, pa.Schema]":
         """The wrapped source's Arrow schemas: the cache stores that source's rows."""

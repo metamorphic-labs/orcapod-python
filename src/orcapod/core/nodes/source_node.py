@@ -25,6 +25,7 @@ from orcapod.core.nodes.provenance_methods import ProvenanceMethods
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
 from orcapod.core.datagrams import Data, Tag
+from orcapod.core.identity_chains import IdentityChainsMixin, track_binding_dependency
 from orcapod.core.operators.drop_nulls import _without_none  # pyright: ignore[reportPrivateUsage]  # DropNulls' rule for removing None from a type, shared, never copied
 from orcapod.core.sources.base import table_is_rows
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
@@ -72,6 +73,10 @@ if TYPE_CHECKING:
         RecordBatchInput,
     )
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
+    from orcapod.protocols.hashing_protocols import (
+        IdentityWalkProtocol,
+        SemanticHasherProtocol,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -509,7 +514,7 @@ def _closed_feed(node: SourceNodeBase) -> CompleteStreamFeed:
     return feed
 
 
-class SourceNodeBase(TraceableBase, ABC):
+class SourceNodeBase(TraceableBase, IdentityChainsMixin, ABC):
     """Abstract base for SourceNode and SourceJobNode.
 
     Provides schema-based identity (content_hash, pipeline_hash) and
@@ -743,6 +748,29 @@ class SourceNodeBase(TraceableBase, ABC):
                 role: list(names) for role, names in texts["nullable"].items()
             },
         }
+
+    @property
+    def _identity_hasher(self) -> SemanticHasherProtocol:
+        """Use the slot's structural hasher for the walk."""
+        return self.data_context.semantic_hasher
+
+    def _identity_leaf(
+        self, walk: IdentityWalkProtocol
+    ) -> tuple[str, ContentHash | None]:
+        """Use the declared slot name and follow the binding to a concrete source."""
+        if not walk.include_sources:
+            return self.name, None
+        bound = self._bound_stream()
+        if bound is None:
+            return self.name, None
+        from orcapod.core.sources.base import RootSource
+
+        if isinstance(bound, RootSource):
+            return self.name, walk.binding_hash(bound)
+        sources = walk.visit(bound).sources
+        if sources is None or isinstance(bound, SourceNodeBase):
+            return self.name, sources
+        return self.name, walk.binding_hash(bound)
 
     def _bound_stream(self) -> "StreamProtocol | None":
         """The concrete stream bound to this slot; a declaration has none."""
@@ -1475,6 +1503,21 @@ class SourceNodeBase(TraceableBase, ABC):
         return pa.Table.from_batches([], schema=pa.schema(fields))
 
 
+def slot_name_for(stream: StreamProtocol, content: ContentHash | None = None) -> str:
+    """Return the current implicit slot name of a stream.
+
+    Root sources use their source name. Other streams use their label and content
+    digest, as when captured on their own.
+    """
+    from orcapod.core.sources.base import RootSource
+
+    if isinstance(stream, RootSource):
+        return stream.source_name
+    if content is None:
+        content = stream.content_hash()
+    return f"{stream.label}:{content.to_hex()}"
+
+
 class SourceNode(SourceNodeBase):
     """Schema-only input-slot declaration for ``Pipeline`` recording.
 
@@ -1549,17 +1592,7 @@ class SourceNode(SourceNodeBase):
         if isinstance(stream, SourceNode):
             return stream
         tag_schema, data_schema = stream.output_schema()
-        if name is not None:
-            slot_name = name
-        else:
-            # Local import avoids a module-level circular dependency between
-            # core.nodes and core.sources.
-            from orcapod.core.sources.base import RootSource
-
-            if isinstance(stream, RootSource):
-                slot_name = stream.source_name
-            else:
-                slot_name = f"{stream.label}:{stream.content_hash().to_hex()}"
+        slot_name = name if name is not None else slot_name_for(stream)
         if not isinstance(stream, SourceNodeBase):
             _require_stream_arrow_types(stream, slot_name)
         node = cls(
@@ -1730,10 +1763,12 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
             SourceSpecMismatchError: If *value* does not fit the declared schema.
         """
         form = None if value is None else self._declared_form_for(value)
-        self._bound_source = value
-        self._declared_form = form
-        self._invalidate_content_hash_cache()
-        self._invalidate_pipeline_hash_cache()
+        with self._identity_lock:
+            self._invalidate_identity_chains()
+            self._bound_source = value
+            self._declared_form = form
+            self._invalidate_content_hash_cache()
+            self._invalidate_pipeline_hash_cache()
 
     @property
     def last_modified(self) -> datetime | None:
@@ -1866,6 +1901,7 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
             Bound source's identity structure when bound; schema-based
             identity (inherited from SourceNodeBase) when unbound.
         """
+        track_binding_dependency(self)
         if self._bound_source is not None:
             return self._bound_source.identity_structure()
         return super().identity_structure()
@@ -2202,17 +2238,7 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
                 #   2. stream.source_name for RootSource (its id without the kind part)
                 #   3. label + short hash prefix for any other concrete stream type
                 tag_schema, data_schema = stream.output_schema()
-                if name is not None:
-                    slot_name = name
-                else:
-                    # Local import avoids a module-level circular dependency between
-                    # core.nodes and core.sources.
-                    from orcapod.core.sources.base import RootSource
-
-                    if isinstance(stream, RootSource):
-                        slot_name = stream.source_name
-                    else:
-                        slot_name = f"{stream.label}:{stream.content_hash().to_hex()}"
+                slot_name = name if name is not None else slot_name_for(stream)
                 _require_stream_arrow_types(stream, slot_name)
                 return cls(
                     name=slot_name,

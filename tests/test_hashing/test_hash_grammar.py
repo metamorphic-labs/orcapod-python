@@ -43,6 +43,11 @@ KNOWN_LABELS = {
     "torch_tensor_v1",
     "group_v1",
     "batch_v1",
+    "slot_name_v1",
+    "source_chain_v1",
+    "name_chain_v1",
+    "content_hash_v1",
+    "node_hash_v1",
 }
 
 
