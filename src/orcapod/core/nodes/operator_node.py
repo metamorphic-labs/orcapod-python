@@ -1953,6 +1953,8 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
                 ``REPLAY``) over a restricted source (ITL-1218); nothing has run.
             InconsistentSourceError: If distinct source objects share a content
                 hash, or sources with one ID differ in schema or key columns.
+            SourceSpecMismatchError: If a bound source now depends on a bindable slot
+                or the live inputs contain a cycle (ITL-1559).
         """
         from orcapod.pipeline.node_run import (
             check_sources,
@@ -1962,10 +1964,14 @@ class OperatorJobNode(ProvenanceMethods, RunHoldingNode, OperatorNodeBase):
         )
         from orcapod.pipeline.restrictions import refuse_restriction_conflicts
         from orcapod.pipeline.run_summary import warn_row_failures
-        from orcapod.pipeline.source_consistency import require_consistent_sources
+        from orcapod.pipeline.source_consistency import (
+            require_consistent_sources,
+            require_run_source_bindings,
+        )
 
         if self._loaded and not load_only:
             raise self._cannot_compute_error()
+        require_run_source_bindings([self])
         require_consistent_sources([(f"node {self.label!r}", self)])
         # A source read under two restrictions, or a caching operator over a restricted
         # source, is refused before any source is checked and before anything is

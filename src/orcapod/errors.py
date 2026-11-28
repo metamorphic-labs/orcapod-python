@@ -612,14 +612,22 @@ class UnboundSourceError(RuntimeError):
 
 
 class SourceSpecMismatchError(InputValidationError, ValueError):
-    """Raised when a source does not fit its slot or depends on a bindable slot.
+    """Raised for an incompatible source binding or a cycle in live inputs.
 
     A source fits a slot when its tag and data columns have the slot's names, roles and
     Python types (ITL-1112): those are what every downstream pipeline hash, and so every
     stored path, is built from. The message names the slot and the column, and for a type
-    difference both types. For a slot-dependent source, the message names both slots
-    (ITL-1559). Raised before the binding is installed.
+    difference both types. For a slot-dependent source, the message names the
+    dependency and any known receiving slot (ITL-1559). The error is raised before
+    installing an invalid binding or running with one.
     """
+
+
+def live_input_cycle_error() -> SourceSpecMismatchError:
+    """Report a cycle found while following live inputs."""
+    return SourceSpecMismatchError(
+        "A cycle in the live input graph is not supported (ITL-1559)."
+    )
 
 
 class InconsistentSourceError(ValueError):

@@ -49,7 +49,9 @@ from orcapod.pipeline.run_summary import (
 from orcapod.pipeline.source_consistency import (
     invocation_source_uses,
     require_consistent_sources,
-    require_slot_free_binding,
+    require_run_source_bindings,
+    slot_dependency,
+    slot_dependency_error,
 )
 from orcapod.protocols import core_protocols as cp
 from orcapod.databases.utils import as_table_committing
@@ -641,7 +643,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
     ) -> list[tuple[SourceJobNode, cp.StreamProtocol | None, _DeclaredForm | None]]:
         """Validate the prospective job and prepare each changed slot's row form."""
         for slot, source in rebinding:
-            require_slot_free_binding(slot.name, source)
+            if (dependency := slot_dependency(source)) is not None:
+                raise slot_dependency_error(slot.name, dependency)
         nodes = self._persistent_node_map.values()
         require_consistent_sources(
             ((f"node {node.label!r}", node) for node in nodes), rebinding
@@ -1172,6 +1175,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             ``job.nodes``.
 
         Raises:
+            SourceSpecMismatchError: If a bound source now depends on a bindable slot
+                or the live inputs contain a cycle (ITL-1559).
             ValueError: If no database is set, or ``commit_every_rows`` is not a
                 positive integer smaller than the database's ``batch_size``.
             RuntimeError: If no pipeline has been compiled, or the job was built
@@ -1264,6 +1269,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         Raises:
             TypeError: If ``orchestrator`` is not an ``AsyncPipelineOrchestrator``;
                 run a ``SyncPipelineOrchestrator`` with ``job.run``.
+            SourceSpecMismatchError: As for ``run``.
             ValueError: As for ``run``.
             RuntimeError: As for ``run``.
             OrcapodDatabaseWriteError: As for ``run``.
@@ -1351,6 +1357,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 "computation, create a fresh PipelineJob from the original pipeline "
                 "definition."
             )
+        # Live inputs can change in place after a binding has been checked.
+        require_run_source_bindings(self._persistent_node_map.values())
+
         # Until this run finishes, what the database holds for a node is not certain.
         self._last_run_finished = False
 
@@ -2008,7 +2017,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             else:
                 if source is None:
                     continue
-                require_slot_free_binding(spec_name, source)
+                if (dependency := slot_dependency(source)) is not None:
+                    raise slot_dependency_error(spec_name, dependency)
                 try:
                     # A rebuilt source whose column types changed is treated as
                     # one that could not be rebuilt (ITL-1112).

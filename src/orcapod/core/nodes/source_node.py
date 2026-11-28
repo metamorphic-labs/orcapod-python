@@ -1599,9 +1599,13 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         data_context: str | contexts.DataContext | None = None,
         arrow_schemas: "tuple[pa.Schema, pa.Schema] | None" = None,
     ) -> None:
-        from orcapod.pipeline.source_consistency import require_slot_free_binding
+        from orcapod.pipeline.source_consistency import (
+            slot_dependency,
+            slot_dependency_error,
+        )
 
-        require_slot_free_binding(name, bound_source)
+        if (dependency := slot_dependency(bound_source)) is not None:
+            raise slot_dependency_error(name, dependency)
         if tag_schema is None or data_schema is None:
             if bound_source is None:
                 raise ValueError(
@@ -1664,13 +1668,19 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
 
         Raises:
             InconsistentSourceError: If the bound stream reads conflicting sources.
+            SourceSpecMismatchError: If the bound stream now depends on a source slot
+                or its live inputs contain a cycle (ITL-1559).
             UnboundSourceError: When no concrete source is bound.
             ValueError: If ``load_only`` and the bound stream computes or delivers
                 when read (``node_run.refuse_unloadable_inputs``).
         """
         from orcapod.pipeline.node_run import check_sources, refuse_unloadable_inputs
-        from orcapod.pipeline.source_consistency import require_consistent_sources
+        from orcapod.pipeline.source_consistency import (
+            require_consistent_sources,
+            require_run_source_bindings,
+        )
 
+        require_run_source_bindings([self])
         require_consistent_sources([(f"node {self.label!r}", self)])
         _ = check_sources([self])
         if load_only:
@@ -1699,11 +1709,15 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
             SourceSpecMismatchError: If *value* does not fit the declared schema or
                 depends on a bindable source slot (ITL-1559).
         """
-        from orcapod.pipeline.source_consistency import require_slot_free_binding
+        from orcapod.pipeline.source_consistency import (
+            slot_dependency,
+            slot_dependency_error,
+        )
 
         owner = self._binding_owner() if self._binding_owner is not None else None
         if owner is None:
-            require_slot_free_binding(self.name, value)
+            if (dependency := slot_dependency(value)) is not None:
+                raise slot_dependency_error(self.name, dependency)
             self._bind(value)
             self._update_modified_time()
         else:
@@ -1757,9 +1771,16 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         data change (one built over data held in memory) is not re-read: build a new
         source object and bind it, or clear the dependent nodes.
         """
+        from orcapod.pipeline.source_consistency import (
+            slot_dependency,
+            slot_dependency_error,
+        )
+
         own = self._modified_time
         if self._bound_source is None:
             return own
+        if (dependency := slot_dependency(self._bound_source)) is not None:
+            raise slot_dependency_error(self.name, dependency)
         bound = self._bound_source.last_modified
         if bound is None or own is None:
             return bound
@@ -2178,6 +2199,9 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
 
         Returns:
             A ``SourceJobNode`` configured according to the case above.
+
+        Raises:
+            SourceSpecMismatchError: If the stream to be bound depends on a source slot.
         """
         match stream:
             case SourceJobNode():
@@ -2206,6 +2230,14 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
                 return node
             case _:
                 # Case 3: concrete stream — bound SJN.
+                from orcapod.pipeline.source_consistency import (
+                    slot_dependency,
+                    slot_dependency_error,
+                )
+
+                # Schema and source-name inference can consult the live inputs.
+                if (dependency := slot_dependency(stream)) is not None:
+                    raise slot_dependency_error(name, dependency)
                 # Slot name priority:
                 #   1. explicit *name* parameter
                 #   2. stream.source_name for RootSource (its id without the kind part)

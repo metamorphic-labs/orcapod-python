@@ -1424,6 +1424,8 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
             OrcapodDatabaseWriteError: If committing the invocation log fails.
             InconsistentSourceError: If distinct source objects share a content
                 hash, or sources with one ID differ in schema or key columns.
+            SourceSpecMismatchError: If a bound source now depends on a bindable slot
+                or the live inputs contain a cycle (ITL-1559).
         """
         import sys
 

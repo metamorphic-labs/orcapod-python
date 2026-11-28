@@ -6,12 +6,17 @@ from collections import Counter
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, cast
 
-from orcapod.errors import InconsistentSourceError, SourceSpecMismatchError
+from orcapod.errors import (
+    InconsistentSourceError,
+    SourceSpecMismatchError,
+    live_input_cycle_error,
+)
 from orcapod.utils.schema_utils import arrow_schema_identity
 
 if TYPE_CHECKING:
     import pyarrow as pa
 
+    from orcapod.core.nodes.source_node import SourceJobNode
     from orcapod.core.sources.base import RootSource
     from orcapod.pipeline.pod_invocation import PodInvocation
     from orcapod.pipeline.restrictions import Rebinding
@@ -21,26 +26,68 @@ if TYPE_CHECKING:
 SourceUse = tuple[str, "StreamProtocol"]
 
 
-def require_slot_free_binding(name: str, source: StreamProtocol | None) -> None:
-    """Report a proposed binding that reads a bindable job slot."""
+def slot_dependency_error(
+    name: str | None, dependency: SourceJobNode
+) -> SourceSpecMismatchError:
+    """Name the slots involved in an unsupported binding and how to replace it."""
+    target = "a source slot" if name is None else f"source slot {name!r}"
+    return SourceSpecMismatchError(
+        f"Binding {target} to a source that depends on source slot "
+        f"{dependency.name!r} is not supported yet (ITL-1559). "
+        + "Pass the underlying source, or use a non-slot node's as_source() to read stored results."
+    )
+
+
+def _streams_to_slots(streams: Iterable[StreamProtocol]) -> Iterable[StreamProtocol]:
+    """Walk live inputs up to source slots and reject cycles by object identity."""
     from orcapod.core.nodes.source_node import SourceJobNode
     from orcapod.pipeline.restrictions import streams_beneath
 
-    # TODO(ITL-1559): live slot references can create cycles or retain an old
-    # slot after recompilation. Stored-result sources end the live-input walk.
-    pending = [] if source is None else [source]
+    pending = [(stream, False) for stream in streams]
+    pending.reverse()
+    active: set[int] = set()
     visited: set[int] = set()
     while pending:
-        stream = pending.pop()
-        if id(stream) in visited:
+        stream, leaving = pending.pop()
+        key = id(stream)
+        if leaving:
+            active.remove(key)
+            visited.add(key)
             continue
-        visited.add(id(stream))
-        if isinstance(stream, SourceJobNode):
-            raise SourceSpecMismatchError(
-                f"Binding source slot {name!r} to a source that depends on source "
-                f"slot {stream.name!r} is not supported yet (ITL-1559)."
+        if key in active:
+            raise live_input_cycle_error()
+        if key in visited:
+            continue
+        yield stream
+        active.add(key)
+        pending.append((stream, True))
+        if not isinstance(stream, SourceJobNode):
+            pending.extend(
+                (upstream, False) for upstream in reversed(streams_beneath(stream))
             )
-        pending.extend(streams_beneath(stream))
+
+
+def slot_dependency(source: StreamProtocol | None) -> SourceJobNode | None:
+    """Find a bindable slot a source would read, if any."""
+    from orcapod.core.nodes.source_node import SourceJobNode
+
+    # TODO(ITL-1559): live slot references can create cycles or retain an old
+    # slot after recompilation. Stored-result sources end the live-input walk.
+    if source is not None:
+        for stream in _streams_to_slots((source,)):
+            if isinstance(stream, SourceJobNode):
+                return stream
+    return None
+
+
+def require_run_source_bindings(streams: Iterable[StreamProtocol]) -> None:
+    """Recheck live slot bindings before a run checks sources or reads rows."""
+    from orcapod.core.nodes.source_node import SourceJobNode
+
+    for stream in _streams_to_slots(streams):
+        if isinstance(stream, SourceJobNode):
+            if (dependency := slot_dependency(stream.bound_source)) is not None:
+                raise slot_dependency_error(stream.name, dependency)
 
 
 def invocation_source_uses(invocations: Iterable[PodInvocation]) -> Iterable[SourceUse]:

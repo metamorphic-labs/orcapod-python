@@ -382,6 +382,24 @@ tag_schema=Schema({...}), data_schema=Schema({...}))`) means one Arrow type per 
 zones, declare the slot with Arrow schemas (`tag_schema=pa.schema([...])`). Binding a source
 never changes a node's schema or where its results are stored.
 
+A binding must also be independent of every bindable source slot, including
+slots reached through operators or source wrappers. As a stopgap pending
+ITL-1559, the job checks this when binding and again before each run, including
+a load-only run. This check also applies to a direct node run. Pass the
+underlying source, or use a non-slot node's `as_source()` to read stored results.
+
+```python
+from orcapod.errors import SourceSpecMismatchError
+from orcapod.operators import SelectDataColumns
+
+projection = SelectDataColumns(["weight", "height"])(job_b.nodes["mice"])
+try:
+    job_a.bind(sources={"mice": projection})
+except SourceSpecMismatchError as error:
+    print(error)
+# Binding source slot 'mice' to a source that depends on source slot 'mice' is not supported yet (ITL-1559). Pass the underlying source, or use a non-slot node's as_source() to read stored results.
+```
+
 A job made without sources has **unbound** slots. It can still be run: nodes that depend on
 an unbound source are skipped, and `job.unbound_sources` lists what is missing. Bind later
 with `job.bind(...)`:

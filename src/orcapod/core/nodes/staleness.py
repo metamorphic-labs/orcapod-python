@@ -11,6 +11,8 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
+from orcapod.errors import live_input_cycle_error
+
 
 class RunHoldingNode:
     """Mixin of the job nodes that hold the rows of their current run.
@@ -93,25 +95,30 @@ def _job_upstreams(node: Any) -> list[RunHoldingNode]:
     return [upstream for upstream in upstreams if isinstance(upstream, RunHoldingNode)]
 
 
-def _stale(node: RunHoldingNode, memo: dict[int, bool]) -> bool:
+def _stale(node: RunHoldingNode, memo: dict[int, bool | None]) -> bool:
     """Whether ``node`` is stale; ``memo`` keeps each node's answer for one traversal."""
     key = id(node)
     if key not in memo:
+        memo[key] = None  # on the active path, answer still pending
         memo[key] = node._own_staleness() or any(  # pyright: ignore[reportPrivateUsage]  # the mixin's own helper
             _stale(upstream, memo) for upstream in _job_upstreams(node)
         )
-    return memo[key]
+    result = memo[key]
+    if result is None:
+        raise live_input_cycle_error()
+    return result
 
 
 def _current(
     node: RunHoldingNode,
     load_only: bool,
-    memo: dict[int, bool],
-    stale_memo: dict[int, bool],
+    memo: dict[int, bool | None],
+    stale_memo: dict[int, bool | None],
 ) -> bool:
     """Whether ``node`` holds a current run; memoized for one traversal."""
     key = id(node)
     if key not in memo:
+        memo[key] = None  # on the active path, answer still pending
         memo[key] = (
             node._holds_run(load_only=load_only)  # pyright: ignore[reportPrivateUsage]  # the mixin's own hook
             and not _stale(node, stale_memo)
@@ -120,7 +127,10 @@ def _current(
                 for upstream in _job_upstreams(node)
             )
         )
-    return memo[key]
+    result = memo[key]
+    if result is None:
+        raise live_input_cycle_error()
+    return result
 
 
 def upstream_job_node_stale(upstreams: Iterable[Any]) -> bool:
@@ -135,7 +145,7 @@ def upstream_job_node_stale(upstreams: Iterable[Any]) -> bool:
     Returns:
         ``True`` if any upstream ``RunHoldingNode`` is stale.
     """
-    memo: dict[int, bool] = {}
+    memo: dict[int, bool | None] = {}
     return any(
         isinstance(upstream, RunHoldingNode) and _stale(upstream, memo)
         for upstream in upstreams

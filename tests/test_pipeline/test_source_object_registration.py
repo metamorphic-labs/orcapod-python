@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any, cast
@@ -417,6 +418,173 @@ def test_binding_refuses_projection_over_the_receiving_slot(
     assert job.sources == before
     assert slot.run().table.to_pylist() == ROWS
     assert job.nodes["b"].bound_source is before["b"]
+
+
+@pytest.mark.parametrize("load_only", [False, True])
+@pytest.mark.parametrize(
+    "entry", ["sync", "async_orchestrator", "run_async", "slot", "node"]
+)
+def test_run_refuses_slot_cycle_created_by_upstream_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: str, load_only: bool
+) -> None:
+    from orcapod.core.nodes.operator_node import OperatorJobNode
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.operators import SelectDataColumns
+
+    job = _job(tmp_path)
+    slot = cast(SourceJobNode, job.nodes["a"])
+    source = job.sources["a"]
+    projection = OperatorJobNode(SelectDataColumns(["x", "y"]), [source])
+    job.bind(sources={"a": projection})
+    _ = projection.run()
+    assert slot.run().table.to_pylist() == ROWS
+    projection.upstreams = (slot,)
+
+    def unexpected_check() -> bool:
+        pytest.fail("A source was checked before the invalid binding was refused")
+
+    monkeypatch.setattr(job.sources["b"], "check_for_new_data", unexpected_check)
+    with pytest.raises(SourceSpecMismatchError, match=r"slot 'a'.*slot 'a'.*ITL-1559"):
+        if entry == "run_async":
+            _ = asyncio.run(job.run_async(load_only=load_only))
+        elif entry == "slot":
+            _ = slot.run(load_only=load_only)
+        elif entry == "node":
+            _ = job.nodes["result_a"].run(load_only=load_only)
+        else:
+            orch = (
+                AsyncPipelineOrchestrator
+                if entry == "async_orchestrator"
+                else SyncPipelineOrchestrator
+            )
+            _ = job.run(orchestrator=orch(), load_only=load_only)
+
+    projection.upstreams = (source,)
+    assert slot.bound_source is projection
+    assert slot.run().table.to_pylist() == ROWS
+
+
+def test_standalone_slot_run_refuses_cycle_created_by_upstream_replacement() -> None:
+    from orcapod.core.nodes.operator_node import OperatorJobNode
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.operators import SelectDataColumns
+
+    source = _shifted_source("ordinary", 10)
+    projection = OperatorJobNode(SelectDataColumns(["x", "y"]), [source])
+    slot = SourceJobNode("standalone", bound_source=projection)
+    _ = projection.run()
+    projection.upstreams = (slot,)
+    with pytest.raises(
+        SourceSpecMismatchError, match=r"slot 'standalone'.*slot 'standalone'.*ITL-1559"
+    ):
+        _ = slot.run()
+
+
+@pytest.mark.parametrize("warm", [False, True])
+def test_run_refuses_foreign_slot_introduced_by_proxy_rebind(
+    tmp_path: Path, warm: bool
+) -> None:
+    from orcapod.core.sources.source_proxy import SourceProxy
+    from orcapod.sources import CachedSource, DerivedSource
+
+    foreign = _job(tmp_path).nodes["b"]
+    ordinary = DerivedSource(
+        _shifted_source("ordinary", 10), source_id="copy", tags_as_data={"t1": "copy"}
+    )
+    candidate = DerivedSource(
+        CachedSource(
+            cast(SourceProtocol, foreign), cache_database=InMemoryArrowDatabase()
+        ),
+        source_id="copy",
+        tags_as_data={"t1": "copy"},
+    )
+    proxy = SourceProxy(
+        ordinary.source_id,
+        ordinary.content_hash().to_string(),
+        ordinary.pipeline_hash().to_string(),
+        *ordinary.output_schema(),
+    )
+    proxy.bind(ordinary)
+    outer = DerivedSource(proxy, source_id="outer", tags_as_data={"t2": "other"})
+    with PipelineJob(database=InMemoryArrowDatabase()) as job:
+        _ = total.pod(outer, label="result")
+    if warm:
+        _ = job.run()
+
+    proxy.bind(candidate)
+    for run in (job.nodes["outer"].run, job.nodes["result"].run, job.run):
+        with pytest.raises(
+            SourceSpecMismatchError, match=r"slot 'outer'.*slot 'b'.*ITL-1559"
+        ):
+            _ = run()
+
+
+@pytest.mark.parametrize("target", ["proxy", "slot"])
+def test_last_modified_and_run_refuse_cycle_through_proxy_delegate(target: str) -> None:
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.core.sources.source_proxy import SourceProxy
+    from orcapod.sources import DerivedSource
+
+    source = _shifted_source("ordinary", 10)
+    proxy = SourceProxy(
+        source.source_id,
+        source.content_hash().to_string(),
+        source.pipeline_hash().to_string(),
+        *source.output_schema(),
+    )
+    proxy.bind(source)
+    derived = DerivedSource(proxy, source_id="copy", tags_as_data={"t1": "copy"})
+    slot = SourceJobNode("a", bound_source=derived)
+    proxy.bind(proxy)
+
+    with pytest.raises(SourceSpecMismatchError, match="cycle.*ITL-1559"):
+        _ = (proxy if target == "proxy" else slot).last_modified
+    with pytest.raises(SourceSpecMismatchError, match="cycle.*ITL-1559"):
+        _ = slot.run(load_only=True)
+    proxy.bind(source)
+    assert slot.last_modified is not None
+
+
+def test_staleness_refuses_cycle_of_job_operators() -> None:
+    from orcapod.core.nodes.operator_node import OperatorJobNode
+    from orcapod.operators import SelectDataColumns
+
+    source = _shifted_source("ordinary", 10)
+    projection = OperatorJobNode(SelectDataColumns(["x", "y"]), [source])
+    _ = projection.run()
+    projection.upstreams = (projection,)
+    with pytest.raises(SourceSpecMismatchError, match="cycle.*ITL-1559"):
+        _ = projection.is_stale
+    with pytest.raises(SourceSpecMismatchError, match="cycle.*ITL-1559"):
+        _ = projection.run()
+    projection.upstreams = (source,)
+    assert not projection.is_stale
+
+
+@pytest.mark.parametrize("name", [None, "a"])
+@pytest.mark.parametrize("wrapper", ["cache", "projection"])
+def test_from_stream_refuses_slot_dependency_before_inferring_name(
+    tmp_path: Path, name: str | None, wrapper: str
+) -> None:
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.operators import SelectDataColumns
+    from orcapod.sources import CachedSource
+
+    foreign = cast(SourceJobNode, _job(tmp_path).nodes["b"])
+    candidate = (
+        CachedSource(
+            cast(SourceProtocol, cast(object, foreign)),
+            cache_database=InMemoryArrowDatabase(),
+        )
+        if wrapper == "cache"
+        else SelectDataColumns(["x", "y"])(foreign)
+    )
+    target = r"slot 'a'" if name else r"a source slot"
+    with pytest.raises(
+        SourceSpecMismatchError,
+        match=rf"{target}.*slot 'b'.*ITL-1559.*Pass the underlying source.*as_source\(\)",
+    ):
+        _ = SourceJobNode.from_stream(candidate, name=name)
 
 
 @pytest.mark.parametrize("orchestrator", ORCHESTRATORS)

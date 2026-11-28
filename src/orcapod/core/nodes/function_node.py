@@ -331,8 +331,8 @@ def run_job_node(
 ) -> None:
     """Run a job node as its ``run()`` does (developer, November 13, 2026; ITL-1095).
 
-    Source registrations are checked as in ``job.run()`` before reading new data. Every
-    source feeding the node is first checked for new data (``check_sources``,
+    Source bindings and registrations are checked as in ``job.run()``. Every
+    source feeding the node is then checked for new data (``check_sources``,
     ITL-1102). Nothing runs when the node then holds a current run
     (``holds_current_run``). Otherwise a node that depends on job nodes runs with them
     (``run_with_dependencies``) and one built over streams outside a job runs alone
@@ -355,8 +355,12 @@ def run_job_node(
     )
     from orcapod.pipeline.restrictions import refuse_restriction_conflicts
     from orcapod.pipeline.run_summary import warn_row_failures
-    from orcapod.pipeline.source_consistency import require_consistent_sources
+    from orcapod.pipeline.source_consistency import (
+        require_consistent_sources,
+        require_run_source_bindings,
+    )
 
+    require_run_source_bindings([node])
     require_consistent_sources([(f"node {node.label!r}", node)])
     # A source read under two restrictions, or a caching operator over a restricted
     # source, is refused before any source is checked and before anything is
@@ -4348,6 +4352,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 (``CACHE_ONLY``): read its stored rows with ``as_source()``.
             InconsistentSourceError: If distinct source objects share a content
                 hash, or sources with one ID differ in schema or key columns.
+            SourceSpecMismatchError: If a bound source now depends on a bindable slot
+                or the live inputs contain a cycle (ITL-1559).
         """
         from orcapod.pipeline.serialization import LoadStatus
 

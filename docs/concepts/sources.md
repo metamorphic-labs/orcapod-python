@@ -106,8 +106,10 @@ source itself.
 
 Binding a source slot to a source or stream that depends on any bindable slot
 raises `SourceSpecMismatchError` (ITL-1559). Pass the underlying source or
-use `node.as_source()` to read stored results. If a batch contains a refused
-binding, every existing binding stays in place.
+use a non-slot node's `as_source()` to read stored results. If a batch contains
+a refused binding, every existing binding stays in place. Job and node runs
+recheck the binding before reading sources, including for load-only runs,
+because an operator or wrapper can change its inputs after binding.
 
 The capture and restriction checks follow wrappers that can read live inputs.
 This includes tag-copy `DerivedSource` over a live source. A `DerivedSource`
