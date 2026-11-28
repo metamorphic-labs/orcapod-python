@@ -49,7 +49,7 @@ from orcapod.pipeline.run_summary import (
 from orcapod.pipeline.source_consistency import (
     invocation_source_uses,
     require_consistent_sources,
-    require_run_source_bindings,
+    require_live_source_bindings,
     slot_dependency,
     slot_dependency_error,
 )
@@ -1358,7 +1358,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 "definition."
             )
         # Live inputs can change in place after a binding has been checked.
-        require_run_source_bindings(self._persistent_node_map.values())
+        require_live_source_bindings(self._persistent_node_map.values())
 
         # Until this run finishes, what the database holds for a node is not certain.
         self._last_run_finished = False

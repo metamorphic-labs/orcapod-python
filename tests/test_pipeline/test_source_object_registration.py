@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from typing import Any, cast
 
@@ -480,9 +481,53 @@ def test_standalone_slot_run_refuses_cycle_created_by_upstream_replacement() -> 
         _ = slot.run()
 
 
+@pytest.mark.parametrize(
+    "entry",
+    ["table", "iteration", "async_iteration", "hash", "head", "preview", "as_source"],
+)
+def test_standalone_reads_refuse_slot_cycle_created_by_upstream_replacement(
+    entry: str,
+) -> None:
+    from orcapod.core.nodes.operator_node import OperatorJobNode
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.operators import SelectDataColumns
+
+    source = DictSource(
+        [{"t": "a", "x": 80}, {"t": "b", "x": 81}],
+        source_id="ordinary",
+        tag_columns=["t"],
+        tag_only_columns=True,
+    )
+    projection = OperatorJobNode(
+        SelectDataColumns(["x"]), [source], pipeline_database=InMemoryArrowDatabase()
+    )
+    slot = SourceJobNode("a", bound_source=projection)
+    projection.upstreams = (slot,)
+
+    async def read_async() -> None:
+        _ = [row async for row in slot.async_iter_data()]
+
+    message = r"slot 'a'.*slot 'a'.*ITL-1559.*Pass the underlying source"
+    if entry == "preview":
+        preview = slot._repr_html_()
+        assert re.search(message, preview)
+        return
+    reads = {
+        "table": slot.as_table,
+        "iteration": lambda: list(slot.iter_data()),
+        "async_iteration": lambda: asyncio.run(read_async()),
+        "hash": slot.content_hash,
+        "head": slot.head,
+        "as_source": projection.as_source,
+    }
+    with pytest.raises(SourceSpecMismatchError, match=message):
+        _ = reads[entry]()
+
+
 @pytest.mark.parametrize("warm", [False, True])
-def test_run_refuses_foreign_slot_introduced_by_proxy_rebind(
-    tmp_path: Path, warm: bool
+@pytest.mark.parametrize("entry", ["run", "table", "iteration", "head", "preview"])
+def test_live_binding_refuses_foreign_slot_introduced_by_proxy_rebind(
+    tmp_path: Path, warm: bool, entry: str
 ) -> None:
     from orcapod.core.sources.source_proxy import SourceProxy
     from orcapod.sources import CachedSource, DerivedSource
@@ -508,15 +553,43 @@ def test_run_refuses_foreign_slot_introduced_by_proxy_rebind(
     outer = DerivedSource(proxy, source_id="outer", tags_as_data={"t2": "other"})
     with PipelineJob(database=InMemoryArrowDatabase()) as job:
         _ = total.pod(outer, label="result")
+    slot = job.nodes["outer"]
     if warm:
-        _ = job.run()
+        assert slot.as_table()["x"].to_pylist() == [11, 13]
+        if entry == "run":
+            _ = job.run()
 
     proxy.bind(candidate)
-    for run in (job.nodes["outer"].run, job.nodes["result"].run, job.run):
-        with pytest.raises(
-            SourceSpecMismatchError, match=r"slot 'outer'.*slot 'b'.*ITL-1559"
-        ):
-            _ = run()
+    message = r"slot 'outer'.*slot 'b'.*ITL-1559.*Pass the underlying source"
+    if entry == "preview":
+        assert re.search(message, slot._repr_html_())
+    elif entry == "run":
+        for run in (slot.run, job.nodes["result"].run, job.run):
+            with pytest.raises(SourceSpecMismatchError, match=message):
+                _ = run()
+    else:
+        reads = {
+            "table": slot.as_table,
+            "iteration": lambda: list(slot.iter_data()),
+            "head": slot.head,
+        }
+        with pytest.raises(SourceSpecMismatchError, match=message):
+            _ = reads[entry]()
+
+
+def test_operator_run_cycle_diagnostic_names_the_step_and_remedy() -> None:
+    from orcapod.core.nodes.operator_node import OperatorJobNode
+    from orcapod.operators import SelectDataColumns
+
+    source = _shifted_source("ordinary", 10)
+    projection = OperatorJobNode(SelectDataColumns(["x"]), [source], label="project")
+    projection.upstreams = (projection,)
+
+    with pytest.raises(
+        SourceSpecMismatchError,
+        match=r"cycle.*'project'.*ITL-1559.*Remove the circular input",
+    ):
+        _ = projection.run()
 
 
 @pytest.mark.parametrize("target", ["proxy", "slot"])

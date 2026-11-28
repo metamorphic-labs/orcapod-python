@@ -38,33 +38,48 @@ def slot_dependency_error(
     )
 
 
-def _streams_to_slots(streams: Iterable[StreamProtocol]) -> Iterable[StreamProtocol]:
-    """Walk live inputs up to source slots and reject cycles by object identity."""
+def _walk_live_inputs(
+    streams: Iterable[StreamProtocol], *, stop_at_slots: bool = False
+) -> Iterable[StreamProtocol]:
+    """Walk live inputs by identity, checking slot dependencies and active-path cycles.
+
+    A prospective binding stops at its first slot. A read or run follows each
+    slot's binding and refuses a second slot anywhere in that binding. Track
+    the binding walk separately so a path entering a slot from its own bound
+    stream reports both slots, even if it then revisits the starting stream.
+    """
     from orcapod.core.nodes.source_node import SourceJobNode
     from orcapod.pipeline.restrictions import streams_beneath
 
-    pending = [(stream, False) for stream in streams]
+    pending: list[tuple[StreamProtocol, SourceJobNode | None, bool]] = [
+        (stream, None, False) for stream in streams
+    ]
     pending.reverse()
-    active: set[int] = set()
-    visited: set[int] = set()
+    active: set[tuple[int, bool]] = set()
+    visited: set[tuple[int, bool]] = set()
     while pending:
-        stream, leaving = pending.pop()
-        key = id(stream)
+        stream, binding, leaving = pending.pop()
+        key = (id(stream), binding is not None)
         if leaving:
             active.remove(key)
             visited.add(key)
             continue
+        if isinstance(stream, SourceJobNode) and binding is not None:
+            raise slot_dependency_error(binding.name, stream)
         if key in active:
-            raise live_input_cycle_error()
+            raise live_input_cycle_error(stream.label)
         if key in visited:
             continue
         yield stream
+        if isinstance(stream, SourceJobNode) and stop_at_slots:
+            continue
         active.add(key)
-        pending.append((stream, True))
-        if not isinstance(stream, SourceJobNode):
-            pending.extend(
-                (upstream, False) for upstream in reversed(streams_beneath(stream))
-            )
+        pending.append((stream, binding, True))
+        next_binding = stream if isinstance(stream, SourceJobNode) else binding
+        pending.extend(
+            (upstream, next_binding, False)
+            for upstream in reversed(streams_beneath(stream))
+        )
 
 
 def slot_dependency(source: StreamProtocol | None) -> SourceJobNode | None:
@@ -74,20 +89,16 @@ def slot_dependency(source: StreamProtocol | None) -> SourceJobNode | None:
     # TODO(ITL-1559): live slot references can create cycles or retain an old
     # slot after recompilation. Stored-result sources end the live-input walk.
     if source is not None:
-        for stream in _streams_to_slots((source,)):
+        for stream in _walk_live_inputs((source,), stop_at_slots=True):
             if isinstance(stream, SourceJobNode):
                 return stream
     return None
 
 
-def require_run_source_bindings(streams: Iterable[StreamProtocol]) -> None:
-    """Recheck live slot bindings before a run checks sources or reads rows."""
-    from orcapod.core.nodes.source_node import SourceJobNode
-
-    for stream in _streams_to_slots(streams):
-        if isinstance(stream, SourceJobNode):
-            if (dependency := slot_dependency(stream.bound_source)) is not None:
-                raise slot_dependency_error(stream.name, dependency)
+def require_live_source_bindings(streams: Iterable[StreamProtocol]) -> None:
+    """Check live inputs before resolving schemas or hashes, reading rows or running."""
+    for _ in _walk_live_inputs(streams):
+        pass
 
 
 def invocation_source_uses(invocations: Iterable[PodInvocation]) -> Iterable[SourceUse]:

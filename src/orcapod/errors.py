@@ -619,14 +619,16 @@ class SourceSpecMismatchError(InputValidationError, ValueError):
     stored path, is built from. The message names the slot and the column, and for a type
     difference both types. For a slot-dependent source, the message names the
     dependency and any known receiving slot (ITL-1559). The error is raised before
-    installing an invalid binding or running with one.
+    installing, reading or running with an invalid binding.
     """
 
 
-def live_input_cycle_error() -> SourceSpecMismatchError:
+def live_input_cycle_error(label: str | None = None) -> SourceSpecMismatchError:
     """Report a cycle found while following live inputs."""
+    location = "" if label is None else f" at {label!r}"
     return SourceSpecMismatchError(
-        "A cycle in the live input graph is not supported (ITL-1559)."
+        f"A cycle in the live input graph{location} is not supported (ITL-1559). "
+        "Remove the circular input or replace it with an independent source."
     )
 
 

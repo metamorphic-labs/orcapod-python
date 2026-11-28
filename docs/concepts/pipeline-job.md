@@ -385,8 +385,9 @@ never changes a node's schema or where its results are stored.
 
 A binding must also be independent of every bindable source slot, including
 slots reached through operators or source wrappers. As a stopgap pending
-ITL-1559, the job checks this when binding and again before each run, including
-a load-only run. This check also applies to a direct node run. Pass the
+ITL-1559, Orcapod checks this when binding, when reading the slot directly and
+before each job or node run, including a load-only run. This also protects the
+schema and hash lookups needed to construct an `as_source()` result. Pass the
 underlying source, or use a non-slot node's `as_source()` to read stored results.
 
 ```python

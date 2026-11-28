@@ -260,6 +260,9 @@ class DerivedSource(RootSource):
         record_id_columns: str | Collection[str] | None = None,
         **kwargs: Any,
     ) -> None:
+        from orcapod.core.nodes.staleness import RunHoldingNode
+        from orcapod.pipeline.source_consistency import require_live_source_bindings
+
         key_columns = normalize_record_id_columns(record_id_columns)
         if tags_as_data is None:
             if isinstance(origin, RootSource):
@@ -271,11 +274,16 @@ class DerivedSource(RootSource):
                 raise ValueError(
                     "record_id_columns is only used together with tags_as_data."
                 )
-            self._tags_as_data: dict[str, str] | None = None
-        else:
+        elif source_id is None:
             # No default source id (ITL-1313): refused before the origin is read.
-            if source_id is None:
-                raise self._missing_source_id()
+            raise self._missing_source_id()
+
+        if isinstance(origin, RunHoldingNode):
+            # Constructing a stored-result source can inspect the live node's
+            # schema or hash. Once constructed, its live-input walk ends there.
+            require_live_source_bindings((origin,))
+        self._tags_as_data: dict[str, str] | None = None
+        if tags_as_data is not None:
             # The mapping names a set of copies: they are placed in the order of their
             # new names, so the order it is given in changes nothing (ITL-1271).
             self._tags_as_data = dict(

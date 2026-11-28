@@ -1679,9 +1679,9 @@ data. The rules:
   The ITL-1559 stopgap also refuses prebuilt streams over the job's own slots.
   Build the step inside the job from the slot, or pass the source itself.
   A slot binding must be independent of every bindable slot, including through
-  live wrappers. Binding and run preparation (both job and node, including
-  load-only) report a dependency as SourceSpecMismatchError. Pass the underlying
-  source or use a non-slot node's as_source() for stored results.
+  live wrappers (ITL-1559). Binding, direct reads, and both job and node runs
+  (including load-only) report a dependency as SourceSpecMismatchError. Pass
+  the underlying source or use a non-slot node's as_source() for stored results.
   Call where() once and reuse the resulting object. A source object conflict
   raises InconsistentSourceError before the separate restriction check, which
   can see restrictions beneath wrappers.

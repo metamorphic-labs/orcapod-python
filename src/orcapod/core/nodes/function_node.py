@@ -357,10 +357,10 @@ def run_job_node(
     from orcapod.pipeline.run_summary import warn_row_failures
     from orcapod.pipeline.source_consistency import (
         require_consistent_sources,
-        require_run_source_bindings,
+        require_live_source_bindings,
     )
 
-    require_run_source_bindings([node])
+    require_live_source_bindings([node])
     require_consistent_sources([(f"node {node.label!r}", node)])
     # A source read under two restrictions, or a caching operator over a restricted
     # source, is refused before any source is checked and before anything is
