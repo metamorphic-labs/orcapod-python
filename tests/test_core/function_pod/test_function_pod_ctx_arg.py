@@ -661,12 +661,12 @@ class TestCtxArgCachedPodWrapping:
 
 
 @pytest.mark.parametrize("async_path", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize("only_downstream_log", [False, True], ids=["function", "tap"])
+@pytest.mark.parametrize("legacy_case", ["function_log", "tap_log", "tap_and_results"])
 def test_reopening_pre_context_identity_completions_refuses_delivery(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     async_path: bool,
-    only_downstream_log: bool,
+    legacy_case: str,
 ) -> None:
     """Completions at the previous schema path refuse a run before redelivery."""
     from orcapod import FunctionPod, PipelineJob, function_pod
@@ -677,6 +677,7 @@ def test_reopening_pre_context_identity_completions_refuses_delivery(
 
     delivered: list[tuple[str, int]] = []
     root = tmp_path / "store"
+    only_downstream_log = legacy_case != "function_log"
 
     def build_job(root: Path) -> PipelineJob:
         @function_pod(output_keys="result", ctx_arg="ctx")
@@ -713,6 +714,11 @@ def test_reopening_pre_context_identity_completions_refuses_delivery(
         previous.setattr(
             FunctionPod, "pipeline_identity_structure", lambda pod: pod.data_function
         )
+        if legacy_case == "tap_and_results":
+            previous.setattr(
+                "orcapod.core.cached_function_pod.context_result_path",
+                lambda uri, _: uri,
+            )
         run(build_job(root))
 
     store = DeltaTableDatabase(root)
@@ -721,8 +727,8 @@ def test_reopening_pre_context_identity_completions_refuses_delivery(
         path for path in table_paths if path[-1] == PIPELINE_DB_SCHEMA_VERSION
     )
     if only_downstream_log:
-        # Keep the shared result cache and the prior tap log. This lets the run
-        # reach the tap, even though the function would otherwise refuse first.
+        # Keep the prior tap log and the result table, without the function log.
+        # With current results, the run reaches the tap without another delivery.
         root = tmp_path / "tap_store"
         tap_store = DeltaTableDatabase(root)
         for path in table_paths:
@@ -737,6 +743,12 @@ def test_reopening_pre_context_identity_completions_refuses_delivery(
         )
         expected_label = "tap"
         expected_deliveries = [("function", 0), ("tap", 100)]
+        if legacy_case == "tap_and_results":
+            (expected_path,) = (
+                path for path in table_paths if path[-1] == RESULT_DB_SCHEMA_VERSION
+            )
+            assert not any(part.startswith("ctx:") for part in expected_path)
+            expected_label = "contextual"
     else:
         expected_path = function_log
         expected_label = "contextual"
@@ -751,6 +763,156 @@ def test_reopening_pre_context_identity_completions_refuses_delivery(
     assert expected_path in info.value.record_paths
     assert delivered == expected_deliveries
     assert DeltaTableDatabase(root).get_all_records(expected_path) == before
+
+
+@pytest.mark.parametrize("async_path", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("run_in_job", [False, True], ids=["standalone", "job"])
+@pytest.mark.parametrize("cache_kind", ["decorator", "pod"])
+def test_pre_context_cache_only_results_refuse_delivery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    async_path: bool,
+    run_in_job: bool,
+    cache_kind: str,
+) -> None:
+    """Standalone results from the old exact cache path protect a finished action."""
+    from orcapod import PipelineJob, function_pod
+    from orcapod.databases import DeltaTableDatabase
+    from orcapod.errors import SideEffectLogDataContextError
+    from orcapod.sources import DictSource
+
+    deliveries: list[int] = []
+    cache_root = tmp_path / "cache"
+
+    def build_pod():
+        cache = DeltaTableDatabase(cache_root)
+
+        @function_pod(
+            output_keys="result",
+            ctx_arg="ctx",
+            result_database=cache if cache_kind == "decorator" else None,
+            pod_cache_database=cache if cache_kind == "pod" else None,
+        )
+        def action(value: int, ctx: InvocationContext) -> int:
+            deliveries.append(value)
+            return value + 100
+
+        return action.pod
+
+    source = DictSource(
+        [{"id": 1, "value": 10}],
+        tag_columns=["id"],
+        tag_only_columns=True,
+        source_id="input",
+    )
+
+    with monkeypatch.context() as previous:
+        if cache_kind == "decorator":
+            previous.setattr(
+                "orcapod.core.data_function.context_result_path",
+                lambda uri, _: uri[1:],
+            )
+        else:
+            previous.setattr(
+                "orcapod.core.cached_function_pod.context_result_path",
+                lambda uri, _: uri,
+            )
+        old_rows = list(build_pod().process(source).iter_data())
+    assert [data.as_dict()["result"] for _, data in old_rows] == [110]
+    assert deliveries == [10]
+
+    store = DeltaTableDatabase(cache_root)
+    (previous_path,) = store.list_table_paths()
+    assert not any(part.startswith("ctx:") for part in previous_path)
+    assert (previous_path[0] == "side_effect_function") == (cache_kind == "pod")
+    before = store.get_all_records(previous_path)
+    assert before is not None and before.num_rows == 1
+
+    pod = build_pod()
+    with pytest.raises(SideEffectLogDataContextError) as info:
+        if run_in_job:
+            with PipelineJob(
+                name="upgrade", database=DeltaTableDatabase(tmp_path / "job")
+            ) as job:
+                pod.process(source, label="action")
+            asyncio.run(job.run_async()) if async_path else job.run()
+        else:
+            stream = pod.process(source)
+            if async_path:
+
+                async def consume() -> None:
+                    async for _ in stream.async_iter_data():
+                        pass
+
+                asyncio.run(consume())
+            else:
+                list(stream.iter_data())
+    assert info.value.record_paths == (previous_path,)
+    assert deliveries == [10]
+    reopened = DeltaTableDatabase(cache_root)
+    assert reopened.list_table_paths() == [previous_path]
+    assert reopened.get_all_records(previous_path) == before
+
+
+@pytest.mark.parametrize("async_path", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize(
+    "plain_written_first", [False, True], ids=["both", "plain_first"]
+)
+def test_current_sibling_log_is_not_a_previous_context_completion(
+    tmp_path: Path, async_path: bool, plain_written_first: bool
+) -> None:
+    """A live plain sibling owns the log at the contextual tap's former path."""
+    from orcapod import PipelineJob, function_pod
+    from orcapod.databases import DeltaTableDatabase
+    from orcapod.side_effects import SideEffectPod
+    from orcapod.sources import DictSource
+
+    deliveries: list[tuple[str, int]] = []
+    root = tmp_path / "store"
+
+    @function_pod(function_name="step", output_keys="result")
+    def plain(value: int) -> int:
+        return value + 100
+
+    @function_pod(function_name="step", output_keys="result", ctx_arg="ctx")
+    def contextual(value: int, ctx: InvocationContext) -> int:
+        deliveries.append(("function", value))
+        return value + 200
+
+    def tap(result: int, ctx: InvocationContext) -> None:
+        deliveries.append(("tap", result))
+
+    def build_job(*, both: bool) -> PipelineJob:
+        source = DictSource(
+            [{"id": 1, "value": 10}],
+            tag_columns=["id"],
+            tag_only_columns=True,
+            source_id="input",
+        )
+        with PipelineJob(name="siblings", database=DeltaTableDatabase(root)) as job:
+            observe = SideEffectPod(tap)
+            observe.process(plain.pod(source, label="plain"), label="plain_tap")
+            if both:
+                observe.process(
+                    contextual.pod(source, label="contextual"), label="context_tap"
+                )
+        return job
+
+    def run(job: PipelineJob) -> None:
+        assert (asyncio.run(job.run_async()) if async_path else job.run()).ok
+
+    if plain_written_first:
+        run(build_job(both=False))
+        assert deliveries == [("tap", 110)]
+
+    job = build_job(both=True)
+    run(job)
+    run(job)
+    reopened = build_job(both=True)
+    run(reopened)
+    assert reopened.nodes["plain_tap"].as_table()["result"].to_pylist() == [110]
+    assert reopened.nodes["context_tap"].as_table()["result"].to_pylist() == [210]
+    assert sorted(deliveries) == [("function", 10), ("tap", 110), ("tap", 210)]
 
 
 @pytest.mark.parametrize(

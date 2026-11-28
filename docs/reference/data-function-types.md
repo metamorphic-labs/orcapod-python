@@ -17,9 +17,15 @@ A function stores each result in its result table, at
 For a job given a separate result database (`PipelineJob(..., result_database=...)`), the
 path starts at `<function>`, in that database, with no `<job>/_result`.
 
-A pod configured with `ctx_arg` uses
-`side_effect_function/<function>/<output schema hash>/v<function major>/ctx:<parameter>/python.function.v1/rev1/rdb_v1`
-relative to its result database. Saved jobs record that result path through the type
+A job's default result path for a pod configured with `ctx_arg` is
+
+```text
+<job>/_result/side_effect_function/<function>/<output schema hash>/v<function major>/ctx:<parameter>/python.function.v1/rev1/rdb_v1
+```
+
+With an explicit result database, the path starts at `side_effect_function` in that
+database. Standalone pod and decorator caches also use this path relative to
+their configured databases. Saved jobs record the result path through the type
 component.
 
 For a plain pod the first four components after `_result` are the function's uri. The

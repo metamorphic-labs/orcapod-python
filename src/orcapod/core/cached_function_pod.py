@@ -79,6 +79,7 @@ class CachedFunctionPod(WrappedFunctionPod):
             # The uri holds no hash up to the function's name, which comes after
             # "side_effect_function" for a pod that takes the invocation context.
             name_path=self.uri[: 2 if function_pod.ctx_arg_name is not None else 1],
+            previous_record_path=self.uri if self.ctx_arg_name is not None else None,
         )
 
     def require_storable_results(self) -> None:

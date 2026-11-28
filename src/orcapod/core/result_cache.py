@@ -211,6 +211,8 @@ class ResultCache:
         auto_flush: bool = True,
         delivers_side_effects: bool = False,
         name_path: tuple[str, ...] | None = None,
+        previous_record_path: tuple[str, ...] | None = None,
+        previous_result_match: tuple[str, bytes] | None = None,
     ) -> None:
         """Create a result cache over one result table.
 
@@ -230,6 +232,10 @@ class ResultCache:
                 the part that holds no hash. Result tables written before v0.3 are
                 looked for under it, whatever hashes their paths hold (ITL-954).
                 ``None`` looks at the paths computed from ``record_path`` only.
+            previous_record_path: Result path through the type component before
+                context-taking results moved to their own path (ITL-1559).
+            previous_result_match: The stored column and value that identify the
+                function's results if the previous path is shared with plain calls.
         """
         self._result_database = result_database
         self._record_path = record_path
@@ -237,6 +243,14 @@ class ResultCache:
         self._auto_flush = auto_flush
         self._delivers_side_effects = delivers_side_effects
         self._name_path = name_path
+        self._previous_result = (
+            (
+                previous_record_path + (revision, RESULT_DB_SCHEMA_VERSION),
+                previous_result_match,
+            )
+            if previous_record_path is not None and previous_record_path != record_path
+            else None
+        )
         # Set once a read has reported the stored rows it skipped.
         self._skipped_rows_reported = False
         # Set once stored results of other generations have been accounted for.
@@ -291,6 +305,7 @@ class ResultCache:
             else None,
             name_path=self._name_path,
             result_revision=self._revision,
+            previous_result=self._previous_result,
         )
 
     def stale_tables_accounted_for(self) -> None:
@@ -301,6 +316,11 @@ class ResultCache:
         not report or refuse them a second time.
         """
         self._stale_tables_checked = True
+
+    def check_before_side_effect(self, data_context_key: str) -> None:
+        """Apply the stale-table check even when a call bypasses cache lookup."""
+        if self._delivers_side_effects:
+            self._account_for_stale_tables(data_context_key)
 
     def _account_for_stale_tables(self, data_context_key: str) -> None:
         """Report or refuse, once per cache object, stored results of other generations.

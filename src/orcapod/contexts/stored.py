@@ -373,8 +373,8 @@ class StaleTables:
         tables: The tables found, each once.
         unlisted: The places that could not be searched because the database cannot
             list its tables.
-        other_completion_paths: Current-layout completion tables at the caller's
-            previous pipeline identity.
+        other_completion_paths: Current-layout tables recording completions at
+            the caller's previous pipeline or result cache path.
     """
 
     tables: list[StaleTable] = field(default_factory=list)
@@ -454,15 +454,15 @@ def find_stale_tables(
     name_path: tuple[str, ...] | None = None,
     result_revision: str | None = None,
     previous_completion_path: tuple[str, ...] | None = None,
+    previous_result: tuple[tuple[str, ...], tuple[str, bytes] | None] | None = None,
 ) -> StaleTables:
     """Find the stored rows of other generations that belong to one table of a node.
-
-    Two searches, neither of which writes anything:
 
     - under ``name_path``, by listing the database, for tables of another layout
       wherever their hashes put them (ITL-954), and for the completion table of
       this node's previous pipeline identity (ITL-1559);
-    - in the current table, for rows of another data context.
+    - in the current table, for rows of another data context;
+    - at the exact previous result path, for evidence of completed calls (ITL-1559).
 
     Args:
         database: The database the paths belong to.
@@ -476,6 +476,8 @@ def find_stale_tables(
             (``tables_of_another_layout``).
         previous_completion_path: The exact path of this node's completion table
             before its pipeline identity changed, relative to this database.
+        previous_result: The exact previous result table path and optional
+            column/value pair identifying a result in a shared legacy namespace.
 
     Returns:
         The tables of another layout found, then one entry per other data context
@@ -512,6 +514,23 @@ def find_stale_tables(
                 found.other_completion_paths.append(
                     database.base_path + previous_completion_path
                 )
+    if previous_result is not None:
+        path, match = previous_result
+        if match is None:
+            completed = database.table_exists(path)
+        else:
+            column, value = match
+            rows = database.get_all_records(path)
+            completed = (
+                rows is not None
+                and column in rows.column_names
+                and pc.any(
+                    pc.equal(rows[column], pa.scalar(value, type=pa.large_binary()))
+                ).as_py()
+                is True
+            )
+        if completed:
+            found.other_completion_paths.append(database.base_path + path)
     if current is not None:
         current_path, current_context = current
         for key, rows in sorted(stored_data_contexts(database, current_path).items()):
@@ -535,7 +554,7 @@ def account_for_stale_tables(
       that takes the invocation context) must not act again for inputs it already
       handled when those completions cannot be matched at the current path or under
       the current data context. It fails before doing anything. Every old-layout table
-      and a completion table at the node's previous pipeline identity count.
+      and a completion table at the node's previous pipeline or result path count.
       The error names the tables. Where the database cannot list its tables, the
       node warns and proceeds (developer, November 11, 2026).
 

@@ -1084,6 +1084,7 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         )
         self._pipeline_database: ArrowDatabaseProtocol | None = None
         self._table_path: tuple[str, ...] | None = None
+        self._current_completion_paths: frozenset[tuple[str, ...]] = frozenset()
         self._unlisted_store_reported = False
         self._current_log_checked = False
         # The rows the last completed run passed on, in the order it passed them;
@@ -1117,6 +1118,10 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         """The attached invocation log path, including logs that only audit delivery."""
         return self._table_path
 
+    def set_current_completion_paths(self, paths: frozenset[tuple[str, ...]]) -> None:
+        """Record the paths owned by live taps sharing this job's database view."""
+        self._current_completion_paths = paths
+
     def _previous_completion_path(self) -> tuple[str, ...] | None:
         from orcapod.core.function_pod import pipeline_hash_before_context_parameter
 
@@ -1125,10 +1130,13 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         previous = pipeline_hash_before_context_parameter(self)
         if previous == self.pipeline_hash():
             return None
-        return self.node_uri + (
+        path = self.node_uri + (
             f"schema:{previous.to_hex()}",
             TRACKING_DB_SCHEMA_VERSION,
         )
+        # Before ctx_arg entered the pipeline hash, this tap could share a
+        # pipeline identity with a live tap on the equivalent plain branch.
+        return None if path in self._current_completion_paths else path
 
     def _refuse_log_of_another_data_context(self) -> None:
         """Refuse invocation logs holding deliveries this run cannot match.
@@ -1212,6 +1220,7 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
             # before anything is delivered or changes (ITL-1162).
             self.require_storable_tables(pipeline_database)
         self._pipeline_database = pipeline_database
+        self._current_completion_paths = frozenset()
         self._unlisted_store_reported = False
         self._current_log_checked = False
         if pipeline_database is not None:
