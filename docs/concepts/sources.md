@@ -100,6 +100,10 @@ stream built from one. Pass the source itself, or use `node.as_source()` to read
 another job's stored results. A schema-only `SourceNode` declares a new unbound
 slot for each job that captures it.
 
+The ITL-1559 stopgap also refuses a prebuilt stream over the receiving job's
+own slot. Pass that slot directly into a step inside the job, or pass the
+source itself.
+
 The capture and restriction checks follow wrappers that can read live inputs.
 This includes tag-copy `DerivedSource` over a live source. A `DerivedSource`
 over a job node reads stored results, so the checks stop there. Source object

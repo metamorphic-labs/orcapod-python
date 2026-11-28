@@ -716,7 +716,7 @@ class SideEffectPod(TraceableBase):
             side_effect_pod=self,
             input_stream=input_stream,
             label=label,
-        )
+        )._mark_recorded(self.tracker_manager)
 
     def __call__(
         self, *streams: StreamProtocol, label: str | None = None

@@ -210,6 +210,42 @@ def test_bound_proxy_uses_its_live_arrow_schema_for_collision_checks(
     assert "different schemas" not in message
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_cached_bound_proxy_uses_the_live_derived_schema(reverse: bool) -> None:
+    origin = ArrowTableSource(
+        pa.table({"t1": ["a"], "t2": ["b"], "x": pa.array([1], type=pa.int32())}),
+        tag_columns=["t1", "t2"],
+        tag_only_columns=True,
+        infer_nullable=True,
+        source_id="origin",
+    )
+    first = DerivedSource(origin, tags_as_data={"t1": "copy"}, source_id="shared")
+    second = DerivedSource(origin, tags_as_data={"t2": "copy"}, source_id="shared")
+    assert first.content_hash() != second.content_hash()
+    proxy = SourceProxy(
+        first.source_id,
+        first.content_hash().to_string(),
+        first.pipeline_hash().to_string(),
+        *first.output_schema(),
+    )
+    cached = proxy.cached(InMemoryArrowDatabase())
+    assert cached.arrow_schemas[1].field("x").type == pa.int64()
+    proxy.bind(first)
+    assert first.arrow_schemas[1] == second.arrow_schemas[1]
+    assert first.arrow_schemas[1].field("x").type == pa.int32()
+
+    # Prebuilt projections get their own slots, so the two sources are compared
+    # without also colliding on a direct slot name.
+    projected = {
+        "left": cached.map_data({"x": "left_x"}),
+        "right": second.map_data({"x": "right_x"}),
+    }
+    with Pipeline("comparison") as pipeline:
+        for label in ("right", "left") if reverse else ("left", "right"):
+            projected[label].map_data({f"{label}_x": "out"}, label=label)
+    assert {"left", "right"} <= pipeline.nodes.keys()
+
+
 def test_implicit_projection_conflict_names_both_function_steps() -> None:
     first = DictSource([{"x": 1, "y": 2}], source_id="shared")
     second = DictSource([{"x": 100, "y": 2}], source_id="shared")

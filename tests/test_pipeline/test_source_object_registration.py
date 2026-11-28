@@ -952,6 +952,7 @@ def test_capture_refuses_foreign_source_slots(
     }
     pod = total.pod
     assert isinstance(pod, FunctionPod)
+    expected_binding = source
     if form == "record":
         with pytest.raises(InconsistentSourceError, match="not supported yet") as error:
             receiver.record_function_pod_invocation(pod, slot, label="borrowed")
@@ -967,6 +968,16 @@ def test_capture_refuses_foreign_source_slots(
         )
         with pytest.raises(InconsistentSourceError, match="not supported yet") as error:
             PipelineJob.from_invocations(graph)
+    elif form == "hashed":
+        mid = total.pod(slot, label="borrowed")
+        _ = mid.content_hash()
+        expected_binding = _shifted_source("changed", 10)
+        slot.bound_source = expected_binding
+        with (
+            receiver,
+            pytest.raises(InconsistentSourceError, match="not supported yet") as error,
+        ):
+            scale.pod(mid, label="downstream")
     elif form in prebuilt:
         stream = prebuilt[form]()
         with (
@@ -982,17 +993,13 @@ def test_capture_refuses_foreign_source_slots(
             receiver,
             pytest.raises(InconsistentSourceError, match="not supported yet") as error,
         ):
-            mid = total.pod(slot, label="borrowed")
-            if form == "hashed":
-                _ = mid.content_hash()
-            slot.bound_source = _shifted_source("changed", 10)
-            scale.pod(mid, label="downstream")
+            total.pod(slot, label="borrowed")
 
     assert "'a'" in str(error.value)
     assert "Pass the source itself" in str(error.value)
     assert "as_source()" in str(error.value)
     assert "ITL-1559" in str(error.value)
-    assert slot.bound_source is source
+    assert slot.bound_source is expected_binding
     assert set(receiver.nodes) == {"kept", "kept_result"}
     receiver.run(orchestrator=orchestrator())
     assert sorted(receiver.kept_result.as_table()["out"].to_pylist()) == [3, 7]
@@ -1179,3 +1186,45 @@ def test_live_derived_source_and_its_source_are_both_capturable(
     job.run(orchestrator=orchestrator())
     assert sorted(job.original.as_table()["out"].to_pylist()) == [3, 7]
     assert sorted(job.derived.as_table()["out"].to_pylist()) == [2, 12]
+
+
+@pytest.mark.parametrize("setter", [False, True], ids=["bind", "setter"])
+@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
+def test_prebuilt_stream_over_own_slot_is_refused_before_rebinding(
+    setter: bool, orchestrator: Orchestrator
+) -> None:
+    from orcapod.operators import SelectDataColumns
+
+    source = _shifted_source("a", 0)
+    replacement = _shifted_source("b", 10)
+    with PipelineJob(database=InMemoryArrowDatabase()) as job:
+        total.pod(source, label="direct")
+
+    slot = job.nodes["a"]
+    prebuilt = SelectDataColumns(["x", "y"])(slot)
+    with Pipeline("also_tracking") as outer, job:
+        with pytest.raises(
+            InconsistentSourceError, match="'a'.*not supported yet"
+        ) as error:
+            total.pod(prebuilt, label="rejected")
+        assert "ITL-1559" in str(error.value)
+        assert "inside the job" in str(error.value)
+
+    assert not outer.nodes
+    assert set(job.nodes) == {"a", "direct"}
+    slot = job.nodes["a"]
+    prebuilt_twin = SelectDataColumns(["x", "y"])(slot)
+    with job:
+        difference.pod(slot, label="own_slot")
+        recorded = SelectDataColumns(["x", "y"])(slot)
+        total.pod(recorded, label="inside")
+        assert prebuilt_twin.content_hash() == recorded.content_hash()
+        with pytest.raises(InconsistentSourceError, match="'a'.*not supported yet"):
+            total.pod(prebuilt_twin, label="rejected_twin")
+    assert {"rejected", "rejected_twin"}.isdisjoint(job.nodes)
+
+    _rebind(job, {"a": replacement}, setter)
+    job.run(orchestrator=orchestrator())
+    assert sorted(job.direct.as_table()["out"].to_pylist()) == [13, 17]
+    assert sorted(job.inside.as_table()["out"].to_pylist()) == [13, 17]
+    assert sorted(job.own_slot.as_table()["out"].to_pylist()) == [9, 9]

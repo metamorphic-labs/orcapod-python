@@ -75,16 +75,33 @@ def root_source_uses(
 
 
 def _comparison_schema(source: RootSource) -> tuple[ContentHash, ContentHash]:
-    """Use the live proxy schema for the comparison, even after an unbound read."""
+    """Compare a bound proxy's live schema through schema-preserving caches."""
+    from orcapod.core.sources.cached_source import CachedSource
     from orcapod.core.sources.source_proxy import SourceProxy
     from orcapod.core.streams.base import typed_arrow_schemas
 
-    if isinstance(source, SourceProxy) and source.is_bound:
-        # The cached schema can describe the unbound proxy's Python types.
-        schemas = typed_arrow_schemas(source, own=False)
-    else:
-        schemas = source.arrow_schemas
-    return arrow_schema_identity(*schemas, source.data_context)
+    current: StreamProtocol = source
+    visited: set[int] = set()
+    saw_bound_proxy = False
+    while id(current) not in visited:
+        visited.add(id(current))
+        if isinstance(current, CachedSource):
+            current = current.cached_source
+        elif (
+            isinstance(current, SourceProxy)
+            and (delegate := current.delegate) is not None
+        ):
+            saw_bound_proxy = True
+            current = delegate
+        else:
+            if saw_bound_proxy:
+                # Cache and proxy schemas may still describe the unbound proxy.
+                # Keep the delegate's schema, including any tag copies it adds.
+                return arrow_schema_identity(
+                    *typed_arrow_schemas(current), source.data_context
+                )
+            break
+    return arrow_schema_identity(*source.arrow_schemas, source.data_context)
 
 
 def require_consistent_sources(

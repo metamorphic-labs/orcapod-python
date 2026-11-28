@@ -749,14 +749,15 @@ class TestJobs:
             return n
 
         job = PipelineJob(name="two", database=DeltaTableDatabase(tmp_path / "s"))
-        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
-            with job:
-                same.pod(
-                    events.where(col("unit") < 2).select_data_columns(["n"]), label="a"
-                )
-                same.pod(
-                    events.where(col("unit") >= 2).select_data_columns(["n"]), label="b"
-                )
+        with job:
+            same.pod(
+                events.where(col("unit") < 2).select_data_columns(["n"]), label="a"
+            )
+            with pytest.raises(
+                InconsistentSourceError, match="distinct source objects"
+            ):
+                events.where(col("unit") >= 2).select_data_columns(["n"], label="b")
+        assert {"a", "b"} & job.nodes.keys() == {"a"}
 
     def test_a_saved_job_keeps_the_window_in_canonical_order(self, project, tmp_path):
         store = tmp_path / "store"

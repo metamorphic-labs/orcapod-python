@@ -116,8 +116,11 @@ capturing compiled nodes or other streams that depend on the other job's
 bindable source slots (`SourceJobNode`). The same restriction applies to
 standalone `SourceJobNode` objects, even when unbound. Pass the source itself to
 record a new chain, or use `node.as_source()` to read the stored results of an
-earlier job. A job can use its own slots while their original bindings are in
-place. A schema-only `SourceNode` declares an independent slot for each job.
+earlier job. A job can pass its own slots directly into new steps while their
+original bindings are in place. The ITL-1559 stopgap refuses streams built
+outside the job over one of its own slots. Build the step from the slot inside
+the job, or pass the source itself. A schema-only `SourceNode` declares an
+independent slot for each job.
 
 ## The database
 

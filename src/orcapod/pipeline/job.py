@@ -231,7 +231,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             self.compile()
 
     def _validate_capture_sources(self, streams: Iterable[cp.StreamProtocol]) -> None:
-        """Require original bindings and refuse bindable slots outside this job."""
+        """Require original bindings and refuse captures that can detach a slot."""
         # ITL-1559: refuse additive capture until the relationship between captured
         # objects and slots is defined. Check at recording so a bind inside an
         # open capture context cannot bypass the rule.
@@ -253,25 +253,35 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             )
         # ITL-1559 stopgap: SourceJobNode has a mutable bound_source even when
         # unbound. SourceNode only declares a name and schemas.
-        own_slots = {
-            id(node)
-            for node in self._persistent_node_map.values()
-            if isinstance(node, SourceJobNode)
-        }
-        visited: set[int] = set()
-        pending = list(streams)
+        # A prebuilt stream can retain an own slot after compile replaces it.
+        # Only recorded steps are rewired to their job's current slots.
+        own_nodes = {id(node) for node in self._persistent_node_map.values()}
+        visited: set[tuple[int, bool]] = set()
+        pending = [(stream, False) for stream in streams]
         while pending:
-            stream = pending.pop()
-            if id(stream) in visited:
+            stream, prebuilt = pending.pop()
+            key = id(stream), prebuilt
+            if key in visited:
                 continue
-            visited.add(id(stream))
-            if isinstance(stream, SourceJobNode) and id(stream) not in own_slots:
-                raise InconsistentSourceError(
-                    f"Capturing source slot {stream.name!r} from outside this job "
-                    "is not supported yet (ITL-1559). Pass the source itself, or "
-                    "use node.as_source() to read another job's stored results."
-                )
-            pending.extend(streams_beneath(stream))
+            visited.add(key)
+            if isinstance(stream, SourceJobNode):
+                if id(stream) not in own_nodes:
+                    raise InconsistentSourceError(
+                        f"Capturing source slot {stream.name!r} from outside this job "
+                        "is not supported yet (ITL-1559). Pass the source itself, or "
+                        "use node.as_source() to read another job's stored results."
+                    )
+                if prebuilt:
+                    raise InconsistentSourceError(
+                        f"Capturing a prebuilt stream over source slot {stream.name!r} "
+                        "is not supported yet (ITL-1559). Build the step inside the "
+                        "job from its slot, or pass the source itself."
+                    )
+            elif id(stream) not in own_nodes and not (
+                isinstance(stream, StreamBase) and stream._was_recorded_by(self)
+            ):
+                prebuilt = True
+            pending.extend((upstream, prebuilt) for upstream in streams_beneath(stream))
 
     def _source_uses(self, extra: PodInvocation | None = None) -> Iterator[SourceUse]:
         """Validate actual graph leaves after a binding replaces a captured input."""
