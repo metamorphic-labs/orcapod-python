@@ -414,6 +414,7 @@ class TestBinaryOperatorAsyncExecute:
         right = ArrowTableStream(right_table, tag_columns=["id"])
 
         op = SemiJoin()
+        op.validate_inputs(left, right)
 
         left_ch = Channel(buffer_size=16)
         right_ch = Channel(buffer_size=16)

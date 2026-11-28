@@ -21,7 +21,9 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections import Counter
-from typing import Any, cast
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Literal, cast
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -33,14 +35,22 @@ from orcapod.contexts import get_default_context
 from orcapod.core import row_ids
 from orcapod.core.datagrams import EmptyData
 from orcapod.core.function_pod import FunctionPod
+from orcapod.core.nodes import function_node
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.operators import SelectDataColumns
 from orcapod.core.sources import ArrowTableSource
 from orcapod.core.streams import ArrowTableStream
-from orcapod.databases import InMemoryArrowDatabase
+from orcapod.databases import (
+    DeltaTableDatabase,
+    ExtensionAwareDatabase,
+    InMemoryArrowDatabase,
+)
 from orcapod.errors import EphemeralResultMissingError
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
+from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
+from orcapod.semantic_types import UniversalTypeConverter
 from orcapod.side_effects import SideEffectPod
+from orcapod.sources import DictSource
 from orcapod.system_constants import constants
 from orcapod.types import CacheMode, ContentHash, NodeConfig
 
@@ -571,6 +581,145 @@ def test_no_read_of_the_operator_node_shows_the_stored_only_columns(
 # ---------------------------------------------------------------------------
 # The placeholder of an ephemeral result that is gone
 # ---------------------------------------------------------------------------
+
+
+def check_pipeline_record_timestamp_tie(
+    database: ArrowDatabaseProtocol,
+    reverse: bool,
+    use_async: bool,
+    available_results: Literal["both", "neither", "lesser"],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Seed same-instance records by running the job in two isolated sessions."""
+    recorded_at = datetime(2026, 11, 27, 12, tzinfo=timezone.utc)
+
+    class PipelineClock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return recorded_at
+
+    monkeypatch.setattr(function_node, "datetime", PipelineClock)
+    values = iter((10, 20))
+
+    @function_pod(output_keys="result")
+    def compute(x: int) -> int:
+        return x + next(values)
+
+    def make_job(
+        pipeline_db: ArrowDatabaseProtocol, ephemeral: InMemoryArrowDatabase
+    ) -> PipelineJob:
+        job = PipelineJob(
+            name="record_tie",
+            database=pipeline_db,
+            result_database=InMemoryArrowDatabase(),
+        )
+        with job:
+            source = DictSource(
+                [{"k": 1, "x": 0}], tag_columns=["k"], source_id="test_rows"
+            )
+            compute.pod(source, label="compute")
+        job.apply_node_config(NodeConfig(is_result_ephemeral=True))
+        job.set_ephemeral_database(ephemeral)
+        return job
+
+    def run(job: PipelineJob, *, load_only: bool = False) -> None:
+        summary = (
+            asyncio.run(job.run_async(load_only=load_only))
+            if use_async
+            else job.run(load_only=load_only)
+        )
+        assert summary.ok
+
+    seed_records = InMemoryArrowDatabase()
+    result_db = InMemoryArrowDatabase()
+    results: list[pa.Table] = []
+    result_path: tuple[str, ...] = ()
+    for _ in range(2):
+        session_results = InMemoryArrowDatabase()
+        job = make_job(seed_records, session_results)
+        run(job)
+        (result_path,) = session_results.list_table_paths()
+        result_rows = session_results.get_all_records(result_path, record_id_column=KEY)
+        assert result_rows is not None
+        results.append(result_rows)
+
+    (pipeline_path,) = seed_records.list_table_paths()
+    records = seed_records.get_all_records(pipeline_path, record_id_column=KEY)
+    assert records is not None
+    assert _values(records, "__recorded_at") == [recorded_at, recorded_at]
+    instances = _values(records, "__pipeline_instance_id")
+    assert len(set(instances)) == 1
+    direction = "descending" if reverse else "ascending"
+    records = records.sort_by([(constants.DATA_RECORD_ID, direction)])
+    for index in range(records.num_rows):
+        database.add_records(
+            pipeline_path, records.slice(index, 1), record_id_column=KEY, flush=True
+        )
+    result_ids = _values(records, constants.DATA_RECORD_ID)
+    assert len(set(result_ids)) == 2
+    winner = max(result_ids)
+
+    if available_results == "neither":
+        gone = make_job(database, InMemoryArrowDatabase())
+        ((_, placeholder),) = (
+            gone.function_pods["compute"].get_cached_results(instances[:1]).values()
+        )
+        assert isinstance(placeholder, EmptyData)
+        expected = records[constants.OUTPUT_DATA_HASH_COL][
+            result_ids.index(winner)
+        ].as_py()
+        assert placeholder.content_hash() == ContentHash.from_prefixed_digest(expected)
+        return
+
+    result_rows = pa.concat_tables(results).sort_by([(KEY, direction)])
+    if available_results == "lesser":
+        # The greater id belongs to a missing result. The available result wins.
+        winner = min(result_ids)
+        result_rows = result_rows.slice(_values(result_rows, KEY).index(winner), 1)
+    for index in range(result_rows.num_rows):
+        result_db.add_records(
+            result_path, result_rows.slice(index, 1), record_id_column=KEY, flush=True
+        )
+    reader = make_job(database, result_db)
+    run(reader, load_only=available_results == "lesser")
+    node = reader.nodes["compute"]
+    ((_, selected),) = node.iter_data()
+    assert selected.datagram_uuid.bytes == winner
+    expected = dict(
+        zip(_values(result_rows, KEY), _values(result_rows, "result"), strict=True)
+    )
+    assert selected.as_dict()["result"] == expected[winner]
+    historical_values = (
+        [expected[winner]] if available_results == "lesser" else [10, 20]
+    )
+    assert (
+        sorted(node.as_source().as_table().column("result").to_pylist())
+        == historical_values
+    )
+
+
+@pytest.mark.parametrize(
+    "reverse", [False, True], ids=["lesser-first", "greater-first"]
+)
+@pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("available_results", ["both", "neither", "lesser"])
+@pytest.mark.parametrize("backend", ["memory", "delta", "extension"])
+def test_pipeline_record_timestamp_tie(
+    backend: str,
+    reverse: bool,
+    use_async: bool,
+    available_results: Literal["both", "neither", "lesser"],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database: ArrowDatabaseProtocol = InMemoryArrowDatabase()
+    if backend == "delta":
+        database = DeltaTableDatabase(tmp_path)
+    elif backend == "extension":
+        database = ExtensionAwareDatabase(database, UniversalTypeConverter())
+    check_pipeline_record_timestamp_tie(
+        database, reverse, use_async, available_results, monkeypatch
+    )
 
 
 def _placeholders(job: PipelineJob) -> list[tuple[Any, Any]]:

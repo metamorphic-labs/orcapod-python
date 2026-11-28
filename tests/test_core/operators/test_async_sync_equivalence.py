@@ -353,6 +353,8 @@ def sync_rows(op: StaticOutputOperatorPod, *sources: StreamProtocol) -> list[Row
 async def _run_async(
     op: StaticOutputOperatorPod, sources: Sequence[StreamProtocol]
 ) -> list[Row]:
+    if isinstance(op, SemiJoin):
+        op.validate_inputs(*sources)
     channels: list[Channel[Row]] = [Channel(buffer_size=64) for _ in sources]
     output: Channel[Row] = Channel(buffer_size=64)
     for stream, channel in zip(sources, channels):

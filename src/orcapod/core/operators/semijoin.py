@@ -23,6 +23,7 @@ from orcapod.core.operators.match_keys import frozen_scalar
 from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError, SemiJoinIgnoredColumnWarning
 from orcapod.protocols.core_protocols import DataProtocol, StreamProtocol, TagProtocol
+from orcapod.protocols.core_protocols.trackers import TrackerManagerProtocol
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, ContentHash, Schema
 from orcapod.utils import arrow_utils, schema_utils
@@ -78,6 +79,12 @@ class SemiJoin(BinaryOperator):
 
     CONSTRAINING_INPUTS: ClassVar[tuple[int, ...]] = (1,)
     CONSTRAINT_MATCHES_SHARED_TAGS: ClassVar[bool] = True
+
+    def __init__(
+        self, tracker_manager: TrackerManagerProtocol | None = None, **kwargs: Any
+    ) -> None:
+        super().__init__(tracker_manager=tracker_manager, **kwargs)
+        self._validated_keys: dict[tuple[ContentHash, ...], tuple[str, ...]] = {}
 
     @staticmethod
     def _match_keys(
@@ -141,7 +148,8 @@ class SemiJoin(BinaryOperator):
 
         One application is validated more than once: when the operator is
         called, when a job builds its node and when the sync orchestrator runs
-        it over the rows it rebuilt. The ignored names are remembered on the
+        it over the rows it rebuilt. A rewired async job can reach execution
+        without validation. Both paths remember the ignored names on the
         operator, so each set is warned about once.
 
         Args:
@@ -290,8 +298,8 @@ class SemiJoin(BinaryOperator):
         Checks that the match keys (the shared tag columns) have compatible
         types; data columns are not keys and are not checked.
 
-        Stores the common keys so that ``async_execute`` can use them
-        to determine the correct empty-right behavior without data.
+        Remembers the ordered pair for direct row-channel execution and its common
+        keys for runs where the right input has no rows.
 
         Raises:
             InputValidationError: If a match key's types differ beyond
@@ -302,26 +310,17 @@ class SemiJoin(BinaryOperator):
                 the inputs share a name that is not a tag on both sides (ITL-1088).
         """
         try:
-            self._validated_common_keys: tuple[str, ...] = self._checked_match_keys(
-                left_stream, right_stream
-            )
-
+            common_keys = self._checked_match_keys(left_stream, right_stream)
         except Exception as e:
             raise InputValidationError(
                 f"Input streams are not compatible for semi-join: {e}"
             ) from e
         self._warn_once_per_application(left_stream, right_stream)
+        pair = (left_stream.pipeline_hash(), right_stream.pipeline_hash())
+        self._validated_keys[pair] = common_keys
 
     def is_commutative(self) -> bool:
         return False
-
-    def _common_keys_from_schema(self) -> tuple[str, ...]:
-        """Return the common keys computed during input validation.
-
-        Falls back to an empty tuple if validation hasn't been called
-        (shouldn't happen in normal pipeline execution).
-        """
-        return getattr(self, "_validated_common_keys", ())
 
     async def async_execute(
         self,
@@ -344,8 +343,9 @@ class SemiJoin(BinaryOperator):
         appear in the right-side index, emit immediately. Left rows keep their
         arrival order.
 
-        Falls back to barrier mode when the right input is empty (schema
-        cannot be inferred from data) or when there are no common keys.
+        A direct call must first validate its exact inputs with
+        ``validate_inputs(left, right)``. With an empty right input, the match keys
+        come from the job's current descriptions or from that validation.
 
         Key types are checked (``require_shared_arrow_type``) on the first row
         of each input, since channels carry no schema. When either input is
@@ -355,23 +355,35 @@ class SemiJoin(BinaryOperator):
         Args:
             inputs: The left and right readable input channels.
             output: Writable channel for downstream consumption.
-            input_pipeline_hashes: Not used: the left rows pass through with
-                their system-tag names, so no column is named after an
-                input's pipeline hash.
+            input_pipeline_hashes: Pipeline hashes of the left and right inputs.
+
+        Raises:
+            InputValidationError: If a direct call supplies an unvalidated pair.
         """
+        from orcapod.core.nodes.operator_node import job_input_stream
+
         left_rows: _LeftRows | None = None
         try:
             output = WithoutMetaWriter(output)
+            left_stream = job_input_stream(inputs[0])
+            right_stream = job_input_stream(inputs[1])
+            validated_keys = self._validated_keys.get(tuple(input_pipeline_hashes))
+            if (left_stream is None or right_stream is None) and validated_keys is None:
+                raise InputValidationError(
+                    "SemiJoin requires validation of the current input pair. "
+                    "Call validate_inputs(left, right) before direct async execution."
+                )
             # Phase 1: Build right-side lookup, reading the left input meanwhile
             right_rows, left_rows = await _collect_right_reading_left(
                 inputs[0], inputs[1]
             )
 
             if not right_rows:
-                # Empty right: determine common keys from the validated
-                # input schemas (set during __init__) to match sync semantics.
-                # Common keys exist → empty result; no common keys → pass left through.
-                common = self._common_keys_from_schema()
+                common = validated_keys
+                if left_stream is not None and right_stream is not None:
+                    common = self._match_keys(
+                        left_stream.keys()[0], right_stream.keys()[0]
+                    )
                 if common:
                     # Drain left channel (discard) — result is empty
                     async for _ in left_rows:
@@ -394,17 +406,10 @@ class SemiJoin(BinaryOperator):
                     # First left row — determine common keys (the shared tag
                     # columns, ITL-1088) and build index
                     common_keys = self._match_keys(tuple(tag.keys()), right_tag_keys)
-                    # Validation warns about shared non-key names; when it did not
-                    # run (a direct call), warn here, once, from the first rows.
-                    if not hasattr(self, "_validated_common_keys"):
-                        ignored = self._ignored_shared_names(
-                            tag.keys(),
-                            data.keys(),
-                            right_tag_keys,
-                            right_rows[0][1].keys(),
-                        )
-                        if ignored:
-                            self._warn_ignored(ignored)
+                    # A job can reach execution without validating these inputs.
+                    if validated_keys is None:
+                        assert left_stream is not None and right_stream is not None
+                        self._warn_once_per_application(left_stream, right_stream)
 
                     if not common_keys:
                         # No common keys — pass all left rows through
