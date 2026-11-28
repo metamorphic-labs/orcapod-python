@@ -59,6 +59,16 @@ def canonical_directory_hash(value: ContentHash) -> ContentHash:
     return ContentHash(DIRECTORY_HASH_LABEL, digest)
 
 
+def _materialize_ignore_patterns(ignore: Iterable[str]) -> tuple[str, ...]:
+    """Validate an iterable of glob patterns and consume it once."""
+    if isinstance(ignore, str):
+        raise TypeError(
+            f"ignore= expects an iterable of pattern strings, not a bare string. "
+            f"Pass a list instead: ignore=[{ignore!r}]"
+        )
+    return tuple(ignore)
+
+
 def _compile_ignore(
     ignore: Callable[[UPath], bool] | Iterable[str] | None,
 ) -> Callable[[UPath], bool] | None:
@@ -80,12 +90,7 @@ def _compile_ignore(
         return None
     if callable(ignore):
         return ignore
-    if isinstance(ignore, str):
-        raise TypeError(
-            f"ignore= expects an iterable of pattern strings, not a bare string. "
-            f"Pass a list instead: ignore=[{ignore!r}]"
-        )
-    patterns = list(ignore)
+    patterns = _materialize_ignore_patterns(ignore)
 
     def _glob_filter(relative: UPath) -> bool:
         return any(PurePosixPath(relative.as_posix()).match(pat) for pat in patterns)
@@ -288,7 +293,7 @@ def verified_directory_hash(
         ignore = once
         custom_ignore = once
     elif ignore is not None:
-        ignore = tuple(ignore)
+        ignore = _materialize_ignore_patterns(ignore)
         custom_ignore = list(ignore)
     else:
         custom_ignore = None

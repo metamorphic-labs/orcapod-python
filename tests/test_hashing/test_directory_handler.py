@@ -460,6 +460,42 @@ def test_directory_handler_rejects_a_sha256_shaped_custom_directory_digest(
         _ = handler.handle(Directory(tmp_path), get_default_semantic_hasher())
 
 
+class _InheritedDirectoryHasher(BasicDirectoryHasher):
+    """Use the built-in traversal through the custom hasher verification path."""
+
+
+def test_verified_custom_directory_rejects_bare_string_ignore(tmp_path: Path) -> None:
+    """A glob string must not become a sequence of single-character patterns."""
+    _ = (tmp_path / "data").write_bytes(b"abc")
+    handler = DirectoryHandler(_InheritedDirectoryHasher(FileHasher()))
+
+    with pytest.raises(TypeError, match="not a bare string"):
+        _ = handler.handle(
+            Directory(tmp_path, ignore="*.pyc"), get_default_semantic_hasher()
+        )
+
+
+@pytest.mark.parametrize("use_generator", [False, True])
+def test_verified_custom_directory_accepts_ignore_patterns(
+    tmp_path: Path, use_generator: bool
+) -> None:
+    """Both traversals use the same patterns from a list or a one-shot generator."""
+    _ = (tmp_path / "data").write_bytes(b"abc")
+    basic = BasicDirectoryHasher(FileHasher())
+    expected = basic.hash_directory(tmp_path)
+    _ = (tmp_path / "module.pyc").write_bytes(b"ignore me")
+    patterns = ["*.pyc"]
+    ignore = (pattern for pattern in patterns) if use_generator else patterns
+    handler = DirectoryHandler(_InheritedDirectoryHasher(FileHasher()))
+
+    assert (
+        handler.handle(
+            Directory(tmp_path, ignore=ignore), get_default_semantic_hasher()
+        )
+        == expected
+    )
+
+
 def test_verified_custom_directory_traversal_reuses_ignore_decisions(
     tmp_path: Path,
 ) -> None:
@@ -468,16 +504,13 @@ def test_verified_custom_directory_traversal_reuses_ignore_decisions(
     _ = (tmp_path / "ignored").write_bytes(b"ignore me")
     basic = BasicDirectoryHasher(FileHasher())
 
-    class CustomDirectoryHasher(BasicDirectoryHasher):
-        pass
-
     seen: list[str] = []
 
     def ignore(path: UPath) -> bool:
         seen.append(path.name)
         return path.name == "ignored"
 
-    handler = DirectoryHandler(CustomDirectoryHasher(FileHasher()))
+    handler = DirectoryHandler(_InheritedDirectoryHasher(FileHasher()))
     result = handler.handle(
         Directory(tmp_path, ignore=ignore), get_default_semantic_hasher()
     )
