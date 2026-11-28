@@ -16,8 +16,9 @@ one case only (a SQLite-backed store is accepted at setup and refuses every even
 reported. A job creates a counter for its execution (`pipeline/observer_losses.py`,
 `RunLosses`). Node-scoped built-in observers and their data loggers carry that counter,
 so overlapping executions count their own losses even when they share an observer or
-a run ID. A failed event encoding or write is counted and logged. Lifecycle hooks run
-on the caller's original observers, and the built-ins derive event metadata as before.
+a run ID. The job selects concrete built-in observers by class identity. A failed event
+encoding or write is counted and logged. Lifecycle hooks run on the caller's original
+observers, and the built-ins derive event metadata as before.
 
 The run puts the count and first reported error for each observer kind in
 `RunSummary.lost_observer_events`. If the error's message cannot be rendered,

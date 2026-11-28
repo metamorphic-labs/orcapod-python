@@ -16,7 +16,7 @@ import warnings
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from typing_extensions import override
@@ -45,6 +45,9 @@ from tests.test_core.operators.several_items import (
     Arrangement,
     make_source,
 )
+
+if TYPE_CHECKING:
+    from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
 
 ORCHESTRATORS: dict[str, Callable[[], Any]] = {
     "sync": SyncPipelineOrchestrator,
@@ -421,6 +424,38 @@ def test_custom_observers_keep_their_lifecycle(
     assert _rows(job) == EXPECTED_ROWS
 
 
+@pytest.mark.parametrize("comparison_raises", [True, False], ids=["raises", "matches"])
+def test_custom_observer_class_is_never_compared(
+    arrangement: Arrangement,
+    run_job: Callable[[PipelineJob, StatusObserver], RunSummary],
+    comparison_raises: bool,
+) -> None:
+    """Only concrete built-in observers have their losses counted by the job."""
+
+    class ObserverMeta(type):
+        @override
+        def __eq__(cls, other: object) -> bool:
+            if comparison_raises:
+                raise TypeError("this application does not compare observer classes")
+            return True
+
+    class CustomObserver(StatusObserver, metaclass=ObserverMeta):
+        """Scope to a built-in status writer through the inherited hook."""
+
+    database = _RefusingDatabase(InMemoryArrowDatabase(), _Refusals(0))
+    # The test double delegates the rest of the database protocol via __getattr__.
+    observer = CustomObserver(cast("ArrowDatabaseProtocol", cast("object", database)))
+    job = _job(arrangement)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", ObserverEventsLostWarning)
+        summary = run_job(job, observer)
+
+    assert summary.ok
+    assert database.refusals.writes == 2 * N_ROWS
+    assert summary.lost_observer_events == {}
+    assert _rows(job) == EXPECTED_ROWS
+
+
 def test_custom_completion_observer_sees_the_current_logging_run(
     arrangement: Arrangement, run_job: Callable[[PipelineJob, Any], RunSummary]
 ) -> None:
@@ -452,8 +487,40 @@ def test_custom_completion_observer_sees_the_current_logging_run(
     assert all_logs["_log_run_id"].to_pylist() == [completion.run_id] * (N_ROWS + 1)
 
 
+class _Utf8CaptureFormatter(logging.Formatter):
+    """Escape lone surrogates after pytest formats the message and traceback."""
+
+    def __init__(self, formatter: logging.Formatter | None) -> None:
+        super().__init__()
+        self._formatter: logging.Formatter = formatter or logging.Formatter()
+
+    @override
+    def format(self, record: logging.LogRecord) -> str:
+        return (
+            self._formatter.format(record)
+            .encode("utf-8", "backslashreplace")
+            .decode("utf-8")
+        )
+
+
+@pytest.fixture
+def utf8_log_capture(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> pytest.LogCaptureFixture:
+    """Keep the original records and make both pytest log captures safe for xdist."""
+    # Pytest captures logs for caplog and for its test report with separate handlers.
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, type(caplog.handler)):
+            monkeypatch.setattr(
+                handler, "formatter", _Utf8CaptureFormatter(handler.formatter)
+            )
+    return caplog
+
+
 def test_unencodable_log_event_preserves_rows(
-    arrangement: Arrangement, run_job: Callable[[PipelineJob, Any], RunSummary]
+    arrangement: Arrangement,
+    run_job: Callable[[PipelineJob, Any], RunSummary],
+    utf8_log_capture: pytest.LogCaptureFixture,
 ) -> None:
     """A filename containing a surrogate can lose a log row but not a result."""
     observer = LoggingObserver(InMemoryArrowDatabase())
@@ -467,6 +534,7 @@ def test_unencodable_log_event_preserves_rows(
     assert summary.ok
     assert summary.lost_observer_events["logging"].count == N_ROWS
     assert _rows(job) == EXPECTED_ROWS
+    assert rb"filename: bad\udcff" in utf8_log_capture.text.encode("utf-8")
 
 
 def test_promoted_row_warning_still_reports_observer_losses(
@@ -519,7 +587,9 @@ def test_unprintable_row_error_still_reports_observer_losses(
 
 
 def test_unencodable_status_event_preserves_other_rows(
-    arrangement: Arrangement, run_job: Callable[[PipelineJob, Any], RunSummary]
+    arrangement: Arrangement,
+    run_job: Callable[[PipelineJob, Any], RunSummary],
+    utf8_log_capture: pytest.LogCaptureFixture,
 ) -> None:
     """A status row with an unencodable error is lost and the job still finishes."""
     job = _job(arrangement, pod=describe_except_unencodable_error)
@@ -541,6 +611,7 @@ def test_unencodable_status_event_preserves_other_rows(
         ObserverEventsLostWarning,
     ]
     assert _rows(job) == [row for row in EXPECTED_ROWS if row[3] != 11]
+    assert rb"filename: bad\udcff" in utf8_log_capture.text.encode("utf-8")
 
 
 def test_run_async_is_a_coroutine_function() -> None:

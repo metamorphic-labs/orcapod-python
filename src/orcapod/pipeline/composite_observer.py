@@ -96,11 +96,12 @@ class CompositeObserver:
         for child in self._observers:
             # Only factory results from concrete built-ins belong to this run.
             # A custom contextualize() can return a shared or delegated observer.
-            if type(child) is CompositeObserver:
+            child_type = type(child)
+            if child_type is CompositeObserver:
                 scoped = child._contextualize(identity_path, losses)
             else:
                 scoped = child.contextualize(*identity_path)
-                if type(child) in built_ins:
+                if any(child_type is built_in for built_in in built_ins):
                     scoped._run_losses = losses
             children.append(scoped)
         return CompositeObserver(*children)
