@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
+from pathlib import Path
 
 import pytest
+from typing_extensions import override
+from upath import UPath
 
+from orcapod.contexts import get_default_semantic_hasher
 from orcapod.logical_types.directory_type import Directory
 from orcapod.hashing.directory_hashers import BasicDirectoryHasher
 from orcapod.hashing.file_hashers import FileHasher
@@ -17,7 +22,7 @@ from orcapod.hashing.semantic_hashing.semantic_hasher import SemanticAwarePython
 from orcapod.hashing.semantic_hashing.type_handler_registry import (
     PythonTypeHandlerRegistry,
 )
-from orcapod.types import ContentHash
+from orcapod.types import ContentHash, PathLike
 
 
 class TestBasicDirectoryHasher:
@@ -324,3 +329,67 @@ class TestDirectoryHandler:
         h1 = handler.handle(Directory(d1), hasher)
         h2 = handler.handle(Directory(d2, ignore=["*.pyc"]), hasher)
         assert h1 == h2
+
+
+class _CustomDirectoryHasher:
+    def __init__(self, result: ContentHash) -> None:
+        self.algorithm: str = "sha256"
+        self.result: ContentHash = result
+        self.calls: int = 0
+
+    def hash_directory(
+        self,
+        directory_path: PathLike,
+        ignore: Callable[[UPath], bool] | list[str] | None = None,
+    ) -> ContentHash:
+        del directory_path, ignore
+        self.calls += 1
+        return self.result
+
+
+def test_directory_handler_refuses_a_reassigned_custom_algorithm(
+    tmp_path: Path,
+) -> None:
+    """Check the advertised algorithm again before invoking the custom hasher."""
+    custom = _CustomDirectoryHasher(ContentHash("md5", b"\x00" * 16))
+    handler = DirectoryHandler(custom)
+    custom.algorithm = "md5"
+
+    with pytest.raises(ValueError, match="directory_v1.*sha256.*'md5'"):
+        _ = handler.handle(Directory(tmp_path), get_default_semantic_hasher())
+    assert custom.calls == 0
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        pytest.param(ContentHash("md5", b"\x00" * 32), id="wrong-label"),
+        pytest.param(ContentHash("directory_v1", b"\x00" * 16), id="wrong-length"),
+    ],
+)
+def test_directory_handler_rejects_an_invalid_custom_result(
+    tmp_path: Path, result: ContentHash
+) -> None:
+    """A SHA-256 declaration cannot make an invalid result acceptable."""
+    handler = DirectoryHandler(_CustomDirectoryHasher(result))
+
+    with pytest.raises(ValueError, match="Directory hash"):
+        _ = handler.handle(Directory(tmp_path), get_default_semantic_hasher())
+
+
+def test_directory_handler_canonicalizes_custom_results(tmp_path: Path) -> None:
+    """The returned directory hash serializes from its validated label and digest."""
+
+    class MisencodedDirectoryHash(ContentHash):
+        @override
+        def to_prefixed_digest(self) -> bytes:
+            return b"md5:" + self.digest
+
+    digest = b"\x00" * 32
+    handler = DirectoryHandler(
+        _CustomDirectoryHasher(MisencodedDirectoryHash("directory_v1", digest))
+    )
+
+    result = handler.handle(Directory(tmp_path), get_default_semantic_hasher())
+
+    assert result.to_prefixed_digest() == b"directory_v1:" + digest

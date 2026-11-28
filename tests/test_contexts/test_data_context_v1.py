@@ -101,6 +101,33 @@ def test_context_refuses_a_custom_directory_hasher_with_an_unsupported_algorithm
         _ = registry.get_context()
 
 
+@pytest.mark.parametrize("report_algorithm", [True, False], ids=["md5", "missing"])
+def test_directory_registration_refuses_an_unsupported_custom_hasher_at_use(
+    tmp_path: Path, report_algorithm: bool
+) -> None:
+    """A hasher injected into the logical-type handler follows the SHA-256 rule."""
+    _ = shutil.copytree(MANIFEST_DIR / "schemas", tmp_path / "schemas")
+    _ = shutil.copyfile(MANIFEST_DIR / "v1.json", tmp_path / "v1.json")
+    registrations = json.loads((CONTEXTS_DIR / "logical_types.json").read_text())
+    for value_type, handler in registrations["value_handlers"]:
+        if value_type["_type"] == "orcapod.logical_types.directory_type.Directory":
+            handler["_config"]["directory_hasher"] = {
+                "_class": f"{__name__}.CustomDirectoryHasher",
+                "_config": {"report_algorithm": report_algorithm},
+            }
+            break
+    registration_path = tmp_path / "schemas" / "registration.json"
+    _ = registration_path.write_text(json.dumps(registrations))
+    context = JSONDataContextRegistry(
+        contexts_dir=tmp_path, logical_types_file=registration_path
+    ).get_context()
+    directory = tmp_path / "data"
+    directory.mkdir()
+
+    with pytest.raises(ValueError, match="directory_v1.*sha256"):
+        _ = context.semantic_hasher.hash_object(orcapod.Directory(directory))
+
+
 def _pins() -> dict[str, dict[str, Any]]:
     """The pin of each manifest, by version: ``{"manifest": ..., "releases": {...}}``,
     with ``"withdrawn": {...}`` when a release was withdrawn.

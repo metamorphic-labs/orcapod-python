@@ -151,9 +151,9 @@ class SqliteHashCacher:
     SQLite database. Uses WAL mode for single-writer/multi-reader
     concurrency and thread-local connections for thread safety.
 
-    The hash is stored as a BLOB in ``{method}:{raw_digest}`` format via
-    ``ContentHash.to_prefixed_digest()``. Each algorithm has its own row in
-    ``file_hash_cache_v2``. Older cache tables are left untouched.
+    Writes store a BLOB containing ``b"sha256:"`` followed by the validated digest
+    bytes. Historical rows for other algorithms remain in ``file_hash_cache_v2``
+    and are ignored by lookups. Older cache tables are left untouched.
 
     Args:
         db_path: Path to the SQLite database file. Defaults to

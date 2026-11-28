@@ -154,11 +154,18 @@ class FileContentHasherProtocol(Protocol):
 class DirectoryHasherProtocol(Protocol):
     """Protocol for directory tree hashing."""
 
+    @property
+    def algorithm(self) -> str:
+        """Return the digest algorithm for entries and nodes, which must be SHA-256."""
+        ...
+
     def hash_directory(
         self,
         directory_path: PathLike,
         ignore: "Callable | list[str] | None" = None,
-    ) -> ContentHash: ...
+    ) -> ContentHash:
+        """Return the directory tree's ``directory_v1`` hash."""
+        ...
 
 
 @runtime_checkable

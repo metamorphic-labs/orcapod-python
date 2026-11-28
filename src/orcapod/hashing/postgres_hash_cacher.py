@@ -59,9 +59,9 @@ class PostgresHashCacher:
     Stores file hashes keyed on ``(path, mtime_ns, size, algorithm)`` in a shared
     PostgreSQL database. Uses thread-local connections for thread safety.
 
-    The hash is stored as a BYTEA in ``{method}:{raw_digest}`` format via
-    ``ContentHash.to_prefixed_digest()``. Each algorithm has its own row in
-    ``file_hash_cache_v2``. The companion ``file_hash_cache_v2_meta`` table records
+    Writes store a BYTEA containing ``b"sha256:"`` followed by the validated digest
+    bytes. Historical rows for other algorithms remain in ``file_hash_cache_v2``
+    and are ignored by lookups. The companion ``file_hash_cache_v2_meta`` table records
     schema version 2. Older cache tables and their metadata are left untouched.
 
     Requires ``psycopg[binary]>=3.0`` (install with

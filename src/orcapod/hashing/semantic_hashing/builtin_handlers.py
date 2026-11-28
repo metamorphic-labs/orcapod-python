@@ -30,6 +30,10 @@ from uuid import UUID
 
 from typing_extensions import override
 
+from orcapod.hashing.directory_hashers import (
+    canonical_directory_hash,
+    require_directory_hash_algorithm,
+)
 from orcapod.hashing.file_hashers import canonical_file_hash
 from orcapod.hashing.hash_utils import SHA256_ALGORITHM, require_file_hash_algorithm
 from orcapod.hashing.pandas_value_hash import (
@@ -511,10 +515,11 @@ class FileHandler:
 
         if not isinstance(obj, File):
             raise TypeError(f"FileHandler: expected an orcapod.File, got {type(obj)!r}")
-        require_file_hash_algorithm(self.file_hasher.hash_algorithm)
         wrapped = getattr(obj, "__wrapped__")
         logger.debug("FileHandler: hashing file content at %s", wrapped)
-        result = self.file_hasher.hash_file(wrapped)
+        file_hasher = self.file_hasher
+        require_file_hash_algorithm(file_hasher.hash_algorithm)
+        result = file_hasher.hash_file(wrapped)
         return canonical_file_hash(SHA256_ALGORITHM, result)
 
 
@@ -525,11 +530,11 @@ class DirectoryHandler:
     traversability are validated at construction time. Derived ``Directory`` instances
     created by path-navigation operations (e.g. ``.parent``, ``/`` operator) bypass that
     validation via ``_from_upath`` — so existence is not guaranteed at ``handle`` time.
-    The hash is produced by ``BasicDirectoryHasher`` using a recursive Merkle scheme.
+    The default ``BasicDirectoryHasher`` uses a recursive Merkle scheme.
 
     Args:
-        directory_hasher: Any object with a
-            ``hash_directory(path, ignore) -> ContentHash`` method.
+        directory_hasher: Directory tree hasher reporting the ``sha256`` algorithm
+            and returning a ``directory_v1`` digest.
     """
 
     def __init__(self, directory_hasher: "DirectoryHasherProtocol") -> None:
@@ -547,7 +552,10 @@ class DirectoryHandler:
         wrapped = getattr(obj, "__wrapped__")
         ignore = getattr(obj, "_ignore", None)
         logger.debug("DirectoryHandler: hashing directory content at %s", wrapped)
-        return self.directory_hasher.hash_directory(wrapped, ignore=ignore)
+        directory_hasher = self.directory_hasher
+        require_directory_hash_algorithm(getattr(directory_hasher, "algorithm", None))
+        result = directory_hasher.hash_directory(wrapped, ignore=ignore)
+        return canonical_directory_hash(result)
 
 
 class NumpyArrayHandler(IgnoreListHandler):

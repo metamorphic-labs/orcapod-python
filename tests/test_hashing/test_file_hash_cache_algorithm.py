@@ -332,6 +332,26 @@ def test_cached_file_hasher_rejects_an_invalid_computed_hash(data_file: Path) ->
     assert not cache.entries
 
 
+def test_cached_file_hasher_rechecks_the_file_algorithm_after_miss(
+    data_file: Path,
+) -> None:
+    """A cache lookup can change the advertised algorithm before file hashing."""
+    inner = _CountingHasher()
+
+    class ChangingCacher(_LegacyCacher):
+        @override
+        def get(self, key: FileHashKey) -> ContentHash | None:
+            inner.inner.algorithm = "md5"
+            return None
+
+    cache = ChangingCacher()
+    hasher = CachedFileHasher(inner, cache)
+    with pytest.raises(ValueError, match="Unsupported file hash algorithm 'md5'"):
+        _ = hasher.hash_file(data_file)
+    assert inner.reads == 0
+    assert not cache.entries
+
+
 def test_file_value_rejects_an_invalid_computed_hash(data_file: Path) -> None:
     """The uncached File handler also checks hashes returned by custom hashers."""
     from orcapod.contexts import get_default_semantic_hasher
@@ -348,6 +368,23 @@ def test_directory_rejects_an_invalid_file_leaf_hash(data_file: Path) -> None:
 
     with pytest.raises(ValueError, match="'md5'.*'sha256'"):
         _ = hasher.hash_directory(data_file.parent)
+
+
+def test_directory_rechecks_the_file_algorithm_after_ignore_filter(
+    data_file: Path,
+) -> None:
+    """A filter can change the hasher's advertised algorithm during traversal."""
+    inner = _CountingHasher()
+    hasher = BasicDirectoryHasher(inner)
+
+    def change_algorithm(path: UPath) -> bool:
+        assert path.name == data_file.name
+        inner.inner.algorithm = "md5"
+        return False
+
+    with pytest.raises(ValueError, match="Unsupported file hash algorithm 'md5'"):
+        _ = hasher.hash_directory(data_file.parent, ignore=change_algorithm)
+    assert inner.reads == 0
 
 
 class _LabelledCacher(_LegacyCacher):

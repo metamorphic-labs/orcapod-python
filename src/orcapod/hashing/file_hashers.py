@@ -255,8 +255,8 @@ class CachedFileHasher:
             except (TypeError, ValueError):
                 pass  # Custom backends can return an incompatible cached hash.
 
-        result = canonical_file_hash(
-            key.algorithm, self.file_hasher.hash_file(file_path)
-        )
+        file_hasher = self.file_hasher
+        require_file_hash_algorithm(file_hasher.hash_algorithm)
+        result = canonical_file_hash(key.algorithm, file_hasher.hash_file(file_path))
         self.cacher.put(key, result)
         return result

@@ -11,7 +11,11 @@ from pathlib import PurePosixPath
 from upath import UPath
 
 from orcapod.hashing.file_hashers import canonical_file_hash
-from orcapod.hashing.hash_utils import SHA256_ALGORITHM, require_file_hash_algorithm
+from orcapod.hashing.hash_utils import (
+    SHA256_ALGORITHM,
+    file_hash_digest_size,
+    require_file_hash_algorithm,
+)
 from orcapod.protocols.hashing_protocols import FileContentHasherProtocol
 from orcapod.types import ContentHash, PathLike
 
@@ -35,6 +39,20 @@ def require_directory_hash_algorithm(algorithm: object) -> None:
             f"{DIRECTORY_HASH_LABEL} is defined over {SHA256_ALGORITHM} "
             f"entry and node digests; got algorithm {algorithm!r}"
         )
+
+
+def canonical_directory_hash(value: ContentHash) -> ContentHash:
+    """Return a validated directory hash with canonical serialization."""
+    method = value.method
+    if str.__eq__(DIRECTORY_HASH_LABEL, method) is not True:
+        raise ValueError(
+            f"Directory hash has label {method!r}, expected {DIRECTORY_HASH_LABEL!r}"
+        )
+    digest = memoryview(value.digest).tobytes()
+    size = file_hash_digest_size(SHA256_ALGORITHM)
+    if len(digest) != size:
+        raise ValueError(f"Directory hash must have {size} bytes, got {len(digest)}")
+    return ContentHash(DIRECTORY_HASH_LABEL, digest)
 
 
 def _compile_ignore(
@@ -111,6 +129,7 @@ def _hash_dir(
             target = os.readlink(child)
             entry_bytes = b"symlink\x00" + name_bytes + b"\x00" + target.encode("utf-8")
         elif child.is_file():
+            require_file_hash_algorithm(file_hasher.hash_algorithm)
             file_hash = file_hasher.hash_file(child)
             canonical_hash = canonical_file_hash(SHA256_ALGORITHM, file_hash)
             # The file hash comes from another hasher: it enters with its label.
@@ -236,8 +255,9 @@ class BasicDirectoryHasher:
             >>> # Custom callable filter (receives relative UPath from root)
             >>> result = hasher.hash_directory("/tmp/mydir", ignore=lambda p: p.name.startswith("."))
         """
-        require_file_hash_algorithm(self.file_hasher.hash_algorithm)
+        file_hasher = self.file_hasher
+        require_file_hash_algorithm(file_hasher.hash_algorithm)
         path = UPath(directory_path)
         filter_fn = _compile_ignore(ignore)
-        digest = _hash_dir(path, path, filter_fn, self.file_hasher)
+        digest = _hash_dir(path, path, filter_fn, file_hasher)
         return ContentHash(method=DIRECTORY_HASH_LABEL, digest=digest)
