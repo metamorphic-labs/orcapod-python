@@ -18,6 +18,7 @@ import pytest
 from orcapod import PipelineJob
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
+from orcapod.errors import InputValidationError
 from orcapod.operators import Batch
 from orcapod.pipeline.dag import OrcaDAG
 from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
@@ -949,10 +950,8 @@ def test_a_null_system_tag_raises_at_the_operator_as_main_does() -> None:
     assert ("end", "marked") not in observer.events
 
 
-def test_a_source_table_with_other_system_tags_is_not_its_rows() -> None:
-    """The source route's guard: an exact ``ArrowTableSource`` whose system tag is a
-    narrow integer has a table that is not its rows (they give ``int64``); a stock
-    source's system tags are what the rows give."""
+def test_a_source_refuses_a_non_text_custom_system_tag() -> None:
+    """Source-built system tags must be non-nullable text."""
     from orcapod.core.streams.base import system_tags_as_rows_give
 
     schema = pa.schema(
@@ -962,17 +961,17 @@ def test_a_source_table_with_other_system_tags_is_not_its_rows() -> None:
             pa.field("region", pa.int16(), nullable=False),
         ]
     )
-    narrow = ArrowTableSource(
-        pa.Table.from_pylist(
-            [{"k": 1, "x": 10, "region": 1}, {"k": 2, "x": 20, "region": 2}],
-            schema=schema,
-        ),
-        tag_columns=["k"],
-        tag_only_columns=True,
-        system_tag_columns=["region"],
-        source_id="s",
-    )
-    assert not system_tags_as_rows_give(narrow.as_table(columns={"system_tags": True}))
+    with pytest.raises(InputValidationError, match=r"'region'.*non-nullable string"):
+        ArrowTableSource(
+            pa.Table.from_pylist(
+                [{"k": 1, "x": 10, "region": 1}, {"k": 2, "x": 20, "region": 2}],
+                schema=schema,
+            ),
+            tag_columns=["k"],
+            tag_only_columns=True,
+            system_tag_columns=["region"],
+            source_id="s",
+        )
     stock = _plain()
     assert system_tags_as_rows_give(stock.as_table(columns={"system_tags": True}))
 
