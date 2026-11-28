@@ -880,15 +880,9 @@ print(recorded.filter(col("t") >= 1.0).head(3).as_table().num_rows)
 # 2
 ```
 
-**`where` and `filter`.** A source that can restrict what it reads (`where`, see
-[Restricting a source](sources.md#restricting-a-source-versus-filtering-in-the-pipeline)) takes the same equalities. The two give the
-same rows, except on a float column for a NaN or a signed zero (`where` uses the table
-system's equality, `filter` Orcapod's: a NaN may match no row under `where` and matches the
-NaN rows under `filter`) and on a source with a `limit` (the limit then counts the matching
-rows). `where` is not a step of the pipeline: it changes no hash, while `filter` is a
-node whose condition enters the identity of every step after it. Explore with `where`; keep
-the selection with `filter` when it becomes part of what the pipeline computes. `where`
-takes only equalities today and refuses any other condition, pointing to `filter`.
+**`where` and `filter`.** `SpiralDBTableSource.where` restricts the rows read from the source.
+`filter` adds a pipeline node whose condition enters the identity of every step after it.
+For supported equalities and ranges, see [Restricting a source](sources.md#restricting-a-source-versus-filtering-in-the-pipeline).
 
 **What is read, and what is applied after reading.** `stream.explain()` (new in this
 release) says, for every source a stream reads, what the source applies itself (its `where`

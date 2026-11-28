@@ -37,3 +37,69 @@ Core type definitions used throughout Orcapod.
 ::: orcapod.types.Absence
 
 ::: orcapod.types.Highlight
+
+## Data and schema types
+
+::: orcapod.types.DataType
+
+::: orcapod.types.DataValue
+
+::: orcapod.types.DataLike
+
+::: orcapod.types.SchemaLike
+
+::: orcapod.types.TagValue
+
+::: orcapod.types.SourceInfoValue
+
+::: orcapod.types.PathLike
+
+::: orcapod.types.PathSet
+
+::: orcapod.types.ColumnInfo
+
+## Polling sources
+
+::: orcapod.types.Cursor
+
+::: orcapod.types.PollingConfig
+
+## Pipeline execution
+
+::: orcapod.types.OrchestratorType
+
+::: orcapod.types.PipelineConfig
+
+::: orcapod.types.PodConfig
+
+::: orcapod.types.NodeConfig
+
+::: orcapod.types.CacheMode
+
+## Files and directories
+
+::: orcapod.File
+
+::: orcapod.Directory
+
+::: orcapod.enable_file_hash_caching
+
+## Custom types and extensions
+
+::: orcapod.dataclass
+
+::: orcapod.OrcapodExtension
+
+::: orcapod.register_extension
+
+## Configuration
+
+::: orcapod.OrcapodConfig
+
+::: orcapod.DisplayConfig
+
+::: orcapod.HashingConfig
+
+::: orcapod.DEFAULT_CONFIG
+
+::: orcapod.load_config

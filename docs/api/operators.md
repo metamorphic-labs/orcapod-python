@@ -47,3 +47,7 @@ Operators perform structural transformations on streams without inspecting or sy
 ::: orcapod.core.operators.Pick
 
 ::: orcapod.core.operators.Index
+
+::: orcapod.operators.DropNulls
+
+::: orcapod.operators.TagBy
