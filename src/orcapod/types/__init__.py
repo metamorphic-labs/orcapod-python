@@ -646,13 +646,20 @@ class ContentHash:
     method: str
     digest: bytes
 
-    def to_hex(self) -> str:
+    def to_hex(self, char_count: int | None = None) -> str:
         """Convert the digest to a hexadecimal string.
 
+        System-tag column names and logical storage paths use the full digest.
+
+        Args:
+            char_count: Optional slice length for display. ``None`` or zero
+                returns the full digest.
+
         Returns:
-            The full hex representation of the digest.
+            The full or shortened hex representation of the digest.
         """
-        return self.digest.hex()
+        hex_str = self.digest.hex()
+        return hex_str[:char_count] if char_count else hex_str
 
     def to_int(self, hexdigits: int | None = None) -> int:
         """Convert the digest to an integer.
@@ -664,7 +671,7 @@ class ContentHash:
         Returns:
             Integer representation of the (optionally truncated) digest.
         """
-        return int(self.to_hex()[: hexdigits or None], 16)
+        return int(self.to_hex(hexdigits), 16)
 
     def to_uuid(self, namespace: uuid.UUID = uuid.NAMESPACE_OID) -> uuid.UUID:
         """Derive a deterministic UUID from the digest.
@@ -704,10 +711,9 @@ class ContentHash:
         Returns:
             String representation of the hash.
         """
-        hex_digest = self.to_hex()[: hexdigits or None]
         if prefix_method:
-            return f"{self.method}:{hex_digest}"
-        return hex_digest
+            return f"{self.method}:{self.to_hex(hexdigits)}"
+        return self.to_hex(hexdigits)
 
     def to_prefixed_digest(self) -> bytes:
         """Return the hash as method-prefixed raw bytes: ``b"{method}:{digest}"``.
@@ -776,7 +782,7 @@ class ContentHash:
         Returns:
             A string like ``"arrow_v2.1:1a2b3c4d"``.
         """
-        return self.to_string(hexdigits=length)
+        return f"{self.method}:{self.to_hex(length)}"
 
 
 @dataclass

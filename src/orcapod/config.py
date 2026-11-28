@@ -2,8 +2,8 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from collections.abc import Iterable, Mapping
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, Self
 
@@ -12,6 +12,13 @@ logger = logging.getLogger(__name__)
 _REMOVED_HASHING_SETTINGS = frozenset(
     {"system_tag_n_char", "schema_n_char", "path_n_char"}
 )
+
+
+def _reject_removed_hashing_keys(keys: Iterable[str]) -> None:
+    removed = sorted(_REMOVED_HASHING_SETTINGS.intersection(keys))
+    if removed:
+        settings = ", ".join(f"hashing.{key}" for key in removed)
+        raise ValueError(f"Removed hash-length settings: {settings}. Use full digests.")
 
 
 def reject_removed_hashing_settings(config: object) -> None:
@@ -31,12 +38,9 @@ def reject_removed_hashing_settings(config: object) -> None:
     hashing = config.get("hashing")
     if not isinstance(hashing, Mapping):
         return
-    removed = sorted(
-        key for key in _REMOVED_HASHING_SETTINGS if hashing.get(key) is not None
+    _reject_removed_hashing_keys(
+        key for key, value in hashing.items() if value is not None
     )
-    if removed:
-        settings = ", ".join(f"hashing.{key}" for key in removed)
-        raise ValueError(f"Removed hash-length settings: {settings}. Use full digests.")
 
 
 @dataclass(frozen=True)
@@ -100,7 +104,7 @@ class DatetimeConfig(_SectionConfig):
 
 @dataclass(frozen=True)
 class HashingConfig(_SectionConfig):
-    """Hashing configuration. Hashes in stored names use full digests."""
+    """Hashing configuration. System-tag names and logical paths use full digests."""
 
 
 @dataclass(frozen=True)
@@ -130,6 +134,12 @@ class OrcapodConfig:
     hashing: HashingConfig = field(default_factory=HashingConfig)
     display: DisplayConfig = field(default_factory=DisplayConfig)
     datetime: DatetimeConfig = field(default_factory=DatetimeConfig)
+
+    def __post_init__(self) -> None:
+        """Refuse removed settings supplied through a typed hashing section."""
+        _reject_removed_hashing_keys(
+            key for key in _REMOVED_HASHING_SETTINGS if hasattr(self.hashing, key)
+        )
 
     def with_updates(self, **kwargs: Any) -> Self:
         """Create a new ``OrcapodConfig`` with updated section values.
@@ -255,6 +265,20 @@ class OrcapodConfig:
 
 # Module-level default config — created at import time.
 DEFAULT_CONFIG = OrcapodConfig()
+
+
+def config_for_save(config: OrcapodConfig) -> dict[str, Any] | None:
+    """Serialize a node's config without removed hashing settings.
+
+    Return ``None`` for the default config so loading uses the current defaults.
+    """
+    if config == DEFAULT_CONFIG:
+        return None
+
+    saved = asdict(config)
+    for key in _REMOVED_HASHING_SETTINGS:
+        saved["hashing"].pop(key, None)
+    return saved
 
 
 def load_config(

@@ -10,6 +10,7 @@ table paths when `schema_n_char` or `system_tag_n_char` shortened a digest. Shor
 digests could also collide and silently combine columns for distinct provenance.
 The `path_n_char` setting had no callers.
 
-**Fix:** Removed all three length settings and used full digests when naming stored
-columns and tables. Config readers refuse any configured length, and the saved
-pipeline loader accepts the null defaults older writers included automatically.
+**Fix:** Removed all three length settings and used full digests in system-tag
+column names and logical table paths. Typed configurations refuse the removed
+fields, and pipeline saves omit them. The loader accepts the null defaults
+older writers included automatically.

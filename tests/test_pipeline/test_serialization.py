@@ -9,7 +9,7 @@ import pyarrow as pa
 import pytest
 
 import orcapod
-from orcapod.config import DEFAULT_CONFIG, DisplayConfig
+from orcapod.config import DEFAULT_CONFIG, DisplayConfig, HashingConfig, OrcapodConfig
 from orcapod.core.nodes import SourceNode
 from orcapod.core.operators import Join
 from orcapod.core.sources import ArrowTableSource
@@ -17,6 +17,7 @@ from orcapod.databases.in_memory_databases import InMemoryArrowDatabase
 from orcapod.pipeline import Pipeline
 from orcapod.pipeline.job import PipelineJob
 from orcapod.pipeline.serialization import PIPELINE_FORMAT_VERSION
+from orcapod.types import Schema
 
 
 @pytest.fixture
@@ -76,6 +77,38 @@ def test_saved_pipeline_accepts_old_default_hashing_settings(spec_pipeline) -> N
         n for n in resaved["nodes"].values() if n["node_type"] == "operator"
     )
     assert operator["config"]["hashing"] == {}
+
+
+def test_pipeline_save_omits_removed_hashing_settings(tmp_path) -> None:
+    @dataclasses.dataclass(frozen=True)
+    class LegacyHashingConfig(HashingConfig):
+        system_tag_n_char: int = 6
+        schema_n_char: int = 0
+        path_n_char: int | None = None
+
+    config = OrcapodConfig(display=DisplayConfig(max_rows=17))
+    # Simulate a legacy typed object reaching save without constructor validation.
+    object.__setattr__(config, "hashing", LegacyHashingConfig())
+    tags = Schema({"k1": int, "k2": int})
+    left = SourceNode(
+        name="left",
+        tag_schema=tags,
+        data_schema=Schema({"a": int, "b": int}),
+        config=config,
+    )
+    right = SourceNode(
+        name="right", tag_schema=tags, data_schema=Schema({"c": int, "d": int})
+    )
+    with Pipeline(name="legacy_config") as pipeline:
+        Join()(left, right, label="joined")
+
+    path = tmp_path / "pipeline.json"
+    pipeline.save(path)
+    saved = json.loads(path.read_text())
+    descriptor = next(n for n in saved["nodes"].values() if n["label"] == "left")
+    assert descriptor["config"]["hashing"] == {}
+    assert descriptor["config"]["display"]["max_rows"] == 17
+    assert "left" in Pipeline.load(path).nodes
 
 
 @pytest.mark.parametrize(

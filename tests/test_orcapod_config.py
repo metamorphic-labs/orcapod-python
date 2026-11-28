@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import make_dataclass
+
 import pytest
 
 
@@ -14,6 +16,18 @@ def test_removed_hashing_constructor_field_is_refused(key: str) -> None:
 
     with pytest.raises(TypeError, match=key):
         HashingConfig(**{key: 6})
+
+
+@pytest.mark.parametrize("key", REMOVED_HASHING_FIELDS)
+@pytest.mark.parametrize("value", [6, 0, None])
+def test_removed_hashing_subclass_field_is_refused(key: str, value: int | None) -> None:
+    from orcapod.config import HashingConfig, OrcapodConfig
+
+    legacy_type = make_dataclass(
+        "LegacyHashingConfig", [(key, int | None)], bases=(HashingConfig,), frozen=True
+    )
+    with pytest.raises(ValueError, match=rf"hashing\.{key}"):
+        OrcapodConfig(hashing=legacy_type(value))
 
 
 @pytest.mark.parametrize("key", REMOVED_HASHING_FIELDS)

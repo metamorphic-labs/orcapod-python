@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import orcapod
-from orcapod.config import reject_removed_hashing_settings
+from orcapod.config import config_for_save, reject_removed_hashing_settings
 from orcapod.contexts import resolve_saved_context
 from orcapod.core.nodes import (
     FunctionNode,
@@ -189,16 +189,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                 _dc = getattr(node, "_data_context", None)
                 data_context_key = _dc.context_key if _dc is not None else None
 
-            import dataclasses
-
-            from orcapod.config import DEFAULT_CONFIG as _DEFAULT_CONFIG
-
-            # Save None when the config matches DEFAULT_CONFIG so that future
-            # changes to the default are picked up on load (forward-compatible).
-            # See ENG-544 for the tradeoff discussion (reproducibility vs.
-            # forward-compatibility).
-            _cfg = node.orcapod_config
-            config_val = None if _cfg == _DEFAULT_CONFIG else dataclasses.asdict(_cfg)
+            config_val = config_for_save(node.orcapod_config)
 
             try:
                 output_schema: dict[str, Any] = (
