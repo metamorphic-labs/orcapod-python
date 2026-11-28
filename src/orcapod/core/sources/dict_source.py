@@ -5,6 +5,9 @@ from typing import Any, ClassVar
 
 import pyarrow as pa
 
+from orcapod.semantic_types.narrow_float_keys import (
+    require_schema_without_narrow_float_keys,
+)
 from orcapod.core.sources.base import RootSource
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.stream_builder import SourceStreamBuilder
@@ -65,6 +68,7 @@ class DictSource(RootSource):
         # pa.Schema directly via data_schema; route to the converter accordingly.
         rows = [dict(row) for row in data]
         if isinstance(data_schema, pa.Schema):
+            require_schema_without_narrow_float_keys(data_schema)
             require_supported_nullable_types(data_schema)
             arrow_table = self.data_context.type_converter.python_dicts_to_arrow_table(
                 rows,

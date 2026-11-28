@@ -470,6 +470,7 @@ class SourceStreamBuilder:
         data_tags: Collection[str] = (),
         *,
         hash_in_key_order: bool = False,
+        inherited_types: bool = False,
     ) -> SourceStreamResult:
         """Run the full enrichment pipeline.
 
@@ -489,6 +490,8 @@ class SourceStreamBuilder:
                 which changes when rows are reordered unless ``hash_in_key_order`` is
                 given; pass an explicit value when the source id must survive
                 reordering.
+            inherited_types: The table retains already-built upstream types, as
+                when a derived source copies a tag into data.
             record_id_columns: The key columns whose values identify a row, in key
                 order: the row identifier is their canonical JSON
                 (``key_row_identifier``), which follows the row regardless of its
@@ -564,7 +567,8 @@ class SourceStreamBuilder:
             )
         # Nor is a dict keyed by, or a set of, float32 or float16 (ITL-1591): refused
         # here first, as the stream refuses it, before any key column or hash.
-        require_schema_without_narrow_float_keys(table.schema)
+        if not inherited_types:
+            require_schema_without_narrow_float_keys(table.schema)
 
         # 1. Drop system columns from raw input.
         table = arrow_utils.drop_system_columns(table)

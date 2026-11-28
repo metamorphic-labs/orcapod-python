@@ -623,6 +623,7 @@ class DerivedSource(RootSource):
             data_tags=self._data_tags(),
             source_name=self.source_name,
             kind_part=self.kind_part(),
+            inherited_types=True,
             record_id_columns=self._record_id_columns or (),
         )
         return result.stream

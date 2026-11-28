@@ -1791,6 +1791,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             saved_connector_kind,
             saved_database_kind,
             saved_source_kind,
+            source_config_has_inherited_types,
         )
 
         path = _Path(path)
@@ -1826,12 +1827,21 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 "must be given to PipelineJob.load. " + "; ".join(missing) + "."
             )
 
+        saved_sources: dict[str, Any] = data.get("bindings", {}).get("sources", {})
+        inherited_source_slots = frozenset(
+            name
+            for name, config in saved_sources.items()
+            if source_config_has_inherited_types(config)
+        )
+
         # Reconstruct pipeline from embedded blueprint data
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as tmp:
             tmp_path = tmp.name
             _json.dump(data["pipeline"], tmp)
         try:
-            pipeline = Pipeline.load(tmp_path)
+            pipeline = Pipeline._load(  # pyright: ignore[reportPrivateUsage]  # job bindings identify inherited source types
+                tmp_path, inherited_source_slots=inherited_source_slots
+            )
         except ValueError as exc:
             # The embedded pipeline was read from a temporary file: name the job file.
             message = str(exc)
@@ -1848,9 +1858,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             if isinstance(node, SourceNodeBase)
         }
         sources: dict[str, cp.StreamProtocol] = {}
-        for spec_name, src_config in (
-            data.get("bindings", {}).get("sources", {}).items()
-        ):
+        for spec_name, src_config in saved_sources.items():
             # Every source states its plain tags (ITL-1019): a refusal is the file's
             # error, not a source that could not be rebuilt.
             try:

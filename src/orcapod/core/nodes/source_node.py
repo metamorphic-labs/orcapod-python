@@ -21,6 +21,10 @@ from typing import TYPE_CHECKING, Any
 import pyarrow as pa
 
 from orcapod import contexts
+from orcapod.semantic_types.narrow_float_keys import (
+    NarrowFloatKeyError,
+    require_schema_without_narrow_float_keys,
+)
 from orcapod.core.nodes.provenance_methods import ProvenanceMethods
 from orcapod.config import OrcapodConfig
 from orcapod.core.base import TraceableBase
@@ -402,6 +406,8 @@ def _columns_without_arrow_type(
             seen.add(name)
             try:
                 declared_arrow_schema({name: python_type}, converter)
+            except NarrowFloatKeyError:
+                raise
             except (ValueError, TypeError):
                 missing.append((name, python_type))
     return missing
@@ -558,6 +564,8 @@ class SourceNodeBase(TraceableBase, ABC):
                 raise ValueError(
                     "arrow_schemas is given by tag_schema and data_schema already"
                 )
+            require_schema_without_narrow_float_keys(tag_schema)
+            require_schema_without_narrow_float_keys(data_schema)
             converter = self.data_context.type_converter
             # Logical types in one form first: a field declared with its identifier
             # in ARROW:extension:* metadata is that logical type (ITL-640).
@@ -600,6 +608,7 @@ class SourceNodeBase(TraceableBase, ABC):
         content_hash: str | None,
         saved_types: Mapping[str, Mapping[str, str]],
         nullable: Mapping[str, Collection[str]],
+        inherited_types: bool,
     ) -> None:
         """Keep what a saved job recorded for this slot (ITL-1138, ITL-640).
 
@@ -617,6 +626,7 @@ class SourceNodeBase(TraceableBase, ABC):
             content_hash: The saved content hash text, or ``None`` if not saved.
             saved_types: The saved type texts, ``{"tag": {...}, "data": {...}}``.
             nullable: The saved nullable column names per role.
+            inherited_types: The saved types came from an upstream result.
         """
         if pipeline_hash is not None:
             self._saved_pipeline_hash = ContentHash.from_string(pipeline_hash)
@@ -627,6 +637,7 @@ class SourceNodeBase(TraceableBase, ABC):
             # types are both derived from them by ``_resolve``, together.
             self._given_arrow_schemas = None
             self._saved_arrow_texts = {
+                "inherited_types": inherited_types,
                 "tag": dict(saved_types.get("tag", {})),
                 "data": dict(saved_types.get("data", {})),
                 "nullable": {role: list(names) for role, names in nullable.items()},
@@ -690,7 +701,12 @@ class SourceNodeBase(TraceableBase, ABC):
         arrow: list[pa.Schema] = []
         for role in ("tag", "data"):
             names = texts["nullable"][role]
-            python[role] = deserialize_schema(texts[role], converter, nullable=names)
+            python[role] = deserialize_schema(
+                texts[role],
+                converter,
+                nullable=names,
+                inherited_types=texts["inherited_types"],
+            )
             if any(isinstance(value, str) for value in python[role].values()):
                 return False
             try:

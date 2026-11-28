@@ -47,6 +47,7 @@ from orcapod.semantic_types.nested_none import (
 from orcapod.semantic_types.narrow_float_keys import (
     NarrowFloatKeyError,
     require_no_narrow_float_keys,
+    require_supported_python_float_key,
 )
 from orcapod.semantic_types.nested_storage import (
     dict_entry_fields,
@@ -489,6 +490,7 @@ class UniversalTypeConverter:
                     "Unparameterized 'set' is not supported. Use 'set[T]' with a concrete "
                     "element type (e.g. set[int], set[str])."
                 )
+            require_supported_python_float_key(args[0], is_set=True)
             inner = self.register_python_class(args[0])
             require_restorable_none(args[0], inner, self._is_user_class_extension)
             if self._logical_type_registry is not None and hasattr(
@@ -514,6 +516,7 @@ class UniversalTypeConverter:
                     "Unparameterized 'dict' is not supported. Use 'dict[K, V]' with concrete "
                     "key and value types (e.g. dict[str, int])."
                 )
+            require_supported_python_float_key(args[0], is_set=False)
             key_arrow = self.register_python_class(args[0])
             val_arrow = self.register_python_class(args[1])
             require_storable_in_struct_field(key_arrow)
@@ -1574,6 +1577,7 @@ class UniversalTypeConverter:
                 raise ValueError(
                     f"dict type must have exactly two type arguments, got: {args}"
                 )
+            require_supported_python_float_key(args[0], is_set=False)
             key_type = self.python_type_to_arrow_type(args[0])
             value_type = self.python_type_to_arrow_type(args[1])
             require_storable_in_struct_field(key_type)
@@ -1624,6 +1628,7 @@ class UniversalTypeConverter:
                 raise ValueError(
                     f"set type must have exactly one type argument, got: {args}"
                 )
+            require_supported_python_float_key(args[0], is_set=True)
             element_type = self.python_type_to_arrow_type(args[0])
             require_restorable_none(
                 args[0], element_type, self._is_user_class_extension

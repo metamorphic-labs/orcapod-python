@@ -76,7 +76,7 @@ def dict_entry_fields(
     ):
         return None
     element_type = arrow_type.value_type
-    if not pa.types.is_struct(element_type):
+    if not pa.types.is_struct(element_type) or element_type.num_fields != 2:
         return None
     if {field.name for field in element_type} != {"key", "value"}:
         return None

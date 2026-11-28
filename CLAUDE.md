@@ -1471,10 +1471,12 @@ data. The rules:
   declared, Python-declared and Arrow-declared alike, at any depth, by a check of types that
   never reads a value. One rule, `semantic_types/narrow_float_keys.py`: the type converter
   applies it to every dict and set type it builds (sources' Python schemas, datagrams,
-  user-class fields, a function pod's inputs and outputs when the pod is defined), and
-  `SourceStreamBuilder.build`, `ArrowTableStream.__init__` and a datagram given an Arrow
-  table apply it to the table's schema; never check it elsewhere. A dict is the converter's
-  one dict shape (`nested_storage.dict_entry_fields`; never write a second shape test) or an
+  user-class fields, a function pod's inputs and outputs when the pod is defined).
+  `SourceStreamBuilder.build` checks schemas at source ingestion, and explicit Arrow
+  declarations are checked before conversion or on restore. A raw `ArrowTableStream` and
+  Arrow-held datagrams carry already-built schemas, including operator and cached results.
+  A list of structs produced by aggregation can have the same Arrow shape as a dict.
+  A dict declaration uses the converter's one dict shape (`nested_storage.dict_entry_fields`; never write a second shape test) or an
   Arrow map; a set is the native set container, live or in its storage form. `float32` and
   `float16` stay valid as a plain column, a list element, a struct field and a dict value;
   the silent narrowing of such plain values from an Arrow declaration is ITL-1613.

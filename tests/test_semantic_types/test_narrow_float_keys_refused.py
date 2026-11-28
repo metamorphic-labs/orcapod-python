@@ -17,6 +17,7 @@ accepted, and so is a ``float64`` key or element.
 from __future__ import annotations
 
 import dataclasses
+import json
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
@@ -35,7 +36,6 @@ from orcapod.core.sources import (
     DictSource,
     ListSource,
 )
-from orcapod.core.streams import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.semantic_types.narrow_float_keys import (
     NARROW_FLOAT_KEYS_NOT_SUPPORTED,
@@ -508,39 +508,11 @@ class TestArrowDeclarations:
             assert str(raised.value).startswith(NOT_SUPPORTED)
             assert "'k'" in str(raised.value)
 
-    @pytest.mark.parametrize(("build", "part"), ARROW_CASES)
-    def test_a_raw_stream_refuses_it(
-        self, build: Callable[[pa.DataType], pa.DataType], part: pa.DataType
-    ) -> None:
-        table = _table(build(part))
-        for layout in (table, table.select(["k", "y", "g", "x", "id"])):
-            for tags in (["id", "g"], ["g", "id"]):
-                with pytest.raises(NarrowFloatKeyError) as raised:
-                    ArrowTableStream(layout, tag_columns=tags)
-                assert str(raised.value).startswith(NOT_SUPPORTED)
-
-    @pytest.mark.parametrize(("build", "part"), ARROW_CASES)
-    @pytest.mark.parametrize("kind", [Datagram, Tag, Data])
-    def test_a_datagram_over_a_table_refuses_it(
-        self,
-        kind: type[Datagram],
-        build: Callable[[pa.DataType], pa.DataType],
-        part: pa.DataType,
-    ) -> None:
-        with pytest.raises(NarrowFloatKeyError) as raised:
-            kind(_table(build(part)))
-        assert "'k'" in str(raised.value)
-
-    def test_a_record_batch_is_refused_like_a_table(self) -> None:
-        batch = _table(_dict_of(pa.float32())).to_batches()[0]
-        with pytest.raises(NarrowFloatKeyError, match=NOT_SUPPORTED):
-            Datagram(batch)
-
     def test_no_value_is_read(self) -> None:
         """A table with no rows is refused the same way: the types decide."""
         empty = _table(_dict_of(pa.float32())).slice(0, 0)
         with pytest.raises(NarrowFloatKeyError, match=NOT_SUPPORTED):
-            ArrowTableStream(empty, tag_columns=["id", "g"])
+            ArrowTableSource(empty, tag_columns=["id", "g"])
 
     def test_a_data_frame_source_refuses_it(self) -> None:
         schema = pa.schema(
@@ -618,3 +590,288 @@ class TestArrowDeclarations:
             data_schema=pa.schema([("id", pa.int64()), ("h", pa.float32())]),
         )
         assert source.as_table().column("h").to_pylist() == [float(np.float32(0.1))]
+
+
+@pytest.mark.parametrize("cls", [Datagram, Tag, Data])
+@pytest.mark.parametrize("declaration", ["python", "type", "field"])
+def test_datagram_with_columns_refuses_declared_narrow_dict_key(cls, declaration):
+    arrow_type = _dict_of(pa.float32())
+    declared = {
+        "python": dict[np.float32, int],
+        "type": arrow_type,
+        "field": pa.field("k", arrow_type),
+    }[declaration]
+    with pytest.raises(NarrowFloatKeyError, match="column 'k'|Column 'k'"):
+        cls({"id": 1}).with_columns({"k": declared}, k={1e-50: 1, 2e-50: 2})
+
+
+@pytest.mark.parametrize("arrow_type", NARROW)
+@pytest.mark.parametrize("stored", [False, True])
+@pytest.mark.parametrize("outer_set", [False, True])
+def test_native_nested_set_refuses_narrow_element(
+    arrow_type: pa.DataType, stored: bool, outer_set: bool
+) -> None:
+    from orcapod.logical_types.canonical_form import storage_form_schema
+    from orcapod.logical_types.list_logical_type_factory import (
+        ArrowElement,
+        ListLogicalType,
+    )
+
+    inner = ListLogicalType(ArrowElement(float, arrow_type), is_set=True)
+    outer = ListLogicalType(inner, is_set=outer_set).get_arrow_extension_type()
+    storage = pa.array([[]], type=outer.storage_type)
+    live = pa.ExtensionArray.from_storage(outer, storage)
+    table = pa.table({"id": [1], "k": live})
+    if stored:
+        table = pa.Table.from_arrays(
+            [table["id"], storage], schema=storage_form_schema(table.schema)
+        )
+    with pytest.raises(NarrowFloatKeyError, match="set element type"):
+        ArrowTableSource(table, tag_columns="id", source_id="nested-set")
+
+
+@pytest.mark.parametrize("operator", ["batch", "group_by", "merge_join"])
+def test_struct_aggregation_keeps_narrow_float_as_data(operator: str) -> None:
+    from orcapod.core.operators import Batch, GroupBy, MergeJoin
+
+    pair = {"key": 0.5, "value": 1}
+    pair_type = pa.struct([("key", pa.float32()), ("value", pa.int64())])
+    table = pa.table({"id": [1], "pair": pa.array([pair], type=pair_type)})
+    source = ArrowTableSource(
+        table, tag_columns="id", tag_only_columns=True, source_id="pair"
+    )
+    if operator == "batch":
+        result = Batch().static_process(source)
+    elif operator == "group_by":
+        result = GroupBy("id").static_process(source)
+    else:
+        result = MergeJoin().static_process(source, source)
+    assert result.as_table()["pair"].to_pylist() == [
+        [pair, pair] if operator == "merge_join" else [pair]
+    ]
+    assert next(result.iter_data())[1].as_table()["pair"].to_pylist() == (
+        result.as_table()["pair"].to_pylist()
+    )
+
+
+def test_struct_aggregation_replays_from_delta(tmp_path: Path) -> None:
+    from orcapod.core.nodes.operator_node import OperatorJobNode
+    from orcapod.core.operators import Batch
+    from orcapod.core.sources.derived_source import DerivedSource
+    from orcapod.databases import DeltaTableDatabase
+    from orcapod.pipeline import PipelineJob
+    from orcapod.types import CacheMode
+
+    pair = {"key": 0.5, "value": 1}
+    pair_type = pa.struct([("key", pa.float32()), ("value", pa.int64())])
+    table = pa.table({"id": [1], "pair": pa.array([pair], type=pair_type)})
+    source = ArrowTableSource(
+        table, tag_columns="id", tag_only_columns=True, source_id="pairs"
+    )
+    writer = OperatorJobNode(
+        operator=Batch(),
+        input_streams=(source,),
+        pipeline_database=DeltaTableDatabase(tmp_path),
+        cache_mode=CacheMode.LOG,
+    )
+    writer.run()
+    replay = OperatorJobNode(
+        operator=Batch(),
+        input_streams=(source,),
+        pipeline_database=DeltaTableDatabase(tmp_path),
+        cache_mode=CacheMode.REPLAY,
+    )
+    replay.run()
+
+    rows = replay.as_table()
+    assert rows["pair"].type == pa.large_list(pair_type)
+    assert rows["pair"].to_pylist() == [[pair]]
+    assert next(replay.iter_data())[1].as_dict()["pair"] == {0.5: 1}
+    derived = DerivedSource(replay, tags_as_data={"id": "copied_id"}, source_id="copy")
+    assert derived.as_table()["pair"].to_pylist() == [[pair]]
+
+    job = PipelineJob(database=DeltaTableDatabase(tmp_path / "job"))
+    with job:
+        derived.batch(label="batch")
+    path = tmp_path / "job.json"
+    job.save(path)
+    assert PipelineJob.load(path).nodes["copy"].arrow_schemas[1].field("pair").type == (
+        rows["pair"].type
+    )
+
+
+@pytest.mark.parametrize(
+    "schema",
+    [
+        pa.schema([("id", pa.int64()), ("k", _dict_of(pa.float32()))]),
+        {"id": int, "k": set[np.float16]},
+    ],
+)
+def test_polling_source_refuses_declared_schema_without_fetch(
+    schema: pa.Schema | dict[str, Any],
+) -> None:
+    from unittest.mock import Mock
+
+    from orcapod.core.sources.polling_source import PollingSource
+    from orcapod.protocols.core_protocols.sources import DynamicSourceProtocol
+
+    impl = Mock(spec=DynamicSourceProtocol)
+    impl.schema.return_value = schema
+    with pytest.raises(NarrowFloatKeyError, match="column 'k'|Column 'k'"):
+        PollingSource(impl, "id", source_id="poll", record_id_columns="id")
+    impl.fetch.assert_not_called()
+
+
+@pytest.mark.parametrize("reader", ["config", "node"])
+@pytest.mark.parametrize("type_text", ["dict", "set"])
+def test_saved_arrow_schema_refuses_narrow_keys(reader: str, type_text: str) -> None:
+    from orcapod.pipeline.serialization import (
+        arrow_type_texts,
+        deserialize_arrow_schema,
+        deserialize_schema,
+    )
+
+    arrow_type = (
+        _dict_of(pa.float32()) if type_text == "dict" else _live_set(pa.float16())
+    )
+    columns = arrow_type_texts(pa.schema([("k", arrow_type)]), _converter())
+    with pytest.raises(NarrowFloatKeyError, match="column 'k'"):
+        if reader == "config":
+            deserialize_arrow_schema({"columns": columns, "nullable": []})
+        else:
+            deserialize_schema(columns, _converter(), [])
+
+
+def test_saved_job_rejects_prohibited_source_declaration(tmp_path: Path) -> None:
+    from orcapod.databases import DeltaTableDatabase
+    from orcapod.pipeline import PipelineJob
+
+    table = _table(_dict_of(pa.float64()))
+    source = ArrowTableSource(
+        table, tag_columns="id", tag_only_columns=True, source_id="pairs"
+    )
+    job = PipelineJob(database=DeltaTableDatabase(tmp_path / "store"))
+    with job:
+        source.batch(label="batch")
+    path = tmp_path / "job.json"
+    job.save(path)
+    saved = json.loads(path.read_text())
+    for node in saved["pipeline"]["nodes"].values():
+        if node["node_type"] == "source":
+            node["source_config"]["data_schema"]["k"] = str(_dict_of(pa.float32()))
+            node["output_schema"]["data"]["k"] = str(_dict_of(pa.float32()))
+    path.write_text(json.dumps(saved))
+    with pytest.raises(NarrowFloatKeyError, match="column 'k'"):
+        PipelineJob.load(path)
+
+
+@pytest.mark.parametrize("declared_in_arrow", [False, True])
+def test_pipeline_input_slot_refuses_declared_narrow_type(
+    declared_in_arrow: bool,
+) -> None:
+    from orcapod.core.nodes.source_node import SourceNode
+    from orcapod.types import Schema
+
+    with pytest.raises(NarrowFloatKeyError, match="column 'k'|Column 'k'"):
+        if declared_in_arrow:
+            SourceNode(
+                "inputs", pa.schema([]), pa.schema([("k", _dict_of(pa.float32()))])
+            )
+        else:
+            SourceNode("inputs", Schema({}), Schema({"k": dict[np.float32, int]}))
+
+
+@pytest.mark.parametrize("cls", [Datagram, Tag, Data])
+@pytest.mark.parametrize("kind", ["dataclass", "structural", "pydantic"])
+def test_datagram_refuses_declared_user_class_field(cls, kind):
+    from orcapod import dataclass as structural_dataclass
+    from pydantic import ConfigDict, create_model
+
+    annotation = dict[np.float32, int]
+    if kind == "pydantic":
+        model_config = ConfigDict(arbitrary_types_allowed=True)
+        model = create_model(
+            "NarrowKeyModel", __config__=model_config, bad=(annotation, ...)
+        )
+    else:
+        model = type("NarrowKeyClass", (), {"__annotations__": {"bad": annotation}})
+        model = (
+            structural_dataclass(model)
+            if kind == "structural"
+            else dataclasses.dataclass(model)
+        )
+    with pytest.raises(NarrowFloatKeyError, match=r"k.*bad|bad"):
+        cls({"k": model(bad={})}, python_schema={"k": model})
+
+
+@pytest.mark.parametrize("is_source", [False, True])
+def test_plain_list_with_unrelated_extension_metadata_is_allowed(is_source):
+    field = pa.field(
+        "k",
+        pa.large_list(pa.float32()),
+        metadata={b"ARROW:extension:metadata": b'{"category":"set"}'},
+    )
+    table = pa.Table.from_arrays(
+        [pa.array([1]), pa.array([[0.5]], type=field.type)],
+        schema=pa.schema([pa.field("id", pa.int64()), field]),
+    )
+    result = ArrowTableSource(table, tag_columns="id") if is_source else Datagram(table)
+    assert result.as_table()["k"].to_pylist() == [[0.5]]
+
+
+@pytest.mark.parametrize("container", ["union", "dictionary", "list_view", "run_end"])
+def test_declared_mutation_refuses_map_through_other_arrow_containers(
+    container: str,
+) -> None:
+    inner = pa.map_(pa.float32(), pa.int64())
+    if container == "union":
+        outer = pa.union([pa.field("map", inner)], mode="sparse")
+    elif container == "dictionary":
+        outer = pa.dictionary(pa.int8(), inner)  # pyright: ignore[reportArgumentType]  # Arrow accepts map values
+    elif container == "list_view":
+        outer = pa.large_list_view(inner)
+    else:
+        outer = pa.run_end_encoded(pa.int16(), inner)  # pyright: ignore[reportArgumentType]  # Arrow accepts map values
+    with pytest.raises(NarrowFloatKeyError, match="dict key type"):
+        Datagram({"id": 1}).with_columns({"k": outer}, k=[])
+
+
+@pytest.mark.parametrize("source", ["dict", "frame", "csv"])
+def test_narrow_key_diagnostic_precedes_source_value_conversion(
+    tmp_path: Path, source: str
+) -> None:
+    from orcapod.core.sources.csv_source import CSVSource
+
+    schema = pa.schema([("id", pa.int64()), ("k", _dict_of(pa.float32()))])
+    with pytest.raises(NarrowFloatKeyError, match="float64"):
+        if source == "dict":
+            DictSource([{"id": 1, "k": "oops"}], "id", data_schema=schema)
+        elif source == "frame":
+            DataFrameSource({"id": [1], "k": ["oops"]}, "id", schema=schema)
+        else:
+            path = tmp_path / "narrow.csv"
+            path.write_text("id,k\n1,oops\n")
+            CSVSource(str(path), "id", schema=schema)
+
+
+@pytest.mark.parametrize("annotation", [set[np.float16], dict[np.float16, int]])
+def test_pod_refuses_python_float16_key_or_element(annotation):
+    def run(k):
+        return len(k)
+
+    run.__annotations__ = {"k": annotation, "return": int}
+    with pytest.raises(NarrowFloatKeyError, match="float64"):
+        function_pod(output_keys="n")(run)
+
+
+def test_duplicate_key_struct_is_not_dict_shape() -> None:
+    pair = pa.struct(
+        [("key", pa.float32()), ("key", pa.int64()), ("value", pa.int64())]
+    )
+    arrow_type = pa.large_list(pair)
+    assert dict_entry_fields(arrow_type) is None
+    table = pa.schema([("id", pa.int64()), ("k", arrow_type)]).empty_table()
+    with pytest.raises(ValueError, match=r"column 'k'|Column 'k'"):
+        ArrowTableSource(table, tag_columns="id")
+    with pytest.raises(ValueError, match=r"column 'k'|Column 'k'"):
+        DictSource([{"id": 1, "k": []}], "id", data_schema=table.schema)

@@ -41,10 +41,10 @@ from orcapod.semantic_types.narrow_float_keys import (
     NarrowFloatKeyError,
     require_schema_without_narrow_float_keys,
 )
-from orcapod.semantic_types.nested_none import with_context
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, DataType, DataValue, Schema, SchemaLike
 from orcapod.utils import arrow_utils
+from orcapod.utils.schema_utils import declared_arrow_schema
 
 logger = logging.getLogger(__name__)
 
@@ -226,9 +226,9 @@ class Datagram(ContentIdentifiableBase):
         """
         for name, python_type in python_schema.items():
             try:
-                self.converter.python_type_to_arrow_type(python_type)
-            except NarrowFloatKeyError as exc:
-                raise with_context(f"Column {name!r} ({python_type})", exc) from exc
+                declared_arrow_schema({name: python_type}, self.converter)
+            except NarrowFloatKeyError:
+                raise
             except Exception:  # noqa: BLE001 - reported by the conversion, as before
                 continue
 
@@ -267,11 +267,6 @@ class Datagram(ContentIdentifiableBase):
             )
 
         table = arrow_utils.normalize_table_to_large_types(table)
-        # A dict keyed by, or a set of, float32 or float16 is refused where its type
-        # is declared, here by the table (ITL-1591): an update would narrow two
-        # distinct floats to one stored value and lose an entry.
-        require_schema_without_narrow_float_keys(table.schema)
-
         # Extract context from table if not provided externally
         if constants.CONTEXT_KEY in table.column_names and data_context is None:
             data_context = table[constants.CONTEXT_KEY].to_pylist()[0]
@@ -1127,10 +1122,12 @@ class Datagram(ContentIdentifiableBase):
                 )
             )
         if arrow_fields:
+            arrow_schema = pa.schema(list(arrow_fields.values()))
+            require_schema_without_narrow_float_keys(arrow_schema)
             tables.append(
                 self.converter.python_dicts_to_arrow_table(
                     [{n: updates[n] for n in arrow_fields}],
-                    arrow_schema=pa.schema(list(arrow_fields.values())),
+                    arrow_schema=arrow_schema,
                 )
             )
         return arrow_utils.hstack_tables(*tables).select(list(updates))
@@ -1183,6 +1180,15 @@ class Datagram(ContentIdentifiableBase):
                 f"Use update() to modify existing columns."
             )
 
+        if column_types:
+            self._refuse_narrow_float_keys(
+                {
+                    name: declared
+                    for name, declared in column_types.items()
+                    if name in updates
+                    and not isinstance(declared, (pa.DataType, pa.Field))
+                }
+            )
         has_arrow_types = column_types is not None and any(
             isinstance(t, (pa.DataType, pa.Field)) for t in column_types.values()
         )

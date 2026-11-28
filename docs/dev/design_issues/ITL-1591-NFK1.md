@@ -19,13 +19,15 @@ or annotation and in an Arrow schema or table alike, at any nesting depth, by a 
 types that reads no value. One rule, `semantic_types/narrow_float_keys.py`
 (`NarrowFloatKeyError`, an `InputValidationError`): the type converter applies it to every
 dict and set type it builds (so a source's Python schema, a datagram's, a user-class field
-and a function pod's declared inputs and outputs, when the pod is defined), and the source
-builder, `ArrowTableStream` and a datagram given an Arrow table apply it to the table's
-schema. A dict is the converter's one dict shape (`nested_storage.dict_entry_fields`, now
-used by the converter's two readers too) or an Arrow map. `float32` and `float16` stay
-accepted as a plain column, a list element, a struct field and a dict value.
+and a function pod's declared inputs and outputs, when the pod is defined). The source
+builder checks schemas at source ingestion. Explicit Arrow schemas are also checked before
+source value conversion, when a datagram adds a column with a declared type, and when a
+saved source declaration is restored. A dict declaration uses the converter's dict shape
+(`nested_storage.dict_entry_fields`) or an Arrow map. Plain narrow-float columns, list
+elements, struct fields and dict values remain accepted.
 
-Left as it is: a plain value in an Arrow-declared `float32` or `float16` column is still
-narrowed silently (ITL-1613). A struct column whose fields are exactly `key` and `value`
-becomes the dict shape once `Batch`, `GroupBy` or `MergeJoin` puts it in a list, and is
-refused there when its `key` is `float32` or `float16`.
+Open points: an Arrow-held datagram can still narrow two keys to one when updated with
+Python floats. A raw `ArrowTableStream` still accepts the same Arrow type. Both APIs also
+carry already-built operator results, including a list of structs whose fields happen to
+be named `key` and `value`. Such a result has the same Arrow shape as a dict. An
+Arrow-declared plain value can still narrow silently (ITL-1613).

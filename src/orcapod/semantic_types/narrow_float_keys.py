@@ -22,8 +22,7 @@ A ``float32`` or ``float16`` plain column, list element, struct field or dict VA
 accepted, and so is a ``float64`` key or element.
 
 The rule is here once. The type converter applies it to every dict and set type it
-builds from a Python declaration (``require_no_narrow_float_keys``); the source builder,
-``ArrowTableStream`` and a datagram over an Arrow table apply it to an Arrow schema
+builds from a Python declaration (``require_no_narrow_float_keys``); source ingestion and explicit Arrow declarations apply it to an Arrow schema
 (``require_schema_without_narrow_float_keys``).
 """
 
@@ -31,7 +30,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from types import UnionType
+from typing import TYPE_CHECKING, Literal, Union, cast, get_args, get_origin
 
 from orcapod.errors import InputValidationError
 from orcapod.semantic_types.nested_storage import dict_entry_fields
@@ -51,11 +51,32 @@ _REMEDY = (
     "string)."
 )
 
+_EXTENSION_NAME_KEY = b"ARROW:extension:name"
 _EXTENSION_METADATA_KEY = b"ARROW:extension:metadata"
 
 
 class NarrowFloatKeyError(InputValidationError, ValueError):
     """A declared type has a ``float32`` or ``float16`` dict key or set element."""
+
+
+def require_supported_python_float_key(annotation: object, *, is_set: bool) -> None:
+    """Report an unsupported NumPy half float in a key or set element declaration."""
+    import numpy as np
+
+    origin = get_origin(annotation)
+    args = get_args(annotation)
+    if origin in (Union, UnionType):
+        non_none = [arg for arg in args if arg is not type(None)]
+        if len(non_none) == 1:
+            require_supported_python_float_key(non_none[0], is_set=is_set)
+    if annotation is np.float16 or (
+        origin is Literal
+        and {type(value) for value in args if value is not None} == {np.float16}
+    ):
+        part = "set element" if is_set else "dict key"
+        raise NarrowFloatKeyError(
+            f"{NARROW_FLOAT_KEYS_NOT_SUPPORTED}: {part} type {annotation}. {_REMEDY}"
+        )
 
 
 def _is_narrow_float(arrow_type: pa.DataType) -> bool:
@@ -66,23 +87,35 @@ def _is_narrow_float(arrow_type: pa.DataType) -> bool:
     return pa.types.is_float32(arrow_type) or pa.types.is_float16(arrow_type)
 
 
-def _is_set_metadata(raw: bytes | None) -> bool:
-    """Whether extension metadata ``raw`` is that of a native set container."""
-    from orcapod.logical_types.list_logical_type_factory import SET_CATEGORY
+def _native_container_metadata(
+    name: bytes | None, raw: bytes | None
+) -> dict[str, object]:
+    """Read metadata only when the extension identifier names a native container."""
+    if not name or not raw:
+        return {}
 
-    if not raw:
-        return False
+    from orcapod.logical_types.list_logical_type_factory import (
+        LIST_CATEGORY,
+        SET_CATEGORY,
+    )
+
     try:
-        metadata = json.loads(raw)
+        metadata: object = json.loads(raw)
     except ValueError:
-        return False
-    return isinstance(metadata, dict) and metadata.get("category") == SET_CATEGORY
+        return {}
+    if not isinstance(metadata, dict):
+        return {}
+    fields = cast("dict[str, object]", metadata)
+    category = fields.get("category")
+    if category not in (LIST_CATEGORY, SET_CATEGORY):
+        return {}
+    if not name.startswith(f"{category}[".encode()) or not name.endswith(b"]"):
+        return {}
+    return fields
 
 
-def _dict_key(
-    arrow_type: pa.DataType, field_metadata: Mapping[bytes, bytes] | None
-) -> str | None:
-    """Say so when ``arrow_type`` stores a dict whose key is a narrow float."""
+def _dict_key(arrow_type: pa.DataType) -> str | None:
+    """Describe a narrow float key in a plain dict's storage type."""
     import pyarrow as pa
 
     if pa.types.is_map(arrow_type):
@@ -92,36 +125,6 @@ def _dict_key(
     else:
         return None
     return f"dict key type {key_type}" if _is_narrow_float(key_type) else None
-
-
-def _set_element(
-    arrow_type: pa.DataType, field_metadata: Mapping[bytes, bytes] | None
-) -> str | None:
-    """Say so when ``arrow_type`` stores a set whose element is a narrow float."""
-    import pyarrow as pa
-
-    if isinstance(arrow_type, pa.ExtensionType):
-        raw = arrow_type.__arrow_ext_serialize__()
-        storage = arrow_type.storage_type
-    else:
-        raw = (field_metadata or {}).get(_EXTENSION_METADATA_KEY)
-        storage = arrow_type
-    if not _is_set_metadata(raw):
-        return None
-    if not (pa.types.is_list(storage) or pa.types.is_large_list(storage)):
-        return None
-    element_type = storage.value_type
-    if _is_narrow_float(element_type):
-        return f"set element type {element_type}"
-    return None
-
-
-_REFUSED_PARTS = (_dict_key, _set_element)
-"""The parts of a declared type that may not be a narrow float.
-
-Each takes one Arrow type with the metadata of the field that holds it, at any depth of
-a declared type, and returns the description of what it refuses there, or ``None``.
-"""
 
 
 def narrow_float_keys(
@@ -142,32 +145,47 @@ def narrow_float_keys(
     """
     import pyarrow as pa
 
-    found = {
-        description
-        for part in _REFUSED_PARTS
-        if (description := part(arrow_type, field_metadata)) is not None
-    }
-    children: list[tuple[pa.DataType, Mapping[bytes, bytes] | None]]
+    metadata = field_metadata or {}
     if isinstance(arrow_type, pa.BaseExtensionType):
-        children = [(arrow_type.storage_type, None)]
-    elif (
-        pa.types.is_list(arrow_type)
-        or pa.types.is_large_list(arrow_type)
-        or pa.types.is_fixed_size_list(arrow_type)
-    ):
+        if isinstance(arrow_type, pa.ExtensionType):
+            metadata = {
+                _EXTENSION_NAME_KEY: arrow_type.extension_name.encode(),
+                _EXTENSION_METADATA_KEY: arrow_type.__arrow_ext_serialize__(),
+            }
+        else:
+            metadata = {}
+        arrow_type = arrow_type.storage_type
+
+    native = _native_container_metadata(
+        metadata.get(_EXTENSION_NAME_KEY), metadata.get(_EXTENSION_METADATA_KEY)
+    )
+    if native and (pa.types.is_list(arrow_type) or pa.types.is_large_list(arrow_type)):
+        from orcapod.logical_types.list_logical_type_factory import SET_CATEGORY
+
         item = arrow_type.value_field
-        children = [(item.type, item.metadata)]
-    elif pa.types.is_struct(arrow_type):
-        children = [(child.type, child.metadata) for child in arrow_type]
-    elif pa.types.is_map(arrow_type):
-        children = [
-            (arrow_type.key_field.type, arrow_type.key_field.metadata),
-            (arrow_type.item_field.type, arrow_type.item_field.metadata),
-        ]
-    else:
-        children = []
-    for child_type, child_metadata in children:
-        found.update(narrow_float_keys(child_type, child_metadata))
+        found: set[str] = set()
+        if native["category"] == SET_CATEGORY and _is_narrow_float(item.type):
+            found.add(f"set element type {item.type}")
+        element_name = native.get("element_ext_name")
+        element_raw = native.get("element_ext_metadata")
+        item_metadata = dict(item.metadata or {})
+        if isinstance(element_name, str):
+            item_metadata[_EXTENSION_NAME_KEY] = element_name.encode()
+            item_metadata[_EXTENSION_METADATA_KEY] = (
+                element_raw.encode() if isinstance(element_raw, str) else b""
+            )
+        found.update(narrow_float_keys(item.type, item_metadata))
+        return sorted(found)
+
+    if pa.types.is_dictionary(arrow_type):
+        return narrow_float_keys(arrow_type.value_type)
+
+    found: set[str] = set()
+    if (description := _dict_key(arrow_type)) is not None:
+        found.add(description)
+    for index in range(arrow_type.num_fields):
+        child = arrow_type.field(index)
+        found.update(narrow_float_keys(child.type, child.metadata))
     return sorted(found)
 
 
@@ -193,9 +211,9 @@ def require_no_narrow_float_keys(arrow_type: pa.DataType) -> None:
 def require_schema_without_narrow_float_keys(arrow_schema: pa.Schema) -> None:
     """Refuse an Arrow schema with a ``float32`` or ``float16`` dict key or set element.
 
-    Applied to the table a source is built from, to the table of every stream and to
-    the table a datagram is given, so a type declared in Arrow is refused as one
-    declared in Python is. No value is read.
+    Applied to a source's Arrow declaration and to explicitly declared mutations.
+    Operator results and their caches can have the same Arrow shape as a dict,
+    so their already-built schemas do not go through this check. No value is read.
 
     Args:
         arrow_schema: The Arrow schema of the table.
