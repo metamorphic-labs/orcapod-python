@@ -30,7 +30,7 @@ from upath import UPath
 
 psycopg = pytest.importorskip("psycopg")
 
-from psycopg import Connection, connect, sql  # noqa: E402
+from psycopg import Connection, connect, errors, sql  # noqa: E402
 from psycopg.conninfo import make_conninfo  # noqa: E402
 from testcontainers.postgres import PostgresContainer  # noqa: E402
 
@@ -886,10 +886,13 @@ class TestPostgresHashCacherStrictStore:
         self, pg_conninfo: str, match_mtime: bool, caplog: pytest.LogCaptureFixture
     ):
         with connect(pg_conninfo) as conn:
-            conn.execute(
-                "CREATE COLLATION algorithm_ci "
-                "(provider=icu, locale='und-u-ks-level2', deterministic=false)"
-            )
+            try:
+                _ = conn.execute(
+                    "CREATE COLLATION algorithm_ci "
+                    "(provider=icu, locale='und-u-ks-level2', deterministic=false)"
+                )
+            except errors.FeatureNotSupported as exc:
+                pytest.skip(f"ICU collation unavailable: {exc}")
             conn.execute(
                 "ALTER TABLE file_hash_cache_v2 "
                 "ALTER COLUMN algorithm TYPE TEXT COLLATE algorithm_ci"

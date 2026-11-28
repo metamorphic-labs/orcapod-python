@@ -44,8 +44,10 @@ as misses. The next valid write for the same key replaces the malformed value,
 refreshes its timestamp, and logs a warning naming the file and hash algorithm.
 An incompatible hash returned by a custom cache is also a miss.
 
-`orcapod warm-cache --force` skips the lookup and reads each eligible file
-again. If a new hash differs from a well-formed hash stored for the same key,
+`orcapod warm-cache --force` skips the cache lookup and recomputes each eligible
+file's hash. Content-hashing algorithms read the file's contents. The
+`hash_path` algorithm checks that the file exists and hashes its path string.
+If a new hash differs from a well-formed hash stored for the same key,
 the cache retains the original entry and the command reports a file error. If
 a rehash and write conflict occurs while a pipeline hashes a file column, it can
 surface as `RuntimeError: Failed to process column 'recording'`, with a
