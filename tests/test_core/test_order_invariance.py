@@ -1257,10 +1257,14 @@ def test_explicit_suffixes_remain_addressable_in_every_definition_order(
         job = PipelineJob(name="labels", database=InMemoryArrowDatabase())
         with job:
             for name, value, label in order:
-                source = ListSource("reading", [value], label=name, source_id=name)
+                role = "step_2" if name == "step_1" else name
+                source = ListSource("reading", [value], label=role, source_id=name)
                 _ = _double_reading.pod(source, label=label)
         summary = job.run()
-        assert set(summary.nodes) == {"step_1", "step_2", "step_3"}
+        generated = (
+            {"step_3", "step_4"} if first_source == "step_1" else {"step_2", "step_3"}
+        )
+        assert set(summary.nodes) == {"step_1", *generated}
         assert job.nodes["step_1"].as_table()["doubled"].to_pylist() == [6]
         results["".join(name for name, _, _ in order)] = {
             "labels": list(job.nodes),

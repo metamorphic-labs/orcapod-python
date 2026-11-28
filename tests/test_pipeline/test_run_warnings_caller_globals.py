@@ -257,6 +257,7 @@ def _unchecked_job() -> PipelineJob:
             tag_columns=["k"],
             tag_only_columns=True,
             source_id="left",
+            label="left",
         )
         right = _FailingCheck(
             OSError("disk gone"),
@@ -264,6 +265,7 @@ def _unchecked_job() -> PipelineJob:
             tag_columns=["k"],
             tag_only_columns=True,
             source_id="right",
+            label="right",
         )
         _ = double.pod(left, label="doubled")
         _ = right.drop_nulls(label="present")
