@@ -1,5 +1,7 @@
 # ITL-938: one coherent versioning system for hashes, hash labels and stored paths
 
+ITL-1564 supersedes the plain derived-source id and content identity described in this historical document. See the [current hashing reference](../../reference/hashing.md#default-source-ids-and-row-identifiers).
+
 Status: **design discussion closed on November 11, 2026.** Every decision is the developer's
 and is listed, dated and quoted, in Part 9. Where an earlier part shows an intermediate view,
 the later part governs; **Part 7.1 is the system on one page.** Decisions the developer made

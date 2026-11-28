@@ -1,5 +1,7 @@
 # ITL-957 Default Source Ids Implementation Plan
 
+ITL-1564 supersedes the plain derived-source id and content identity described in this historical document. See the [current hashing reference](../../reference/hashing.md#default-source-ids-and-row-identifiers).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use sensei:executing-plans to implement this
 > plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking. A successor worker
 > continues from the first unchecked step; "Progress notes" at the end is kept current.

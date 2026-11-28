@@ -748,13 +748,15 @@ The default source id includes the job's name and the node's content hash, for e
 `derived_v1:analysis/nightly:semantic_v1:<hex>`. Job name components are joined with `/`.
 A missing or empty job name, or a name component containing `/` or `:`, requires an
 explicit `source_id`. Jobs with the same name and node content hash get the same default
-id across databases. The stored rows retain their provenance.
+id across databases.
 
-The `as_source()` of a node
-downstream of a `Join` or `MergeJoin` of two sources cannot yet be bound as a source of a new
-`PipelineJob`: its schema is the node's, which declares a pair of system tags for each joined
-source, and binding accepts exactly one pair, so it is refused with `SourceSpecMismatchError`
-(support is planned, ITL-1127).
+The origin's stored tables keep their provenance. A plain `as_source()` read exposes no
+system tags and returns null source-info tokens.
+
+The declared schema still comes from the node. For a node downstream of a `Join` or
+`MergeJoin` of two sources, that schema declares a pair of system tags for each joined
+source. Binding to a new `PipelineJob` accepts exactly one pair, so it raises
+`SourceSpecMismatchError` (ITL-1127).
 
 **Using a tag value as an input to a computation.** Tags identify a row and data is what a
 function computes on. A data-tag (the default for a declared tag) is both: a function

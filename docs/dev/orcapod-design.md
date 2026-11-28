@@ -160,7 +160,7 @@ Data-inclusive identity capturing the precise semantic content of an object:
 | Operator | Operator class + identity structure |
 | ArrowTableStream | Producer + upstreams (or table content if no producer) |
 | Datagram | Arrow table content |
-| DerivedSource | Origin node's content hash |
+| Plain DerivedSource | Full source id, Arrow schema identity and an empty key tuple |
 
 Content hashes use a `BaseSemanticHasher` that recursively expands structures, dispatches to type-specific handlers, and terminates at `ContentHash` leaves (preventing hash-of-hash inflation).
 
@@ -411,7 +411,7 @@ Sources with identical schemas produce identical `pipeline_hash` values. When pr
 Derived sources bridge pipeline stages by materializing intermediate results:
 
 - **Construction**: `function_node.as_source()` or `operator_node.as_source()` returns a `DerivedSource` that reads from the node's pipeline database.
-- **Identity**: Content hash ties to the origin node's content hash; pipeline hash is schema-only (inherited from `RootSource`).
+- **Identity**: The plain form hashes its full source id, Arrow schema identity and an empty key tuple. Its default id includes the job path and the labelled node content hash (ITL-1564). The pipeline hash is schema-only.
 - **Use case**: Downstream pipelines reference the derived source directly, independent of the upstream topology that produced it.
 
 Derived sources serve two purposes:

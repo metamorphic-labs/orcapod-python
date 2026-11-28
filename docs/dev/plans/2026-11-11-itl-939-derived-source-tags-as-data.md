@@ -1,5 +1,7 @@
 # DerivedSource `tags_as_data` Implementation Plan (ITL-939)
 
+ITL-1564 supersedes the plain derived-source id and content identity described in this historical document. See the [current hashing reference](../../reference/hashing.md#default-source-ids-and-row-identifiers).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use sensei:subagent-driven-development (recommended) or sensei:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** `DerivedSource(origin, tags_as_data={tag: data_name})` — a root source derived from a

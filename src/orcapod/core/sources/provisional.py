@@ -28,10 +28,10 @@ PROVISIONAL_SOURCES: Mapping[str, str] = MappingProxyType(
         # Its default source id hashes the implementation's own identity(), and its
         # content hash leaves out the source id and the declared schema (ITL-1316).
         "PollingSource": "ITL-1316",
-        # Both forms (developer, November 21, 2026, ITL-1331): the plain form
-        # (``node.as_source()``) hashes only its origin's content hash and accepts a
-        # source id its identity does not use; the tags_as_data form changed days before
-        # the release (ITL-1313). The source identity follow-ups decide it (ITL-1317).
+        # Both forms are provisional (ITL-1331). The plain form uses the root source
+        # recipe with its full source id, Arrow schema identity and an empty key tuple
+        # (ITL-1564). The tags_as_data form adds the sorted copy mapping and requires
+        # an explicit source id (ITL-1313).
         "DerivedSource": "ITL-1317",
     }
 )

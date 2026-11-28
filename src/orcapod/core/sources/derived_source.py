@@ -108,7 +108,9 @@ class DerivedSource(RootSource):
     **Plain** (``tags_as_data`` not given), created by ``FunctionNode.as_source()``
     or ``OperatorNode.as_source()``: a static stream backed by the computed records
     of a DB-backed stream node. It presents the node's stored results with the
-    node's own tag and data columns. The origin must implement
+    node's own tag and data columns. The stored tables keep their provenance.
+    Plain reads expose no system tags and return null source-info tokens.
+    The origin must implement
     ``get_all_records()``, ``output_schema()``, ``keys()`` and ``content_hash()``.
 
     **With ``tags_as_data``**: a new root source over any source or job node that

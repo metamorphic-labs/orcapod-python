@@ -1,5 +1,7 @@
 # ITL-939 design spike: a value that is both a tag and data
 
+ITL-1564 supersedes the plain derived-source id and content identity described in this historical document. See the [current hashing reference](../../reference/hashing.md#default-source-ids-and-row-identifiers).
+
 **Status:** the developer has decided the form (November 11, 2026). Design C, the operator
 `CopyTagsToData`, is **rejected**: "if we have CopyTagToData that cannot be treated as an
 operator as that is actively introducing new data into data." The chosen direction is the
