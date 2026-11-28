@@ -150,53 +150,121 @@ READS: dict[str, Callable[[DeltaTableDatabase], object]] = {
 }
 
 
-@pytest.fixture
-def missing_log(
-    base: Path, stored: DeltaTableDatabase, monkeypatch: pytest.MonkeyPatch
-) -> DeltaTableDatabase:
-    """Open a fresh handle after removing the log from a table with stored rows."""
+@pytest.fixture(params=[("table",), PATH], ids=["top-level", "nested"])
+def damaged_path(request: pytest.FixtureRequest) -> tuple[str, ...]:
+    """Return the record path of the table whose log will be removed."""
+    return request.param
+
+
+@pytest.fixture(
+    params=[None, ["tag1", "tag2"], ["tag2", "tag1"]],
+    ids=["flat", "partitioned", "reordered-partitions"],
+)
+def damaged_stores(
+    base: Path,
+    damaged_path: tuple[str, ...],
+    request: pytest.FixtureRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[DeltaTableDatabase, DeltaTableDatabase]:
+    """Return fresh and warm handles after dropping the log from a populated table."""
     monkeypatch.setattr(delta_lake_databases, "sleep", lambda _delay: None)
-    directory = table_dir(base)
-    assert any(directory.glob("*.parquet"))
+    directory = base.joinpath(*damaged_path)
+    data = pa.table(
+        {
+            DeltaTableDatabase.RECORD_ID_COLUMN: [b"a"],
+            "tag1": ["a"],
+            "tag2": ["b"],
+            "x": [1],
+            "y": [2],
+        }
+    )
+    partitions = request.param
+    if partitions == ["tag2", "tag1"]:
+        data = data.select(
+            ["y", "tag2", DeltaTableDatabase.RECORD_ID_COLUMN, "x", "tag1"]
+        )
+    deltalake.write_deltalake(directory, data, partition_by=partitions)
+    warm = DeltaTableDatabase(base_path=base)
+    assert warm.get_all_records(damaged_path) is not None
+    assert any(directory.rglob("*.parquet"))
     shutil.rmtree(directory / "_delta_log")
-    return DeltaTableDatabase(base_path=base)
+    return DeltaTableDatabase(base_path=base), warm
+
+
+MISSING_LOG_READS: dict[
+    str, Callable[[DeltaTableDatabase, tuple[str, ...]], object]
+] = {
+    "get_all_records": lambda db, path: db.get_all_records(path),
+    "get_records_by_ids": lambda db, path: db.get_records_by_ids(path, [b"a", b"b"]),
+    "get_record_by_id": lambda db, path: db.get_record_by_id(path, b"a"),
+    "get_records_with_column_value": lambda db, path: db.get_records_with_column_value(
+        path, {"y": 2, "x": 1}
+    ),
+    "get_table_schema": lambda db, path: db.get_table_schema(path),
+    "table_exists": lambda db, path: db.table_exists(path),
+    "list_sources": lambda db, _path: db.list_sources(),
+    "list_table_paths": lambda db, _path: db.list_table_paths(),
+    "list_table_paths_with_prefix": lambda db, path: db.list_table_paths(path),
+}
 
 
 @pytest.mark.parametrize(
-    "read",
-    [
-        *READS.values(),
-        lambda db: db.get_table_schema(PATH),
-        lambda db: db.table_exists(PATH),
-    ],
-    ids=[*READS, "get_table_schema", "table_exists"],
+    "read", MISSING_LOG_READS.values(), ids=list(MISSING_LOG_READS)
 )
 def test_missing_log_is_a_read_error(
-    base: Path,
-    missing_log: DeltaTableDatabase,
-    read: Callable[[DeltaTableDatabase], object],
+    damaged_path: tuple[str, ...],
+    damaged_stores: tuple[DeltaTableDatabase, DeltaTableDatabase],
+    read: Callable[[DeltaTableDatabase, tuple[str, ...]], object],
 ) -> None:
-    """Every read refuses to treat a folder with orphaned data as absent."""
+    """Row reads and metadata discovery name the table with orphaned data."""
+    fresh, _ = damaged_stores
     with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as info:
-        read(missing_log)
-    assert_names_table(info.value, base)
+        read(fresh, damaged_path)
+    assert info.value.record_path == damaged_path
+
+
+def test_table_exists_refuses_a_missing_log_on_a_warm_handle(
+    damaged_path: tuple[str, ...],
+    damaged_stores: tuple[DeltaTableDatabase, DeltaTableDatabase],
+) -> None:
+    """An existence check sees the missing log while row reads keep their snapshot."""
+    _, warm = damaged_stores
+    with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as info:
+        warm.table_exists(damaged_path)
+    assert info.value.record_path == damaged_path
+    assert warm.get_all_records(damaged_path) is not None
 
 
 def test_flush_refuses_a_missing_log(
-    base: Path, missing_log: DeltaTableDatabase
+    base: Path,
+    damaged_path: tuple[str, ...],
+    damaged_stores: tuple[DeltaTableDatabase, DeltaTableDatabase],
 ) -> None:
     """Flushing to a folder with orphaned data writes no files or log."""
-    directory = table_dir(base)
-    before = {path.name: path.read_bytes() for path in directory.iterdir()}
-    missing_log.add_records(
-        PATH, rows([b"c"], pa.array([3], pa.int64())), record_id_column="rid"
+    fresh, _ = damaged_stores
+    directory = base.joinpath(*damaged_path)
+    before = snapshot(directory)
+    fresh.add_records(
+        damaged_path, rows([b"c"], pa.array([3], pa.int64())), record_id_column="rid"
     )
 
     with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as info:
-        missing_log.flush()
+        fresh.flush()
 
-    assert_names_table(info.value, base)
-    assert {path.name: path.read_bytes() for path in directory.iterdir()} == before
+    assert info.value.record_path == damaged_path
+    assert snapshot(directory) == before
+
+
+@pytest.mark.parametrize("name", ["table", "tag=child"])
+def test_partition_paths_do_not_count_as_separate_tables(base: Path, name: str) -> None:
+    """A healthy table owns its partitions, even when listing starts in one."""
+    path = ("group", name)
+    data = pa.table({"tag1": ["a"], "tag2": ["b"], "x": [1], "y": [2]})
+    deltalake.write_deltalake(base.joinpath(*path), data, partition_by=["tag1", "tag2"])
+    db = DeltaTableDatabase(base_path=base)
+    assert not db.table_exists(("group",))
+    assert db.list_table_paths() == [path]
+    assert db.list_table_paths((*path, "tag1=a")) == []
 
 
 def test_flush_can_load_a_log_published_during_the_retry(

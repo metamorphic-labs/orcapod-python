@@ -13,6 +13,7 @@ tests ERROR with the reason.
 Run with:  uv run pytest tests/test_databases/test_delta_table_database_s3.py -v
 """
 
+import deltalake
 import pyarrow as pa
 import pytest
 import s3fs
@@ -61,17 +62,36 @@ def test_s3_flush_and_read(s3_base_uri, s3_storage_options):
     assert result.num_rows == 3
 
 
+@pytest.mark.parametrize(
+    "path", [("table",), ("group", "table")], ids=["top-level", "nested"]
+)
+@pytest.mark.parametrize(
+    "partitions", [None, ["tag1", "tag2"]], ids=["flat", "partitioned"]
+)
 def test_s3_table_with_missing_log_is_refused(
     s3_base_uri: str,
     s3_storage_options: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
+    path: tuple[str, ...],
+    partitions: list[str] | None,
 ) -> None:
-    """A cloud read or flush refuses a missing log and preserves the data objects."""
+    """Cloud reads, metadata and flushes refuse a missing log and preserve the objects."""
     monkeypatch.setattr(delta_lake_databases, "sleep", lambda _delay: None)
-    path = ("table",)
-    uri = f"{s3_base_uri}/table"
-    db = DeltaTableDatabase(s3_base_uri, storage_options=s3_storage_options)
-    db.add_record(path, b"a", pa.table({"v": [1]}), flush=True)
+    uri = "/".join((s3_base_uri,) + path)
+    data = pa.table(
+        {
+            "y": [2],
+            "tag1": ["a"],
+            DeltaTableDatabase.RECORD_ID_COLUMN: [b"a"],
+            "tag2": ["b"],
+            "x": [1],
+        }
+    )
+    deltalake.write_deltalake(
+        uri, data, partition_by=partitions, storage_options=s3_storage_options
+    )
+    warm = DeltaTableDatabase(s3_base_uri, storage_options=s3_storage_options)
+    assert warm.get_all_records(path) is not None
 
     fs = s3fs.S3FileSystem(
         key=s3_storage_options["AWS_ACCESS_KEY_ID"],
@@ -80,16 +100,24 @@ def test_s3_table_with_missing_log_is_refused(
         use_listings_cache=False,
     )
     fs.rm(f"{uri}/_delta_log", recursive=True)
-    before = fs.find(uri)
-    assert len(before) == 1 and before[0].endswith(".parquet")
+    before = {name: fs.cat_file(name) for name in fs.find(uri)}
+    assert len(before) == 1 and next(iter(before)).endswith(".parquet")
 
-    recovered = DeltaTableDatabase(s3_base_uri, storage_options=s3_storage_options)
-    with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as info:
-        recovered.get_all_records(path)
-    assert info.value.table == uri
-    with pytest.raises(OrcapodDatabaseReadError, match="_delta_log"):
-        recovered.add_record(path, b"b", pa.table({"v": [2]}), flush=True)
-    assert fs.find(uri) == before
+    fresh = DeltaTableDatabase(s3_base_uri, storage_options=s3_storage_options)
+    for operation in (
+        lambda: fresh.get_all_records(path),
+        lambda: fresh.get_table_schema(path),
+        lambda: fresh.table_exists(path),
+        lambda: warm.table_exists(path),
+        lambda: fresh.list_table_paths(),
+        lambda: fresh.list_table_paths(path),
+        lambda: fresh.add_record(path, b"b", pa.table({"v": [2]}), flush=True),
+    ):
+        with pytest.raises(OrcapodDatabaseReadError, match="_delta_log") as info:
+            _ = operation()
+        assert info.value.table == uri
+        assert info.value.record_path == path
+    assert {name: fs.cat_file(name) for name in fs.find(uri)} == before
 
 
 def test_s3_skip_duplicates(s3_base_uri, s3_storage_options):
