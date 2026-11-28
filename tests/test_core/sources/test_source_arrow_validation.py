@@ -936,8 +936,9 @@ def test_dataframe_source_declares_native_custom_system_tag_required_large_strin
 
 @pytest.mark.parametrize("representation", ["pandas", "polars"])
 @pytest.mark.parametrize("values", [["one", None], [1, 2]])
+@pytest.mark.parametrize("explicit_schema", [False, True])
 def test_dataframe_source_rejects_invalid_native_custom_system_tag(
-    representation: str, values: list[object]
+    representation: str, values: list[object], explicit_schema: bool
 ) -> None:
     """Native custom system tags reject null and non-text values."""
     data_values = {
@@ -951,8 +952,32 @@ def test_dataframe_source_rejects_invalid_native_custom_system_tag(
         if representation == "pandas"
         else pl.DataFrame(data_values)
     )
-    with pytest.raises(InputValidationError, match=r"'extra'"):
-        DataFrameSource(data, tag_columns=TAGS, system_tag_columns=["extra"])
+    schema = (
+        pa.schema(
+            [
+                pa.field("g", pa.large_string()),
+                pa.field("k", pa.large_string()),
+                pa.field("x", pa.int64()),
+                pa.field("extra", pa.large_string(), nullable=False),
+            ]
+        )
+        if explicit_schema
+        else None
+    )
+    expected_type = "int64" if isinstance(values[0], int) else "large_string"
+    with pytest.raises(InputValidationError, match=rf"'extra'.*type {expected_type}"):
+        DataFrameSource(
+            data, schema=schema, tag_columns=TAGS, system_tag_columns=["extra"]
+        )
+
+
+def test_dataframe_source_preserves_declared_arrow_data_field() -> None:
+    field = pa.field("x", pa.int64(), nullable=True, metadata={b"unit": b"kg"})
+    table = pa.Table.from_arrays(
+        [pa.array([1], type=pa.int64())], schema=pa.schema([field])
+    )
+    source = DataFrameSource(table, source_id="declared")
+    assert source.as_table().schema.field("x").equals(field, check_metadata=True)
 
 
 def test_dict_source_declares_custom_system_tag_required_large_string() -> None:

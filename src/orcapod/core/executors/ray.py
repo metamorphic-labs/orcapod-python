@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import threading
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from orcapod.core.data_function import PYTHON_FUNCTION
 from orcapod.core.executors.base import PythonFunctionExecutorBase
 from orcapod.types import Schema
-from orcapod.core.executors.capture_wrapper import make_capture_wrapper
+from orcapod.core.executors.capture_wrapper import CaptureResponse, make_capture_wrapper
+from orcapod.utils.output_containers import UnexpectedOutputContainer
 
 if TYPE_CHECKING:
     from orcapod.protocols.observability_protocols import DataExecutionLoggerProtocol
@@ -170,6 +171,10 @@ class RayExecutor(PythonFunctionExecutorBase):
         """Return a copy of the Ray remote options dict."""
         return dict(self._remote_opts)
 
+    def return_container_options(self, container: type) -> dict[str, object]:
+        """Request that the Ray worker check the output container before transport."""
+        return {"return_container": container}
+
     def execute_callable(
         self,
         fn: Callable[..., Any],
@@ -188,23 +193,24 @@ class RayExecutor(PythonFunctionExecutorBase):
         propagates via ``RayTaskError``.  The driver extracts the captured I/O,
         records it to *logger*, and re-raises the **original** user exception
         so that Ray's error handling (retries, etc.) is not disrupted.
+
+        If the executor options request a container check, the worker checks
+        the result before serializing it and the driver reports a mismatch.
         """
         import ray
 
-        self._ensure_ray_initialized()
-        remote_fn = self._get_remote_fn(ray, fn.__name__)
-        ref = remote_fn.options(name=fn.__name__).remote(fn, kwargs)
+        ref = self._submit_callable(ray, fn, kwargs, executor_options)
 
         try:
-            raw, stdout_log, stderr_log, python_logs = ray.get(ref)
+            # This is one reference to a capture-wrapper response.
+            response = cast(CaptureResponse, cast(object, ray.get(ref)))
         except Exception as exc:
             handled = self._handle_worker_error(exc, logger)
             if handled is exc:
                 raise
             raise handled from exc
 
-        self._record_success(stdout_log, stderr_log, python_logs, logger)
-        return raw
+        return self._read_response(response, logger)
 
     async def async_execute_callable(
         self,
@@ -217,24 +223,44 @@ class RayExecutor(PythonFunctionExecutorBase):
         """Async counterpart of `execute_callable`."""
         import ray
 
-        self._ensure_ray_initialized()
-        remote_fn = self._get_remote_fn(ray, fn.__name__)
-        ref = remote_fn.options(name=fn.__name__).remote(fn, kwargs)
+        ref = self._submit_callable(ray, fn, kwargs, executor_options)
 
         try:
             # In Ray client mode (ray://) ClientObjectRef.future() returns a
             # concurrent.futures.Future which cannot be directly awaited.
             # asyncio.wrap_future() handles both Future types correctly.
-            raw, stdout_log, stderr_log, python_logs = await asyncio.wrap_future(
-                ref.future()
-            )
+            response = await asyncio.wrap_future(ref.future())
         except Exception as exc:
             handled = self._handle_worker_error(exc, logger)
             if handled is exc:
                 raise
             raise handled from exc
 
+        return self._read_response(response, logger)
+
+    def _submit_callable(
+        self,
+        ray: Any,
+        fn: Callable[..., Any],
+        kwargs: dict[str, Any],
+        executor_options: dict[str, Any] | None,
+    ) -> Any:
+        """Dispatch the capture wrapper with the optional return check."""
+        self._ensure_ray_initialized()
+        remote_fn = self._get_remote_fn(ray, fn.__name__).options(name=fn.__name__)
+        return_container = (executor_options or {}).get("return_container")
+        if return_container is None:
+            return remote_fn.remote(fn, kwargs)
+        return remote_fn.remote(fn, kwargs, return_container)
+
+    def _read_response(
+        self, response: CaptureResponse, logger: DataExecutionLoggerProtocol | None
+    ) -> Any:
+        """Record captured I/O and decode the worker's result or container mismatch."""
+        raw, stdout_log, stderr_log, python_logs, *mismatch = response
         self._record_success(stdout_log, stderr_log, python_logs, logger)
+        if mismatch:
+            raise UnexpectedOutputContainer(mismatch[0])
         return raw
 
     def _get_remote_fn(self, ray: Any, fn_name: str) -> Any:

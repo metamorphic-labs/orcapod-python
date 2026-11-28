@@ -429,11 +429,11 @@ class OutputTypeError(TypeError, ValueError):
 
     Attributes:
         function_name: Name of the function pod's function.
-        output_key: Name of the output column; ``None`` for ``NoOutputsDeclaredError``
-            (the function declares no output).
-        declared_type: The declared type of that output; ``None`` for
-            ``NoOutputsDeclaredError``.
-        value: The value the function returned for that output.
+        output_key: Name of the output column, or ``None`` if the error concerns
+            the whole return.
+        declared_type: The declared type of the output or the whole return, if annotated.
+        value: The value the function returned for that output. Container mismatches
+            retain only the returned type's name.
         detail: Where inside the value the mismatch is, when that is not the whole
             value; ``None`` otherwise.
         hint: What the function should return instead, when there is a specific fix.
@@ -487,6 +487,72 @@ class OutputTypeError(TypeError, ValueError):
                 self.value,
                 self.detail,
                 self.hint,
+            ),
+        )
+
+
+class OutputContainerTypeError(OutputTypeError):
+    """A function with multiple output keys returned the wrong container (ITL-1254).
+
+    The mismatch applies to the whole return, before individual outputs are selected.
+    Only the returned type is retained, since the invalid value may be a generator or
+    another object that cannot cross an executor boundary.
+
+    Attributes:
+        returned_type: Display name of the returned value's type.
+        return_container: Runtime type required for the returned value.
+    """
+
+    def __init__(
+        self,
+        function_name: str,
+        returned_type: str,
+        return_container: type,
+        annotation: object | None,
+    ) -> None:
+        """Create the error for the returned container.
+
+        Args:
+            function_name: Name of the function pod's function.
+            returned_type: Display name of the returned value's type.
+            return_container: Runtime type required for the returned value.
+            annotation: Declared return annotation, or None if there is none.
+        """
+        self.function_name = function_name
+        self.output_key = None
+        self.declared_type = annotation
+        self.value = None
+        self.detail = None
+        self.returned_type = returned_type
+        self.return_container = return_container
+        container = type_text(return_container)
+        target = (
+            f"a {container}"
+            if return_container in (tuple, list)
+            else f"an instance of {container}"
+        )
+        hint = f"Return {target} with one value per output key, in the order of output_keys"
+        if annotation is None:
+            declaration = "has no return annotation"
+            hint += ", or annotate the return type"
+        else:
+            declaration = f"declares {type_text(annotation)}"
+        self.hint = hint
+        TypeError.__init__(
+            self,
+            f"Function {function_name!r} returned {returned_type} for multiple "
+            f"output keys and {declaration}. {self.hint}.",
+        )
+
+    def __reduce__(self) -> tuple[object, ...]:
+        """Pickle the diagnostic without serializing the invalid returned value."""
+        return (
+            type(self),
+            (
+                self.function_name,
+                self.returned_type,
+                self.return_container,
+                self.declared_type,
             ),
         )
 
