@@ -21,10 +21,11 @@ The order is defined on storage values (what the converter produces):
 Keys or elements that cannot be ordered against each other, and two keys or elements
 with the same storage value, raise ``CanonicalOrderError``.
 
-A dict key is compared as it is stored (ITL-924): a Python ``float`` key of a
-``dict[np.float32, V]`` is narrowed to ``float32`` first
-(``float_narrowing.stored_key_converter``), so ``1e-50`` and ``2e-50``, both stored as
-``0.0``, are two keys with the same storage value and raise, naming both.
+A dict key and a set element are compared as they are stored (ITL-924): a Python
+``float`` key of a ``dict[np.float32, V]``, or element of a ``set[np.float32]``, is
+narrowed to ``float32`` first (``float_narrowing.stored_key_converter``), so ``1e-50``
+and ``2e-50``, both stored as ``0.0``, have the same storage value and raise, naming
+both.
 """
 
 from __future__ import annotations
@@ -74,15 +75,19 @@ def _is_nan(value: object) -> bool:
 
 
 def _sorted_by_rank(
-    items: list[tuple[_Rank, _T]], given_keys: Iterable[object] | None = None
+    items: list[tuple[_Rank, _T]],
+    given: Iterable[object] | None = None,
+    kind: str = "key",
 ) -> list[_T]:
     """Sort ``(rank, payload)`` pairs by rank and return the payloads.
 
     Args:
         items: The pairs to sort.
-        given_keys: For the entries of a dict, the keys as they were given, one per
-            item in the order of ``items``. They are read only to describe two keys
-            with one stored value.
+        given: The dict keys or set elements as they were given, one per item in the
+            order of ``items``. They are read only to describe two of them with one
+            stored value.
+        kind: What ``given`` holds, for that description: ``"key"`` or
+            ``"set element"``.
 
     Raises:
         CanonicalOrderError: If two ranks cannot be compared or are equal.
@@ -93,15 +98,15 @@ def _sorted_by_rank(
         raise CanonicalOrderError(f"values cannot be ordered: {exc}") from exc
     for first, second in pairwise(order):
         if items[first][0] == items[second][0]:
-            if given_keys is None:
+            if given is None:
                 raise CanonicalOrderError(
                     f"duplicate key or set element: {items[second][1]!r}"
                 )
-            keys = list(given_keys)
-            stored = items[first][0][-1]
+            values = list(given)
+            stored: object = items[first][0][-1]
             raise CanonicalOrderError(
-                f"duplicate key: the keys {keys[first]!r} and {keys[second]!r} are "
-                f"both stored as {stored!r}, so one entry would be lost"
+                f"duplicate {kind}: {values[first]!r} and {values[second]!r} are "
+                + f"both stored as {stored!r}, so one would be lost"
             )
     return [items[index][1] for index in order]
 
@@ -129,11 +134,15 @@ def sort_dict_entries(
     )
 
 
-def sort_set_elements(elements: list[_T]) -> list[_T]:
+def sort_set_elements(
+    elements: list[_T], given_elements: Iterable[object] | None = None
+) -> list[_T]:
     """Return the storage elements of one set value in canonical order.
 
     Args:
-        elements: The converted elements of a set.
+        elements: The converted elements of a set, each as it is stored.
+        given_elements: The elements as they were given, one per element in the order
+            of ``elements``; named when two of them have one stored value.
 
     Returns:
         A new list holding the same elements, sorted.
@@ -142,7 +151,11 @@ def sort_set_elements(elements: list[_T]) -> list[_T]:
         CanonicalOrderError: For a NaN element, elements that cannot be ordered against
             each other, or two elements with the same storage value.
     """
-    return _sorted_by_rank([(_key_rank(element), element) for element in elements])
+    return _sorted_by_rank(
+        [(_key_rank(element), element) for element in elements],
+        given_elements,
+        "set element",
+    )
 
 
 def canonical_python_value(

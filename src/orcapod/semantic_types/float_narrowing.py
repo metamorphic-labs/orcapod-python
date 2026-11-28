@@ -7,9 +7,10 @@ cannot hold exactly is stored changed (``0.1`` as ``0.10000000149011612``, ``1e-
 ``orcapod.errors.ValueConversionWarning`` per process and declared type. Whether a
 value is narrowed is decided from its type and the declared type, never from its value.
 
-Dict keys are the one place where narrowing can lose data: two keys that differ as
-Python floats can be one ``float32`` key. ``stored_key_converter`` gives the key as it
-is stored, so the duplicate-key check of ``canonical_order`` sees stored keys.
+Dict keys and set elements are where narrowing can lose data: two that differ as
+Python floats can be one ``float32`` value. ``stored_key_converter`` gives a key or
+element as it is stored, so the duplicate check of ``canonical_order`` sees stored
+values.
 
 A leaf module: the function-output check (``output_conformance``) takes its
 float-narrowing predicate from here.
@@ -122,14 +123,14 @@ def noting_narrowed_floats(declared: type, width: int) -> Callable[[Any], Any]:
 def stored_key_converter(
     key_type: object, convert: Callable[[Any], Any]
 ) -> Callable[[Any], Any]:
-    """Return a converter giving a dict key as it is stored.
+    """Return a converter giving a dict key or set element as it is stored.
 
     For a key type that is a narrower float, a wider float key is narrowed here as
     Arrow narrows it, so two keys that become one stored key are seen as duplicates.
     For every other key type ``convert`` is returned as it is.
 
     Args:
-        key_type: The declared Python type of the keys.
+        key_type: The declared Python type of the keys or elements.
         convert: The Python-to-storage converter of ``key_type``.
 
     Returns:

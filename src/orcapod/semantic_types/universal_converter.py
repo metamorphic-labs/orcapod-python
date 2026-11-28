@@ -1917,17 +1917,21 @@ class UniversalTypeConverter:
 
         elif origin is list:
             element_converter = self.get_python_to_arrow_converter(args[0])
+            # A set's elements are compared as they are stored (ITL-924).
+            set_element_converter = stored_key_converter(args[0], element_converter)
 
             def convert_list(value: Any) -> list[Any]:
                 """Convert list storage, preserving set order independence on updates."""
                 if value is None:
                     raise _none_not_admitted(python_type)
-                elements = [element_converter(item) for item in value]
                 # An Arrow schema remembers a plain set only as a list. Python set
                 # inputs still need canonical storage order; actual lists keep theirs.
-                return (
-                    sort_set_elements(elements) if isinstance(value, set) else elements
-                )
+                if isinstance(value, set):
+                    return sort_set_elements(
+                        [set_element_converter(item) for item in value],
+                        given_elements=value,
+                    )
+                return [element_converter(item) for item in value]
 
             return convert_list
 
@@ -1957,12 +1961,18 @@ class UniversalTypeConverter:
         elif origin is set:
             # A set has no order: elements are stored sorted, never in iteration
             # order, which depends on PYTHONHASHSEED for str and bytes (ITL-905).
-            element_converter = self.get_python_to_arrow_converter(args[0])
+            # Each element as it is stored, so elements that become one stored
+            # element are seen as duplicates (ITL-924).
+            element_converter = stored_key_converter(
+                args[0], self.get_python_to_arrow_converter(args[0])
+            )
 
             def convert_set(value: Any) -> list[Any]:
                 if value is None:
                     raise _none_not_admitted(python_type)
-                return sort_set_elements([element_converter(item) for item in value])
+                return sort_set_elements(
+                    [element_converter(item) for item in value], given_elements=value
+                )
 
             return convert_set
 

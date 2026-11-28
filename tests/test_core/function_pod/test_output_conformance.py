@@ -651,7 +651,10 @@ ACCEPTED_SILENTLY = [
     pytest.param(
         np.float32, np.float32(0.5), np.float32(0.5), id="np-float32-for-np-float32"
     ),
-    pytest.param(np.float32, np.float16(0.5), 0.5, id="D2-np-float16-for-np-float32"),
+    # Held as the declared type, like an output returned as np.float32 (ITL-924).
+    pytest.param(
+        np.float32, np.float16(0.5), np.float32(0.5), id="D2-np-float16-for-np-float32"
+    ),
     pytest.param(int, 3, 3, id="int-for-int"),
     pytest.param(list[int], [1, 2], [1, 2], id="list-for-list"),
     pytest.param(dt.date, dt.date(2020, 1, 1), dt.date(2020, 1, 1), id="date-for-date"),

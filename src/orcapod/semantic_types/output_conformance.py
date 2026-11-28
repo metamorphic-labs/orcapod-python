@@ -21,7 +21,10 @@ from dataclasses import dataclass
 
 from orcapod.errors import type_text
 from orcapod.logical_types import user_class_identity
-from orcapod.semantic_types.float_narrowing import narrows_float
+from orcapod.semantic_types.float_narrowing import (
+    narrower_float_width,
+    narrows_float,
+)
 from orcapod.logical_types.user_class_logical_type import UserClassLogicalType
 
 if typing.TYPE_CHECKING:
@@ -343,6 +346,10 @@ def normalize_output_numbers(value: object, declared: object) -> object:
         return bool(value)
     if declared is int or kind in ("i", "u"):
         return int(typing.cast(typing.SupportsInt, value))
+    if narrower_float_width(declared) is not None:
+        # The checked value is a float the declared type holds exactly. Kept as the
+        # declared type: a Python float would read as one being narrowed (ITL-924).
+        return typing.cast(type, declared)(value)
     if declared is float or kind == "f":
         return float(typing.cast(typing.SupportsFloat, value))
     if origin is list and isinstance(value, list):

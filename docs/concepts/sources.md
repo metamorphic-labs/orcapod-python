@@ -132,6 +132,22 @@ your own, refuses a column whose type is or holds one, naming it (a stream's ide
 Arrow schema hash, which cannot hold them). Cast a list view to the large list of the same
 items, and expand a run-end-encoded column with `pyarrow.compute.run_end_decode`.
 
+A Python `float` given for a column declared `numpy.float32` (in a `data_schema` of Python
+types, or the `python_schema` of a datagram built from values) is converted as Arrow converts
+it, with no check of the value: one that `float32` cannot hold exactly is stored changed
+(`0.1` as `0.10000000149011612`, `1e-50` as `0.0`, `1e300` as `inf`). Orcapod issues one
+`ValueConversionWarning` per process the first time this happens, not one per column, row or
+source; whether it happens is decided from the types, never from the values. Pass
+`numpy.float32` values, or declare the column `float`, to avoid it. `numpy.float32` values and
+an Arrow column that is already `float32` never warn. The same holds at every depth: a list
+element, a dict key or value, a set element, a field of a class. The warning is issued where
+the values are converted to Arrow: when a source is built, and when a datagram built from
+values gives its table or hash. One case is refused, because data would be lost: dict keys, or
+set elements, that differ as Python floats and are one `float32` value (`1e-50` and `2e-50`
+are both `0.0`) raise `CanonicalOrderError`, naming the column and both. A function's output
+has its own, stricter rule: a Python `float` returned for a declared `numpy.float32` is
+rejected ([Function pods](function-pods.md)).
+
 Dictionary-encoded columns are not currently supported in Orcapod, tags and data alike. A
 column whose Arrow type is a `dictionary`, or holds one inside it (a list of dictionary values,
 a struct with a dictionary field), is refused with `InputValidationError` when the source or

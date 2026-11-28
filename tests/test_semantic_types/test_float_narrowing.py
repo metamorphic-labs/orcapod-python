@@ -338,5 +338,76 @@ def test_function_output_declared_float32_still_rejects_a_python_float() -> None
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         with pytest.raises(Exception, match=r"numpy\.float32"):
-            pod(source).as_table()
+            pod.pod(source).as_table()
     assert _narrowing_warnings(caught) == []
+
+
+def test_an_accepted_narrower_output_is_stored_unchanged_without_a_warning() -> None:
+    """``np.float16`` returned for ``np.float32`` is held as ``np.float32`` (exact)."""
+
+    def half(x: int) -> Any:
+        return np.float16(0.5)
+
+    half.__annotations__["return"] = np.float32
+    pod: Any = function_pod(output_keys="y")(half)
+    source = DictSource(
+        [{"id": 1, "x": 1}], tag_columns=["id"], tag_only_columns=True, source_id="s"
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        stream = pod.pod(source)
+        table = stream.as_table()
+        held = [data.as_dict()["y"] for _, data in stream.iter_data()]
+    assert _narrowing_warnings(caught) == []
+    assert table.schema.field("y").type == pa.float32()
+    assert _bits(_column(table, "y")) == _bits([0.5])
+    assert [type(value) for value in held] == [np.float32]
+    assert held == [0.5]
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.ValueConversionWarning")
+class TestSetElementsThatCollideAfterNarrowing:
+    """``{1e-50, 2e-50}`` would be stored as two ``0.0`` elements and read as one."""
+
+    def _assert_names_column_and_both_elements(self, error: BaseException) -> None:
+        text = str(error)
+        assert "'members'" in text
+        assert "1e-50" in text
+        assert "2e-50" in text
+
+    def test_datagram_raises(self) -> None:
+        with pytest.raises(CanonicalOrderError) as raised:
+            Datagram(
+                {"members": {1e-50, 2e-50}},
+                python_schema={"members": set[np.float32]},
+            ).as_table()
+        self._assert_names_column_and_both_elements(raised.value)
+
+    def test_dict_source_raises(self) -> None:
+        with pytest.raises(CanonicalOrderError) as raised:
+            DictSource(
+                [{"id": 1, "members": {1e-50, 2e-50}}],
+                tag_columns=["id"],
+                tag_only_columns=True,
+                data_schema={"id": int, "members": set[np.float32]},
+            )
+        self._assert_names_column_and_both_elements(raised.value)
+
+    def test_a_set_given_for_a_list_column_raises(self) -> None:
+        given: dict[str, Any] = {"members": {1e-50, 2e-50}}
+        with pytest.raises(CanonicalOrderError) as raised:
+            Datagram(given, python_schema={"members": list[np.float32]}).as_table()
+        self._assert_names_column_and_both_elements(raised.value)
+
+    def test_elements_distinct_in_float32_are_all_stored(self) -> None:
+        table = Datagram(
+            {"members": {0.5, 0.1, 1e-50}}, python_schema={"members": set[np.float32]}
+        ).as_table()
+        assert _bits(_column(table, "members")[0]) == _as_arrow_narrows(
+            [1e-50, 0.1, 0.5]
+        )
+
+    def test_numpy_float32_elements_are_stored(self) -> None:
+        given: dict[str, Any] = {"members": {np.float32(0.5), np.float32(0.1)}}
+        table = Datagram(given, python_schema={"members": set[np.float32]}).as_table()
+        assert _bits(_column(table, "members")[0]) == _bits([0.1, 0.5])
