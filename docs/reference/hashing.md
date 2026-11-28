@@ -331,6 +331,7 @@ test session with `-p tests.test_hashing.hash_site_trace`.
 | user-class identity | a class's identity record | SHA-256 hex prefix | extension name `name@<fingerprint>` (a name) | `logical_types/user_class_identity.py:identity_string` |
 | database registry key | a database config, canonical JSON | SHA-256 hex, 8 digits | `db_<hex>` key in a saved job (a name) | `pipeline/serialization.py:DatabaseRegistry._make_key` |
 | SpiralDB schema table digest | the scope and the rows of a dataset's schema table, canonical JSON with the stored schema bytes | SHA-256 hex | completion marker of the schema table (a checksum of stored rows) | `databases/spiraldb_schema_table.py:rows_digest` |
+| Connector store table name | the full store path, as a compact UTF-8 JSON array of path components | SHA-256 hex, `spiral_table_name_v1` (`SPIRAL_TABLE_NAME_LABEL`) | the bare hexadecimal suffix in a table name, with a length set by the backend | `databases/store_table_names.py:store_table_digest` |
 | synthesized struct class name | the field signature | MD5 hex, 8 digits | a Python class name (a name) | (not reached by a traced test) `semantic_types/universal_converter.py` |
 | random ids | nothing | `uuid4`, `uuid7` | run ids, datagram and record uuids, observer ids, correlation keys | (not hashes) |
 | unused code | Arrow tables | SHA-256, SHA3, BLAKE2b | no caller; removal is ITL-1156 | (not reached) `hashing/arrow_utils.py`, `hashing/arrow_serialization.py` |

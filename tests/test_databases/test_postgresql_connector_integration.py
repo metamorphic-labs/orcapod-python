@@ -573,7 +573,7 @@ def test_operator_cache_refused_at_write_and_nothing_written(
     """An operator cache's system-tag column names exceed 63 bytes (ITL-1162)."""
     from orcapod import PipelineJob
     from orcapod.core.operators import SelectDataColumns
-    from orcapod.errors import UnstorableColumnError, UnstorableTableNameError
+    from orcapod.errors import UnstorableColumnError
     from orcapod.sources import DictSource
     from orcapod.types import CacheMode
 
@@ -592,32 +592,60 @@ def test_operator_cache_refused_at_write_and_nothing_written(
     )
     with pytest.raises(Exception) as exc_info:
         _ = job.run()
-    # The cache's table name (over 63 bytes) or its system-tag column names are
-    # refused, whichever entry comes first; nothing reaches the server.
+    # The system-tag column names are refused before any write.
     chain: list[BaseException] = []
     err: BaseException | None = exc_info.value
     while err is not None:
         chain.append(err)
         err = err.__cause__ or err.__context__
-    assert any(
-        isinstance(e, (UnstorableColumnError, UnstorableTableNameError)) for e in chain
-    ), chain
+    assert any(isinstance(e, UnstorableColumnError) for e in chain), chain
     assert connector.get_table_names() == []
 
 
 @pytest.mark.postgres
-def test_long_table_name_refused_and_nothing_written(
+def test_long_non_ascii_paths_fit_postgresql_table_names(
     connector: PostgreSQLConnector,
 ) -> None:
-    """A table name PostgreSQL would truncate is never sent to it (ITL-1162)."""
-    from orcapod.errors import UnstorableTableNameError
-
+    """Keep separate tables even when PostgreSQL would truncate the old names."""
     db = ConnectorArrowDatabase(connector)
-    path = ("fn", "x" * 70)
-    table = pa.table({"v": pa.array([1], type=pa.int64())})
-    with pytest.raises(UnstorableTableNameError):
-        db.add_record(path, b"1", table)
-    with pytest.raises(UnstorableTableNameError):
-        db.get_all_records(path)
-    db.flush()
-    assert connector.get_table_names() == []
+    first = ("job", "é" * 70 + "a", "pdb_v2")
+    second = ("job", "é" * 70 + "b", "pdb_v2")
+    db.add_record(first, b"one", pa.table({"value": [1]}), flush=True)
+    db.add_record(second, b"one", pa.table({"value": [2]}), flush=True)
+
+    names = [name for name in connector.get_table_names() if name.startswith("o1_")]
+    assert len(names) == 2
+    assert all(len(name.encode("utf-8")) == 63 for name in names)
+    with PostgreSQLConnector(connector._dsn) as reopened:
+        store = ConnectorArrowDatabase(reopened)
+        assert store.list_table_paths(("job", first[1])) == [first]
+        assert store.at("job").list_table_paths() == [first[1:], second[1:]]
+        first_rows = store.get_all_records(first)
+        second_rows = store.get_all_records(second)
+    assert first_rows is not None and first_rows.to_pylist() == [{"value": 1}]
+    assert second_rows is not None and second_rows.to_pylist() == [{"value": 2}]
+
+
+@pytest.mark.postgres
+def test_record_write_failure_rolls_back_the_table_and_registration(
+    connector: PostgreSQLConnector, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The catalog, record table and rows are committed together."""
+    store = ConnectorArrowDatabase(connector)
+    path = ("job", "new")
+    record = pa.table({"value": [1]})
+
+    def fail_write(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("simulated write failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(connector, "upsert_records", fail_write)
+        with pytest.raises(RuntimeError, match="simulated write failure"):
+            store.add_record(path, b"one", record, flush=True)
+
+    with PostgreSQLConnector(connector._dsn) as reopened:
+        assert reopened.get_table_names() == []
+        other = ConnectorArrowDatabase(reopened)
+        assert other.list_table_paths() == []
+        other.add_record(path, b"one", record, flush=True)
+        assert other.list_table_paths() == [path]

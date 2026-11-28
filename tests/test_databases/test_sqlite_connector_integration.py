@@ -8,6 +8,8 @@ import pyarrow as pa
 import pytest
 
 from orcapod.databases import ConnectorArrowDatabase, SQLiteConnector
+from orcapod.errors import OrcapodDatabaseError
+from orcapod.types import ColumnInfo
 
 
 @pytest.fixture
@@ -19,6 +21,106 @@ def db() -> Iterator[ConnectorArrowDatabase]:
 
 
 class TestConnectorArrowDatabaseWithSQLite:
+    def test_long_paths_with_the_same_sanitized_name_store_separate_rows(
+        self, db: ConnectorArrowDatabase
+    ) -> None:
+        common = "shared_prefix_" * 12
+        first = ("job", common + ":a", "pdb_v2")
+        second = ("job", common + "-a", "pdb_v2")
+        db.add_record(first, b"one", pa.table({"value": [1]}), flush=True)
+        db.add_record(second, b"one", pa.table({"value": [2]}), flush=True)
+
+        first_rows = db.get_all_records(first)
+        second_rows = db.get_all_records(second)
+        assert first_rows is not None and first_rows.to_pylist() == [{"value": 1}]
+        assert second_rows is not None and second_rows.to_pylist() == [{"value": 2}]
+
+    def test_paths_with_a_forced_digest_collision_cannot_share_a_table(
+        self, db: ConnectorArrowDatabase, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from orcapod.databases import store_table_names
+
+        monkeypatch.setattr(
+            store_table_names, "store_table_digest", lambda path: "a" * 64
+        )
+        first = ("name:part",)
+        second = ("name-part",)
+        db.add_record(second, b"one", pa.table({"value": [2]}))
+        db.add_record(first, b"one", pa.table({"value": [1]}))
+        db.flush_batch(first)
+        with pytest.raises(OrcapodDatabaseError, match="already belongs"):
+            db.get_all_records(second)
+        with pytest.raises(OrcapodDatabaseError, match="already belongs"):
+            db.flush_batch(second)
+        with pytest.raises(OrcapodDatabaseError, match="already belongs"):
+            db.add_record(second, b"one", pa.table({"value": [2]}), flush=True)
+        assert db.list_table_paths() == [first]
+        records = db.get_all_records(first)
+        assert records is not None and records.to_pylist() == [{"value": 1}]
+
+    def test_legacy_table_is_ignored_and_preserved(self) -> None:
+        with SQLiteConnector(":memory:") as connector:
+            columns = [
+                ColumnInfo("__record_id", pa.large_binary(), False),
+                ColumnInfo("value", pa.int64(), False),
+            ]
+            connector.create_table_if_not_exists("job__pdb_v2", columns, "__record_id")
+            connector.upsert_records(
+                "job__pdb_v2",
+                pa.table({"__record_id": [b"one"], "value": [1]}),
+                "__record_id",
+            )
+            db = ConnectorArrowDatabase(connector)
+            path = ("job", "pdb_v2")
+            assert not db.table_exists(path)
+            assert db.get_table_schema(path) is None
+            assert db.get_all_records(path) is None
+            assert db.list_table_paths(("job",)) == []
+
+            db.add_record(path, b"one", pa.table({"value": [2]}), flush=True)
+            assert db.list_table_paths(("job",)) == [path]
+            old = pa.Table.from_batches(
+                list(connector.iter_batches('SELECT "value" FROM "job__pdb_v2"'))
+            )
+            assert old.to_pylist() == [{"value": 1}]
+
+    def test_unregistered_physical_name_is_not_claimed(self) -> None:
+        from orcapod.databases.store_table_names import store_table_name
+
+        with SQLiteConnector(":memory:") as connector:
+            path = ("unregistered",)
+            name = store_table_name(path, hint_length=27, digest_length=32)
+            connector.create_table_if_not_exists(
+                name,
+                [ColumnInfo("__record_id", pa.large_binary(), False)],
+                "__record_id",
+            )
+            db = ConnectorArrowDatabase(connector)
+            assert not db.table_exists(path)
+            assert db.list_table_paths() == []
+            with pytest.raises(OrcapodDatabaseError, match="no stored path"):
+                db.add_record(path, b"one", pa.table({"value": [1]}), flush=True)
+            assert connector.get_table_names() == [name]
+
+    def test_registration_and_table_creation_roll_back_on_write_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        with SQLiteConnector(":memory:") as connector:
+            db = ConnectorArrowDatabase(connector)
+
+            def fail_write(*args: object, **kwargs: object) -> None:
+                raise RuntimeError("simulated write failure")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(connector, "upsert_records", fail_write)
+                with pytest.raises(RuntimeError, match="simulated write failure"):
+                    db.add_record(
+                        ("new",), b"one", pa.table({"value": [1]}), flush=True
+                    )
+            assert connector.get_table_names() == []
+            db.add_record(("new",), b"one", pa.table({"value": [1]}), flush=True)
+            assert db.list_table_paths() == [("new",)]
+
     def test_add_and_get_record(self, db: ConnectorArrowDatabase) -> None:
         # add_record stamps all rows with the same __record_id, so within-batch
         # deduplication keeps only the last row (same behaviour as InMemoryArrowDatabase).

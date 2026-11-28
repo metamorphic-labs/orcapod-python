@@ -19,11 +19,18 @@ import os
 import sqlite3
 import threading
 from collections.abc import Iterator
-from typing import Any
+from contextlib import contextmanager
+from typing import Any, cast
 
 import pyarrow as pa
 
+from orcapod.databases._sql_store import (
+    STORE_PATH_CATALOG,
+    catalog_name_pattern,
+    require_catalog_pair,
+)
 from orcapod.databases.utils import is_direct_projection
+from orcapod.errors import OrcapodDatabaseError
 from orcapod.types import ColumnInfo
 
 logger = logging.getLogger(__name__)
@@ -285,6 +292,85 @@ class SQLiteConnector:
                 "ORDER BY name"
             )
             return [row["name"] for row in cursor]
+
+    def get_store_table_paths(
+        self, name: str, *, exact: bool = False
+    ) -> list[tuple[str, str]]:
+        """Return registered record tables matching a physical name or prefix."""
+        with self._lock:
+            conn = self._require_open()
+            if (
+                conn.execute(
+                    "SELECT 1 FROM main.sqlite_schema WHERE type = 'table' AND name = ?",
+                    (STORE_PATH_CATALOG,),
+                ).fetchone()
+                is None
+            ):
+                return []
+            match = "= ?" if exact else "LIKE ? ESCAPE '!'"
+            rows = cast(
+                "Iterator[sqlite3.Row]",
+                conn.execute(
+                    f"""
+                    SELECT paths.table_name, paths.path_json
+                    FROM main."{STORE_PATH_CATALOG}" AS paths
+                    JOIN main.sqlite_schema AS physical ON physical.name = paths.table_name
+                    WHERE physical.type = 'table' AND paths.table_name {match}
+                    """,
+                    (name if exact else catalog_name_pattern(name),),
+                ),
+            )
+            return [(cast(str, row[0]), cast(str, row[1])) for row in rows]
+
+    @contextmanager
+    def store_table_transaction(
+        self, table_name: str, path_json: str
+    ) -> Iterator[None]:
+        """Register and write a record table in one SQLite transaction."""
+        with self._lock:
+            conn = self._require_open()
+            _ = conn.execute("BEGIN IMMEDIATE")
+            try:
+                _ = conn.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS main."{STORE_PATH_CATALOG}"
+                    (table_name TEXT NOT NULL PRIMARY KEY, path_json TEXT NOT NULL)
+                    """
+                )
+                row = cast(
+                    "sqlite3.Row | None",
+                    conn.execute(
+                        f'SELECT path_json FROM main."{STORE_PATH_CATALOG}" WHERE table_name = ?',
+                        (table_name,),
+                    ).fetchone(),
+                )
+                physical = cast(
+                    "sqlite3.Row | None",
+                    conn.execute(
+                        "SELECT name, type FROM main.sqlite_schema WHERE name = ? COLLATE NOCASE",
+                        (table_name,),
+                    ).fetchone(),
+                )
+                if physical is not None and tuple(physical) != (table_name, "table"):
+                    raise OrcapodDatabaseError(
+                        f"Object {table_name!r} is not a record table"
+                    )
+                require_catalog_pair(
+                    table_name,
+                    physical is not None,
+                    cast(str, row[0]) if row else None,
+                    path_json,
+                )
+                if row is None:
+                    _ = conn.execute(
+                        f'INSERT INTO main."{STORE_PATH_CATALOG}" (table_name, path_json) VALUES (?, ?)',
+                        (table_name, path_json),
+                    )
+                yield
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
 
     def get_pk_columns(self, table_name: str) -> list[str]:
         """Return primary-key column names in key-sequence order.

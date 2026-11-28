@@ -20,19 +20,27 @@ import re
 import threading
 import uuid
 from collections.abc import Iterator
-from typing import TYPE_CHECKING, Any
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any, cast
 
 import pyarrow as pa
 
+from orcapod.databases._sql_store import (
+    STORE_PATH_CATALOG,
+    catalog_name_pattern,
+    require_catalog_pair,
+)
 from orcapod.databases.utils import is_direct_projection
-from orcapod.errors import UnstorableTableNameError
+from orcapod.errors import OrcapodDatabaseError, UnstorableTableNameError
 from orcapod.types import ColumnInfo
 from orcapod.utils.lazy_module import LazyModule
 
 if TYPE_CHECKING:
     import psycopg
+    from psycopg import sql as pg_sql
 else:
     psycopg = LazyModule("psycopg")
+    pg_sql = LazyModule("psycopg.sql")
 
 logger = logging.getLogger(__name__)
 
@@ -392,6 +400,7 @@ class PostgreSQLConnector:
         self._conn: Any = psycopg.connect(dsn, autocommit=False)
         self._lock = threading.RLock()  # RLock required: iter_batches → _resolve_column_type_lookup → get_column_info re-enters the lock
         self._cursor_seq = itertools.count()
+        self._store_transaction_active = False
 
     # ── Internal helpers ──────────────────────────────────────────────────────
 
@@ -426,6 +435,116 @@ class PostgreSQLConnector:
                     """
                 )
                 return [row[0] for row in cur.fetchall()]
+
+    def get_store_table_paths(
+        self, name: str, *, exact: bool = False
+    ) -> list[tuple[str, str]]:
+        """Return registered record tables matching a physical name or prefix."""
+        with (
+            self._lock,
+            cast(
+                "psycopg.Connection[tuple[object, ...]]", self._require_open()
+            ).cursor() as cur,
+        ):
+            _ = cur.execute(
+                """
+                SELECT ns.nspname
+                FROM pg_catalog.pg_namespace AS ns
+                JOIN pg_catalog.pg_class AS rel ON rel.relnamespace = ns.oid
+                WHERE ns.nspname = current_schema() AND rel.relname = %s
+                  AND rel.relkind = 'r'
+                """,
+                (STORE_PATH_CATALOG,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return []
+            catalog = pg_sql.Identifier(cast(str, row[0]), STORE_PATH_CATALOG)
+            match = pg_sql.SQL("= %s" if exact else "LIKE %s ESCAPE '!'")
+            _ = cur.execute(
+                pg_sql.SQL("""
+                    SELECT paths.table_name, paths.path_json
+                    FROM {catalog} AS paths
+                    JOIN pg_catalog.pg_class AS physical ON physical.relname = paths.table_name
+                    JOIN pg_catalog.pg_namespace AS ns ON ns.oid = physical.relnamespace
+                    WHERE ns.nspname = current_schema()
+                      AND physical.relkind IN ('r', 'p') AND paths.table_name {match}
+                    """).format(catalog=catalog, match=match),
+                (name if exact else catalog_name_pattern(name),),
+            )
+            return cast("list[tuple[str, str]]", cur.fetchall())
+
+    @contextmanager
+    def store_table_transaction(
+        self, table_name: str, path_json: str
+    ) -> Iterator[None]:
+        """Register and write a record table in one PostgreSQL transaction."""
+        with self._lock:
+            conn = cast("psycopg.Connection[tuple[object, ...]]", self._require_open())
+            self._store_transaction_active = True
+            try:
+                with conn.cursor() as cur:
+                    # Serialize registrations in this schema, including when the
+                    # catalog does not exist yet. 0x4F524341 is the Orcapod lock key.
+                    _ = cur.execute(
+                        """
+                        SELECT nspname, pg_advisory_xact_lock(%s, oid::integer)
+                        FROM pg_catalog.pg_namespace WHERE nspname = current_schema()
+                        """,
+                        (0x4F524341,),
+                    )
+                    location = cur.fetchone()
+                    if location is None or location[0] is None:
+                        raise OrcapodDatabaseError("PostgreSQL has no current schema")
+                    catalog = pg_sql.Identifier(
+                        cast(str, location[0]), STORE_PATH_CATALOG
+                    )
+                    _ = cur.execute(
+                        pg_sql.SQL("""
+                            CREATE TABLE IF NOT EXISTS {}
+                            (table_name TEXT NOT NULL PRIMARY KEY, path_json TEXT NOT NULL)
+                            """).format(catalog)
+                    )
+                    _ = cur.execute(
+                        pg_sql.SQL(
+                            "SELECT path_json FROM {} WHERE table_name = %s"
+                        ).format(catalog),
+                        (table_name,),
+                    )
+                    row = cur.fetchone()
+                    _ = cur.execute(
+                        """
+                        SELECT rel.relkind FROM pg_catalog.pg_class AS rel
+                        JOIN pg_catalog.pg_namespace AS ns ON ns.oid = rel.relnamespace
+                        WHERE ns.nspname = current_schema() AND rel.relname = %s
+                        """,
+                        (table_name,),
+                    )
+                    physical = cur.fetchone()
+                    if physical is not None and physical[0] not in ("r", "p"):
+                        raise OrcapodDatabaseError(
+                            f"Relation {table_name!r} is not a record table"
+                        )
+                    require_catalog_pair(
+                        table_name,
+                        physical is not None,
+                        cast(str, row[0]) if row else None,
+                        path_json,
+                    )
+                    if row is None:
+                        _ = cur.execute(
+                            pg_sql.SQL(
+                                "INSERT INTO {} (table_name, path_json) VALUES (%s, %s)"
+                            ).format(catalog),
+                            (table_name, path_json),
+                        )
+                yield
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+            finally:
+                self._store_transaction_active = False
 
     def current_location(self) -> tuple[str, int, str, str]:
         """Return the server, database and schema the connection reached.
@@ -655,9 +774,11 @@ class PostgreSQLConnector:
             try:
                 with conn.cursor() as cur:
                     cur.execute(ddl)
-                conn.commit()
+                if not self._store_transaction_active:
+                    conn.commit()
             except Exception:
-                conn.rollback()
+                if not self._store_transaction_active:
+                    conn.rollback()
                 raise
 
     def upsert_records(
@@ -701,9 +822,11 @@ class PostgreSQLConnector:
             try:
                 with conn.cursor() as cur:
                     cur.executemany(sql, rows_iter)
-                conn.commit()
+                if not self._store_transaction_active:
+                    conn.commit()
             except Exception:
-                conn.rollback()
+                if not self._store_transaction_active:
+                    conn.rollback()
                 raise
 
     @property
