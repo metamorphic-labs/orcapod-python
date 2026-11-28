@@ -205,9 +205,10 @@ def test_optional_logical_item_is_refused_at_construction():
         make_pod(list[Path | None], [None])
 
 
-def test_an_iterable_cannot_bypass_set_output_validation():
+@pytest.mark.parametrize("value", [[1], frozenset({1}), [None]])
+def test_an_iterable_cannot_bypass_set_output_validation(value):
     """An iterable that Arrow can encode as a set is still the wrong output type."""
-    pod = make_pod(set[int], [None])
+    pod = make_pod(set[int], value)
     data = Data({"x": 1}, python_schema={"x": int})
     with pytest.raises(OutputTypeError, match="Return a set"):
         pod.pod.data_function.direct_call(data)

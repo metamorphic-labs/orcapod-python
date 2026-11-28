@@ -393,7 +393,8 @@ def nested_nullability_differences(
 
     Compare large-normalized containers. Type widths, struct field names and
     order, list length, map ordering, and logical identifiers still distinguish
-    types. Logical storage is opaque here.
+    types. For matching logical identifiers, compare the declared storage types
+    recursively.
 
     Args:
         left_type: The first declared Arrow type.
@@ -407,10 +408,15 @@ def nested_nullability_differences(
         EXTENSION_METADATA_KEY,
         EXTENSION_NAME_KEY,
     )
+    from orcapod.logical_types.identifier import arrow_type_identifier
 
     paths: list[str] = []
 
     def compare(left: pa.DataType, right: pa.DataType, prefix: str) -> bool:
+        if isinstance(left, pa.ExtensionType) and isinstance(right, pa.ExtensionType):
+            if arrow_type_identifier(left) != arrow_type_identifier(right):
+                return False
+            return compare(left.storage_type, right.storage_type, prefix)
         if left.id != right.id or left.num_fields != right.num_fields:
             return False
         if (

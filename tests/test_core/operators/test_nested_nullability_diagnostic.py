@@ -14,23 +14,48 @@ from orcapod.sources import ArrowTableSource
 from orcapod.utils.arrow_utils import nested_nullability_differences
 
 
+class _ListExtension(pa.ExtensionType):
+    """An extension whose identifier is independent of its list storage flags."""
+
+    def __init__(self, storage_type: pa.DataType, metadata: bytes = b"") -> None:
+        self._metadata = metadata
+        super().__init__(storage_type, "test.nested_nullability_list")
+
+    def __arrow_ext_serialize__(self) -> bytes:
+        return self._metadata
+
+    @classmethod
+    def __arrow_ext_deserialize__(
+        cls, storage_type: pa.DataType, serialized: bytes
+    ) -> "_ListExtension":
+        return cls(storage_type, serialized)
+
+
+def _extension_list(nullable: bool, metadata: bytes = b"") -> _ListExtension:
+    return _ListExtension(
+        pa.large_list(pa.field("item", pa.int64(), nullable=nullable)), metadata
+    )
+
+
 def _source(
     name: str,
     data_name: str,
     *,
     nullable: bool,
-    structured: bool = True,
+    shape: str = "struct-item",
     scalar: pa.DataType = pa.int64(),
 ):
     item: pa.Field[Any] = (
         pa.field("item", pa.struct([pa.field("code", scalar, nullable=nullable)]))
-        if structured
+        if shape == "struct-item"
         else pa.field("item", scalar, nullable=nullable)
     )
     key = pa.large_list(item)
-    schema = pa.schema([pa.field("k", key), pa.field(data_name, pa.int64())])
-    value = [{"code": 1}] if structured else [1]
-    table = pa.Table.from_pylist([{"k": value, data_name: 2}], schema=schema)
+    value = [{"code": 1}] if shape == "struct-item" else [1]
+    keys: pa.Array[Any] = pa.array([value], type=key)
+    if shape == "extension-list":
+        keys = pa.ExtensionArray.from_storage(_ListExtension(key), keys)
+    table = pa.table({"k": keys, data_name: pa.array([2], type=pa.int64())})
     return ArrowTableSource(
         table, tag_columns=["k"], tag_only_columns=True, source_id=name
     )
@@ -61,11 +86,11 @@ def _assert_remedy(message, field):
 
 @pytest.mark.parametrize("operator_class", [Join, MergeJoin, SemiJoin])
 @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize("structured", [False, True], ids=["list", "struct-item"])
-def test_joins_name_the_nested_flag(operator_class, asynchronous, structured):
+@pytest.mark.parametrize("shape", ["list", "struct-item", "extension-list"])
+def test_joins_name_the_nested_flag(operator_class, asynchronous, shape):
     """A nested-only mismatch gets the same remedy on both paths."""
-    left = _source("a", "v", nullable=True, structured=structured)
-    right = _source("b", "w", nullable=False, structured=structured)
+    left = _source("a", "v", nullable=True, shape=shape)
+    right = _source("b", "w", nullable=False, shape=shape)
     operator = operator_class()
     with pytest.raises((InputValidationError, ExceptionGroup)) as error:
         if asynchronous:
@@ -76,7 +101,7 @@ def test_joins_name_the_nested_flag(operator_class, asynchronous, structured):
     if isinstance(value, ExceptionGroup):
         [value] = value.exceptions
     assert isinstance(value, InputValidationError)
-    _assert_remedy(str(value), "k.item.code" if structured else "k.item")
+    _assert_remedy(str(value), "k.item.code" if shape == "struct-item" else "k.item")
 
 
 def test_another_type_difference_keeps_the_generic_message():
@@ -110,14 +135,30 @@ def test_a_flag_and_a_logical_identifier_are_two_differences():
     assert nested_nullability_differences(left, right) == ()
 
 
+def test_an_extension_flag_and_different_serialized_metadata_are_two_differences():
+    """Extension storage is comparable only when its full identifier agrees."""
+    assert (
+        nested_nullability_differences(
+            _extension_list(True, b"first"), _extension_list(False, b"second")
+        )
+        == ()
+    )
+
+
+def test_an_extension_flag_and_a_storage_layout_are_two_differences():
+    """Changing flags alone cannot reconcile a storage layout mismatch."""
+    left = _ListExtension(pa.list_(pa.int64()))
+    assert nested_nullability_differences(left, _extension_list(False)) == ()
+
+
 @pytest.mark.parametrize("asynchronous", [False, True], ids=["sync", "async"])
-@pytest.mark.parametrize("structured", [False, True], ids=["list", "struct-item"])
-def test_slot_binding_names_the_nested_flag(asynchronous, structured):
+@pytest.mark.parametrize("shape", ["list", "struct-item", "extension-list"])
+def test_slot_binding_names_the_nested_flag(asynchronous, shape):
     """Both job routes reject this declaration at their shared binding boundary."""
     slot = SourceNode.from_stream(
-        _source("a", "v", nullable=True, structured=structured), name="src"
+        _source("a", "v", nullable=True, shape=shape), name="src"
     )
-    other = _source("b", "v", nullable=False, structured=structured)
+    other = _source("b", "v", nullable=False, shape=shape)
     with PipelineJob(name="nested_flags") as job:
         MapData({"v": "out"})(slot, label="op")
 
@@ -130,4 +171,6 @@ def test_slot_binding_names_the_nested_flag(asynchronous, structured):
             asyncio.run(bind_and_run())
         else:
             job.bind(sources={"src": other})
-    _assert_remedy(str(error.value), "k.item.code" if structured else "k.item")
+    _assert_remedy(
+        str(error.value), "k.item.code" if shape == "struct-item" else "k.item"
+    )
