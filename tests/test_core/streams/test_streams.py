@@ -515,13 +515,12 @@ class TestArrowTableStreamNullablePreservation:
 
     def test_infer_schema_nullable_before_build_produces_plain_type(self):
         """Applying infer_schema_nullable() before build() gives plain T for null-free columns."""
-        from orcapod.config import DEFAULT_CONFIG
         from orcapod.contexts import resolve_context
         from orcapod.core.sources.stream_builder import SourceStreamBuilder
         from orcapod.utils import arrow_utils
 
         ctx = resolve_context(None)
-        builder = SourceStreamBuilder(data_context=ctx, config=DEFAULT_CONFIG)
+        builder = SourceStreamBuilder(data_context=ctx)
 
         # Raw Arrow table with nullable=True (the default)
         table = pa.table(

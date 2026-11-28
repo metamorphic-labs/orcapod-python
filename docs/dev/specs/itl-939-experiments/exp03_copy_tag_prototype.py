@@ -174,17 +174,17 @@ print("Join rows:", j.as_table().num_rows, "(correct answer is 5)")
 section("3. data content hashes: copy operator vs W2 recipe")
 w2_in = fx.w2_src.select_data_columns(["session_start", "experiment_start_timestamp"])
 c_in = copied.select_data_columns(["session_start", "experiment_start_timestamp"])
-w2_hashes = [d.content_hash().to_hex(16) for _, d in w2_in.iter_data()]
-c_hashes = [d.content_hash().to_hex(16) for _, d in c_in.iter_data()]
+w2_hashes = [d.content_hash().to_hex()[:16] for _, d in w2_in.iter_data()]
+c_hashes = [d.content_hash().to_hex()[:16] for _, d in c_in.iter_data()]
 print("W2   :", w2_hashes)
 print("copy :", c_hashes)
 print("per-row data hashes equal (so pod result caches agree):", w2_hashes == c_hashes)
 print(
     "pipeline_hash experiment (unchanged by the feature):",
-    experiment.pipeline_hash().to_hex(16),
+    experiment.pipeline_hash().to_hex()[:16],
 )
-print("pipeline_hash after copy:", copied.pipeline_hash().to_hex(16))
-print("pipeline_hash W2 source :", fx.w2_src.pipeline_hash().to_hex(16))
+print("pipeline_hash after copy:", copied.pipeline_hash().to_hex()[:16])
+print("pipeline_hash W2 source :", fx.w2_src.pipeline_hash().to_hex()[:16])
 
 # 4. Why design D (pods read tags directly) is unsafe with today's result cache.
 section("4. two rows, same data, different tags -> same input data hash")
@@ -203,7 +203,7 @@ s = ArrowTableSource(
     source_id="d",
     infer_nullable=True,
 )
-print("data hashes:", [d.content_hash().to_hex(16) for _, d in s.iter_data()])
+print("data hashes:", [d.content_hash().to_hex()[:16] for _, d in s.iter_data()])
 print(
     "-> a pod that read session_start_datetime from the TAG would get one cached result"
 )
@@ -211,7 +211,7 @@ print("   for both rows (ResultCache keys on the input data hash only).")
 s_c = CopyTagsToData({"session_start_datetime": "session_start"})(s)
 print(
     "with the copy, data hashes:",
-    [d.content_hash().to_hex(16) for _, d in s_c.iter_data()],
+    [d.content_hash().to_hex()[:16] for _, d in s_c.iter_data()],
 )
 
 # 5. Nullable keys (every EDI key column is nullable in the DB schema).

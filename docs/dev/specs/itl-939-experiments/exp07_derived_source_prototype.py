@@ -96,7 +96,7 @@ class ProtoDerivedSource(RootSource):
             table = table.append_column(
                 pa.field(name, field.type, nullable=field.nullable), table[tag]
             )
-        builder = SourceStreamBuilder(self.data_context, self.orcapod_config)
+        builder = SourceStreamBuilder(self.data_context)
         # The builder takes the name and the kind part apart since ITL-1425.
         self._stream = builder.build(
             table,
@@ -139,7 +139,7 @@ COLS = ["session_start", "experiment_start_timestamp"]
 
 def h(x: Any) -> str:
     """Return the first 16 hex characters of a ``ContentHash``."""
-    return x.to_hex(16)
+    return x.to_hex()[:16]
 
 
 def prov(table: pa.Table) -> list[str]:

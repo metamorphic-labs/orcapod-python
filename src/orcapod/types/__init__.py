@@ -646,16 +646,17 @@ class ContentHash:
     method: str
     digest: bytes
 
-    # TODO: make the default char count configurable
     def to_hex(self, char_count: int | None = None) -> str:
         """Convert the digest to a hexadecimal string.
 
+        System-tag column names and logical storage paths use the full digest.
+
         Args:
-            char_count: If given, truncate the hex string to this many
-                characters.
+            char_count: Optional slice length for display. ``None`` or zero
+                returns the full digest.
 
         Returns:
-            The full (or truncated) hex representation of the digest.
+            The full or shortened hex representation of the digest.
         """
         hex_str = self.digest.hex()
         return hex_str[:char_count] if char_count else hex_str

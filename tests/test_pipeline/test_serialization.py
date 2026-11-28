@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 
 import pyarrow as pa
 import pytest
 
 import orcapod
+from orcapod.config import DEFAULT_CONFIG, DisplayConfig, HashingConfig, OrcapodConfig
 from orcapod.core.nodes import SourceNode
 from orcapod.core.operators import Join
 from orcapod.core.sources import ArrowTableSource
@@ -15,6 +17,7 @@ from orcapod.databases.in_memory_databases import InMemoryArrowDatabase
 from orcapod.pipeline import Pipeline
 from orcapod.pipeline.job import PipelineJob
 from orcapod.pipeline.serialization import PIPELINE_FORMAT_VERSION
+from orcapod.types import Schema
 
 
 @pytest.fixture
@@ -45,6 +48,107 @@ def spec_pipeline(tmp_path):
         Join()(node_a, node_b, label="joiner")
 
     return pipeline, tmp_path
+
+
+@pytest.fixture(params=[False, True], ids=["forward", "reverse"])
+def hashing_settings_pipeline(request):
+    """Build the same join with two tag, data and operand arrangements."""
+
+    def build(left_config: OrcapodConfig = DEFAULT_CONFIG) -> Pipeline:
+        def schema(*names: str) -> Schema:
+            order = names[::-1] if request.param else names
+            return Schema({name: int for name in order})
+
+        left = SourceNode(
+            name="left",
+            tag_schema=schema("k1", "k2", "k3"),
+            data_schema=schema("a", "b", "c"),
+            config=left_config,
+        )
+        right = SourceNode(
+            name="right",
+            tag_schema=schema("k1", "k2", "k3"),
+            data_schema=schema("d", "e", "f"),
+        )
+        inputs = (right, left) if request.param else (left, right)
+        with Pipeline(name="hashing_settings") as pipeline:
+            Join()(*inputs, label="joiner")
+        return pipeline
+
+    return build
+
+
+def test_saved_pipeline_accepts_old_default_hashing_settings(
+    hashing_settings_pipeline, tmp_path
+) -> None:
+    pipeline = hashing_settings_pipeline()
+    path = tmp_path / "pipeline.json"
+    pipeline.save(path)
+    saved = json.loads(path.read_text())
+    operator = next(n for n in saved["nodes"].values() if n["node_type"] == "operator")
+    # A read-only node restores its display settings directly from the descriptor.
+    del operator["operator_config"]
+    # The old writer serialized all dataclass defaults alongside a display override.
+    operator["config"] = dataclasses.asdict(
+        DEFAULT_CONFIG.with_updates(display=DisplayConfig(max_rows=17))
+    )
+    operator["config"]["hashing"] = {
+        "system_tag_n_char": None,
+        "schema_n_char": None,
+        "path_n_char": None,
+    }
+    path.write_text(json.dumps(saved))
+
+    loaded = Pipeline.load(path)
+    assert loaded.nodes["joiner"].orcapod_config.display.max_rows == 17
+    loaded.save(path)
+    resaved = json.loads(path.read_text())
+    operator = next(
+        n for n in resaved["nodes"].values() if n["node_type"] == "operator"
+    )
+    assert operator["config"]["hashing"] == {}
+
+
+def test_pipeline_save_omits_removed_hashing_settings(
+    hashing_settings_pipeline, tmp_path
+) -> None:
+    @dataclasses.dataclass(frozen=True)
+    class LegacyHashingConfig(HashingConfig):
+        system_tag_n_char: int = 6
+        schema_n_char: int = 0
+        path_n_char: int | None = None
+
+    config = OrcapodConfig(display=DisplayConfig(max_rows=17))
+    # Simulate a legacy typed object reaching save without constructor validation.
+    object.__setattr__(config, "hashing", LegacyHashingConfig())
+    pipeline = hashing_settings_pipeline(config)
+
+    path = tmp_path / "pipeline.json"
+    pipeline.save(path)
+    saved = json.loads(path.read_text())
+    descriptor = next(n for n in saved["nodes"].values() if n["label"] == "left")
+    assert descriptor["config"]["hashing"] == {}
+    assert descriptor["config"]["display"]["max_rows"] == 17
+    assert "left" in Pipeline.load(path).nodes
+
+
+@pytest.mark.parametrize("node_type", ["source", "operator"])
+@pytest.mark.parametrize("key", ["system_tag_n_char", "schema_n_char", "path_n_char"])
+@pytest.mark.parametrize("as_array", [False, True], ids=["object", "array"])
+def test_saved_pipeline_refuses_removed_hashing_settings(
+    hashing_settings_pipeline, tmp_path, node_type: str, key: str, as_array: bool
+) -> None:
+    pipeline = hashing_settings_pipeline()
+    path = tmp_path / "pipeline.json"
+    pipeline.save(path)
+    saved = json.loads(path.read_text())
+    node = next(n for n in saved["nodes"].values() if n["node_type"] == node_type)
+    fields = {key: 6}
+    node["config"] = {"hashing": [{}, fields] if as_array else fields}
+    path.write_text(json.dumps(saved))
+
+    with pytest.raises(ValueError, match=rf"hashing\.{key}"):
+        Pipeline.load(path)
 
 
 class TestPipelineBlueprintSave:

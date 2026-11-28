@@ -69,14 +69,12 @@ class TestContentHashStringRoundtrip:
 
 
 class TestContentHashHexConsistency:
-    """to_hex() truncation should be consistent."""
+    """Hex conversion preserves the entire digest."""
 
-    @given(content_hashes, st.integers(min_value=1, max_value=64))
+    @given(content_hashes)
     @settings(max_examples=50)
-    def test_truncation_is_prefix(self, h, length):
-        full_hex = h.to_hex()
-        truncated = h.to_hex(length)
-        assert full_hex.startswith(truncated)
+    def test_hex_round_trip(self, h):
+        assert bytes.fromhex(h.to_hex()) == h.digest
 
 
 class TestContentHashEquality:

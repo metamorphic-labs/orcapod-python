@@ -50,7 +50,7 @@ from orcapod.utils import arrow_utils
 from orcapod.utils.arrow_utils import system_tag_column_names
 from orcapod.utils.schema_utils import (
     _normalize_column_list,
-    compute_source_schema_hash,
+    compute_schema_hash,
     declared_arrow_schema,
 )
 
@@ -384,14 +384,14 @@ class PollingSource(RootSource, Generic[T]):
             _tag_source_id::<HASH>  →  source-ID column (large_string)
             _tag_record_id::<HASH>  →  record-ID column (large_string)
 
-        where ``<HASH>`` is produced by ``compute_source_schema_hash(tag_schema,
-        data_schema, data_context, config)``.
+        where ``<HASH>`` is produced by ``compute_schema_hash(tag_schema,
+        data_schema, data_context)``.
 
         Callers such as ``FunctionJobNode.async_execute`` ask for these column
         names up-front (via ``output_schema(columns={"system_tags": True})`` /
         ``keys(columns={"system_tags": True})``) before any data has been
         fetched.  ``_declared_schema_hash`` computes this hash from the schemas
-        declared by ``impl.schema()`` via the shared ``compute_source_schema_hash``
+        declared by ``impl.schema()`` via the shared ``compute_schema_hash``
         helper, so those callers can get the correct column names and Arrow types
         without triggering a poll+fetch cycle.
 
@@ -402,9 +402,7 @@ class PollingSource(RootSource, Generic[T]):
         declared = self._declared_arrow_pair()
         if declared is None:
             return None
-        return compute_source_schema_hash(
-            *declared, self.data_context, self.orcapod_config
-        )
+        return compute_schema_hash(*declared, self.data_context)
 
     def _declared_arrow_pair(self) -> "tuple[pa.Schema, pa.Schema] | None":
         """The declared tag and data Arrow schemas, or ``None`` with none declared."""
@@ -943,7 +941,7 @@ class PollingSource(RootSource, Generic[T]):
         arrow_table = arrow_table.cast(target_schema)
         self._require_declared_types(arrow_table)
 
-        builder = SourceStreamBuilder(self.data_context, self.orcapod_config)
+        builder = SourceStreamBuilder(self.data_context)
         result = builder.build(
             arrow_table,
             tag_columns=self._tag_columns,

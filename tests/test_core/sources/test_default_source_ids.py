@@ -16,7 +16,6 @@ import polars as pl
 import pyarrow as pa
 import pytest
 
-from orcapod.config import HashingConfig, OrcapodConfig
 from orcapod.core.function_pod import FunctionPod
 from orcapod.core.nodes.function_node import FunctionJobNode
 from orcapod.core.nodes.operator_node import OperatorJobNode
@@ -161,14 +160,6 @@ class TestInMemoryDefaultSourceId:
         info = table.column(f"{constants.SOURCE_PREFIX}{data_column}").to_pylist()
         sep = constants.BLOCK_SEPARATOR
         assert info == [f"{full}{sep}row_{i}{sep}{data_column}" for i in range(3)]
-
-    def test_default_is_full_length_whatever_path_n_char(
-        self, cls, kind, make, data_column
-    ):
-        """A default source id is a name, never shortened (developer, November 16, 2026)."""
-        full = make().source_id
-        config = OrcapodConfig(hashing=HashingConfig(path_n_char=12))
-        assert make(config=config).source_id == full
 
 
 class TestArrowTableDefaultIsTheLabelledTableHash:

@@ -46,7 +46,7 @@ class TestComputeSchemaHash:
     def test_returns_full_hex_digest(self, ctx):
         from orcapod.utils.schema_utils import compute_schema_hash
 
-        result = compute_schema_hash(TAG, DATA, ctx, None)
+        result = compute_schema_hash(TAG, DATA, ctx)
         assert isinstance(result, str)
         # SHA-256 digest is 32 bytes = 64 hex characters, no label.
         assert len(result) == 64
@@ -55,14 +55,9 @@ class TestComputeSchemaHash:
     def test_deterministic(self, ctx):
         from orcapod.utils.schema_utils import compute_schema_hash
 
-        assert compute_schema_hash(TAG, DATA, ctx, None) == compute_schema_hash(
-            TAG, DATA, ctx, None
+        assert compute_schema_hash(TAG, DATA, ctx) == compute_schema_hash(
+            TAG, DATA, ctx
         )
-
-    def test_length_equals_char_count_when_explicit(self, ctx):
-        from orcapod.utils.schema_utils import compute_schema_hash
-
-        assert len(compute_schema_hash(TAG, DATA, ctx, 12)) == 12
 
     @pytest.mark.parametrize(
         "other",
@@ -78,8 +73,8 @@ class TestComputeSchemaHash:
         from orcapod.utils.schema_utils import compute_schema_hash
 
         changed = pa.schema([DATA.field("value"), other])
-        assert compute_schema_hash(TAG, DATA, ctx, None) != compute_schema_hash(
-            TAG, changed, ctx, None
+        assert compute_schema_hash(TAG, DATA, ctx) != compute_schema_hash(
+            TAG, changed, ctx
         )
 
     def test_column_order_and_large_variants_are_not_part_of_it(self, ctx):
@@ -91,9 +86,9 @@ class TestComputeSchemaHash:
         plain_tag = pa.schema(
             [TAG.field("id"), pa.field("site", pa.string())]
         )  # string, not large_string
-        expected = compute_schema_hash(TAG, DATA, ctx, None)
-        assert compute_schema_hash(reordered_tag, reordered_data, ctx, None) == expected
-        assert compute_schema_hash(plain_tag, DATA, ctx, None) == expected
+        expected = compute_schema_hash(TAG, DATA, ctx)
+        assert compute_schema_hash(reordered_tag, reordered_data, ctx) == expected
+        assert compute_schema_hash(plain_tag, DATA, ctx) == expected
 
 
 @dataclasses.dataclass

@@ -1393,7 +1393,7 @@ class TestSourceSystemTagSchemaHash:
             table, tag_columns=["id"], tag_only_columns=True, infer_nullable=True
         )
         schema_hash = source._schema_hash
-        pipeline_hash_hex = source.pipeline_hash().to_hex(char_count=len(schema_hash))
+        pipeline_hash_hex = source.pipeline_hash().to_hex()
         assert schema_hash == pipeline_hash_hex
 
 
@@ -1488,11 +1488,9 @@ class TestJoinSystemTagCanonicalOrdering:
         - schema_hash matching the original source's schema_hash
         - stream_hash matching the input stream's pipeline_hash
         - canonical index matching the position"""
-        from orcapod.config import OrcapodConfig
         from orcapod.system_constants import constants
 
         src_a, src_b, src_c = three_sources
-        n_char = OrcapodConfig().hashing.system_tag_n_char
 
         # Independently determine expected position → source mapping
         sources = [src_a, src_b, src_c]
@@ -1519,7 +1517,7 @@ class TestJoinSystemTagCanonicalOrdering:
                 f"{expected_source._schema_hash!r}, got {schema_hash!r}"
             )
             # For direct source→join, stream_hash == source's pipeline_hash
-            expected_stream_hash = expected_source.pipeline_hash().to_hex(n_char)
+            expected_stream_hash = expected_source.pipeline_hash().to_hex()
             assert stream_hash == expected_stream_hash, (
                 f"Position {expected_idx}: expected stream_hash "
                 f"{expected_stream_hash!r}, got {stream_hash!r}"
@@ -1595,11 +1593,8 @@ class TestJoinSystemTagCanonicalOrdering:
         With an intermediate MapData, stream_hash comes from the
         DynamicPodStream which has a different pipeline_hash than the
         original source."""
-        from orcapod.config import OrcapodConfig
         from orcapod.core.sources.arrow_table_source import ArrowTableSource
         from orcapod.system_constants import constants
-
-        n_char = OrcapodConfig().hashing.system_tag_n_char
 
         src_a = ArrowTableSource(
             pa.table(
@@ -1686,7 +1681,7 @@ class TestJoinSystemTagCanonicalOrdering:
 
             # stream_hash should match the intermediate stream's pipeline_hash
             # (different from schema_hash due to the MapData operator)
-            expected_stream_hash = expected_stream.pipeline_hash().to_hex(n_char)
+            expected_stream_hash = expected_stream.pipeline_hash().to_hex()
             assert stream_hash == expected_stream_hash, (
                 f"Position {expected_idx}: expected stream_hash "
                 f"{expected_stream_hash!r}, got {stream_hash!r}"

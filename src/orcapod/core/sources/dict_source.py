@@ -84,7 +84,7 @@ class DictSource(RootSource):
                 )
 
         self._key_columns = normalize_record_id_columns(record_id_columns) or ()
-        builder = SourceStreamBuilder(self.data_context, self.orcapod_config)
+        builder = SourceStreamBuilder(self.data_context)
         result = builder.build(
             arrow_table,
             tag_columns=tag_columns,

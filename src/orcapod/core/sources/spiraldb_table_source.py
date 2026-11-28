@@ -422,7 +422,7 @@ class SpiralDBTableSource(RootSource):
             self._data_tags = source_data_tags(resolved_tags, tag_only_columns)
 
             # A zero-row stream with the table's columns answers every schema question.
-            self._builder = SourceStreamBuilder(self.data_context, self.orcapod_config)
+            self._builder = SourceStreamBuilder(self.data_context)
             try:
                 template = self._builder.build(
                     schema.empty_table(),

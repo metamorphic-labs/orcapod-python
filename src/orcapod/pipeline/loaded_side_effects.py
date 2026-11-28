@@ -46,7 +46,7 @@ class SavedSideEffectNode:
     """
 
     def __init__(self, descriptor: dict[str, Any]) -> None:
-        from orcapod.config import DEFAULT_CONFIG, OrcapodConfig
+        from orcapod.config import OrcapodConfig
         from orcapod.contexts import resolve_saved_context
         from orcapod.types import ContentHash
 
@@ -72,11 +72,8 @@ class SavedSideEffectNode:
         self.data_context: DataContext = resolve_saved_context(
             descriptor.get("data_context_key")
         )
-        config_dict = descriptor.get("config")
-        self.orcapod_config: OrcapodConfig = (
-            OrcapodConfig.from_dict(config_dict)
-            if config_dict is not None
-            else DEFAULT_CONFIG
+        self.orcapod_config: OrcapodConfig = OrcapodConfig.from_node_descriptor(
+            descriptor
         )
 
 

@@ -372,6 +372,25 @@ class TestUUIDHandler:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("char_count", "expected"),
+    [
+        (None, "deadbeef"),
+        (0, "deadbeef"),
+        (4, "dead"),
+        (20, "deadbeef"),
+        (-1, "deadbee"),
+    ],
+)
+def test_content_hash_to_hex_display_length(
+    char_count: int | None, expected: str
+) -> None:
+    content_hash = ContentHash("test_v1", bytes.fromhex("deadbeef"))
+
+    assert content_hash.to_hex() == "deadbeef"
+    assert content_hash.to_hex(char_count=char_count) == expected
+
+
 class TestContentHashTerminal:
     def test_content_hash_returned_as_is(self, hasher):
         """hash_object(ContentHash) must return the same object unchanged."""
@@ -1073,8 +1092,8 @@ class TestGlobalSingletons:
         assert isinstance(ch.to_hex(), str)
         assert len(ch.to_hex()) == 64
         assert isinstance(ch.to_int(), int)
-        assert isinstance(ch.to_hex(16), str)
-        assert len(ch.to_hex(16)) == 16
+        assert ch.to_int(hexdigits=16) == int(ch.to_hex()[:16], 16)
+        assert ch.to_string(prefix_method=False, hexdigits=16) == ch.to_hex()[:16]
 
     def test_get_default_arrow_hasher_returns_protocol_instance(self):
         """get_default_arrow_hasher() returns the arrow hasher from the default context."""
