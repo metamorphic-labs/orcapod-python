@@ -209,10 +209,11 @@ untouched.
 ## Return values must match the declared type
 
 Each value the function returns is checked against its declared output type before it is
-stored or hashed. A `float` returned for an output declared `int` is rejected; it is not
-truncated. The `OutputTypeError` names the function, the output, the declared type and the
-type of the value (never the value itself, which stays on the error's `value` attribute),
-and says what to return instead:
+stored or hashed. An explicit `output_schema` supplies the type for each output it declares.
+For any other output, the type comes from the return annotation. Returning a `float`
+for an output declared `int` raises `OutputTypeError`. The error names the function,
+the output, the declared type and the type of the value. The value itself stays on the
+error's `value` attribute. The error also says what to return instead.
 
 ```python
 from orcapod.errors import OutputTypeError
@@ -1322,7 +1323,22 @@ for tag, data in count_rows.pod(readings):
 
 ### A `None` inside a container
 
-A `None` inside a list, a set, a dict value or a class field is accepted where its type is
+In data context v1, top-level `T` and `T | None` are distinct. Inside a column, Python
+declarations produce nullable Arrow fields. For example, `list[int]` and
+`list[int | None]` produce the same Arrow type. A function with a `list[int]` parameter
+can receive a list containing `None` from a source or datagram. An explicit Arrow
+non-null item flag is preserved by the source.
+
+The declared output type constrains values at every depth. For example, a pod with
+`-> list[int]` that returns `[1, None]` raises `OutputTypeError` naming the nested
+position. If its explicit `output_schema` declares that output as `list[int | None]`,
+the pod stores the list with the missing item. A declared `set[int]` similarly rejects
+`{None}`, while `set[int | None]` accepts it. Fixed and heterogeneous tuples are
+unsupported as a single pod output. A tuple annotation can describe several separate
+outputs.
+
+When the position admits `None`, it can be stored and read in a list, a set, a dict
+value or a class field where its type is
 a scalar (`int`, `float`, `str`, `bool`, `bytes`, `datetime`, ...) or a class of your own
 (a dataclass, an `orcapod.dataclass` or a pydantic model): `list[int | None]`,
 `dict[str, float | None]`, `list[MyData | None]` and a field `x: int | None` store and read

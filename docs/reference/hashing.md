@@ -1164,6 +1164,11 @@ and `k` such stages stacked carry each one `2 ** k` times (ITL-1114). The table 
 `head()` and the notebook preview of a stream that has not run are built from carries the system
 tag columns too, so those calls are as wide as the joins make them (ITL-1132).
 
+For tied operands that carry custom system tags, Join assigns positions by the
+complete system-tag declarations. It orders each matched row's system tags together
+among operands with the same declarations. Custom tags stay with their source and
+record IDs and each field keeps its declaration.
+
 ---
 
 ### Site 6b — Aggregating operator system tag fold
@@ -1314,7 +1319,7 @@ which are `large_string`.
 A row read from an Arrow table holds its token columns' types. `with_source_info` writes a
 Python replacement under the held type and preserves the list item's name, nullability and
 metadata. It refuses a string for a list, a list for a string, a wrong depth, a null item
-where the item field is required, and `None` for a list type. `with_source_info(x=None)`
+where the item field is required, and `None` for a list type at any depth. `with_source_info(x=None)`
 under a held string type writes a `large_string` null in both
 `as_table(columns={"source": True})` and `source_info_table()`. The `Data` constructor
 also checks non-`None` replacements against the held type. With
@@ -1881,6 +1886,15 @@ The same walker gives the form of every other place a schema is compared or save
   live: it stays in the storage form, and the slot, a source of the same table and the
   slot made from that source have one Python schema, one Arrow schema and one pipeline
   hash.
+
+Python declarations produce implicitly nullable nested fields in data context v1.
+For example, `list[int]` and `list[int | None]` convert to the same Arrow type
+and yield the same Arrow schema hash for that column. An explicit Arrow field
+flag is preserved and hashed at every depth, including in a list item or struct
+child. A column's top-level nullable flag also enters the hash. Function output
+validation uses each declared output type independently of these storage flags.
+The type comes from the explicit `output_schema` for that output, or from the
+return annotation when the schema supplies no type for it.
 
 What a schema must therefore agree on to be one identity:
 

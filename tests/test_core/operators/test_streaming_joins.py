@@ -210,9 +210,17 @@ def assert_same_fields(got: pa.Table, want: pa.Table) -> None:
     assert sorted(got.column_names) == sorted(want.column_names)
     for field in want.schema:
         other = got.schema.field(field.name)
-        assert other.type == field.type, field.name
-        assert other.metadata == field.metadata, field.name
-        assert other.nullable == field.nullable, field.name
+        assert other.equals(field, check_metadata=True), field.name
+
+
+def test_field_oracle_refuses_different_nested_metadata() -> None:
+    item = pa.field("token", pa.large_string(), metadata={b"origin": b"declared"})
+    declared = pa.schema([pa.field("_source_x", pa.large_list(item))]).empty_table()
+    changed = pa.schema(
+        [pa.field("_source_x", pa.large_list(item.remove_metadata()))]
+    ).empty_table()
+    with pytest.raises(AssertionError, match="_source_x"):
+        assert_same_fields(changed, declared)
 
 
 def assert_same_rows(

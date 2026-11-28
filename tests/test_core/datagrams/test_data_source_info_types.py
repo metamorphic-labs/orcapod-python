@@ -151,3 +151,20 @@ def test_a_null_replacement_of_a_held_list_token_is_refused() -> None:
     for held in (row.as_table(columns={"source": True}), row.source_info_table()):
         assert held.schema.field("_source_x").type.equals(kind, check_metadata=True)
         assert held["_source_x"].to_pylist() == [["old"]]
+
+
+@pytest.mark.parametrize("via_constructor", [False, True])
+def test_a_replacement_cannot_put_a_null_inside_nested_token_lists(
+    via_constructor: bool,
+) -> None:
+    kind = pa.large_list(pa.large_list(pa.large_string()))
+    table = pa.table({"x": [[[1]]], "_source_x": pa.array([[["old"]]], type=kind)})
+    row = Data(table)
+    with pytest.raises(pa.ArrowTypeError, match="list token is never null"):
+        if via_constructor:
+            _ = Data(table, source_info={"x": [None]})
+        else:
+            _ = row.with_source_info(x=[None])
+    assert row.with_source_info(x=[[None]]).source_info_table()[
+        "_source_x"
+    ].to_pylist() == [[[None]]]

@@ -66,6 +66,12 @@ print(dict(tag_schema))   # {'subject_id': <class 'str'>}
 print(dict(data_schema))  # {'age': <class 'int'>, 'weight': <class 'float'>}
 ```
 
+The Python schema distinguishes a nullable whole column as `T | None`. A Python
+container annotation leaves nested fields nullable in the Arrow schema in data
+context v1. For example, `list[int]` can describe a column whose items include
+`None`. Inspect `as_table().schema` for explicit nested Arrow flags, which streams
+preserve and include in their Arrow identity.
+
 ### `keys()`
 
 Returns column names as `(tag_keys, data_keys)`:

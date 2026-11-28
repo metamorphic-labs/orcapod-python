@@ -38,6 +38,13 @@ although a pod can observe them. Changing one of them keeps the type and its sto
 results. If such a change alters what a pod computes, bump the pod's version, as you
 would for any change to its code.
 
+In data context v1, field annotations in either kind of class produce nullable
+Arrow struct children. A class annotation still determines what a function pod
+can return. For example, a returned object with `None` in an `int` field raises
+`OutputTypeError` naming the field. Annotate it as `int | None` to return missing
+values deliberately. Pydantic's own validation still applies whenever it
+constructs a model.
+
 ## `op.dataclass` in a notebook
 
 `op.dataclass` is used like `dataclasses.dataclass` and returns a real dataclass. Define

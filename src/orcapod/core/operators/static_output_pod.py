@@ -1183,8 +1183,8 @@ def stream_from_batches(
     fields are nullable and keep the stream's declared types. If the stream
     has no token types yet, the populated batches establish them.
     The result keeps ``stream``'s producer, upstreams, pipeline hash and data context.
-    With no batch it is ``stream``'s zero-row input,
-    typed by its description and never by rows.
+    With no batch it is ``stream``'s zero-row input, or the accepted channel schema
+    if the stream cannot supply a typed zero-row input.
 
     Args:
         stream: The describing stream: the node or stream the rows are of.
@@ -1208,6 +1208,12 @@ def stream_from_batches(
         if typed is not None or declared_schema is None:
             return StaticOutputOperatorPod._materialize_upstream([], stream)  # pyright: ignore[reportPrivateUsage]  # the zero-row input of an operator
         table = declared_schema.empty_table()
+        tag_keys, data_keys = _keys_in_delivered_order(
+            stream.keys(), table.column_names
+        )
+        return StaticOutputOperatorPod._as_upstream_stream(  # pyright: ignore[reportPrivateUsage]  # the zero-row result under the channel declaration
+            table, tag_keys, data_tag_names(tag_keys, data_keys), stream
+        )
     return StaticOutputOperatorPod._output_stream(  # pyright: ignore[reportPrivateUsage]  # F and the identity, stage 2's
         table, _keys_in_delivered_order(stream.keys(), table.column_names), stream
     )

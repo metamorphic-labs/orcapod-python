@@ -171,7 +171,7 @@ def test_a_list_token_against_a_string_token_of_a_shared_data_tag_is_refused(
 
 @TAG_ORDER
 def test_a_three_input_join_refuses_two_declarations_when_no_row_matches(
-    tags: str,
+    tags: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Three inputs with disjoint keys; the third declares another token type.
 
@@ -182,16 +182,19 @@ def test_a_three_input_join_refuses_two_declarations_when_no_row_matches(
     first row now gives its declaration to all the others.
     """
     order = TAG_ORDERS[tags]
-    candidates = [
-        _keyed((f"c{i}", f"d{i}"), [[3]], ["o"], STR, order) for i in range(12)
-    ]
     inputs = [
         _keyed(("a", "b"), [[1]], [["m"]], TOKENS, order),
         _keyed(("p", "q"), [[2]], [["n"]], TOKENS, order),
-        max(candidates, key=lambda stream: stream.pipeline_hash().to_hex()),
+        _keyed(("c", "d"), [[3]], ["o"], STR, order),
     ]
+    hashes = sorted(
+        (stream.pipeline_hash() for stream in inputs), key=lambda h: h.to_hex()
+    )
+    for stream, pipeline_hash in zip(inputs, hashes, strict=True):
+        monkeypatch.setattr(stream, "pipeline_hash", lambda h=pipeline_hash: h)
     for rotation in range(3):
         rotated = inputs[rotation:] + inputs[:rotation]
+        assert Join().order_input_streams(*rotated) == inputs
         _refused_alike(_both_routes(Join, *rotated), "_source_k", TOKENS, STR)
 
 

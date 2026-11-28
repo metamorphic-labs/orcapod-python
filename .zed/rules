@@ -1137,7 +1137,7 @@ these preimages anywhere else.
   `with_source_info` writes a Python replacement under the row's held token type and
   preserves the item name, nullability and metadata (`arrow_utils.source_info_replacement`,
   ITL-1557). It refuses a string for a list, a list for a string, a wrong depth, a null item
-  under a required item field, and `None` for a list type. Under a held string type,
+  under a required item field, and `None` for a list type at any depth. Under a held string type,
   `with_source_info(x=None)` writes a `large_string` null in both `as_table` and
   `source_info_table`. The `Data` constructor also checks non-`None` replacements against
   the held type. `Data(table, source_info={"x": None})` keeps the token the table already
@@ -1469,9 +1469,14 @@ data. The rules:
   A source's custom system-tag names must each identify an existing non-nullable text
   column with no null values and no Arrow field metadata. Remove field metadata before
   building the source. This restriction is a stopgap pending ITL-1561. System-tag fields on
-  a raw ArrowTableStream keep their metadata. When Join sorts tied system tags, it declares
-  the rebuilt fields without operand metadata. A rebuilt field is nullable if any of the
-  corresponding input fields can hold a null.
+  a raw ArrowTableStream keep their metadata. DataFrameSource uses an explicit schema for
+  custom system-tag nullability and validates the raw values, types and metadata before casting.
+  Join sorts tied source and record IDs together, with null IDs last, and declares the
+  rebuilt fields without operand metadata. A rebuilt field is nullable if any of the
+  corresponding input fields can hold a null. When tied operands carry custom system tags,
+  their complete system-tag declarations determine the canonical positions. Within one
+  declaration, Join sorts the matched rows' system tags together. Each field keeps its
+  declared type, nullable flag and metadata. Sorting happens on the final link only.
   A raw `ArrowTableStream` still preserves `null` in its table in ITL-1543 part A.
   A row's system-tag fields come from its stream, including raw streams. Join
   uses those declarations on the async row path as well as in its tables.
@@ -1567,6 +1572,15 @@ data. The rules:
 - The type converter keys synthesized struct classes by the large-normalized struct, so
   struct<b: string> and struct<b: large_string> are one Python type (a workaround,
   TODO(ITL-841)).
+- Data context v1 gives nested fields produced from Python declarations implicit nullability
+  (developer, November 28, 2026, ITL-445/ITL-842). For example, `list[int]` and
+  `list[int | None]` give the same Arrow type. Sources, datagrams and function inputs can
+  carry a nested null where the codec supports it. A function checks nested values against
+  each declared output type, using the explicit `output_schema` for that output when
+  specified and the return annotation otherwise. A plain `T` at any depth refuses `None`.
+  Top-level flags distinguish T from T | None. An explicit nested Arrow flag is
+  kept as declared and enters the Arrow schema hash. Strict checking of Python input
+  annotations at nested positions is a later opt-in (ITL-1584).
 - normalize_to_large_types changes layouts only: every nested field (list items, struct
   children, map keys and items) keeps its name, nullability and metadata, so it never changes
   a schema or value hash. Never rebuild a nested type as pa.large_list(element_type), which

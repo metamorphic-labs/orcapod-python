@@ -56,6 +56,7 @@ from orcapod.core.operators import (
     TagBy,
 )
 from orcapod.core.operators.static_output_pod import StaticOutputOperatorPod
+from orcapod.core.operators.streaming_joins import TRANSPORT_COLUMNS, StreamingJoin
 from orcapod.core.sources import ArrowTableSource
 from orcapod.core.streams import ArrowTableStream
 from orcapod.databases import InMemoryArrowDatabase
@@ -1103,9 +1104,64 @@ def test_standalone_async_join_rows_keep_declared_system_tag_fields(
                 )
 
 
+@pytest.mark.parametrize("arity", [2, 3])
+def test_tied_join_sorts_null_record_ids_only_at_the_final_link(
+    arity: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source_id, record_id = "_tag_source_id::seed", "_tag_record_id::seed"
+    inputs = [
+        ArrowTableStream(
+            pa.table(
+                {
+                    "k": [1],
+                    "g": ["same"],
+                    source_id: pa.array([source], pa.large_string()),
+                    record_id: pa.array([record], pa.large_string()),
+                }
+            ),
+            tag_columns=["k", "g"],
+            data_tags=["k", "g"],
+        )
+        for source, record in (("same", None), ("same", "r"), ("z", "other"))[:arity]
+    ]
+    assert len({stream.pipeline_hash() for stream in inputs}) == 1
+    columns = {"system_tags": True}
+    join = Join()
+    expected = join(*inputs).as_table(columns=columns)
+
+    def position_names(prefix: str) -> list[str]:
+        return sorted(name for name in expected.column_names if name.startswith(prefix))
+
+    source_names, record_names = position_names(source_id), position_names(record_id)
+    assert [expected[n][0].as_py() for n in source_names] == ["same", "same", "z"][
+        :arity
+    ]
+    assert [expected[n][0].as_py() for n in record_names] == ["r", None, "other"][
+        :arity
+    ]
+
+    calls: list[int] = []
+    sort_system_tags = arrow_utils.sort_system_tag_values
+
+    def observe(table: pa.Table) -> pa.Table:
+        calls.append(sum(name.startswith(record_id) for name in table.column_names))
+        return sort_system_tags(table)
+
+    monkeypatch.setattr(arrow_utils, "sort_system_tag_values", observe)
+    [(tag, _)] = async_rows(join, *reversed(inputs))
+    names = [*source_names, *record_names]
+    assert (
+        tag.as_table(columns=columns)
+        .select(names)
+        .equals(expected.select(names), check_metadata=True)
+    )
+    assert calls == [arity]
+
+
+@pytest.mark.parametrize("same_declarations", [False, True])
 @pytest.mark.parametrize("reverse_columns", [False, True])
 def test_tied_join_keeps_custom_system_tags_with_their_operand(
-    reverse_columns: bool,
+    reverse_columns: bool, same_declarations: bool
 ) -> None:
     source_id, record_id, custom = (
         "_tag_source_id::seed",
@@ -1121,7 +1177,10 @@ def test_tied_join_keeps_custom_system_tags_with_their_operand(
                 pa.field(source_id, pa.large_string(), False),
                 pa.field(record_id, pa.large_string(), False),
                 pa.field(
-                    custom, pa.large_string(), name == "a", {b"owner": name.encode()}
+                    custom,
+                    pa.large_string(),
+                    name == "a" and not same_declarations,
+                    {b"owner": b"shared" if same_declarations else name.encode()},
                 ),
             ]
         )
@@ -1145,6 +1204,7 @@ def test_tied_join_keeps_custom_system_tags_with_their_operand(
         )
     assert len({stream.pipeline_hash() for stream in inputs.values()}) == 1
     columns = {"system_tags": True}
+    canonical: pa.Table | None = None
     for order in itertools.permutations(inputs):
         operands = [inputs[name] for name in order]
         join = Join()
@@ -1152,19 +1212,44 @@ def test_tied_join_keeps_custom_system_tags_with_their_operand(
         expected = stream.as_table(columns=columns)
         prediction, _ = join.output_schema(*operands, columns=columns)
         names = sorted(
-            name for name in expected.column_names if name.startswith(custom)
+            name for name in expected.column_names if name.startswith("_tag_")
         )
-        for name, owner in zip(names, order, strict=True):
+        target = expected.select(names)
+        if canonical is None:
+            canonical = target
+        else:
+            assert target.equals(canonical, check_metadata=True)
+        for name in (name for name in names if name.startswith(custom)):
+            source = name.replace(custom, source_id, 1)
+            owner = expected[source][0].as_py()
             assert expected[name].to_pylist() == [f"{owner}1", f"{owner}2"]
-            assert prediction[name] == (str | None if owner == "a" else str)
+            assert prediction[name] == (
+                str | None if owner == "a" and not same_declarations else str
+            )
+            assert expected.schema.field(name).metadata == {
+                b"owner": b"shared" if same_declarations else owner.encode()
+            }
         for rows in (list(stream.iter_data()), async_rows(join, *operands)):
             assert len(rows) == expected.num_rows
             actual = pa.concat_tables(
                 [tag.as_table(columns=columns).select(names) for tag, _ in rows]
             )
-            target = expected.select(names)
             assert actual.equals(target, check_metadata=True)
             assert actual.schema.equals(target.schema, check_metadata=True)
+        kernel = StreamingJoin(join, operands)
+        batches = [
+            batch
+            for index, operand in enumerate(operands)
+            for packet in operand.as_table(columns=TRANSPORT_COLUMNS).to_batches()
+            for batch in kernel.push(index, packet)
+        ]
+        actual = pa.Table.from_batches(batches).sort_by("k").select(names)
+        assert actual.equals(target, check_metadata=True)
+        assert (
+            kernel.zero_row_result.as_table(columns=columns)
+            .select(names)
+            .schema.equals(target.schema, check_metadata=True)
+        )
 
 
 @pytest.mark.parametrize("reverse_columns", [False, True])
