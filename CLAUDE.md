@@ -396,6 +396,12 @@ A logical type's identifier is its Arrow extension name plus its Arrow extension
   identifier is the container kind plus the element's identifier; the type hash treats them
   like any generic alias (origin and arguments). A change to how they are stored or hashed is
   a data context (global hash version) change, not a logical type change.
+- Sets of user-defined logical types use `canonical_order.ordered_set_storage` after
+  coercion to the declared Arrow type (ITL-922). Compare structs by declared field order
+  and lists by item order, recursively. Class comparators have no effect. A NaN at any
+  depth, duplicate storage values or incomparable values raise `CanonicalOrderError`.
+  The caller adds the column. Path, UPath, UUID, File and Directory sets keep their native
+  scalar sort.
 - `set[T]` of a primitive is a native container too (developer, November 14, 2026, ITL-611):
   `ListLogicalType` over an `ArrowElement`, extension name `set[<large Arrow type text>]`
   (`set[int64]`), metadata `{"category": "set", "element_kind": "arrow"}` (developer,

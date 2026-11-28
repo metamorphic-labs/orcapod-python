@@ -17,6 +17,7 @@ These exceptions and warnings report invalid inputs, schemas, or values.
 ::: orcapod.errors.RecursiveTypeError
 
 ::: orcapod.errors.CanonicalOrderError
+::: orcapod.errors.LogicalSetCanonicalOrderError
 
 ::: orcapod.errors.UnsupportedValueError
 

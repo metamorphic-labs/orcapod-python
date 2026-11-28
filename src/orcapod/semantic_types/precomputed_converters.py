@@ -13,7 +13,9 @@ from collections.abc import Callable
 import pyarrow as pa
 
 
+from orcapod.errors import LogicalSetCanonicalOrderError
 from orcapod.semantic_types.universal_converter import UniversalTypeConverter
+from orcapod.utils.arrow_utils import table_from_storage
 
 
 class SemanticSchemaConverter:
@@ -85,7 +87,12 @@ class SemanticSchemaConverter:
                     converted_record[field_name] = None
                 else:
                     # Convert using the pre-computed converter
-                    converted_record[field_name] = converter(value)
+                    try:
+                        converted_record[field_name] = converter(value)
+                    except LogicalSetCanonicalOrderError as exc:
+                        raise LogicalSetCanonicalOrderError(
+                            f"Column {field_name!r}: {exc}"
+                        ) from exc
             converted_data.append(converted_record)
 
         return converted_data
@@ -140,9 +147,9 @@ class SemanticSchemaConverter:
                 when the caller needs to enforce specific field types or nullable
                 flags that differ from what was inferred at construction time.
         """
-        return pa.Table.from_pylist(
+        return table_from_storage(
             self.python_dicts_to_struct_dicts(data),
-            schema=arrow_schema or self.arrow_schema,
+            arrow_schema or self.arrow_schema,
         )
 
     def arrow_table_to_python_dicts(self, table: pa.Table) -> list[dict[str, Any]]:

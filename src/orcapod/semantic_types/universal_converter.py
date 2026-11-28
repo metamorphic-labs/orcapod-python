@@ -34,6 +34,9 @@ from orcapod.errors import (
     UnsupportedValueError,
 )
 from orcapod.semantic_types.canonical_order import (
+    _in_logical_set,
+    _ordered_dict_storage,
+    ordered_set_storage,
     sort_dict_entries,
     sort_set_elements,
 )
@@ -1296,9 +1299,7 @@ class UniversalTypeConverter:
                         converted_record[field_name] = converter(record[field_name])
                     except CanonicalOrderError as exc:
                         # The ordering rule cannot say which column it was in.
-                        raise CanonicalOrderError(
-                            f"Column {field_name!r}: {exc}"
-                        ) from exc
+                        raise type(exc)(f"Column {field_name!r}: {exc}") from exc
                     except UnsupportedValueError as exc:
                         # The value's own type cannot say which column it was in.
                         raise UnsupportedValueError(
@@ -1395,12 +1396,68 @@ class UniversalTypeConverter:
             )
             python_schema = self.arrow_schema_to_python_schema(arrow_schema)
 
-        struct_dicts = self.python_dicts_to_struct_dicts(
-            python_dicts, python_schema=python_schema
-        )
+        return self._storage_table(python_dicts, python_schema, arrow_schema)
 
-        # TODO: add more helpful message here
-        return pa.Table.from_pylist(struct_dicts, schema=arrow_schema)
+    def _storage_table(
+        self,
+        rows: list[dict[str, Any]],
+        python_schema: SchemaLike,
+        arrow_schema: pa.Schema,
+    ) -> pa.Table:
+        """Batch logical set columns and convert the remaining cells as usual."""
+        if len(rows) <= 1 or self._logical_type_registry is None:
+            return arrow_utils.table_from_storage(
+                self.python_dicts_to_struct_dicts(rows, python_schema), arrow_schema
+            )
+
+        from orcapod.logical_types.list_logical_type_factory import ListLogicalType
+
+        encoded_columns: dict[int, pa.Array[Any]] = {}
+        remaining_schema = dict(python_schema)
+        registry = self._logical_type_registry
+        for index, field in enumerate(arrow_schema):
+            field_type = field.type
+            if not isinstance(
+                field_type, pa.ExtensionType
+            ) or not field_type.extension_name.startswith("set["):
+                continue
+            annotation = remaining_schema.get(field.name)
+            nullable = False
+            if get_origin(annotation) in (typing.Union, types.UnionType):
+                args = get_args(annotation)
+                if len(args) == 2 and type(None) in args:
+                    annotation = next(arg for arg in args if arg is not type(None))
+                    nullable = True
+            if get_origin(annotation) is not set:
+                continue
+            logical_type = registry.get_by_python_type(typing.cast(type, annotation))
+            if (
+                not isinstance(logical_type, ListLogicalType)
+                or not logical_type._orders_stored_sets
+                or not field_type.equals(logical_type.get_arrow_extension_type())
+            ):
+                continue
+            values = [row.get(field.name) for row in rows]
+            # A present None for a required type still takes the converter's
+            # usual error path. A missing cell is handled as a null as before.
+            if not nullable and any(
+                value is None and field.name in row
+                for value, row in zip(values, rows, strict=True)
+            ):
+                continue
+            try:
+                storage = logical_type._python_sets_to_storage(values, self)
+            except CanonicalOrderError as exc:
+                raise type(exc)(f"Column {field.name!r}: {exc}") from exc
+            except UnsupportedValueError as exc:
+                raise UnsupportedValueError(f"Column {field.name!r}: {exc}") from exc
+            encoded_columns[index] = pa.ExtensionArray.from_storage(field_type, storage)
+            del remaining_schema[field.name]
+
+        struct_dicts = self.python_dicts_to_struct_dicts(rows, remaining_schema)
+        return arrow_utils.table_from_storage(
+            struct_dicts, arrow_schema, encoded_columns=encoded_columns
+        )
 
     def arrow_table_to_python_dicts(
         self, arrow_table: pa.Table
@@ -1907,16 +1964,20 @@ class UniversalTypeConverter:
         elif origin is list:
             element_converter = self.get_python_to_arrow_converter(args[0])
 
-            def convert_list(value: Any) -> list[Any]:
+            def convert_list(value: Any) -> list[Any] | pa.Array[Any]:
                 """Convert list storage, preserving set order independence on updates."""
                 if value is None:
                     raise _none_not_admitted(python_type)
                 elements = [element_converter(item) for item in value]
                 # An Arrow schema remembers a plain set only as a list. Python set
                 # inputs still need canonical storage order; actual lists keep theirs.
-                return (
-                    sort_set_elements(elements) if isinstance(value, set) else elements
-                )
+                if not isinstance(value, set):
+                    return elements
+                if _in_logical_set.get():
+                    return ordered_set_storage(
+                        elements, self.python_type_to_arrow_type(args[0])
+                    )
+                return sort_set_elements(elements)
 
             return convert_list
 
@@ -1926,15 +1987,18 @@ class UniversalTypeConverter:
 
             # A dict is order independent: entries are stored in canonical key order
             # so equal dicts store and hash identically (ITL-905).
-            def convert_dict(value: Any) -> list[dict[str, Any]]:
+            def convert_dict(value: Any) -> list[dict[str, Any]] | pa.Array[Any]:
                 if value is None:
                     raise _none_not_admitted(python_type)
-                return sort_dict_entries(
-                    [
-                        {"key": key_converter(k), "value": value_converter(v)}
-                        for k, v in value.items()
-                    ]
-                )
+                entries = [
+                    {"key": key_converter(k), "value": value_converter(v)}
+                    for k, v in value.items()
+                ]
+                if _in_logical_set.get():
+                    storage_type = self.python_type_to_arrow_type(python_type)
+                    assert isinstance(storage_type, pa.LargeListType)
+                    return _ordered_dict_storage(entries, storage_type.value_type)
+                return sort_dict_entries(entries)
 
             return convert_dict
 
@@ -1943,10 +2007,15 @@ class UniversalTypeConverter:
             # order, which depends on PYTHONHASHSEED for str and bytes (ITL-905).
             element_converter = self.get_python_to_arrow_converter(args[0])
 
-            def convert_set(value: Any) -> list[Any]:
+            def convert_set(value: Any) -> list[Any] | pa.Array[Any]:
                 if value is None:
                     raise _none_not_admitted(python_type)
-                return sort_set_elements([element_converter(item) for item in value])
+                elements = [element_converter(item) for item in value]
+                if _in_logical_set.get():
+                    return ordered_set_storage(
+                        elements, self.python_type_to_arrow_type(args[0])
+                    )
+                return sort_set_elements(elements)
 
             return convert_set
 
