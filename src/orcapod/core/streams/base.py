@@ -92,7 +92,7 @@ def system_tags_as_rows_give(table: pa.Table) -> bool:
     only kind library code makes). A whole table is its rows only when its system tags
     are already so, in their values as in their fields: a narrow integer, a nullable
     field, a null value (also in a field declared non-nullable) or field metadata (an
-    Arrow extension's, which a tag drops) is decided by the rows (ITL-1347).
+    Arrow extension's, which a tag drops) is decided by the rows (ITL-1347, ITL-1361).
 
     Args:
         table: The table.

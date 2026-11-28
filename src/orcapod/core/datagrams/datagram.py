@@ -38,10 +38,40 @@ from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
 from orcapod.semantic_types import infer_python_schema_from_pylist_data
 from orcapod.semantic_types.canonical_order import canonical_python_value
 from orcapod.system_constants import constants
-from orcapod.types import ColumnConfig, DataType, DataValue, Schema, SchemaLike
+from orcapod.types import (
+    ColumnConfig,
+    ContentHash,
+    DataType,
+    DataValue,
+    Schema,
+    SchemaLike,
+)
 from orcapod.utils import arrow_utils
 
 logger = logging.getLogger(__name__)
+
+
+def data_table_content_hash(
+    table: pa.Table, data_context: str | contexts.DataContext | None = None
+) -> ContentHash:
+    """Return the content hash of a datagram whose data table is ``table``.
+
+    The one definition of a datagram's content hash: ``content_hash()`` is the semantic
+    hash of ``identity_structure()``, ``OrcapodTable(<data table>)``
+    (``Datagram.identity_structure``), which the data context's Arrow hasher hashes
+    (``hash_table``). A caller that holds the data table a datagram would hold, without
+    the datagram, hashes it here (a function node's input rows, ITL-1361).
+
+    Args:
+        table: The data table, as a datagram of these columns holds it (normalized to
+            its large layouts, no meta or context column).
+        data_context: The data context whose semantic hasher hashes it.
+
+    Returns:
+        The content hash ``content_hash()`` of such a datagram returns.
+    """
+    hasher = contexts.resolve_context(data_context).semantic_hasher
+    return hasher.hash_object(OrcapodTable(table))
 
 
 def _data_and_meta_tables(table: pa.Table) -> tuple[pa.Table, pa.Table | None]:
@@ -590,6 +620,22 @@ class Datagram(ContentIdentifiableBase):
                         all_schemas.append(_pa.schema(matched))
 
         return arrow_utils.join_arrow_schemas(*all_schemas)
+
+    def _keep_content_hash(self, content_hash: ContentHash, hasher_id: str) -> None:
+        """Keep ``content_hash`` as this datagram's, computed before it was built.
+
+        The one digest of an input row (ITL-1361): a function node computes a row's
+        data hash once, when it prepares the row's entry id
+        (``data_table_content_hash``, the definition ``content_hash`` follows), as
+        ``main`` did by hashing the row's datagram then. A datagram built later for
+        that row keeps that digest, so the stored input data hash and record id use
+        it and nothing hashes the value again (a ``File`` that changed meanwhile).
+
+        Args:
+            content_hash: The row's data hash.
+            hasher_id: The semantic hasher's id it was computed with.
+        """
+        _ = self._content_hash_cache.setdefault(hasher_id, content_hash)
 
     def identity_structure(self) -> Any:
         """Return the primary data table, marked as a table Orcapod built.
@@ -1196,6 +1242,24 @@ class Datagram(ContentIdentifiableBase):
     # ------------------------------------------------------------------
     # 8. Utility Operations
     # ------------------------------------------------------------------
+
+    def with_datagram_uuid(self, record_uuid: uuid.UUID) -> Self:
+        """Return a shallow copy of this datagram whose datagram id is ``record_uuid``.
+
+        Every column, type, source-info token and cached content hash is this
+        datagram's (``copy``); only the id differs. A row read back from a store is built
+        by a stream, which gives it a fresh id; the id it was stored under is set here
+        (ITL-1060).
+
+        Args:
+            record_uuid: The datagram id of the copy.
+
+        Returns:
+            The copy.
+        """
+        new_d = self.copy(include_cache=True, preserve_id=False)
+        new_d._datagram_uuid = record_uuid
+        return new_d
 
     def copy(self, include_cache: bool = True, preserve_id: bool = True) -> Self:
         """Return a shallow copy of this datagram.

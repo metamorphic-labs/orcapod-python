@@ -42,6 +42,11 @@ class CompositeObserver:
     def __init__(self, *observers: Any) -> None:
         self._observers = list(observers)
 
+    @property
+    def observers(self) -> tuple[Any, ...]:
+        """The observers it calls, in order."""
+        return tuple(self._observers)
+
     def contextualize(self, *identity_path: str) -> "CompositeObserver":
         """Return a new CompositeObserver wrapping each child's contextualized version."""
         if not identity_path:

@@ -70,9 +70,24 @@ def entry_id_preimage(tag: "TagProtocol", data: "DataProtocol") -> "pa.Table":
         ``__input_data_hash`` (``large_binary``), the labelled digest of the
         data's content hash.
     """
-    return tag.as_table(columns={"system_tags": True}).append_column(
+    return entry_id_preimage_from_parts(
+        tag.as_table(columns={"system_tags": True}), data.content_hash()
+    )
+
+
+def entry_id_preimage_from_parts(tags: pa.Table, data_hash: ContentHash) -> pa.Table:
+    """Build the entry preimage from the row's tag table and data hash.
+
+    Args:
+        tags: The one-row tag table with its system tags.
+        data_hash: The row's input data content hash.
+
+    Returns:
+        The tag table with the labelled data digest appended.
+    """
+    return tags.append_column(
         constants.INPUT_DATA_HASH_COL,
-        pa.array([data.content_hash().to_prefixed_digest()], type=pa.large_binary()),
+        pa.array([data_hash.to_prefixed_digest()], type=pa.large_binary()),
     )
 
 
@@ -104,12 +119,24 @@ def instance_id_preimage(entry: "ContentHash", data: "DataProtocol") -> "pa.Tabl
         digest of the entry id), then the source-info columns of the data in name
         order. A placeholder that carries no token gives the entry id alone.
     """
+    # A placeholder (``EmptyData``) gives the tokens it carries here, and no column
+    # when it carries none.
+    return instance_id_preimage_from_tokens(entry, data.source_info_table())
+
+
+def instance_id_preimage_from_tokens(entry: ContentHash, tokens: pa.Table) -> pa.Table:
+    """Build the instance preimage from an entry id and the row's token table.
+
+    Args:
+        entry: The row's entry id.
+        tokens: The row's source-info table, in the form its datagram gives.
+
+    Returns:
+        The labelled entry digest followed by token columns in name order.
+    """
     preimage = pa.table(
         {ENTRY_ID_COL: pa.array([entry.to_prefixed_digest()], type=pa.large_binary())}
     )
-    # A placeholder (``EmptyData``) gives the tokens it carries here, and no column
-    # when it carries none.
-    tokens = data.source_info_table()
     for name in sorted(tokens.column_names):
         preimage = preimage.append_column(
             tokens.schema.field(name), tokens.column(name)

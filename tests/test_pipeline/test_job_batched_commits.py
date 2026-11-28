@@ -451,14 +451,24 @@ def test_instance_id_is_computed_once_per_row(
     """Each row's instance id is computed once, not once per use."""
     # Counts calls of a public node method through a class-level spy; the test is
     # about how often the node computes the id.
+    # A row's id is made from its datagrams (``compute_instance_id``) or, for an
+    # input over an Arrow table, from its table slices (ITL-1361): both are counted.
     calls = {"n": 0}
     original = FunctionJobNode.compute_instance_id
+    original_of_slices = FunctionJobNode._instance_id_of_slices  # pyright: ignore[reportPrivateUsage]  # the table path's id
 
     def counting(self: FunctionJobNode, tag: Any, input_data: Any) -> bytes:
         calls["n"] += 1
         return original(self, tag, input_data)
 
+    def counting_slices(
+        self: FunctionJobNode, tag_row: Any, data_hash: Any, source_row: Any
+    ) -> bytes:
+        calls["n"] += 1
+        return original_of_slices(self, tag_row, data_hash, source_row)
+
     monkeypatch.setattr(FunctionJobNode, "compute_instance_id", counting)
+    monkeypatch.setattr(FunctionJobNode, "_instance_id_of_slices", counting_slices)
     job = build_job(InMemoryArrowDatabase(), 20)
     job.run(orchestrator=ORCHESTRATORS[orchestrator]())
     assert calls["n"] == 20

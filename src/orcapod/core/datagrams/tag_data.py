@@ -61,6 +61,31 @@ def _source_info_field(name: str, token: SourceInfoValue) -> pa.Field[Any]:
     return _pa.field(name, arrow_utils.source_info_arrow_type(token))
 
 
+def source_info_row_as_datagram_gives(typed: pa.Table) -> pa.Table:
+    """Return the source-info table of a row read from an Arrow table.
+
+    Args:
+        typed: One row of the stream's prepared source-info columns.
+
+    Returns:
+        The row's nullable token fields, with each null token typed as text.
+    """
+    # This is the row representation on main today. ITL-1543 owns matching the
+    # row's schema with the stream's. Non-null tokens keep the stream's Arrow type.
+    columns = [
+        pa.chunked_array([pa.nulls(1, _NULL_TOKEN_TYPE)])
+        if column.null_count == len(column)
+        else column
+        for column in typed.columns
+    ]
+    return pa.Table.from_arrays(
+        columns,
+        schema=pa.schema(
+            [pa.field(f.name, c.type) for f, c in zip(typed.schema, columns)]
+        ),
+    )
+
+
 class Tag(Datagram):
     """
     Datagram with system-tags support.
@@ -609,22 +634,7 @@ class Data(Datagram):
             if all(name in self._source_info for name in names):
                 return self._ensure_source_info_table()
             return self._token_columns({})
-        # The fields of a row's own table: the name and the type, nullable, as
-        # ``_source_info_field`` makes them (a stream's may be non-null). The
-        # arrays are the stream's, wrapped again, never cast. A null token is a
-        # ``large_string`` null whatever its column declares.
-        columns = [
-            pa.chunked_array([pa.nulls(1, _NULL_TOKEN_TYPE)])
-            if column.null_count == len(column)
-            else column
-            for column in typed.columns
-        ]
-        return pa.Table.from_arrays(
-            columns,
-            schema=pa.schema(
-                [pa.field(f.name, c.type) for f, c in zip(typed.schema, columns)]
-            ),
-        )
+        return source_info_row_as_datagram_gives(typed)
 
     def _token_columns(self, kept: "Mapping[str, pa.ChunkedArray[Any]]") -> "pa.Table":
         """Return one token column per data column this row holds, in their order.

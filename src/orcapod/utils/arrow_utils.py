@@ -1471,8 +1471,8 @@ def fold_system_tag_values(values: Sequence[Any], *, label: str) -> str:
     """Fold a group's system-tag values into one scalar: ``"<label>:<hex>"``.
 
     The one fold helper (ITL-1154). Many->one operators must emit scalar system tags,
-    because ``_build_record_id_preimage`` (``core/nodes/function_node.py``) hashes
-    those columns directly to derive a record's identity. Each column folds
+    because ``entry_id_preimage`` (``core/row_ids.py``) hashes those columns directly
+    to derive an entry's identity. Each column folds
     independently over its own ordered member values, the source-id column and the
     record-id column alike; both are text.
 
