@@ -24,7 +24,7 @@ import sys
 import uuid
 from abc import abstractmethod
 from collections import Counter
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence, Set
 from datetime import datetime, timezone
 from functools import partial
 from typing import Any, Literal, NamedTuple, cast
@@ -1400,6 +1400,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
     _token_column_types: "dict[str, pa.DataType] | None" = None
     # Set once a database that cannot list its tables was reported.
     _unlisted_store_reported: bool = False
+    _job_completion_paths: Set[tuple[str, ...]] = frozenset()
     # Instance ids of the inputs of the last completed run in this process, each with
     # its number of inputs; None when no run completed (ITL-1093). A class default so
     # nodes rebuilt from a saved descriptor start without a run.
@@ -1522,6 +1523,11 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             and self._function_pod.ctx_arg_name is not None
         )
 
+    @property
+    def completion_log_path(self) -> tuple[str, ...] | None:
+        """The pipeline table storing this live context-taking node's completions."""
+        return self._versioned_pipeline_path if self._delivers_side_effects else None
+
     def _begin_run(self) -> None:
         """Reset schema preflight and refresh the stored tables for this run.
 
@@ -1592,9 +1598,9 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         unchanged, and their number is reported (ITL-944). Such tables are looked for
         at this node's own path and, because the hashes in a path can differ between
         versions, anywhere under the function's name in the database (ITL-954). A node
-        that delivers side effects fails instead. Alternate paths at the current
-        pipeline layout, stale result tables, and rows of another data context in
-        the current tables also count because their completions cannot be matched.
+        that delivers side effects fails instead. Completion paths outside the
+        current job, stale result tables, and rows of another data context in the
+        current tables also count because their completions cannot be matched.
 
         Raises:
             SideEffectLogDataContextError: If this node delivers side effects and
@@ -1610,7 +1616,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             if delivers and not self._current_tables_checked
             else None,
             name_path=self.node_name_path or None,
-            completion_path=self._versioned_pipeline_path if delivers else None,
+            completion_path=self.completion_log_path,
+            job_completion_paths=self._job_completion_paths,
         )
         if delivers:
             for cached_pod in (self._cached_function_pod, self._ephemeral_cached_pod):
@@ -1688,6 +1695,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         pipeline_database: ArrowDatabaseProtocol | None = None,
         result_database: ArrowDatabaseProtocol | None = None,
         ephemeral_database: ArrowDatabaseProtocol | None = None,
+        *,
+        job_completion_paths: Set[tuple[str, ...]] = frozenset(),
     ) -> None:
         """Attach databases for persistent caching and pipeline records.
 
@@ -1718,6 +1727,8 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
                 via ``set_ephemeral_database()``. Equivalent to calling
                 ``set_ephemeral_database(ephemeral_database)`` after
                 ``attach_databases()``.
+            job_completion_paths: Current completion log paths in the job's
+                pipeline database.
         """
         if pipeline_database is not None:
             # A database that cannot store this node's tables refuses them now,
@@ -1726,6 +1737,7 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
         if ephemeral_database is not None:
             self.require_storable_results(ephemeral_database)
         # Another database has its own tables of other generations to account for.
+        self._job_completion_paths = job_completion_paths
         self._stale_tables_checked = False
         self._current_tables_checked = False
         self._pipeline_preflight_checked = False

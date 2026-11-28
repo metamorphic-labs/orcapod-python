@@ -651,7 +651,9 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             self._database, self._result_database
         )
 
-        for node in (self._persistent_node_map or {}).values():
+        nodes = (self._persistent_node_map or {}).values()
+        job_completion_paths: set[tuple[str, ...]] = set()
+        for node in nodes:
             if isinstance(node, FunctionJobNode):
                 if self._unresolved_result_database is not None:
                     # Left without a database (see ``load``), never given ``_result``.
@@ -659,6 +661,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 node.attach_databases(
                     pipeline_database=pipeline_db,
                     result_database=result_db,
+                    job_completion_paths=job_completion_paths,
                 )
             elif isinstance(node, OperatorJobNode):
                 node.attach_databases(
@@ -666,7 +669,16 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     cache_mode=node.cache_mode,
                 )
             elif isinstance(node, SideEffectJobNode):
-                node.attach_databases(pipeline_database=pipeline_db)
+                node.attach_databases(
+                    pipeline_database=pipeline_db,
+                    job_completion_paths=job_completion_paths,
+                )
+
+        # Collect the paths after attachment, when every node addresses its job table.
+        for node in nodes:
+            if isinstance(node, (FunctionJobNode, SideEffectJobNode)):
+                if (path := node.completion_log_path) is not None:
+                    job_completion_paths.add(path)
 
     # ------------------------------------------------------------------
     # _iter_function_job_nodes() / apply_node_config()

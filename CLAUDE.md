@@ -1050,8 +1050,8 @@ current data context are the current entries.
   and every read or lookup keeps rows of the current data context only
   (`keep_rows_of_data_context`, or a lookup constraint on the column).
 - A table at an older layout is never read as current and never modified. What a node does
-  about such tables, rows of another data context, and completion tables at another path
-  under the same name is decided in one place,
+  about such tables, rows of another data context, and completion tables under the same name
+  outside the current job's completion paths is decided in one place,
   `contexts/stored.account_for_stale_tables`: count and report, or, for a node that delivers
   side effects (a `SideEffectPod` node, or a function node whose pod takes the invocation
   context, `ctx_arg`), raise `SideEffectLogDataContextError` before any delivery. A new kind
@@ -1063,8 +1063,9 @@ current data context are the current entries.
   node's database; `<prefix>/source` for a cached source) and every table there whose last
   component is not in `contexts/stored.CURRENT_LAYOUTS` is of another layout
   (`tables_of_another_layout`). For a node that tracks completions, the same listing
-  finds a current-layout completion table at a path other than the node's own
-  (`completion_path`, ITL-1559). A new layout constant must be added to `CURRENT_LAYOUTS`. A
+  finds current-layout completion tables outside the node's own path and those of its job
+  (`completion_path` and `job_completion_paths`, ITL-1559).
+  A new layout constant must be added to `CURRENT_LAYOUTS`. A
   store that cannot list raises `TableListingNotSupportedError`: side-effecting nodes then
   warn and proceed (developer, November 11, 2026). Every database class implements
   `list_table_paths`. Stores of the versions before 0.4 are not looked for otherwise (no

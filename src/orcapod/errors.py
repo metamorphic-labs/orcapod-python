@@ -1297,10 +1297,10 @@ class SideEffectLogDataContextError(OrcapodDatabaseError):
     skipped and computed again.
 
     The search lists tables under the node's function or pod name (ITL-954).
-    A table at an older layout or a current-layout completion table at another
-    path counts. The latter can occur when a pipeline hash changes (ITL-1559).
-    A table belonging to another node of the same name can therefore raise this
-    error too. ``record_paths`` names every table found.
+    A table at an older layout or a current-layout completion table under the
+    same name outside the current job's completion paths counts. The latter can
+    occur when a pipeline hash changes (ITL-1559). ``record_paths`` names every
+    table found.
 
     A fresh database is not a safe way around this error: it holds no completions, so on
     it the node performs every side effect again. Run the node on a fresh database only

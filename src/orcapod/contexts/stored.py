@@ -17,8 +17,8 @@ The path of a table holds hashes, and those can differ between builds, so such a
 not looked for at a computed path. The beginning of the path, up to the name of the
 function or pod, holds no hash: the tables under it are listed (``list_table_paths``), and
 a table whose last path component is not one of the current layouts is of another layout
-(ITL-954). This listing also finds completion tables at the current layout under a
-different path, which can happen when a pipeline hash changes (ITL-1559).
+(ITL-954). This listing also finds current-layout completion tables that the
+current job does not address, which can happen when a pipeline hash changes (ITL-1559).
 
 Example:
     To list the data contexts a stored table holds, call
@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import logging
 import warnings
-from collections.abc import Collection
+from collections.abc import Collection, Set
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple, Protocol, cast
 
@@ -454,6 +454,7 @@ def find_stale_tables(
     name_path: tuple[str, ...] | None = None,
     result_revision: str | None = None,
     completion_path: tuple[str, ...] | None = None,
+    job_completion_paths: Set[tuple[str, ...]] = frozenset(),
 ) -> StaleTables:
     """Find the stored rows of other generations that belong to one table of a node.
 
@@ -461,7 +462,7 @@ def find_stale_tables(
 
     - under ``name_path``, by listing the database, for tables of another layout
       wherever their hashes put them (ITL-954), and for completion tables with
-      the current layout whose paths differ from ``completion_path``;
+      the current layout outside the set of paths addressed by the current job;
     - in the current table, for rows of another data context.
 
     Args:
@@ -477,6 +478,8 @@ def find_stale_tables(
         completion_path: The expected path of a side-effect completion log. A table
             under ``name_path`` with the same layout at another path may hold
             completions this node cannot match (ITL-1559).
+        job_completion_paths: Completion paths relative to this database for the
+            compiled job. Logs belonging to another node of this job are current.
 
     Returns:
         The tables of another layout found, then one entry per other data context
@@ -510,7 +513,9 @@ def find_stale_tables(
                 found.other_completion_paths = [
                     database.base_path + path
                     for path in paths
-                    if path[-1] == completion_path[-1] and path != completion_path
+                    if path[-1] == completion_path[-1]
+                    and path != completion_path
+                    and path not in job_completion_paths
                 ]
     if current is not None:
         current_path, current_context = current
@@ -535,7 +540,8 @@ def account_for_stale_tables(
       that takes the invocation context) must not act again for inputs it already
       handled when those completions cannot be matched at the current path or under
       the current data context. It fails before doing anything. Every old-layout table
-      and every differently scoped completion table under the node's name counts.
+      and every completion table under the node's name outside the current job's
+      completion paths counts.
       The error names the tables. Where the database cannot list its tables, the
       node warns and proceeds (developer, November 11, 2026).
 

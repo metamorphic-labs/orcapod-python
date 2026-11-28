@@ -177,6 +177,56 @@ def test_context_parameter_distinguishes_job_branches(
     ]
 
 
+@pytest.mark.parametrize("async_path", [False, True], ids=["sync", "async"])
+@pytest.mark.parametrize("tap_only", [False, True], ids=["function", "tap"])
+def test_same_name_completion_logs_for_distinct_schemas(
+    tmp_path: Path, async_path: bool, tap_only: bool
+) -> None:
+    """Same-name nodes deliver once each, including after reopening their store."""
+    from orcapod import PipelineJob, function_pod
+    from orcapod.databases import DeltaTableDatabase
+    from orcapod.side_effects import SideEffectPod
+    from orcapod.sources import DictSource
+
+    delivered: list[int] = []
+
+    @function_pod(output_keys="result", ctx_arg="ctx")
+    def contextual(value: int, ctx: InvocationContext) -> int:
+        delivered.append(value)
+        return value
+
+    def observe(value: int, ctx: InvocationContext) -> None:
+        delivered.append(value)
+
+    pod = SideEffectPod(observe) if tap_only else contextual.pod
+    sources = (
+        DictSource(
+            [{"id": 1, "value": 1}],
+            tag_columns=["id"],
+            tag_only_columns=True,
+            source_id="first",
+        ),
+        DictSource(
+            [{"id": 2, "group": "second", "value": 2}],
+            tag_columns=["id", "group"],
+            tag_only_columns=True,
+            source_id="second",
+        ),
+    )
+    root = tmp_path / "store"
+    layout = TRACKING_DB_SCHEMA_VERSION if tap_only else PIPELINE_DB_SCHEMA_VERSION
+
+    for _ in range(2):
+        with PipelineJob(name="sibling_logs", database=DeltaTableDatabase(root)) as job:
+            for label, source in zip(("first_step", "second_step"), sources):
+                pod.process(source, label=label)
+        summary = asyncio.run(job.run_async()) if async_path else job.run()
+        assert summary.ok
+        paths = DeltaTableDatabase(root).list_table_paths()
+        assert sum(path[-1] == layout for path in paths) == 2
+        assert sorted(delivered) == [1, 2]
+
+
 def test_context_parameter_name_enters_pipeline_identity() -> None:
     """Renaming the context parameter changes both hashes with the same pod URI."""
     from orcapod import function_pod

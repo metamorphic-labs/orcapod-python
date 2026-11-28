@@ -12,7 +12,7 @@ import asyncio
 import dataclasses
 import datetime
 import logging
-from collections.abc import Callable, Collection, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterator, Sequence, Set
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import pyarrow as pa
@@ -1084,6 +1084,7 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         )
         self._pipeline_database: ArrowDatabaseProtocol | None = None
         self._table_path: tuple[str, ...] | None = None
+        self._job_completion_paths: Set[tuple[str, ...]] = frozenset()
         self._unlisted_store_reported = False
         self._current_log_checked = False
         # The rows the last completed run passed on, in the order it passed them;
@@ -1112,14 +1113,19 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         self._run_load_only = False
         self._set_modified_time(None)
 
+    @property
+    def completion_log_path(self) -> tuple[str, ...] | None:
+        """The attached invocation log path, including logs that only audit delivery."""
+        return self._table_path
+
     def _refuse_log_of_another_data_context(self) -> None:
         """Refuse invocation logs holding deliveries this run cannot match.
 
         A delivery already made is found by a record id hashed under this node's
         data context, so deliveries logged under another one would not be found and
         every side effect would be delivered again (ITL-944). The search looks under
-        the pod's name for older layouts and, when tracking completions, logs at a
-        different path under the current layout (ITL-954, ITL-1559). Checked at the
+        the pod's name for older layouts and, when tracking completions, logs outside
+        the current job's completion paths (ITL-954, ITL-1559). Checked at the
         start of every run, so a log that appears between runs is found too.
         The current log is read and counted by data context the first time only;
         the later runs list the database, which reads no table.
@@ -1139,6 +1145,7 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
             completion_path=self._table_path
             if self._pod.pod_config.track_completion
             else None,
+            job_completion_paths=self._job_completion_paths,
         )
         if found.unlisted:
             # The check runs before every run; that the database cannot list its tables
@@ -1180,6 +1187,8 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
     def attach_databases(
         self,
         pipeline_database: ArrowDatabaseProtocol | None = None,
+        *,
+        job_completion_paths: Set[tuple[str, ...]] = frozenset(),
     ) -> None:
         """Attach or detach the pipeline database.
 
@@ -1190,12 +1199,15 @@ class SideEffectJobNode(RunHoldingNode, SideEffectNode):
         Args:
             pipeline_database: Pre-scoped pipeline DB (at pipeline root),
                 or ``None`` to detach.
+            job_completion_paths: Current completion log paths in the job's
+                pipeline database.
         """
         if pipeline_database is not None:
             # A database that cannot store the invocation log refuses it now,
             # before anything is delivered or changes (ITL-1162).
             self.require_storable_tables(pipeline_database)
         self._pipeline_database = pipeline_database
+        self._job_completion_paths = job_completion_paths
         self._unlisted_store_reported = False
         self._current_log_checked = False
         if pipeline_database is not None:
