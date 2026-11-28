@@ -191,6 +191,34 @@ print(rates.keys())
     ).select(unit_keys + ["rate_hz"])
     ```
 
+## List columns
+
+A dataframe list column can supply a `list[int]` parameter even when some of its
+items are null. A missing item is passed to the function as `None`. This is
+separate from the nullability of the whole column and from the return annotation.
+
+```python
+from orcapod.sources import DataFrameSource
+
+
+@function_pod(output_keys="total")
+def total_present(counts: list[int]) -> int:
+    return sum(count for count in counts if count is not None)
+
+
+list_frame = pl_units.head(1).select(
+    "unit", pl.concat_list("n_spikes", pl.lit(None, dtype=pl.Int64)).alias("counts")
+)
+for frame in (list_frame, pd.DataFrame(list_frame.to_dicts())):
+    source = DataFrameSource(frame, tag_columns=["unit"], tag_only_columns=True)
+    print(source.output_schema()[1]["counts"] == list[int])
+    print(total_present.pod(source).as_table()["total"].to_pylist() == pl_units["n_spikes"].head(1).to_list())
+# True
+# True
+# True
+# True
+```
+
 ## Group
 
 `group_by` keeps the named tags and gathers each group's `rate_hz` values into a list

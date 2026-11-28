@@ -818,6 +818,7 @@ LABEL_DEFINITIONS = {
     "polars_series_v1": "hashing/semantic_hashing/builtin_handlers.py",
     "group_v1": "core/operators/group_by.py",
     "batch_v1": "core/operators/batch.py",
+    "spiral_table_name_v1": "databases/store_table_names.py",
 }
 
 

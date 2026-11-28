@@ -1084,6 +1084,17 @@ class SourceNodeBase(TraceableBase, ABC):
                 elif _is_narrower(declared[name], given[name]):
                     narrower.add(name)
                 else:
+                    if compare_arrow:
+                        issue = self._arrow_type_issue(
+                            role,
+                            name,
+                            slot_arrow[role],
+                            source_arrow[role],
+                            nested_only=True,
+                        )
+                        if issue is not None:
+                            issues.append(issue)
+                            continue
                     issues.append(
                         f"{role} column {name!r} is declared "
                         f"{_type_text(declared[name])} but the source has "
@@ -1146,6 +1157,8 @@ class SourceNodeBase(TraceableBase, ABC):
         name: str,
         slot_schema: "pa.Schema",
         source_schema: "pa.Schema",
+        *,
+        nested_only: bool = False,
     ) -> str | None:
         """Compare one column's Arrow type in the slot and in *source* (ITL-640).
 
@@ -1161,6 +1174,8 @@ class SourceNodeBase(TraceableBase, ABC):
             name: The column name.
             slot_schema: The slot's Arrow schema of that role.
             source_schema: The source's Arrow schema of that role.
+            nested_only: Diagnose a nested flag mismatch only. A caller that
+                already has a Python type error uses this mode.
 
         Returns:
             The issue text, or ``None`` when the types agree.
@@ -1172,15 +1187,28 @@ class SourceNodeBase(TraceableBase, ABC):
         if declared.nullable and not given.nullable:
             given = given.with_nullable(True)
         hasher = self.data_context.arrow_hasher
-        if hasher.hash_schema(pa.schema([declared])) == hasher.hash_schema(
-            pa.schema([given])
-        ):
+        if not nested_only and hasher.hash_schema(
+            pa.schema([declared])
+        ) == hasher.hash_schema(pa.schema([given])):
             return None
         issue = (
             f"{role} column {name!r} has the Arrow type {_arrow_field_text(declared)} "
             f"in the slot but {_arrow_field_text(source_schema.field(name))} in the "
             "source"
         )
+        if declared.nullable == given.nullable:
+            paths = arrow_utils.nested_nullability_differences(
+                declared.type, given.type
+            )
+            if paths:
+                fields = ", ".join(repr(f"{name}.{path}") for path in paths)
+                return (
+                    f"{issue}. The Arrow types differ in the nullability of nested "
+                    f"field {fields}. Declare the same nested flags on the slot and "
+                    "source or drop the explicit non-null declaration."
+                )
+        if nested_only:
+            return None
         if self._given_arrow_schemas is None:
             python_type = (self._tag_schema if role == "tag" else self._data_schema)[
                 name
