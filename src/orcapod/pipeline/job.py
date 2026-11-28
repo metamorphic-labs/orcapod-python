@@ -49,6 +49,7 @@ from orcapod.pipeline.run_summary import (
 from orcapod.pipeline.source_consistency import (
     invocation_source_uses,
     require_consistent_sources,
+    require_slot_free_binding,
 )
 from orcapod.protocols import core_protocols as cp
 from orcapod.databases.utils import as_table_committing
@@ -554,8 +555,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 hash, or sources with one ID differ in schema or key columns
                 (ITL-1506). The job is left as it was.
             SourceSpecMismatchError: If any source's columns differ from its slot's
-                declared names, roles or types, or the bindings would create a cycle
-                of bound slots.
+                declared names, roles or types, or the source depends on a bindable
+                source slot (ITL-1559).
             ValueError: If a source key has no matching ``SourceJobNode`` slot, or an
                 operator node that caches (``LOG`` or ``REPLAY``) would read a
                 restricted source, one this bind binds or one already bound
@@ -639,9 +640,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         self, rebinding: Rebinding
     ) -> list[tuple[SourceJobNode, cp.StreamProtocol | None, _DeclaredForm | None]]:
         """Validate the prospective job and prepare each changed slot's row form."""
-        replacements = {id(slot): source for slot, source in rebinding}
         for slot, source in rebinding:
-            slot._require_acyclic_binding(source, replacements)  # pyright: ignore[reportPrivateUsage]  # validate the proposed slot chain before committing it
+            require_slot_free_binding(slot.name, source)
         nodes = self._persistent_node_map.values()
         require_consistent_sources(
             ((f"node {node.label!r}", node) for node in nodes), rebinding
@@ -1885,6 +1885,8 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
             InconsistentSourceError: If distinct reconstructed source objects
                 share a content hash, or sources with one ID differ in schema
                 or key columns (ITL-1506).
+            SourceSpecMismatchError: If a reconstructed source depends on a bindable
+                source slot (ITL-1559).
             ValueError: If the file's format version is not the one this Orcapod
                 writes (an earlier format is refused, never migrated), or if it was
                 saved before the database key was renamed (``bindings.store``
@@ -1992,6 +1994,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                 check_saved_source_config(src_config)
             except ValueError as exc:
                 raise ValueError(f"{path}: source {spec_name!r}: {exc}") from exc
+            failure: Exception | None = None
             try:
                 # Slots written with the same complete config share one rebuild.
                 config_key = _json.dumps(src_config, sort_keys=True)
@@ -2000,13 +2003,23 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                         src_config
                     )
                 source = sources_by_config[config_key]
-                if source is not None:
-                    # A rebuilt source its slot refuses (a file whose column types
-                    # changed) is one that could not be rebuilt (ITL-1112).
+            except Exception as exc:
+                failure = exc
+            else:
+                if source is None:
+                    continue
+                require_slot_free_binding(spec_name, source)
+                try:
+                    # A rebuilt source whose column types changed is treated as
+                    # one that could not be rebuilt (ITL-1112).
                     if spec_name in slots:
                         slots[spec_name].validate(source)
+                except Exception as exc:
+                    failure = exc
+                else:
                     sources[spec_name] = source
-            except NotImplementedError:
+
+            if isinstance(failure, NotImplementedError):
                 # In-memory sources (DictSource, ListSource, ArrowTableSource,
                 # DataFrameSource) are not saved with the job, by design.
                 logger.info(
@@ -2019,12 +2032,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     spec_name,
                     spec_name,
                 )
-            except Warning:
+            elif isinstance(failure, Warning):
                 # A warning turned into an error (a ProvisionalHashWarning under an
                 # error filter) is the caller's request: it propagates, never read as a
                 # source that could not be rebuilt (ITL-1331).
-                raise
-            except Exception as exc:
+                raise failure
+            elif failure is not None:
                 logger.warning(
                     "Could not reconstruct source %r (%s) from its saved config: %s. "
                     "Stored function-node results are still readable from the database. "
@@ -2033,7 +2046,7 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
                     spec_name,
                     saved_source_kind(src_config),
                     # Its type, never its text (ITL-1391).
-                    type(exc).__name__,
+                    type(failure).__name__,
                     spec_name,
                     spec_name,
                 )

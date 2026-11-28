@@ -6,7 +6,7 @@ from collections import Counter
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, cast
 
-from orcapod.errors import InconsistentSourceError
+from orcapod.errors import InconsistentSourceError, SourceSpecMismatchError
 from orcapod.utils.schema_utils import arrow_schema_identity
 
 if TYPE_CHECKING:
@@ -19,6 +19,28 @@ if TYPE_CHECKING:
     from orcapod.types import ContentHash
 
 SourceUse = tuple[str, "StreamProtocol"]
+
+
+def require_slot_free_binding(name: str, source: StreamProtocol | None) -> None:
+    """Report a proposed binding that reads a bindable job slot."""
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.pipeline.restrictions import streams_beneath
+
+    # TODO(ITL-1559): live slot references can create cycles or retain an old
+    # slot after recompilation. Stored-result sources end the live-input walk.
+    pending = [] if source is None else [source]
+    visited: set[int] = set()
+    while pending:
+        stream = pending.pop()
+        if id(stream) in visited:
+            continue
+        visited.add(id(stream))
+        if isinstance(stream, SourceJobNode):
+            raise SourceSpecMismatchError(
+                f"Binding source slot {name!r} to a source that depends on source "
+                f"slot {stream.name!r} is not supported yet (ITL-1559)."
+            )
+        pending.extend(streams_beneath(stream))
 
 
 def invocation_source_uses(invocations: Iterable[PodInvocation]) -> Iterable[SourceUse]:

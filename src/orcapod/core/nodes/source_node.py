@@ -1584,8 +1584,8 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         data_context: Optional data context override.
 
     Raises:
-        SourceSpecMismatchError: If *bound_source* does not fit the slot or would
-            create a cycle of bound slots.
+        SourceSpecMismatchError: If *bound_source* does not fit the slot or depends
+            on a bindable source slot (ITL-1559).
         ValueError: If both *tag_schema* and *data_schema* are omitted and
             *bound_source* is ``None``.
     """
@@ -1599,6 +1599,9 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         data_context: str | contexts.DataContext | None = None,
         arrow_schemas: "tuple[pa.Schema, pa.Schema] | None" = None,
     ) -> None:
+        from orcapod.pipeline.source_consistency import require_slot_free_binding
+
+        require_slot_free_binding(name, bound_source)
         if tag_schema is None or data_schema is None:
             if bound_source is None:
                 raise ValueError(
@@ -1694,10 +1697,13 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         Raises:
             InconsistentSourceError: If the replacement introduces conflicting sources.
             SourceSpecMismatchError: If *value* does not fit the declared schema or
-                would create a cycle of bound slots.
+                depends on a bindable source slot (ITL-1559).
         """
+        from orcapod.pipeline.source_consistency import require_slot_free_binding
+
         owner = self._binding_owner() if self._binding_owner is not None else None
         if owner is None:
+            require_slot_free_binding(self.name, value)
             self._bind(value)
             self._update_modified_time()
         else:
@@ -1711,39 +1717,20 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         """The concrete stream bound to this slot, or ``None``."""
         return self._bound_source
 
-    def _require_acyclic_binding(
-        self,
-        source: StreamProtocol | None,
-        replacements: Mapping[int, StreamProtocol | None] | None = None,
-    ) -> None:
-        """Reject a cycle through bound slots, accounting for pending replacements."""
-        seen = {id(self)}
-        while isinstance(source, SourceJobNode):
-            slot_id = id(source)
-            if slot_id in seen:
-                raise SourceSpecMismatchError(
-                    f"Cannot bind source slot {self.name!r}: the binding creates a slot cycle."
-                )
-            seen.add(slot_id)
-            bound = source.bound_source
-            source = bound if replacements is None else replacements.get(slot_id, bound)
-
     def _bind(self, value: StreamProtocol | None) -> None:
-        """Check and install a binding without a job-wide transaction.
+        """Check and install a binding once its independence from slots is checked.
 
         The binding the setter and ``__init__`` share. Only the setter stamps the slot
         as modified (ITL-1095): a node built with its source is not a rebinding.
 
         Raises:
             InconsistentSourceError: If the bound stream reads conflicting sources.
-            SourceSpecMismatchError: If *value* does not fit the declared schema or
-                would create a cycle of bound slots.
+            SourceSpecMismatchError: If *value* does not fit the declared schema.
         """
         from orcapod.pipeline.source_consistency import require_consistent_sources
 
         form = None
         if value is not None:
-            self._require_acyclic_binding(value)
             require_consistent_sources([(f"slot {self.name!r}", value)])
             form = self._declared_form_for(value)
         self._apply_binding(value, form)
@@ -2259,8 +2246,7 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
             bound_source: The source rebuilt from the saved config, if any.
 
         Raises:
-            SourceSpecMismatchError: If *bound_source* does not fit the slot or would
-                create a cycle of bound slots.
+            SourceSpecMismatchError: If *bound_source* does not fit the slot.
         """
         node = cls(
             name=slot.name,

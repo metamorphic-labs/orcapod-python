@@ -612,13 +612,13 @@ class UnboundSourceError(RuntimeError):
 
 
 class SourceSpecMismatchError(InputValidationError, ValueError):
-    """Raised when a source does not fit its slot or its binding would create a cycle.
+    """Raised when a source does not fit its slot or depends on a bindable slot.
 
     A source fits a slot when its tag and data columns have the slot's names, roles and
     Python types (ITL-1112): those are what every downstream pipeline hash, and so every
     stored path, is built from. The message names the slot and the column, and for a type
-    difference both types. If a binding would create a cycle through bound slots, the
-    message names the target slot. Raised before the binding is installed.
+    difference both types. For a slot-dependent source, the message names both slots
+    (ITL-1559). Raised before the binding is installed.
     """
 
 

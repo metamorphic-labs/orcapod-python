@@ -474,8 +474,14 @@ class DerivedSource(RootSource):
 
     @property
     def live_source_inputs(self) -> tuple[StreamProtocol, ...] | None:
-        """Tag copies over a source read it live. Job nodes give stored results."""
-        return (self._origin,) if isinstance(self._origin, RootSource) else None
+        """Expose live origins while treating stored-result job nodes as leaves."""
+        from orcapod.core.nodes.source_node import SourceJobNode
+
+        return (
+            (self._origin,)
+            if isinstance(self._origin, (RootSource, SourceJobNode))
+            else None
+        )
 
     def _origin_records(self) -> "pa.Table | None":
         """Return the origin's rows, or ``None`` when a job node has none stored.

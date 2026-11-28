@@ -104,6 +104,11 @@ The ITL-1559 stopgap also refuses a prebuilt stream over the receiving job's
 own slot. Pass that slot directly into a step inside the job, or pass the
 source itself.
 
+Binding a source slot to a source or stream that depends on any bindable slot
+raises `SourceSpecMismatchError` (ITL-1559). Pass the underlying source or
+use `node.as_source()` to read stored results. If a batch contains a refused
+binding, every existing binding stays in place.
+
 The capture and restriction checks follow wrappers that can read live inputs.
 This includes tag-copy `DerivedSource` over a live source. A `DerivedSource`
 over a job node reads stored results, so the checks stop there. Source object

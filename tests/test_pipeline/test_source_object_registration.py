@@ -12,7 +12,7 @@ from orcapod import Pipeline, PipelineJob, function_pod, side_effect_pod
 from orcapod.databases import InMemoryArrowDatabase
 from orcapod.errors import InconsistentSourceError, SourceSpecMismatchError
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
-from orcapod.protocols.core_protocols import StreamProtocol
+from orcapod.protocols.core_protocols import SourceProtocol, StreamProtocol
 from orcapod.side_effects import SideEffectPod
 from orcapod.sources import CSVSource, DictSource
 
@@ -367,7 +367,10 @@ def test_job_binding_refuses_slot_cycles_atomically(
     previous_modified = slot_a.last_modified, slot_b.last_modified
     original_database = job.database
 
-    with pytest.raises(SourceSpecMismatchError, match=r"slot 'a'.*cycle"):
+    dependency = "a" if setter else "b"
+    with pytest.raises(
+        SourceSpecMismatchError, match=rf"slot 'a'.*slot '{dependency}'.*ITL-1559"
+    ):
         if setter:
             slot_a.bound_source = slot_a
         else:
@@ -382,6 +385,123 @@ def test_job_binding_refuses_slot_cycles_atomically(
     assert job.sources["b"] is original_b
     assert (slot_a.last_modified, slot_b.last_modified) == previous_modified
     assert job.database is original_database
+
+
+@pytest.mark.parametrize("path", ["standalone_setter", "owned_setter", "batch_bind"])
+def test_binding_refuses_projection_over_the_receiving_slot(
+    tmp_path: Path, path: str
+) -> None:
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.operators import SelectDataColumns
+
+    job = _job(tmp_path)
+    original = job.sources["a"]
+    slot = (
+        SourceJobNode("a", bound_source=original)
+        if path == "standalone_setter"
+        else cast(SourceJobNode, job.nodes["a"])
+    )
+    view = SelectDataColumns(["x", "y"])(slot)
+    before = job.sources
+
+    with pytest.raises(
+        SourceSpecMismatchError,
+        match=r"slot 'a'.*slot 'a'.*not supported yet.*ITL-1559",
+    ):
+        if path == "batch_bind":
+            job.bind(sources={"b": _shifted_source("replacement", 10), "a": view})
+        else:
+            slot.bound_source = view
+
+    assert slot.bound_source is original
+    assert job.sources == before
+    assert slot.run().table.to_pylist() == ROWS
+    assert job.nodes["b"].bound_source is before["b"]
+
+
+@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
+@pytest.mark.parametrize("kind", ["direct", "projection", "join", "cached", "derived"])
+def test_bind_refuses_other_slots_atomically_and_recompile_preserves_rows(
+    tmp_path: Path, kind: str, orchestrator: Orchestrator
+) -> None:
+    from orcapod.operators import Join, SelectDataColumns
+    from orcapod.core.nodes.function_node import FunctionJobNode
+    from orcapod.sources import CachedSource, DerivedSource
+
+    job = _job(tmp_path, ("a", "b", "c"))
+    slot_b, slot_c = job.nodes["b"], job.nodes["c"]
+    candidate: StreamProtocol = slot_b
+    if kind == "projection":
+        candidate = SelectDataColumns(["x", "y"])(slot_b)
+    elif kind == "join":
+        candidate = Join()(
+            SelectDataColumns(["x"])(slot_b), SelectDataColumns(["y"])(slot_c)
+        )
+    elif kind == "cached":
+        candidate = CachedSource(
+            cast(SourceProtocol, slot_b), cache_database=InMemoryArrowDatabase()
+        )
+    elif kind == "derived":
+        candidate = DerivedSource(
+            cast(FunctionJobNode, slot_b),
+            source_id="from_slot",
+            tags_as_data={"t1": "t"},
+        )
+
+    before = job.sources
+    with pytest.raises(
+        SourceSpecMismatchError,
+        match=r"slot 'a'.*slot '[bc]'.*not supported yet.*ITL-1559",
+    ):
+        job.bind(sources={"c": _shifted_source("replacement", 10), "a": candidate})
+
+    for name, source in before.items():
+        assert job.sources[name] is job.nodes[name].bound_source is source
+        assert job.nodes[name].as_table().to_pylist() == ROWS
+    job.compile()
+    assert all(
+        job.nodes[name].bound_source is source for name, source in before.items()
+    )
+    job.run(orchestrator=orchestrator())
+    assert sorted(job.nodes["result_a"].as_table()["out"].to_pylist()) == [3, 7]
+    assert sorted(job.nodes["result_b"].as_table()["out"].to_pylist()) == [-1, -1]
+    assert sorted(job.nodes["result_c"].as_table()["out"].to_pylist()) == [2, 12]
+
+
+@pytest.mark.parametrize("bound", [False, True])
+@pytest.mark.parametrize("path", ["constructor", "from_pipeline", "load"])
+def test_initial_bind_refuses_a_foreign_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bound: bool, path: str
+) -> None:
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.pipeline import serialization
+
+    other = _job(tmp_path)
+    foreign = cast(SourceJobNode, other.nodes["b"])
+    if not bound:
+        foreign.bound_source = None
+    old_binding = foreign.bound_source
+    job = _job(tmp_path)
+    match = r"slot 'a'.*slot 'b'.*not supported yet.*ITL-1559"
+
+    if path == "constructor":
+        with pytest.raises(SourceSpecMismatchError, match=match):
+            SourceJobNode("a", bound_source=foreign)
+    elif path == "from_pipeline":
+        pipeline = job.as_pipeline()
+        with pytest.raises(SourceSpecMismatchError, match=match):
+            PipelineJob.from_pipeline(pipeline, sources={"a": foreign})
+    else:
+        job_path = tmp_path / "job.json"
+        job.save(job_path)
+        monkeypatch.setattr(
+            serialization, "resolve_source_from_config", lambda _config: foreign
+        )
+        with pytest.raises(SourceSpecMismatchError, match=match):
+            PipelineJob.load(job_path)
+
+    assert foreign.bound_source is old_binding
+    assert job.nodes["a"].as_table().to_pylist() == ROWS
 
 
 @pytest.mark.parametrize("binding", ["constructor", "from_stream", "setter"])
@@ -491,15 +611,18 @@ def test_compile_refuses_schema_conflict_introduced_through_live_slot() -> None:
 
 
 @pytest.mark.filterwarnings("ignore::orcapod.errors.SemiJoinIgnoredColumnWarning")
-def test_source_slot_run_checks_roots_changed_after_binding(tmp_path: Path) -> None:
+def test_source_slot_run_checks_roots_changed_after_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from orcapod.core.nodes.source_node import SourceJobNode
     from orcapod.operators import SemiJoin
 
     first, conflict = _pair(tmp_path, "different", False)
-    right = SourceJobNode.from_stream(_source(tmp_path, "dict", "other"))
+    right = _source(tmp_path, "dict", "other")
     composite = SemiJoin()(first, right, label="matched")
     slot = SourceJobNode.from_stream(composite, name="standalone")
-    right.bound_source = conflict
+    # Simulate a rewired composite; its original binding uses only plain sources.
+    monkeypatch.setattr(composite, "_upstreams", (first, conflict))
     with pytest.raises(InconsistentSourceError, match="distinct source objects"):
         slot.run()
 
@@ -1071,11 +1194,13 @@ def test_capture_accepts_own_slots_and_another_jobs_stored_results(
     def scale(out: int) -> int:
         return out * 10
 
+    stored_source = upstream.before.as_source()
     with PipelineJob(database=InMemoryArrowDatabase()) as receiver:
         with pytest.raises(InconsistentSourceError, match="not supported yet"):
             scale.pod(upstream.before, label="borrowed")
-        scale.pod(upstream.before.as_source(), label="stored")
+        scale.pod(stored_source, label="stored")
     assert "borrowed" not in receiver.nodes
+    receiver.bind(sources={stored_source.source_name: stored_source})
     receiver.run(orchestrator=orchestrator())
     assert sorted(receiver.stored.as_table()["scaled"].to_pylist()) == [30, 70]
 

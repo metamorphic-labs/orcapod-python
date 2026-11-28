@@ -8,6 +8,7 @@ import pytest
 
 from orcapod.core.nodes.source_node import SourceJobNode
 from orcapod.errors import SourceSpecMismatchError, UnboundSourceError
+from orcapod.protocols.core_protocols import StreamProtocol
 from orcapod.types import ColumnConfig, Schema
 
 
@@ -253,12 +254,13 @@ class TestSourceJobNode:
         assert job_node.bound_source is src
 
     @pytest.mark.parametrize(
-        "length", [1, 2, 3], ids=["direct", "two_slots", "three_slots"]
+        "length", [1, 2, 3], ids=["direct", "one_projection", "two_projections"]
     )
     def test_slot_binding_refuses_cycles(
         self, tag_schema: Schema, data_schema: Schema, length: int
     ) -> None:
         from orcapod.core.sources.dict_source import DictSource
+        from orcapod.operators import SelectDataColumns
 
         source = DictSource(
             data=[{"id": 1, "value": 1.0}], tag_columns=["id"], tag_only_columns=True
@@ -269,33 +271,37 @@ class TestSourceJobNode:
             data_schema=data_schema,
             bound_source=source,
         )
-        upstream = target
-        for index in range(length - 1):
-            upstream = SourceJobNode(name=f"upstream_{index}", bound_source=upstream)
-        previous_modified = target.last_modified, upstream.last_modified
+        upstream: StreamProtocol = target
+        for _ in range(length - 1):
+            upstream = SelectDataColumns(["value"])(upstream)
+        previous_modified = target.last_modified
 
-        with pytest.raises(SourceSpecMismatchError, match=r"slot 'target'.*cycle"):
+        with pytest.raises(
+            SourceSpecMismatchError, match=r"slot 'target'.*slot 'target'.*ITL-1559"
+        ):
             target.bound_source = upstream
 
         assert target.bound_source is source
-        assert (target.last_modified, upstream.last_modified) == previous_modified
+        assert target.last_modified == previous_modified
+        assert target.as_table().equals(source.as_table())
 
-    def test_slot_binding_accepts_acyclic_chain(
-        self, tag_schema: Schema, data_schema: Schema
+    @pytest.mark.parametrize("cached", [False, True])
+    def test_slot_binding_accepts_slot_free_source_and_unbinding(
+        self, tag_schema: Schema, data_schema: Schema, cached: bool
     ) -> None:
         from orcapod.core.sources.dict_source import DictSource
+        from orcapod.databases import InMemoryArrowDatabase
 
         source = DictSource(
             data=[{"id": 1, "value": 1.0}], tag_columns=["id"], tag_only_columns=True
         )
-        leaf = SourceJobNode(name="slot", bound_source=source)
-        middle = SourceJobNode(name="slot", bound_source=leaf)
+        binding = source.cached(InMemoryArrowDatabase()) if cached else source
         target = SourceJobNode(
             name="slot", tag_schema=tag_schema, data_schema=data_schema
         )
-        target.bound_source = middle
+        target.bound_source = binding
 
-        assert target.bound_source is middle
+        assert target.bound_source is binding
         assert target.as_table().equals(source.as_table())
         target.bound_source = None
         assert target.bound_source is None
