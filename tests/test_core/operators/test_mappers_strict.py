@@ -491,9 +491,8 @@ def test_the_stream_methods_refuse_a_system_column_name(
         getattr(_source(), method)({old_name: new_name})
 
 
-@pytest.mark.parametrize("new_name", ["_age", "_content_hash"])
-def test_other_underscore_names_stay_usable_as_new_names(new_name: str) -> None:
-    """Only names a stream reads as system columns are refused (see ITL-1160)."""
+@pytest.mark.parametrize("new_name", ["age_", "content_hash"])
+def test_underscores_after_the_first_character_are_allowed(new_name: str) -> None:
     source = _source()
     for stream, async_op in (
         (source.map_data({"age": new_name}), MapData({"age": new_name})),

@@ -323,6 +323,15 @@ shortcut) to control which column groups are included.
 | `content_hash` | Content hash column | `_content_hash` |
 | `sort_by_tags` | Sort rows by tag columns | (ordering only) |
 
+Every column name beginning with `_` is reserved for Orcapod. Use another name for
+user tags, data columns, operator outputs and function pod output keys. Underscores
+after the first character are allowed.
+
+When reading a table back as a source, drop its system columns first. If you still
+have the original stream, `stream.as_table()` gives you its user-facing columns.
+The source's `system_tag_columns` option still lets you nominate input columns as
+custom system tags under its existing validation rules.
+
 Pass config as a dict or a `ColumnConfig` object:
 
 ```python

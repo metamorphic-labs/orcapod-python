@@ -825,6 +825,7 @@ class PythonDataFunction(DataFunctionBase[PythonFunctionExecutorProtocol]):
             output_keys = [output_keys]
         # A copy taken once: a later change to the caller's list changes nothing.
         output_keys = tuple(output_keys)
+        schema_utils.require_names_not_system(output_keys)
         self._output_keys = output_keys
         if function_name is None:
             if hasattr(self._function, "__name__"):

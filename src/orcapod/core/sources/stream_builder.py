@@ -1,7 +1,7 @@
 """Compositional builder for enriching raw Arrow tables into source streams.
 
 Extracts the enrichment pipeline that was previously embedded in
-``ArrowTableSource.__init__``: dropping system columns, validating tags,
+``ArrowTableSource.__init__``: validating input columns and tags,
 computing schema/table hashes, adding source-info provenance, adding system
 tag columns, and wrapping the result in an ``ArrowTableStream``.
 """
@@ -61,6 +61,27 @@ def require_supported_nullable_types(schema: pa.Schema) -> None:
             f"Source column(s) {names} contain Arrow type null. "
             "Please declare a supported nullable type."
         )
+
+
+def require_source_column_names(
+    names: Collection[str], system_tag_columns: Collection[str] = ()
+) -> None:
+    """Refuse raw source columns in the system namespace.
+
+    Args:
+        names: Raw input column names.
+        system_tag_columns: Columns explicitly nominated as system tags. These
+            follow the builder's existing custom system-tag validation.
+
+    Raises:
+        InputValidationError: If a raw column uses a reserved name.
+    """
+    try:
+        schema_utils.require_names_not_system(set(names) - set(system_tag_columns))
+    except InputValidationError as exc:
+        raise InputValidationError(
+            f"{exc} To build the source, rename the reserved columns or drop them first."
+        ) from exc
 
 
 def require_custom_system_tags(
@@ -516,9 +537,9 @@ class SourceStreamBuilder:
                 ``kind_part`` is not given or is not ``<kind>_v<N>``, or if the
                 source id it builds is not valid, or if ``hash_in_key_order`` is given with
                 a ``source_name`` or without key columns.
-            InputValidationError: If a column's type is, or contains, a
-                dictionary: dictionary-encoded columns are not currently supported
-                (ITL-1264, ITL-1277).
+            InputValidationError: If a raw column has a reserved name, or its
+                type is, or contains, a dictionary. Dictionary-encoded columns
+                are not currently supported (ITL-1264, ITL-1277).
         """
         # Whole-argument checks first, before the table is read.
         key_columns = normalize_record_id_columns(record_id_columns) or ()
@@ -539,10 +560,6 @@ class SourceStreamBuilder:
         # Tag-only columns: the tags that are not also data.
         tag_only_tuple = tuple(c for c in tag_columns_tuple if c not in data_tags_tuple)
 
-        # A tag never has a meta column's name; the meta columns are dropped next,
-        # so say so here rather than report the tag as missing (ITL-1080).
-        schema_utils.require_names_not_meta(tag_columns_tuple)
-
         # Dictionary-encoded columns are not currently supported (ITL-1264,
         # ITL-1277). The stream refuses them too; checking first reports the
         # dictionary, not a key column error, and before anything is hashed. It runs
@@ -560,7 +577,9 @@ class SourceStreamBuilder:
                 found, tag_columns_tuple, data_tags_tuple, system_tag_columns_tuple
             )
 
-        # 1. Drop system columns from raw input.
+        # 1. Refuse reserved names before any system columns could be dropped.
+        require_source_column_names(table.column_names, system_tag_columns_tuple)
+        schema_utils.require_names_not_meta(tag_columns_tuple)
         table = arrow_utils.drop_system_columns(table)
         require_custom_system_tags(table, system_tag_columns_tuple)
 

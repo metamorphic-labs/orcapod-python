@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from re import escape
 from collections.abc import Collection
 from pathlib import Path
 from typing import Any, TypedDict
@@ -58,7 +59,7 @@ class _SourceOptions(TypedDict):
     """Keyword arguments supported by the sources in the validation matrix."""
 
     tag_columns: Collection[str]
-    tag_only_columns: bool
+    tag_only_columns: bool | Collection[str]
     source_id: str
     system_tag_columns: Collection[str]
 
@@ -97,11 +98,13 @@ def _source(
     monkeypatch: pytest.MonkeyPatch,
     *,
     system_tag_columns: Collection[str] = (),
+    tag_columns: Collection[str] = TAGS,
+    tag_only_columns: bool | Collection[str] = True,
 ) -> StreamProtocol:
     """Build the named source over the same columns using its regular reader."""
     options: _SourceOptions = {
-        "tag_columns": TAGS,
-        "tag_only_columns": True,
+        "tag_columns": tag_columns,
+        "tag_only_columns": tag_only_columns,
         "source_id": "rows",
         "system_tag_columns": system_tag_columns,
     }
@@ -122,7 +125,7 @@ def _source(
         file = path / "rows.db"
         types = {pa.string(): "TEXT", pa.int64(): "INTEGER"}
         cols = ", ".join(
-            f"{f.name} {types[f.type]}" + ("" if f.nullable else " NOT NULL")
+            f'"{f.name}" {types[f.type]}' + ("" if f.nullable else " NOT NULL")
             for f in table.schema
         )
         with sqlite3.connect(file) as conn:
@@ -150,6 +153,108 @@ def _source(
         return PostgreSQLTableSource("postgresql://localhost/test", "rows", **options)
     assert kind == "db"
     return DBTableSource(connector, "rows", **options)
+
+
+@pytest.mark.parametrize("kind", SOURCE_KINDS)
+@pytest.mark.parametrize("role", ["data", "tag", "data-tag"])
+@pytest.mark.parametrize("first", [False, True])
+def test_raw_sources_refuse_all_reserved_columns(
+    kind: str, role: str, first: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    table = pa.table(
+        {
+            "g": ["a", "b"],
+            "k": [1, 2],
+            "x": [3, 4],
+            "y": [5, 6],
+            "_foo": ["a", "b"],
+            "_content_hash": ["c", "d"],
+        }
+    )
+    if first:
+        table = table.select(["_content_hash", "g", "_foo", "k", "y", "x"])
+    tags = TAGS if role == "data" else (*TAGS, "_foo")
+    with pytest.raises(InputValidationError, match="drop them first") as info:
+        _source(
+            kind,
+            table,
+            tmp_path,
+            monkeypatch,
+            tag_columns=tags,
+            tag_only_columns=TAGS if role == "data-tag" else True,
+        )
+    assert "'_foo'" in str(info.value)
+    assert "'_content_hash'" in str(info.value)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "_",
+        "_foo",
+        "_tag_y",
+        "_tag::y",
+        "_source_y",
+        "_content_hash",
+        "_context_key",
+        "__meta",
+    ],
+)
+def test_list_source_refuses_reserved_value_column(name: str) -> None:
+    with pytest.raises(InputValidationError, match=escape(repr(name))):
+        ListSource(name, [10, 20])
+
+
+def test_list_source_refuses_reserved_tags() -> None:
+    def tags(value: int, index: int) -> dict[str, int]:
+        return {"k": index, "g": value, "_foo": value, "_content_hash": index}
+
+    with pytest.raises(
+        InputValidationError, match="'_content_hash'.*'_foo'.*drop them first"
+    ):
+        ListSource("value", [10, 20], tag_function=tags)
+
+
+def test_rereading_an_orcapod_table_requires_dropping_system_columns() -> None:
+    source = DictSource(
+        [
+            {"g": "a", "k": 1, "x": 3, "y": 4},
+            {"g": "b", "k": 2, "x": 5, "y": 6},
+        ],
+        tag_columns=TAGS,
+        tag_only_columns=True,
+    )
+    raw = source.as_table(all_info=True)
+    system_columns = [name for name in raw.column_names if name.startswith("_")]
+    with pytest.raises(InputValidationError, match="drop them first") as info:
+        ArrowTableSource(raw, tag_columns=TAGS, tag_only_columns=True)
+    assert system_columns
+    assert all(repr(name) in str(info.value) for name in system_columns)
+    rebuilt = ArrowTableSource(
+        raw.drop(system_columns), tag_columns=TAGS, tag_only_columns=True
+    )
+    assert rebuilt.as_table().equals(source.as_table())
+
+
+def test_database_refuses_reserved_columns_before_reading_rows() -> None:
+    class SchemaOnlyConnector(_Connector):
+        def iter_batches(self, query, params=None, batch_size=1000):
+            pytest.fail("a reserved database column must prevent reading rows")
+
+    table = _table(pa.field("_foo", pa.string()), ["a", "b"])
+    with pytest.raises(InputValidationError, match="'_foo'.*drop them first"):
+        DBTableSource(
+            SchemaOnlyConnector(table), "rows", tag_columns=TAGS, source_id="rows"
+        )
+
+
+def test_source_accepts_underscores_after_the_first_character() -> None:
+    source = DictSource(
+        [{"foo_": "a", "a_b": 1, "tag_x": 2, "other": 3}],
+        tag_columns=["foo_", "a_b"],
+        tag_only_columns=True,
+    )
+    assert source.keys() == (("foo_", "a_b"), ("tag_x", "other"))
 
 
 def _table(field: pa.Field[Any], values: list[Any]) -> pa.Table:
@@ -234,7 +339,7 @@ def test_refuses_arrow_null_from_readers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    column = "unused" if kind == "spiral" else "__unused"
+    column = "unused"
     table = _table(pa.field(column, pa.null()), [None, None])
     with pytest.raises(
         InputValidationError, match=rf"{column!r}.*declare a supported nullable type"
@@ -330,6 +435,34 @@ class _Poll:
 
     async def close(self) -> None:
         """There is no connection to close."""
+
+
+@pytest.mark.parametrize("declare", [True, False], ids=["schema", "batch"])
+@pytest.mark.parametrize("as_tag", [True, False], ids=["tag", "data"])
+def test_polling_refuses_reserved_schema_and_batch_columns(
+    declare: bool, as_tag: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    table = _table(pa.field("_foo", pa.string()), ["a", "b"])
+    table = table.append_column("_source_x", pa.array(["p", "q"]))
+    batch = pl.from_arrow(table)
+    assert isinstance(batch, pl.DataFrame)
+    tags = (*TAGS, "_foo") if as_tag else TAGS
+    if declare:
+
+        async def unexpected_fetch(*args: Any, **kwargs: Any) -> None:
+            pytest.fail("a reserved declared column must prevent polling")
+
+        monkeypatch.setattr(_Poll, "fetch", unexpected_fetch)
+    with pytest.raises(InputValidationError, match="drop them first") as info:
+        source = PollingSource(
+            _Poll(table.schema if declare else None, batch),
+            tags,
+            source_id="poll",
+            record_id_columns="k",
+        )
+        source.check_for_new_data()
+    assert "'_foo'" in str(info.value)
+    assert "'_source_x'" in str(info.value)
 
 
 @pytest.mark.parametrize("values", [[], [[None], []]])

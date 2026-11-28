@@ -26,6 +26,7 @@ from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
 from orcapod.core.sources.source_ids import location_source_name
 from orcapod.core.sources.reload import keep_nullable_columns, same_rows
 from orcapod.core.sources.stream_builder import (
+    require_source_column_names,
     require_supported_nullable_types,
     normalize_record_id_columns,
     SourceStreamBuilder,
@@ -166,6 +167,7 @@ class DBTableSource(RootSource):
         # _query allows subclasses (e.g. SQLiteTableSource) to inject a custom
         # SELECT (e.g. SELECT rowid, * FROM "t") without duplicating the rest of init.
         self._query = _query if _query is not None else f'SELECT * FROM "{table_name}"'
+        self._system_tag_columns: Collection[str] = system_tag_columns
         table = self._read_table(connector)
         # The rows as read, columns and types included: a check compares a new read
         # with them, and refuses a table whose columns changed.
@@ -173,7 +175,6 @@ class DBTableSource(RootSource):
 
         # Step 4: Enrich via SourceStreamBuilder (same pipeline as all other RootSources)
         self._tag_columns: Collection[str] = resolved_tag_columns
-        self._system_tag_columns: Collection[str] = system_tag_columns
         # Every declared tag is a data-tag unless kept tag-only (ITL-1023); a
         # rebuild after a check (ITL-1102) applies the same choice.
         data_tags = source_data_tags(self._tag_columns, tag_only_columns)
@@ -224,13 +225,16 @@ class DBTableSource(RootSource):
         """
         if self._table_name not in connector.get_table_names():
             raise ValueError(f"Table {self._table_name!r} not found in database.")
+        col_infos = connector.get_column_info(self._table_name)
+        require_source_column_names(
+            [info.name for info in col_infos], self._system_tag_columns
+        )
         batches = list(connector.iter_batches(self._query))
         if not batches:
             raise ValueError(f"Table {self._table_name!r} is empty.")
         table: pa.Table = pa.Table.from_batches(batches)
         # Apply database-defined nullability: the connector's get_column_info
         # returns the authoritative nullable flag per column from the DB schema.
-        col_infos = connector.get_column_info(self._table_name)
         if col_infos:
             db_nullable = {ci.name: ci.nullable for ci in col_infos}
             db_schema = pa.schema(

@@ -28,6 +28,7 @@ from orcapod.logical_types.canonical_form import declaration_form_schema
 from orcapod.core.sources.stream_builder import (
     SourceStreamBuilder,
     normalize_record_id_columns,
+    require_source_column_names,
     require_supported_nullable_types,
 )
 from orcapod.core.streams.view import (
@@ -331,6 +332,7 @@ class PollingSource(RootSource, Generic[T]):
         unified_schema = self._impl.schema()
         if isinstance(unified_schema, pa.Schema):
             require_supported_nullable_types(unified_schema)
+            require_source_column_names(unified_schema.names)
             # Logical types in one form first: a field declared with its identifier
             # in ARROW:extension:* metadata is that logical type (ITL-640).
             self._declared_arrow = declaration_form_schema(
@@ -369,6 +371,7 @@ class PollingSource(RootSource, Generic[T]):
                     unified_schema, self.data_context.type_converter
                 )
                 require_supported_nullable_types(self._declared_arrow)
+                require_source_column_names(self._declared_arrow.names)
 
     # -------------------------------------------------------------------------
     # Schema helpers — fetch-free schema computation from declared schemas
@@ -899,9 +902,9 @@ class PollingSource(RootSource, Generic[T]):
             )
             df = df.with_columns([pl.from_arrow(c) for c in sub_table])
 
-        raw = df.to_arrow()
-        require_supported_nullable_types(raw.schema)
-        arrow_table = arrow_utils.drop_system_columns(raw)
+        arrow_table = df.to_arrow()
+        require_supported_nullable_types(arrow_table.schema)
+        require_source_column_names(arrow_table.column_names)
 
         # Establish canonical schema on first call; apply it on every call.
         if self._canonical_arrow_schema is None:

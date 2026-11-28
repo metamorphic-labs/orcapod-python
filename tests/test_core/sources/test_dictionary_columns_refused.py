@@ -297,7 +297,7 @@ def test_a_source_refuses_a_dictionary_in_hand_built_system_columns(
     own: tuple[str, ...], with_user_column: bool, own_first: bool
 ) -> None:
     """The builder checks before it drops system columns (CodeRabbit on PR 455): a
-    dictionary-free system column is still stripped, a dictionary one is refused."""
+    dictionary-encoded system column is refused with its role."""
     user: dict[str, pa.Array[Any]] = {
         "a": pa.array(["x", "y"]),
         "b": pa.array(["p", "q"]),
@@ -317,7 +317,7 @@ def test_a_source_refuses_a_dictionary_in_hand_built_system_columns(
     assert ("- data column 'v'" in message) == with_user_column
 
 
-def test_a_dictionary_free_system_column_is_still_stripped() -> None:
+def test_a_dictionary_free_system_column_is_also_refused() -> None:
     table = pa.table(
         {
             "a": ["x", "y"],
@@ -326,8 +326,10 @@ def test_a_dictionary_free_system_column_is_still_stripped() -> None:
             "v": [1, 2],
         }
     )
-    source = ArrowTableSource(table, tag_columns=["a"], tag_only_columns=True)
-    assert source.keys() == (("a",), ("v",))
+    with pytest.raises(
+        InputValidationError, match="'__note'.*'_source_v'.*drop them first"
+    ):
+        ArrowTableSource(table, tag_columns=["a"], tag_only_columns=True)
 
 
 def test_an_opaque_type_over_a_dictionary_is_refused() -> None:

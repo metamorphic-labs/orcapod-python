@@ -13,6 +13,7 @@ from orcapod.core.sources.stream_builder import SourceStreamBuilder
 from orcapod.core.sources.stream_builder import (
     normalize_record_id_columns,
     require_custom_system_tags,
+    require_source_column_names,
     require_supported_nullable_types,
 )
 from orcapod.utils import arrow_utils, polars_data_utils
@@ -83,6 +84,7 @@ class DataFrameSource(RootSource):
         require_supported_nullable_types(
             polars_data_utils.get_system_columns(df).to_arrow().schema
         )
+        require_source_column_names(df.columns, system_tag_columns)
         df = polars_data_utils.drop_system_columns(df)
 
         missing = set(tag_columns) - set(df.columns)

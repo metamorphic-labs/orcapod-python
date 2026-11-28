@@ -3,14 +3,37 @@
 from __future__ import annotations
 
 import pytest
+from re import escape
 
 from orcapod.logical_types.base_logical_type import BaseLogicalType
 import dataclasses
-from orcapod.core.operators import Pick
+from orcapod.core.operators import AddTags, MapColumns, MapData, MapTags, Pick, TagBy
 from orcapod.core.sources import DictSource
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.errors import InputValidationError
 from orcapod.core.operators import Index
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda name: Index("items", 0, out=name),
+        lambda name: Pick("scores", "speed", out=name),
+        lambda name: MapColumns({"x": name}),
+        lambda name: MapData({"x": name}),
+        lambda name: MapTags({"x": name}),
+        lambda name: AddTags({name: "value"}),
+        lambda name: TagBy(name),
+    ],
+    ids=["index", "pick", "map-columns", "map-data", "map-tags", "add-tags", "tag-by"],
+)
+@pytest.mark.parametrize(
+    "name",
+    ["_", "_foo", "_tag_y", "_tag::y", "_source_y", "_content_hash", "_context_key"],
+)
+def test_operators_refuse_reserved_column_names(build, name: str) -> None:
+    with pytest.raises(InputValidationError, match=escape(repr(name))):
+        build(name)
 
 
 class ConcreteLogicalType(BaseLogicalType):

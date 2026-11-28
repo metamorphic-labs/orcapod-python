@@ -118,13 +118,13 @@ def test_a_stored_table_holding_a_reserved_name_takes_no_append(
     db.flush()  # a no-op
 
 
-@function_pod(output_keys=["__delta_rs_source"])
-def _reserved(v: int) -> int:
+@function_pod(output_keys=["v`output"])
+def _unstorable(v: int) -> int:
     return v
 
 
 @pytest.mark.parametrize("use_async", [False, True], ids=["sync", "async"])
-def test_a_job_writing_a_reserved_name_stops_at_its_first_write(
+def test_a_job_writing_an_unstorable_name_stops_at_its_first_write(
     tmp_path: Path, use_async: bool
 ) -> None:
     source = ArrowTableSource(
@@ -142,11 +142,11 @@ def test_a_job_writing_a_reserved_name_stops_at_its_first_write(
         source_id="s",
         record_id_columns=["k"],
     )
-    with pytest.raises(UnstorableColumnError, match="MERGE reserves"):
+    with pytest.raises(UnstorableColumnError, match="backtick"):
         database = DeltaTableDatabase(tmp_path)
         job = PipelineJob(name="itl1377", database=database)
         with job:
-            _reserved.pod(source, label="fn")
+            _unstorable.pod(source, label="fn")
         if use_async:
             asyncio.run(job.run_async())
         else:

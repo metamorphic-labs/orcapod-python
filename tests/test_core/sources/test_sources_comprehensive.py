@@ -29,6 +29,8 @@ import pyarrow as pa
 import polars as pl
 import pytest
 
+from orcapod.errors import InputValidationError
+
 from orcapod.core.sources import (
     ArrowTableSource,
     CSVSource,
@@ -293,18 +295,17 @@ class TestDataFrameSourceAdditional:
         assert "id" in tag_keys
         assert "value" in data_keys
 
-    def test_system_columns_stripped_from_polars_input(self):
-        """Polars DataFrames with system-prefix columns have those columns dropped."""
+    def test_system_columns_refused_in_polars_input(self):
         df = pl.DataFrame(
             {
                 "x": [1, 2],
                 "_tag_something": ["a", "b"],
             }
         )
-        src = DataFrameSource(data=df)
-        tag_keys, data_keys = src.keys()
-        assert "_tag_something" not in tag_keys
-        assert "_tag_something" not in data_keys
+        with pytest.raises(
+            InputValidationError, match="'_tag_something'.*drop them first"
+        ):
+            DataFrameSource(data=df)
 
     def test_source_id_in_provenance_tokens(self):
         df = pl.DataFrame({"id": [1, 2, 3], "value": ["a", "b", "c"]})

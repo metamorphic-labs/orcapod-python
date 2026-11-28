@@ -27,7 +27,7 @@ import pytest
 from orcapod import PipelineJob, function_pod
 from orcapod.core.streams.arrow_table_stream import ArrowTableStream
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
-from orcapod.errors import ProvenanceInconsistencyError
+from orcapod.errors import InputValidationError, ProvenanceInconsistencyError
 from orcapod.operators import (
     Batch,
     DropTagColumns,
@@ -1005,18 +1005,28 @@ def test_an_inner_list_of_nested_folds_traces_its_members() -> None:
     ]
 
 
-@function_pod(output_keys="_total")
-def underscored(x: int, y: int) -> int:
+@function_pod(output_keys="total")
+def total(x: int, y: int) -> int:
     return x + y
 
 
-def test_an_underscore_data_column_of_an_empty_run_is_a_data_column() -> None:
+@pytest.mark.parametrize("name", ["_total", "_content_hash", "__delta_rs_source"])
+def test_a_function_refuses_a_reserved_output_name_at_definition(name: str) -> None:
+    with pytest.raises(InputValidationError, match=repr(name)):
+        function_pod(output_keys=name)(total_for_reserved_output)
+
+
+def total_for_reserved_output(x: int, y: int) -> int:
+    return x + y
+
+
+def test_a_data_column_of_an_empty_run_is_a_data_column() -> None:
     source = table_source(rows_kgxy(("a", "1", 1, 2)), TWO_BY_TWO, ["k", "g"], "src")
     job = PipelineJob(name="under", database=InMemoryArrowDatabase())
     with job:
-        underscored.pod(Filter({"x": 999})(source), label="sums")
+        total.pod(Filter({"x": 999})(source), label="sums")
     job.run()
-    empty = job.nodes["sums"].trace({"k": "a", "g": "1"}, "_total")
+    empty = job.nodes["sums"].trace({"k": "a", "g": "1"}, "total")
     assert (empty.status, empty.matched) == ("no_match", 0)
     with pytest.raises(ValueError, match="not a data column"):
         job.nodes["sums"].trace({"k": "a", "g": "1"}, "k")
