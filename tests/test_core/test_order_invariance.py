@@ -146,6 +146,9 @@ pytestmark = [
         "ignore::orcapod.core.data_tags.DataTagMaterializationWarning"
     ),
     pytest.mark.filterwarnings("ignore::orcapod.errors.ProvisionalHashWarning"),
+    # PolarsFilter is built here on purpose; the warning of every construction is tested in
+    # test_polars_filter_warning.py (ITL-1296).
+    pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning"),
 ]
 
 # (tag order index, layout): the three tag orders (declared, reversed, a rotation) with the

@@ -48,6 +48,10 @@ from orcapod.system_constants import constants
 from orcapod.types import CacheMode
 from orcapod.system_constants import OPERATOR_DB_SCHEMA_VERSION
 
+# PolarsFilter is built here on purpose; the warning of every construction is tested in
+# test_polars_filter_warning.py (ITL-1296).
+pytestmark = pytest.mark.filterwarnings("ignore::orcapod.errors.PolarsFilterWarning")
+
 Row = tuple[TagProtocol, DataProtocol]
 
 # ---------------------------------------------------------------------------
