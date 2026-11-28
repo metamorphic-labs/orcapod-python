@@ -15,7 +15,11 @@ from typing import TYPE_CHECKING, Any
 import pyarrow as pa
 
 from orcapod.core.data_function_types import StoredColumn
-from orcapod.errors import OrcapodDatabaseReadError, OrcapodDatabaseWriteError
+from orcapod.errors import (
+    InputValidationError,
+    OrcapodDatabaseReadError,
+    OrcapodDatabaseWriteError,
+)
 from orcapod.hashing.arrow_hashers import ARROW_HASH_LABEL
 from orcapod.contexts.stored import (
     StaleTables,
@@ -74,12 +78,54 @@ COMMON_RESULT_COLUMNS: tuple[StoredColumn, ...] = (
 
 Their layout is ``RESULT_DB_SCHEMA_VERSION`` (``rdb_v1``), the last component of every
 result table path. The other common columns depend on the function: each output key,
-with its declared type, and ``_source_<key>`` (``large_string``), the output's
+with its declared type, and ``_source_<key>`` (``RESULT_TOKEN_COLUMN``), the output's
 source-info token ``<uri parts joined by ":">::<result record id hex>::<key>``. The
 row's record id (a UUID, 16 bytes) is kept by the database as its record id column. A
 data function type's own columns (``pf_var_*``, ``pf_exec_*``) are declared by the type
 (``core/data_function_types.py``).
 """
+
+RESULT_TOKEN_COLUMN = StoredColumn(
+    f"{constants.SOURCE_PREFIX}<key>",
+    str,
+    "large_string",
+    True,
+    "the output's source-info token; one string, or null",
+)
+"""The declared column of every output's source-info token (ITL-1563).
+
+Stated once, for every function: the column is a nullable ``large_string`` whatever a
+write holds, and a null token is a ``large_string`` null. ``ResultCache.store`` refuses
+a row whose token column has any other type, so a table's token type never follows
+the values of a write. Custom token types are not supported.
+"""
+
+
+def _require_declared_token_columns(schema: pa.Schema) -> None:
+    """Refuse a result row whose source-info token column is not the declared type.
+
+    Args:
+        schema: The schema of the output row, with its source-info columns.
+
+    Raises:
+        InputValidationError: If a ``_source_<key>`` column has another type than
+            ``RESULT_TOKEN_COLUMN`` declares, naming each such column and both types.
+    """
+    other = [
+        field
+        for field in schema
+        if field.name.startswith(constants.SOURCE_PREFIX)
+        and str(field.type) != RESULT_TOKEN_COLUMN.arrow_type
+    ]
+    if not other:
+        return
+    columns = ", ".join(f"{field.name!r} is {field.type}" for field in other)
+    raise InputValidationError(
+        "A function result's source-info token is one string: every token column "
+        f"of a result table is {RESULT_TOKEN_COLUMN.arrow_type} (nullable), but "
+        f"{columns}. Nothing was written. Give each output one string token, or "
+        "none (a null token)."
+    )
 
 
 class ResultCache:
@@ -334,12 +380,18 @@ class ResultCache:
             skip_duplicates: If True, silently skip if a record with the
                 same ID already exists.
             data_context_key: Key of the caller's data context, stored on the row.
+
+        Raises:
+            InputValidationError: If a source-info token column of ``output_data``
+                is not a ``large_string`` (``RESULT_TOKEN_COLUMN``); nothing is
+                written.
         """
         require_same_data_context(input_data.data_context_key, data_context_key)
         require_same_data_context(output_data.data_context_key, data_context_key)
         self._account_for_stale_tables(data_context_key)
 
         data_table = output_data.as_table(columns={"source": True})
+        _require_declared_token_columns(data_table.schema)
 
         # Add variation and execution columns with prefixes.
         # Use a running counter for insertion position since add_column shifts indices.
