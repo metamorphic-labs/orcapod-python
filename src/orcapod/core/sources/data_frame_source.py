@@ -1,16 +1,25 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence, Sized
+from collections.abc import (
+    Callable,
+    Collection,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+    Sized,
+)
 from dataclasses import fields, is_dataclass
 from itertools import chain, repeat
-from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NamedTuple, cast
 
 import numpy as np
 import pandas as pd
 import polars as pl
 import pyarrow as pa
 from pydantic import BaseModel
+from typing_extensions import override
 
 from orcapod.core.sources.base import RootSource
 from orcapod.core.data_tags import TagOnlyColumns, source_data_tags
@@ -36,13 +45,79 @@ class _FrameRow(NamedTuple):
 
     value: Any
     names: tuple[str, ...]
-    row_type: type
-    non_column_names: tuple[str, ...] = ()
+    kind: Literal["mapping", "model", "dataclass", "namedtuple", "series", "positional"]
+    additional_names: tuple[str, ...] = ()
 
     @property
     def exposed_names(self) -> tuple[str, ...]:
         """Return declared and other field names exposed by the row."""
-        return (*self.names, *self.non_column_names)
+        return (*self.names, *self.additional_names)
+
+
+class _FrameModelRow(BaseModel):
+    """Present the original Pydantic layout and check any dump Polars uses.
+
+    Polars reads declared field values directly for flat models and calls
+    `model_dump` when it unpacks nested models. Forward both paths so validation
+    keeps Polars' original type inference and does not run a serializer twice.
+    """
+
+    __slots__: ClassVar[tuple[str, ...]] = (
+        "_original",
+        "_names",
+        "_system_tag_columns",
+    )
+    if TYPE_CHECKING:
+        _original: BaseModel
+        _names: set[str]
+        _system_tag_columns: Collection[str]
+
+    @classmethod
+    def from_model(
+        cls,
+        value: BaseModel,
+        names: tuple[str, ...],
+        system_tag_columns: Collection[str],
+    ) -> _FrameModelRow:
+        """Wrap a model that has already been constructed and validated."""
+        row = cls.model_construct()
+        object.__setattr__(row, "_original", value)
+        object.__setattr__(row, "_names", set(names))
+        object.__setattr__(row, "_system_tag_columns", system_tag_columns)
+        return row
+
+    @override
+    def __getattribute__(self, name: str) -> Any:
+        if name in ("__class__", "__dict__"):
+            return getattr(self._original, name)
+        return super().__getattribute__(name)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._original, name)
+
+    @override
+    def model_dump(self, **kwargs: object) -> dict[str, object]:
+        """Validate the serialized field names before they reach inference."""
+        dump = cast("Callable[..., object]", self._original.model_dump)
+        values = dump(**kwargs)
+        if not isinstance(values, dict):
+            raise InputValidationError(
+                "A serialized model row must return a dict with string field names."
+            )
+        fields = cast("dict[object, object]", values)
+        names = {name for name in fields if isinstance(name, str)}
+        if len(names) != len(fields):
+            raise InputValidationError(
+                "A serialized model row needs string field names."
+            )
+        require_source_column_names(names, self._system_tag_columns)
+        if names != self._names:
+            raise InputValidationError(
+                f"Serialized model row has different fields. Missing "
+                f"{sorted(self._names - names)!r}, extra "
+                f"{sorted(names - self._names)!r}. Use a mapping."
+            )
+        return cast("dict[str, object]", fields)
 
 
 def _describe_model_row(value: BaseModel) -> _FrameRow:
@@ -61,16 +136,26 @@ def _describe_model_row(value: BaseModel) -> _FrameRow:
         | value.model_fields_set
         | vars(value).keys()
     )
-    if model.model_config.get("serialize_by_alias"):
-        exposed.update(
-            field.serialization_alias
-            for field in declared.values()
-            if field.serialization_alias is not None
-        )
+    aliases = {
+        field.serialization_alias
+        for name, field in declared.items()
+        if model.model_config.get("serialize_by_alias")
+        and field.serialization_alias is not None
+        and field.serialization_alias != name
+    }
     if not all(isinstance(name, str) for name in exposed):
         raise InputValidationError("needs string field names.")
+    if aliases & declared.keys():
+        require_source_column_names(aliases)
+        raise InputValidationError(
+            f"has serialization aliases {sorted(aliases)!r} that rename existing "
+            "model fields. Use a mapping."
+        )
     return _FrameRow(
-        value, tuple(declared), model, tuple(sorted(exposed - declared.keys()))
+        value,
+        tuple(declared),
+        "model",
+        tuple(sorted((exposed - declared.keys()) | aliases)),
     )
 
 
@@ -82,22 +167,23 @@ def _describe_frame_row(value: Any) -> _FrameRow | None:
         names = tuple(value)
         if not all(isinstance(name, str) for name in names):
             raise InputValidationError("needs string field names.")
-        return _FrameRow(value if isinstance(value, dict) else dict(value), names, dict)
+        return _FrameRow(
+            value if isinstance(value, dict) else dict(value), names, "mapping"
+        )
     if isinstance(value, BaseModel):
         return _describe_model_row(value)
     if is_dataclass(value) and not isinstance(value, type):
         return _FrameRow(
-            value, tuple(field.name for field in fields(value)), type(value)
+            value, tuple(field.name for field in fields(value)), "dataclass"
         )
-    if isinstance(value, tuple):
-        names = getattr(type(value), "_fields", None)
+    if isinstance(value, Sequence):
+        names = getattr(value, "_fields", None)
         if isinstance(names, tuple) and all(isinstance(name, str) for name in names):
-            return _FrameRow(value, names, type(value))
-    raise InputValidationError(
-        f"({type(value).__name__}) needs named fields. "
-        "Use a mapping, namedtuple, dataclass or Pydantic model for rows. "
-        "Pass named Polars or pandas Series or pandas Index objects as a list of columns."
-    )
+            return _FrameRow(value, names, "namedtuple")
+    if isinstance(value, (pd.Series, pd.Index, pl.Series)):
+        name = str(value.name) if value.name is not None else ""
+        return _FrameRow(value, (name,) if name else (), "series")
+    return _FrameRow(value, (), "positional")
 
 
 def _describe_frame_rows(values: Iterable[Any]) -> Iterator[_FrameRow | None]:
@@ -121,23 +207,7 @@ def _checked_frame_rows(
                 require_source_column_names(row.exposed_names, system_tag_columns)
             except InputValidationError as exc:
                 raise InputValidationError(f"Source row {index}. {exc}") from exc
-            if row.non_column_names:
-                raise InputValidationError(
-                    f"Source row {index} exposes extra or computed model fields "
-                    f"{list(row.non_column_names)!r} outside its declared columns. "
-                    "Use a mapping or a model without computed or extra fields."
-                )
-            if isinstance(row.value, BaseModel):
-                model = type(row.value)
-                if (
-                    model.model_dump is not BaseModel.model_dump
-                    or model.__pydantic_decorators__.model_serializers
-                ):
-                    raise InputValidationError(
-                        f"Source row {index} has serialized field names that cannot be "
-                        "verified from its declared model fields. Use a mapping."
-                    )
-            names = set(row.names)
+            names = set(row.exposed_names)
             if first is None:
                 first, expected = row, names
             if names != expected:
@@ -147,13 +217,13 @@ def _checked_frame_rows(
                     "Use the same field names in every row. For mappings, add missing "
                     "fields with None where appropriate and remove unintended fields."
                 )
-            if row.row_type is not first.row_type or (
-                row.row_type is not dict and row.names != first.names
+            if row.kind != first.kind or (
+                row.kind != "mapping" and row.names != first.names
             ):
                 raise InputValidationError(
                     f"Source row {index} has a different layout "
-                    f"({row.row_type.__name__} fields {row.names!r}). "
-                    f"Use the same row layout ({first.row_type.__name__} fields "
+                    f"({type(row.value).__name__} fields {row.names!r}). "
+                    f"Use the same row layout ({type(first.value).__name__} fields "
                     f"{first.names!r}) or use mappings throughout."
                 )
         yield row
@@ -176,10 +246,16 @@ def _require_materialized_row_names(
         raise InputValidationError(f"Source row {first}. {exc}") from exc
 
 
-def _frame_from_checked_rows(
-    rows: Iterator[_FrameRow | None], *, materialized: bool
+def _frame_from_rows(
+    data: Iterable[Any], system_tag_columns: Collection[str], *, materialized: bool
 ) -> pl.DataFrame:
-    """Keep Polars' typed conversion for a single verified layout."""
+    """Use the regular Polars conversion after checking row or column names."""
+    rows = _describe_frame_rows(data)
+    if materialized:
+        described = list(rows)
+        _require_materialized_row_names(described, system_tag_columns)
+        rows = iter(described)
+
     leading_nulls = 0
     for first in rows:
         if first is not None:
@@ -189,22 +265,39 @@ def _frame_from_checked_rows(
         return pl.DataFrame([None] * leading_nulls)
 
     all_rows = chain(repeat(None, leading_nulls), (first,), rows)
-    if first.row_type is dict:
-        values = (row.value if row is not None else None for row in all_rows)
+    if first.kind == "series" or (materialized and isinstance(first.value, np.ndarray)):
+        return _frame_from_columns(
+            all_rows, system_tag_columns, materialized=materialized
+        )
+
+    checked = _checked_frame_rows(all_rows, system_tag_columns)
+    if first.kind in ("mapping", "positional"):
+        values = (row.value if row is not None else None for row in checked)
         return pl.DataFrame(list(values) if materialized else values)
 
     null_positions: set[int] = set()
 
     def typed_values() -> Iterator[Any]:
-        for index, row in enumerate(all_rows):
+        for index, row in enumerate(checked):
             if row is None:
                 null_positions.add(index)
+            elif isinstance(row.value, BaseModel):
+                yield _FrameModelRow.from_model(
+                    row.value, row.exposed_names, system_tag_columns
+                )
             else:
                 yield row.value
 
     typed = typed_values()
     frame = pl.DataFrame(list(typed) if materialized else typed)
-    if tuple(frame.columns) != first.names:
+    if first.kind == "model":
+        expected = set(first.exposed_names)
+        if set(frame.columns) != expected:
+            raise InputValidationError(
+                f"Source row {leading_nulls} exposes model fields {sorted(expected)!r}, "
+                f"but Polars returned {frame.columns!r}. Use a mapping."
+            )
+    elif tuple(frame.columns) != first.names:
         raise InputValidationError(
             f"Source row {leading_nulls} declares fields {first.names!r}, "
             f"but Polars returned {frame.columns!r}. Use mappings for these rows."
@@ -222,38 +315,32 @@ def _frame_from_checked_rows(
 
 
 def _frame_from_columns(
-    columns: Sequence[Any], system_tag_columns: Collection[str]
+    columns: Iterable[_FrameRow | None],
+    system_tag_columns: Collection[str],
+    *,
+    materialized: bool,
 ) -> pl.DataFrame:
     """Check named columns and refuse named rows in a column-oriented sequence."""
-    names: set[str] = set()
     named_series: dict[int, str] = {}
-    named_rows: dict[int, tuple[str, ...]] = {}
-    for index, column in enumerate(columns):
-        if isinstance(column, (pd.Series, pd.Index, pl.Series)):
-            if column.name is not None and (name := str(column.name)):
-                names.add(name)
-                named_series[index] = name
-        elif isinstance(column, np.ndarray) or column is None:
-            continue
-        elif (
-            isinstance(column, (Mapping, BaseModel))
-            or is_dataclass(column)
-            or (isinstance(column, tuple) and hasattr(type(column), "_fields"))
-        ):
-            row = _describe_frame_row(column)
-            if row is not None:
-                names.update(row.exposed_names)
-                named_rows[index] = row.names
 
-    require_source_column_names(names, system_tag_columns)
-    if named_rows:
-        index, fields = next(iter(named_rows.items()))
-        raise InputValidationError(
-            f"Source row {index} declares fields {fields!r} in a column-oriented "
-            "sequence. Pass named rows separately or use named columns."
-        )
+    def checked_columns() -> Iterator[Any]:
+        for index, column in enumerate(columns):
+            if column is None:
+                yield None
+                continue
+            if not materialized:
+                require_source_column_names(column.exposed_names, system_tag_columns)
+            if column.kind == "series" and column.names:
+                named_series[index] = column.names[0]
+            elif column.kind not in ("positional", "series"):
+                raise InputValidationError(
+                    f"Source row {index} declares fields {column.names!r} in a "
+                    "column-oriented sequence. Pass named rows separately or use named columns."
+                )
+            yield column.value
 
-    frame = pl.DataFrame(columns)
+    values = checked_columns()
+    frame = pl.DataFrame(list(values) if materialized else values)
     for index, name in named_series.items():
         if index >= frame.width or name != frame.columns[index]:
             raise InputValidationError(
@@ -286,37 +373,25 @@ def source_dataframe(
     elif isinstance(data, Mapping):
         require_source_column_names(data.keys(), system_tag_columns)
     elif isinstance(data, Sequence):
-        first = next((value for value in data if value is not None), None)
-        if isinstance(first, (pd.Series, pd.Index, np.ndarray, pl.Series)):
-            return _frame_from_columns(data, system_tag_columns)
-        rows = list(_describe_frame_rows(data))
-        _require_materialized_row_names(rows, system_tag_columns)
-        return _frame_from_checked_rows(
-            _checked_frame_rows(rows, system_tag_columns), materialized=True
-        )
+        return _frame_from_rows(data, system_tag_columns, materialized=True)
     elif (
         isinstance(data, Iterable)
         and not isinstance(data, Sized)
         and not hasattr(data, "__arrow_c_stream__")
     ):
-        return _frame_from_checked_rows(
-            _checked_frame_rows(
-                _describe_frame_rows(data),
-                system_tag_columns,
-            ),
-            materialized=False,
-        )
+        return _frame_from_rows(data, system_tag_columns, materialized=False)
     return pl.DataFrame(data)
 
 
 class DataFrameSource(RootSource):
     """A source backed by a Polars DataFrame or supported tabular or column input.
 
-    Python rows must be mappings with the same keys, or namedtuple, dataclass
-    or Pydantic rows of one class with the same declared fields. Put extra or computed
-    Pydantic fields in mappings, and use mappings for models with custom
-    serialization. A ``None`` row keeps its position as a null row. Pass
-    named Polars Series, pandas Series or pandas Index objects as a list of columns.
+    Named Python rows must supply the same fields. Namedtuple, dataclass and
+    Pydantic rows can use different classes of the same kind with the same field
+    layout. Names exposed by a model must be retained as columns, including when
+    the model is serialized. Positional and scalar inputs use Polars' column
+    names. A ``None`` row keeps its position as a null row. Named Series can be
+    passed as a sequence or iterator of columns.
 
     The DataFrame is converted to an Arrow table and enriched by
     ``SourceStreamBuilder`` (source-info, schema-hash, system tags).

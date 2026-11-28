@@ -9,7 +9,7 @@ from re import escape
 from collections.abc import Collection, Iterator
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, ClassVar, TypedDict
 
 import deltalake
 import polars as pl
@@ -19,6 +19,7 @@ import pytest
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Field,
     SerializerFunctionWrapHandler,
     computed_field,
     model_serializer,
@@ -285,23 +286,24 @@ def test_csv_refuses_reserved_header_before_parsing_bad_rows(
             build()
 
 
-def test_dataframe_source_guides_series_iterators_to_named_columns() -> None:
-    columns = [
-        pl.Series(name, values)
-        for name, values in {
-            "k": [1, 2],
-            "g": ["a", "b"],
-            "x": [3, 4],
-            "y": [5, 6],
-        }.items()
-    ]
-    with pytest.raises(InputValidationError, match=r"Series.*list of columns"):
-        DataFrameSource(iter(columns), tag_columns=TAGS, tag_only_columns=True)
-    source = DataFrameSource(columns, tag_columns=TAGS, tag_only_columns=True)
-    assert source.as_table().to_pylist() == [
-        {"k": 1, "g": "a", "x": 3, "y": 5},
-        {"k": 2, "g": "b", "x": 4, "y": 6},
-    ]
+def test_frame_stops_at_first_reserved_series_in_iterator() -> None:
+    def columns() -> Iterator[pl.Series]:
+        yield pl.Series("k", [1, 2])
+        yield pl.Series("_foo", [3, 4])
+        pytest.fail("reserved columns must stop iteration")
+
+    with pytest.raises(InputValidationError, match="'_foo'.*drop them first"):
+        DataFrameSource(columns())
+
+
+@pytest.mark.parametrize("as_iterator", [False, True], ids=["sequence", "iterator"])
+def test_positional_frame_input_checks_following_row_names(as_iterator: bool) -> None:
+    from collections import namedtuple
+
+    row = namedtuple("ReservedRecord", ["k", "_hidden"], rename=True)
+    rows: list[Any] = [(1, 2), row(3, 4)]
+    with pytest.raises(InputValidationError, match="'_1'.*drop them first"):
+        DataFrameSource(iter(rows) if as_iterator else rows)
 
 
 @pytest.mark.parametrize("as_iterator", [False, True], ids=["sequence", "iterator"])
@@ -376,6 +378,12 @@ class _FrameRow:
 
 
 @dataclass
+class _EquivalentFrameRow:
+    k: int
+    x: int
+
+
+@dataclass
 class _ReservedFrameRow:
     k: int
     _foo: int
@@ -440,6 +448,15 @@ class _PlainFrameModel(BaseModel):
     x: int
 
 
+class _EquivalentFrameModel(_PlainFrameModel):
+    pass
+
+
+class _AliasedFrameModel(_PlainFrameModel):
+    model_config = ConfigDict(serialize_by_alias=True)
+    x: int = Field(serialization_alias="value")
+
+
 class _ReservedComputedFrameModel(_PlainFrameModel):
     @computed_field  # type: ignore[prop-decorator]
     @property
@@ -466,6 +483,13 @@ class _SerializedFrameModel(BaseModel):
         if self.k > 100:
             fields["_foo"] = 12345
         return fields
+
+
+class _NestedComputedFrameModel(_SerializedFrameModel):
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def total(self) -> int:
+        return self.k + self.x.x
 
 
 def _model_with_explicit_attribute() -> _PlainFrameModel:
@@ -528,11 +552,16 @@ FRAME_ROW_CASES = [
         id="pydantic-ordinary-undeclared",
     ),
     pytest.param(
+        [_AliasedFrameModel(k=1, x=2)],
+        r"row 0.*'value'.*mapping",
+        id="pydantic-discarded-alias",
+    ),
+    pytest.param(
         [
             _SerializedFrameModel(k=i, x=_PlainFrameModel(k=i, x=i + 2))
             for i in range(102)
         ],
-        r"row 0.*serialized field names.*mapping",
+        r"'_foo'.*drop them first",
         id="pydantic-dynamic-serialization",
     ),
     pytest.param(
@@ -552,13 +581,13 @@ FRAME_ROW_CASES = [
     ),
     pytest.param(
         [_FrameModel.model_validate({"k": 1, "x": 2, "extra": 3})],
-        r"row 0.*extra.*'extra'",
+        r"row 0.*'extra'.*mapping",
         id="legal-model-extra",
     ),
     pytest.param(
-        [(1, 2), (3, 4)],
-        r"row 0.*named fields",
-        id="unnamed-rows",
+        [{"k": 1, "x": 2}, (3, 4)],
+        r"row 1.*field names.*'k'.*'x'",
+        id="mixed-named-and-positional-input",
     ),
 ]
 
@@ -1316,7 +1345,24 @@ def test_raw_reserved_names_precede_arrow_type_validation(kind: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "kind", ["pandas-series", "pandas-index", "namedtuple", "numpy"]
+    "kind",
+    [
+        "pandas-series",
+        "pandas-index",
+        "namedtuple",
+        "namedtuple-iterator",
+        "numpy",
+        "positional",
+        "positional-iterator",
+        "scalar",
+        "scalar-iterator",
+        "series-iterator",
+        "mixed-dataclasses",
+        "mixed-models",
+        "model-serializer",
+        "model-dump-override",
+        "model-computed-column",
+    ],
 )
 @pytest.mark.parametrize("path", ["frame", "poll-sync", "poll-async"])
 def test_named_frame_inputs_keep_polars_conversion(kind: str, path: str) -> None:
@@ -1324,6 +1370,13 @@ def test_named_frame_inputs_keep_polars_conversion(kind: str, path: str) -> None
 
     import numpy as np
     import pandas as pd
+
+    class DumpOverride(_SerializedFrameModel):
+        calls: ClassVar[list[int]] = []
+
+        def model_dump(self, **kwargs: Any) -> dict[str, Any]:
+            self.calls.append(self.k)
+            return {**super().model_dump(**kwargs), "k": self.k + 10}
 
     batch: list[Any]
     if kind == "pandas-series":
@@ -1333,21 +1386,45 @@ def test_named_frame_inputs_keep_polars_conversion(kind: str, path: str) -> None
     elif kind.startswith("namedtuple"):
         row = namedtuple("FrameRecord", ["k", "x"])
         batch = [row(1, 3), row(2, 4)]
+    elif kind.startswith("positional"):
+        batch = [(1, 3), (2, 4)]
+    elif kind.startswith("scalar"):
+        batch = [1, 2]
+    elif kind == "series-iterator":
+        batch = [pl.Series("k", [1, 2]), pl.Series("x", [3, 4])]
+    elif kind == "mixed-dataclasses":
+        batch = [_FrameRow(1, 3), _EquivalentFrameRow(2, 4)]
+    elif kind == "mixed-models":
+        batch = [_PlainFrameModel(k=1, x=3), _EquivalentFrameModel(k=2, x=4)]
+    elif kind in {"model-serializer", "model-dump-override", "model-computed-column"}:
+        model = {
+            "model-serializer": _SerializedFrameModel,
+            "model-dump-override": DumpOverride,
+            "model-computed-column": _NestedComputedFrameModel,
+        }[kind]
+        batch = [model(k=i, x=_PlainFrameModel(k=i, x=i + 2)) for i in (1, 2)]
     else:
         batch = [np.array([1, 2]), np.array([3, 4])]
 
-    data = iter(batch) if kind == "namedtuple-iterator" else batch
-    frame = pl.DataFrame(batch)
-    key, value = frame.columns
+    use_iterator = kind.endswith("-iterator")
+    data = iter(batch) if use_iterator else batch
+    # Both sources passed the original input straight to Polars on main.
+    frame = pl.DataFrame(iter(batch) if use_iterator else batch)
+    key = frame.columns[0]
+    tags = [key] if frame.width > 1 else []
     expected = frame.to_dicts()
+    expected_dump_calls = DumpOverride.calls.copy()
+    DumpOverride.calls.clear()
     if path == "frame":
-        source = DataFrameSource(data, [key], tag_only_columns=True)
-        control = DataFrameSource(frame, [key], tag_only_columns=True)
+        source = DataFrameSource(data, tags, tag_only_columns=True)
+        control = DataFrameSource(frame, tags, tag_only_columns=True)
         assert source.as_table().equals(control.as_table(), check_metadata=True)
         assert source.source_id == control.source_id
+        assert source.content_hash() == control.content_hash()
+        assert source.pipeline_hash() == control.pipeline_hash()
     else:
         source = PollingSource(
-            _Poll(None, data), [key], source_id="poll", record_id_columns=key
+            _Poll(None, data), tags, source_id="poll", record_id_columns=key
         )
         if path == "poll-sync":
             assert source.as_table().to_pylist() == expected
@@ -1356,11 +1433,12 @@ def test_named_frame_inputs_keep_polars_conversion(kind: str, path: str) -> None
             async def read() -> list[dict[str, Any]]:
                 async with contextlib.aclosing(source.async_iter_data()) as rows:
                     return [
-                        {key: tag.as_dict()[key], value: data.as_dict()[value]}
+                        {**tag.as_dict(), **data.as_dict()}
                         for tag, data in [await anext(rows) for _ in expected]
                     ]
 
             assert asyncio.run(read()) == expected
+    assert DumpOverride.calls == expected_dump_calls
 
 
 @pytest.mark.parametrize("view", ["operator-replay", "operator-records", "derived"])
