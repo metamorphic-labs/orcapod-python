@@ -33,6 +33,7 @@ from orcapod.databases import (
     InMemoryArrowDatabase,
     SQLiteConnector,
 )
+from orcapod.databases._sql_store import STORE_PATH_CATALOG, TABLE_PATH_ENTRY_KIND
 from orcapod.databases.utils import in_held_column_order
 from orcapod.errors import (
     InputValidationError,
@@ -206,8 +207,7 @@ def test_a_table_created_again_in_another_order_is_read_as_it_is_now(
     with open_database("SQLite", tmp_path) as db:
         _add(db, _rows([ID, "a", "c", "b"], [1]), flush=True)
         _add(db, _rows(["c", "a", "b", ID], [2]), flush=True)
-        with sqlite3.connect(tmp_path / "store.db") as other:
-            other.execute('DROP TABLE "t"')
+        _drop_sqlite_store_table(tmp_path / "store.db")
         other_db = ConnectorArrowDatabase(SQLiteConnector(str(tmp_path / "store.db")))
         _add(other_db, _rows(["b", ID, "c", "a"], [3]), flush=True)
         _add(db, _rows([ID, "a", "c", "b"], [4]), flush=True)
@@ -227,8 +227,7 @@ def test_rows_queued_before_a_table_is_created_again_are_read_with_it_by_name(
     with open_database("SQLite", tmp_path) as db:
         _add(db, _rows([ID, "a", "c", "b"], [1]), flush=True)
         _add(db, _rows(["b", ID, "c", "a"], [2]))  # queued as [id, a, c, b]
-        with sqlite3.connect(tmp_path / "store.db") as other:
-            other.execute('DROP TABLE "t"')
+        _drop_sqlite_store_table(tmp_path / "store.db")
         other_db = ConnectorArrowDatabase(SQLiteConnector(str(tmp_path / "store.db")))
         _add(other_db, _rows(["b", ID, "c", "a"], [3]), flush=True)
         _check(
@@ -596,8 +595,7 @@ def test_an_all_duplicate_append_looks_up_no_order(tmp_path: Path) -> None:
 
 
 def test_an_aligned_append_looks_the_stored_table_up_once(tmp_path: Path) -> None:
-    """The connector database looks a table up once per flushed append, at the
-    flush, as main does: an append looks nothing up when it is queued."""
+    """Check ownership before queuing and inspect the current schema once per flush."""
     path = str(tmp_path / "store.db")
     ConnectorArrowDatabase(SQLiteConnector(path)).add_records(
         PATH, _rows([ID, "a", "c", "b"], [1]), record_id_column=ID, flush=True
@@ -606,18 +604,35 @@ def test_an_aligned_append_looks_the_stored_table_up_once(tmp_path: Path) -> Non
     db = ConnectorArrowDatabase(connector)
     with (
         patch.object(
-            connector, "get_table_names", wraps=connector.get_table_names
-        ) as names,
+            connector,
+            "store_table_transaction",
+            wraps=connector.store_table_transaction,
+        ) as registration,
+        patch.object(
+            connector, "get_store_table_paths", wraps=connector.get_store_table_paths
+        ) as catalog,
         patch.object(
             connector, "get_column_info", wraps=connector.get_column_info
         ) as info,
     ):
         _add(db, _rows([ID, "a", "c", "b"], [2]), flush=True)
-        assert (names.call_count, info.call_count) == (1, 1)
+        assert (catalog.call_count, registration.call_count, info.call_count) == (
+            1,
+            1,
+            1,
+        )
         _add(db, _rows(["b", ID, "c", "a"], [3]))
-        assert (names.call_count, info.call_count) == (1, 1)
+        assert (catalog.call_count, registration.call_count, info.call_count) == (
+            2,
+            1,
+            1,
+        )
         db.flush()
-        assert (names.call_count, info.call_count) == (2, 2)
+        assert (catalog.call_count, registration.call_count, info.call_count) == (
+            2,
+            2,
+            2,
+        )
     _check(
         db.get_all_records(PATH, record_id_column=ID), [ID, "a", "c", "b"], [1, 2, 3]
     )
@@ -639,9 +654,31 @@ def _sqlite(path: Path) -> ConnectorArrowDatabase:
     return ConnectorArrowDatabase(SQLiteConnector(str(path)))
 
 
-def _recreate_with_text_a(path: Path) -> None:
+def _sqlite_table_name(conn: sqlite3.Connection) -> str:
+    """Get the physical name of the one registered table in these fixtures."""
+    ((table_name,),) = cast(
+        "list[tuple[str]]",
+        conn.execute(
+            f'SELECT table_name FROM "{STORE_PATH_CATALOG}" WHERE entry_kind = ?',
+            (TABLE_PATH_ENTRY_KIND,),
+        ).fetchall(),
+    )
+    return table_name
+
+
+def _drop_sqlite_store_table(path: Path) -> None:
+    """Drop the table and its registration together."""
     with sqlite3.connect(path) as other:
-        other.execute('DROP TABLE "t"')
+        name = _sqlite_table_name(other)
+        _ = other.execute("BEGIN")
+        _ = other.execute(f'DROP TABLE "{name}"')
+        _ = other.execute(
+            f'DELETE FROM "{STORE_PATH_CATALOG}" WHERE table_name = ?', (name,)
+        )
+
+
+def _recreate_with_text_a(path: Path) -> None:
+    _drop_sqlite_store_table(path)
     _sqlite(path).add_records(
         PATH,
         pa.table(
@@ -656,10 +693,10 @@ def _recreate_with_text_a(path: Path) -> None:
     )
 
 
-CHANGES: dict[str, Any] = {
-    "rename": lambda c: c.execute('ALTER TABLE "t" RENAME COLUMN a TO A'),
-    "add": lambda c: c.execute('ALTER TABLE "t" ADD COLUMN extra INTEGER'),
-    "drop": lambda c: c.execute('ALTER TABLE "t" DROP COLUMN b'),
+CHANGES = {
+    "rename": "RENAME COLUMN a TO A",
+    "add": "ADD COLUMN extra INTEGER",
+    "drop": "DROP COLUMN b",
 }
 
 
@@ -680,7 +717,8 @@ def test_a_table_changed_between_queue_and_flush_is_refused_as_on_main(
         _recreate_with_text_a(path)
     else:
         with sqlite3.connect(path) as other:
-            CHANGES[change](other)
+            name = _sqlite_table_name(other)
+            _ = other.execute(f'ALTER TABLE "{name}" {CHANGES[change]}')
     before = _sqlite(path).get_all_records(PATH, record_id_column="rid")
     with pytest.raises(ValueError, match="Schema mismatch"):
         db.flush()
@@ -698,8 +736,7 @@ def test_a_table_dropped_and_written_again_by_the_same_handle_takes_the_new_orde
     path = tmp_path / "store.db"
     db = _sqlite(path)
     db.add_records(PATH, _abc(1), record_id_column="rid", flush=True)
-    with sqlite3.connect(path) as other:
-        other.execute('DROP TABLE "t"')
+    _drop_sqlite_store_table(path)
     db.add_records(PATH, _abc(2, ("b", "rid", "a")), record_id_column="rid", flush=True)
     table = _sqlite(path).get_all_records(PATH, record_id_column="rid")
     assert table is not None
@@ -708,9 +745,7 @@ def test_a_table_dropped_and_written_again_by_the_same_handle_takes_the_new_orde
 
 
 def test_a_queued_row_is_read_from_memory(tmp_path: Path) -> None:
-    """A point lookup of a queued row answers from memory, in the order the row is
-    queued, with no lookup of the stored table (as main): the stored table is not
-    even listed. Presentation order is a reader's business (ITL-1370)."""
+    """Check catalog ownership before returning a queued row in its queued order."""
     with open_database("SQLite", tmp_path) as db:
         rows = pa.table(
             {
@@ -722,10 +757,18 @@ def test_a_queued_row_is_read_from_memory(tmp_path: Path) -> None:
         db.add_records(PATH, rows, record_id_column="rid", flush=True)
         second = rows.set_column(0, "rid", pa.array([bytes([2])], pa.large_binary()))
         db.add_records(PATH, second, record_id_column="rid")
-        with patch.object(
-            db._connector, "get_table_names", side_effect=AssertionError("listed")
+        with (
+            patch.object(
+                db._connector,
+                "get_store_table_paths",
+                wraps=db._connector.get_store_table_paths,
+            ) as catalog,
+            patch.object(
+                db._connector, "iter_batches", side_effect=AssertionError("read rows")
+            ),
         ):
             queued = db.get_record_by_id(PATH, bytes([2]), record_id_column="rid")
+        catalog.assert_called_once()
         assert queued is not None
         assert queued.column_names == ["rid", "z", "a"]
         db.flush()
