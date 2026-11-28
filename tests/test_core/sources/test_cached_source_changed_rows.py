@@ -19,6 +19,7 @@ import pytest
 
 from orcapod import PipelineJob, function_pod
 from orcapod.core.sources.cached_source import SOURCE_RECORDED_AT_COL
+from orcapod.core.sources.source_proxy import SourceProxy
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.databases.connector_arrow_database import ConnectorArrowDatabase
 from orcapod.databases.sqlite_connector import SQLiteConnector
@@ -494,6 +495,136 @@ def test_an_in_memory_source_is_held_to_the_same_rule() -> None:
     ) as refused:
         _ = CachedSource(source(2.5), cache_database=cache).as_table()
     assert '{"session":2,"subject":"s1"}' in str(refused.value)
+
+
+class _ReorderedReadDatabase(InMemoryArrowDatabase):
+    """Return the same stored columns in a different order."""
+
+    def get_all_records(
+        self, record_path: tuple[str, ...], record_id_column: str | None = None
+    ) -> pa.Table | None:
+        records = super().get_all_records(record_path, record_id_column)
+        if records is None:
+            return None
+        return records.select(sorted(records.column_names))
+
+
+class _ReorderedDeliverySource(ArrowTableSource):
+    """Return the same delivered columns in a different order."""
+
+    def as_table(self, **kwargs: Any) -> pa.Table:
+        table = super().as_table(**kwargs)
+        return table.select(sorted(table.column_names))
+
+
+@pytest.mark.parametrize("reordered", ["stored", "delivered", "both"])
+def test_a_changed_row_is_refused_with_reordered_fields(reordered: str) -> None:
+    database = (
+        InMemoryArrowDatabase()
+        if reordered == "delivered"
+        else _ReorderedReadDatabase()
+    )
+
+    def cached(value: float, *, first: bool = False) -> CachedSource:
+        source = (
+            ArrowTableSource
+            if first or reordered == "stored"
+            else _ReorderedDeliverySource
+        )
+        return source(
+            pa.table({"id": [1], "value": [value]}),
+            record_id_columns="id",
+            source_id="readings",
+        ).cached(database)
+
+    first = cached(1.0, first=True)
+    assert first.as_table().num_rows == 1
+    before = _stored_cache(first, database)
+    assert cached(1.0).as_table().num_rows == 1
+    assert _stored_cache(first, database).equals(before)
+    with pytest.raises(CachedSourceChangedRowError, match='"id":1'):
+        _ = cached(2.0).as_table()
+    assert _stored_cache(first, database).equals(before)
+
+
+@pytest.mark.parametrize("entry", ["table", "rows", "proxy"])
+def test_a_refused_read_leaves_every_nested_cache_unchanged(
+    tmp_path: Path, entry: str
+) -> None:
+    path = tmp_path / "readings.csv"
+    inner_db, middle_db, outer_db = (InMemoryArrowDatabase() for _ in range(3))
+
+    def outer_source(source: CachedSource) -> CachedSource | SourceProxy:
+        if entry != "proxy":
+            return source
+        tag_schema, data_schema = source.output_schema()
+        proxy = SourceProxy(
+            source.source_id,
+            source.content_hash().to_string(),
+            source.pipeline_hash().to_string(),
+            tag_schema,
+            data_schema,
+        )
+        proxy.bind(source)
+        return proxy
+
+    _write(path, ROWS[:1])
+    first = outer_source(_cached(path, InMemoryArrowDatabase())).cached(outer_db)
+    assert _presented(first) == ROWS[:1]
+    before = _stored_cache(first, outer_db)
+    new: Row = ("s9", 1, 9.0, 90)
+    _write(path, [new])
+    seed_middle = _cached(path, middle_db)
+    assert _presented(seed_middle) == [new]
+    middle_before = _stored_cache(seed_middle, middle_db)
+
+    changed = _changed(ROWS, ("s1", 1))
+    _write(path, changed)
+    inner = _cached(path, inner_db)
+    middle = inner.cached(middle_db)
+    wrapped = outer_source(middle)
+    outer = wrapped.cached(outer_db)
+    # Only the outer cache holds a conflicting row. The middle cache may accept
+    # this delivery, but must wait for the outer check before adding any new keys.
+    with pytest.raises(CachedSourceChangedRowError):
+        if entry == "rows":
+            _ = list(outer.iter_data())
+        else:
+            _ = outer.as_table()
+    assert _stored_cache(outer, outer_db).equals(before)
+    assert _stored_cache(middle, middle_db).equals(middle_before)
+    assert list(inner_db.list_table_paths(())) == []
+
+    accepted = wrapped.cached(InMemoryArrowDatabase())
+    assert _presented(accepted) == sorted([*changed, new])
+    assert _stored_cache(middle, middle_db).num_rows == 4
+    assert _stored_cache(inner, inner_db).num_rows == 3
+
+
+def test_checking_for_new_data_leaves_a_nested_delivery_for_the_read(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "readings.csv"
+    inner_db, outer_db = InMemoryArrowDatabase(), InMemoryArrowDatabase()
+
+    _write(path, ROWS[:1])
+    seed = _cached(path, outer_db)
+    assert _presented(seed) == ROWS[:1]
+    outer_before = _stored_cache(seed, outer_db)
+
+    _write(path, ROWS[1:])
+    inner = _cached(path, inner_db)
+    assert _presented(inner) == ROWS[1:]
+    inner_before = _stored_cache(inner, inner_db)
+    outer = inner.cached(outer_db)
+
+    _write(path, _changed(ROWS, ("s1", 1)))
+    assert outer.check_for_new_data()
+    assert _stored_cache(inner, inner_db).equals(inner_before)
+    with pytest.raises(CachedSourceChangedRowError):
+        _ = outer.as_table()
+    assert _stored_cache(inner, inner_db).equals(inner_before)
+    assert _stored_cache(outer, outer_db).equals(outer_before)
 
 
 @pytest.mark.parametrize(

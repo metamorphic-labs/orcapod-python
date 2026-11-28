@@ -2,8 +2,10 @@ from __future__ import annotations
 
 
 import logging
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from typing import Any, ClassVar, TYPE_CHECKING, cast
 
 import pyarrow as pa
@@ -70,6 +72,22 @@ _CHANGED_ROWS_NAMED = 5
 """How many record ids a ``CachedSourceChangedRowError`` names before the count."""
 
 
+@dataclass
+class _PreparedCacheRead:
+    """A checked delivery and the rows enclosing caches can read from it."""
+
+    cache: CachedSource
+    stream: ArrowTableStream
+    delivery: pa.Table | None
+    seen: datetime | None
+    reads_prepared_cache: bool
+
+
+_PREPARED_CACHE_READS: ContextVar[list[_PreparedCacheRead] | None] = ContextVar(
+    "prepared_source_cache_reads", default=None
+)
+
+
 def _recorded_at_field() -> "pa.Field[pa.DataType]":
     """The ``__recorded_at`` field of a cached-source table: a UTC instant, never null."""
     return pa.field(
@@ -77,17 +95,15 @@ def _recorded_at_field() -> "pa.Field[pa.DataType]":
     )
 
 
-def _record_id_column(records: pa.Table) -> str | None:
+def _record_id_column(names: Sequence[str]) -> str | None:
     """Return the source's generated record-id field, if it carries one.
 
     The source builder appends the generated pair after the input columns,
-    including any custom system tags. The cache preserves that field order.
+    including any custom system tags. Use the declaration's order.
     A plain derived source carries no generated pair.
     """
     system_tags = [
-        name
-        for name in records.column_names
-        if name.startswith(constants.SYSTEM_TAG_PREFIX)
+        name for name in names if name.startswith(constants.SYSTEM_TAG_PREFIX)
     ]
     if len(system_tags) < 2:
         return None
@@ -97,6 +113,21 @@ def _record_id_column(records: pa.Table) -> str | None:
         return None
     expected_pair = arrow_utils.system_tag_column_names(record_id.removeprefix(prefix))
     return record_id if (source_id, record_id) == expected_pair else None
+
+
+def _unambiguous_record_id_column(names: Sequence[str]) -> str | None:
+    """Find a sole provenance pair when a source does not declare its system tags."""
+    available = set(names)
+    prefix = f"{constants.SYSTEM_TAG_RECORD_ID_PREFIX}{constants.BLOCK_SEPARATOR}"
+    pairs = [
+        name
+        for name in names
+        if name.startswith(prefix)
+        and available.issuperset(
+            arrow_utils.system_tag_column_names(name.removeprefix(prefix))
+        )
+    ]
+    return pairs[0] if len(pairs) == 1 else None
 
 
 class CachedSource(RootSource):
@@ -409,6 +440,15 @@ class CachedSource(RootSource):
         """The source this cache reads and keeps the rows of."""
         return self._source
 
+    def _wraps_cache(self) -> bool:
+        """Whether the wrapped source passes through another cache's rows unchanged."""
+        from orcapod.core.sources.source_proxy import SourceProxy
+
+        source = self._source
+        while isinstance(source, SourceProxy) and source.delegate is not None:
+            source = source.delegate
+        return isinstance(source, CachedSource)
+
     def _live_records(self) -> pa.Table:
         """Read the wrapped source's rows, each with its record hash in front.
 
@@ -420,9 +460,17 @@ class CachedSource(RootSource):
 
         refuse_restricted_cache_input(self._source)
         require_same_data_context(self._source.data_context_key, self.data_context_key)
-        live_table = self._source.as_table(
-            columns={"source": True, "system_tags": True, "meta": True}
-        )
+        # Only transparent wrappers can use a would-be cache snapshot here. A
+        # source that creates new rows or IDs may depend on its origin's actual
+        # read-back order (for example, DerivedSource's positional record IDs).
+        token = None if self._wraps_cache() else _PREPARED_CACHE_READS.set(None)
+        try:
+            live_table = self._source.as_table(
+                columns={"source": True, "system_tags": True, "meta": True}
+            )
+        finally:
+            if token is not None:
+                _PREPARED_CACHE_READS.reset(token)
         validate_source_table(live_table)
         live_table = live_table.drop(
             [
@@ -452,25 +500,21 @@ class CachedSource(RootSource):
             pa.array(record_hashes, type=pa.large_binary()),
         )
 
-    def _ingest_live_data(self) -> None:
-        """Fetch live data from the source and store new rows in the cache.
-
-        Raises if the source cannot provide data (e.g. an unbound
-        ``SourceProxy``).
-        """
-        seen = self._source_modified_time()
+    def _prepare_ingestion(self) -> pa.Table:
+        """Read and check a delivery without writing any cache rows."""
         self._cache_database.refresh_table(self.cache_path)
         # Before the wrapped source's rows are read: a cache of another source id is
         # refused without reading or writing any row (ITL-1425).
         self._require_rows_of_this_source()
         live_with_hash = self._live_records()
-        # Store in DB with hash as record ID (skip_duplicates deduplicates).
-        # The data context column is appended after the record hashes are computed:
-        # it names the generation of hashing that produced them and is not hashed.
         self._account_for_stale_tables()
         # Before anything is written: a row whose record id the cache holds with
         # other content refuses the whole read (ITL-1396).
         self._require_no_changed_rows(live_with_hash)
+        return live_with_hash
+
+    def _write_delivery(self, live_with_hash: pa.Table, seen: datetime | None) -> None:
+        """Write an accepted delivery, deduplicating on its stored row hash."""
         # When the cache wrote these rows: one time for the whole write, appended
         # after the record hashes like the data context, so in no hash. A row the
         # cache already holds is skipped below and keeps its first time.
@@ -506,19 +550,31 @@ class CachedSource(RootSource):
             CachedSourceChangedRowError: Naming the source id, the first changed
                 record ids and how many rows changed. Nothing was written.
         """
-        live_id_column = _record_id_column(live_with_hash)
-        if live_id_column is None:
-            return
         records = self._read_cache_table()
         if records is None:
             return
-        cached_id_column = _record_id_column(records)
-        if cached_id_column is None:
+        # The source builder's declared order distinguishes its generated pair
+        # from similarly named custom tags. Neither table's order identifies it.
+        declared = typed_zero_row_table(self._source)
+        if declared is not None:
+            id_column = _record_id_column(declared.column_names)
+        elif not schema_requires_io(self._source, ColumnConfig(system_tags=True)):
+            names = self._source.keys(columns={"system_tags": True})[0]
+            id_column = _record_id_column(names) or _unambiguous_record_id_column(
+                live_with_hash.column_names
+            )
+        else:
+            id_column = _unambiguous_record_id_column(live_with_hash.column_names)
+        if (
+            id_column is None
+            or id_column not in live_with_hash.column_names
+            or id_column not in records.column_names
+        ):
             return
         records = keep_rows_of_data_context(records, self.data_context_key)
         cached: dict[str, set[bytes | None]] = {}
         for record_id, record_hash in zip(
-            cast("list[str]", records.column(cached_id_column).to_pylist()),
+            cast("list[str]", records.column(id_column).to_pylist()),
             records.column(self.HASH_COLUMN_NAME).to_pylist(),
             strict=True,
         ):
@@ -527,9 +583,7 @@ class CachedSource(RootSource):
             {
                 record_id
                 for record_id, record_hash in zip(
-                    cast(
-                        "list[str]", live_with_hash.column(live_id_column).to_pylist()
-                    ),
+                    cast("list[str]", live_with_hash.column(id_column).to_pylist()),
                     live_with_hash.column(self.HASH_COLUMN_NAME).to_pylist(),
                     strict=True,
                 )
@@ -608,11 +662,17 @@ class CachedSource(RootSource):
         # The cache first: a cache of another source id is refused before the
         # wrapped source is checked or read (ITL-1425).
         self._require_rows_of_this_source()
-        _ = self._source.check_for_new_data()
-        seen = self._source_modified_time()
-        if seen == self._source_seen:
-            return False
-        live = self._live_records().column(self.HASH_COLUMN_NAME).to_pylist()
+        # Checking a nested cache needs its would-be rows, but must leave the
+        # delivery for the next consuming read.
+        token = _PREPARED_CACHE_READS.set([] if self._wraps_cache() else None)
+        try:
+            _ = self._source.check_for_new_data()
+            seen = self._source_modified_time()
+            if seen == self._source_seen:
+                return False
+            live = self._live_records().column(self.HASH_COLUMN_NAME).to_pylist()
+        finally:
+            _PREPARED_CACHE_READS.reset(token)
         # The next read presents the cache's rows and the live rows together (the
         # cache keeps every row any source sharing it wrote).
         cached = self._cached_record_hashes()
@@ -744,22 +804,55 @@ class CachedSource(RootSource):
         if stored_ids:
             self._source_ids_checked = True
 
-    def _build_merged_stream(self) -> ArrowTableStream:
-        """Ingest live data (if available), then return all cached records.
-
-        If the inner source cannot provide data (e.g. an unbound
-        ``SourceProxy``), the method falls back to returning whatever is
-        already stored in the cache database.  If the cache is empty, an
-        empty stream is returned.
-        """
+    def _prepare_delivery(self, pending: list[_PreparedCacheRead]) -> pa.Table | None:
+        """Check the live delivery or, for an unavailable source, serve stored rows."""
+        checkpoint = len(pending)
         try:
-            self._ingest_live_data()
+            return self._prepare_ingestion()
         except NotImplementedError:
+            del pending[checkpoint:]
             logger.info(
                 "Inner source %r cannot provide data; serving from cache only.",
                 self._source.source_id,
             )
+            return None
 
+    def _preview_stream(self, delivery: pa.Table | None) -> ArrowTableStream:
+        """Present the cached and newly accepted rows while enclosing caches check them."""
+        stored = self._read_cached_records_with_hashes()
+        rows = stored.drop(self._STORED_ONLY_COLUMNS) if stored is not None else None
+        if delivery is not None and self._cache_database.stores_records:
+            physical = self._read_cache_table()
+            existing = (
+                set(physical.column(self.HASH_COLUMN_NAME).to_pylist())
+                if physical is not None
+                else set()
+            )
+            # A new hash is stored once, with its last occurrence in the delivery.
+            additions = {
+                record_hash: i
+                for i, record_hash in enumerate(
+                    delivery.column(self.HASH_COLUMN_NAME).to_pylist()
+                )
+                if record_hash not in existing
+            }
+            if additions:
+                new_rows = delivery.take(sorted(additions.values())).drop(
+                    [self.HASH_COLUMN_NAME]
+                )
+                rows = (
+                    new_rows
+                    if rows is None
+                    else pa.concat_tables([rows, new_rows.select(rows.column_names)])
+                )
+        return self._stream_over(rows if rows is not None else self._empty_table())
+
+    def _publish_stream(
+        self, delivery: pa.Table | None, seen: datetime | None
+    ) -> ArrowTableStream:
+        """Write a checked delivery and hold the rows read back from the database."""
+        if delivery is not None:
+            self._write_delivery(delivery, seen)
         stored = self._read_cached_records_with_hashes()
         if stored is None:
             self._presented_hashes = set()
@@ -772,11 +865,16 @@ class CachedSource(RootSource):
             }
             all_records = stored.drop(self._STORED_ONLY_COLUMNS)
 
-        tag_keys = self._source.keys()[0]
+        self._cached_stream = self._stream_over(all_records)
+        self._update_modified_time()
+        return self._cached_stream
+
+    def _stream_over(self, records: pa.Table) -> ArrowTableStream:
+        """Present cached-source rows with the source's tag columns and context."""
         # Cached rows are this source's: give them its data context, not the default.
         return ArrowTableStream(
-            all_records,
-            tag_columns=tag_keys,
+            records,
+            tag_columns=self._source.keys()[0],
             data_context=self.data_context,
             data_tags=stream_data_tags(self._source),
         )
@@ -839,22 +937,54 @@ class CachedSource(RootSource):
         src_time = self._source.last_modified
         return src_time is None or src_time > own_time
 
-    def _ensure_stream(self) -> None:
-        """Build the merged stream on first access, or rebuild if source is stale."""
-        if self._cached_stream is not None and self.is_stale:
-            self._cached_stream = None
-        if self._cached_stream is None:
-            self._cached_stream = self._build_merged_stream()
-            self._update_modified_time()
+    def _ensure_stream(self) -> ArrowTableStream:
+        """Build the merged stream after every cache reached by the read accepts it."""
+        pending = _PREPARED_CACHE_READS.get()
+        for prepared in pending or ():
+            if prepared.cache is self:
+                return prepared.stream
+        if self._cached_stream is not None and not self.is_stale:
+            return self._cached_stream
+        seen = self._source_modified_time()
+        if pending is not None:
+            checkpoint = len(pending)
+            delivery = self._prepare_delivery(pending)
+            preview = self._preview_stream(delivery)
+            pending.append(
+                _PreparedCacheRead(
+                    self, preview, delivery, seen, len(pending) != checkpoint
+                )
+            )
+            return preview
+
+        pending = []
+        token = _PREPARED_CACHE_READS.set(pending)
+        try:
+            delivery = self._prepare_delivery(pending)
+            # Publish from the inside out. A successful read still uses each
+            # database's actual presentation order. The preview checked the
+            # same record ids and hashes without modifying any store.
+            for prepared in pending:
+                accepted = (
+                    prepared.cache._live_records()
+                    if prepared.reads_prepared_cache
+                    else prepared.delivery
+                )
+                prepared.stream = prepared.cache._publish_stream(
+                    accepted, prepared.seen
+                )
+            if pending:
+                delivery = self._live_records()
+            return self._publish_stream(delivery, seen)
+        finally:
+            _PREPARED_CACHE_READS.reset(token)
 
     def clear_cache(self) -> None:
         """Discard in-memory cached stream (forces rebuild on next access)."""
         self._cached_stream = None
 
     def iter_data(self) -> Iterator[tuple[TagProtocol, DataProtocol]]:
-        self._ensure_stream()
-        assert self._cached_stream is not None
-        return self._cached_stream.iter_data()
+        return self._ensure_stream().iter_data()
 
     def as_table(
         self,
@@ -862,9 +992,7 @@ class CachedSource(RootSource):
         columns: ColumnConfig | dict[str, Any] | None = None,
         all_info: bool = False,
     ) -> "pa.Table":
-        self._ensure_stream()
-        assert self._cached_stream is not None
-        return self._cached_stream.as_table(columns=columns, all_info=all_info)
+        return self._ensure_stream().as_table(columns=columns, all_info=all_info)
 
     def _typed_zero_row_table(self) -> "pa.Table | None":
         """The wrapped source's zero-row table: the cache stores that source's rows.

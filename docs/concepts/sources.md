@@ -792,6 +792,9 @@ one row, so the cache never takes a second, different row under a record id it h
   any stored value of the row differs: a tag, a data column, a system tag or a source-info
   token.
 
+When cached sources are nested, every cache in the chain checks the delivery before any
+of them writes rows. This includes caches connected by a bound source proxy.
+
 Changed data is another dataset. Give the source a new `source_id`, or keep a new cache for
 it (another `cache_path` or cache database).
 
