@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Any
 
 import pyarrow as pa
 
+from orcapod.logical_types.directory_type import Directory
+from orcapod.logical_types.file_type import File
 from orcapod.logical_types.identifier import arrow_type_identifier
 from orcapod.logical_types.ignore_list import IgnoreListHandler, parse_ignore_metadata
 
@@ -458,9 +460,6 @@ class SemanticHashingVisitor(ArrowTypeDataVisitor):
         # Convert storage value → Python object and hash it.
         python_obj = self._type_converter.storage_to_python(storage_value, python_type)
         handler = self._python_hasher.type_handler_registry.get_handler(python_obj)
-        from orcapod.logical_types.directory_type import Directory
-        from orcapod.logical_types.file_type import File
-
         if isinstance(handler, IgnoreListHandler) and not isinstance(
             python_obj, (File, Directory)
         ):
