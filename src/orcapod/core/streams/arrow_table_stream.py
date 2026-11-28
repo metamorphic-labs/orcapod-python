@@ -251,21 +251,26 @@ class ArrowTableStream(StreamBase):
         Raises:
             InputValidationError: Naming a non-string, null or unpaired system tag.
         """
-        names = {
-            renames.get(name, name)
-            for name in table.column_names
-            if name != constants.CONTEXT_KEY
+        system_tags = {
+            index: name
+            for index, original in enumerate(table.column_names)
+            if original != constants.CONTEXT_KEY
+            and (name := renames.get(original, original)).startswith(
+                constants.SYSTEM_TAG_PREFIX
+            )
         }
+        if not system_tags:
+            return
+        names = set(system_tags.values())
+        schema = table.schema
         source_prefix = (
             constants.SYSTEM_TAG_SOURCE_ID_PREFIX + constants.BLOCK_SEPARATOR
         )
         record_prefix = (
             constants.SYSTEM_TAG_RECORD_ID_PREFIX + constants.BLOCK_SEPARATOR
         )
-        for index, field in enumerate(table.schema):
-            name = renames.get(field.name, field.name)
-            if name not in names or not name.startswith(constants.SYSTEM_TAG_PREFIX):
-                continue
+        for index, name in system_tags.items():
+            field = schema.field(index)
             if not (
                 pa.types.is_string(field.type)
                 or pa.types.is_large_string(field.type)
