@@ -24,6 +24,59 @@ def db() -> Iterator[ConnectorArrowDatabase]:
     connector.close()
 
 
+def _check_sql_path_rejects_hidden_separator(
+    db: ConnectorArrowDatabase, *, scoped: bool
+) -> None:
+    class HiddenSeparator(str):
+        def __contains__(self, item: object) -> bool:
+            return False
+
+    db.add_record(("a", "b"), b"id", pa.table({"value": [10]}), flush=True)
+    if scoped:
+        with pytest.raises(ValueError, match="invalid character"):
+            db.at(HiddenSeparator("a/b"))
+    else:
+        with pytest.raises(ValueError, match="invalid character"):
+            db.add_record(
+                (HiddenSeparator("a/b"),), b"id", pa.table({"value": [99]}), flush=True
+            )
+    rows = db.get_all_records(("a", "b"))
+    assert rows is not None and rows.to_pylist() == [{"value": 10}]
+
+
+def _check_sql_listing_normalizes_subclass_prefix(
+    db: ConnectorArrowDatabase, *, flush: bool
+) -> None:
+    class OddString(str):
+        def __eq__(self, other: object) -> bool:
+            return self is other
+
+        __hash__ = str.__hash__
+
+        def __str__(self) -> str:
+            return "different"
+
+    scope = db.at(OddString("same"))
+    scope.add_record(("child",), b"id", pa.table({"value": [1]}), flush=flush)
+
+    assert scope.list_table_paths() == [("child",)]
+    assert db.list_table_paths((OddString("same"),)) == [("same", "child")]
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_sql_path_rejects_hidden_separator(
+    db: ConnectorArrowDatabase, scoped: bool
+) -> None:
+    _check_sql_path_rejects_hidden_separator(db, scoped=scoped)
+
+
+@pytest.mark.parametrize("flush", [False, True])
+def test_sql_listing_normalizes_subclass_prefix(
+    db: ConnectorArrowDatabase, flush: bool
+) -> None:
+    _check_sql_listing_normalizes_subclass_prefix(db, flush=flush)
+
+
 class TestConnectorArrowDatabaseWithSQLite:
     def test_long_paths_with_the_same_sanitized_name_store_separate_rows(
         self, db: ConnectorArrowDatabase

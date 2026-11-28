@@ -199,15 +199,18 @@ class ConnectorArrowDatabase:
     # ── Path helpers ──────────────────────────────────────────────────────────
 
     def _get_record_key(self, record_path: tuple[str, ...]) -> str:
-        path_key = "/".join(self._plain_path(self._path_prefix + record_path))
+        full_path = self._plain_path(self._path_prefix + record_path)
         if self._sql_store is None:
-            return path_key
-        return f"{self._sql_store.get_current_store_schema()}\0{path_key}"
+            return "/".join(full_path)
+        self._validate_path_components(full_path)
+        return f"{self._sql_store.get_current_store_schema()}\0{'/'.join(full_path)}"
 
     @staticmethod
     def _plain_path(path: tuple[str, ...]) -> tuple[str, ...]:
-        """Copy accepted string components to ordinary strings."""
-        return tuple("".join((part,)) for part in path)
+        """Copy the underlying text of string components to ordinary strings."""
+        return tuple(
+            str.__str__(part) if isinstance(part, str) else part for part in path
+        )
 
     def _record_path_from_key(self, record_key: str) -> tuple[str, ...]:
         """Decode the path portion of a shared pending key."""
@@ -243,17 +246,20 @@ class ConnectorArrowDatabase:
                 f"{self.max_hierarchy_depth - len(self._path_prefix)} "
                 f"(base_path uses {len(self._path_prefix)} components)"
             )
-        for i, component in enumerate(record_path):
-            if not component or not isinstance(component, str):
-                raise ValueError(
-                    f"record_path component {i} is invalid: {repr(component)}"
-                )
+        self._validate_path_components(record_path)
+
+    @staticmethod
+    def _validate_path_components(path: tuple[str, ...]) -> None:
+        """Check components before encoding the path as a pending key."""
+        for i, component in enumerate(path):
+            if not isinstance(component, str) or not component:
+                raise ValueError(f"Path component {i} is invalid: {component!r}")
             # "/" is the separator used by _get_record_key; "\0" is a common
             # string-boundary sentinel. Both would corrupt key round-tripping
             # in flush() where record_path is reconstructed via split("/").
             if "/" in component or "\0" in component:
                 raise ValueError(
-                    f"record_path component {repr(component)} contains an "
+                    f"Path component {component!r} contains an "
                     "invalid character ('/' or '\\0')"
                 )
 
@@ -357,6 +363,7 @@ class ConnectorArrowDatabase:
         """
         full_prefix = self._path_prefix + prefix
         if self._sql_store is not None:
+            full_prefix = self._plain_path(full_prefix)
             stem = STORE_TABLE_NAME_PREFIX + table_name_hint(
                 full_prefix, hint_length=_SQL_HINT_LENGTH
             )
@@ -543,6 +550,8 @@ class ConnectorArrowDatabase:
         flush: bool = False,
     ) -> None:
         """Add multiple records to the pending batch."""
+        if self._sql_store is not None:
+            record_path = self._plain_path(record_path)
         self._validate_record_path(record_path)
         if records.num_rows == 0:
             return
@@ -796,16 +805,9 @@ class ConnectorArrowDatabase:
                 ``'/'`` or ``'\\0'`` (which would corrupt the ``'/'``-separated
                 record key scheme and break ``flush()``'s key reconstruction).
         """
-        for i, component in enumerate(path_components):
-            if not component or not isinstance(component, str):
-                raise ValueError(
-                    f"at() path component {i} is invalid: {repr(component)}"
-                )
-            if "/" in component or "\0" in component:
-                raise ValueError(
-                    f"at() path component {repr(component)} contains an invalid character "
-                    "('/' or '\\0')"
-                )
+        if self._sql_store is not None:
+            path_components = self._plain_path(path_components)
+        self._validate_path_components(path_components)
         new_root = self._root if self._root is not None else self
         new_scoped_path = self._scoped_path + path_components
         return ConnectorArrowDatabase(

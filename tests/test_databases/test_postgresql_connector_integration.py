@@ -39,6 +39,8 @@ from orcapod.types import ColumnInfo
 from tests.test_databases.test_sqlite_connector_integration import (
     _check_catalog_operation,
     _check_pending_collision,
+    _check_sql_listing_normalizes_subclass_prefix,
+    _check_sql_path_rejects_hidden_separator,
 )
 from tests.test_core.test_result_cache import (
     TIE_ORDERS,
@@ -832,6 +834,26 @@ def test_str_subclass_path_reopens_as_ordinary_string(
 
 
 @pytest.mark.postgres
+@pytest.mark.parametrize("scoped", [False, True])
+def test_sql_path_rejects_hidden_separator(
+    connector: PostgreSQLConnector, scoped: bool
+) -> None:
+    _check_sql_path_rejects_hidden_separator(
+        ConnectorArrowDatabase(connector), scoped=scoped
+    )
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize("flush", [False, True])
+def test_sql_listing_normalizes_subclass_prefix(
+    connector: PostgreSQLConnector, flush: bool
+) -> None:
+    _check_sql_listing_normalizes_subclass_prefix(
+        ConnectorArrowDatabase(connector), flush=flush
+    )
+
+
+@pytest.mark.postgres
 def test_metadata_lookup_folds_unquoted_schema_identifier(
     connector: PostgreSQLConnector,
 ) -> None:
@@ -875,13 +897,43 @@ def test_standalone_catalog_lookup_releases_its_transaction(
 
 
 @pytest.mark.postgres
+@pytest.mark.parametrize("read", ["get_all_records", "get_table_schema"])
+def test_public_store_read_and_listing_release_catalog_lock(
+    connector: PostgreSQLConnector, read: str
+) -> None:
+    db = ConnectorArrowDatabase(connector)
+    path = ("lock-test",)
+    db.add_record(path, b"id", pa.table({"value": [1]}), flush=True)
+
+    assert getattr(db, read)(path) is not None
+    assert db.list_table_paths() == [path]
+
+    _check_catalog_can_be_locked(connector)
+    assert connector._require_open().info.transaction_status.name == "IDLE"
+
+
+def _check_catalog_can_be_locked(connector: PostgreSQLConnector) -> None:
+    """Verify the store's catalog can take an exclusive lock from another connection."""
+    with psycopg.connect(connector._dsn) as independent:
+        _ = independent.execute(
+            sql.SQL("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE NOWAIT").format(
+                sql.Identifier(STORE_PATH_CATALOG)
+            )
+        )
+
+
+@pytest.mark.postgres
 def test_catalog_lookup_does_not_commit_a_callers_transaction(
     connector: PostgreSQLConnector,
 ) -> None:
+    db = ConnectorArrowDatabase(connector)
+    path = ("lock-test",)
+    db.add_record(path, b"id", pa.table({"value": [1]}), flush=True)
     conn = connector._require_open()
     _ = conn.execute("CREATE TABLE caller_work (value INTEGER)")
 
-    _ = connector.get_store_table_paths("o1_")
+    assert db.list_table_paths() == [path]
+    _check_catalog_can_be_locked(connector)
 
     assert conn.info.transaction_status.name == "INTRANS"
     conn.rollback()

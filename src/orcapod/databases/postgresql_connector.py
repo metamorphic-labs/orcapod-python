@@ -453,7 +453,7 @@ class PostgreSQLConnector:
         """Return all user table names in this database (sorted, excludes views)."""
         with self._lock:
             conn = self._require_open()
-            with conn.cursor() as cur:
+            with conn.transaction(force_rollback=True), conn.cursor() as cur:
                 cur.execute(
                     """
                     SELECT table_name
@@ -472,7 +472,9 @@ class PostgreSQLConnector:
         from psycopg import sql as pg_sql
 
         conn = cast("psycopg.Connection[tuple[object, ...]]", self._require_open())
-        with self._lock, conn.transaction(), conn.cursor() as cur:
+        # Rolling back the read scope also releases its catalog lock when
+        # psycopg uses a savepoint inside a caller-owned transaction.
+        with self._lock, conn.transaction(force_rollback=True), conn.cursor() as cur:
             _ = cur.execute(
                 """
                 SELECT ns.nspname, ns.oid,
@@ -524,7 +526,7 @@ class PostgreSQLConnector:
     def get_current_store_schema(self) -> str:
         """Return the persistent schema selected for connector stores."""
         conn = cast("psycopg.Connection[tuple[object, ...]]", self._require_open())
-        with self._lock, conn.transaction(), conn.cursor() as cur:
+        with self._lock, conn.transaction(force_rollback=True), conn.cursor() as cur:
             _ = cur.execute(
                 """
                 SELECT ns.nspname,
@@ -650,7 +652,7 @@ class PostgreSQLConnector:
         with self._lock:
             conn = self._require_open()
             host, port = conn.info.host, conn.info.port
-            with conn.cursor() as cur:
+            with conn.transaction(force_rollback=True), conn.cursor() as cur:
                 cur.execute("SELECT current_database(), current_schema()")
                 row = cur.fetchone()
         if row is None or row[0] is None or row[1] is None:
@@ -712,7 +714,7 @@ class PostgreSQLConnector:
         with self._lock:
             conn = self._require_open()
             self._validate_table_name(table_name)
-            with conn.cursor() as cur:
+            with conn.transaction(force_rollback=True), conn.cursor() as cur:
                 cur.execute(
                     """
                     SELECT kcu.column_name
@@ -738,7 +740,7 @@ class PostgreSQLConnector:
         with self._lock:
             conn = self._require_open()
             self._validate_table_name(table_name)
-            with conn.cursor() as cur:
+            with conn.transaction(force_rollback=True), conn.cursor() as cur:
                 cur.execute(
                     """
                     SELECT column_name, data_type, udt_name, is_nullable
