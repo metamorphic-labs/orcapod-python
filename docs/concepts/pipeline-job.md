@@ -535,6 +535,10 @@ print(loaded.nodes["bmi"].as_table().num_rows, summary.nodes["bmi"].not_stored)
 # 3 0
 ```
 
+As a stopgap (ITL-1560), a loaded job raises `RuntimeError` if you try to capture steps
+into it or call `compile()`. Build the job from its pipeline to change the graph.
+Binding sources and running with `load_only=True` remain supported.
+
 The full rules (which sources are rebuilt from the file, operators, side effects, a
 database that holds other rows than the file expects) are in
 [Saving and loading a job](function-pods.md#saving-and-loading-a-job).

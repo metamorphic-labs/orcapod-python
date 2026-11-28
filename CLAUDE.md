@@ -1579,6 +1579,8 @@ data. The rules:
   commit clears only the nodes that ran; nodes it held keep their earlier run. A load-only run's rows have status
   `loaded_only`. Only job nodes' `run()` takes an argument (`load_only`).
   A loaded job (`PipelineJob.load`) runs only with `load_only=True`.
+  As a stopgap (ITL-1560), it refuses capture and recompilation. Build the job from
+  its pipeline to change the graph. Source binding is supported.
   `job.run()`/`run_async()` use the same state rule and plan (`node_run.plan_run`): a current node is
   held (not run; its rows feed its successors, both orchestrators take held rows), sources
   are read only for nodes that run, a failed end-of-run commit clears only the nodes that ran,

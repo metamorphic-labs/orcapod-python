@@ -8,7 +8,7 @@ import logging
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Self, cast
 
 import orcapod
 from orcapod.core.nodes import JobNode
@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from orcapod.pipeline.async_orchestrator import AsyncPipelineOrchestrator
     from orcapod.pipeline.execution_context import ExecutionContext
     from orcapod.pipeline.graph import Pipeline
+    from orcapod.pipeline.pod_invocation import PodInvocation
     from orcapod.pipeline.sync_orchestrator import SyncPipelineOrchestrator
     from orcapod.protocols.database_protocols import ArrowDatabaseProtocol
     from orcapod.protocols.observability_protocols import ExecutionObserverProtocol
@@ -210,9 +211,34 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
         # Pre-set by from_pipeline() via _set_compiled_pipeline().
         self._compiled_pipeline: Pipeline | None = None
 
+    def _require_editable_graph(self) -> None:
+        """Refuse graph changes on a job restored from a saved file."""
+        # Stopgap (ITL-1560): load() restores compiled nodes without the
+        # recorded invocations needed to compile them again. See ITL-1559.
+        if self._loaded:
+            raise RuntimeError(
+                "A loaded job cannot be extended or recompiled yet "
+                "(stopgap, ITL-1560). Build the job from its pipeline to change it."
+            )
+
+    def _record_invocation(self, invocation: PodInvocation) -> None:
+        """Record a pod invocation after checking that the graph can be edited."""
+        self._require_editable_graph()
+        super()._record_invocation(invocation)
+
     # ------------------------------------------------------------------
     # Context manager — respects auto_compile flag
     # ------------------------------------------------------------------
+
+    def __enter__(self) -> Self:
+        """Enter the recording context and return the job.
+
+        Raises:
+            RuntimeError: If this job was loaded from a saved file.
+        """
+        self._require_editable_graph()
+        super().__enter__()
+        return self
 
     def __exit__(self, exc_type=None, exc_value=None, traceback=None) -> None:
         """Exit the recording context, compiling if no exception occurred."""
@@ -238,7 +264,12 @@ class PipelineJob(AbstractPipelineBase[JobNode]):
 
         If ``_database`` is set, distributes databases to all function and
         operator job nodes.
+
+        Raises:
+            RuntimeError: If this job was loaded from a saved file.
         """
+        self._require_editable_graph()
+
         # Preserve any sources already bound (e.g. from a prior bind() call).
         pre_sources = dict(self._sources)
         pre_sources_by_hash = dict(self._sources_by_hash)
