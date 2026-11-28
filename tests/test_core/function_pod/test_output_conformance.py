@@ -17,16 +17,19 @@ on both orchestrators and both store backends) and check the developer's decisio
 
 from __future__ import annotations
 
+import asyncio
 import collections
 import datetime as dt
 import enum
 import types
 import warnings
+from abc import ABCMeta
+from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, NamedTuple, cast
 
 import numpy as np
 import pytest
@@ -34,7 +37,9 @@ import pytest
 from pydantic import BaseModel
 
 from orcapod import PipelineJob, errors, function_pod
+from orcapod.core.data_function import PythonDataFunction
 from orcapod.core.datagrams import Data
+from orcapod.core.function_pod import FunctionPod
 from orcapod.databases import DeltaTableDatabase, InMemoryArrowDatabase
 from orcapod.pipeline import AsyncPipelineOrchestrator, SyncPipelineOrchestrator
 from orcapod.pipeline.observer import NoOpObserver
@@ -267,6 +272,253 @@ class _CrashRecorder(NoOpObserver):
     def on_data_crash(self, node_label: Any, tag: Any, data: Any, error: Any) -> None:
         """Record the error of a failed row."""
         self.crashes.append(error)
+
+
+def _multi_output_function(
+    annotation: object, returned: object, *, asynchronous: bool = False
+) -> types.FunctionType:
+    """Build a function with the requested annotation and runtime return value."""
+
+    def invalid_container(x: int, y: str) -> object:
+        return returned
+
+    async def async_invalid_container(x: int, y: str) -> object:
+        return returned
+
+    fn = async_invalid_container if asynchronous else invalid_container
+    if annotation is None:
+        del fn.__annotations__["return"]
+    else:
+        fn.__annotations__["return"] = annotation
+    return fn
+
+
+class _NamedOutputs(NamedTuple):
+    sample_count: int
+    rate: float
+
+
+_TWO_TEXT = ("first", "second")
+_THREE_NUMBERS = ("third", "first", "second")
+# The schema extractor already accepts a runtime alias with one type per key.
+# A standard list[T] cannot declare the positions of several outputs.
+_POSITIONAL_LIST = types.GenericAlias(list, (int, float))
+_POSITIONAL_SEQUENCE = types.GenericAlias(Sequence, (int, int))
+
+
+@pytest.mark.parametrize(
+    ("reserved_keys", "allowed_keys", "return_error"),
+    [
+        pytest.param("_first", "first", errors.OutputTypeError, id="single-output"),
+        pytest.param(
+            ("first", "_second"),
+            _TWO_TEXT,
+            errors.OutputContainerTypeError,
+            id="multiple-outputs",
+        ),
+    ],
+)
+def test_reserved_output_names_are_refused_before_return_validation(
+    reserved_keys: str | tuple[str, ...],
+    allowed_keys: str | tuple[str, ...],
+    return_error: type[errors.OutputTypeError],
+) -> None:
+    fn = _multi_output_function(tuple[str, str], {"first": "a", "second": "b"})
+
+    with pytest.raises(errors.InputValidationError, match="reserved"):
+        _ = PythonDataFunction(fn, output_keys=reserved_keys)
+
+    data_function = PythonDataFunction(fn, output_keys=allowed_keys)
+    with pytest.raises(return_error, match="returned dict") as caught:
+        _ = data_function.call(Data({"x": 7, "y": "b"}))
+    assert type(caught.value) is return_error
+
+
+@pytest.mark.parametrize(
+    ("annotation", "returned", "keys"),
+    [
+        pytest.param(
+            tuple[str, str], {"first": "a", "second": "b"}, _TWO_TEXT, id="dict"
+        ),
+        pytest.param(tuple[str, str], {"a", "b"}, _TWO_TEXT, id="set"),
+        pytest.param(tuple[str, str], frozenset({"a", "b"}), _TWO_TEXT, id="frozenset"),
+        pytest.param(tuple[str, str], "ab", _TWO_TEXT, id="str"),
+        pytest.param(
+            tuple[str, str], lambda: (v for v in ("a", "b")), _TWO_TEXT, id="generator"
+        ),
+        pytest.param(
+            tuple[int, int, float],
+            {"third": 1, "first": 2, "second": 3.5},
+            _THREE_NUMBERS,
+            id="numeric-dict",
+        ),
+        pytest.param(tuple[int, int, float], b"abc", _THREE_NUMBERS, id="bytes"),
+        pytest.param(tuple[int, int, float], [1, 2, 3.5], _THREE_NUMBERS, id="list"),
+        pytest.param(_POSITIONAL_LIST, (1, 2.5), _TWO_TEXT, id="tuple-for-list"),
+        pytest.param(_POSITIONAL_SEQUENCE, "ab", _TWO_TEXT, id="sequence-str"),
+        pytest.param(_POSITIONAL_SEQUENCE, b"ab", _TWO_TEXT, id="sequence-bytes"),
+        pytest.param(
+            _POSITIONAL_SEQUENCE, bytearray(b"ab"), _TWO_TEXT, id="sequence-bytearray"
+        ),
+    ],
+)
+@pytest.mark.parametrize("reverse_keys", [False, True], ids=["as-declared", "reversed"])
+@pytest.mark.parametrize(
+    ("entrypoint", "asynchronous", "store_kind"),
+    [
+        pytest.param("call", False, "memory", id="call"),
+        pytest.param("async_call", True, "memory", id="async-call"),
+        pytest.param("as_table", False, "memory", id="table-sync-function"),
+        pytest.param("as_table", True, "memory", id="table-async-function"),
+        pytest.param("run", False, "memory", id="run-memory"),
+        pytest.param("run_async", True, "memory", id="run-async-memory"),
+        pytest.param("run", False, "delta", id="run-delta"),
+        pytest.param("run_async", True, "delta", id="run-async-delta"),
+    ],
+)
+def test_multi_output_containers_are_checked_before_values_are_unpacked(
+    annotation: object,
+    returned: object,
+    keys: tuple[str, ...],
+    entrypoint: str,
+    asynchronous: bool,
+    store_kind: str,
+    reverse_keys: bool,
+    tmp_path: Path,
+) -> None:
+    """All entry points report the container mismatch and jobs store no rows."""
+    if callable(returned):
+        returned = returned()
+    if reverse_keys:
+        keys = keys[::-1]
+    fn = _multi_output_function(annotation, returned, asynchronous=asynchronous)
+    source = DictSource(
+        data=[{"session": "s1", "record": 1, "x": 7, "y": "b"}],
+        tag_columns=["session", "record"],
+        tag_only_columns=True,
+        source_id="multi-output-input",
+    )
+
+    if entrypoint in ("run", "run_async"):
+        pod = FunctionPod.from_fn(fn, output_keys=list(keys))
+        observer = _CrashRecorder()
+        job = PipelineJob(name="multi_output", database=_store(store_kind, tmp_path))
+        with job:
+            _ = pod(source, label="result")
+        with pytest.warns(errors.RowFailuresWarning, match=fn.__name__):
+            if asynchronous:
+                _ = asyncio.run(job.run_async(observer=observer))
+            else:
+                _ = job.run(observer=observer)
+        node = job.nodes["result"]
+        assert node.as_table().num_rows == 0
+        stored = node.get_all_records()
+        assert stored is None or stored.num_rows == 0
+        [error] = observer.crashes
+        assert isinstance(error, errors.OutputTypeError)
+    else:
+        data_function = PythonDataFunction(fn, output_keys=keys)
+        data = Data({"x": 7, "y": "b"})
+        with pytest.raises(errors.OutputTypeError, match=fn.__name__) as caught:
+            if entrypoint == "call":
+                _ = data_function.call(data)
+            elif entrypoint == "async_call":
+                _ = asyncio.run(data_function.async_call(data))
+            else:
+                _ = FunctionPod.from_fn(fn, output_keys=list(keys))(source).as_table()
+        error = caught.value
+
+    message = str(error)
+    assert fn.__name__ in message
+    assert f"returned {type(returned).__name__} " in message
+    assert str(annotation) in message
+    assert "one value per output key, in the order of output_keys" in message
+
+
+@pytest.mark.parametrize("use_executor", [True, False])
+@pytest.mark.parametrize("asynchronous", [True, False])
+def test_multi_output_generator_is_refused_without_iterating(
+    use_executor: bool, asynchronous: bool
+) -> None:
+    """Container validation happens before the return value is iterated."""
+
+    def reject_iteration():
+        pytest.fail("The return value was iterated")
+        yield 1
+
+    fn = _multi_output_function(
+        tuple[int, int], reject_iteration(), asynchronous=asynchronous
+    )
+    data_function = PythonDataFunction(fn, output_keys=_TWO_TEXT)
+    if not use_executor:
+        data_function.set_executor(None)
+    data = Data({"x": 7, "y": "b"})
+    with pytest.raises(errors.OutputTypeError, match="invalid_container.*generator"):
+        if asynchronous:
+            _ = asyncio.run(data_function.async_call(data))
+        else:
+            _ = data_function.call(data)
+
+
+@pytest.mark.parametrize(
+    ("annotation", "returned"),
+    [
+        pytest.param(tuple[int, float], (1, 2.5), id="tuple"),
+        pytest.param(tuple[int, float], _NamedOutputs(1, 2.5), id="namedtuple"),
+        pytest.param(_POSITIONAL_LIST, [1, 2.5], id="list"),
+        pytest.param(_POSITIONAL_SEQUENCE, range(1, 3), id="sequence"),
+        pytest.param(None, (1, 2.5), id="unannotated"),
+    ],
+)
+def test_multi_output_containers_assign_values_in_output_key_order(
+    annotation: object, returned: Sequence[object]
+) -> None:
+    fn = _multi_output_function(annotation, returned)
+    data_function = PythonDataFunction(
+        fn,
+        output_keys=("second", "first"),
+        output_schema={"second": int, "first": float} if annotation is None else None,
+    )
+    result = data_function.call(Data({"x": 7, "y": "b"}))
+    assert result is not None
+    assert result.as_dict() == {"second": returned[0], "first": returned[1]}
+
+
+def test_unannotated_multi_output_function_requires_a_tuple() -> None:
+    fn = _multi_output_function(None, [1, 2.5])
+    data_function = PythonDataFunction(
+        fn, output_keys=_TWO_TEXT, output_schema={"first": int, "second": float}
+    )
+    with pytest.raises(
+        errors.OutputTypeError,
+        match="invalid_container.*list.*Return a tuple.*annotate",
+    ):
+        _ = data_function.call(Data({"x": 7, "y": "b"}))
+
+
+@pytest.mark.parametrize("annotation", [dict[str, int], list[int]])
+def test_multi_output_annotation_must_declare_position_types(
+    annotation: object,
+) -> None:
+    fn = _multi_output_function(annotation, [])
+    with pytest.raises(ValueError, match="return type annotation"):
+        PythonDataFunction(fn, output_keys=_TWO_TEXT)
+
+
+class _MappingSequence(dict[str, str]):
+    """A mapping whose class also satisfies the sequence origin check."""
+
+
+_ = cast(ABCMeta, cast(object, Sequence)).register(_MappingSequence)
+
+
+@pytest.mark.parametrize("origin", [str, bytes, bytearray, _MappingSequence])
+def test_multi_output_excluded_container_annotation_is_refused_at_definition(
+    origin: type,
+) -> None:
+    fn = _multi_output_function(types.GenericAlias(origin, (str, str)), "ab")
+    with pytest.raises(ValueError, match=r"return type annotation.*tuple\["):
+        _ = PythonDataFunction(fn, output_keys=_TWO_TEXT)
 
 
 def _half_on_even(x: int) -> int:
