@@ -743,16 +743,19 @@ def test_saved_arrow_schema_refuses_narrow_keys(reader: str, type_text: str) -> 
 
 
 def test_saved_job_rejects_prohibited_source_declaration(tmp_path: Path) -> None:
+    from orcapod import SourceNode
+    from orcapod.core.operators import Batch
     from orcapod.databases import DeltaTableDatabase
     from orcapod.pipeline import PipelineJob
 
-    table = _table(_dict_of(pa.float64()))
-    source = ArrowTableSource(
-        table, tag_columns="id", tag_only_columns=True, source_id="pairs"
+    slot = SourceNode(
+        "pairs",
+        pa.schema([("id", pa.int64())]),
+        pa.schema([("k", _dict_of(pa.float64()))]),
     )
     job = PipelineJob(database=DeltaTableDatabase(tmp_path / "store"))
     with job:
-        source.batch(label="batch")
+        Batch()(slot, label="batch")
     path = tmp_path / "job.json"
     job.save(path)
     saved = json.loads(path.read_text())
@@ -875,3 +878,134 @@ def test_duplicate_key_struct_is_not_dict_shape() -> None:
         ArrowTableSource(table, tag_columns="id")
     with pytest.raises(ValueError, match=r"column 'k'|Column 'k'"):
         DictSource([{"id": 1, "k": []}], "id", data_schema=table.schema)
+
+
+@pytest.mark.parametrize(
+    "derived", [False, True], ids=["static-batch", "derived-source"]
+)
+@pytest.mark.parametrize(
+    "legacy", [False, True], ids=["current-blueprint", "legacy-blueprint"]
+)
+def test_standalone_blueprint_loads_inherited_batch_input(
+    tmp_path: Path, derived: bool, legacy: bool
+) -> None:
+    from orcapod import SourceNode
+    from orcapod.core.operators import Batch
+    from orcapod.databases import DeltaTableDatabase
+    from orcapod.pipeline import Pipeline, PipelineJob
+
+    pair_type = pa.struct([("key", pa.float32()), ("value", pa.int64())])
+    table = pa.table(
+        {"id": [1], "pair": pa.array([{"key": 0.5, "value": 1}], type=pair_type)}
+    )
+    source = ArrowTableSource(
+        table, tag_columns="id", tag_only_columns=True, source_id="pairs"
+    )
+    if derived:
+        job = PipelineJob(
+            name="parent", database=DeltaTableDatabase(tmp_path / "cache")
+        )
+        with job:
+            source.batch(label="parent")
+        job.run()
+        stream = job.nodes["parent"].as_source(
+            tags_as_data={"id": "copied_id"}, source_id="derived_pairs"
+        )
+    else:
+        stream = Batch().static_process(source)
+
+    pipeline = Pipeline("child")
+    with pipeline:
+        Batch()(stream, label="child")
+    path = tmp_path / "blueprint.json"
+    pipeline.save(path)
+    saved = json.loads(path.read_text())
+    slot_config = next(
+        node["source_config"]
+        for node in saved["nodes"].values()
+        if node["node_type"] == "source"
+    )
+    assert slot_config["inherited_types"] is True
+    if legacy:
+        del slot_config["inherited_types"]
+        path.write_text(json.dumps(saved))
+
+    restored = Pipeline.load(path)
+    slot = next(node for node in restored.nodes.values() if node.node_type == "source")
+    assert isinstance(slot, SourceNode)
+    assert slot.arrow_schemas[1].field("pair").type == pa.large_list(pair_type)
+    assert slot.pipeline_hash() == pipeline.nodes[slot.name].pipeline_hash()
+    restored.save(path)
+    assert len(Pipeline.load(path).nodes) == 2
+
+
+@pytest.mark.parametrize("width", NARROW)
+@pytest.mark.parametrize("storage_form", [False, True], ids=["live", "storage"])
+@pytest.mark.parametrize("polling", [False, True], ids=["dataframe", "polling"])
+def test_arrow_sources_refuse_narrow_set_before_polars(
+    width: pa.DataType, storage_form: bool, polling: bool
+) -> None:
+    from unittest.mock import Mock
+
+    from orcapod.core.sources.polling_source import PollingSource
+    from orcapod.protocols.core_protocols.sources import DynamicSourceProtocol
+    from orcapod.types import Cursor
+
+    extension = _live_set(width)
+    values = pa.array([[0.5]], type=extension.storage_type)
+    if storage_form:
+        schema = pa.schema(
+            [pa.field("id", pa.int64()), _set_storage_field(width).with_name("k")]
+        )
+        table = pa.Table.from_arrays([pa.array([1]), values], schema=schema)
+    else:
+        table = pa.table(
+            {"id": [1], "k": pa.ExtensionArray.from_storage(extension, values)}
+        )
+
+    if polling:
+        impl = Mock(spec=DynamicSourceProtocol)
+        impl.schema.return_value = None
+        impl.fetch.return_value = (Cursor(value=1), table)
+        source = PollingSource(impl, "id", source_id="poll", record_id_columns="id")
+        with pytest.raises(NarrowFloatKeyError, match="column 'k'.*set element type"):
+            source.check_for_new_data()
+    else:
+        with pytest.raises(NarrowFloatKeyError, match="column 'k'.*set element type"):
+            DataFrameSource(table, tag_columns="id", source_id="dataframe")
+
+
+@pytest.mark.parametrize(
+    "python_narrow,arrow_narrow", [(True, True), (True, False), (False, True)]
+)
+def test_source_node_validates_both_schema_declarations_with_arrow_override(
+    python_narrow: bool, arrow_narrow: bool
+) -> None:
+    from orcapod import SourceNode
+    from orcapod.types import Schema
+
+    with pytest.raises(NarrowFloatKeyError, match="[Cc]olumn 'k'"):
+        SourceNode(
+            "slot",
+            Schema({"id": int}),
+            Schema({"k": dict[np.float32, int] if python_narrow else dict[float, int]}),
+            arrow_schemas=(
+                pa.schema([("id", pa.int64())]),
+                pa.schema(
+                    [("k", _dict_of(pa.float32() if arrow_narrow else pa.float64()))]
+                ),
+            ),
+        )
+
+
+@pytest.mark.parametrize("nonnullable", [False, True], ids=["mixed", "nonnullable"])
+def test_datagram_checks_narrow_arrow_declaration_before_values(
+    nonnullable: bool,
+) -> None:
+    narrow = _dict_of(pa.float32())
+    row = Data({"id": 1})
+    with pytest.raises(NarrowFloatKeyError, match="column 'k'"):
+        if nonnullable:
+            row.with_columns({"k": pa.field("k", narrow, nullable=False)}, k=None)
+        else:
+            row.with_columns({"m": int, "k": narrow}, m="invalid integer", k={})

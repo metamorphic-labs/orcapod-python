@@ -70,6 +70,8 @@ class DataFrameSource(RootSource):
 
         if schema is not None:
             require_schema_without_narrow_float_keys(schema)
+        if isinstance(data, (pa.Table, pa.RecordBatch)):
+            require_schema_without_narrow_float_keys(data.schema)
         df = pl.DataFrame(data)
 
         # Convert any Object-dtype columns to Arrow-compatible types.

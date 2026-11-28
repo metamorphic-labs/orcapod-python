@@ -22,7 +22,11 @@ dict and set type it builds (so a source's Python schema, a datagram's, a user-c
 and a function pod's declared inputs and outputs, when the pod is defined). The source
 builder checks schemas at source ingestion. Explicit Arrow schemas are also checked before
 source value conversion, when a datagram adds a column with a declared type, and when a
-saved source declaration is restored. A dict declaration uses the converter's dict shape
+saved source declaration is restored. DataFrameSource and PollingSource check incoming Arrow
+schemas before Polars can drop native set identity. Saved pipeline input slots record
+whether their schemas came from a stream, so loading a blueprint can retain an operator
+result's types. Public slot declarations check both the Python types and any Arrow override.
+A dict declaration uses the converter's dict shape
 (`nested_storage.dict_entry_fields`) or an Arrow map. Plain narrow-float columns, list
 elements, struct fields and dict values remain accepted.
 

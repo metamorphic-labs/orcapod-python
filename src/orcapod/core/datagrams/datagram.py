@@ -38,13 +38,12 @@ from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
 from orcapod.semantic_types import infer_python_schema_from_pylist_data
 from orcapod.semantic_types.canonical_order import canonical_python_value
 from orcapod.semantic_types.narrow_float_keys import (
-    NarrowFloatKeyError,
     require_schema_without_narrow_float_keys,
 )
 from orcapod.system_constants import constants
 from orcapod.types import ColumnConfig, DataType, DataValue, Schema, SchemaLike
 from orcapod.utils import arrow_utils
-from orcapod.utils.schema_utils import declared_arrow_schema
+from orcapod.utils.schema_utils import require_python_schema_without_narrow_float_keys
 
 logger = logging.getLogger(__name__)
 
@@ -194,7 +193,9 @@ class Datagram(ContentIdentifiableBase):
             else inferred
         )
         if python_schema:
-            self._refuse_narrow_float_keys(python_schema)
+            require_python_schema_without_narrow_float_keys(
+                python_schema, self.converter
+            )
         self._data_dict = self._canonical_dict_values(
             data_columns, self._data_python_schema
         )
@@ -208,29 +209,6 @@ class Datagram(ContentIdentifiableBase):
         )
         self._meta_table: pa.Table | None = None
         self._context_table: pa.Table | None = None
-
-    def _refuse_narrow_float_keys(self, python_schema: SchemaLike) -> None:
-        """Refuse a declared type with a ``float32`` or ``float16`` dict key or set element.
-
-        The datagram converts its values to Arrow only when asked for a table; a type
-        with such a key or element is refused when it is declared, here (ITL-1591).
-        The rule is the type converter's, applied when it maps the declared type to
-        Arrow. Any other reason a declared type has no Arrow type is reported where it
-        is today, by the conversion.
-
-        Args:
-            python_schema: The declared Python types, by column name.
-
-        Raises:
-            NarrowFloatKeyError: Naming the column and its declared type.
-        """
-        for name, python_type in python_schema.items():
-            try:
-                declared_arrow_schema({name: python_type}, self.converter)
-            except NarrowFloatKeyError:
-                raise
-            except Exception:  # noqa: BLE001 - reported by the conversion, as before
-                continue
 
     def _canonical_dict_values(
         self, columns: dict[str, DataValue], schema: Schema
@@ -1093,11 +1071,6 @@ class Datagram(ContentIdentifiableBase):
             if name not in updates:
                 continue
             if isinstance(declared, pa.Field):
-                if updates[name] is None and not declared.nullable:
-                    raise ValueError(
-                        f"Column {name!r} is declared non-nullable"
-                        + f" ({declared}) but its value is None"
-                    )
                 arrow_fields[name] = declared.with_name(name)
             elif isinstance(declared, pa.DataType):
                 arrow_fields[name] = pa.field(
@@ -1105,6 +1078,14 @@ class Datagram(ContentIdentifiableBase):
                 )
             else:
                 python_schema[name] = declared
+        arrow_schema = pa.schema(list(arrow_fields.values()))
+        require_schema_without_narrow_float_keys(arrow_schema)
+        for name, field in arrow_fields.items():
+            if updates[name] is None and not field.nullable:
+                raise ValueError(
+                    f"Column {name!r} is declared non-nullable"
+                    f" ({column_types[name]}) but its value is None"
+                )
         inferred_names = [n for n in updates if n not in column_types]
         if inferred_names:
             python_schema.update(
@@ -1122,8 +1103,6 @@ class Datagram(ContentIdentifiableBase):
                 )
             )
         if arrow_fields:
-            arrow_schema = pa.schema(list(arrow_fields.values()))
-            require_schema_without_narrow_float_keys(arrow_schema)
             tables.append(
                 self.converter.python_dicts_to_arrow_table(
                     [{n: updates[n] for n in arrow_fields}],
@@ -1181,13 +1160,14 @@ class Datagram(ContentIdentifiableBase):
             )
 
         if column_types:
-            self._refuse_narrow_float_keys(
+            require_python_schema_without_narrow_float_keys(
                 {
                     name: declared
                     for name, declared in column_types.items()
                     if name in updates
                     and not isinstance(declared, (pa.DataType, pa.Field))
-                }
+                },
+                self.converter,
             )
         has_arrow_types = column_types is not None and any(
             isinstance(t, (pa.DataType, pa.Field)) for t in column_types.values()

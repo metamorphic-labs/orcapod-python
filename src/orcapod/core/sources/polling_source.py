@@ -878,6 +878,8 @@ class PollingSource(RootSource, Generic[T]):
         Returns:
             ``ArrowTableStream`` if data has rows and columns, ``None`` otherwise.
         """
+        if isinstance(data, (pa.Table, pa.RecordBatch)):
+            require_schema_without_narrow_float_keys(data.schema)
         df = pl.DataFrame(data)
         if len(df.columns) == 0:
             logger.debug(

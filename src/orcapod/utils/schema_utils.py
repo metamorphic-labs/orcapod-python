@@ -640,6 +640,23 @@ def declared_arrow_schema(schema: SchemaLike, converter: Any) -> "pa.Schema":
     return pa.schema(fields)
 
 
+def require_python_schema_without_narrow_float_keys(
+    schema: SchemaLike, converter: Any
+) -> None:
+    """Check a Python declaration when its Arrow conversion is deferred or optional.
+
+    Use the converter's narrow key and element check. Other conversion errors
+    belong to the path that requires the converter to produce an Arrow type.
+    """
+    for name, python_type in schema.items():
+        try:
+            declared_arrow_schema({name: python_type}, converter)
+        except NarrowFloatKeyError:
+            raise
+        except Exception:  # noqa: BLE001 - conversion is optional here
+            continue
+
+
 def compute_schema_hash(
     tag_schema: "pa.Schema",
     data_schema: "pa.Schema",

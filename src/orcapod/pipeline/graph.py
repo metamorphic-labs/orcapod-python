@@ -248,6 +248,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                         "tag_schema": dict(saved["tag"]),
                         "data_schema": dict(saved["data"]),
                         "nullable": copy.deepcopy(saved["nullable"]),
+                        "inherited_types": node._inherited_types,  # pyright: ignore[reportPrivateUsage]  # blueprint slot provenance
                     }
                     descriptor["reconstructable"] = True
 
@@ -323,13 +324,6 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
             ValueError: If the file's format version is not the one this Orcapod
                 writes (an earlier format is refused, never migrated).
         """
-        return cls._load(path, inherited_source_slots=frozenset())
-
-    @classmethod
-    def _load(
-        cls, path: str | Path, *, inherited_source_slots: frozenset[str]
-    ) -> "Pipeline":
-        """Load a blueprint with the provenance of any sources bound in a job."""
         import json as _json
         from orcapod.pipeline.serialization import (
             FALL_THROUGH_TAGS_KEY,
@@ -434,7 +428,10 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                     )
                     if not node_name:
                         node_name = descriptor.get("label") or "unknown"
-                    inherited_types = node_name in inherited_source_slots
+                    # Old blueprints did not distinguish declarations from
+                    # inherited schemas. Their saved Arrow types can describe an
+                    # operator result, so preserve them as they were saved.
+                    inherited_types = source_config.get("inherited_types", True)
                     # Which columns may be null: recorded (``require_nullability_records``).
                     saved_nullable: dict[str, list[str]]
                     if "tag_schema" in source_config and "data_schema" in source_config:
@@ -485,6 +482,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
                         data_schema=data_schema,
                         data_context=saved_context,
                         arrow_schemas=arrow_schemas,
+                        _inherited_types=True,
                     )
                     # The saved hashes, and the saved type text of a column whose
                     # class this process has not registered yet (ITL-1138).
