@@ -1312,13 +1312,15 @@ def _joined_from_stored(
     matched: "pl.DataFrame",
     taginfo: "pa.Table",
     parts: Sequence[tuple[str, "pa.Table"]],
+    output_source_columns: set[str],
 ) -> "pa.Table":
     """Build the joined records from the stored tables, by the rows Polars matched.
 
-    The layout is the one Polars' join and diagonal concatenation gave: every
-    pipeline-table column, then each result column other than the record id (a name
-    the pipeline table also has takes the suffix ``_right``), in order of first
-    appearance across ``parts``; a column a part lacks is null in that part's rows.
+    Pipeline columns come first, followed by result columns in order of first
+    appearance across ``parts``. The result's copy of the record id is skipped.
+    Output tokens come from the result table under their original names.
+    Other overlaps take the suffix ``_right``. A column a part lacks is null
+    in that part's rows.
 
     Args:
         matched: The matched rows, in output order: a ``_TAGINFO_ROW`` column and,
@@ -1327,12 +1329,13 @@ def _joined_from_stored(
         taginfo: The stored pipeline table.
         parts: Per result table, in concatenation order: its row-number column in
             ``matched`` and the table.
+        output_source_columns: Token column names for the function's own outputs.
 
     Returns:
         The joined table, every value taken from the stored tables.
     """
     taginfo_rows = matched.get_column(_TAGINFO_ROW).to_arrow()
-    names = list(taginfo.column_names)
+    names = [name for name in taginfo.column_names if name not in output_source_columns]
     columns: list[Any] = [taginfo.column(name).take(taginfo_rows) for name in names]
     # Output name -> stored column name, per part.
     result_names: dict[str, str] = {}
@@ -1340,7 +1343,7 @@ def _joined_from_stored(
         for name in results.column_names:
             if name == constants.DATA_RECORD_ID:
                 continue
-            out = f"{name}_right" if name in taginfo.column_names else name
+            out = f"{name}_right" if name in names else name
             result_names.setdefault(out, name)
     part_rows = []
     for row_column, _ in parts:
@@ -3883,7 +3886,12 @@ class FunctionJobNode(ProvenanceMethods, RunHoldingNode, FunctionNodeBase):
             parts.append((_EPHEMERAL_RESULT_ROW, cast("pa.Table", eph_results)))
         if persistent_df.height > 0:
             parts.append((_RESULT_ROW, cast("pa.Table", results)))
-        joined = _joined_from_stored(merged_df, taginfo, parts)
+        output_source_columns = {
+            f"{constants.SOURCE_PREFIX}{key}"
+            for key in self.keys()[1]
+            if key not in data_tags
+        }
+        joined = _joined_from_stored(merged_df, taginfo, parts, output_source_columns)
         # The table is built from arrays, with no field flags: restore them from the
         # pipeline table in every case (its data-tag marker included), and from the
         # result table when one was read.
