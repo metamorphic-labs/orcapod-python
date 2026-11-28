@@ -23,7 +23,7 @@ jobs:
       id-token: write
     strategy:
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        python-version: ${{ fromJSON(github.event_name == 'pull_request' && '["3.13"]' || '["3.11", "3.12", "3.13"]') }}
 
     services:
       postgres:
