@@ -425,19 +425,20 @@ async def test_direct_unknown_pair_refuses_before_emitting_a_warning() -> None:
 
 @pytest.mark.asyncio
 async def test_empty_right_after_operator_node_is_rewired() -> None:
-    """A node rewired to an unkeyed pair passes through its left rows."""
-    left, other, right = _shared_operator_inputs(False, False)
+    """A rewired unkeyed node with an empty right passes through its new left rows."""
+    _, left, right = _shared_operator_inputs(False, False)
+    filtered = left.polars_filter(m=4)
     empty = right.polars_filter(u=0)
     job = PipelineJob(name="rewired_semijoin", database=InMemoryArrowDatabase())
     with job:
         _ = SemiJoin()(left, empty, label="step")
     node = job.nodes["step"]
     assert isinstance(node, OperatorJobNode)
-    node.upstreams = (other, empty)
+    node.upstreams = (filtered, empty)
 
-    actual = await _execute_node_rows(node, other, empty, run_async=True)
-    expected = list(node.execute(other, empty).iter_data())
-    assert len(expected) == 3
+    actual = await _execute_node_rows(node, filtered, empty, run_async=True)
+    expected = list(node.execute(filtered, empty).iter_data())
+    assert len(expected) == 1
     assert_equivalent(expected, actual)
     assert_same_provenance(expected, actual)
 
@@ -483,10 +484,8 @@ async def test_rewired_semijoin_warns_once_for_the_same_names(run_async: bool) -
     assert [tag["id"] for tag, _ in rows] == [1]
 
 
-@pytest.mark.parametrize("run_async", [False, True], ids=["sync", "async"])
-@pytest.mark.asyncio
-async def test_rewired_semijoin_new_warning_is_retried(run_async: bool) -> None:
-    """A new ignored name warns, including after each failed attempt to warn."""
+def test_semijoin_rejects_a_new_right_schema_atomically() -> None:
+    """A mismatch in the second input preserves even the compatible first input."""
     left, right = left_source(), right_same_tag_other_y()
     job = PipelineJob(name="rewired_new_warning", database=InMemoryArrowDatabase())
     with job:
@@ -494,21 +493,12 @@ async def test_rewired_semijoin_new_warning_is_retried(run_async: bool) -> None:
     node = job.nodes["step"]
     assert isinstance(node, OperatorJobNode)
     filtered = left.polars_filter(x=10)
-    node.upstreams = (filtered, right)
+    before = node.upstreams
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", SemiJoinIgnoredColumnWarning)
-        for _ in range(2):
-            with pytest.raises(SemiJoinIgnoredColumnWarning, match="'y'"):
-                _ = await _execute_node_rows(node, filtered, right, run_async=run_async)
-    with pytest.warns(SemiJoinIgnoredColumnWarning, match="'y'") as record:
-        rows = await _execute_node_rows(node, filtered, right, run_async=run_async)
-    assert len(record) == 1
-    assert [tag["id"] for tag, _ in rows] == [1]
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", SemiJoinIgnoredColumnWarning)
-        repeated = await _execute_node_rows(node, filtered, right, run_async=run_async)
-    assert [tag["id"] for tag, _ in repeated] == [1]
+    with pytest.raises(ValueError, match=r"'step'.*upstream 1.*'z'.*'y'"):
+        node.upstreams = (filtered, right)
+
+    assert node.upstreams is before
 
 
 @pytest.mark.parametrize("shared_tags", [True, False], ids=["keyed", "unkeyed"])

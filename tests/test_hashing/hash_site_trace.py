@@ -259,9 +259,16 @@ def run_scenario() -> None:
     warnings.filterwarnings("ignore")
     import orcapod as op
     from orcapod.contexts import get_default_context
+    from orcapod.core.nodes import OperatorNode
+    from orcapod.core.operators import MapData
+    from orcapod.core.sources import DictSource
     from tests.test_hashing.golden import cases
 
     _ = cases.compute_all()
+    source = DictSource([{"x": 1, "y": 2}])
+    replacement = DictSource([{"y": 3, "x": 4}])
+    node = OperatorNode(MapData({"x": "xx", "y": "yy"}), (source,))
+    node.upstreams = (replacement,)
     hasher = get_default_context().semantic_hasher
     with tempfile.TemporaryDirectory() as tmp:
         root = _Path(tmp)
