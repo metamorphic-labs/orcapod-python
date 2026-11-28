@@ -94,7 +94,7 @@ def _refused(
             InconsistentSourceError, match="distinct source objects"
         ) as error:
             pod(second, label="fb")
-    for part in (first.source_id, "fa", "fb", "source_id"):
+    for part in (first.source_id, "fa", "fb", "reuse"):
         assert part in str(error.value)
     assert "fb" not in graph.nodes
 
@@ -368,8 +368,8 @@ def test_from_pipeline_checks_the_initial_bind() -> None:
 )
 def test_run_checks_slots_changed_outside_job_bind(orchestrator: type) -> None:
     job = _job()
-    job.nodes["left"].bound_source = _dict(1)
-    job.nodes["right"].bound_source = _dict(100)
+    job.nodes["left"]._bind(_dict(1))
+    job.nodes["right"]._bind(_dict(100))
     with pytest.raises(InconsistentSourceError, match="distinct source objects"):
         job.run(orchestrator=orchestrator())
     assert not job.fa.as_table().num_rows
@@ -609,18 +609,23 @@ def _semi_join_job() -> PipelineJob:
 
 
 def _rebind_outside_bind(job: PipelineJob, right_keys: str | None, x: int) -> None:
-    job.nodes["left"].bound_source = DictSource(
-        [{"k": "a", "x": 1}, {"k": "b", "x": 2}],
-        tag_columns="k",
-        tag_only_columns=True,
-        source_id="shared",
+    # Inject invalid job state to test the run-time checks.
+    job.nodes["left"]._bind(
+        DictSource(
+            [{"k": "a", "x": 1}, {"k": "b", "x": 2}],
+            tag_columns="k",
+            tag_only_columns=True,
+            source_id="shared",
+        )
     )
-    job.nodes["right"].bound_source = DictSource(
-        [{"k": "a", "x": 1}, {"k": "b", "x": x}],
-        tag_columns="k",
-        tag_only_columns=True,
-        record_id_columns=right_keys,
-        source_id="shared",
+    job.nodes["right"]._bind(
+        DictSource(
+            [{"k": "a", "x": 1}, {"k": "b", "x": x}],
+            tag_columns="k",
+            tag_only_columns=True,
+            record_id_columns=right_keys,
+            source_id="shared",
+        )
     )
 
 
@@ -700,8 +705,8 @@ def test_node_run_checks_its_sources_on_several_columns(
         )
         _ = with_pair.pod(matched, label="fm")
     # Rebound outside bind, so only the run-time checks can refuse.
-    job.nodes["left"].bound_source = _arranged(left, "shared", left_keys)
-    job.nodes["right"].bound_source = _arranged(right, "shared", right_keys, changed)
+    job.nodes["left"]._bind(_arranged(left, "shared", left_keys))
+    job.nodes["right"]._bind(_arranged(right, "shared", right_keys, changed))
     with pytest.raises(InconsistentSourceError, match=message):
         _ = job.run(orchestrator=orchestrator())
     for node in ("m", "fm"):

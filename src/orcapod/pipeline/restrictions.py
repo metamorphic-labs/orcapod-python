@@ -42,10 +42,11 @@ RestrictedSource: TypeAlias = tuple[str, Condition, int | None]
 (``source_name``), its condition and its limit."""
 
 
-Rebinding: TypeAlias = "Sequence[tuple[SourceJobNode, StreamProtocol]]"
+Rebinding: TypeAlias = "Sequence[tuple[SourceJobNode, StreamProtocol | None]]"
 """The sources a bind is about to bind: ``(slot, source)`` pairs, one per slot of the
 job that the bind changes. A slot is matched by object identity, never by name: a
-source being bound can itself be a slot of another job, of the same name."""
+source being bound can itself be a slot of another job, of the same name.
+``None`` unbinds the slot."""
 
 
 def source_name(source: RootSource) -> str:

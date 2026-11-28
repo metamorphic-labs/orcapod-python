@@ -42,6 +42,9 @@ def root_source_uses(
     from orcapod.core.sources.base import RootSource
 
     replacements = {id(slot): source for slot, source in rebinding}
+    resolved_slots = (
+        {id(slot) for slot in bound_leaves.values()} if bound_leaves else set()
+    )
     visited: set[tuple[int, bool]] = set()
     pending = [
         (location, stream, bool(bound_leaves))
@@ -53,7 +56,7 @@ def root_source_uses(
         if key in visited:
             continue
         visited.add(key)
-        if recorded and bound_leaves is not None:
+        if recorded and bound_leaves is not None and id(stream) not in resolved_slots:
             slot = bound_leaves.get(stream.content_hash().to_string())
             if slot is not None:
                 pending.append((location, slot, False))
@@ -63,7 +66,10 @@ def root_source_uses(
         elif isinstance(stream, SourceJobNode):
             bound = replacements.get(id(stream), stream.bound_source)
             if bound is not None:
-                pending.append((f"slot {stream.name!r}", bound, False))
+                slot_use = f"slot {stream.name!r}"
+                if location != f"node {stream.label!r}":
+                    slot_use = f"{location} via {slot_use}"
+                pending.append((slot_use, bound, False))
         else:
             # Loaded nodes can have inputs that could not be reconstructed.
             upstreams = cast("tuple[StreamProtocol | None, ...]", stream.upstreams)
@@ -102,6 +108,8 @@ def require_consistent_sources(
     Raises:
         InconsistentSourceError: Naming both locations and how to resolve the conflict.
     """
+    from orcapod.core.sources.derived_source import DerivedSource
+
     by_hash: dict[str, tuple[str, RootSource]] = {}
     by_id: dict[str, list[tuple[str, RootSource]]] = {}
     for location, source in root_source_uses(uses, rebinding):
@@ -111,10 +119,15 @@ def require_consistent_sources(
             reuse = "Build the source once and reuse the object"
             if first.condition.equalities or source.condition.equalities:
                 reuse = "Call where() once and reuse the resulting source object"
+            remedy = f"{reuse}, or give each source its own source_id."
+            if any(
+                isinstance(candidate, DerivedSource) and candidate._tags_as_data is None  # pyright: ignore[reportPrivateUsage]  # plain derived sources hash only the origin
+                for candidate in (first, source)
+            ):
+                remedy = f"{reuse}."
             raise InconsistentSourceError(
                 f"Source {source.source_id!r} has distinct source objects with one "
-                f"content hash in {first_location} and {location}. {reuse}, "
-                "or give each source its own source_id."
+                f"content hash in {first_location} and {location}. {remedy}"
             )
         by_id.setdefault(source.source_id, []).append((location, source))
 

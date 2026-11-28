@@ -1706,14 +1706,13 @@ class TestOperatorCacheOverARestriction:
     def test_a_slot_rebound_directly_is_refused_when_the_run_starts(
         self, project, tmp_path, mode, run
     ):
-        """A source set on the slot itself (no job to check it) is refused by the
-        run, sync or async, before any source is read or anything written."""
+        """Invalid job state is refused at run time before any reads or writes."""
         events = self._events()
         folder = tmp_path / "store"
         store = DeltaTableDatabase(folder)
         job = self._job(store, events)
         self._cache(job, "rename", mode, store)
-        job.nodes["events"].bound_source = events.where(subject_id="m1")
+        job.nodes["events"]._bind(events.where(subject_id="m1"))
         scans = len(fake_spiral_sdk.scan_log)
 
         with pytest.raises(ValueError, match="cannot cache a restricted read"):
@@ -1888,8 +1887,8 @@ class TestOperatorCacheEntryPoints:
         folder = tmp_path / "s"
         node = self._logged_node(DeltaTableDatabase(folder), mode)
         (slot,) = node.upstreams
-        slot.bound_source = _source(source_id="events", tag_only_columns=True).where(
-            subject_id="m1"
+        slot._bind(
+            _source(source_id="events", tag_only_columns=True).where(subject_id="m1")
         )
         inputs, output = Channel(buffer_size=8), Channel(buffer_size=8)
 
@@ -2119,7 +2118,7 @@ class TestBindOfADatabaseOverARestrictedSlot:
         store = DeltaTableDatabase(tmp_path / "s")
         job = TestRestrictionThroughWrappers._cached_job(store, mode)
         node = job.nodes["rename"]
-        job.nodes["events"].bound_source = _events().where(subject_id="m1")
+        job.nodes["events"]._bind(_events().where(subject_id="m1"))
         before = (job.database, node._pipeline_database)  # pyright: ignore[reportPrivateUsage]
 
         other = DeltaTableDatabase(tmp_path / "other")
@@ -2372,8 +2371,8 @@ class TestASlotOverTwoTables:
         self, project, other_table, tmp_path, run
     ):
         job = self._job(tmp_path, self._others().where(subject_id="m1"))
-        job.nodes["events"].bound_source = _events().semi_join(
-            self._others().where(subject_id="m2")
+        job.nodes["events"]._bind(
+            _events().semi_join(self._others().where(subject_id="m2"))
         )
         scans = len(fake_spiral_sdk.scan_log)
 

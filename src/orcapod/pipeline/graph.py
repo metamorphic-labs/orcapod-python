@@ -690,6 +690,7 @@ class Pipeline(AbstractPipelineBase[GraphNode]):
         # Shared read-only structural state (recording + compiled)
         clone._name = self._name
         clone._invocation_lut = self._invocation_lut
+        clone._invocation_input_keys = self._invocation_input_keys
         clone._source_streams = self._source_streams
         clone._node_lut = self._node_lut
         clone._upstreams = self._upstreams

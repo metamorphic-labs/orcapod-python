@@ -13,6 +13,7 @@ import dataclasses
 import functools
 import json
 import logging
+import weakref
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Collection, Iterator, Mapping, Sequence
 from datetime import datetime
@@ -65,6 +66,7 @@ from orcapod.utils.schema_utils import (
 )
 
 if TYPE_CHECKING:
+    from orcapod.pipeline.job import PipelineJob
     from orcapod.types.explanation import Explanation
     from orcapod.channels import WritableChannel
     from orcapod.protocols.core_protocols import StreamProtocol
@@ -1630,6 +1632,7 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
         )
         self._bound_source: StreamProtocol | None = None
         self._declared_form: _DeclaredForm | None = None
+        self._binding_owner: weakref.ReferenceType[PipelineJob] | None = None
         if bound_source is not None:
             # Checks the source and, for a narrower one, records how its rows become
             # rows of the declared schema (ITL-1112), as the setter does, but does not
@@ -1655,12 +1658,15 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
             load_only: Accepted for every job node; a source reads its rows either way.
 
         Raises:
+            InconsistentSourceError: If the bound stream reads conflicting sources.
             UnboundSourceError: When no concrete source is bound.
             ValueError: If ``load_only`` and the bound stream computes or delivers
                 when read (``node_run.refuse_unloadable_inputs``).
         """
         from orcapod.pipeline.node_run import check_sources, refuse_unloadable_inputs
+        from orcapod.pipeline.source_consistency import require_consistent_sources
 
+        require_consistent_sources([(f"node {self.label!r}", self)])
         _ = check_sources([self])
         if load_only:
             refuse_unloadable_inputs(self)
@@ -1675,33 +1681,55 @@ class SourceJobNode(ProvenanceMethods, SourceNodeBase):
     def bound_source(self, value: StreamProtocol | None) -> None:
         """Bind *value* as the concrete source and invalidate both hash caches.
 
-        A source is checked against the slot's declared schema first (``validate``), so
-        one that does not fit is refused before anything changes. A narrower source
-        (``x: int`` for a slot declaring ``x: int | None``) is accepted, and the node
-        gives its rows as rows of the declared schema (ITL-1112). ``None`` unbinds.
+        A source must fit the slot's declared schema before the binding changes.
+        A narrower source (``x: int`` for a slot declaring ``x: int | None``) is
+        accepted, and the node gives its rows as rows of the declared schema
+        (ITL-1112). ``None`` unbinds.
+        In a job, assignment uses the binding checks of ``PipelineJob.bind()``.
         Binding stamps the slot as modified, so every job node fed by it is stale and
         reads empty until it runs again (ITL-1095).
 
         Raises:
+            InconsistentSourceError: If the replacement introduces conflicting sources.
             SourceSpecMismatchError: If *value* does not fit the declared schema.
         """
-        self._bind(value)
-        self._update_modified_time()
+        owner = self._binding_owner() if self._binding_owner is not None else None
+        if owner is None:
+            self._bind(value)
+            self._update_modified_time()
+        else:
+            owner._replace_source_binding(self, value)  # pyright: ignore[reportPrivateUsage]  # the setter uses the job's binding transaction
+
+    def _set_binding_owner(self, owner: PipelineJob | None) -> None:
+        """Route changes to a job while this is one of its active slots."""
+        self._binding_owner = weakref.ref(owner) if owner is not None else None
 
     def _bound_stream(self) -> StreamProtocol | None:
         """The concrete stream bound to this slot, or ``None``."""
         return self._bound_source
 
     def _bind(self, value: StreamProtocol | None) -> None:
-        """Check *value* and bind it, invalidating both hash caches.
+        """Check and install a binding without a job-wide transaction.
 
         The binding the setter and ``__init__`` share. Only the setter stamps the slot
         as modified (ITL-1095): a node built with its source is not a rebinding.
 
         Raises:
+            InconsistentSourceError: If the bound stream reads conflicting sources.
             SourceSpecMismatchError: If *value* does not fit the declared schema.
         """
-        form = None if value is None else self._declared_form_for(value)
+        from orcapod.pipeline.source_consistency import require_consistent_sources
+
+        form = None
+        if value is not None:
+            require_consistent_sources([(f"slot {self.name!r}", value)])
+            form = self._declared_form_for(value)
+        self._apply_binding(value, form)
+
+    def _apply_binding(
+        self, value: StreamProtocol | None, form: _DeclaredForm | None
+    ) -> None:
+        """Install a validated binding and invalidate its cached hashes."""
         self._bound_source = value
         self._declared_form = form
         self._invalidate_content_hash_cache()

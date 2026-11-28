@@ -134,9 +134,9 @@ def test_run_refuses_two_objects_with_one_hash(
 ) -> None:
     first, second = _pair(tmp_path, kind, reverse)
     job = _job(tmp_path)
-    # Bypass bind to exercise the run-time check independently.
-    job.nodes["a"].bound_source = first
-    job.nodes["b"].bound_source = second
+    # Inject invalid job state to exercise the run-time check independently.
+    job.nodes["a"]._bind(first)
+    job.nodes["b"]._bind(second)
     with pytest.raises(
         InconsistentSourceError, match="distinct source objects"
     ) as error:
@@ -284,3 +284,281 @@ def test_itl_1554_loading_shared_slots_feeding_the_same_pod(tmp_path: Path) -> N
 
     with pytest.raises(NotImplementedError, match="StreamBase.identity_structure"):
         PipelineJob.load(path, database=db)
+
+
+@pytest.mark.parametrize("kind", ["equal", "different", "csv"])
+def test_slot_setter_refuses_duplicates_and_preserves_bindings(
+    tmp_path: Path, kind: str
+) -> None:
+    first, second = _pair(tmp_path, kind, False)
+    job = _job(tmp_path)
+    job.nodes["a"].bound_source = first
+    original = job.nodes["b"].bound_source
+    with pytest.raises(
+        InconsistentSourceError, match="distinct source objects"
+    ) as error:
+        job.nodes["b"].bound_source = second
+    assert "slot 'a'" in str(error.value) and "slot 'b'" in str(error.value)
+    assert job.nodes["b"].bound_source is original
+    assert job.sources["a"] is first
+    assert job.sources["b"] is original
+    job.compile()
+    assert job.nodes["a"].bound_source is first
+    assert job.nodes["b"].bound_source is original
+
+
+def test_slot_setter_same_hash_replacement_survives_capture(tmp_path: Path) -> None:
+    first = _source(tmp_path, "dict", "a")
+    replacement = _source(tmp_path, "dict", "a", change=True)
+    with PipelineJob(database=InMemoryArrowDatabase()) as job:
+        total.pod(first, label="first")
+    job.nodes["a"].bound_source = replacement
+    with job:
+        difference.pod(replacement, label="second")
+    assert job.sources["a"] is replacement
+    assert job.nodes["a"].bound_source is replacement
+    job.run()
+    assert sorted(job.first.as_table()["out"].to_pylist()) == [3, 43]
+    assert sorted(job.second.as_table()["out"].to_pylist()) == [-37, -1]
+
+
+def test_slot_setter_can_unbind_and_recompile(tmp_path: Path) -> None:
+    job = _job(tmp_path)
+    job.nodes["a"].bound_source = None
+    assert "a" not in job.sources
+    job.compile()
+    assert job.nodes["a"].bound_source is None
+    assert job.unbound_sources == ["a"]
+
+
+@pytest.mark.parametrize("binding", ["constructor", "from_stream", "setter"])
+@pytest.mark.filterwarnings("ignore::orcapod.errors.SemiJoinIgnoredColumnWarning")
+def test_source_slot_refuses_composite_with_conflicting_roots(
+    tmp_path: Path, binding: str
+) -> None:
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.operators import SemiJoin
+
+    first, second = _pair(tmp_path, "different", False)
+    composite = SemiJoin()(first, second, label="matched")
+    slot = SourceJobNode.from_stream(first, name="standalone")
+    with pytest.raises(
+        InconsistentSourceError, match="distinct source objects"
+    ) as error:
+        if binding == "constructor":
+            SourceJobNode("standalone", bound_source=composite)
+        elif binding == "from_stream":
+            SourceJobNode.from_stream(composite, name="standalone")
+        else:
+            slot.bound_source = composite
+    for part in ("slot 'standalone'", "'matched' input 1", "'matched' input 2"):
+        assert part in str(error.value)
+    assert slot.bound_source is first
+
+
+def test_coalesced_captures_release_duplicate_projections(tmp_path: Path) -> None:
+    import gc
+    from weakref import ref
+
+    source = _source(tmp_path, "dict", "shared")
+    graph = Pipeline("retention")
+
+    def capture_projection():
+        projection = source.select_data_columns(["x", "y"])
+        with graph:
+            _ = total.pod(projection, label="step")
+        return ref(projection)
+
+    projections = [capture_projection() for _ in range(8)]
+    _ = gc.collect()
+
+    assert "step" in graph.nodes
+    assert sum(projection_ref() is not None for projection_ref in projections) <= 2
+
+
+def test_capture_reports_both_uses_of_slots_with_the_same_name(tmp_path: Path) -> None:
+    from orcapod.core.nodes.source_node import SourceJobNode
+
+    first, second = _pair(tmp_path, "different", False)
+    left = SourceJobNode.from_stream(first, name="same")
+    right = SourceJobNode.from_stream(second, name="same")
+    with Pipeline("diagnostics"):
+        total.pod(left, label="first")
+        with pytest.raises(
+            InconsistentSourceError, match="distinct source objects"
+        ) as error:
+            difference.pod(right, label="second")
+    message = str(error.value)
+    assert "step 'first'" in message and "step 'second'" in message
+
+
+def test_plain_derived_collision_only_suggests_reusing_the_object(
+    tmp_path: Path,
+) -> None:
+    job = _job(tmp_path, ("a",))
+    job.run()
+    first = job.result_a.as_source(source_id="left")
+    second = job.result_a.as_source(source_id="right")
+    assert first.content_hash() == second.content_hash()
+    assert first.source_id != second.source_id
+
+    @function_pod(output_keys="answer")
+    def consume(out: int) -> int:
+        return out
+
+    with Pipeline("diagnostics"):
+        consume.pod(first, label="first")
+        with pytest.raises(InconsistentSourceError, match="reuse the object") as error:
+            consume.pod(second, label="second")
+    assert "source_id" not in str(error.value)
+
+
+def test_compile_refuses_schema_conflict_introduced_through_live_slot() -> None:
+    import pyarrow as pa
+
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.sources import ArrowTableSource
+
+    def source(name: str, kind: pa.DataType) -> ArrowTableSource:
+        return ArrowTableSource(
+            pa.table({"x": pa.array([1], type=kind), "y": [2]}),
+            source_id=name,
+            infer_nullable=True,
+        )
+
+    first = SourceJobNode.from_stream(source("shared", pa.int32()), name="same")
+    second = SourceJobNode.from_stream(source("other", pa.int64()), name="same")
+    with Pipeline("compile", auto_compile=False) as pipeline:
+        total.pod(first, label="first")
+        difference.pod(second, label="second")
+    second.bound_source = source("shared", pa.int64())
+    with pytest.raises(InconsistentSourceError, match="different schemas") as error:
+        pipeline.compile()
+    assert "step 'first'" in str(error.value) and "step 'second'" in str(error.value)
+
+
+@pytest.mark.filterwarnings("ignore::orcapod.errors.SemiJoinIgnoredColumnWarning")
+def test_source_slot_run_checks_roots_changed_after_binding(tmp_path: Path) -> None:
+    from orcapod.core.nodes.source_node import SourceJobNode
+    from orcapod.operators import SemiJoin
+
+    first, conflict = _pair(tmp_path, "different", False)
+    right = SourceJobNode.from_stream(_source(tmp_path, "dict", "other"))
+    composite = SemiJoin()(first, right, label="matched")
+    slot = SourceJobNode.from_stream(composite, name="standalone")
+    right.bound_source = conflict
+    with pytest.raises(InconsistentSourceError, match="distinct source objects"):
+        slot.run()
+
+
+@pytest.mark.parametrize("setter", [False, True], ids=["bind", "setter"])
+@pytest.mark.parametrize("bound_first", [False, True])
+@pytest.mark.parametrize("orchestrator", ORCHESTRATORS)
+def test_capture_after_rebind_requires_the_current_source_object(
+    tmp_path: Path, setter: bool, bound_first: bool, orchestrator: Orchestrator
+) -> None:
+    original = _source(tmp_path, "dict", "a")
+    same_original_hash = _source(tmp_path, "dict", "a", reverse=True, change=True)
+    replacement = _source(tmp_path, "dict", "b", change=True)
+    with PipelineJob(database=InMemoryArrowDatabase()) as job:
+        total.pod(original, label="before")
+    if setter:
+        job.nodes["a"].bound_source = replacement
+    else:
+        job.bind(sources={"a": replacement})
+    job.compile()
+
+    with job:
+        if bound_first:
+            difference.pod(replacement, label="after")
+        for retired in (original, same_original_hash):
+            with pytest.raises(InconsistentSourceError, match="slot 'a'") as error:
+                product.pod(retired, label="refused")
+            assert "Pass the source bound there" in str(error.value)
+            assert "bind" in str(error.value)
+        if not bound_first:
+            difference.pod(replacement, label="after")
+
+    assert set(job.sources) == {"a"}
+    assert set(job.nodes) == {"a", "before", "after"}
+    job.run(orchestrator=orchestrator())
+    assert sorted(job.before.as_table()["out"].to_pylist()) == [3, 43]
+    assert sorted(job.after.as_table()["out"].to_pylist()) == [-37, -1]
+
+    # Both steps still read the same slot if it is rebound again.
+    job.bind(sources={"a": original})
+    job.compile()
+    with job:
+        with pytest.raises(InconsistentSourceError, match="slot 'a'"):
+            product.pod(replacement, label="also_refused")
+    job.run(orchestrator=orchestrator())
+    assert sorted(job.before.as_table()["out"].to_pylist()) == [3, 7]
+    assert sorted(job.after.as_table()["out"].to_pylist()) == [-1, -1]
+
+
+WRAPPER_PAIRS = [
+    "source-cache",
+    "two-caches",
+    "nested-cache",
+    "two-as-source",
+    "two-tag-copies",
+    "source-proxy",
+    "cache-proxy",
+]
+
+
+@pytest.fixture(params=WRAPPER_PAIRS)
+def wrapper_pair(tmp_path: Path, request: pytest.FixtureRequest):
+    from orcapod.core.sources.cached_source import CachedSource
+    from orcapod.core.sources.source_proxy import SourceProxy
+    from orcapod.databases import DeltaTableDatabase
+    from orcapod.sources import DerivedSource
+
+    source = _source(tmp_path, "dict", "shared")
+    kind = request.param
+    if kind == "two-as-source":
+        job = _job(tmp_path, ("a",))
+        job.run()
+        first = job.result_a.as_source()
+        return first, job.result_a.as_source(), first, "out"
+    if kind == "two-tag-copies":
+        first = DerivedSource(
+            source, tags_as_data={"t1": "tag_value"}, source_id="copied"
+        )
+        second = DerivedSource(
+            source, tags_as_data={"t1": "tag_value"}, source_id="copied"
+        )
+        return first, second, first, "x"
+    if kind in ("source-proxy", "cache-proxy"):
+        cache = source.cached(DeltaTableDatabase(tmp_path / "cache"))
+        proxy = CachedSource.from_config(cache.to_config()).cached_source
+        assert isinstance(proxy, SourceProxy)
+        proxy.bind(source)
+        return source if kind == "source-proxy" else cache, proxy, proxy, "x"
+
+    cache = source.cached(InMemoryArrowDatabase())
+    if kind == "source-cache":
+        return source, cache, cache, "x"
+    if kind == "two-caches":
+        return cache, source.cached(InMemoryArrowDatabase()), cache, "x"
+    return cache, cache.cached(InMemoryArrowDatabase()), cache, "x"
+
+
+def test_wrapper_pairs_with_one_content_hash_are_refused(wrapper_pair) -> None:
+    first, second, _, column = wrapper_pair
+    assert first is not second
+    assert first.content_hash() == second.content_hash()
+    with Pipeline("wrapper_conflict") as graph:
+        first.map_data({column: "a"}, label="first")
+        with pytest.raises(InconsistentSourceError, match="distinct source objects"):
+            second.map_data({column: "b"}, label="second")
+    assert "first" in graph.nodes
+    assert "second" not in graph.nodes
+
+
+def test_one_wrapper_object_can_be_reused(wrapper_pair) -> None:
+    _, _, shared, column = wrapper_pair
+    with Pipeline("wrapper_reuse") as graph:
+        shared.map_data({column: "a"}, label="first")
+        shared.map_data({column: "b"}, label="second")
+    assert {"first", "second"} <= graph.nodes.keys()

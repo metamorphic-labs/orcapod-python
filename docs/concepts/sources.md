@@ -79,16 +79,30 @@ record id names a row within its source and never holds the source id. A job nam
 slot by the source's name (`job.bind(sources={"units": ...})`).
 
 Each source content hash is registered to one Python object per pipeline or job.
-Build the source once and reuse that object wherever you read it, or give each
-source its own `source_id`. Two distinct objects with the same content hash raise
+Build the source once and reuse that object wherever you read it. For sources
+whose hash includes their `source_id`, each source can instead have its own ID.
+Two distinct objects with the same content hash raise
 `InconsistentSourceError` even when their rows agree, including sources that read
 rows later. Capture, binding, loading and execution all check for conflicts.
 Rebinding replaces a slot's source. On load, slots with identical saved source
 configurations share one reconstructed object.
 
-The source object can be a `SourceProxy`, a `CachedSource` or a `DerivedSource`.
-Reuse the wrapper itself wherever you use that source. A wrapper and another source
-with the same content hash cannot both be registered in the same pipeline.
+When adding a step to a job after rebinding a slot, pass the source object currently
+bound there. Capturing an older object while that slot holds a different object
+raises `InconsistentSourceError`. To use the older object again, bind it to the slot
+first. ITL-1559 tracks whether a captured source should refer to the object or to the
+slot.
+
+The same rule applies to wrappers. Each of these pairs raises
+`InconsistentSourceError` when the objects share one content hash.
+
+| Sources used together | How to share the source |
+| --- | --- |
+| A source and a `CachedSource` over it | Build the cache once and use it in both places. |
+| Two caches over one source, or a cache and its inner cache | Choose one cache object and reuse it. |
+| Two calls to `node.as_source()` on one node | Call `as_source()` once and reuse the result. |
+| Two `DerivedSource(tags_as_data=...)` objects with the same hash | Build one derived source and reuse it. |
+| A source or its cache paired with a `SourceProxy` restored for it | Choose one source object and reuse it. |
 
 ITL-1553 tracks accepting distinct objects that represent the same source.
 ITL-1531 tracks sources that read their rows later.

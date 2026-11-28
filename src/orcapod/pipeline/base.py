@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from collections.abc import Hashable, Iterator
+from collections.abc import Hashable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
@@ -133,9 +133,8 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         # --- Additive recording state (never cleared) -----------------
         # Maps content-hash-string → PodInvocation for each recorded invocation.
         self._invocation_lut: dict[str, PodInvocation] = {}
-        # Keep the original input objects for validation even when a live source
-        # and a fixed source share one address and their invocations coalesce.
-        self._recorded_source_uses: dict[int, SourceUse] = {}
+        # Ordered graph keys chosen at capture, which stay fixed across rebindings.
+        self._invocation_input_keys: dict[str, tuple[str, ...]] = {}
         # Maps content-hash-string → raw stream for each unregistered upstream.
         self._source_streams: dict[str, Any] = {}
         # Topology graph — vertices and edges are content-hash strings.
@@ -351,55 +350,58 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
 
         key = invocation.content_hash().to_string()
         inputs = tuple(invocation.input_streams)
-        upstreams = [
-            (upstream, upstream.content_hash().to_string()) for upstream in inputs
-        ]
+        input_keys = tuple(self._capture_input_key(upstream) for upstream in inputs)
         # Checked before anything is recorded, so a refused invocation leaves the
         # graph as it was. A restriction does not change a source's identity, so the
         # pipeline keeps one restriction (or none) per source identity, whatever
         # streams lead to it: every source this invocation reads is checked with
         # every source the pipeline's streams read now (nothing is remembered: a
         # slot rebound since the last invocation changes what they read).
-        require_consistent_sources(self._source_uses(invocation))
-        require_one_restriction([*self._held_streams(), *inputs])
-        self._remember_invocation(key, invocation)
+        uses = tuple(self._source_uses(invocation))
+        require_consistent_sources(uses)
+        require_one_restriction(stream for _, stream in uses)
+        self._remember_invocation(key, invocation, input_keys)
         self._hash_graph.add_node(key)
-        for upstream, upstream_hash in upstreams:
+        for upstream, upstream_hash in zip(inputs, input_keys, strict=True):
             self._hash_graph.add_edge(upstream_hash, key)
             if upstream_hash not in self._source_streams:
                 self._source_streams[upstream_hash] = upstream
 
-    def _remember_invocation(self, key: str, invocation: PodInvocation) -> None:
+    def _capture_input_key(self, stream: cp.StreamProtocol) -> str:
+        """Return the topology key for a new use of this stream."""
+        return stream.content_hash().to_string()
+
+    def _remember_invocation(
+        self, key: str, invocation: PodInvocation, input_keys: tuple[str, ...]
+    ) -> None:
         """Keep the smallest explicit label when identical invocations share a node."""
-        for location, stream in invocation_source_uses(invocation):
-            self._recorded_source_uses[id(stream)] = (location, stream)
         previous = self._invocation_lut.get(key)
         if previous is not None and previous.label is not None:
             if invocation.label is None or previous.label < invocation.label:
                 return
         self._invocation_lut[key] = invocation
+        self._invocation_input_keys[key] = input_keys
 
-    def _held_streams(self) -> list[Any]:
-        """Every stream the pipeline holds: its leaves and every recorded input."""
-        return [
-            *self._source_streams.values(),
-            *(
-                stream
-                for invocation in self._invocation_lut.values()
-                for stream in invocation.input_streams
-            ),
-        ]
+    def _recorded_uses(
+        self, bound_leaves: Mapping[str, cp.StreamProtocol]
+    ) -> Iterator[SourceUse]:
+        """Use the live binding when a recorded input was routed to a replaced slot."""
+        # Prefer the labelled endpoint of a chain over an implicit projection.
+        for key, invocation in reversed(self._invocation_lut.items()):
+            for (location, stream), input_key in zip(
+                invocation_source_uses(invocation),
+                self._invocation_input_keys[key],
+                strict=True,
+            ):
+                yield location, bound_leaves.get(input_key, stream)
+        for key, stream in self._source_streams.items():
+            yield f"source {stream.label!r}", bound_leaves.get(key, stream)
 
     def _source_uses(self, extra: PodInvocation | None = None) -> Iterator[SourceUse]:
-        """Inputs before hash deduplication, with their original step names."""
-        # Prefer the labelled endpoint of a chain over an implicit projection.
-        for invocation in reversed(self._invocation_lut.values()):
-            yield from invocation_source_uses(invocation)
-        yield from self._recorded_source_uses.values()
+        """Held inputs and, when supplied, the candidate's inputs before deduplication."""
+        yield from self._recorded_uses({})
         if extra is not None:
             yield from invocation_source_uses(extra)
-        for stream in self._source_streams.values():
-            yield f"source {stream.label!r}", stream
 
     def _source_node_from_recording(self, key: str) -> Any:
         """Create the source node for a recorded leaf."""
@@ -475,7 +477,7 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         """No-op — all recording state is additive and persists across with-blocks.
 
         Note:
-            ``_invocation_lut``, ``_recorded_source_uses``, ``_source_streams``, and ``_hash_graph``
+            ``_invocation_lut``, ``_source_streams``, and ``_hash_graph``
             intentionally accumulate across ``with`` blocks.
             ``_persistent_node_map``, ``_node_lut``, ``_upstreams``, and
             ``_graph_edges`` are compiled artifacts overwritten by each
@@ -537,8 +539,9 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         # Checked again here, from what the streams read now: a slot rebound after
         # the last invocation would otherwise connect a branch recorded over one
         # restriction to another (ITL-1218).
-        require_consistent_sources(self._source_uses())
-        require_one_restriction(self._held_streams())
+        uses = tuple(self._source_uses())
+        require_consistent_sources(uses)
+        require_one_restriction(stream for _, stream in uses)
 
         source_node_cls = self.source_node_class
 
@@ -604,9 +607,7 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
             if key not in self._invocation_lut:
                 continue  # vertex with no invocation (e.g. pure source hash)
             inv = self._invocation_lut[key]
-            upstream_nodes = [
-                node_map[up.content_hash().to_string()] for up in inv.input_streams
-            ]
+            upstream_nodes = [node_map[up] for up in self._invocation_input_keys[key]]
             if isinstance(inv, FunctionInvocation):
                 node_map[key] = self.function_node_class(
                     function_pod=inv.pod,
@@ -838,10 +839,13 @@ class AbstractPipelineBase(Generic[NodeT], AutoRegisteringContextBasedTracker, A
         instance._source_streams = dict(graph.source_streams)
         for inv in graph.invocations:
             key = inv.content_hash().to_string()
-            instance._remember_invocation(key, inv)
+            input_keys = tuple(
+                instance._capture_input_key(up) for up in inv.input_streams
+            )
+            instance._remember_invocation(key, inv, input_keys)
             instance._hash_graph.add_node(key)
-            for upstream in inv.input_streams:
-                instance._hash_graph.add_edge(upstream.content_hash().to_string(), key)
+            for input_key in input_keys:
+                instance._hash_graph.add_edge(input_key, key)
         # Also add source hashes as isolated nodes (no incoming edges)
         for h in graph.source_streams:
             if h not in instance._hash_graph:

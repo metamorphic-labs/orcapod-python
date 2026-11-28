@@ -1510,6 +1510,15 @@ data. The rules:
   match its previous one (bind does not compare the two), but bind refuses, before replacing
   any binding, a bind after which two slots would read one source identity under different
   restrictions (below). A job run over a restricted source feeding GroupBy, Batch or MergeJoin issues one RestrictedAggregationWarning.
+  Each source content hash belongs to one source object per pipeline or job
+  (ITL-1469). Capture, compile, binding through either API, loading and running
+  check the sources the graph reads. A slot binding replaces its former source.
+  Pass the currently bound source when adding a step to a job. A capture of an
+  older source for the slot is refused while a different object is bound there
+  (ITL-1559 tracks whether a captured source should refer to the object or the slot).
+  Call where() once and reuse the resulting object. A source object conflict
+  raises InconsistentSourceError before the separate restriction check, which
+  can see restrictions beneath wrappers.
   A pipeline keeps one restriction (or none) per source identity (a restriction leaves the
   identity unchanged), so one table restricted two ways (or with and without a restriction) in
   one pipeline is refused (restrictions.require_one_restriction, over the sources the streams
