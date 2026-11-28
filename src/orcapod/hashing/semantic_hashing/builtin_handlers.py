@@ -30,6 +30,8 @@ from uuid import UUID
 
 from typing_extensions import override
 
+from orcapod.hashing.file_hashers import require_file_hash
+from orcapod.hashing.hash_utils import SHA256_ALGORITHM, require_file_hash_algorithm
 from orcapod.hashing.pandas_value_hash import (
     PANDAS_DATAFRAME_HASH_LABEL,
     PANDAS_DATAFRAME_OPTIONS,
@@ -495,10 +497,11 @@ class FileHandler:
     the wrapped ``UPath``, which follows symlinks by default.
 
     Args:
-        file_hasher: Any object with a ``hash_file(path) -> ContentHash`` method.
+        file_hasher: File content hasher reporting the ``sha256`` algorithm.
     """
 
     def __init__(self, file_hasher: "FileContentHasherProtocol") -> None:
+        require_file_hash_algorithm(file_hasher.hash_algorithm)
         self.file_hasher = file_hasher
 
     def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> ContentHash:
@@ -510,7 +513,9 @@ class FileHandler:
             raise TypeError(f"FileHandler: expected an orcapod.File, got {type(obj)!r}")
         wrapped = getattr(obj, "__wrapped__")
         logger.debug("FileHandler: hashing file content at %s", wrapped)
-        return self.file_hasher.hash_file(wrapped)
+        result = self.file_hasher.hash_file(wrapped)
+        _ = require_file_hash(SHA256_ALGORITHM, result.method, result.digest)
+        return result
 
 
 class DirectoryHandler:

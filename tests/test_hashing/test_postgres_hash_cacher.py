@@ -788,6 +788,17 @@ def _all_rows(pg_conninfo: str) -> list[tuple[object, ...]]:
 
 @pytest.mark.postgres
 class TestPostgresHashCacherAlgorithmLabel:
+    def test_clear_keeps_historical_rows(self, pg_conninfo: str) -> None:
+        """Clearing the active cache leaves the old algorithm's row intact."""
+        old_key = _key_for_algorithm("md5")
+        _insert_raw(pg_conninfo, old_key, b"md5:" + b"\x07" * 16)
+        before = _all_rows(pg_conninfo)
+        with PostgresHashCacher(pg_conninfo) as cache:
+            cache.put(make_key(), make_hash())
+            cache.clear()
+            assert cache.get(make_key()) is None
+        assert _all_rows(pg_conninfo) == before
+
     @pytest.mark.parametrize("match_mtime", [True, False])
     def test_row_of_another_algorithm_stays_and_is_never_read(
         self, pg_conninfo: str, match_mtime: bool
@@ -857,7 +868,7 @@ class TestPostgresHashCacherStrictStore:
         # A stray row whose label the collation equates with the key's label.
         key = make_key()
         stray = FileHashKey(key.path, key.mtime_ns, key.size, "SHA256")
-        blob = b"SHA256:" + b"\x07" * 32
+        blob = b"sha256:" + b"\x07" * 32
         _insert_raw(pg_conninfo, stray, blob)
         with PostgresHashCacher(pg_conninfo, match_mtime=match_mtime) as cache:
             assert cache.get(key) is None
@@ -867,6 +878,7 @@ class TestPostgresHashCacherStrictStore:
             with pytest.raises(ValueError, match="'SHA256'.*sha256 is the only"):
                 cache.put(stray, ContentHash("SHA256", b"\x02" * 32))
             assert cache.get(stray) is None
+            cache.clear()
         with connect(pg_conninfo) as conn:
             assert conn.execute(
                 "SELECT convert_to(algorithm, 'UTF8'), hash, cached_at FROM file_hash_cache_v2"

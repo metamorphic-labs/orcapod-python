@@ -19,6 +19,7 @@ from orcapod.hashing.file_hashers import (
     serialize_storable_file_hash,
     stored_hash_format,
 )
+from orcapod.hashing.hash_utils import SHA256_ALGORITHM
 from orcapod.types import ContentHash
 
 logger = logging.getLogger(__name__)
@@ -181,18 +182,22 @@ class PostgresHashCacher:
         if hash_format is None:
             return None  # Invalid labels can include NULs, which PostgreSQL rejects.
         conn = self._connection()
+        # Keep the index's collation for lookup and require an exact label even
+        # when the column uses a collation that considers different labels equal.
         if self._match_mtime:
             row = conn.execute(
                 "SELECT hash FROM file_hash_cache_v2 "
-                "WHERE path=%s AND mtime_ns=%s AND size=%s AND algorithm=%s",
-                (str(key.path), key.mtime_ns, key.size, algorithm),
+                "WHERE path=%s AND mtime_ns=%s AND size=%s AND algorithm=%s "
+                'AND algorithm COLLATE pg_catalog."C"=%s',
+                (str(key.path), key.mtime_ns, key.size, algorithm, algorithm),
             ).fetchone()
         else:
             row = conn.execute(
                 "SELECT hash FROM file_hash_cache_v2 "
                 "WHERE path=%s AND size=%s AND algorithm=%s "
+                'AND algorithm COLLATE pg_catalog."C"=%s '
                 "ORDER BY mtime_ns DESC LIMIT 1",
-                (str(key.path), key.size, algorithm),
+                (str(key.path), key.size, algorithm, algorithm),
             ).fetchone()
         if row is None:
             return None
@@ -284,8 +289,11 @@ class PostgresHashCacher:
         )
 
     def clear(self) -> None:
-        """Delete all rows from the cache table."""
-        self._connection().execute("DELETE FROM file_hash_cache_v2")
+        """Delete SHA-256 rows, preserving rows from historical algorithms."""
+        self._connection().execute(
+            'DELETE FROM file_hash_cache_v2 WHERE algorithm COLLATE pg_catalog."C"=%s',
+            (SHA256_ALGORITHM,),
+        )
 
     def close(self) -> None:
         """Close this thread's database connection."""

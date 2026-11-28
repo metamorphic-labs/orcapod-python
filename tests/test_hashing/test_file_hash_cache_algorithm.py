@@ -19,8 +19,10 @@ import pytest
 from typing_extensions import override
 from upath import UPath
 
+from orcapod.hashing.directory_hashers import BasicDirectoryHasher
 from orcapod.hashing.file_hashers import CachedFileHasher, FileHasher, FileHashKey
 from orcapod.hashing.hash_cachers import InMemoryHashCacher, SqliteHashCacher
+from orcapod.hashing.semantic_hashing.builtin_handlers import FileHandler
 from orcapod.types import ContentHash, PathLike
 
 Cacher = InMemoryHashCacher | SqliteHashCacher
@@ -78,6 +80,70 @@ def test_sqlite_without_mtime_skips_a_newer_row_of_another_label(
             "SELECT mtime_ns, hash, cached_at FROM file_hash_cache_v2 WHERE algorithm=?",
             (label,),
         ).fetchall() == [(old_key.mtime_ns, old_blob, 1)]
+
+
+def test_sqlite_clear_keeps_historical_rows(tmp_path: Path) -> None:
+    """Clearing the active cache leaves the old algorithm's row intact."""
+    db_path = tmp_path / "cache.db"
+    old_key = _key("md5")
+    old_blob = _hash_of("md5").to_prefixed_digest()
+    with SqliteHashCacher(db_path) as cache:
+        _insert_raw(db_path, old_blob, key=old_key)
+        cache.put(_key("sha256"), _hash_of("sha256"))
+        cache.clear()
+        assert cache.get(_key("sha256")) is None
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "SELECT algorithm, hash, cached_at FROM file_hash_cache_v2"
+        ).fetchall() == [("md5", old_blob, 1)]
+
+
+@pytest.mark.parametrize("match_mtime", [True, False])
+def test_sqlite_read_and_clear_match_the_exact_label(
+    tmp_path: Path, match_mtime: bool
+) -> None:
+    """A case-insensitive column cannot turn a historical row into an active one."""
+    db_path = tmp_path / "cache.db"
+    with sqlite3.connect(db_path) as conn:
+        _ = conn.execute(
+            """CREATE TABLE file_hash_cache_v2 (
+                path TEXT NOT NULL, mtime_ns INTEGER NOT NULL, size INTEGER NOT NULL,
+                algorithm TEXT COLLATE NOCASE NOT NULL, hash BLOB NOT NULL,
+                cached_at INTEGER NOT NULL,
+                PRIMARY KEY (path, mtime_ns, size, algorithm)
+            ) WITHOUT ROWID"""
+        )
+    blob = _hash_of("sha256").to_prefixed_digest()
+    _insert_raw(db_path, blob, key=_key("SHA256"))
+    with SqliteHashCacher(db_path, match_mtime=match_mtime) as cache:
+        assert cache.get(_key("sha256")) is None
+        cache.clear()
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute(
+            "SELECT algorithm, hash FROM file_hash_cache_v2"
+        ).fetchall() == [("SHA256", blob)]
+
+
+class _LookalikeLabel(str):
+    """A label that compares and hashes like SHA-256 in a dictionary."""
+
+    @override
+    def __eq__(self, other: object) -> bool:
+        return other == "sha256"
+
+    @override
+    def __hash__(self) -> int:
+        return hash("sha256")
+
+
+@pytest.mark.parametrize("match_mtime", [True, False])
+def test_memory_read_rejects_a_lookalike_label(match_mtime: bool) -> None:
+    """A string's underlying label determines whether a cache lookup is valid."""
+    cache = InMemoryHashCacher(match_mtime=match_mtime)
+    value = _hash_of("sha256")
+    cache.put(_key("sha256"), value)
+    assert cache.get(_key(_LookalikeLabel("md5"))) is None
+    assert cache.get(_key("sha256")) == value
 
 
 @pytest.fixture
@@ -149,6 +215,57 @@ class _LegacyCacher:
 
     def put(self, key: FileHashKey, value: ContentHash) -> None:
         self.entries[(key.path, key.mtime_ns, key.size)] = value
+
+
+class _WrongResultHasher:
+    """A hasher whose returned label disagrees with its advertised label."""
+
+    hash_algorithm: str = "sha256"
+
+    def hash_file(self, file_path: PathLike) -> ContentHash:
+        """Return an incompatible hash."""
+        _ = file_path
+        return _hash_of("md5")
+
+
+def test_cached_file_hasher_rejects_an_invalid_computed_hash(data_file: Path) -> None:
+    """The wrapper validates the result even if a custom cacher accepts anything."""
+    cache = _LegacyCacher()
+    hasher = CachedFileHasher(_WrongResultHasher(), cache)
+
+    with pytest.raises(ValueError, match="'md5'.*'sha256'"):
+        _ = hasher.hash_file(data_file)
+    assert not cache.entries
+
+
+def test_file_value_rejects_an_invalid_computed_hash(data_file: Path) -> None:
+    """The uncached File handler also checks hashes returned by custom hashers."""
+    from orcapod.contexts import get_default_semantic_hasher
+    from orcapod.logical_types.file_type import File
+
+    handler = FileHandler(_WrongResultHasher())
+    with pytest.raises(ValueError, match="'md5'.*'sha256'"):
+        _ = handler.handle(File(data_file), get_default_semantic_hasher())
+
+
+def test_directory_rejects_an_invalid_file_leaf_hash(data_file: Path) -> None:
+    """A custom file hasher must produce SHA-256 before a leaf is folded in."""
+    hasher = BasicDirectoryHasher(_WrongResultHasher())
+
+    with pytest.raises(ValueError, match="'md5'.*'sha256'"):
+        _ = hasher.hash_directory(data_file.parent)
+
+
+class _LabelledCacher(_LegacyCacher):
+    """A custom cacher that advertises an algorithm."""
+
+    hash_algorithm: str = "md5"
+
+
+def test_cached_file_hasher_refuses_a_custom_cachers_unsupported_label() -> None:
+    """An explicit cacher algorithm follows the same rule as the inner hasher."""
+    with pytest.raises(ValueError, match="Unsupported file hash algorithm 'md5'"):
+        _ = CachedFileHasher(FileHasher(), _LabelledCacher())
 
 
 @pytest.mark.parametrize(
@@ -563,4 +680,15 @@ def test_cached_file_hasher_refuses_a_label_no_cache_can_store(cacher: Cacher):
     inner = _CustomLabelHasher()
     with pytest.raises(ValueError, match="app-sha256-v1"):
         _ = CachedFileHasher(inner, cacher)
+    assert inner.calls == 0
+
+
+@pytest.mark.parametrize("consumer", [FileHandler, BasicDirectoryHasher])
+def test_uncached_consumers_refuse_an_unsupported_file_hasher(
+    consumer: type[FileHandler] | type[BasicDirectoryHasher],
+) -> None:
+    """Direct injection into File and Directory follows the context's SHA-256 rule."""
+    inner = _CustomLabelHasher()
+    with pytest.raises(ValueError, match="Unsupported file hash algorithm"):
+        _ = consumer(inner)
     assert inner.calls == 0

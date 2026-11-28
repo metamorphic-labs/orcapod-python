@@ -12,6 +12,7 @@ revision in the manifest's golden history (ITL-946). A withdrawn release is reco
 from __future__ import annotations
 
 import json
+import shutil
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -20,15 +21,49 @@ import pytest
 
 import orcapod
 from orcapod import contexts
+from orcapod.contexts.core import ContextValidationError
+from orcapod.contexts.registry import JSONDataContextRegistry
 from orcapod.hashing.semantic_hashing.type_handler_registry import (
     PythonTypeHandlerRegistry,
 )
 from orcapod.semantic_types.universal_converter import UniversalTypeConverter
+from orcapod.types import ContentHash, PathLike
 from tests.test_hashing.golden import store
 from tests.test_hashing.golden.generate_golden_hashes import main
 
 CONTEXTS_DIR = Path(str(resources.files("orcapod.contexts")))
 MANIFEST_DIR = CONTEXTS_DIR / "data"
+
+
+class CustomFileHasher:
+    """A configurable file hasher for testing manifest validation."""
+
+    def __init__(self, algorithm: str) -> None:
+        self.hash_algorithm: str = algorithm
+
+    def hash_file(self, file_path: PathLike) -> ContentHash:
+        """Return a hash under the configured label."""
+        _ = file_path
+        return ContentHash(self.hash_algorithm, b"\x00" * 16)
+
+
+def test_context_refuses_a_custom_file_hasher_with_an_unsupported_label(
+    tmp_path: Path,
+) -> None:
+    """A custom hasher declared in the manifest follows the built-in SHA-256 rule."""
+    _ = shutil.copytree(MANIFEST_DIR / "schemas", tmp_path / "schemas")
+    spec = _manifest("v1")
+    spec["file_hasher"] = {
+        "_class": f"{__name__}.CustomFileHasher",
+        "_config": {"algorithm": "md5"},
+    }
+    _ = (tmp_path / "v1.json").write_text(json.dumps(spec))
+    registry = JSONDataContextRegistry(contexts_dir=tmp_path)
+
+    with pytest.raises(
+        ContextValidationError, match="Unsupported file hash algorithm 'md5'"
+    ):
+        _ = registry.get_context()
 
 
 def _pins() -> dict[str, dict[str, Any]]:

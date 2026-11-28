@@ -19,10 +19,11 @@ from orcapod.hashing.file_hashers import (
     FileHashKey,
     matches_stored_file_hash,
     parse_stored_file_hash,
-    require_storable,
+    require_file_hash,
     serialize_storable_file_hash,
     stored_hash_format,
 )
+from orcapod.hashing.hash_utils import SHA256_ALGORITHM, require_file_hash_algorithm
 from orcapod.types import ContentHash
 
 logger = logging.getLogger(__name__)
@@ -87,7 +88,11 @@ class InMemoryHashCacher:
         Returns:
             Cached ``ContentHash``, or ``None`` if not found.
         """
-        inner = self._cache.get((key.path, key.size, key.algorithm))
+        try:
+            require_file_hash_algorithm(key.algorithm)
+        except ValueError:
+            return None
+        inner = self._cache.get((key.path, key.size, SHA256_ALGORITHM))
         if inner is None:
             return None
         if self._match_mtime:
@@ -113,7 +118,7 @@ class InMemoryHashCacher:
                 (checked before the write guards), or if a write finds a different
                 hash under the same key.
         """
-        _ = require_storable(key.algorithm, value.method, value.digest)
+        _ = require_file_hash(key.algorithm, value.method, value.digest)
         if self._read_only:
             return
         if (
@@ -122,7 +127,7 @@ class InMemoryHashCacher:
             and key.size < self._min_cache_size_bytes
         ):
             return
-        entries = self._cache.setdefault((key.path, key.size, key.algorithm), {})
+        entries = self._cache.setdefault((key.path, key.size, SHA256_ALGORITHM), {})
         if entries.setdefault(key.mtime_ns, value) != value:
             raise ValueError(f"Different hash already cached for {key!r}")
 
@@ -278,13 +283,14 @@ class SqliteHashCacher:
         if self._match_mtime:
             row = conn.execute(
                 "SELECT CASE WHEN typeof(hash)='blob' THEN hash END FROM file_hash_cache_v2 "
-                "WHERE path=? AND mtime_ns=? AND size=? AND algorithm=?",
+                "WHERE path=? AND mtime_ns=? AND size=? AND algorithm COLLATE BINARY=?",
                 (str(key.path), key.mtime_ns, key.size, algorithm),
             ).fetchone()
         else:
             row = conn.execute(
                 "SELECT CASE WHEN typeof(hash)='blob' THEN hash END FROM file_hash_cache_v2 "
-                "WHERE path=? AND size=? AND algorithm=? ORDER BY mtime_ns DESC LIMIT 1",
+                "WHERE path=? AND size=? AND algorithm COLLATE BINARY=? "
+                "ORDER BY mtime_ns DESC LIMIT 1",
                 (str(key.path), key.size, algorithm),
             ).fetchone()
         if row is None or not isinstance(row[0], bytes):
@@ -370,9 +376,12 @@ class SqliteHashCacher:
         )
 
     def clear(self) -> None:
-        """Delete all rows from the cache table."""
+        """Delete SHA-256 rows, preserving rows from historical algorithms."""
         conn = self._connection()
-        conn.execute("DELETE FROM file_hash_cache_v2")
+        conn.execute(
+            "DELETE FROM file_hash_cache_v2 WHERE algorithm COLLATE BINARY=?",
+            (SHA256_ALGORITHM,),
+        )
         conn.commit()
 
     def close(self) -> None:

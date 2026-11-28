@@ -54,15 +54,14 @@ def stored_hash_format(label: str) -> tuple[bytes, int] | None:
     return label.encode("ascii") + b":", digest_size
 
 
-def require_storable(algorithm: str, method: str, digest: bytes) -> int:
-    """Require a hash of the key's algorithm and return the validated digest size.
+def require_file_hash(algorithm: str, method: str, digest: bytes) -> int:
+    """Require a file hash of the expected algorithm and return its digest size.
 
-    Every file hash cacher calls this first in ``put``, so a store never holds a
-    value under another algorithm's key (ITL-1488): the value's label must be the
-    key's, and its digest exactly that algorithm's length.
+    The value's label must match the expected algorithm, and its digest must be
+    exactly that algorithm's length.
 
     Args:
-        algorithm: The key's algorithm label.
+        algorithm: The expected algorithm label.
         method: The incoming hash's algorithm label.
         digest: The incoming hash's raw digest.
 
@@ -74,10 +73,7 @@ def require_storable(algorithm: str, method: str, digest: bytes) -> int:
             file hash algorithm), or the digest has another length.
     """
     if str.__eq__(algorithm, method) is not True:
-        raise ValueError(
-            f"A {method!r} hash cannot be stored under a key whose label is "
-            f"{algorithm!r}"
-        )
+        raise ValueError(f"File hash has label {method!r}, expected {algorithm!r}")
     size = file_hash_digest_size(algorithm)
     if len(digest) != size:
         raise ValueError(f"A {algorithm!r} digest is {size} bytes, not {len(digest)}")
@@ -91,7 +87,7 @@ def serialize_storable_file_hash(
     # Snapshot the raw buffer so validation and serialization use the same bytes,
     # even if a subclass overrides digest access or bytes operations.
     digest = memoryview(value.digest).tobytes()
-    digest_size = require_storable(algorithm, value.method, digest)
+    digest_size = require_file_hash(algorithm, value.method, digest)
     prefix = algorithm.encode("ascii") + b":"
     return prefix, digest_size, prefix + digest
 
@@ -194,7 +190,8 @@ class CachedFileHasher:
        the inner hasher's ``hash_algorithm``. Each algorithm has its own entry.
     3. Accept a hit only if it is a ``ContentHash`` with the expected label and
        digest length.
-    4. On miss: delegate to the inner hasher, store the result, return it.
+    4. On miss: delegate to the inner hasher, validate the result, store it, and
+       return it.
 
     Both ``FileHasher`` and ``CachedFileHasher`` satisfy
     ``FileContentHasherProtocol`` — callers do not need to know which they
@@ -206,11 +203,12 @@ class CachedFileHasher:
     Args:
         file_hasher: Inner hasher that performs the actual content hashing.
         cacher: Cache backend implementing
-            ``CacherProtocol[FileHashKey, ContentHash]``.
+            ``CacherProtocol[FileHashKey, ContentHash]``. A backend that advertises
+            an algorithm must report ``"sha256"``.
 
     Raises:
-        ValueError: If ``file_hasher.hash_algorithm`` is not ``"sha256"``; the
-            message names the label given.
+        ValueError: If the file hasher or cacher advertises an unsupported
+            algorithm.
     """
 
     def __init__(
@@ -219,6 +217,8 @@ class CachedFileHasher:
         cacher: "CacherProtocol[FileHashKey, ContentHash]",
     ) -> None:
         require_file_hash_algorithm(file_hasher.hash_algorithm)
+        for attribute in ("hash_algorithm", "algorithm"):
+            require_file_hash_algorithm(getattr(cacher, attribute, SHA256_ALGORITHM))
         self.file_hasher = file_hasher
         self.cacher = cacher
 
@@ -244,12 +244,13 @@ class CachedFileHasher:
         hit = self.cacher.get(key)
         if isinstance(hit, ContentHash):
             try:
-                _ = require_storable(key.algorithm, hit.method, hit.digest)
+                _ = require_file_hash(key.algorithm, hit.method, hit.digest)
             except ValueError:
                 pass  # Custom backends can return an incompatible cached hash.
             else:
                 return hit
 
         result = self.file_hasher.hash_file(file_path)
+        _ = require_file_hash(key.algorithm, result.method, result.digest)
         self.cacher.put(key, result)
         return result

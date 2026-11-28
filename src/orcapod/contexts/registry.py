@@ -414,6 +414,8 @@ class JSONDataContextRegistry:
         instantiated automatically and become available as ``_ref`` targets for
         later components in the same file.
         """
+        from orcapod.hashing.hash_utils import require_file_hash_algorithm
+
         try:
             context_key = spec["context_key"]
             version = spec["version"]
@@ -460,7 +462,12 @@ class JSONDataContextRegistry:
                     continue
                 if isinstance(value, dict) and "_class" in value:
                     logger.debug(f"Creating {key} for context {version}")
-                    ref_lut[key] = parse_objectspec(value, ref_lut=ref_lut)
+                    component = parse_objectspec(value, ref_lut=ref_lut)
+                    if key == "file_hasher":
+                        require_file_hash_algorithm(
+                            getattr(component, "hash_algorithm", None)
+                        )
+                    ref_lut[key] = component
 
             # The value handlers of the logical types join the core handlers of the
             # context file; they may refer to its components (``file_hasher`` ...).

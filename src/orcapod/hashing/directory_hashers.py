@@ -10,7 +10,8 @@ from pathlib import PurePosixPath
 
 from upath import UPath
 
-from orcapod.hashing.hash_utils import SHA256_ALGORITHM
+from orcapod.hashing.file_hashers import require_file_hash
+from orcapod.hashing.hash_utils import SHA256_ALGORITHM, require_file_hash_algorithm
 from orcapod.protocols.hashing_protocols import FileContentHasherProtocol
 from orcapod.types import ContentHash, PathLike
 
@@ -104,6 +105,7 @@ def _hash_dir(
             entry_bytes = b"symlink\x00" + name_bytes + b"\x00" + target.encode("utf-8")
         elif child.is_file():
             file_hash = file_hasher.hash_file(child)
+            _ = require_file_hash(SHA256_ALGORITHM, file_hash.method, file_hash.digest)
             # The file hash comes from another hasher: it enters with its label.
             entry_bytes = (
                 b"file\x00" + name_bytes + b"\x00" + file_hash.to_prefixed_digest()
@@ -142,8 +144,8 @@ class BasicDirectoryHasher:
     on repeated calls (e.g. across pipeline runs).
 
     Args:
-        file_hasher: Hasher used to compute the ``ContentHash`` for each file leaf in
-            the tree. Any object with a ``hash_file(path) -> ContentHash`` method.
+        file_hasher: File content hasher reporting the ``sha256`` algorithm,
+            used to compute the ``ContentHash`` for each file leaf.
         algorithm: Hash algorithm for structural (Merkle entry and node) hashing.
             Only ``"sha256"`` (the default) is accepted: the label ``directory_v1``
             names the SHA-256 procedure and nothing else.
@@ -167,13 +169,14 @@ class BasicDirectoryHasher:
         algorithm: str = SHA256_ALGORITHM,
         buffer_size: int = 65536,
     ) -> None:
-        if algorithm != SHA256_ALGORITHM:
+        if str.__eq__(SHA256_ALGORITHM, algorithm) is not True:
             raise ValueError(
                 f"{DIRECTORY_HASH_LABEL} is defined over {SHA256_ALGORITHM} "
                 f"entry and node digests; got algorithm {algorithm!r}"
             )
+        require_file_hash_algorithm(file_hasher.hash_algorithm)
         self.file_hasher = file_hasher
-        self.algorithm = algorithm
+        self.algorithm = SHA256_ALGORITHM
         self.buffer_size = buffer_size
 
     def hash_directory(

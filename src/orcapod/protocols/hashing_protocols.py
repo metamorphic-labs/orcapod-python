@@ -144,9 +144,7 @@ class FileContentHasherProtocol(Protocol):
     def hash_algorithm(self) -> str:
         """The label of every hash ``hash_file`` returns (its ``ContentHash.method``).
 
-        A file hash cache uses it to return an entry only to a hasher of the same
-        algorithm (ITL-1488). To be cached (``CachedFileHasher``), the label must
-        be ``sha256``, the only file hash algorithm (ITL-1155).
+        The label must be ``sha256``, the only file hash algorithm (ITL-1155).
         """
         ...
 
