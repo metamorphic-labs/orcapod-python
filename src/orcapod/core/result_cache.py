@@ -60,7 +60,7 @@ COMMON_RESULT_COLUMNS: tuple[StoredColumn, ...] = (
         datetime,
         "timestamp[us, tz=UTC]",
         True,
-        "when the result was stored; the newest wins when two rows share an input",
+        "when the result was stored; the newest wins, with ties broken by the greater result id",
     ),
     StoredColumn(
         constants.DATA_CONTEXT_COL,
@@ -233,7 +233,8 @@ class ResultCache:
         *additional_constraints* can narrow the match further (e.g. by
         function variation hash for stricter cache invalidation).
 
-        If multiple records match, the most recent (by timestamp) wins.
+        If multiple records match, the newest stored timestamp wins. On a tie,
+        the greater result id (UUIDv7, compared as bytes) wins.
 
         Args:
             input_data: The input data whose content hash is the
@@ -281,12 +282,12 @@ class ResultCache:
         if result_table.num_rows > 1:
             logger.info(
                 "Cache conflict resolution: %d records for constraints %s, "
-                "taking most recent",
+                "taking newest timestamp, with ties broken by the greater result id",
                 result_table.num_rows,
                 list(constraints.keys()),
             )
             result_table = result_table.sort_by(
-                [(constants.POD_TIMESTAMP, "descending")]
+                [(constants.POD_TIMESTAMP, "descending"), (RECORD_ID_COL, "descending")]
             ).take([0])
 
         record_id_bytes = result_table.to_pylist()[0][RECORD_ID_COL]

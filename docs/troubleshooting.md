@@ -126,7 +126,7 @@ the message names the first offending column:
   `pa.table(...)` without a schema has nullable columns.
 - `column 'q' is not a parameter of the function`: the stream has a column the function
   does not take. `pod(stream)` drops such columns for you (it adds a `SelectDataColumns`
-  step), so you see this only from `pod.process(stream)`, from `pod(stream, strict=True)`,
+  step), so you see this only from `pod.process(stream)`, from `pod(stream, strict_columns=True)`,
   or when **no** column of the stream is a parameter.
 
 **Fix.** For a missing column, rename with `stream.map_data({"old": "new"})`. For a type

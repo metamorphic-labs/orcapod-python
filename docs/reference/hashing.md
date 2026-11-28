@@ -399,6 +399,7 @@ A record id is the row identifier (rule 8), built from row positions or key valu
 | hooks (`pod_hash`) | `core/function_pod.py:_FunctionPodBase._build_post_run_payload` |
 | in-memory graph keys and sort keys | `pipeline/base.py:AbstractPipelineBase.compile`, `pipeline/base.py:AbstractPipelineBase.compile.<locals>.<lambda>`, `pipeline/base.py:AbstractPipelineBase.prepare_invocation`, `pipeline/base.py:AbstractPipelineBase.prepare_invocation.<locals>.<genexpr>`, `pipeline/base.py:AbstractPipelineBase.to_invocations`, `pipeline/base.py:AbstractPipelineBase.from_invocations`, `pipeline/base.py:AbstractPipelineBase.from_invocations.<locals>.<genexpr>`, `pipeline/job.py:PipelineJob.compile`, `pipeline/restrictions.py:sources_read` (the source identity a restriction is kept under, ITL-1218) |
 | in-memory source registration keys | `pipeline/source_consistency.py:require_consistent_sources` |
+| in-memory lookup keys for a validated operator input or input pair (ITL-1358) | `core/operators/index.py:Index.validate_unary_input`, `core/operators/index.py:Index.async_execute`, `core/operators/pick.py:Pick.validate_unary_input`, `core/operators/pick.py:Pick.async_execute`, `core/operators/semijoin.py:SemiJoin.validate_binary_inputs`, `core/operators/semijoin.py:SemiJoin.async_execute` |
 | in-memory topological sort of compiled and restored nodes, using the pipeline hash to order ready invocations | `pipeline/base.py:AbstractPipelineBase._ordered_node_map.<locals>.order_key` |
 | canonical input order (sort by digest). Inputs with equal pipeline hashes (developer decision, November 16, 2026, ITL-1154: kept as it is): system-tag column names follow the stable pipeline-hash sort; each row's values are sorted by (source id, record id) by `sort_system_tag_values`, so the result does not depend on argument order; the operator's identity holds its inputs as a frozenset | `core/operators/join.py:Join.order_input_streams.<locals>.<lambda>` |
 | in-memory identity and repr | `core/base.py:ContentIdentifiableBase.__hash__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__hash__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__eq__`, `hashing/semantic_hashing/content_identifiable_mixin.py:ContentIdentifiableMixin.__repr__` |
@@ -1221,7 +1222,10 @@ instance and the result it points at.
   and result (the record id covers the node's content hash; developer, November 26, 2026), so it
   keeps its own row. A recompute (the
   stored result is gone) has a new result id, so it is a new row; among the rows of one
-  instance, the one recorded last is the current one. There is no recomputation index.
+  instance, the one recorded last is the current one. If records have the same
+  recording time, a record with an available result wins over one whose ephemeral
+  result is gone. Among equally timed records whose results are all available
+  or all gone, the greater result UUID wins. There is no recomputation index.
   "Recorded last" is read from `__recorded_at`, the recording process's UTC clock at the
   write: a clock set back between two writes of one instance leaves the earlier record
   current until a later write.
