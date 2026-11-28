@@ -321,6 +321,9 @@ class Join(NonZeroInputOperator):
                 )
             for name in sorted(merged):
                 if data_schema[name] != other_data_schema[name]:
+                    explain_nested_join_conflict(
+                        "Join", stream, other_stream, include_data=True
+                    )
                     raise InputValidationError(
                         f"{type(self).__name__}: data-tag {name!r} has type "
                         f"{data_schema[name]} in one input and "

@@ -44,6 +44,7 @@ def _source(
     nullable: bool,
     shape: str = "struct-item",
     scalar: pa.DataType = pa.int64(),
+    data_tag: bool = False,
 ):
     item: pa.Field[Any] = (
         pa.field("item", pa.struct([pa.field("code", scalar, nullable=nullable)]))
@@ -57,7 +58,11 @@ def _source(
         keys = pa.ExtensionArray.from_storage(_ListExtension(key), keys)
     table = pa.table({"k": keys, data_name: pa.array([2], type=pa.int64())})
     return ArrowTableSource(
-        table, tag_columns=["k"], tag_only_columns=True, source_id=name
+        table,
+        tag_columns=["k"],
+        tag_only_columns=not data_tag,
+        # ArrowTableSource infers data-tags from tag_only_columns.
+        source_id=name,
     )
 
 
@@ -111,6 +116,15 @@ def test_another_type_difference_keeps_the_generic_message():
     with pytest.raises(InputValidationError, match="not compatible") as error:
         Join()(left, right).as_table()
     assert "drop the explicit non-null declaration" not in str(error.value)
+
+
+def test_join_names_nested_flag_in_shared_data_tag():
+    """A merged data-tag type mismatch gets the same nested-field remedy."""
+    left = _source("a", "v", nullable=True, shape="struct-item", data_tag=True)
+    right = _source("b", "w", nullable=False, shape="struct-item", data_tag=True)
+    with pytest.raises(InputValidationError) as error:
+        Join()(left, right).as_table()
+    _assert_remedy(str(error.value), "k.item.code")
 
 
 def test_a_flag_and_a_logical_identifier_are_two_differences():

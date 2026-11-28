@@ -32,6 +32,10 @@ import pytest
 
 from orcapod.databases import ConnectorArrowDatabase, PostgreSQLConnector
 from orcapod.types import ColumnInfo
+from tests.test_core.test_result_cache import (
+    TIE_ORDERS,
+    check_result_lookup_timestamp_tie,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +94,18 @@ def _make_table(ids: list[str], values: list[float | None]) -> pa.Table:
 # ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize("order", TIE_ORDERS)
+def test_postgresql_result_lookup_timestamp_tie(
+    connector: PostgreSQLConnector,
+    order: tuple[int, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    check_result_lookup_timestamp_tie(
+        ConnectorArrowDatabase(connector), order, monkeypatch
+    )
 
 
 @pytest.mark.postgres

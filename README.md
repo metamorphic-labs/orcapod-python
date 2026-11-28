@@ -81,6 +81,9 @@ print(job.nodes["fahrenheit"].as_table().sort_by("experiment").to_pylist())
 # [{'experiment': 'exp_001', 'temp_fahrenheit': 68.9}, {'experiment': 'exp_002', 'temp_fahrenheit': 72.14}]
 ```
 
+A function pod drops unused data columns by default. Pass `strict_columns=True` to reject
+them.
+
 Add a row and run a new job over the same database. The two stored results are found again
 by their input values, and only the new row is computed:
 

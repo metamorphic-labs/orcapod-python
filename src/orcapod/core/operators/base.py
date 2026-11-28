@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 from abc import abstractmethod
 from collections.abc import Collection, Sequence
+from dataclasses import dataclass
 from itertools import combinations
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, get_args
+
 
 from orcapod.core.operators.meta_columns import (
     without_input_meta,
@@ -21,11 +23,43 @@ from orcapod.protocols.core_protocols import (
     StreamProtocol,
     TagProtocol,
 )
-from orcapod.types import ColumnConfig, ContentHash, Schema
+from orcapod.types import ColumnConfig, ContentHash, DataType, Schema
 from orcapod.utils import arrow_utils
 
 if TYPE_CHECKING:
     import pyarrow as pa
+
+    from orcapod.protocols.semantic_types_protocols import TypeConverterProtocol
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectionType:
+    """The output type and deferred Arrow fallback for one projection input."""
+
+    python_type: DataType | None = None
+    arrow_fallback: pa.DataType | None = None
+    fallback_error: str = ""
+    known_key: bool = False
+
+    @property
+    def nullable(self) -> bool:
+        """Whether the predicted output type admits ``None``."""
+        return type(None) in get_args(self.python_type)
+
+    @classmethod
+    def resolve(
+        cls,
+        python_type: DataType,
+        converter: TypeConverterProtocol,
+        *,
+        known_key: bool = False,
+    ) -> ProjectionType:
+        """Resolve the fallback with the input's converter and defer any failure."""
+        try:
+            arrow_fallback = converter.python_type_to_arrow_type(python_type)
+        except (ValueError, TypeError, NotImplementedError) as exc:
+            return cls(python_type, fallback_error=str(exc), known_key=known_key)
+        return cls(python_type, arrow_fallback, known_key=known_key)
 
 
 def require_shared_arrow_type(
