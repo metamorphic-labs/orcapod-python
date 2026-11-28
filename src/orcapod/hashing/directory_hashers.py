@@ -10,8 +10,16 @@ from pathlib import PurePosixPath
 
 from upath import UPath
 
-from orcapod.hashing.hash_utils import SHA256_ALGORITHM
-from orcapod.protocols.hashing_protocols import FileContentHasherProtocol
+from orcapod.hashing.file_hashers import FileHasher, verified_file_hash
+from orcapod.hashing.hash_utils import (
+    SHA256_ALGORITHM,
+    SHA256_DIGEST_SIZE,
+    require_file_hash_algorithm,
+)
+from orcapod.protocols.hashing_protocols import (
+    DirectoryHasherProtocol,
+    FileContentHasherProtocol,
+)
 from orcapod.types import ContentHash, PathLike
 
 logger = logging.getLogger(__name__)
@@ -25,6 +33,40 @@ hash with its label (``b"<label>:" + digest``: a hash fed into another hash carr
 label, ITL-1154), symlinks recorded by target. A change that gives an existing directory a
 different digest takes a new label (``directory_v2``).
 """
+
+
+def require_directory_hash_algorithm(algorithm: object) -> None:
+    """Require SHA-256 for the entry and node digests of ``directory_v1``."""
+    if str.__eq__(SHA256_ALGORITHM, algorithm) is not True:
+        raise ValueError(
+            f"{DIRECTORY_HASH_LABEL} is defined over {SHA256_ALGORITHM} "
+            f"entry and node digests; got algorithm {algorithm!r}"
+        )
+
+
+def canonical_directory_hash(value: ContentHash) -> ContentHash:
+    """Return a validated directory hash with canonical serialization."""
+    method = value.method
+    if str.__eq__(DIRECTORY_HASH_LABEL, method) is not True:
+        raise ValueError(
+            f"Directory hash has label {method!r}, expected {DIRECTORY_HASH_LABEL!r}"
+        )
+    digest = memoryview(value.digest).tobytes()
+    if len(digest) != SHA256_DIGEST_SIZE:
+        raise ValueError(
+            f"Directory hash must have {SHA256_DIGEST_SIZE} bytes, got {len(digest)}"
+        )
+    return ContentHash(DIRECTORY_HASH_LABEL, digest)
+
+
+def _materialize_ignore_patterns(ignore: Iterable[str]) -> tuple[str, ...]:
+    """Validate an iterable of glob patterns and consume it once."""
+    if isinstance(ignore, str):
+        raise TypeError(
+            f"ignore= expects an iterable of pattern strings, not a bare string. "
+            f"Pass a list instead: ignore=[{ignore!r}]"
+        )
+    return tuple(ignore)
 
 
 def _compile_ignore(
@@ -48,12 +90,7 @@ def _compile_ignore(
         return None
     if callable(ignore):
         return ignore
-    if isinstance(ignore, str):
-        raise TypeError(
-            f"ignore= expects an iterable of pattern strings, not a bare string. "
-            f"Pass a list instead: ignore=[{ignore!r}]"
-        )
-    patterns = list(ignore)
+    patterns = _materialize_ignore_patterns(ignore)
 
     def _glob_filter(relative: UPath) -> bool:
         return any(PurePosixPath(relative.as_posix()).match(pat) for pat in patterns)
@@ -65,7 +102,6 @@ def _hash_dir(
     path: UPath,
     root: UPath,
     filter_fn: Callable[[UPath], bool] | None,
-    algorithm: str,
     file_hasher: FileContentHasherProtocol,
 ) -> bytes:
     """Recursively compute the Merkle hash of a directory.
@@ -78,7 +114,6 @@ def _hash_dir(
             ``root`` and returns ``True`` to exclude the entry. Excluding a directory
             entry also implicitly excludes its entire subtree (the recursive call is
             skipped for excluded directories).
-        algorithm: Hash algorithm name used for structural (entry and node) hashing.
         file_hasher: Hasher used to compute ``ContentHash`` for each file leaf.
 
     Returns:
@@ -103,26 +138,27 @@ def _hash_dir(
             target = os.readlink(child)
             entry_bytes = b"symlink\x00" + name_bytes + b"\x00" + target.encode("utf-8")
         elif child.is_file():
-            file_hash = file_hasher.hash_file(child)
+            # File hashers accept UPath directly, including remote paths.
+            file_hash = verified_file_hash(file_hasher, child)  # pyright: ignore[reportArgumentType]
             # The file hash comes from another hasher: it enters with its label.
             entry_bytes = (
                 b"file\x00" + name_bytes + b"\x00" + file_hash.to_prefixed_digest()
             )
         elif child.is_dir():
-            subdir_digest = _hash_dir(child, root, filter_fn, algorithm, file_hasher)
+            subdir_digest = _hash_dir(child, root, filter_fn, file_hasher)
             entry_bytes = b"dir\x00" + name_bytes + b"\x00" + subdir_digest
         else:
             # Special file (socket, device node, named pipe) — skip silently.
             logger.debug("BasicDirectoryHasher: skipping special file %s", child)
             continue
 
-        entry_digest = hashlib.new(algorithm, entry_bytes).digest()
+        entry_digest = hashlib.sha256(entry_bytes).digest()
         entries.append((name_bytes, entry_digest))
 
     # Sort byte-wise by name — locale-independent, deterministic.
     entries.sort(key=lambda x: x[0])
 
-    h = hashlib.new(algorithm)
+    h = hashlib.sha256()
     h.update(b"directory\x00")
     for _, entry_digest in entries:
         h.update(entry_digest)
@@ -142,8 +178,8 @@ class BasicDirectoryHasher:
     on repeated calls (e.g. across pipeline runs).
 
     Args:
-        file_hasher: Hasher used to compute the ``ContentHash`` for each file leaf in
-            the tree. Any object with a ``hash_file(path) -> ContentHash`` method.
+        file_hasher: File content hasher reporting the ``sha256`` algorithm,
+            used to compute the ``ContentHash`` for each file leaf.
         algorithm: Hash algorithm for structural (Merkle entry and node) hashing.
             Only ``"sha256"`` (the default) is accepted: the label ``directory_v1``
             names the SHA-256 procedure and nothing else.
@@ -151,7 +187,7 @@ class BasicDirectoryHasher:
             is owned by ``file_hasher``. Defaults to 65536.
 
     Raises:
-        ValueError: If ``algorithm`` is not ``"sha256"``.
+        ValueError: If the requested or file hasher algorithm is unsupported.
 
     Example:
         >>> from orcapod.hashing.file_hashers import FileHasher
@@ -167,14 +203,15 @@ class BasicDirectoryHasher:
         algorithm: str = SHA256_ALGORITHM,
         buffer_size: int = 65536,
     ) -> None:
-        if algorithm != SHA256_ALGORITHM:
-            raise ValueError(
-                f"{DIRECTORY_HASH_LABEL} is defined over {SHA256_ALGORITHM} "
-                f"entry and node digests; got algorithm {algorithm!r}"
-            )
+        require_directory_hash_algorithm(algorithm)
+        require_file_hash_algorithm(file_hasher.hash_algorithm)
         self.file_hasher = file_hasher
-        self.algorithm = algorithm
         self.buffer_size = buffer_size
+
+    @property
+    def algorithm(self) -> str:
+        """The directory hasher's structural algorithm, SHA-256."""
+        return SHA256_ALGORITHM
 
     def hash_directory(
         self,
@@ -203,6 +240,8 @@ class BasicDirectoryHasher:
             A ``ContentHash`` with ``method="directory_v1"`` (``DIRECTORY_HASH_LABEL``).
 
         Raises:
+            ValueError: If a hasher advertises an unsupported algorithm or a custom
+                file hash does not match SHA-256 of the file bytes.
             FileNotFoundError: If ``directory_path`` does not exist.
             NotADirectoryError: If ``directory_path`` is not a directory.
             PermissionError: If the directory is not traversable.
@@ -220,7 +259,49 @@ class BasicDirectoryHasher:
             >>> # Custom callable filter (receives relative UPath from root)
             >>> result = hasher.hash_directory("/tmp/mydir", ignore=lambda p: p.name.startswith("."))
         """
+        require_directory_hash_algorithm(self.algorithm)
+        file_hasher = self.file_hasher
+        require_file_hash_algorithm(file_hasher.hash_algorithm)
         path = UPath(directory_path)
         filter_fn = _compile_ignore(ignore)
-        digest = _hash_dir(path, path, filter_fn, self.algorithm, self.file_hasher)
+        digest = _hash_dir(path, path, filter_fn, file_hasher)
         return ContentHash(method=DIRECTORY_HASH_LABEL, digest=digest)
+
+
+def verified_directory_hash(
+    directory_hasher: DirectoryHasherProtocol,
+    path: PathLike,
+    ignore: Callable[[UPath], bool] | Iterable[str] | None,
+) -> ContentHash:
+    """Hash a directory and verify custom results against the library's Merkle tree."""
+    require_directory_hash_algorithm(getattr(directory_hasher, "algorithm", None))
+    if type(directory_hasher) is BasicDirectoryHasher:
+        return directory_hasher.hash_directory(path, ignore=ignore)
+
+    if callable(ignore):
+        # Reuse the custom traversal's decisions. The caller's filter can have
+        # side effects, so it should run only once per relative path.
+        filter_fn = ignore
+        decisions: dict[str, bool] = {}
+
+        def once(relative: UPath) -> bool:
+            key = relative.as_posix()
+            if key not in decisions:
+                decisions[key] = filter_fn(relative)
+            return decisions[key]
+
+        ignore = once
+        custom_ignore = once
+    elif ignore is not None:
+        ignore = _materialize_ignore_patterns(ignore)
+        custom_ignore = list(ignore)
+    else:
+        custom_ignore = None
+
+    reported = directory_hasher.hash_directory(path, ignore=custom_ignore)
+    require_directory_hash_algorithm(getattr(directory_hasher, "algorithm", None))
+    canonical = canonical_directory_hash(reported)
+    computed = BasicDirectoryHasher(FileHasher()).hash_directory(path, ignore=ignore)
+    if canonical.digest != computed.digest:
+        raise ValueError(f"Directory hash does not match {DIRECTORY_HASH_LABEL}")
+    return computed

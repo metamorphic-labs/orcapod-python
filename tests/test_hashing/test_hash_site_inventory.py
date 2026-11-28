@@ -17,6 +17,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 REFERENCE = PROJECT_ROOT / "docs" / "reference" / "hashing.md"
 SITE = re.compile(r"`([\w/]+\.py:[\w.<>]+)`")
@@ -111,3 +113,81 @@ def test_every_documented_site_exists() -> None:
         if qualname not in _qualified_names(ast.parse(source)):
             stale.append(site)
     assert not stale, f"documented hash sites that no longer exist: {stale}"
+
+
+_PERSISTENT_CACHERS = [
+    ("hashing/hash_cachers.py", "SqliteHashCacher"),
+    ("hashing/postgres_hash_cacher.py", "PostgresHashCacher"),
+]
+
+
+@pytest.mark.parametrize(("path", "class_name"), _PERSISTENT_CACHERS)
+def test_persistent_file_cache_sites_are_in_the_inventory(
+    path: str, class_name: str
+) -> None:
+    """Include both persistent backends even when no PostgreSQL server is running."""
+    sites = _documented_sites()
+    assert f"{path}:{class_name}.get" in sites
+    assert f"{path}:{class_name}.put" in sites
+    stored_values = (
+        REFERENCE.read_text(encoding="utf-8")
+        .split("### Stored values (labelled)", 1)[1]
+        .split("\n### ", 1)[0]
+    )
+    assert f"{path}:{class_name}.put" in SITE.findall(stored_values)
+
+
+@pytest.mark.parametrize(("path", "class_name"), _PERSISTENT_CACHERS)
+def test_persistent_file_cache_docstrings_describe_canonical_writes(
+    path: str, class_name: str
+) -> None:
+    """The cache format comes from validated fields, even for custom hash objects."""
+    source = (PROJECT_ROOT / "src" / "orcapod" / path).read_text(encoding="utf-8")
+    cls = next(
+        node
+        for node in ast.parse(source).body
+        if isinstance(node, ast.ClassDef) and node.name == class_name
+    )
+    doc = ast.get_docstring(cls)
+    assert doc is not None
+    assert 'b"sha256:"' in doc
+    assert "validated digest" in doc
+    assert "ContentHash.to_prefixed_digest()" not in doc
+
+
+def test_shared_file_cache_encoding_is_in_the_inventory() -> None:
+    """The stored-value inventory includes the parser and serializer shared by both DBs."""
+    stored_values = (
+        REFERENCE.read_text(encoding="utf-8")
+        .split("### Stored values (labelled)", 1)[1]
+        .split("\n### ", 1)[0]
+    )
+    sites = set(SITE.findall(stored_values))
+    assert {
+        "hashing/file_hashers.py:parse_stored_file_hash",
+        "hashing/file_hashers.py:serialize_storable_file_hash",
+    } <= sites
+
+
+def test_in_memory_cache_write_is_in_the_inventory() -> None:
+    """The repeated-write hash comparison also appears in the stored value table."""
+    stored_values = (
+        REFERENCE.read_text(encoding="utf-8")
+        .split("### Stored values (labelled)", 1)[1]
+        .split("\n### ", 1)[0]
+    )
+    site = "hashing/hash_cachers.py:InMemoryHashCacher.put"
+    assert site in _documented_sites()
+    assert site in SITE.findall(stored_values)
+
+
+def test_directory_migration_names_the_required_algorithm_declaration() -> None:
+    """Existing SHA-256 directory backend authors can find the migration step."""
+    fragment = (PROJECT_ROOT / "changelog.d" / "ITL-1155.md").read_text(
+        encoding="utf-8"
+    )
+    migration = fragment.split("### Breaking changes and migration", 1)[1].split(
+        "\n### ", 1
+    )[0]
+    assert "DirectoryHasherProtocol" in migration
+    assert '`algorithm = "sha256"`' in migration

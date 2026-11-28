@@ -16,9 +16,13 @@ Covers:
 
 from __future__ import annotations
 
+import builtins
 import hashlib
 import json
 from collections import OrderedDict, namedtuple
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from types import ModuleType
 from typing import Any
 from uuid import UUID
 
@@ -34,6 +38,7 @@ from orcapod.hashing.semantic_hashing.builtin_handlers import (
 from orcapod.hashing.semantic_hashing.content_identifiable_mixin import (
     ContentIdentifiableMixin,
 )
+from orcapod.hashing.semantic_hashing.encoded import Encoded
 from orcapod.hashing.semantic_hashing.semantic_hasher import (
     SemanticAwarePythonHasher,
     _is_namedtuple,
@@ -42,6 +47,8 @@ from orcapod.hashing.semantic_hashing.type_handler_registry import (
     PythonTypeHandlerRegistry,
     get_default_python_type_handler_registry,
 )
+from orcapod.logical_types.directory_type import Directory
+from orcapod.logical_types.file_type import File
 from orcapod.types import ContentHash
 
 # ---------------------------------------------------------------------------
@@ -66,6 +73,84 @@ def hasher() -> SemanticAwarePythonHasher:
 @pytest.fixture
 def lenient_hasher() -> SemanticAwarePythonHasher:
     return make_hasher(strict=False)
+
+
+class CustomFile(File):
+    """A file with a custom registered identity."""
+
+
+class CustomDirectory(Directory):
+    """A directory with a custom registered identity."""
+
+
+@pytest.mark.parametrize("path_type", [CustomFile, CustomDirectory])
+@pytest.mark.parametrize("produces_content_hash", [False, True])
+def test_registered_path_subclass_can_encode_metadata_but_cannot_supply_a_raw_hash(
+    path_type: type[CustomFile] | type[CustomDirectory],
+    produces_content_hash: bool,
+    tmp_path: Path,
+) -> None:
+    """Only the verified content handlers may return a terminal path hash."""
+    calls: list[File | Directory] = []
+
+    class CustomHandler:
+        """Use a path name as metadata or attempt to return an unverified hash."""
+
+        def handle(
+            self, obj: File | Directory, hasher: object
+        ) -> Encoded | ContentHash:
+            calls.append(obj)
+            if produces_content_hash:
+                return ContentHash("md5", b"\0" * 16)
+            return Encoded("custom_path", {"name": obj.name})
+
+    path = tmp_path / "example"
+    if path_type is CustomFile:
+        _ = path.write_bytes(b"content")
+    else:
+        path.mkdir()
+    obj = path_type(path)
+    registry = PythonTypeHandlerRegistry()
+    registry.register(path_type, CustomHandler())
+    hasher = SemanticAwarePythonHasher(type_handler_registry=registry)
+
+    if produces_content_hash:
+        with pytest.raises(TypeError, match="must supply a .* hasher"):
+            _ = hasher.hash_object(obj)
+    else:
+        expected_digest = hashlib.sha256(
+            b'{"__type__":"custom_path","name":"example"}'
+        ).digest()
+        assert hasher.hash_object(obj) == ContentHash("semantic_v1", expected_digest)
+    assert calls == [obj]
+
+
+@pytest.mark.parametrize("value", [UUID(int=1), b"registered value"])
+def test_registered_value_dispatch_does_not_import_path_hashing_dependencies(
+    hasher: SemanticAwarePythonHasher,
+    monkeypatch: pytest.MonkeyPatch,
+    value: UUID | bytes,
+) -> None:
+    """Repeated UUID and bytes hashing does no import work in the semantic hasher."""
+    expected = hasher.hash_object(value)
+    original_import = builtins.__import__
+
+    def track_import(
+        name: str,
+        globals: Mapping[str, object] | None = None,
+        locals: Mapping[str, object] | None = None,
+        fromlist: Sequence[str] | None = (),
+        level: int = 0,
+    ) -> ModuleType:
+        """Fail on synchronous imports from the semantic hasher."""
+        assert (globals or {}).get(
+            "__name__"
+        ) != SemanticAwarePythonHasher.__module__, name
+        return original_import(name, globals, locals, fromlist, level)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "__import__", track_import)
+        assert hasher.hash_object(value) == expected
 
 
 # ---------------------------------------------------------------------------

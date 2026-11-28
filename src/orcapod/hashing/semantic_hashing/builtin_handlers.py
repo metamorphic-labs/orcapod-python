@@ -30,6 +30,9 @@ from uuid import UUID
 
 from typing_extensions import override
 
+from orcapod.hashing.directory_hashers import verified_directory_hash
+from orcapod.hashing.file_hashers import verified_file_hash
+from orcapod.hashing.hash_utils import require_file_hash_algorithm
 from orcapod.hashing.pandas_value_hash import (
     PANDAS_DATAFRAME_HASH_LABEL,
     PANDAS_DATAFRAME_OPTIONS,
@@ -495,10 +498,11 @@ class FileHandler:
     the wrapped ``UPath``, which follows symlinks by default.
 
     Args:
-        file_hasher: Any object with a ``hash_file(path) -> ContentHash`` method.
+        file_hasher: File content hasher reporting the ``sha256`` algorithm.
     """
 
     def __init__(self, file_hasher: "FileContentHasherProtocol") -> None:
+        require_file_hash_algorithm(file_hasher.hash_algorithm)
         self.file_hasher = file_hasher
 
     def handle(self, obj: Any, hasher: "SemanticHasherProtocol") -> ContentHash:
@@ -510,7 +514,7 @@ class FileHandler:
             raise TypeError(f"FileHandler: expected an orcapod.File, got {type(obj)!r}")
         wrapped = getattr(obj, "__wrapped__")
         logger.debug("FileHandler: hashing file content at %s", wrapped)
-        return self.file_hasher.hash_file(wrapped)
+        return verified_file_hash(self.file_hasher, wrapped)
 
 
 class DirectoryHandler:
@@ -520,11 +524,11 @@ class DirectoryHandler:
     traversability are validated at construction time. Derived ``Directory`` instances
     created by path-navigation operations (e.g. ``.parent``, ``/`` operator) bypass that
     validation via ``_from_upath`` — so existence is not guaranteed at ``handle`` time.
-    The hash is produced by ``BasicDirectoryHasher`` using a recursive Merkle scheme.
+    The default ``BasicDirectoryHasher`` uses a recursive Merkle scheme.
 
     Args:
-        directory_hasher: Any object with a
-            ``hash_directory(path, ignore) -> ContentHash`` method.
+        directory_hasher: Directory tree hasher reporting the ``sha256`` algorithm
+            and returning a ``directory_v1`` digest.
     """
 
     def __init__(self, directory_hasher: "DirectoryHasherProtocol") -> None:
@@ -542,7 +546,7 @@ class DirectoryHandler:
         wrapped = getattr(obj, "__wrapped__")
         ignore = getattr(obj, "_ignore", None)
         logger.debug("DirectoryHandler: hashing directory content at %s", wrapped)
-        return self.directory_hasher.hash_directory(wrapped, ignore=ignore)
+        return verified_directory_hash(self.directory_hasher, wrapped, ignore)
 
 
 class NumpyArrayHandler(IgnoreListHandler):

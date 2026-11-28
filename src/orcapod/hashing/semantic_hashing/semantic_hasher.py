@@ -72,7 +72,13 @@ import re
 from collections.abc import Callable, Mapping
 from typing import Any, cast
 
+from orcapod.hashing.semantic_hashing.builtin_handlers import (
+    DirectoryHandler,
+    FileHandler,
+)
 from orcapod.hashing.semantic_hashing.encoded import TYPE_KEY, Encoded
+from orcapod.logical_types.directory_type import Directory
+from orcapod.logical_types.file_type import File
 from orcapod.protocols import hashing_protocols as hp
 from orcapod.types import ContentHash
 from orcapod.utils.canonical_type_names import canonical_module_name
@@ -212,12 +218,16 @@ class SemanticAwarePythonHasher:
         # takes priority over _expand_mapping for Schema objects, which are Mappings).
         handler = self._registry.get_handler(obj)
         if handler is not None:
-            logger.debug(
-                "hash_object: dispatching %s to handler %s",
-                type(obj).__name__,
-                type(handler).__name__,
-            )
-            result = handler.handle(obj, self)
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "hash_object: dispatching %s to handler %s",
+                    type(obj).__name__,
+                    type(handler).__name__,
+                )
+            if isinstance(obj, (File, Directory)):
+                result = self._handle_path(obj, handler)
+            else:
+                result = handler.handle(obj, self)
             if isinstance(result, Encoded):
                 # The only route to a trusted tagged object: a handler's own result.
                 return self._hash_to_content_hash(
@@ -250,6 +260,31 @@ class SemanticAwarePythonHasher:
         # Fallback for unhandled types.
         fallback = self._handle_unknown(obj)
         return self._hash_to_content_hash(fallback)
+
+    def _handle_path(
+        self, obj: File | Directory, handler: hp.PythonTypeHandlerProtocol
+    ) -> ContentHash | Encoded:
+        """Verify path content hashes and allow subclasses to describe their identity."""
+        if isinstance(obj, File):
+            if isinstance(handler, FileHandler):
+                return FileHandler.handle(handler, obj, self)
+            if isinstance(handler, hp.FileContentHasherProtocol):
+                return FileHandler(handler).handle(obj, self)
+            base = File
+            error = "A File handler must supply a file content hasher"
+        else:
+            if isinstance(handler, DirectoryHandler):
+                return DirectoryHandler.handle(handler, obj, self)
+            if isinstance(handler, hp.DirectoryHasherProtocol):
+                return DirectoryHandler(handler).handle(obj, self)
+            base = Directory
+            error = "A Directory handler must supply a directory tree hasher"
+
+        if type(obj) is not base:
+            result = handler.handle(obj, self)
+            if isinstance(result, Encoded):
+                return result
+        raise TypeError(error)
 
     # ------------------------------------------------------------------
     # Private: structural expansion

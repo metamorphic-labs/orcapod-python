@@ -4,8 +4,9 @@ from upath import UPath
 
 from orcapod.hashing.hash_utils import (
     SHA256_ALGORITHM,
-    file_hash_digest_size,
+    SHA256_DIGEST_SIZE,
     hash_file,
+    require_file_hash_algorithm,
 )
 from orcapod.protocols.hashing_protocols import (
     CacherProtocol,
@@ -32,7 +33,8 @@ class FileHashKey:
         mtime_ns: Last-modified time in nanoseconds (``path.stat().st_mtime_ns``).
         size: File size in bytes (``path.stat().st_size``).
         algorithm: PROVISIONAL. Hash label of the algorithm (``ContentHash.method`` of the
-            hash, e.g. ``"sha256"``).
+            hash): ``"sha256"``, the only file hash algorithm (ITL-1155). A key
+            with any other label is refused on ``put`` and a miss on ``get``.
     """
 
     path: UPath
@@ -43,55 +45,52 @@ class FileHashKey:
 
 def stored_hash_format(label: str) -> tuple[bytes, int] | None:
     """Return the ASCII prefix and digest size for a supported cache label."""
-    if not label.isascii():
+    if str.__eq__(SHA256_ALGORITHM, label) is not True:
         return None
-    try:
-        digest_size = file_hash_digest_size(label)
-    except ValueError:
-        return None
-    return label.encode("ascii") + b":", digest_size
+    return SHA256_ALGORITHM.encode("ascii") + b":", SHA256_DIGEST_SIZE
 
 
-def require_storable(algorithm: str, method: str, digest: bytes) -> int:
-    """Require a hash of the key's algorithm and return the validated digest size.
-
-    Every file hash cacher calls this first in ``put``, so a store never holds a
-    value under another algorithm's key (ITL-1488): the value's label must be the
-    key's, and its digest exactly that algorithm's length.
-
-    Args:
-        algorithm: The key's algorithm label.
-        method: The incoming hash's algorithm label.
-        digest: The incoming hash's raw digest.
-
-    Returns:
-        The validated digest size.
-
-    Raises:
-        ValueError: If the labels differ, the label names no algorithm with a fixed
-            digest length, or the digest has another length.
-    """
-    if str.__eq__(algorithm, method) is not True:
+def _validated_file_digest(
+    value: ContentHash, stored_label: str = SHA256_ALGORITHM
+) -> bytes:
+    """Snapshot the raw digest after checking the hash's label and digest size."""
+    method = value.method
+    if str.__eq__(stored_label, method) is not True:
+        raise ValueError(f"File hash has label {method!r}, expected {stored_label!r}")
+    require_file_hash_algorithm(stored_label)
+    # Validate the same bytes that will be returned, even for a custom hash.
+    raw_digest = value.digest
+    digest = (
+        raw_digest if type(raw_digest) is bytes else memoryview(raw_digest).tobytes()
+    )
+    if len(digest) != SHA256_DIGEST_SIZE:
         raise ValueError(
-            f"A {method!r} hash cannot be stored under a key whose label is "
-            f"{algorithm!r}"
+            f"A {SHA256_ALGORITHM!r} digest is {SHA256_DIGEST_SIZE} bytes, not {len(digest)}"
         )
-    size = file_hash_digest_size(algorithm)
-    if len(digest) != size:
-        raise ValueError(f"A {algorithm!r} digest is {size} bytes, not {len(digest)}")
-    return size
+    return digest
+
+
+def canonical_file_hash(
+    value: ContentHash, *, stored_label: str = SHA256_ALGORITHM
+) -> ContentHash:
+    """Validate the file hash and ensure it uses canonical SHA-256 serialization."""
+    digest = _validated_file_digest(value, stored_label)
+    if (
+        type(value) is ContentHash
+        and type(value.method) is str
+        and value.digest is digest
+    ):
+        return value
+    return ContentHash(SHA256_ALGORITHM, digest)
 
 
 def serialize_storable_file_hash(
     algorithm: str, value: ContentHash
 ) -> tuple[bytes, int, bytes]:
     """Return the key's prefix and digest size, and the canonical bytes to store."""
-    # Snapshot the raw buffer so validation and serialization use the same bytes,
-    # even if a subclass overrides digest access or bytes operations.
-    digest = memoryview(value.digest).tobytes()
-    digest_size = require_storable(algorithm, value.method, digest)
-    prefix = algorithm.encode("ascii") + b":"
-    return prefix, digest_size, prefix + digest
+    digest = _validated_file_digest(value, algorithm)
+    prefix = SHA256_ALGORITHM.encode("ascii") + b":"
+    return prefix, len(digest), prefix + digest
 
 
 def matches_stored_file_hash(blob: object, prefix: bytes, digest_size: int) -> bool:
@@ -137,11 +136,19 @@ def parse_stored_file_hash(
 
 
 class FileHasher:
-    """Hash file content using a configurable algorithm.
+    """Hash file content with SHA-256.
+
+    ``sha256`` is the only file hash algorithm (ITL-1155): the file content hash
+    carries the label ``sha256``, and no other algorithm has a defined label.
 
     Args:
-        algorithm: Hashing algorithm to use. Defaults to ``"sha256"``.
+        algorithm: The hash algorithm. Only ``"sha256"``, the default, is
+            accepted.
         buffer_size: Read buffer size in bytes. Defaults to 65536.
+
+    Raises:
+        ValueError: If ``algorithm`` is not ``"sha256"``; the message names the
+            algorithm given.
     """
 
     def __init__(
@@ -149,13 +156,18 @@ class FileHasher:
         algorithm: str = SHA256_ALGORITHM,
         buffer_size: int = 65536,
     ):
-        self.algorithm = algorithm
+        require_file_hash_algorithm(algorithm)
         self.buffer_size = buffer_size
 
     @property
+    def algorithm(self) -> str:
+        """The digest algorithm for file content, SHA-256."""
+        return SHA256_ALGORITHM
+
+    @property
     def hash_algorithm(self) -> str:
-        """The label of every hash this hasher returns: the algorithm's name."""
-        return self.algorithm
+        """The label of every hash this hasher returns."""
+        return SHA256_ALGORITHM
 
     def hash_file(self, file_path: PathLike) -> ContentHash:
         """Hash the file at ``file_path`` and return its ``ContentHash``.
@@ -166,9 +178,7 @@ class FileHasher:
         Returns:
             ContentHash of the file's content.
         """
-        return hash_file(
-            file_path, algorithm=self.algorithm, buffer_size=self.buffer_size
-        )
+        return hash_file(file_path, buffer_size=self.buffer_size)
 
 
 class CachedFileHasher:
@@ -178,30 +188,31 @@ class CachedFileHasher:
     ``CacherProtocol[FileHashKey, ContentHash]``. On each call to
     ``hash_file``:
 
-    1. Resolve the path to an absolute ``UPath`` and stat the file.
-    2. Look up ``(path, mtime_ns, size, algorithm)`` in the cacher, using
-       the inner hasher's ``hash_algorithm``. Each algorithm has its own entry.
+    1. Validate the advertised algorithms, resolve the path to an absolute
+       ``UPath``, and stat the file.
+    2. Look up ``(path, mtime_ns, size, algorithm)`` in the cacher using the
+       canonical SHA-256 label.
     3. Accept a hit only if it is a ``ContentHash`` with the expected label and
        digest length.
-    4. On miss: delegate to the inner hasher, store the result, return it.
+    4. On miss: delegate to the inner hasher, validate the result, and cache it.
+       Both hits and newly computed results return a canonical ``ContentHash``.
 
     Both ``FileHasher`` and ``CachedFileHasher`` satisfy
     ``FileContentHasherProtocol`` — callers do not need to know which they
     have.
 
-    The inner hasher's label must name an algorithm a cache can store: a
-    ``hashlib`` algorithm with a fixed digest length, or ``hash_path``, ``xxh64``
-    or ``crc32`` (every algorithm ``FileHasher`` can hash with qualifies). Any
-    other label is refused here, before a file is hashed.
+    The inner hasher's label must be ``sha256``, the only file hash algorithm
+    (ITL-1155). Any other label is refused here, before a file is hashed.
 
     Args:
         file_hasher: Inner hasher that performs the actual content hashing.
         cacher: Cache backend implementing
-            ``CacherProtocol[FileHashKey, ContentHash]``.
+            ``CacherProtocol[FileHashKey, ContentHash]``. A backend that advertises
+            an algorithm must report ``"sha256"``.
 
     Raises:
-        ValueError: If ``file_hasher.hash_algorithm`` names no algorithm with a fixed
-            digest length.
+        ValueError: If the file hasher or cacher advertises an unsupported
+            algorithm.
     """
 
     def __init__(
@@ -209,14 +220,15 @@ class CachedFileHasher:
         file_hasher: FileContentHasherProtocol,
         cacher: "CacherProtocol[FileHashKey, ContentHash]",
     ) -> None:
-        _ = file_hash_digest_size(file_hasher.hash_algorithm)
         self.file_hasher = file_hasher
         self.cacher = cacher
+        require_file_hash_algorithm(file_hasher.hash_algorithm)
+        _validate_cacher_algorithm(cacher)
 
     @property
     def hash_algorithm(self) -> str:
-        """The inner hasher's label: the label of every hash this hasher returns."""
-        return self.file_hasher.hash_algorithm
+        """The label of every hash this hasher returns."""
+        return SHA256_ALGORITHM
 
     def hash_file(self, file_path: PathLike) -> ContentHash:
         """Return the ``ContentHash`` for ``file_path``, using the cache.
@@ -227,20 +239,49 @@ class CachedFileHasher:
         Returns:
             ContentHash of the file's content (from cache or computed).
         """
+        file_hasher = self.file_hasher
+        cacher = self.cacher
+        require_file_hash_algorithm(file_hasher.hash_algorithm)
+        _validate_cacher_algorithm(cacher)
         path = file_path if isinstance(file_path, UPath) else UPath(file_path)
         path = path.resolve()
         stat = path.stat()
-        key = FileHashKey(path, stat.st_mtime_ns, stat.st_size, self.hash_algorithm)
+        key = FileHashKey(path, stat.st_mtime_ns, stat.st_size, SHA256_ALGORITHM)
 
-        hit = self.cacher.get(key)
+        hit = cacher.get(key)
+        require_file_hash_algorithm(file_hasher.hash_algorithm)
+        _validate_cacher_algorithm(cacher)
         if isinstance(hit, ContentHash):
             try:
-                _ = require_storable(key.algorithm, hit.method, hit.digest)
-            except ValueError:
+                return canonical_file_hash(hit)
+            except (TypeError, ValueError):
                 pass  # Custom backends can return an incompatible cached hash.
-            else:
-                return hit
 
-        result = self.file_hasher.hash_file(file_path)
-        self.cacher.put(key, result)
+        result = verified_file_hash(file_hasher, file_path)
+        _validate_cacher_algorithm(cacher)
+        cacher.put(key, result)
         return result
+
+
+def _validate_cacher_algorithm(
+    cacher: CacherProtocol[FileHashKey, ContentHash],
+) -> None:
+    """Require SHA-256 of cache backends that declare an algorithm."""
+    for attribute in ("hash_algorithm", "algorithm"):
+        require_file_hash_algorithm(getattr(cacher, attribute, SHA256_ALGORITHM))
+
+
+def verified_file_hash(
+    file_hasher: FileContentHasherProtocol, file_path: PathLike
+) -> ContentHash:
+    """Hash a file and verify custom results against the library's SHA-256."""
+    require_file_hash_algorithm(file_hasher.hash_algorithm)
+    result = file_hasher.hash_file(file_path)
+    if type(file_hasher) in (FileHasher, CachedFileHasher):
+        return result
+    require_file_hash_algorithm(file_hasher.hash_algorithm)
+    reported = canonical_file_hash(result)
+    computed = hash_file(file_path)
+    if reported.digest != computed.digest:
+        raise ValueError("File hash does not match SHA-256 of the file's bytes")
+    return computed

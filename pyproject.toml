@@ -7,7 +7,6 @@ name = "orcapod"
 description = "Intuitive and powerful library for highly reproducible scientific data pipeline"
 dynamic = ["version"]
 dependencies = [
-    "xxhash",
     "networkx",
     "pandas>=2.2.3,<3",
     "pyarrow>=22.0.0",

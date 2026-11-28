@@ -14,7 +14,6 @@ Tests without the postgres marker run without a server.
 
 from __future__ import annotations
 
-import hashlib
 import os
 import threading
 from collections.abc import Iterator
@@ -370,42 +369,6 @@ class TestPostgresHashCacherThreshold:
 
 @pytest.mark.postgres
 class TestPostgresHashCacherConcurrency:
-    @pytest.mark.parametrize("fail_on_call", [1, 2])
-    def test_hash_provider_failure_preserves_valid_row(
-        self,
-        pg_conninfo: str,
-        cacher: PostgresHashCacher,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-        fail_on_call: int,
-    ):
-        key = make_key()
-        original = make_hash().to_prefixed_digest()
-        _insert_raw(pg_conninfo, key, original)
-        real_new = hashlib.new
-        calls = 0
-
-        def transient_new(name: str) -> object:
-            nonlocal calls
-            calls += 1
-            if calls == fail_on_call:
-                raise MemoryError("hash constructor allocation failed")
-            return real_new(name)
-
-        monkeypatch.setattr(hashlib, "new", transient_new)
-        if fail_on_call == 1:
-            with pytest.raises(MemoryError, match="allocation failed"):
-                cacher.put(key, make_hash(bytes(32)))
-        else:
-            with pytest.raises(ValueError, match="Different hash"):
-                cacher.put(key, make_hash(bytes(32)))
-        assert calls == 1
-        with psycopg.connect(pg_conninfo) as conn:
-            assert conn.execute(
-                "SELECT hash, cached_at FROM file_hash_cache_v2"
-            ).fetchone() == (original, 1)
-        assert not caplog.records
-
     @pytest.mark.parametrize("pg_conninfo", ["UTF8", "SQL_ASCII"], indirect=True)
     @pytest.mark.parametrize("same_hash", [True, False])
     @pytest.mark.parametrize("malformed_existing", [False, True])
@@ -802,71 +765,76 @@ class TestPostgresReprRedaction:
 
 
 # ---------------------------------------------------------------------------
-# A hash is returned only for its own algorithm (ITL-1488)
+# sha256 is the only file hash algorithm (ITL-1488, ITL-1155)
 # ---------------------------------------------------------------------------
 
 
 _SIZES = {"sha256": 32, "md5": 16}
 
 
-def _key_for_algorithm(algorithm: str) -> FileHashKey:
+def _key_for_algorithm(algorithm: str, mtime_ns: int = 1000) -> FileHashKey:
     return FileHashKey(
-        path=UPath("/a/b.txt"), mtime_ns=1000, size=100, algorithm=algorithm
+        path=UPath("/a/b.txt"), mtime_ns=mtime_ns, size=100, algorithm=algorithm
     )
+
+
+def _all_rows(pg_conninfo: str) -> list[tuple[object, ...]]:
+    with connect(pg_conninfo) as conn:
+        return conn.execute(
+            "SELECT path, mtime_ns, size, algorithm, hash, cached_at "
+            "FROM file_hash_cache_v2 ORDER BY algorithm, mtime_ns"
+        ).fetchall()
 
 
 @pytest.mark.postgres
 class TestPostgresHashCacherAlgorithmLabel:
-    @pytest.mark.parametrize(
-        ("first", "second"), [("sha256", "md5"), ("md5", "sha256")]
-    )
-    def test_entry_of_another_label_is_miss(
-        self, cacher: PostgresHashCacher, first: str, second: str
-    ):
-        cacher.put(
-            _key_for_algorithm(first), ContentHash(first, bytes([1]) * _SIZES[first])
-        )
-        assert cacher.get(_key_for_algorithm(second)) is None
-        assert cacher.get(_key_for_algorithm(first)) == ContentHash(
-            first, bytes([1]) * _SIZES[first]
-        )
+    def test_clear_keeps_historical_rows(self, pg_conninfo: str) -> None:
+        """Clearing the active cache leaves the old algorithm's row intact."""
+        old_key = _key_for_algorithm("md5")
+        _insert_raw(pg_conninfo, old_key, b"md5:" + b"\x07" * 16)
+        before = _all_rows(pg_conninfo)
+        with PostgresHashCacher(pg_conninfo) as cache:
+            cache.put(make_key(), make_hash())
+            cache.clear()
+            assert cache.get(make_key()) is None
+        assert _all_rows(pg_conninfo) == before
 
-    @pytest.mark.parametrize(
-        ("first", "second"), [("sha256", "md5"), ("md5", "sha256")]
-    )
-    def test_put_of_another_algorithm_retains_both_entries(
-        self, cacher: PostgresHashCacher, first: str, second: str
+    @pytest.mark.parametrize("match_mtime", [True, False])
+    def test_row_of_another_algorithm_stays_and_is_never_read(
+        self, pg_conninfo: str, match_mtime: bool
     ):
-        cacher.put(
-            _key_for_algorithm(first), ContentHash(first, bytes([1]) * _SIZES[first])
-        )
-        cacher.put(
-            _key_for_algorithm(second), ContentHash(second, bytes([2]) * _SIZES[second])
-        )
-        assert cacher.get(_key_for_algorithm(second)) == ContentHash(
-            second, bytes([2]) * _SIZES[second]
-        )
-        assert cacher.get(_key_for_algorithm(first)) == ContentHash(
-            first, bytes([1]) * _SIZES[first]
-        )
+        """A row an earlier version stored under md5: untouched, never returned."""
+        old_key = _key_for_algorithm("md5", mtime_ns=2000)
+        _insert_raw(pg_conninfo, old_key, b"md5:" + b"\x07" * 16)
+        before = _all_rows(pg_conninfo)
+        value = ContentHash("sha256", b"\x01" * 32)
+        with PostgresHashCacher(pg_conninfo, match_mtime=match_mtime) as c:
+            assert c.get(old_key) is None
+            assert c.get(_key_for_algorithm("sha256", mtime_ns=2000)) is None
+            c.put(_key_for_algorithm("sha256"), value)
+            assert c.get(_key_for_algorithm("sha256")) == value
+            assert c.get(old_key) is None
+            # Without the mtime match, the newer md5 row is skipped.
+            got = c.get(_key_for_algorithm("sha256", mtime_ns=3000))
+            assert got == (None if match_mtime else value)
+        after = _all_rows(pg_conninfo)
+        assert [row for row in after if row[3] != "sha256"] == before
+        assert len(after) == 2
 
-    @pytest.mark.parametrize(
-        ("first", "second"), [("sha256", "md5"), ("md5", "sha256")]
-    )
-    def test_match_mtime_false_skips_newer_entry_of_another_label(
-        self, pg_conninfo: str, first: str, second: str
+    @pytest.mark.parametrize("match_mtime", [True, False])
+    def test_put_under_another_algorithm_is_refused(
+        self, pg_conninfo: str, match_mtime: bool
     ):
-        c = PostgresHashCacher(pg_conninfo, match_mtime=False)
-        try:
-            older = FileHashKey(UPath("/a/b.txt"), 1000, 100, first)
-            newer = FileHashKey(UPath("/a/b.txt"), 2000, 100, second)
-            c.put(older, ContentHash(first, bytes([1]) * _SIZES[first]))
-            c.put(newer, ContentHash(second, bytes([2]) * _SIZES[second]))
-            assert c.get(FileHashKey(UPath("/a/b.txt"), 3000, 100, first)) == (
-                ContentHash(first, bytes([1]) * _SIZES[first])
-            )
-        finally:
-            c.close()
+        """A well-formed md5 hash under an md5 key is refused, naming md5."""
+        with PostgresHashCacher(pg_conninfo, match_mtime=match_mtime) as c:
+            with pytest.raises(
+                ValueError,
+                match="Unsupported file hash algorithm 'md5': sha256 is the only",
+            ):
+                c.put(_key_for_algorithm("md5"), ContentHash("md5", b"\x01" * 16))
+            assert c.get(_key_for_algorithm("md5")) is None
+            assert c.get(_key_for_algorithm("sha256")) is None
+        assert _all_rows(pg_conninfo) == []
 
 
 _CRAFTED_BLOBS = [
@@ -897,19 +865,24 @@ class TestPostgresHashCacherStrictStore:
                 "ALTER TABLE file_hash_cache_v2 "
                 "ALTER COLUMN algorithm TYPE TEXT COLLATE algorithm_ci"
             )
+        # A stray row whose label the collation equates with the key's label.
         key = make_key()
-        original = make_hash()
-        blob = original.to_prefixed_digest()
-        _insert_raw(pg_conninfo, key, blob)
+        stray = FileHashKey(key.path, key.mtime_ns, key.size, "SHA256")
+        blob = b"sha256:" + b"\x07" * 32
+        _insert_raw(pg_conninfo, stray, blob)
         with PostgresHashCacher(pg_conninfo, match_mtime=match_mtime) as cache:
-            other_key = FileHashKey(key.path, key.mtime_ns, key.size, "SHA256")
+            assert cache.get(key) is None
             with pytest.raises(ValueError, match="matched a row with algorithm label"):
-                cache.put(other_key, ContentHash("SHA256", b"\x02" * 32))
-            assert cache.get(key) == original
+                cache.put(key, make_hash())
+            # The stray label itself is not a file hash algorithm.
+            with pytest.raises(ValueError, match="'SHA256'.*sha256 is the only"):
+                cache.put(stray, ContentHash("SHA256", b"\x02" * 32))
+            assert cache.get(stray) is None
+            cache.clear()
         with connect(pg_conninfo) as conn:
             assert conn.execute(
                 "SELECT convert_to(algorithm, 'UTF8'), hash, cached_at FROM file_hash_cache_v2"
-            ).fetchall() == [(b"sha256", blob, 1)]
+            ).fetchall() == [(b"SHA256", blob, 1)]
         assert not caplog.records
 
     @pytest.mark.parametrize("match_mtime", [True, False])
@@ -1045,17 +1018,17 @@ class TestPostgresHashCacherStrictStore:
             "sha256", b"\x07" * 32
         )
 
-    def test_two_algorithms_written_concurrently_never_cross(self, pg_conninfo: str):
-        """Concurrent puts of two algorithms on one file: no error, no wrong hit.
-
-        Both hashes remain available throughout the concurrent writes.
-        """
+    def test_concurrent_puts_with_refused_labels_never_reach_the_store(
+        self, pg_conninfo: str
+    ):
+        """Concurrent sha256 puts succeed while md5 puts are refused; no md5 row."""
         PostgresHashCacher(pg_conninfo).close()
         values = {
             label: ContentHash(label, bytes([n]) * _SIZES[label])
             for n, label in ((1, "sha256"), (2, "md5"))
         }
         errors: list[Exception] = []
+        refused: list[str] = []
         barrier = threading.Barrier(8)
 
         def write(label: str) -> None:
@@ -1066,9 +1039,14 @@ class TestPostgresHashCacherStrictStore:
                 c = PostgresHashCacher(pg_conninfo)
                 barrier.wait()
                 for _ in range(20):
-                    c.put(_key_for_algorithm(label), values[label])
-                    got = c.get(_key_for_algorithm(label))
-                    assert got == values[label]
+                    if label == "sha256":
+                        c.put(_key_for_algorithm(label), values[label])
+                        assert c.get(_key_for_algorithm(label)) == values[label]
+                    else:
+                        with pytest.raises(ValueError, match="sha256 is the only"):
+                            c.put(_key_for_algorithm(label), values[label])
+                        assert c.get(_key_for_algorithm(label)) is None
+                        refused.append(label)
             except Exception as exc:
                 barrier.abort()
                 errors.append(exc)
@@ -1085,13 +1063,15 @@ class TestPostgresHashCacherStrictStore:
         for t in threads:
             t.join()
         assert errors == []
+        assert len(refused) == 80
 
         reader = PostgresHashCacher(pg_conninfo)
         try:
             found = {label: reader.get(_key_for_algorithm(label)) for label in values}
         finally:
             reader.close()
-        assert found == values
+        assert found == {"sha256": values["sha256"], "md5": None}
+        assert [row[3] for row in _all_rows(pg_conninfo)] == ["sha256"]
 
 
 _INVALID_LABELS = [

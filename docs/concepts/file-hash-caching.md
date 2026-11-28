@@ -11,9 +11,13 @@ If you have not used `op.File` and `op.Directory` yet, read
 ## FileHasher, HashCacher, and CachedFileHasher
 
 `FileHasher` is the base hasher. When you call `hash_file(path)` on it, it
-reads the file's bytes from disk and returns a content hash (SHA-256 by
-default, configurable via the `algorithm` argument). It does this every time,
-with no memory of previous results.
+reads the file's bytes from disk and returns their SHA-256 content hash, with
+the label `sha256`. It does this every time, with no memory of previous
+results. The standalone `hash_file(path)` function also computes SHA-256 and
+takes only the path and an optional buffer size. `FileHasher(algorithm=...)`
+accepts only `"sha256"` and raises `ValueError` for other names. Loading a data
+context whose file hasher names another algorithm raises
+`ContextValidationError` with the same detail.
 
 `HashCacher` is a protocol for any object that maps a `FileHashKey` to a
 `ContentHash`. The key is a four-field struct:
@@ -31,9 +35,10 @@ the write and its conflict check.
 
 `FileHashKey.algorithm` is **PROVISIONAL**. Its value is the hash label
 (`ContentHash.method`) reported by the file hasher's `hash_algorithm` property.
-The cache stores each algorithm's hash separately for a given file state.
-For example, `orcapod warm-cache --algorithm md5` fills MD5 entries. A later
-SHA-256 lookup can fill its own entries alongside them.
+Its only accepted value is `sha256`. A cache write under a key with any other
+label raises `ValueError`, and a lookup with one is a miss. Entries of another
+algorithm that an earlier development version wrote into a cache file are left
+in place and never read; the SHA-256 entries are written beside them.
 
 A cache write raises `ValueError` if the hash label or digest length is invalid
 for the key, or if the key already holds a different well-formed hash. Writing
@@ -45,8 +50,7 @@ refreshes its timestamp, and logs a warning naming the file and hash algorithm.
 An incompatible hash returned by a custom cache is also a miss.
 
 `orcapod warm-cache --force` skips the cache lookup and recomputes each eligible
-file's hash. Content-hashing algorithms read the file's contents. The
-`hash_path` algorithm checks that the file exists and hashes its path string.
+file's hash from the file's contents.
 If a new hash differs from a well-formed hash stored for the same key,
 the cache retains the original entry and the command reports a file error. If
 a rehash and write conflict occurs while a pipeline hashes a file column, it can
@@ -58,10 +62,8 @@ entries. An explicit operation to replace a valid hash is tracked separately
 (ITL-1547). Let file rewrites advance the modification time to avoid stale hits
 in the default mode.
 
-The label must name an algorithm whose digest length is fixed: a `hashlib`
-algorithm such as `sha256` or `md5`, or `hash_path`, `xxh64` or `crc32`. Every algorithm
-`FileHasher` can hash with qualifies. `CachedFileHasher` refuses (`ValueError`) an
-inner hasher with any other label when it is built.
+`CachedFileHasher` refuses (`ValueError`, naming the label) an inner hasher
+whose `hash_algorithm` is not `sha256` when it is built.
 
 `CachedFileHasher` wraps a `FileHasher` with any `HashCacher`. When you call
 `hash_file(path)` on it, it first constructs the key from the file's current

@@ -187,6 +187,12 @@ class TestLabelFormat:
                 file_hasher=FileHasher(), algorithm="md5"
             )
 
+    def test_directory_algorithm_cannot_be_reassigned_to_md5(self) -> None:
+        hasher = directory_hashers.BasicDirectoryHasher(file_hasher=FileHasher())
+        with pytest.raises(AttributeError):
+            object.__setattr__(hasher, "algorithm", "md5")
+        assert hasher.algorithm == "sha256"
+
 
 # ---------------------------------------------------------------------------
 # Rule 1 (ITL-1154): a hash fed into another hash carries its label
@@ -804,9 +810,6 @@ class TestProducerlessStreamIdentity:
 SOURCE_ROOT = Path(orcapod.__file__).parent
 LABEL_DEFINITIONS = {
     "sha256": "hashing/hash_utils.py",
-    "hash_path": "hashing/hash_utils.py",
-    "xxh64": "hashing/hash_utils.py",
-    "crc32": "hashing/hash_utils.py",
     "semantic_v1": "hashing/semantic_hashing/semantic_hasher.py",
     "arrow_v1": "hashing/arrow_hashers.py",
     "arrow_ordered_v1": "hashing/arrow_hashers.py",

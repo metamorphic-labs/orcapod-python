@@ -137,6 +137,7 @@ class SemanticHasherProtocol(Protocol):
         ...
 
 
+@runtime_checkable
 class FileContentHasherProtocol(Protocol):
     """Protocol for file-related hashing."""
 
@@ -144,24 +145,29 @@ class FileContentHasherProtocol(Protocol):
     def hash_algorithm(self) -> str:
         """The label of every hash ``hash_file`` returns (its ``ContentHash.method``).
 
-        A file hash cache uses it to return an entry only to a hasher of the same
-        algorithm (ITL-1488). To be cached (``CachedFileHasher``), the label must
-        name a ``hashlib`` algorithm with a fixed digest length, or ``hash_path``,
-        ``xxh64`` or ``crc32``.
+        The label must be ``sha256``, the only file hash algorithm (ITL-1155).
         """
         ...
 
     def hash_file(self, file_path: PathLike) -> ContentHash: ...
 
 
+@runtime_checkable
 class DirectoryHasherProtocol(Protocol):
     """Protocol for directory tree hashing."""
+
+    @property
+    def algorithm(self) -> str:
+        """Return the digest algorithm for entries and nodes, which must be SHA-256."""
+        ...
 
     def hash_directory(
         self,
         directory_path: PathLike,
         ignore: "Callable | list[str] | None" = None,
-    ) -> ContentHash: ...
+    ) -> ContentHash:
+        """Return the directory tree's ``directory_v1`` hash."""
+        ...
 
 
 @runtime_checkable

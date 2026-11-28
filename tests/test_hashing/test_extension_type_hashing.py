@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import builtins
 import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from types import ModuleType
 
 import pyarrow as pa
 import pytest
@@ -19,6 +22,8 @@ from orcapod.hashing.semantic_hashing.type_handler_registry import (
 )
 from orcapod.hashing.semantic_hashing.semantic_hasher import SemanticAwarePythonHasher
 from orcapod.contexts import get_default_context
+from orcapod.contexts.core import DataContext
+from orcapod.semantic_types.universal_converter import UniversalTypeConverter
 
 
 # Module-level dataclass required for registration (local classes are rejected
@@ -69,6 +74,37 @@ class TestArrowTypeDataVisitorExtension:
 
 
 class TestSemanticHashingVisitorExtension:
+    def test_extension_hashing_does_not_import_path_types(
+        self, ctx: DataContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Repeated extension hashing does no import work in the visitor."""
+        file = tmp_path / "test.txt"
+        _ = file.write_text("content")
+        converter = ctx.type_converter
+        assert isinstance(converter, UniversalTypeConverter)
+        arrow_type = converter.register_python_class(File)
+        storage = converter.python_to_storage(File(file), File)
+        visitor = SemanticHashingVisitor(converter, ctx.semantic_hasher)
+        expected = visitor.visit(arrow_type, storage)
+        original_import = builtins.__import__
+
+        def track_import(
+            name: str,
+            globals: Mapping[str, object] | None = None,
+            locals: Mapping[str, object] | None = None,
+            fromlist: Sequence[str] | None = (),
+            level: int = 0,
+        ) -> ModuleType:
+            """Fail on synchronous imports from the extension visitor."""
+            assert (globals or {}).get(
+                "__name__"
+            ) != SemanticHashingVisitor.__module__, name
+            return original_import(name, globals, locals, fromlist, level)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(builtins, "__import__", track_import)
+            assert visitor.visit(arrow_type, storage) == expected
+
     def test_file_column_hashed_to_large_binary(self, ctx, tmp_path):
         """File extension columns are replaced with pa.large_binary() hash tokens."""
         file = tmp_path / "test.txt"

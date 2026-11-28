@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
+from pathlib import Path
 
 import pytest
+from typing_extensions import override
+from upath import UPath
 
+from orcapod.contexts import get_default_semantic_hasher
 from orcapod.logical_types.directory_type import Directory
 from orcapod.hashing.directory_hashers import BasicDirectoryHasher
 from orcapod.hashing.file_hashers import FileHasher
@@ -17,7 +22,7 @@ from orcapod.hashing.semantic_hashing.semantic_hasher import SemanticAwarePython
 from orcapod.hashing.semantic_hashing.type_handler_registry import (
     PythonTypeHandlerRegistry,
 )
-from orcapod.types import ContentHash
+from orcapod.types import ContentHash, PathLike
 
 
 class TestBasicDirectoryHasher:
@@ -324,3 +329,190 @@ class TestDirectoryHandler:
         h1 = handler.handle(Directory(d1), hasher)
         h2 = handler.handle(Directory(d2, ignore=["*.pyc"]), hasher)
         assert h1 == h2
+
+
+class _CustomDirectoryHasher:
+    def __init__(self, result: ContentHash) -> None:
+        self.algorithm: str = "sha256"
+        self.result: ContentHash = result
+        self.calls: int = 0
+
+    def hash_directory(
+        self,
+        directory_path: PathLike,
+        ignore: Callable[[UPath], bool] | list[str] | None = None,
+    ) -> ContentHash:
+        del directory_path, ignore
+        self.calls += 1
+        return self.result
+
+
+def test_directory_handler_refuses_a_reassigned_custom_algorithm(
+    tmp_path: Path,
+) -> None:
+    """Check the advertised algorithm again before invoking the custom hasher."""
+    custom = _CustomDirectoryHasher(ContentHash("md5", b"\x00" * 16))
+    handler = DirectoryHandler(custom)
+    custom.algorithm = "md5"
+
+    with pytest.raises(ValueError, match="directory_v1.*sha256.*'md5'"):
+        _ = handler.handle(Directory(tmp_path), get_default_semantic_hasher())
+    assert custom.calls == 0
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        pytest.param(ContentHash("md5", b"\x00" * 32), id="wrong-label"),
+        pytest.param(ContentHash("directory_v1", b"\x00" * 16), id="wrong-length"),
+    ],
+)
+def test_directory_handler_rejects_an_invalid_custom_result(
+    tmp_path: Path, result: ContentHash
+) -> None:
+    """A SHA-256 declaration cannot make an invalid result acceptable."""
+    handler = DirectoryHandler(_CustomDirectoryHasher(result))
+
+    with pytest.raises(ValueError, match="Directory hash"):
+        _ = handler.handle(Directory(tmp_path), get_default_semantic_hasher())
+
+
+def test_directory_handler_canonicalizes_custom_results(tmp_path: Path) -> None:
+    """The returned directory hash serializes from its validated label and digest."""
+
+    class MisencodedDirectoryHash(ContentHash):
+        @override
+        def to_prefixed_digest(self) -> bytes:
+            return b"md5:" + self.digest
+
+    digest = BasicDirectoryHasher(FileHasher()).hash_directory(tmp_path).digest
+    handler = DirectoryHandler(
+        _CustomDirectoryHasher(MisencodedDirectoryHash("directory_v1", digest))
+    )
+
+    result = handler.handle(Directory(tmp_path), get_default_semantic_hasher())
+
+    assert result.to_prefixed_digest() == b"directory_v1:" + digest
+
+
+def test_direct_directory_hasher_refuses_a_subclass_advertising_md5(
+    tmp_path: Path,
+) -> None:
+    """Inherited directory hashing refuses a subclass with a mismatched declaration."""
+
+    class ReconfiguredDirectory(BasicDirectoryHasher):
+        _declared_algorithm: str = "sha256"
+
+        @property
+        @override
+        def algorithm(self) -> str:
+            return self._declared_algorithm
+
+        @algorithm.setter
+        def algorithm(self, value: str) -> None:
+            self._declared_algorithm = value
+
+    custom = ReconfiguredDirectory(FileHasher())
+    custom.algorithm = "md5"
+    with pytest.raises(ValueError, match="directory_v1.*sha256.*'md5'"):
+        _ = custom.hash_directory(tmp_path)
+
+
+def test_directory_handler_refuses_a_declaration_changed_during_traversal(
+    tmp_path: Path,
+) -> None:
+    """A callback can change the declaration before the custom digest is returned."""
+    _ = (tmp_path / "data").write_bytes(b"abc")
+
+    class SwitchingDirectoryHasher:
+        algorithm = "sha256"
+
+        def hash_directory(
+            self,
+            directory_path: PathLike,
+            ignore: Callable[[UPath], bool] | list[str] | None = None,
+        ) -> ContentHash:
+            assert callable(ignore)
+            assert not ignore(UPath("data"))
+            return ContentHash("directory_v1", b"\x00" * 32)
+
+    custom = SwitchingDirectoryHasher()
+
+    def ignore(path: UPath) -> bool:
+        custom.algorithm = "md5"
+        return False
+
+    handler = DirectoryHandler(custom)
+    with pytest.raises(ValueError, match="directory_v1.*sha256.*'md5'"):
+        _ = handler.handle(
+            Directory(tmp_path, ignore=ignore), get_default_semantic_hasher()
+        )
+
+
+def test_directory_handler_rejects_a_sha256_shaped_custom_directory_digest(
+    tmp_path: Path,
+) -> None:
+    """The declared algorithm and digest length cannot certify a Merkle hash."""
+    handler = DirectoryHandler(
+        _CustomDirectoryHasher(ContentHash("directory_v1", bytes(32)))
+    )
+    with pytest.raises(ValueError, match="does not match.*directory_v1"):
+        _ = handler.handle(Directory(tmp_path), get_default_semantic_hasher())
+
+
+class _InheritedDirectoryHasher(BasicDirectoryHasher):
+    """Use the built-in traversal through the custom hasher verification path."""
+
+
+def test_verified_custom_directory_rejects_bare_string_ignore(tmp_path: Path) -> None:
+    """A glob string must not become a sequence of single-character patterns."""
+    _ = (tmp_path / "data").write_bytes(b"abc")
+    handler = DirectoryHandler(_InheritedDirectoryHasher(FileHasher()))
+
+    with pytest.raises(TypeError, match="not a bare string"):
+        _ = handler.handle(
+            Directory(tmp_path, ignore="*.pyc"), get_default_semantic_hasher()
+        )
+
+
+@pytest.mark.parametrize("use_generator", [False, True])
+def test_verified_custom_directory_accepts_ignore_patterns(
+    tmp_path: Path, use_generator: bool
+) -> None:
+    """Both traversals use the same patterns from a list or a one-shot generator."""
+    _ = (tmp_path / "data").write_bytes(b"abc")
+    basic = BasicDirectoryHasher(FileHasher())
+    expected = basic.hash_directory(tmp_path)
+    _ = (tmp_path / "module.pyc").write_bytes(b"ignore me")
+    patterns = ["*.pyc"]
+    ignore = (pattern for pattern in patterns) if use_generator else patterns
+    handler = DirectoryHandler(_InheritedDirectoryHasher(FileHasher()))
+
+    assert (
+        handler.handle(
+            Directory(tmp_path, ignore=ignore), get_default_semantic_hasher()
+        )
+        == expected
+    )
+
+
+def test_verified_custom_directory_traversal_reuses_ignore_decisions(
+    tmp_path: Path,
+) -> None:
+    """A conforming custom backend and its verifier share one callback per path."""
+    _ = (tmp_path / "data").write_bytes(b"abc")
+    _ = (tmp_path / "ignored").write_bytes(b"ignore me")
+    basic = BasicDirectoryHasher(FileHasher())
+
+    seen: list[str] = []
+
+    def ignore(path: UPath) -> bool:
+        seen.append(path.name)
+        return path.name == "ignored"
+
+    handler = DirectoryHandler(_InheritedDirectoryHasher(FileHasher()))
+    result = handler.handle(
+        Directory(tmp_path, ignore=ignore), get_default_semantic_hasher()
+    )
+    assert result == basic.hash_directory(tmp_path, ignore=["ignored"])
+    assert sorted(seen) == ["data", "ignored"]

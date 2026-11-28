@@ -12,6 +12,7 @@ revision in the manifest's golden history (ITL-946). A withdrawn release is reco
 from __future__ import annotations
 
 import json
+import shutil
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -20,15 +21,111 @@ import pytest
 
 import orcapod
 from orcapod import contexts
+from orcapod.contexts.core import ContextValidationError
+from orcapod.contexts.registry import JSONDataContextRegistry
 from orcapod.hashing.semantic_hashing.type_handler_registry import (
     PythonTypeHandlerRegistry,
 )
 from orcapod.semantic_types.universal_converter import UniversalTypeConverter
+from orcapod.types import ContentHash, PathLike
 from tests.test_hashing.golden import store
 from tests.test_hashing.golden.generate_golden_hashes import main
 
 CONTEXTS_DIR = Path(str(resources.files("orcapod.contexts")))
 MANIFEST_DIR = CONTEXTS_DIR / "data"
+
+
+class CustomFileHasher:
+    """A configurable file hasher for testing manifest validation."""
+
+    def __init__(self, algorithm: str) -> None:
+        self.hash_algorithm: str = algorithm
+
+    def hash_file(self, file_path: PathLike) -> ContentHash:
+        """Return a hash under the configured label."""
+        _ = file_path
+        return ContentHash(self.hash_algorithm, b"\x00" * 16)
+
+
+def test_context_refuses_a_custom_file_hasher_with_an_unsupported_label(
+    tmp_path: Path,
+) -> None:
+    """A custom hasher declared in the manifest follows the built-in SHA-256 rule."""
+    _ = shutil.copytree(MANIFEST_DIR / "schemas", tmp_path / "schemas")
+    spec = _manifest("v1")
+    spec["file_hasher"] = {
+        "_class": f"{__name__}.CustomFileHasher",
+        "_config": {"algorithm": "md5"},
+    }
+    _ = (tmp_path / "v1.json").write_text(json.dumps(spec))
+    registry = JSONDataContextRegistry(contexts_dir=tmp_path)
+
+    with pytest.raises(
+        ContextValidationError, match="Unsupported file hash algorithm 'md5'"
+    ):
+        _ = registry.get_context()
+
+
+class CustomDirectoryHasher:
+    """A custom directory hasher that accepts any algorithm setting."""
+
+    def __init__(self, algorithm: str = "md5", *, report_algorithm: bool) -> None:
+        if report_algorithm:
+            self.algorithm: str = algorithm
+
+    def hash_directory(
+        self, directory_path: PathLike, ignore: object = None
+    ) -> ContentHash:
+        """Stand in for an implementation using the configured algorithm."""
+        return ContentHash("md5", b"\x00" * 16)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [{"algorithm": "md5", "report_algorithm": False}, {"report_algorithm": True}],
+    ids=["declared", "advertised"],
+)
+def test_context_refuses_a_custom_directory_hasher_with_an_unsupported_algorithm(
+    tmp_path: Path, config: dict[str, Any]
+) -> None:
+    _ = shutil.copytree(MANIFEST_DIR / "schemas", tmp_path / "schemas")
+    spec = _manifest("v1")
+    spec["directory_hasher"] = {
+        "_class": f"{__name__}.CustomDirectoryHasher",
+        "_config": config,
+    }
+    _ = (tmp_path / "v1.json").write_text(json.dumps(spec))
+    registry = JSONDataContextRegistry(contexts_dir=tmp_path)
+
+    with pytest.raises(ContextValidationError, match="directory_v1.*sha256.*'md5'"):
+        _ = registry.get_context()
+
+
+@pytest.mark.parametrize("report_algorithm", [True, False], ids=["md5", "missing"])
+def test_directory_registration_refuses_an_unsupported_custom_hasher_at_use(
+    tmp_path: Path, report_algorithm: bool
+) -> None:
+    """A hasher injected into the logical-type handler follows the SHA-256 rule."""
+    _ = shutil.copytree(MANIFEST_DIR / "schemas", tmp_path / "schemas")
+    _ = shutil.copyfile(MANIFEST_DIR / "v1.json", tmp_path / "v1.json")
+    registrations = json.loads((CONTEXTS_DIR / "logical_types.json").read_text())
+    for value_type, handler in registrations["value_handlers"]:
+        if value_type["_type"] == "orcapod.logical_types.directory_type.Directory":
+            handler["_config"]["directory_hasher"] = {
+                "_class": f"{__name__}.CustomDirectoryHasher",
+                "_config": {"report_algorithm": report_algorithm},
+            }
+            break
+    registration_path = tmp_path / "schemas" / "registration.json"
+    _ = registration_path.write_text(json.dumps(registrations))
+    context = JSONDataContextRegistry(
+        contexts_dir=tmp_path, logical_types_file=registration_path
+    ).get_context()
+    directory = tmp_path / "data"
+    directory.mkdir()
+
+    with pytest.raises(ValueError, match="directory_v1.*sha256"):
+        _ = context.semantic_hasher.hash_object(orcapod.Directory(directory))
 
 
 def _pins() -> dict[str, dict[str, Any]]:
@@ -359,3 +456,59 @@ def test_a_context_refuses_an_arrow_hasher_without_hash_schema() -> None:
         semantic_hasher=default.semantic_hasher,
     )
     assert rebuilt.arrow_hasher is default.arrow_hasher
+
+
+class FixedLabelFileHasher(CustomFileHasher):
+    """A custom hasher whose declaration hides its constructor argument."""
+
+    def __init__(self, algorithm: str) -> None:
+        self.algorithm = algorithm
+        super().__init__("sha256")
+
+
+def test_context_refuses_an_md5_setting_with_a_sha256_declaration(
+    tmp_path: Path,
+) -> None:
+    """Validate the explicit setting before building the component."""
+    _ = shutil.copytree(MANIFEST_DIR / "schemas", tmp_path / "schemas")
+    spec = _manifest("v1")
+    spec["file_hasher"] = {
+        "_class": f"{__name__}.FixedLabelFileHasher",
+        "_config": {"algorithm": "md5"},
+    }
+    _ = (tmp_path / "v1.json").write_text(json.dumps(spec))
+    with pytest.raises(
+        ContextValidationError, match="Unsupported file hash algorithm 'md5'"
+    ):
+        _ = JSONDataContextRegistry(contexts_dir=tmp_path).get_context()
+
+
+class RawDirectoryHandler(CustomDirectoryHasher):
+    """A directory backend that also implements the generic handler interface."""
+
+    def handle(self, obj: orcapod.Directory, hasher: object) -> ContentHash:
+        return self.hash_directory(obj)
+
+
+def test_directory_registration_cannot_bypass_verification_with_handle(
+    tmp_path: Path,
+) -> None:
+    """The generic handler method cannot bypass directory hash verification."""
+    _ = shutil.copytree(MANIFEST_DIR / "schemas", tmp_path / "schemas")
+    _ = shutil.copyfile(MANIFEST_DIR / "v1.json", tmp_path / "v1.json")
+    registrations = json.loads((CONTEXTS_DIR / "logical_types.json").read_text())
+    for pair in registrations["value_handlers"]:
+        if pair[0]["_type"] == "orcapod.logical_types.directory_type.Directory":
+            pair[1] = {
+                "_class": f"{__name__}.RawDirectoryHandler",
+                "_config": {"report_algorithm": True},
+            }
+            break
+    registration_path = tmp_path / "schemas" / "registration.json"
+    _ = registration_path.write_text(json.dumps(registrations))
+    context = JSONDataContextRegistry(
+        contexts_dir=tmp_path, logical_types_file=registration_path
+    ).get_context()
+
+    with pytest.raises(ValueError, match="directory_v1.*sha256.*'md5'"):
+        _ = context.semantic_hasher.hash_object(orcapod.Directory(tmp_path))
